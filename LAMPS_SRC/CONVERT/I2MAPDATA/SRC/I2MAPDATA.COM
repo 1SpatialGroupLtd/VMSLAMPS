@@ -1,8 +1,11 @@
+$!
 $	ver=f$verify(0)
 $!
 $!	Copyright (C) Laser-Scan Ltd., Cambridge, England.
 $!
-$!	Created						RJH	16-Sep-1994
+$!	Created						RJH 16-Sep-1994
+$!
+$!	Mod 1435 new frtshr rebuild			 JB 29-Nov-1994
 $!
 $!	CONVERT I2MAPDATA Utility - Command file to build the program
 $!
@@ -69,6 +72,9 @@ $	   get_strpar		= "t"
 $	   check_md_code	= "t"
 $	   check_ac_code	= "t"
 $	   check_fc		= "t"
+$	   check_flag		= "t"
+$	   check_coord		= "t"
+$	   keep_coord		= "t"
 $	   find_fc		= "t"
 $	   set_ac_details	= "t"
 $	   get_ac_code		= "t"
@@ -78,6 +84,10 @@ $	   open_md		= "t"
 $	   close_iff		= "t"
 $	   close_md		= "t"
 $	   process		= "t"
+$	   start_feature	= "t"
+$	   read_points		= "t"
+$	   write_points		= "t"
+$	   rotation_to_point	= "t"
 $	   write_md_head	= "t"
 $	   write_md_seg		= "t"
 $	   write_md_code	= "t"
@@ -86,43 +96,50 @@ $!
 $	   goto a11
 $!
 $ a05:	   inq/nop i2mapdata		"Compile I2MAPDATA ? "
-$	   inq/nop control_init		"Compile  CONTROL_INIT ? "
+$	   inq/nop control_init		"Compile CONTROL_INIT ? "
 $	   inq/nop obey			"Compile OBEY ? "
-$	   inq/nop obey_qual		"Compile  OBEY_QUAL ? "
-$	   inq/nop obey_erret		"Compile  OBEY_ERRET ? "
+$	   inq/nop obey_qual		"Compile OBEY_QUAL ? "
+$	   inq/nop obey_erret		"Compile OBEY_ERRET ? "
 $	   inq/nop rdfrt		"Compile RDFRT ? "
 $	   inq/nop rdpar		"Compile RDPAR ? "
-$	   inq/nop rdlin		"Compile  RDLIN ? "
-$	   inq/nop get_strpar		"Compile   GET_STRPAR ? "
-$	   inq/nop check_md_code	"Compile   CHECK_MD_CODE ? "
-$	   inq/nop check_ac_code	"Compile   CHECK_AC_CODE ? "
-$	   inq/nop check_fc		"Compile   CHECK_FC ? "
-$	   inq/nop find_fc		"Compile   FIND_FC ? "
-$	   inq/nop set_ac_details	"Compile  SET_AC_DETAILS ? "
-$	   inq/nop get_ac_code		"Compile   GET_AC_CODE ? "
-$	   inq/nop get_ac_name		"Compile   GET_AC_NAME ? "
+$	   inq/nop rdlin		"Compile RDLIN ? "
+$	   inq/nop get_strpar		"Compile GET_STRPAR ? "
+$	   inq/nop check_md_code	"Compile CHECK_MD_CODE ? "
+$	   inq/nop check_ac_code	"Compile CHECK_AC_CODE ? "
+$	   inq/nop check_fc		"Compile CHECK_FC ? "
+$	   inq/nop check_flag		"Compile CHECK_FLAG ? "
+$	   inq/nop check_coord		"Compile CHECK_COORD ? "
+$	   inq/nop keep_coord		"Compile KEEP_COORD ? "
+$	   inq/nop find_fc		"Compile FIND_FC ? "
+$	   inq/nop set_ac_details	"Compile SET_AC_DETAILS ? "
+$	   inq/nop get_ac_code		"Compile GET_AC_CODE ? "
+$	   inq/nop get_ac_name		"Compile GET_AC_NAME ? "
 $	   inq/nop open_iff		"Compile OPEN_IFF ? "
 $	   inq/nop open_md		"Compile OPEN_MD ? "
 $	   inq/nop close_iff		"Compile CLOSE_IFF ? "
 $	   inq/nop close_md		"Compile CLOSE_MD ? "
 $	   inq/nop process		"Compile PROCESS ? "
-$	   inq/nop write_md_head	"Compile  WRITE_MD_HEAD ? "
-$	   inq/nop write_md_seg		"Compile  WRITE_MD_SEG ? "
-$	   inq/nop write_md_code	"Compile  WRITE_MD_CODE ? "
-$	   inq/nop write_md_coord	"Compile  WRITE_MD_COORD ? "
+$	   inq/nop start_feature	"Compile START_FEATURE ? "
+$	   inq/nop read_points		"Compile READ_POINTS ? "
+$	   inq/nop write_points		"Compile WRITE_POINTS ? "
+$	   inq/nop rotation_to_point	"Compile ROTATION_TO_POINT ? "
+$	   inq/nop write_md_head	"Compile WRITE_MD_HEAD ? "
+$	   inq/nop write_md_seg		"Compile WRITE_MD_SEG ? "
+$	   inq/nop write_md_code	"Compile WRITE_MD_CODE ? "
+$	   inq/nop write_md_coord	"Compile WRITE_MD_COORD ? "
 $	   write sys$output " "
 $!
 $ a11:	   inq/nop mes "Generate message definitions ? "
 $	   inquire/nop lnkit "Link ? "
 $	   if .not. lnkit then goto notkb
 $!
-$	   linkver="i2mapdata"
-$	   inquire/nop answer "Experimental version ? "
-$	   if answer then linkver="i2mapdatax"
-$!
 $	   linkopts="/map"
 $	   inquire/nop answer "Link with debug ? "
 $	   if answer then linkopts=linkopts+"/debug"
+$!
+$	   linkver="i2mapdata"
+$	   inquire/nop answer "Experimental version ? "
+$	   if answer then linkver="i2mapdatax"
 $!
 $	   inquire/nop answer "Cross reference map ? "
 $	   if answer then linkopts=linkopts+"/cross"
@@ -147,7 +164,7 @@ $		wc "$ 	delete adc.ide;*,i2mapdata.tmp;*"
 $!
 $ fortonly:		
 $	if .not. compile then goto lnkonly
-$	   if .not. i2mapdata then goto a101
+$	   if .not. i2mapdata then goto a1010
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -157,7 +174,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog i2mapdata.lis"
 $!
-$ a101:	   if .not. control_init then goto a110
+$ a1010:   if .not. control_init then goto a1100
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -167,7 +184,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog control_init.lis"
 $!
-$ a110:	   if .not. obey then goto a111
+$ a1100:   if .not. obey then goto a1110
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -177,7 +194,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog obey.lis"
 $!
-$ a111:	   if .not. obey_qual then goto a112
+$ a1110:   if .not. obey_qual then goto a1120
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -187,7 +204,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog obey_qual.lis"
 $!
-$ a112:	   if .not. obey_erret then goto a120
+$ a1120:   if .not. obey_erret then goto a1200
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -197,7 +214,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog obey_erret.lis"
 $!
-$ a120:	   if .not. rdfrt then goto a130
+$ a1200:   if .not. rdfrt then goto a1300
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -207,7 +224,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog rdfrt.lis"
 $!
-$ a130:	   if .not. rdpar then goto a131
+$ a1300:   if .not. rdpar then goto a1310
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -220,7 +237,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog rdpar.lis"
 $!
-$ a131:	   if .not. rdlin then goto a132
+$ a1310:   if .not. rdlin then goto a1320
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -230,7 +247,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog rdlin.lis"
 $!
-$ a132:	   if .not. get_strpar then goto a133
+$ a1320:   if .not. get_strpar then goto a1330
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -240,7 +257,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog get_strpar.lis"
 $!
-$ a133:	   if .not. check_md_code then goto a134
+$ a1330:   if .not. check_md_code then goto a1340
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -250,7 +267,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog check_md_code.lis"
 $!
-$ a134:	   if .not. check_ac_code then goto a135
+$ a1340:   if .not. check_ac_code then goto a1350
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -260,7 +277,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog check_ac_code.lis"
 $!
-$ a135:	   if .not. check_fc then goto a136
+$ a1350:   if .not. check_fc then goto a1351
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -270,7 +287,37 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog check_fc.lis"
 $!
-$ a136:	   if .not. find_fc then goto a137
+$ a1351:   if .not. check_flag then goto a1352
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' check_flag.f"
+$		wc "$ 	purge/nolog check_flag.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog check_flag.lis"
+$!
+$ a1352:   if .not. check_coord then goto a1353
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' check_coord.f"
+$		wc "$ 	purge/nolog check_coord.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog check_coord.lis"
+$!
+$ a1353:   if .not. keep_coord then goto a1360
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' keep_coord.f"
+$		wc "$ 	purge/nolog keep_coord.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog keep_coord.lis"
+$!
+$ a1360:   if .not. find_fc then goto a1370
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -280,7 +327,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog find_fc.lis"
 $!
-$ a137:	   if .not. set_ac_details then goto a138
+$ a1370:   if .not. set_ac_details then goto a1380
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -290,7 +337,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog set_ac_details.lis"
 $!
-$ a138:	   if .not. get_ac_code then goto a139
+$ a1380:   if .not. get_ac_code then goto a1390
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -300,7 +347,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog get_ac_code.lis"
 $!
-$ a139:	   if .not. get_ac_name then goto a140
+$ a1390:   if .not. get_ac_name then goto a1400
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -310,7 +357,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog get_ac_name.lis"
 $!
-$ a140:	   if .not. open_iff then goto a141
+$ a1400:   if .not. open_iff then goto a1410
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -320,7 +367,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog open_iff.lis"
 $!
-$ a141:	   if .not. open_md then goto a142
+$ a1410:   if .not. open_md then goto a1420
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -330,7 +377,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog open_md.lis"
 $!
-$ a142:	   if .not. close_iff then goto a143
+$ a1420:   if .not. close_iff then goto a1430
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -340,7 +387,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog close_iff.lis"
 $!
-$ a143:	   if .not. close_md then goto a150
+$ a1430:   if .not. close_md then goto a1500
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -350,7 +397,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog close_md.lis"
 $!
-$ a150:	   if .not. process then goto a151
+$ a1500:   if .not. process then goto a1501
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -359,8 +406,46 @@ $		wc "$ 	purge/nolog process.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog process.lis"
+$ a1501:   if .not. start_feature then goto a1502
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' start_feature.f"
+$		wc "$ 	purge/nolog start_feature.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog start_feature.lis"
+$ a1502:   if .not. read_points then goto a1503
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' read_points.f"
+$		wc "$ 	purge/nolog read_points.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog read_points.lis"
 $!
-$ a151:	   if .not. write_md_head then goto a152
+$ a1503:   if .not. write_points then goto a1504
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' write_points.f"
+$		wc "$ 	purge/nolog write_points.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog write_points.lis"
+$!
+$ a1504:   if .not. rotation_to_point then goto a1510
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' rotation_to_point.f"
+$		wc "$ 	purge/nolog rotation_to_point.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog rotation_to_point.lis"
+$!
+$ a1510:   if .not. write_md_head then goto a1520
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -370,7 +455,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog write_md_head.lis"
 $!
-$ a152:	   if .not. write_md_seg then goto a153
+$ a1520:   if .not. write_md_seg then goto a1530
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -380,7 +465,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog write_md_seg.lis"
 $!
-$ a153:	   if .not. write_md_code then goto a154
+$ a1530:   if .not. write_md_code then goto a1540
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -390,7 +475,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog write_md_code.lis"
 $!
-$ a154:	   if .not. write_md_coord then goto a160
+$ a1540:   if .not. write_md_coord then goto a1600
 $		wc "$!	'f$verify(0)"
 $		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$	set verify"
@@ -400,7 +485,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 	purge/nolog write_md_coord.lis"
 $!
-$ a160:
+$ a1600:
 $ lnkonly:
 $ 	if .not. lnkit then goto nolnk
 $		wc "$!	'f$verify(0)"
@@ -419,6 +504,9 @@ $		wc "		get_strpar, -"
 $		wc "		check_md_code, -"
 $		wc "		check_ac_code, -"
 $		wc "		check_fc, -"
+$		wc "		check_flag, -"
+$		wc "		check_coord, -"
+$		wc "		keep_coord, -"
 $		wc "		find_fc, -"
 $		wc "		set_ac_details, -"
 $		wc "		get_ac_code, -"
@@ -428,12 +516,16 @@ $		wc "		open_md, -"
 $		wc "		close_iff, -"
 $		wc "		close_md, -"
 $		wc "		process, -"
+$		wc "		start_feature, -"
+$		wc "		read_points, -"
+$		wc "		write_points, -"
+$		wc "		rotation_to_point, -"
 $		wc "		write_md_head, -"
 $		wc "		write_md_seg, -"
 $		wc "		write_md_code, -"
 $		wc "		write_md_coord, -"
 $		wc "		i2mapdata.promsg_obj, -"
-$		wc "		lsl$library:lslfrtlib/lib,-"
+$		wc "		lsl$library:frtshr/opt,-"
 $	   	wc "		lsl$library:iffshr/opt,lslshr/opt"
 $!
 $ nolnk:

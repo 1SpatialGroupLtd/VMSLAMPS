@@ -1,0 +1,638 @@
+        INTEGER*4 FUNCTION PRINT_PROJ_REC(DTILUN)
+C
+***	MODULE	PRINT_PROJ_REC
+***	IDENT	29FE96
+C
+C 	Copyright Laser-Scan Ltd., Cambridge, England
+C 	Author  : D R Catlow
+C
+C	Created : 30 September 1987
+C Modified:
+C
+CMOD	Output correct information for Equirectangular 
+C	and Sinusoidal projections				RWR  8-May-1991
+CMOD	Add extra projections (Cassini,Krovak,			RWR  1-Mar-1993
+C       Bonne, Mollweide, Hammer-Aitoff and Winkel III)  wi 93/3
+C
+CMOD1500 Add Modified-Stereographic projections			JDB 12-Jul-1995
+C
+CMOD1533 Change ERRM$0 to ERRM and ADJL$0 to ADJL
+C	 and IS21$0 to IS21F for GOTHIC versions of GCTPLIB	JDB 29-Feb-1996
+C
+C	Function for DTITRANS to print projection details from
+C	the Projection Record for the DTI file opened on DTILUN.
+C	Very much copied from ITRANS routine OUTMD.
+C
+C----------------------------------------------------------------------
+	IMPLICIT NONE
+C
+C DTILIB commons
+C
+***	COMMON   /LSL$CMNDTI:DTIHDR/
+***	COMMON	 /LSL$CMNDTI:DTIPROJ/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+C
+***	COMMON   /LSL$CMNIFF:MD2NAM/	! holds MD variables that are
+C					! used by DTITRANS to ensure
+C					! compatability with ITRANS.
+***	COMMON   /HERE:DTITRANS/
+***	PARAMETER/HERE:DTITRANSMSG/
+C
+C Arguments:
+	INTEGER*4	DTILUN		! which DTI file
+C 
+C Ensure common block initialised
+	EXTERNAL	MD2DAT
+C Locals:
+	INTEGER*4	I		! counter
+	INTEGER*4	PROJ_INDEX	! projection index
+	INTEGER*4	UNIT_INDEX	! units index
+	INTEGER*4	SPHEROID_INDEX	! spheroid index
+	INTEGER*4	MODIND		! modified-stereographic version
+	REAL*8		TEMP_LAT	! holds lat value temporarily
+	REAL*8		TEMP_LAT_SEC	! ditto but in seconds
+	REAL*8		TEMP_LON	! holds lon value temporarily
+	REAL*8		TEMP_LON_SEC	! ditto but in seconds
+	CHARACTER*1	TYPE		! format for projs 8 & 20
+	CHARACTER*30	PROJ
+	CHARACTER*60	ERR
+	CHARACTER*80	STRNG
+	INTEGER		STRNL
+	REAL*8		DATA(15)
+	INTEGER*4	ZONE		! zone identifier
+	LOGICAL		EQUIRECT	! Equirectangular
+	LOGICAL		MERC 		! Mercator projection
+C
+	CHARACTER*45	ZONESTR
+	DATA		ZONESTR/'Zone'/
+C
+	INTEGER		IERR		! error code for GCTP
+	COMMON/ERRM/	IERR
+C
+C Parameters
+C For spherical Oblique Mercator projection
+	REAL*8		A,E,KS0,X0,Y0,LATP,LON0,AL,UL,
+     &			SINLATP,COSLATP
+	COMMON /CNST21/ A,E,KS0,X0,Y0,LATP,LON0,AL,UL,
+     &	                SINLATP,COSLATP
+C
+	INTEGER*4	LAT,LONG
+	PARAMETER	(LONG=2,LAT=1)
+	INTEGER*4	SCL,COORD
+	PARAMETER	(COORD=0,SCL=1)
+	REAL*8		PI
+	PARAMETER	(PI=3.14159265358979323846D0)
+C
+C Functions:
+	INTEGER*4	SIGCHS		! determines number of significant chs.
+	CHARACTER*14	DISPANG
+	REAL*8		ADJL
+C
+C----------------------------------------------------------------------
+C----------------------------------------------------------------------
+	PRINT_PROJ_REC=DTRANS__NORMAL	! set to success intially
+C
+C assume not Equirectangular or Mercator projection at the moment
+	EQUIRECT = .FALSE.
+	MERC     = .FALSE.
+C
+C----------------------------------------------------------------------
+	CALL WRITEF(' ')
+C
+C Determine spheroid if the projection is defined in the
+C Projection Record.
+C
+	DO 100, I=1,MD2_NOSPH
+	   IF(DTIPROJ_SPHEROID(DTILUN).EQ.MD2_SPHCD(I))GOTO 150
+100	CONTINUE	 
+C
+C Invalid spheroid code
+	CALL WRITEF('%N is an illegal spheroid code',
+     &              DTIPROJ_SPHEROID(DTILUN))
+	PRINT_PROJ_REC=DTRANS__INVPROJVAL
+	GOTO 180
+C
+C----------------------------------------------------------------------
+150	SPHEROID_INDEX=I
+        CALL WRITEF('Spheroid      :%^L%I4 (%S)',
+     &      MD2_SPHCD(SPHEROID_INDEX),
+     &	    MD2_SPH(SPHEROID_INDEX)(1:SIGCHS(MD2_SPH(SPHEROID_INDEX))))
+C
+C If user defined spheroid, print out associated values
+C
+	IF(DTIPROJ_SPHEROID(DTILUN).EQ.101)CALL WRITEF
+     &	   ('  defined as %^D%F0.3 %F0.3',
+     &	   DTIPROJ_USER_SPHEROID(1,DTILUN),
+     &	   DTIPROJ_USER_SPHEROID(2,DTILUN))
+C
+C----------------------------------------------------------------------
+C Projection Identifier
+C
+180	DO 200, I=1,MD2_NOPRJ
+	   IF(DTIPROJ_PROJECTION(DTILUN).EQ.MD2_PRJCD(I))GOTO 250
+200	CONTINUE
+C
+C Invalid Projection Code
+	CALL WRITEF('%N is an illegal projection code',
+     &              DTIPROJ_PROJECTION(DTILUN))
+	PRINT_PROJ_REC=DTRANS__INVPROJVAL
+	GOTO 3000			! skip projection details
+C
+C----------------------------------------------------------------------
+250	PROJ_INDEX=I
+	IF(DTIPROJ_PROJECTION(DTILUN).NE.8.AND.
+     &     DTIPROJ_PROJECTION(DTILUN).NE.20.AND.
+     &     DTIPROJ_PROJECTION(DTILUN).NE.21)THEN
+	   CALL WRITEF
+     &          ('Projection    :%^L%I4 (%S)',
+     &          MD2_PRJCD(PROJ_INDEX),
+     &	        MD2_PRJ(PROJ_INDEX)(3:SIGCHS(MD2_PRJ(PROJ_INDEX))))
+	ELSE
+C
+C Find variant of projection:
+	   IF ((DTIPROJ_PROJECTION(DTILUN).EQ.8.AND.
+     &        DTIPROJ_PROJ_PARAMS(9,DTILUN).EQ.0.0).OR.
+     &	      ((DTIPROJ_PROJECTION(DTILUN).EQ.20.OR.
+     &        DTIPROJ_PROJECTION(DTILUN).EQ.21).AND.
+     &        DTIPROJ_PROJ_PARAMS(13,DTILUN).EQ.0.0))THEN
+	      TYPE='A'
+	   ELSE
+	      TYPE='B'
+	   ENDIF
+C
+	   CALL WRITEF('Projection    :%^L%I4 (%S - format %S)',
+     &	               MD2_PRJCD(PROJ_INDEX),MD2_PRJ(PROJ_INDEX)
+     &	               (3:SIGCHS(MD2_PRJ(PROJ_INDEX))),TYPE)
+	ENDIF
+C
+C----------------------------------------------------------------------
+C Branch according to projection index
+C
+C	     unset,  utm,   spc,  alb,   lcc, mer, pol ster, poly, eqd con
+C	        tm, ster,  laea,   az,  gnom,  orth,
+C	      gvnp, sinu, equirect, mill,  vdg,
+C	      obl mer (hot/sph), ster, cass, krov,  bonn,
+C	      moll, hamm, wink, mod ster, unset , unset
+C
+	GOTO (3000,  400,  450,  500, 500,  540,  550,   600,  650,
+     &	       700,  750,  750,  750, 750,  750,
+     &	       800,  850,  840,  850, 850,
+     &	       900,  950,       1000, 1050, 1100, 1150,
+     &	       850,  850,  850, 1250, 3000, 3000) PROJ_INDEX
+C
+C----------------------------------------------------------------------
+C 	UTM - only if zone 0
+C----------------------------------------------------------------------
+C
+400	CALL WRITEF(' ')
+C
+	ZONE = DTIPROJ_PROJ_PARAMS(3,DTILUN)
+	IF(DTIPROJ_PROJ_PARAMS(2,DTILUN).LT.0.0) THEN
+	  CALL WRITEF('   %S:%I5 (Southern hemisphere)',
+     &	               ZONESTR,ZONE)
+C
+	ELSE
+	  CALL WRITEF('   %S:%I5',ZONESTR,ZONE)
+	ENDIF
+C
+	IF(ZONE.EQ.0) THEN		! need point in geographicals
+	  CALL OUTANG('Longitude of a point in the UTM zone',
+     &                 DTIPROJ_PROJ_PARAMS(1,DTILUN),
+     &	               LONG)
+	ENDIF
+C
+	GOTO 3000
+C
+C----------------------------------------------------------------------
+C State Plane Coordinate system
+C----------------------------------------------------------------------
+C
+450	CALL WRITEF(' ')
+	ZONE=DTIPROJ_PROJ_PARAMS(3,DTILUN)
+	CALL WRITEF('   %S:%I5',ZONESTR,ZONE)
+C
+	GOTO 3000
+C
+C----------------------------------------------------------------------
+C 	Albers Conical equal area and Lambert Conformal Conic
+C----------------------------------------------------------------------
+C
+500	CALL WRITEF(' ')
+C
+C Latitude of standard parallels
+	CALL OUTANG('Latitude of 1st standard parallel',
+     &              DTIPROJ_PROJ_PARAMS(3,DTILUN),LAT)
+	CALL OUTANG('Latitude of 2nd standard parallel',
+     &              DTIPROJ_PROJ_PARAMS(4,DTILUN),LAT)
+C
+	GOTO 2500		! to print out other details
+C
+C----------------------------------------------------------------------
+C Mercator and Polar Stereographic
+C----------------------------------------------------------------------
+C
+540	MERC = .TRUE.
+C
+550	CALL WRITEF(' ')
+C
+C Latitude of true scale
+	CALL OUTANG('Latitude of true scale',
+     &              DTIPROJ_PROJ_PARAMS(6,DTILUN),LAT)
+C
+C Longitude of central meridian (for Mercator)
+C
+	IF(MERC) THEN
+	  CALL OUTANG('Longitude of the central meridian',
+     &                DTIPROJ_PROJ_PARAMS(5,DTILUN),LONG)
+C
+C Polar sterographic, longitude straight down from the pole
+	ELSE
+	   CALL OUTANG('Longitude down from N Pole (up from S)',
+     &                DTIPROJ_PROJ_PARAMS(5,DTILUN),LONG)
+	ENDIF
+C
+	GOTO 2750		! remaining details
+C
+C----------------------------------------------------------------------
+C 	Polyconic
+C----------------------------------------------------------------------
+C
+600	CONTINUE
+C
+C Similar to other conics, therefore
+C
+	GOTO 2500
+C
+C----------------------------------------------------------------------
+C 	Equidistant Conic 
+C----------------------------------------------------------------------
+C
+650	CONTINUE
+C
+C Type B is same as other conics
+	IF (TYPE.EQ.'B')GOTO 500
+C
+C Type A is slightly different
+	CALL WRITEF(' ')
+	CALL OUTANG('Latitude of standard parallel',
+     &               DTIPROJ_PROJ_PARAMS(3,DTILUN),LAT)
+C
+	GOTO 2500		! remaining details
+C
+C----------------------------------------------------------------------
+C 	Transverse Mercator
+C----------------------------------------------------------------------
+C
+700	CALL WRITEF(' ')
+C
+C Scale factor of Central meridian
+	CALL OUTDBL('Scale factor on central meridian',
+     &               DTIPROJ_PROJ_PARAMS(3,DTILUN),SCL)
+C
+	GOTO 2500		! remaining details
+C
+C----------------------------------------------------------------------
+C 	Stereographic, Lambert Azimuthal Equal Area, Azimuthal,
+C	Gnomonic and Orthographic 
+C----------------------------------------------------------------------
+C
+750	CALL WRITEF(' ')
+C
+760	CONTINUE
+C
+C Latitude and Longitude of centre of projection
+C
+	CALL OUTANG('Latitude  of centre of projection',
+     &               DTIPROJ_PROJ_PARAMS(6,DTILUN),LAT)
+	CALL OUTANG('Longitude of centre of projection',
+     &               DTIPROJ_PROJ_PARAMS(5,DTILUN),LONG)
+C
+	GOTO 2750		! remaining details
+C
+C----------------------------------------------------------------------
+C 	General Vertical Near-side Perspective
+C----------------------------------------------------------------------
+C
+800	CALL WRITEF(' ')
+C
+C Height of perspective point above surface
+	CALL OUTDBL('Height of perspective point above surface',
+     &	             DTIPROJ_PROJ_PARAMS(3,DTILUN),COORD)
+C
+C Latitude and Longitude of centre of projection
+	CALL OUTANG('Latitude  of centre of projection',
+     &               DTIPROJ_PROJ_PARAMS(6,DTILUN),LAT)
+	CALL OUTANG('Longitude of centre of projection',
+     &               DTIPROJ_PROJ_PARAMS(5,DTILUN),LONG)
+C
+	GOTO 2750		! remaining details
+C
+C----------------------------------------------------------------------
+C 	Sinusoidal, Miller Cylindrical,Van der Grinten projection
+C 	and Equi-Rectangular, Mollweide, Hammer-Aitoff and Winkel III
+C----------------------------------------------------------------------
+C
+840	EQUIRECT = .TRUE.
+850	CALL WRITEF(' ')
+C
+C Latitude of true scale, for equi-rectangular projection
+	IF (EQUIRECT)
+     &	CALL OUTANG('Latitude of true scale',
+     &              DTIPROJ_PROJ_PARAMS(6,DTILUN),LAT)
+C
+C Longitude of central meridian
+	CALL OUTANG('Longitude of central meridian',
+     &               DTIPROJ_PROJ_PARAMS(5,DTILUN),LONG)
+C
+	GOTO 2750		! remaining details
+C
+C----------------------------------------------------------------------
+C 	Oblique Mercator (Hotine)
+C----------------------------------------------------------------------
+C
+900	CALL WRITEF(' ')
+C
+C Scale factor at centre of projection
+	CALL OUTDBL('Scale factor at centre of projection',
+     &	            DTIPROJ_PROJ_PARAMS(3,DTILUN),SCL)
+C
+C For Type B, print azimuth angle east of north of central line
+C and long. of point on central line where azimuth is measured
+C
+	IF (TYPE.EQ.'B') THEN
+	   CALL OUTANG('Azimuth of central line (east of north)',
+     &	                DTIPROJ_PROJ_PARAMS(4,DTILUN),0)
+	   CALL OUTANG('Longitude of point on central line where '//
+     &	               'azimuth measured',
+     &                  DTIPROJ_PROJ_PARAMS(5,DTILUN),LONG)
+	ENDIF
+C
+C Latitude of centre of map, and false origin
+	CALL OUTANG('Latitude of the origin of projection',
+     &               DTIPROJ_PROJ_PARAMS(6,DTILUN),LAT)
+	CALL OUTDBL('Eastings  of origin',
+     &               DTIPROJ_PROJ_PARAMS(7,DTILUN),COORD)
+	CALL OUTDBL('Northings of origin',
+     &               DTIPROJ_PROJ_PARAMS(8,DTILUN),COORD)
+C
+C Type A - end points of central line
+C
+	IF (TYPE.EQ.'A') THEN
+	   CALL OUTANG('Latitude  of 1st point on central line',
+     &	                DTIPROJ_PROJ_PARAMS(10,DTILUN),LAT)
+	   CALL OUTANG('Longitude of 1st point on central line',
+     &	                DTIPROJ_PROJ_PARAMS(9,DTILUN),LONG)
+	   CALL OUTANG('Latitude  of 2nd point on central line',
+     &	                DTIPROJ_PROJ_PARAMS(12,DTILUN),LAT)
+	   CALL OUTANG('Longitude of 2nd point on central line',
+     &	                DTIPROJ_PROJ_PARAMS(11,DTILUN),LONG)
+	ENDIF
+C
+	GOTO 3000
+C
+C----------------------------------------------------------------------
+C 	Oblique Mercator (Spherical)
+C----------------------------------------------------------------------
+C
+950	CALL WRITEF(' ')
+C
+C Initialise projection, to get values for false eastings 
+C and northings
+C
+	IF(DTILUN.EQ.IN_LUN)THEN
+	  CALL PARINIT(INSYS,INZONE,DATA,INUNIT,IN_LUN)
+	ELSE
+	  CALL PARINIT(OUTSYS,OUTZONE,DATA,OUTUNIT,OUT_LUN)
+	ENDIF
+C
+	IERR = 0
+	CALL IS21F(ZONE,DATA)
+C
+	IF (IERR.NE.0.) THEN
+	   CALL LSL_PUTMSG(DTRANS__WGCTPERR)
+	   GOTO 9999
+	ENDIF	   
+C
+C Scale factor at centre of projection
+	CALL OUTDBL('Scale factor on false equator',
+     &               DTIPROJ_PROJ_PARAMS(3,DTILUN),SCL)
+
+C False origin (in geographicals).....
+	CALL OUTANG('Latitude  of datum',
+     &               DTIPROJ_PROJ_PARAMS(8,DTILUN),LAT)
+	CALL OUTANG('Longitude of datum',
+     &               DTIPROJ_PROJ_PARAMS(7,DTILUN),LONG)
+C
+C and in projection units
+C
+	IF (IERR.EQ.0)THEN
+	   CALL OUTDBL('   Eastings  of origin',X0,COORD)
+	   CALL OUTDBL('   Northings of origin',Y0,COORD)
+	ENDIF
+C
+C Type A - end points of central line
+	IF (TYPE.EQ.'A') THEN
+	   CALL OUTANG('Latitude  of 1st point on central line',
+     &	                DTIPROJ_PROJ_PARAMS(10,DTILUN),LAT)
+	   CALL OUTANG('Longitude of 1st point on central line',
+     &	                DTIPROJ_PROJ_PARAMS(9,DTILUN),LONG)
+	   CALL OUTANG('Latitude  of 2nd point on central line',
+     &	                DTIPROJ_PROJ_PARAMS(12,DTILUN),LAT)
+	   CALL OUTANG('Longitude of 2nd point on central line',
+     &	                DTIPROJ_PROJ_PARAMS(11,DTILUN),LONG)
+C
+C Work out vertex
+	   TEMP_LON = LON0 + PI*0.5
+	   TEMP_LON = ADJL(TEMP_LON)
+	   TEMP_LON_SEC = TEMP_LON*3600.0*180.0/PI	! in secs
+	   TEMP_LAT  = PI*0.5 - LATP
+	   TEMP_LAT_SEC = TEMP_LAT*3600.0*180.0/PI	! in secs
+	   CALL WRITEF('      (Vertex  %S %S)',
+     &                DISPANG(TEMP_LAT_SEC,LAT),
+     &	              DISPANG(TEMP_LON_SEC,LONG))
+C
+C Work out pole
+	   TEMP_LON =TEMP_LON + PI
+	   TEMP_LON = ADJL(TEMP_LON)
+	   TEMP_LON_SEC = TEMP_LON_SEC*3600.0*180.0/ PI	! in secs
+	   TEMP_LAT_SEC = LATP*3600.0*180.0/PI		! in secs
+	   CALL WRITEF('      (Pole    %S %S)',
+     &                 DISPANG(TEMP_LAT_SEC,LAT),
+     &	               DISPANG(TEMP_LON_SEC,LONG))
+	ELSE
+C
+C Type B - geographical coordinates of vertex
+	   CALL OUTANG('Latitude  of vertex of central line',
+     &	                DTIPROJ_PROJ_PARAMS(10,DTILUN),LAT)
+	   CALL OUTANG('Longitude of vertex of central line',
+     &	                DTIPROJ_PROJ_PARAMS(9,DTILUN),LONG)
+	ENDIF
+C
+	GOTO 3000
+C
+C----------------------------------------------------------------------
+C 	Stereographic (UKSL format)
+C----------------------------------------------------------------------
+C
+1000	CALL WRITEF(' ')
+C
+	IF (DTIPROJ_PROJ_PARAMS(4,DTILUN).GT.0.0) 
+     &	   CALL OUTDBL('Radius of Conformal Earth',
+     &     DTIPROJ_PROJ_PARAMS(4,DTILUN),COORD)
+C
+	CALL OUTANG('Latitude  of centre of projection',
+     &               DTIPROJ_PROJ_PARAMS(6,DTILUN),LAT)
+	CALL OUTANG('Longitude of centre of projection',
+     &               DTIPROJ_PROJ_PARAMS(5,DTILUN),LONG)
+C
+	GOTO 2750		! for remainder
+C
+C----------------------------------------------------------------------
+C 	Cassini
+C----------------------------------------------------------------------
+C
+1050	CONTINUE
+C
+C same as the conics
+C
+	GOTO 2500
+C
+C----------------------------------------------------------------------
+C 	Krovak
+C----------------------------------------------------------------------
+C
+1100	CALL WRITEF(' ')
+	CALL OUTANG('Latitude at which conformal sphere calculated',
+     &	               DTIPROJ_PROJ_PARAMS(9,DTILUN),LAT)
+	CALL OUTANG('Latitude of origin',
+     &	               DTIPROJ_PROJ_PARAMS(4,DTILUN),LAT)
+	CALL OUTANG('Longitude of origin',
+     &	               DTIPROJ_PROJ_PARAMS(3,DTILUN),LONG)
+	CALL OUTANG('Latitude of origin on conformal sphere',
+     &	               DTIPROJ_PROJ_PARAMS(5,DTILUN),LAT)
+	CALL OUTDBL('Scale factor on parallel through origin',
+     &	               DTIPROJ_PROJ_PARAMS(6,DTILUN),SCL )
+C
+C and false origin
+C
+	GOTO 2750
+C
+C----------------------------------------------------------------------
+C 	Bonne
+C----------------------------------------------------------------------
+C
+1150	CALL WRITEF(' ')
+	CALL FLWRTF(' ')
+	CALL OUTANG('Latitude of standard parallel',
+     &	               DTIPROJ_PROJ_PARAMS(3,DTILUN),LAT)
+	CALL OUTANG('Longitude of the central meridian',
+     &	               DTIPROJ_PROJ_PARAMS(5,DTILUN),LONG)
+C
+	GOTO 2750
+C
+C----------------------------------------------------------------------
+C 	Modified-Stereographic
+C----------------------------------------------------------------------
+C
+1250	CONTINUE
+C
+	MODIND = DTIPROJ_PROJ_PARAMS(4,DTILUN)
+C
+	CALL WRITEF('Modification :%^L%I4 (%S)',
+     &	   MD2_MODCD(MODIND),MD2_MOD(MODIND)(3:SIGCHS(MD2_MOD(MODIND))))
+	CALL WRITEF(' ')
+C
+	GOTO 760
+
+C----------------------------------------------------------------------
+C Long of central meridian, latitude of origin, false eastings
+C and false northings (often common with other projections)
+C
+2500	CONTINUE
+C
+	CALL OUTANG('Latitude  of the projection origin',
+     &               DTIPROJ_PROJ_PARAMS(6,DTILUN),LAT)
+	CALL OUTANG('Longitude of the central meridian',
+     &               DTIPROJ_PROJ_PARAMS(5,DTILUN),LONG)
+C
+2750	CONTINUE
+C
+	CALL OUTDBL('Eastings  of origin',
+     &               DTIPROJ_PROJ_PARAMS(7,DTILUN),COORD)
+	CALL OUTDBL('Northings of origin',
+     &               DTIPROJ_PROJ_PARAMS(8,DTILUN),COORD)
+C
+C----------------------------------------------------------------------
+C Units
+C
+3000	CALL WRITEF(' ')
+	DO 3100 I=1,MD2_NOUNT
+	   IF (DTIPROJ_UNITS(DTILUN).EQ.MD2_UNTCD(I))GOTO 3250
+3100	CONTINUE
+C
+C Invalid unit code
+C
+	CALL WRITEF('%N is an illegal unit code',DTIPROJ_UNITS(DTILUN))
+	PRINT_PROJ_REC=DTRANS__INVPROJVAL
+C
+	GOTO 4000
+C
+3250	UNIT_INDEX=I
+C
+C All spheroids known by GCTP are specified in International 
+C metres. If user specified spheroid, then we talk about 
+C projection units.
+C Also when dealing with Oblique Stereographic (UKSL format) 
+C with user specified conformal earth's radius, then talk
+C about projection units
+C
+	IF (DTIPROJ_SPHEROID(DTILUN).EQ.101 .OR.
+     &	   DTIPROJ_PROJECTION(DTILUN).EQ.22 .AND.
+     &     DTIPROJ_PROJ_PARAMS(4,DTILUN).GT.0.0) THEN
+	   MD2_UNT(3)='projection units'
+C
+	ELSE
+	   MD2_UNT(3)='metres'
+	ENDIF
+C
+	CALL WRITEF('Units         :%^L%I4 (%S)',
+     &              MD2_UNTCD(UNIT_INDEX),
+     &	            MD2_UNT(UNIT_INDEX)(1:SIGCHS(MD2_UNT(UNIT_INDEX))))
+C
+C----------------------------------------------------------------------
+C Local origin ie. SW corner
+C
+4000	IF(DTIPROJ_PROJECTION(DTILUN).EQ.100)THEN
+	  CALL WRITEF('Local origin  : %^D%F15.3 (Latitude) '//
+     &	               '%F15.3 (Longitude)',
+     &                 DTIPROJ_ORIGIN(2,DTILUN),
+     &                 DTIPROJ_ORIGIN(1,DTILUN))
+C
+	ELSE
+	  CALL WRITEF('Local origin  : %^D%F15.3 (Eastings) '//
+     &	               '%F15.3 (Northings)',
+     &                 DTIPROJ_ORIGIN(1,DTILUN),
+     &                 DTIPROJ_ORIGIN(2,DTILUN))
+	ENDIF
+C
+C----------------------------------------------------------------------
+C Sample values
+C
+5000	IF(DTIPROJ_PROJECTION(DTILUN).EQ.100)THEN
+	  CALL WRITEF('Sample values : %^D%F15.3 (Latitude) '//
+     &	               '%F15.3 (Longitude)',
+     &                 DTIPROJ_SAMPLE(2,DTILUN),
+     &                 DTIPROJ_SAMPLE(1,DTILUN))
+C
+	ELSE
+	  CALL WRITEF('Sample values : %^D%F15.3 (Eastings) '//
+     &	               '%F15.3 (Northings)',
+     &                 DTIPROJ_SAMPLE(1,DTILUN),
+     &                 DTIPROJ_SAMPLE(2,DTILUN))
+	ENDIF
+C
+C----------------------------------------------------------------------
+C
+9999	RETURN
+	END
+C

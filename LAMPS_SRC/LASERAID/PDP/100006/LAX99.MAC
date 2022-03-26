@@ -1,0 +1,138 @@
+	.TITLE	LAX99
+	.IDENT	/7MAR79/
+	.ENABL LC
+;
+; Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+;
+; Author M.C.Fulford
+;
+;	Created 14.ii.79
+;
+; I/O routines for communication between LAX & 9900
+;
+
+	.MCALL	DEFIN$, FILIO$
+	FILIO$			; define i/o function codes
+	.MCALL	DIR$, QIO$, WTSE$S, MRKT$S, CMKT$S
+
+; equated symbols
+T9LUN = 1
+T9EFN = 1
+
+; QIO for line transmission
+T9QIO:	QIO$	IO.ATT,T9LUN,T9EFN,,T9ISB,,<T9BUF>
+T9QFUN=T9QIO+Q.IOFN
+T9QBPT=T9QIO+Q.IOPL
+T9QBCT=T9QIO+Q.IOPL+2
+T9ISB=T9QIO+Q.IOPL+10	; overlays unused parameters
+
+; workspace
+ACK:	.BYTE	6
+NAK:	.BYTE	25
+	.EVEN
+T9BTCT:	.WORD	0	; byte count
+T9BUFP:	.WORD	0	; pointer
+T9BUF:	.BLKB	32.
+T9BND:
+
+; start up line
+
+INIT99::MRKT$S	#T9EFN,#1,#2	; mark time 1 sec
+	JSR	R5,T9.QIO	; try to attach
+	 .WORD	 IO.ATT
+	ROR 	-(SP)		; preserve error indicator
+	CMKT$S			; cancel mark-time
+	TST	(SP)+
+	BPL	10$		; j if successful attach
+; error or timed out
+	CMPB	R0,#IE.DAA&377	
+	BEQ	90$		; already attached is o.k.
+	BPT			; unable to attach
+; initial attach - ensure input set up properly
+10$:	MOV	#T9BND-T9BUF,T9QBCT
+	MOV	#IO.RAL,T9QFUN
+	DIR$	#T9QIO
+	MOV	#IO.KIL,T9QFUN
+	DIR$	#T9QIO
+90$:	RETURN
+
+;
+; subroutine to perform QIO, function follows call
+; called via R5
+;
+T9.QIO:	MOV	(R5)+,T9QFUN
+	DIR$	#T9QIO
+	MOV	$DSW,R0
+	BCS	5$		; j if directive rejected
+	WTSE$S	#T9EFN
+	MOV	T9ISB,R0
+	CMPB	R0,#1
+	BEQ	9$
+5$:	BPT			; rejection or failure
+	SEC			; indicate failed
+9$:	CLR	T9BTCT
+	RTS	R5
+;
+; WRTWD(BUFFER, WORDCOUNT) - write out list of words 
+;			     to the 9900
+;
+WRTWD::	MOV	2(R5), T9QBPT	; buffer address
+	MOV	@4(R5), R0	; word count
+	ASL	R0		; double to ..
+	MOV	R0, T9QBCT	; .. byte count
+	JSR	R5, T9.QIO	; write it out
+	 .WORD	 IO.WAL
+	RETURN
+;
+; NXTBYT() - return next byte as integer result
+;
+NXTBYT::TST	T9BTCT		; any bytes left ?
+	BGT	5$		; j if there are
+	CALL	GETPKT		; else get some
+5$:	CLR	R0
+	BISB	@T9BUFP, R0	; extract byte
+	INC	T9BUFP		; update pointer ..
+	DEC	T9BTCT		; .. & byte count
+	RETURN
+;
+; read a packet from the 9900
+;
+GETPKT:	MOV	#376, R4	; expected code byte
+5$:	MOV	#T9BUF, T9QBPT	; buffer
+	MOV	#32.,  T9QBCT	; byte count
+	JSR	R5, T9.QIO	; read the packet
+	 .WORD	 IO.RAL!TF.RNE
+; check for error bytes (377)
+	MOV	#32., R0
+10$:	CMPB	T9BUF-1(R0), #377 ; error ?
+	BEQ	20$
+	SOB	R0, 10$		; keep checking
+	BR	30$		; no errors
+; error found - negative acknowledge
+20$:	MOVB	#NAK, T9QBPT
+	MOV	#1, T9QBCT
+	JSR	R5, T9.QIO	; send one byte
+	 .WORD	 IO.WAL
+	MOV	#375, R4	; expect different code byte
+	BR	5$
+; no error bytes - acknowledge
+30$:	MOVB	#ACK, T9QBPT
+	MOV	#1, T9QBCT
+	JSR	R5, T9.QIO
+	 .WORD	 IO.WAL
+; check code byte
+	CMPB	T9BUF, R4
+	BEQ	40$
+	BPT
+; set up pointer & counter
+40$:	MOV	#T9BUF+2,T9BUFP	; pointer
+	MOVB	T9BUF+1, R0	; byte count
+	BGT	42$
+	BPT			; <=0 ??
+42$:	CMP	R0, #30.
+	BLE	44$
+	BPT			; >30. ??
+44$:	MOV	R0, T9BTCT	; store byte count
+	RETURN
+
+	.END

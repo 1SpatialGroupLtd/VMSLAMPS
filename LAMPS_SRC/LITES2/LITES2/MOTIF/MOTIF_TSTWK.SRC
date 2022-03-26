@@ -1,6 +1,6 @@
 	LOGICAL*1 FUNCTION TSTWK(NUMBER,WTYPE,NAME_LEN,NAME,PLANES)
 C
-***	IDENT	26OC92
+***	IDENT	08MY96
 ***	MODULE	TSTWK
 C
 C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
@@ -18,6 +18,7 @@ C
 	IMPLICIT NONE
 C
 	INCLUDE	'($SSDEF)'
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
 ***	COMMON/CMN:WORKS/
 C
 C arguments
@@ -30,14 +31,25 @@ C
 C functions called
 	INTEGER	TRNALL		! LSLLIB, translate logical name
 	INTEGER	RDLONG		! LSLLIB, read long integer
+	INTEGER	XOpenDisplay
+	INTEGER	XDefaultScreenOfDisplay
+	INTEGER	XDefaultDepthOfScreen
+	INTEGER	GKS_COUNT_BITS
 C
 C workspace
-	CHARACTER*3	TRAN
+	CHARACTER*4	TRAN
 	INTEGER		MAXCOL
 	INTEGER		LOCAL_LEN
 	PARAMETER	(LOCAL_LEN = 5)
 	CHARACTER*(LOCAL_LEN)	LOCAL
 	DATA		LOCAL /'MOTIF'/
+	INTEGER		DISPLAY,SCREEN
+	INTEGER		SAVED_PLANES
+	DATA		SAVED_PLANES/-1/
+	SAVE		SAVED_PLANES
+	RECORD		/X$VISUAL/VISUAL
+	INTEGER		COLS
+	INTEGER		I
 C
 C return program name
 	NAME_LEN = MIN(LOCAL_LEN,LEN(NAME))
@@ -58,28 +70,72 @@ C leave 6000 and 7000 alone for primary and secondary
 	IF (NUMBER.GT.2.OR.(WTYPE.NE.6000.AND.WTYPE.NE.7000)
      &						) WTYPE = 10000+NUMBER
 C
-C Determine number of colours available
-CCC	CALL UIS$GET_HW_COLOR_INFO('SYS$WORKSTATION',,MAXCOL)
-CCC Uncertain for MOTIF. If we haven't opened the display yet,
-CCC then we don't know.
-	MAXCOL = 256		! assume 8 planes for now
-	PLANES = 8
+C Determine number of colours available (once and for all)
+	IF (SAVED_PLANES.LT.0) THEN
+	   SAVED_PLANES = 0
+	   DISPLAY = XOpenDisplay(%VAL(0))
+	   IF (DISPLAY.NE.0) THEN
+	      SCREEN = XDefaultScreenOfDisplay(%VAL(DISPLAY))
+	      SAVED_PLANES = XDefaultDepthOfScreen(%VAL(SCREEN))
+	      CALL X$DEFAULT_VISUAL_OF_SCREEN(SCREEN,VISUAL)
+	      IF (VISUAL.X$L_VISU_CLASS .EQ. X$C_DIRECT_COLOR .OR.
+     &		  VISUAL.X$L_VISU_CLASS .EQ. X$C_TRUE_COLOR ) THEN
 C
-C For an 8 plane system, then if WTYPE=7000, use colours 0-249 (leaving
-C the reserved colours alone), unless logical name LSL$UIS_MAX_COLOUR
-C is set to some other maximum number of colours,
-C otherwise use 7 planes.
-	IF (MAXCOL.GE.256.AND.(WTYPE.EQ.7000.OR.NUMBER.GT.2)) THEN
-	   IF (NUMBER.GT.2) GOTO 10
-	   IF (.NOT.TRNALL('LSL$DECW_MAX_COLOUR',TRAN)) THEN
-	      IF (.NOT.TRNALL('LSL$UIS_MAX_COLOUR',TRAN)) GOTO 10 ! failed
+C NB GKS_COUNT_BITS is in GKSMOTIFLIB
+C
+	         SAVED_PLANES = MIN(
+     &			GKS_COUNT_BITS(VISUAL.X$L_VISU_RED_MASK),
+     &			GKS_COUNT_BITS(VISUAL.X$L_VISU_GREEN_MASK),
+     &			GKS_COUNT_BITS(VISUAL.X$L_VISU_BLUE_MASK) )
+	      ENDIF
+	      CALL XCloseDisplay(%VAL(DISPLAY))
+	   ELSE
+C
+C Here if DECW$DISPLAY defined, but can't open display.
+C Assume people are trying to plot with no display, so assume 8 planes
+	      SAVED_PLANES = 8
 	   ENDIF
-	   CALL SETAUX(%REF(TRAN),3)
-	   IF (RDLONG(MAXCOL)) GOTO 10
-	   IF (MAXCOL.GT.256.OR.MAXCOL.LT.2) GOTO 10
-	   MAXCOL = MAXCOL-1
+	ENDIF
+	
+	PLANES = SAVED_PLANES
+C
+C The rest of LITES2 has not been amended for more than 8 planes
+C e.g. length of colour arrays, so restrict to 8 for now
+	IF (PLANES.GT.8) PLANES = 8
+	MAXCOL = 2**PLANES
+C For an 8 or 12 plane system, then if WTYPE=7000, use colours 0-249 or
+C 0-4079 (leaving the reserved colours alone), unless logical name
+C LSL$DECW_MAX_COLOUR is set to some other maximum number of colours,
+C otherwise use 7 or 11 planes.
+	COLS = -1
+	I = TRNALL('LSL$DECW_MAX_COLOUR',TRAN)
+	IF (.NOT.I) I = TRNALL('LSL$UIS_MAX_COLOUR',TRAN)
+	IF (I) THEN
+	   CALL SETAUX(%REF(TRAN),4)
+	   IF (.NOT.RDLONG(I)) COLS = I
+	ENDIF
+C
+	IF (MAXCOL.GE.4096.AND.
+     &			(WTYPE.EQ.7000.OR.NUMBER.GT.2)) THEN
+	   IF (NUMBER.GT.2) GOTO 8
+	   IF (COLS.GT.4096.OR.COLS.LT.2) GOTO 8
+	   MAXCOL = COLS-1
+	   GOTO 9
+8	   MAXCOL = 4079		! allow 0-4079 (12 planes)
+9	   CONTINUE
+	ELSEIF (MAXCOL.GE.2048) THEN
+	   IF (WTYPE.EQ.6000) THEN
+	      MAXCOL = 2047		! allow 0-2047 (11 planes)
+	   ELSE
+	      MAXCOL = 1023		! 10 planes + 1 for refresh
+	   ENDIF
+	ELSEIF (MAXCOL.GE.256.AND.
+     &			(WTYPE.EQ.7000.OR.NUMBER.GT.2)) THEN
+	   IF (NUMBER.GT.2) GOTO 10
+	   IF (COLS.GT.256.OR.COLS.LT.2) GOTO 10
+	   MAXCOL = COLS-1
 	   GOTO 11
-10	   MAXCOL = 249			! allow 0-249 (8 planes)
+10	   MAXCOL = 239		! allow 0-239 (8 planes)
 11	   CONTINUE
 	ELSEIF (MAXCOL.GE.128) THEN
 	   IF (WTYPE.EQ.6000) THEN
@@ -89,25 +145,24 @@ C otherwise use 7 planes.
 	   ENDIF
 C
 C For a 4 plane system, then if WTYPE=7000, use colours 0-15
-C unless logical name LSL$UIS_MAX_COLOUR
+C unless logical name LSL$DECW_MAX_COLOUR
 C is set to some other maximum number of colours,
-	ELSEIF (MAXCOL.GE.16.AND.(WTYPE.EQ.7000.OR.NUMBER.GT.2)) THEN
+	ELSEIF (MAXCOL.GE.16.AND.
+     &			(WTYPE.EQ.7000.OR.NUMBER.GT.2)) THEN
 	   IF (NUMBER.GT.2) GOTO 12
-	   IF (.NOT.TRNALL('LSL$DECW_MAX_COLOUR',TRAN)) THEN
-	      IF (.NOT.TRNALL('LSL$UIS_MAX_COLOUR',TRAN)) GOTO 12 ! failed
-	   ENDIF
-	   CALL SETAUX(%REF(TRAN),3)
-	   IF (RDLONG(MAXCOL)) GOTO 12
-	   IF (MAXCOL.GT.16.OR.MAXCOL.LT.2) GOTO 12
-	   MAXCOL = MAXCOL-1
+	   IF (COLS.GT.16.OR.COLS.LT.2) GOTO 12
+	   MAXCOL = COLS-1
 	   GOTO 13
-12	   MAXCOL = 15			! allow 0-15 (4 planes)
+12	   MAXCOL = 15		! allow 0-15 (4 planes)
 13	   CONTINUE
 	ELSEIF (MAXCOL.GE.8) THEN	! 4 plane system
-	   MAXCOL = 7			! allow 0-7
+	   MAXCOL = 7		! allow 0-7
+	ELSEIF (MAXCOL.GE.4) THEN
+	   MAXCOL = 3
 	ELSE				! mono system
-	   MAXCOL = 1			! allow 0-1
+	   MAXCOL = 1		! allow 0-1
 	ENDIF
+C
 14	IF (2**(PLANES-1).LE.MAXCOL) GOTO 9999
 	PLANES = PLANES-1
 	GOTO 14

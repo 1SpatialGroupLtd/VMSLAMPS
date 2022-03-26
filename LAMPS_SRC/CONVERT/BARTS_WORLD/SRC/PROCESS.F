@@ -1,5 +1,5 @@
 	SUBROUTINE 	PROCESS
-CDEC$	IDENT	'25OC91'
+CDEC$	IDENT	'15JA92'
 C
 C	Copyright (C)				Laser-Scan Ltd., Cambridge
 C	Auth					01-Oct-1991	Jon Barber
@@ -55,12 +55,16 @@ C Local
 C
 C Record types
 C
+	INTEGER		AC_TYPE
+	PARAMETER	(AC_TYPE=3)
+C
 	INTEGER*2	CAPITAL_FC(5)
 	INTEGER*2	TOWN_FC(5)
 	INTEGER*2	RIVER_FC
 	INTEGER*2	COUNTRY_FC
 	INTEGER*2	ADMINAREA_FC
 	INTEGER*2	PHYSICAL_FC
+	INTEGER*2	PHYSICAL_HEIGHT_FC
 C
 	INTEGER*2	CAPITAL_TH(5)
 	INTEGER*2	TOWN_TH(5)
@@ -75,6 +79,7 @@ C
 	DATA		COUNTRY_FC  /79/
 	DATA		ADMINAREA_FC/80/
 	DATA		PHYSICAL_FC /99/
+	DATA		PHYSICAL_HEIGHT_FC /100/
 C
 	DATA		CAPITAL_TH  /6,8,10,12,14/
 	DATA		TOWN_TH     /6,8,10,12,14/
@@ -90,6 +95,10 @@ C
 C
 	REAL*8		Y,X			! geog degrees
 	INTEGER		LOWER,UPPER		! populations
+	INTEGER		HEIGHT,DEPTH		! populations
+	LOGICAL		HAD_HEIGHT
+	LOGICAL		HAD_DEPTH
+C
 	CHARACTER*255	STRING			! record type
 	CHARACTER*255	TEXT			! name
 	INTEGER		TEXT_LEN
@@ -283,9 +292,31 @@ C
 C
 C No populations for these features
 C
-	IF (FC.EQ.PHYSICAL_FC .OR. FC.EQ.ADMINAREA_FC .OR.
+	IF (FC.EQ.ADMINAREA_FC .OR.
      &	    FC.EQ.COUNTRY_FC  .OR. FC.EQ.RIVER_FC) GOTO 101
 C 
+	IF (FC.EQ.PHYSICAL_FC) THEN		! no populations
+	   HAD_HEIGHT = .FALSE.
+	   HAD_DEPTH  = .FALSE.
+C
+	   OK = RDCH(ICH)			! Check for ':'
+	   OK = RDCH(ICH)			! Check for ':'
+	   OK = RDCH(ICH)			! Check for ':'
+	   IF (ICH.NE.TC) CALL BSCH
+C
+	   OK = RDLONG(HEIGHT) 	      
+	   IF (.NOT.OK) HAD_HEIGHT = .TRUE.
+C
+	   OK = RDCH(ICH)			! Check for ':'
+C
+	   OK = RDLONG(DEPTH)
+	   IF (.NOT.OK) HAD_DEPTH = .TRUE.
+C
+	   GOTO 101
+	ENDIF
+C
+C Get populations
+C
 	OK = RDCH(ICH)			! Check for ':'
 	IF (OK) THEN			! no char
 	   CALL WRITEF (' Unable to read character on line %N',RECNUM)
@@ -311,6 +342,8 @@ C	   CALL WRITEF (' Unable to read character on line %N',RECNUM)
 C
 	OK = RDLONG(UPPER)
 	IF (OK) GOTO 101		! no number
+C
+C ***************************************************************
 C
 101	CONTINUE
 C
@@ -370,6 +403,17 @@ C
 C
 	CALL EXPAND('FS %^W%N',FC)
 	CALL FLWLIN()
+C
+	IF (HAD_HEIGHT) THEN
+	   CALL EXPAND('AC %N %N',AC_TYPE,HEIGHT)
+	   CALL FLWLIN()
+	ENDIF
+C
+	IF (HAD_DEPTH) THEN
+	   CALL EXPAND('AC %N %N',AC_TYPE,DEPTH)
+	   CALL FLWLIN()
+	ENDIF
+C
 	CALL EXPAND('TH %^W%N',TH)
 	CALL FLWLIN()
 	CALL FLWSTR('ST')
@@ -380,6 +424,44 @@ C
 	CALL FLWLIN()
 C
 	CALL FLWSTR('EF')
+C
+C Add extra TX features for height or depth of physical features
+C
+	IF (HAD_HEIGHT .OR. HAD_DEPTH) THEN
+	   CALL FLWSTR('NF')
+C
+	   CALL EXPAND('FS %^W%N',PHYSICAL_HEIGHT_FC)
+	   CALL FLWLIN()
+C
+	   IF (HAD_HEIGHT) THEN
+	      CALL EXPAND('AC %N %N',AC_TYPE,HEIGHT)
+	      CALL FLWLIN()
+	   ENDIF
+C
+	   IF (HAD_DEPTH) THEN
+	      CALL EXPAND('AC %N %N',AC_TYPE,DEPTH)
+	      CALL FLWLIN()
+	   ENDIF
+C
+	   CALL EXPAND('TH %^W%N',TH)
+	   CALL FLWLIN()
+	   CALL FLWSTR('ST')
+C
+	   CALL EXPAND('%F %F',Y,X)
+	   CALL FLWLIN()
+C
+	   IF (HAD_HEIGHT) THEN
+	      CALL EXPAND('TX %N',HEIGHT)
+	      CALL FLWLIN()
+	   ENDIF
+C
+	   IF (HAD_DEPTH) THEN
+	      CALL EXPAND('TX %N',DEPTH)
+	      CALL FLWLIN()
+	   ENDIF
+C
+	   CALL FLWSTR('EF')
+	ENDIF
 C
 	GOTO 10
 C

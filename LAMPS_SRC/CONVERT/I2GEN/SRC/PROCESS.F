@@ -134,10 +134,12 @@ C
 C
 C Dont want to do this at the mo. Unsure of what GENAMAP does with origins.
 C
-C	RANGE(1) = RANGE(1) + MD2LOC(1)
-C	RANGE(2) = RANGE(2) + MD2LOC(1)
-C	RANGE(3) = RANGE(3) + MD2LOC(2)
-C	RANGE(4) = RANGE(4) + MD2LOC(2)
+	IF (HAD_OFFSET) THEN
+	   RANGE(1) = RANGE(1) + MD2LOC(1)
+	   RANGE(2) = RANGE(2) + MD2LOC(1)
+	   RANGE(3) = RANGE(3) + MD2LOC(2)
+	   RANGE(4) = RANGE(4) + MD2LOC(2)
+	ENDIF
 	GOTO 100			! get next IFF entry
 C
 C ......................................................................
@@ -220,21 +222,17 @@ C
 	STBLOCKS = 1
 	CALL EIHMK(1)
 	CALL EIHRS(NPTS,IENDS)
-	IF (NPTS.LT.200) THEN
-	   TOTPTS = NPTS
-	ELSE
+	TOTPTS = TOTPTS + NPTS
+610	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 220
+	IF (IECODE.EQ.'ST'.OR.IECODE.EQ.'ZS') THEN
+	   STBLOCKS = STBLOCKS + 1
+	   CALL EIHRS(NPTS,IENDS)
+	   IF (STBLOCKS.GT.1 .AND. IENDS.EQ.0) GOTO 610	! invisible lines
 	   TOTPTS = TOTPTS + NPTS
-610	   CALL IFFNXT(IECODE,IELEN)
-	   IF (IELEN.EQ.-1) GOTO 220
-	   IF (IECODE.EQ.'ST'.OR.IECODE.EQ.'ZS') THEN
-	      STBLOCKS = STBLOCKS + 1
-	      CALL EIHRS(NPTS,IENDS)
-	      IF (STBLOCKS.GT.1 .AND. IENDS.EQ.0) GOTO 610   ! invisible lines
-	      TOTPTS = TOTPTS + NPTS
-	      GOTO 610
-	   ELSE
-	      CALL IFFRWM
-	   ENDIF
+	   GOTO 610
+	ELSE
+	   CALL IFFRWM
 	ENDIF
 C
 C If it's a text feature save the coords until we get TX
@@ -256,6 +254,10 @@ C
 	      TEXTY=STBUFF(2,1)
 	   ENDIF
 	   HAD_TXT_COORDS = .TRUE.
+	   IF (HAD_OFFSET) THEN
+	      TEXTX=TEXTX+MD2LOC(1)
+	      TEXTY=TEXTY+MD2LOC(2)
+	   ENDIF
 	ELSE
 C
 C Write header line
@@ -285,6 +287,10 @@ C
 		 ELSE
 	            X=STBUFF(1,I)
 	            Y=STBUFF(2,I)
+		 ENDIF
+		 IF (HAD_OFFSET) THEN
+		    X=X+MD2LOC(1)     ! add origin offset in MD
+		    Y=Y+MD2LOC(2)
 		 ENDIF
 	         CALL EXPAND('%F0.1 %F0.1',X,Y)
 	         CALL FLWLIN(,,,)

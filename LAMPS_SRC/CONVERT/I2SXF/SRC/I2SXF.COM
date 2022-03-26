@@ -32,7 +32,11 @@ $ 	inquire cmd "commands       (get_command)                  "
 $	inquire par "parameter file (rdpar,rdsxd)                  "
 $	inquire iff "IFF file       (close_iff)                    "
 $	inquire prc "process        (process)                      "
-$	inquire ini "init           (report,find_codes)            "
+$	inquire scd "get_sxf_code   (get_sxf_code)                 "
+$	inquire ufc "use_fc          (use_fc)                      "
+$	inquire ula "use_layer      (use_layer)                    "
+$	inquire hed "heading        (sxf_heading)                  "
+$	inquire ini "init           (report)                       "
 $	wsb
 $	inquire lnk "link            "
 $	inquire lbg "link with debug "
@@ -84,14 +88,32 @@ $noiff:	if .not.prc then goto noprc
 $	   fort/extend'dbg' process.f
 $	   purge process.obj
 $!
-$noprc:	if .not.ini then goto noini
+$noprc:	if .not.scd then goto noscd
+$	   fort/extend'dbg' get_sxf_code.f
+$	   purge get_sxf_code.obj
+$!
+$noscd:	if .not.ufc then goto noufc
+$	   fort/extend'dbg' use_fc.f
+$	   purge use_fc.obj
+$!
+$noufc:	if .not.ula then goto noula
+$	   fort/extend'dbg' use_layer.f
+$	   purge use_layer.obj
+$!
+$noula:	if .not.hed then goto nohed
+$	   fort/extend'dbg' sxf_heading.f
+$	   purge sxf_heading.obj
+$!
+$nohed:	if .not.ini then goto noini
 $	   fort/extend'dbg' report.f
 $	   purge report.obj
 $!
 $noini:	if .not.lnk then goto end
 $!
 $lnk:	link'ldbg'	i2sxf,get_command,rdpar,close_iff,report,-
-			i2sxf_cld,i2sxf.promsg_obj,-
+			get_sxf_code,use_fc,use_layer,-
+			sxf_heading,-
+			i2sxf_cld,process,i2sxf.promsg_obj,-
 			lsl$library:lslfrtlib/lib, -
 			lsl$library:iffshr/opt, -
 			lsl$library:lslshr/opt

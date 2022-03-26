@@ -1,0 +1,481 @@
+	LOGICAL FUNCTION READ_LINEAR()
+C
+***     MODULE READ_LINEAR
+***     IDENT	11NO96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author	IM	02-09-87
+C Modified	TJI	 5-Oct-1987
+C
+C Reads and converts line, cline and point features
+C
+CMOD	Handle NTF level 3 input				VLG 09-Mar-1990
+CMOD	Source tidied						SG  18-Jul-1991
+CMOD	If the feature code could not be deciphered from the	SG  23-Jul-1991
+C	string passed out by GET_ATTRIB, the FC is set to 0
+C	and the output string attribute	placed into the
+C	optional text of an AC type 1.
+CMOD	If the feature code was non numerical, an AC type 1	SG  30-Jul-1991
+C	will always be written.
+CMOD	Moved modular code for determining feature code into	SG  31-Jul-1991
+C	new routine.
+CMOD	If below level 3, then the record_id field (LINE_ID,	SG  26-Sep-1991
+C	POINT_ID,etc) may have the FSN there, if so use it.
+CMOD	If unable to read FC as a number, always (regardless	SG  27-Sep-1991
+C	of level) output the FC as optional text in AC 1.
+CMOD	Modified to lookup in the FRT the GT type of the	ST  03-Oct-1991
+C	feature to be output to determine whether an RO entry
+C	is needed.
+CMOD	BS7567 (v2.0) support added (W93/13)			ST  02-Jun-1993
+CMOD	Only attempt to read 'OR' attribute at Level 3 for
+C	NTF v1.1 and if had an attribute file. Mod 1310		ST  02-Jun-1993
+CMOD	Now correctly scales the rotation (from the OR)		ST  02-Jun-1993
+C	attribute by 1000 as its interpretation is R6,3.	ST  14-Jan-1994
+C       Mod 1330.
+CMOD 	Added some functionality to call FIND_GEOM_IN_NODERECS	ST  14-Dec-1994
+C	to transfer level info from NODEs to lines as ACs when
+C       reading OSCAR data. This must be called twice, once for
+C	the start and end of the line. Mod 1447.
+CMOD    Altered the above mod (1447) as with MERIDIAN data the  MIK 17-Jun-1996
+C	same node can have the start and end of the same link
+C	so needs to look in same NODEREC for both. Mod 1546.
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Commons:
+	INCLUDE 'CACHE.PAR'
+	INCLUDE 'ATTRIBUTE.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE 'LOOKUP.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE 'CACHE.CMN'
+C
+	REAL		 PI
+	PARAMETER	(PI=3.1415926)
+C
+C Functions:
+C
+	LOGICAL		RDREAL, RDINT,RDLONG
+	LOGICAL		READ_GEOMETRY
+	LOGICAL		READ_CHAIN
+	LOGICAL		READ_LINE_ATTRIBS
+	LOGICAL		ASSOCIATE_FSN
+	LOGICAL		GET_FC
+	LOGICAL		FIND_GEOM_IN_NODERECS
+	REAL		ZCONVERT
+	LOGICAL		FRTFND		! Get info about a FC
+C
+C Workspace:
+C
+	LOGICAL		OK		! Success flag
+	INTEGER		I,LOOP		! DO loop counter
+	INTEGER*4	NUM		! For reading numbers into
+	CHARACTER*2	FC_ATTR_CODE
+
+	BYTE		AC_STR(20)
+	CHARACTER*20	OUT_ATTR
+	INTEGER		ATTR_LEN
+	REAL 		HEIGHT		! Contour height
+	REAL		ROTATE		! Orientation angle
+	REAL		OR		! Orientation angle
+	LOGICAL		HAD_RO		! Did we have ROTATE?
+	INTEGER*2	ISTAT(4)	! Feature status (FS) flags 
+	INTEGER*2	AC_CODE 
+	CHARACTER*8	VALUE		! The VALUE field
+C
+	INTEGER		MCOORDS		! Maximum no of coords in
+	PARAMETER	(MCOORDS=10000)	! a feature
+C
+	REAL		COORDS(2,MCOORDS)	! Store feature's coords
+	INTEGER		NCOORDS		! Number of coordinates
+	INTEGER		GEOM_ID		! ID of associated geometry record
+	INTEGER		CHAIN_ID
+	EQUIVALENCE	(GEOM_ID, CHAIN_ID)
+	INTEGER		ATT_ID
+	INTEGER		INPUT_FSN
+	INTEGER		FC		! NTF FC
+C
+	LOGICAL		IS_LINE	
+	LOGICAL		IS_CLINE
+	LOGICAL		IS_POINT
+	LOGICAL		HAD_FSN
+	LOGICAL		IS_LABEL
+C	
+	CHARACTER*2	NTF$_REC_DESCR
+	CHARACTER*6	NTF$_GEOM_ID
+	CHARACTER*6	NTF$_REC_ID
+	CHARACTER*6	NTF$_ATT_ID
+	CHARACTER*6	NTF$_NAME_ID
+	CHARACTER*4	NTF$_FEAT_CODE
+	CHARACTER*5	RECORD_TYPE
+C
+C new variables for OSCAR data
+C
+	INTEGER		END		! the current end we've found
+	INTEGER		POS		! the current position in NODERECs
+	INTEGER		LEV		! the level found
+	INTEGER		STARTLEV	! the level for the start of the line
+	INTEGER		ENDLEV		! the level for the end of the line
+	LOGICAL		HAD_LEVEL	! did we find a link level end?
+
+	LOGICAL		GEOM_DEBUG
+C
+C
+C##############################################################################
+C
+	OK=.TRUE.	! Assume success
+	ATT_ID = 0
+	REC_IN_HAND = .FALSE.	!Current record is processed
+	IS_CLINE = .FALSE.
+	IS_LINE = .FALSE.
+	IS_POINT = .FALSE.
+	IS_LABEL = .FALSE.
+C
+C------------------------------------------------------------------------------
+C
+	NTF$_REC_DESCR	= STRING( 1:2 )
+	NTF$_REC_ID	= STRING( 3:8 )
+	IF (LEVEL.EQ.3) THEN
+	   NTF$_GEOM_ID = STRING( 9:14)
+	ELSE
+	   NTF$_FEAT_CODE = STRING(17:20)
+	ENDIF
+	IF (LEVEL.EQ.3) THEN
+	   IF (VERSION.EQ.2.0) THEN
+	      NTF$_ATT_ID = STRING(17:22)
+	   ELSE
+	      NTF$_ATT_ID = STRING(15:20)
+	   ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C set up various flags and the record_description for later use
+C
+	IF    (NTF$_REC_DESCR.EQ.REC$_CLINE) THEN	! a cline
+	  IS_CLINE = .TRUE.
+	  RECORD_TYPE = 'CLINE'
+	ELSEIF(NTF$_REC_DESCR.EQ.REC$_LINEREC) THEN	! a line
+	  IS_LINE = .TRUE.
+	  RECORD_TYPE = 'LINE '
+	ELSEIF(NTF$_REC_DESCR.EQ.REC$_POINTREC) THEN	! a point
+	  IS_POINT = .TRUE.
+	  RECORD_TYPE = 'POINT'
+	ELSEIF(NTF$_REC_DESCR.EQ.REC$_POLYGON) THEN	! a polygon
+	  IS_CLINE = .TRUE.				!treat as CLINE
+	  RECORD_TYPE = 'POLYG'
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C below level 3, the ID field could be used to store the feature serial number
+C so if the field is not blank and we could read a number then use it as the FSN
+C
+	HAD_FSN = .FALSE.				!initialise flag
+C
+	IF ((LEVEL.LT.3).AND.(NTF$_REC_ID.NE.' ')) THEN	!something in ID field
+	  CALL SETAUX(%REF(NTF$_REC_ID),6)		!set as input buffer
+	  OK = .NOT.RDLONG(INPUT_FSN)			!attempt to read FSN
+	  HAD_FSN = OK.AND.(INPUT_FSN.GT.0)
+	ENDIF
+C
+	IF (HAD_FSN) THEN				!if we read the FSN
+	  FSN = INPUT_FSN				! use it
+	ELSE						!didnt read FSN
+	  FSN = FSN+1					! increment FSN
+	ENDIF
+C
+	CALL IFFNF( FSN, FSN )				!start feature
+C
+C------------------------------------------------------------------------------
+C Now work out the FS entry - At level 3 the FC is stored in an ATTREC whereas
+C at levels 1 and 2 the feature code is in the POINTREC or LINEREC record
+C
+C	...................................................................
+C	is the file below NTF level 3? feature code is in this record
+C
+	IF (LEVEL.LT.3) THEN
+	   CALL SETAUX(%REF(NTF$_FEAT_CODE),4)		! set input buffer
+	   OK = .NOT.RDINT(FC)				! try to read FC
+	   IF ((.NOT.OK).OR.(FC.LE.0)) THEN		! error bad FC
+	      ISTAT(1) = 0				! default to FC 0
+	      FC = 0					! flag not numeric
+	      DO 100 I=1,4				! copy it to AC
+		AC_STR(I) = ICHAR(NTF$_FEAT_CODE(I:I))
+100	      CONTINUE
+	      ATTR_LEN = 4				! 4 character FC
+	   ELSE						! FC okay
+	      ISTAT(1) = FC				! Copy to output
+	      IF (HAD_FC_LOOKUP)			! translate?
+     &		CALL FC_TRANS(%VAL(LUT_BASE_ADDR), FC, ISTAT(1))
+	   ENDIF
+C
+C	...................................................................
+C	the file is NTF level 3, so feature code is in ATTREC
+C
+	ELSE
+	   CALL SETAUX(%REF(NTF$_ATT_ID) , 6)		! set input buffer
+	   OK = .NOT.RDLONG(ATT_ID)			! try to read ATT_ID
+	   IF (OK) OK = ATT_ID.GT.0			! validate ATT_ID
+	   IF (.NOT.OK) THEN				! error
+	      CALL WRITEF('%%NTF2I-E-MISC, error reading ATT_ID field')
+	      CALL WRITEF('-NTF2I-I-MISC, "%S"REC, ATT_ID ="%S"',
+     &				RECORD_TYPE, NTF$_ATT_ID)
+	      GOTO 999					! exit the routine
+	   ENDIF
+C
+C	   .................................................................
+C	   get feature code as number and text
+C
+	   OK = GET_FC( ATT_ID, FC, ATTR_LEN, AC_STR)
+	   IF (.NOT.OK) THEN				! didn't find FC
+	      CALL LSL_PUTMSG(NTF2I__NOFC)		! give error message
+	      GOTO 999					! exit routine
+	   ENDIF
+	   ISTAT(1) = FC				! Copy to output
+	   IF (FC.GT.0 .AND. HAD_FC_LOOKUP)		! translate?
+     &		CALL FC_TRANS(%VAL(LUT_BASE_ADDR), FC, ISTAT(1))
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C work out rest of ISTAT
+C
+	ISTAT(2)=0					! only used by LASERAID
+	ISTAT(4)=0					! User dependent data
+	ISTAT(3)=0					! default to linear data
+
+	IF (IS_POINT)  ISTAT(3)='4000'X			! set to point feature
+	CALL IFFFS( ISTAT )				! write out FS entry
+C
+C------------------------------------------------------------------------------
+C IF FC is 0, then were unable to read the original feature code as a number.
+C If so, always output the feature code as the optional text in AC 1
+
+C
+	IF (FC.EQ.0) CALL IFFAC(1, 0, AC_STR, ATTR_LEN)	! write the ac
+C
+C------------------------------------------------------------------------------
+C Get selected attributes
+C
+	HAD_RO = .FALSE.				! assume  no rotation
+C
+C	.....................................................................
+C	at level 3, only look for orientation of feature
+C
+	IF (LEVEL.EQ.3) THEN
+	   IF (HAD_ATTRIBUTE.AND.VERSION.EQ.1.1) THEN
+C
+C OR should be R6,3 so we must divide the result by 1000
+C
+	      ATTR_LEN = 6				!width of OR ATTR
+	      CALL GET_ATTRIB(ATT_ID,'OR',OUT_ATTR,ATTR_LEN) !look for OR
+	      IF (ATTR_LEN.NE.0) THEN 			! found it
+		 CALL SETAUX( %REF(OUT_ATTR(1:ATTR_LEN)) , ATTR_LEN)
+		 IF (RDREAL(OR)) GOTO 999 		! bad 'OR' field
+		 ROTATE = OR*PI/180.0/1000.0		! convert to radians
+		 HAD_RO = .TRUE.
+	      ENDIF
+	   ENDIF
+C
+C	.....................................................................
+C	levels 1,2, only read 'HT' or 'OR' attribute
+C
+	ELSE
+	   VALUE = STRING(9:16)				!copy line height string
+C
+C	   ....................................................................
+C	   found a 'HT'- line height attribute
+C
+	   IF (VALUE(1:2).EQ.'HT') THEN			!if it is the HT ATTR
+	      CALL SETAUX(%REF(VALUE(3:8)),6)
+	      OK = .NOT.RDLONG(NUM)			!attempt to read int
+	      AC_CODE = 3
+	      IF (.NOT.OK) THEN				!error
+		 CALL WRITEF('%%NTF2I-E-MISC, error reading HT attr %S',VALUE)
+		 CALL WRITEF('-NTF2I-I-MISC, "%S" REC %I',RECORD_TYPE,SEC_REC)
+	         GOTO 999				!exit routine
+	      ELSE
+	         HEIGHT = ZCONVERT( NUM )		! convert to true hght
+		 DO 150 I=1,ATTR_PTR
+		    IF (NTF_ATT_NAME(I).EQ.'HT') THEN
+		       AC_CODE = IFF_ATT_NUM(I)
+		       GOTO 151
+		    ENDIF
+150		 CONTINUE
+	      ENDIF
+151	      IF (AC_CODE.EQ.2) THEN
+		 CALL IFFAC(AC_CODE,NUM)	! output it as an integer AC
+	      ELSE
+		 CALL IFFAC(AC_CODE,HEIGHT)	! output it as a real AC
+	      ENDIF
+C
+C	   ....................................................................
+C	   found a 'OR'- text orientationattribute
+C
+	   ELSE IF (VALUE(1:2).EQ.'OR') THEN
+	      CALL SETAUX(%REF(VALUE(3:8)),6)		!set input buffer
+	      OK = .NOT.RDLONG(NUM)			!attempt to read integer
+	      IF (OK) THEN				!error
+	         ROTATE = (REAL(NUM)/10)*PI/180		! convert to radians
+	         HAD_RO = .TRUE.			! hold it for later
+	      ELSE
+		 CALL WRITEF('%%NTF2I-E-MISC, error reading OR attr %S',VALUE)
+		 CALL WRITEF('-NTF2I-I-MISC, "%S" REC %I',RECORD_TYPE,SEC_REC)
+	         GOTO 999				!exit routine
+	      ENDIF
+C
+C	   ....................................................................
+C	   unrecognised attribute
+C
+	   ELSE IF (VALUE(1:2).NE.'  ') THEN   
+	      CALL LSL_PUTMSG(NTF2I__ANCIGN,VALUE(1:2),SEC_REC)
+	   ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Get GEOM ID (if at level 3)
+C
+	GEOM_ID	= 0					! default no GEOM_ID
+	IF (LEVEL.EQ.3) THEN				! only exists at level3
+	   CALL SETAUX(%REF(NTF$_GEOM_ID),6)		
+	   OK = .NOT.RDLONG(GEOM_ID)			! try to read geom_id
+	   IF (OK) OK = (GEOM_ID.GT.0)			! check range
+	   IF (.NOT.OK) THEN				! error
+	      CALL WRITEF('%%NTF2I-E-MISC, error GEOM_ID "%S"',NTF$_GEOM_ID)
+	      CALL WRITEF('-NTF2I-I-MISC, "%S" record %I',RECORD_TYPE,SEC_REC)
+	      GOTO 999					!exit routine
+	   ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C If we are reading OSCAR data, find the current GEOM_ID in the NODE records
+C and create an AC for the start or end to hold the link's level.
+C
+	IF (HAD_OSCAR.AND.NTF$_REC_DESCR.EQ.REC$_LINEREC.AND.LEVEL.EQ.3) THEN
+
+	   IF(.NOT. CACHE_INIT) THEN
+	      DO 160 I=1,CACHE_MAX_GEOM_ID
+	         CACHE_START_LEVEL(I)=-1
+	         CACHE_END_LEVEL(I)=-1
+	         CACHE_INIT = .TRUE.
+	         CACHE_HITS = 0
+	         CACHE_MISSES= 0
+160	      CONTINUE
+
+C force reading of all node records to fill cache
+
+	      END = -1
+	      POS = 1
+	      OK = FIND_GEOM_IN_NODERECS(POS,999999,END,LEV)
+	      POS = 1
+	      OK = FIND_GEOM_IN_NODERECS(POS,999999,END,LEV)
+	   ENDIF
+
+	   STARTLEV = 0
+	   ENDLEV = 0
+	   END = -1
+	   POS = 1					! start at first record
+
+	   OK = FIND_GEOM_IN_NODERECS(POS,GEOM_ID,END,LEV)
+	   IF (.NOT.OK) GOTO 999
+	   HAD_LEVEL = END.NE.-1
+	   IF (END.EQ.1) STARTLEV = LEV
+	   IF (END.EQ.2) ENDLEV = LEV
+C
+C Find other end, carrying off where the other left off (POS is next record
+C to be examined in node list) but reprocess the same record in case start
+C and end of link are in same record.
+C
+	   POS = POS -1
+	   OK = FIND_GEOM_IN_NODERECS(POS,GEOM_ID,END,LEV)
+	   IF (.NOT.OK) GOTO 999
+	   IF (.NOT.HAD_LEVEL) HAD_LEVEL = END.NE.-1
+	   IF (END.EQ.1) STARTLEV = LEV
+	   IF (END.EQ.2) ENDLEV = LEV
+C
+C Write ACs if anything was found
+C
+	   IF (HAD_LEVEL) THEN
+	      CALL IFFAC(OSCAR_START_AC, STARTLEV)	! the start level
+	      CALL IFFAC(OSCAR_END_AC,   ENDLEV)	! the end level
+	   ENDIF
+	ENDIF
+
+C------------------------------------------------------------------------------
+C       Read the GEOMETRY
+C	remember that CHAIN_ID and GEOM_ID are equivalent,
+C	get the coordinates
+C
+	IF (IS_CLINE) THEN
+	   OK = READ_CHAIN(COORDS,NCOORDS,MCOORDS,CHAIN_ID)
+	ELSE
+	   OK = READ_GEOMETRY(COORDS,NCOORDS,MCOORDS,GEOM_ID)
+	ENDIF
+	IF (.NOT.OK) GOTO 999
+C
+C	........................................................................
+C	If we are at levels 2 or 3 then ATTREC may follow
+C
+	IF ((LEVEL.EQ.2).OR.(LEVEL.EQ.3)) THEN
+	   OK=READ_LINE_ATTRIBS(ATT_ID)
+	   IF (.NOT.OK) GOTO 999
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C We can now output the coordinates that we read earlier
+C
+	CALL WRITE_COORDS(COORDS,NCOORDS)		!write coordinates
+C
+C------------------------------------------------------------------------------
+C Decide on the basis of GT whether we need to output an RO entry
+C
+C	IF (IS_POINT.AND.HAD_RO) CALL IFFRO(ROTATE)	!rotation on symbol
+	IF (IS_POINT) THEN
+	   IF (HAD_FRT) THEN
+	      IF (FRTFND(ISTAT(1))) THEN
+		 CALL WRITEF('%%NTF2I-W-MISC, FC %^W%I0 not in FRT',ISTAT(1))
+		 CALL WRITEF('-NTF2I-I-MISC, Graphical Type needed to determine if RO entry required')
+C		 CALL LSL_PUTMSG(NTF2I__NOFCINFRT)		! give error message
+		 GOTO 999					! exit routine
+	      ELSE
+	         IF (FRTGT.EQ.8) THEN
+		    IF (HAD_RO) THEN
+		       CALL IFFRO(ROTATE)
+		    ELSE
+		       CALL IFFRO(0.0)
+		    ENDIF
+	         ELSEIF (FRTGT.EQ.9) THEN
+C do not handle scaled symbols yet. They are written by NTF2I as point records
+C with two points. READ_GEOMETRY does not check the GTYPE. It should.
+		 ENDIF
+	      ENDIF
+	   ELSE
+	      IF (HAD_RO) CALL IFFRO(ROTATE)	!rotation on symbol
+	   ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Associate the ID of this record with the FSN is at level 3
+C
+	IF (LEVEL.EQ.3) THEN
+	  OK = ASSOCIATE_FSN( NTF$_REC_DESCR, NTF$_REC_ID, FSN )
+	  IF (.NOT.OK) THEN
+	    CALL WRITEF('NTF2I-E-MISC, Unable to associate record ID with FSN')
+	    CALL WRITEF('NTF2I-I-MISC, %S, ID = %I ,FSN = %I',
+     &			 		RECORD_TYPE, NTF$_REC_ID, FSN	)
+	  ENDIF
+	ENDIF
+C
+C##############################################################################
+C rejoin errors and always close the feature
+C
+999	CALL IFFEF					!end feature
+	READ_LINEAR=OK
+	RETURN
+	END

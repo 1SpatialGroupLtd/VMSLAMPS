@@ -1,0 +1,680 @@
+	PROGRAM CEDD2I
+C
+***	IDENT	26JL91
+***	MODULE	CEDD2I
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author J Barber,  11 May 1988
+C
+C This program reads a IHO (International Hydrographic Organisation)
+C CEDD (Committee for Exchange of Digital Data) datafile on disc or
+C magnetic tape and translates the information into an IFF file on disc.
+C
+	IMPLICIT NONE
+C
+C common blocks
+C
+***     PARAMETER/HERE:CEDD2IMSG/
+***     PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***     COMMON/HERE:DESCR/
+***	COMMON/HERE:STATE/	        ! what state we are in 
+***	COMMON/HERE:PARAMS/	        ! control stuff
+***	COMMON/LSL$CMNLSL:MTIVCM/	! magtape common
+***	COMMON/LSL$CMNLSL:STATUS/	! contains LSL_STATUS
+***     COMMON/LSL$CMNFRT:FRTACD/
+***     COMMON/LSL$CMNLSL:FILENAME/     ! for filename expansion
+        INCLUDE '($SSDEF)'
+C
+C functions called
+C
+	INTEGER		MTINIT	   ! init tape for input
+        INTEGER         MTIBCK     ! backspace one blk
+        INTEGER         FLROPN     ! open input data file
+        INTEGER         FLWOPN     ! open output files
+        INTEGER         FLWCLO     ! close output files
+        INTEGER         PUTFLN     ! prime /FILENAME/
+        INTEGER         EXPFLN     ! extract filename
+	INTEGER   	GETCOMLIN  ! decodes command line
+C
+        LOGICAL         FRTINI     ! initialise the ACD's
+        LOGICAL         RDMAG      ! read record/block
+	LOGICAL		RDDSI	   ! read DSI record
+        LOGICAL         FEATUR     ! read FEAture record
+        LOGICAL         SEGMNT     ! read SEGment record
+        LOGICAL         RDTXT      ! read TXT record
+        LOGICAL         STDUMP     ! open DUMP file
+C
+C workspace
+C
+        INTEGER         LSTBLK     ! last block type
+	INTEGER  	RETVAL	   ! for MTINIT etc
+        INTEGER         IERR
+        INTEGER         CMLINE     ! read command line
+C
+        INTEGER*2       I          ! loop count
+C 
+        LOGICAL         EOF        ! TAPEMK for tape
+C                                  !    EOF for file
+        CHARACTER*5     EXTN       ! extension to filename
+C
+C ************************************************************
+	CALL LSL_INIT		   ! initialise LSLLIB     
+C
+C set up the IFF mechanism for fielding errors
+C
+	CALL IFFTDY
+C
+        DSICNT = 0           ! record counts
+        FEACNT = 0
+        SEGCNT = 0
+        TXTCNT = 0
+	MANNUM = 0           ! present position on tape from start
+C                            ! (= manus no. on tape if REWOUND)  
+C----------------------------------------------------------------
+C get and decode command qualifiers
+C
+        CMLINE = GETCOMLIN()
+        IF (.NOT.CMLINE) THEN
+           CALL LSL_PUTMSG (CEDD2I__CMDLINERR)
+           LSL_STATUS = CMLINE
+           GOTO 5000
+        ENDIF 
+        IF (INVAL) GOTO 5000
+C 
+C initialise the magtape drive... to BOT only if REWIND specified
+C
+        CALL WRITEF
+C
+	IF (DEVICE) THEN
+           RETVAL = MTINIT (TAPEUN, .NOT.REWIND)
+           IF (.NOT.RETVAL) THEN         ! error initialising tape
+              CALL LSL_PUTMSG (CEDD2I__TAPINTERR, TAPEUN)
+              CALL LSL_PUTMSG (RETVAL)
+              IF (RETVAL.EQ.LSL__SYSERR) CALL LSL_PUTMSG (MTIERR)
+              LSL_STATUS = RETVAL
+              GOTO 5000		         ! and give up
+           ENDIF
+           CALL WRITEF ('Reading from mag tape unit %S', TAPEUN)
+           IF (REWIND) CALL WRITEF ('Tape now rewound to BOT')
+        ELSE
+C
+C  or open disc file copy of tape data
+C
+           RETVAL = FLROPN (CEDLUN, CEDNAM, IERR, )
+           IF (.NOT.RETVAL) THEN
+              CALL LSL_PUTMSG (CEDD2I__CEDDOPNERR, CEDNAM(:CEDLEN))
+              CALL LSL_PUTMSG (RETVAL)
+              IF (RETVAL.EQ.LSL__SYSOPEN) CALL LSL_PUTMSG (IERR)
+              LSL_STATUS = RETVAL
+              GOTO 5000
+           ENDIF
+           CALL WRITEF ('Reading from (disc) file: %S', 
+     &						CEDNAM(:CEDLEN))
+        ENDIF
+        CALL WRITEF
+C
+C  open dump file for HEX info
+C
+        IF (DUMP.AND.DEVICE .AND. .NOT.DUMPOPN) THEN
+           DUMP = STDUMP()
+        ENDIF
+C
+C  initialise the FRT file
+C
+        IF (FRTINI (FRTNAM)) THEN
+           CALL LSL_PUTMSG (CEDD2I__FRTINTERR, FRTNAM(:FRTLEN))
+           GOTO 5000
+        ENDIF
+C
+C  and here we read each record or block off the tape...
+C
+1100    LSTBLK = BLKTYP
+        IF (.NOT.RDMAG (EOF)) THEN                       ! read block 
+           CALL LSL_PUTMSG (CEDD2I__RDBLKERR)
+           IF (DEVICE) CALL WRITEF (' at tape block no. %N', MTINBL)
+           GOTO 5000
+        ENDIF
+C
+C   is the new block part of same record
+C
+        IF (CEDDAT. AND. BLKTYP.EQ.LSTBLK) GOTO 1100 
+C
+C are we skipping? if so, then ignore all except DSI records
+C
+	IF (SKIP .AND. BLKTYP.NE.DSIBLK) THEN ! DSI block
+	   GOTO 1100		              ! ignore other blocks
+	ENDIF                                 !   till DSI found
+C
+C  what sort of block is it
+C
+1150    IF (BLKTYP.EQ.VOLUME) THEN
+C
+           IF (.NOT.DEVICE) THEN
+              CALL LSL_PUTMSG (CEDD2I__UNEXPBLK, LABEL)
+              GOTO 5000
+           ENDIF
+C
+           IF (MTINBL.NE.1) CALL LSL_PUTMSG   ! Vol must be first
+     &                               (CEDD2I__VOLSITERR, MTINBL)
+           IF (DIAG) CALL WRITEF ('.Volume label (blk no. %N)', MTINBL)
+C
+           IF (.NOT.RDMAG (EOF)) THEN                    ! read block 
+              CALL LSL_PUTMSG (CEDD2I__RDBLKERR)
+              CALL WRITEF (' at tape block no. %N', MTINBL)
+              GOTO 5000
+           ENDIF
+C
+           IF (BLKTYP.NE.HEADER) THEN
+              CALL LSL_PUTMSG (CEDD2I__UNEXPBLK, LABEL)
+              CALL WRITEF (' at tape block no. %N', MTINBL)
+           ENDIF 
+C
+           GOTO 1150
+C
+	ELSEIF (BLKTYP.EQ.HEADER) THEN               ! header block
+C
+           IF (.NOT.DEVICE) THEN
+              CALL LSL_PUTMSG (CEDD2I__UNEXPBLK, LABEL)
+              GOTO 5000
+           ENDIF
+C
+    	   IF (DIAG) CALL WRITEF ('.Header block (blk no. %N)', MTINBL)
+C
+           IF (.NOT.RDMAG (EOF)) THEN                    ! read block 
+              CALL LSL_PUTMSG (CEDD2I__RDBLKERR)
+              CALL WRITEF (' at tape block no. %N', MTINBL)
+              GOTO 5000
+           ENDIF
+C
+           IF (BLKTYP.NE.TAPEMK) THEN
+              IF (BLKTYP.EQ.HEADER) GOTO 1150
+C
+              CALL LSL_PUTMSG (CEDD2I__UNEXPBLK, LABEL)
+              CALL WRITEF (' at tape block no. %N', MTINBL)
+           ELSE
+	      IF (DIAG) CALL WRITEF ('.Tapemark (blk no. %N)', MTINBL)
+C
+              IF (.NOT.RDMAG (EOF)) THEN                 ! read block 
+                 CALL LSL_PUTMSG (CEDD2I__RDBLKERR)
+                 CALL WRITEF (' at tape block no. %N', MTINBL)
+                 GOTO 5000
+              ENDIF
+C
+              IF (BLKTYP.NE.DSIBLK) THEN
+                 CALL LSL_PUTMSG (CEDD2I__UNEXPBLK, LABEL)
+                 CALL WRITEF (' at tape block no. %N', MTINBL)
+                 GOTO 5000
+              ENDIF
+           ENDIF
+C
+           GOTO 1150
+C
+        ELSEIF (BLKTYP.EQ.DSIBLK) THEN
+C
+           DSICNT = DSICNT + 1
+C
+           IF (DIAG) THEN
+              IF (DEVICE) THEN
+                 CALL WRITEF ('.DSI block (no. %N), block no. %N',
+     &                                            DSICNT, MTINBL)
+              ELSE
+                 CALL WRITEF ('.DSI record (no. %N)', DSICNT)
+              ENDIF
+           ENDIF
+C
+           MANNUM = DSICNT
+C
+           IF (.NOT.DEVICE) GOTO 1175
+C
+           IF (CPYALL) GOTO 1170
+C
+C  if skipping to a particular dataset, check to see if this is it
+C   if SKIP: either SERNUM, or SERLAT and/or SERLON at DSI
+C
+           IF (SKIP.AND.SERNUM) THEN
+C
+              DO 1165 I = 1,FILENO
+                 IF (SKIPTO(I).EQ.MANNUM) THEN    ! a required dataset
+                    SKIP = .FALSE.                ! for dataset
+                    SERNUM = .FALSE.
+                    SKIPTO(I) = 0                 ! turn off this file
+C
+                    IF (FILENO.LE.1) THEN
+                       GOTO 1175                  ! use given output 
+                    ELSE                          !   filename
+                       GOTO 1170                  ! create output
+                    ENDIF                         !   filename
+                 ENDIF
+1165          CONTINUE
+C
+              GOTO 1100                           ! find another DSI
+           ENDIF
+C
+C  create output filename from dataset number
+C
+1170       RETVAL = PUTFLN (FILNAM)
+           IF (.NOT.RETVAL) THEN
+              CALL LSL_PUTMSG (CEDD2I__PUTFLNERR, FILNAM(:FILLEN))
+              CALL LSL_PUTMSG (RETVAL)
+              LSL_STATUS = RETVAL
+              GOTO 5000
+           ENDIF
+C
+           IF (MANNUM.LT.10) THEN
+              WRITE (EXTN, 1171) MANNUM
+1171          FORMAT ('_000', I1)
+           ELSEIF (MANNUM.LT.100) THEN
+              WRITE (EXTN, 1172) MANNUM
+1172          FORMAT ('_00', I2)
+           ELSEIF (MANNUM.LT.1000) THEN
+              WRITE (EXTN, 1173) MANNUM
+1173          FORMAT ('_0', I3)
+           ELSE
+              WRITE (EXTN, 1174) MANNUM
+1174          FORMAT ('_', I4)
+           ENDIF
+C
+           HAD_NAM = .TRUE.
+           STR_NAM = STR_NAM(1:LEN_NAM)//EXTN
+           LEN_NAM = LEN_NAM + 5
+C
+           RETVAL = EXPFLN (FULNAM, FULLEN)
+           IF (.NOT.RETVAL) THEN
+              CALL LSL_PUTMSG (CEDD2I__EXPFLNERR, FULNAM(:FULLEN))
+              CALL LSL_PUTMSG (RETVAL)
+              LSL_STATUS = RETVAL
+              GOTO 5000
+           ENDIF
+C
+C  continue with program
+C  read the DSI record for origin etc and start IFF file if the 
+C    required one
+C
+1175       CALL WRITEF
+           IF (.NOT.SKIP) THEN
+              IF (DEVICE) THEN
+                 CALL WRITEF ('Copying dataset no. %^W%N from tape', 
+     &                                                       MANNUM)
+              ELSE
+                 CALL WRITEF ('Copying dataset %S ', CEDNAM(:CEDLEN))
+              ENDIF
+C
+              CALL WRITEF ('  to output IFF file %S', FULNAM(:FULLEN))
+              CALL WRITEF
+           ENDIF
+C
+           IF (.NOT.RDDSI()) THEN
+              CALL LSL_PUTMSG (CEDD2I__DSIREADERR, DSICNT)
+              IF (DEVICE) CALL WRITEF (' at tape block no. %N', MTINBL)
+              GOTO 5000                              ! and give up
+           ENDIF
+C
+C  was this the right file - tested for origin at DSI
+C  to get past here must be processing, otherwise further SKIP and 
+C     look for further DSI's
+C
+           IF (SKIP) GOTO 1100             ! wasn't the right one       
+C
+C  now we have the right dataset to process (and DSI read):
+C
+1180       IF (.NOT.RDMAG (EOF)) THEN                    ! read block 
+              CALL LSL_PUTMSG (CEDD2I__RDBLKERR)
+              IF (DEVICE) CALL WRITEF (' at tape block no. ', MTINBL)
+              GOTO 5000
+           ENDIF
+C
+           IF (BLKTYP.NE.FEABLK) THEN
+              CALL LSL_PUTMSG (CEDD2I__UNEXPBLK, LABEL)
+              IF (DEVICE) CALL WRITEF (' at tape block %N ', MTINBL)
+              GOTO 5000
+           ENDIF
+C
+           GOTO 1150
+C
+        ELSEIF (BLKTYP.EQ.FEABLK) THEN
+C        
+           FEACNT = FEACNT + 1
+C
+           IF (DIAG) THEN
+              IF (DEVICE) THEN
+                 CALL WRITEF ('.FEA block (no. %N), block no. %N',
+     &                                            FEACNT, MTINBL)
+              ELSE
+                 CALL WRITEF ('.FEA record (no. %N)', FEACNT)
+              ENDIF
+           ENDIF
+C
+C  read the feature records
+C
+           IF (.NOT.FEATUR()) THEN
+              CALL LSL_PUTMSG (CEDD2I__FEAREADERR, FEACNT)
+              IF (DEVICE) CALL WRITEF (' at tape block no. %N',
+     &                                                      MTINBL)
+           ENDIF
+C
+           IF (.NOT.RDMAG (EOF)) THEN                    ! read block 
+              CALL LSL_PUTMSG (CEDD2I__RDBLKERR)
+              IF (DEVICE) CALL WRITEF (' at tape block no. %N', 
+     &                                                      MTINBL)
+              GOTO 5000
+           ENDIF
+C
+           IF (BLKTYP.NE.SEGBLK) THEN
+              CALL LSL_PUTMSG (CEDD2I__UNEXPBLK, LABEL)
+              IF (DEVICE) CALL WRITEF (' at tape block no. %N', 
+     &                                                      MTINBL)
+              GOTO 5000
+           ENDIF
+C
+           GOTO 1150
+C
+        ELSEIF (BLKTYP.EQ.SEGBLK) THEN
+C       
+           SEGCNT = SEGCNT + 1
+C
+           IF (DIAG) THEN
+              IF (DEVICE) THEN
+                 CALL WRITEF ('.SEG block (no. %N), block no. %N',
+     &                                            SEGCNT, MTINBL)
+              ELSE
+                 CALL WRITEF ('.SEG record (no. %N)', SEGCNT)
+              ENDIF
+           ENDIF
+C
+C  read the segment records
+C
+           IF (.NOT.SEGMNT()) THEN
+              CALL LSL_PUTMSG (CEDD2I__SEGREADERR, SEGCNT)
+              IF (DEVICE) CALL WRITEF (' at tape block no. %N', 
+     &                                                     MTINBL)
+           ENDIF
+C
+C   merge the 2 temporary files
+C
+           CALL MERGER
+C
+           IF (.NOT.RDMAG (EOF)) THEN                    ! read block 
+              IF (EOF) THEN
+                 CALL WRITEF ('No more data to read')
+                 CALL WRITEF ('No TXT record in dataset')
+                 IF (DEVICE) THEN
+                    CALL WRITEF 
+     & ('Copying of dataset number %^W%N completed to IFF %S',
+     &                                        MANNUM, FULNAM(:FULLEN))
+                 ELSE
+                    CALL WRITEF 
+     & ('Copying of dataset %S to IFF %S completed', CEDNAM(:CEDLEN),
+     &                                               FULNAM(:FULLEN))
+                 ENDIF
+                 GOTO 4000                              ! no more data
+              ELSE
+                 GOTO 5000
+              ENDIF
+           ENDIF
+C
+           IF (BLKTYP.EQ.TXTBLK) THEN
+              GOTO 1150
+           ELSE
+              GOTO 3000
+           ENDIF
+C
+        ELSEIF (BLKTYP.EQ.TXTBLK) THEN
+C
+           TXTCNT = TXTCNT + 1
+C
+           IF (DIAG) THEN
+              IF (DEVICE) THEN
+                 CALL WRITEF ('.TXT block (no. %N), block no. %N',
+     &                                            TXTCNT, MTINBL)
+              ELSE
+                 CALL WRITEF ('.TXT record (no. %N)', TXTCNT)
+              ENDIF
+           ENDIF
+C
+           IF (.NOT.TXTOPN) THEN
+C
+C   create file for TXT contents
+C
+              RETVAL = PUTFLN (FULNAM)
+              IF (.NOT.RETVAL) THEN
+                 CALL LSL_PUTMSG (CEDD2I__PUTFLNERR, FULNAM(:FULLEN))
+                 CALL LSL_PUTMSG (RETVAL)
+                 GOTO 1200
+              ENDIF
+C
+              HAD_EXT = .TRUE.
+              LEN_EXT = 3
+              STR_EXT = 'TXT'
+C
+              RETVAL = EXPFLN (TXTNAM, TXTLEN)
+              IF (.NOT.RETVAL) THEN
+                 CALL LSL_PUTMSG (CEDD2I__EXPFLNERR, TXTNAM(:TXTLEN))
+                 CALL LSL_PUTMSG (RETVAL)
+                 GOTO 1200
+              ENDIF
+C
+              RETVAL = FLWOPN (TXTLUN, TXTNAM, IERR, )
+              IF (.NOT.RETVAL) THEN
+                 CALL LSL_PUTMSG (CEDD2I__FILOPNERR, TXTNAM(:TXTLEN))
+                 CALL LSL_PUTMSG (RETVAL)
+                 IF (RETVAL.EQ.LSL__SYSOPEN) CALL LSL_PUTMSG (IERR)
+                 GOTO 1200
+              ENDIF
+              TXTOPN = .TRUE.
+              IF (DIAG) CALL WRITEF ('.Text file %S opened', 
+     &                                               TXTNAM(:TXTLEN))
+           ENDIF
+C       
+C  read text record
+C
+           IF (.NOT.RDTXT()) THEN
+              CALL LSL_PUTMSG (CEDD2I__TXTREADERR, TXTCNT)
+              IF (DEVICE) CALL WRITEF (' at tape block no. %N', 
+     &                                                    MTINBL)
+           ENDIF
+C
+1200       IF (.NOT.RDMAG (EOF)) THEN               ! read next block 
+              IF (EOF) THEN
+                 CALL WRITEF ('No more data to read')
+                 IF (DEVICE) THEN
+                    CALL WRITEF 
+     & ('Copying of dataset number %^W%N completed to IFF %S',
+     &                                        MANNUM, FULNAM(:FULLEN))
+                 ELSE
+                    CALL WRITEF 
+     & ('Copying of dataset %S to IFF %S completed', CEDNAM(:CEDLEN),
+     &                                               FULNAM(:FULLEN))
+                 ENDIF
+                 GOTO 4000                              ! no more data
+              ELSE
+                 GOTO 5000
+              ENDIF
+           ELSE
+              IF (BLKTYP.EQ.TXTBLK) THEN
+                 GOTO 1150
+              ELSE
+                 IF (TXTOPN) THEN
+                    CALL FLWSEL (TXTLUN)
+                    RETVAL = FLWCLO (TXTLUN, IERR)
+                    IF (.NOT.RETVAL) THEN
+                       CALL LSL_PUTMSG (CEDD2I__FILCLOERR, 
+     &                                              TXTNAM(:TXTLEN))
+                       CALL LSL_PUTMSG (RETVAL)
+                       IF (RETVAL.EQ.LSL__SYSCLOSE) 
+     &                                      CALL LSL_PUTMSG (IERR)
+                       GOTO 3000
+                    ENDIF
+                    IF (DIAG) CALL WRITEF
+     &                            ('.Text file %S closed', 
+     &                                             TXTNAM(:TXTLEN))
+                    TXTOPN = .FALSE.
+                 ENDIF
+                 GOTO 3000
+              ENDIF
+           ENDIF
+C
+        ELSEIF (BLKTYP.EQ.TAPEMK .OR. BLKTYP.EQ.TRAILR) THEN
+C
+           IF (BLKTYP.EQ.TAPEMK) THEN
+              CALL LSL_PUTMSG (CEDD2I__UNEXPTMK, MTINBL)
+           ELSE
+              CALL LSL_PUTMSG (CEDD2I__UNEXPBLK, LABEL)
+              CALL WRITEF (' at tape block no. %N', MTINBL)
+           ENDIF
+           GOTO 3000
+C
+	ELSE                 ! some mistake - unknown type of block 
+C                     
+	   CALL LSL_PUTMSG (CEDD2I__UNKNOWNBLK, LABEL)
+           IF (DEVICE) CALL WRITEF (' at tape block no. %N ', MTINBL)
+C
+           CALL LSL_PUTMSG (CEDD2I__BLKIGNORE)    ! block ignored
+           GOTO 1100
+C
+	ENDIF
+C
+C  ----------------------------------------------------------------
+C   blocks found at the end of the tape
+C
+3000    IF (BLKTYP.EQ.TAPEMK) THEN
+C
+           IF (DIAG) CALL WRITEF ('.Tapemark (blk no. %N)', MTINBL)
+C
+           IF (.NOT.RDMAG (EOF)) THEN
+              CALL LSL_PUTMSG (CEDD2I__RDBLKERR)
+              CALL WRITEF (' at tape block no. %N', MTINBL)
+              GOTO 5000
+           ENDIF
+C
+           IF (BLKTYP.EQ.TAPEMK) THEN      ! second tapemark
+C
+              IF (DIAG) CALL WRITEF ('.Tapemark (blk no. %N)', MTINBL)
+              CALL LSL_PUTMSG (CEDD2I__ENDOFDSS, MTINBL)
+              GOTO 4500
+           ELSE
+              GOTO 3000
+           ENDIF
+C
+        ELSEIF (BLKTYP.EQ.TRAILR) THEN
+C
+           IF (DIAG) CALL WRITEF ('.EOF Trailer block (blk no. %N)',
+     &                                                       MTINBL)
+C
+           IF (.NOT.RDMAG (EOF)) THEN
+              CALL LSL_PUTMSG (CEDD2I__RDBLKERR)
+              CALL WRITEF (' at tape block no. %N', MTINBL)
+              GOTO 5000
+           ELSE
+              GOTO 3000
+           ENDIF
+C
+        ELSE                 ! should be start of new dataset
+C
+           IF (BLKTYP.NE.DSIBLK .AND. BLKTYP.NE.HEADER) THEN
+              CALL LSL_PUTMSG (CEDD2I__UNEXPBLK, LABEL)
+              GOTO 5000
+           ELSE
+              RETVAL = MTIBCK()        ! backspace for next run
+              IF (.NOT.RETVAL) THEN
+                 CALL LSL_PUTMSG (CEDD2I__BCKSPERR, MTINBL)
+                 CALL LSL_PUTMSG (RETVAL)
+                 IF (RETVAL.EQ.LSL__SYSERR) CALL LSL_PUTMSG (MTIERR)
+              ENDIF
+              BLKTYP = 0  
+              LABEL = '   '
+          ENDIF
+C
+        ENDIF
+C
+C  -------------------------------------------------------------
+C  any more files to copy?
+C
+4000    IF (CPYALL) THEN
+           SKIP = .FALSE.
+           GOTO 1100        ! copy more files
+        ENDIF
+C
+        DO 2600 I = 1,FILENO
+C
+           IF (SKIPTO(I).GT.MANNUM) THEN      ! some files left
+              SKIP = .TRUE.
+              SERNUM = .TRUE.
+              GOTO 1100
+           ENDIF
+C
+2600    CONTINUE
+C
+C   No more data on tape 
+C     check if we were searching for a particular dataset
+C
+4500    IF (SKIP) THEN			
+           IF (SERNUM) THEN  
+              DO 2500 I = 1,FILENO
+                 IF (SKIPTO(I).GT.0) THEN
+                    CALL LSL_PUTMSG (CEDD2I__FILENOTFND, 
+     &                                             SKIPTO(I), MANNUM)
+                 ENDIF
+2500          CONTINUE
+C
+           ELSE                   
+              IF (SERLAT .AND. .NOT.SERLON)
+     &                              CALL LSL_PUTMSG (CEDD2I__LATNOTFND)
+              IF (SERLAT .AND. SERLON) 
+     &                              CALL LSL_PUTMSG (CEDD2I__LLNOTFND)
+              IF (SERLON .AND. .NOT.SERLAT)
+     &                              CALL LSL_PUTMSG (CEDD2I__LONGNTFND)
+           ENDIF
+           SKIP   = .FALSE.	   ! can't search after trailer
+        ENDIF
+C
+C  ------------------------------------------------------------------
+C  normal end: 
+C
+        IF (DUMPOPN) THEN
+           CALL FLWSEL (DUMPLUN)
+           RETVAL = FLWCLO (DUMPLUN, IERR)
+           IF (.NOT.RETVAL) THEN
+              CALL LSL_PUTMSG (CEDD2I__FILCLOERR, DUMPFILE(:DUMPLEN))
+              CALL LSL_PUTMSG (RETVAL)
+              IF (RETVAL.EQ.LSL__SYSCLOSE) CALL LSL_PUTMSG (IERR)
+              GOTO 5600
+           ENDIF
+           DUMPOPN = .FALSE.
+           IF (DIAG) CALL WRITEF ('.Dump file %S closed', 
+     &                                            DUMPFILE(:DUMPLEN))
+        ENDIF
+C
+        LSL_STATUS = SS$_NORMAL
+        CALL LSL_PUTMSG (CEDD2I__NORMAL)
+C
+        GOTO 5700
+C
+C  abnormal or premature end, close any outstanding files
+C
+5000    DO 5500 I = 2,4
+           IF (INIFF(I)) THEN
+              CALL IFFSEL(I)
+              CALL ENDIFF(I)
+           ENDIF
+5500    CONTINUE
+C
+5600    IF (TXTOPN) THEN
+           CALL FLWSEL (TXTLUN)
+           RETVAL = FLWCLO (TXTLUN, IERR)
+           IF (.NOT.RETVAL) THEN
+              CALL LSL_PUTMSG (CEDD2I__FILCLOERR, TXTNAM(:TXTLEN))
+              CALL LSL_PUTMSG (RETVAL)
+              IF (RETVAL.EQ.LSL__SYSCLOSE) CALL LSL_PUTMSG (IERR)
+              GOTO 5700
+           ENDIF
+           IF (DIAG) CALL WRITEF ('.Text file %S closed', 
+     &                                            TXTNAM(:TXTLEN))
+           TXTOPN = .FALSE.
+        ENDIF
+C
+        LSL_STATUS = SS$_ABORT
+C
+5700    CALL LSL_EXIT		   ! and leave the program
+	END
+C

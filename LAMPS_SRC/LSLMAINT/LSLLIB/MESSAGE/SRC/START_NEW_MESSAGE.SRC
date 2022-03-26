@@ -1,0 +1,216 @@
+	LOGICAL FUNCTION START_NEW_MESSAGE
+C
+***	IDENT	02MR88
+***	MODULE	START_NEW_MESSAGE
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C Author TJ Ibbs, 2 July 1987
+C
+C This routine starts off a new message
+C It returns TRUE if is fails, and FALSE otherwise
+C
+	IMPLICIT NONE
+C
+C *****************************************************************************
+C Parameter files
+C
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'	! LSLLIB message numbers
+	INCLUDE	'HERE:NEWMSGMSG.PAR'		! NEWMSG message numbers
+	INCLUDE	'LSL$CMNLSL:READSTR.PAR'	! READSTR paramaters
+C
+C Common files
+C
+	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'	! filespec common file
+	INCLUDE	'HERE:QUALIFIERS.CMN'		! command line stuff
+	INCLUDE	'HERE:MESSAGES.CMN'		! the messages themselves
+	INCLUDE	'HERE:FILES.CMN'		! for unit numbers
+C
+C Functions
+C
+	INTEGER		READSTR		! read a string
+	LOGICAL		RDCHS_NL	! read chars - ignore newlines
+	LOGICAL		RDCHS		! just read chars
+C
+C Workspace
+C
+	BYTE		ICH		! single character
+	INTEGER		OK, IERR	! function returns
+	INTEGER		LENGTH		! string length
+	LOGICAL		AT_EOF		! well, are we?
+C
+	CHARACTER*(BIG_STR)	OUTPUT_TEXT
+	INTEGER			OUTPUT_LENGTH
+C
+C *****************************************************************************
+C assume that we fail
+C
+	START_NEW_MESSAGE = .TRUE.
+C
+C note that we are in a new message
+C
+	IN_MESSAGE = .TRUE.
+C
+C do we have room to store this new message?
+C
+	IF ( MESS_COUNT.GE.MAX_MESS_COUNT ) THEN
+	   CALL LSL_PUTMSG( NEWMSG__MAXMESS, MAX_MESS_COUNT )
+	   CALL LSL_ADDMSG( NEWMSG__LINENO, LINE_COUNT )
+	   GOTO 9000
+	ENDIF
+C
+C yes, we do - so count it
+C
+	MESS_COUNT = MESS_COUNT +1
+C
+C *****************************************************************************
+C we must now read the message ident from the file
+C - we want to read until we find a backslash (the start of the text),
+C   or until we find a space/tab, or until end-of-line, and we want to
+C   ignore leading spaces
+C
+	LENGTH = READSTR( IDENT(MESS_COUNT),
+     &			  BACKSLASH, ON_SPACE, .TRUE., IERR )
+C
+C now check that we had an ident (ie it had a non-zero length),
+C and that it was not too long
+C
+	IF ( LENGTH.EQ.0 ) THEN
+	   CALL LSL_PUTMSG( NEWMSG__NOIDENT )
+	   CALL LSL_ADDMSG( NEWMSG__LINENO, LINE_COUNT )
+	   CALL LSL_ADDMSG( IERR )
+	   GOTO 9000
+	ELSEIF ( IERR.EQ.LSL__STRTOOLONG ) THEN
+	   CALL LSL_PUTMSG( NEWMSG__IDENTLEN, IDENT(MESS_COUNT),
+     &			    SZ_IDENT )
+	   CALL LSL_ADDMSG( NEWMSG__LINENO, LINE_COUNT )
+	   GOTO 9000
+	ENDIF
+C
+C and pad it out with spaces
+C
+	IDENT(MESS_COUNT) = IDENT(MESS_COUNT)(1:LENGTH)
+C
+C *****************************************************************************
+C we can now read the text of the message
+C - look for the backslash at its start, ignoring any line breaks if
+C   necessary
+C
+	AT_EOF = RDCHS_NL(ICH)
+	IF ( AT_EOF .OR. (ICH.NE.BACKSLASH) ) THEN
+	   CALL LSL_PUTMSG( NEWMSG__NOTEXT )
+	   CALL LSL_ADDMSG( NEWMSG__MESSAG, IDENT(MESS_COUNT) )
+	   GOTO 9000
+	ENDIF
+C
+C so we have read the initial '\' - now read the text itself
+C - we will end on a backslash, or end-of-line, but two consecutive
+C   backslashes will insert a backslash into the text
+C
+	MESSLEN = READSTR( MESS, BACKSLASH, ON_CHAR2, .FALSE., IERR )
+C
+C again, did something go wrong?
+C - check for a message of length zero, and for a message that was
+C   too long
+C
+	IF ( MESSLEN.EQ.0 ) THEN
+	   CALL LSL_PUTMSG( NEWMSG__NULLMESS )
+	   CALL LSL_ADDMSG( NEWMSG__MESSAG, IDENT(MESS_COUNT) )
+	   CALL LSL_ADDMSG( IERR )
+	   GOTO 9000
+	ELSEIF ( IERR.EQ.LSL__STRTOOLONG ) THEN
+	   CALL LSL_PUTMSG( NEWMSG__MESSLEN, SZ_MESS )
+	   CALL LSL_ADDMSG( NEWMSG__MESSAG, IDENT(MESS_COUNT) )
+	   CALL LSL_ADDSTR( MESS(:MESSLEN) )
+	   GOTO 9000
+	ENDIF
+C
+C and check that the message text does not contain '<' or '>', as we
+C use these as delimitors in the macro that we generate from the text
+C
+	IF ( INDEX(MESS(:MESSLEN),'<').NE.0 .OR.
+     &	     INDEX(MESS(:MESSLEN),'>').NE.0 ) THEN
+	   CALL LSL_PUTMSG( NEWMSG__TRIBRAC )
+	   CALL LSL_ADDMSG( NEWMSG__MESSAG, IDENT(MESS_COUNT) )
+	   CALL LSL_ADDSTR( MESS(:MESSLEN) )
+	   GOTO 9000
+	ENDIF
+C
+C *****************************************************************************
+C we will now check that the user does not have anything else on the line,
+C other than an optional comment. This is to test for someone trying to run
+C an old .MES file, of the form
+C
+C	<severity> <ident> \ <text1> \ \ <text2> \
+C
+C through our program. Thus if we find a backslash, we output a message
+C warning the user. If we find any other rubbish, we complain and ignore
+C it.
+C
+	IF ( .NOT.RDCHS(ICH) ) THEN		! found a character
+	   IF ( ICH.NE.COMMENT ) THEN		! not a comment
+	      IF ( ICH.EQ.BACKSLASH ) THEN	! is a backslash
+		 CALL OLD_FORM_MESSAGE
+	      ELSE
+		 CALL LSL_PUTMSG( NEWMSG__RUBBISH, ICH, LINE_COUNT )
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C *****************************************************************************
+C so we can now output the data we have so far to the .PROMSG file
+C
+	IF ( OUT_OBJECT ) THEN
+C
+	   CALL FLWSEL( PRO_UNIT )
+C
+C	 is the severity of this message different from that of the last?
+C
+	   IF ( SEV.NE.NEW_SEV ) THEN
+	      SEV = NEW_SEV
+	      CALL FLWRTF( '.SEVERITY %S', SEV )
+	      IF (EXTRA_LOG) CALL TTWSTR
+	   ENDIF
+C
+C	 and now output the message ident and text
+C	 - the space in front of the <ident> is for safety when using ADC
+C	   to process the file (and extract the ***IDENT and ***MODULE). If
+C	   we don't have a space there, and use ADC without the /CO switch
+C	   (retain comments) and our <ident> starts with 'C' - ie a letter
+C	   'C' in column 1 - then ADC will assume that this is a FORTRAN
+C	   comment line, and not transmit it (yes, I know it's daft).
+C	   Having that extra space saves us having to worry about it all.
+C
+	   CALL FLWRTF( ' %S	<%S>', IDENT(MESS_COUNT),
+     &				       MESS(:MESSLEN) )
+	   IF (EXTRA_LOG) CALL TTWSTR
+C
+	ENDIF
+C
+C *****************************************************************************
+C if we are outputting an index file for creating a .RNO, then let us output
+C the start of this message...
+C The line takes the form
+C
+C		<severity> <type> <count> <ident> <text>
+C
+	IF ( OUT_RUNOFF ) THEN
+C
+C	 remember the single letter severity code for later use
+C
+	   SCODE(MESS_COUNT) = NEW_SEV(1:1)
+C
+	   CALL FLWSEL( SEQ_UNIT )
+	   CALL FLWRTF( INDEX_FORMAT, SCODE(MESS_COUNT), 'M', 0,
+     &				      IDENT(MESS_COUNT), MESS(:MESSLEN) )
+C
+	ENDIF
+C
+C *****************************************************************************
+C so we have succeeded in what we were trying to do
+C
+	START_NEW_MESSAGE = .FALSE.
+C
+C *****************************************************************************
+C
+9000	RETURN
+	END

@@ -1,0 +1,744 @@
+	INTEGER FUNCTION OPTSEA(DEFAUL,TEXT,TEXLEN)
+C
+***	MODULE	OPTSEA
+***	IDENT	24AU99
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Converted for TRIEDIT; GPX and MOUSE added
+C	logical name LSL$DTMCREATETERMINAL used		TJH 03-Dec-1987
+CMOD	SIGMEX 6100 option instead of S6000,
+C	BITPAD added					TJH 01-Aug-1986
+CMOD	LSL$DTMCREATESYS changed to LSL$PANLOOKUP	TJH 30-Apr-1985
+CMOD	Bug fix: Joystick test had omitted T4106,
+C	T4107, T4109				 	TJH 26-Apr-1985
+CMOD    VT41xx, Tek thumbwheels, Tek joystick, 
+C       MUART table and nographics options added	TJH 03-Apr-1985
+C	Author					 	TJH 27-Jun-1984
+C
+C OPTSEA opens and reads from file, hardware options available for the 
+C current terminal line or sets up a default configuration depending
+C on the status of DEFAUL
+C
+C If DEFAUL is TRUE use the minimum defaults for the
+C present terminal line, read from the lookup file LSL$PANLOOKUP:
+C CONFIGDEF.DAT.  Control flags held in /TTTYPE/ are set accordingly.
+C
+C If DEFAUL is FALSE the arguments supplied by the user are decoded
+C by CONFIG  and sent to OPTSEA individually in TEXT. These must be 
+C looked up in LSL$PANLOOKUP:CONFIGURE.DAT and if successfully
+C found they must be examined for possible usage conflicts, eg.
+C TABLE with TRACKER BALL. Control flags held in /TTTYPE/ are set 
+C accordingly.
+C
+C
+C The function returns the following values:
+C 	OPTSEA=0	! the current terminal line was not found in
+C                       ! the lookup file
+C	OPTSEA=1        ! file opened and read successfully
+C	OPTSEA=2        ! error reading lookup file
+C       OPTSEA=3        ! a user specified option cannot be supported
+C			! on the current terminal line. (According
+C                       ! to CONFIGURE.DAT anyway)
+C
+C Terminal line options in "LSL$PANLOOKUP:CONFIGDEF.DAT" and
+C "LSL$PANLOOKUP:CONFIGURE.DAT" may be changed at will by a site
+C manager enabling lines to be swapped without major confusion to 
+C TRIEDIT.
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	CHARACTER*(*)	TEXT    ! desired option
+	INTEGER         TEXLEN  ! length of passed text string
+C
+C Parameters:
+	INTEGER*2       CONLUN ! terminal lookup file LUN
+	PARAMETER      (CONLUN=88)
+	INTEGER         NUMOPT ! number of options currently supported
+	PARAMETER      (NUMOPT=20)
+	INCLUDE 	'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 	'($SSDEF)/NOLIST'
+C
+C Common blocks:
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TTTYPE.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:DTMJPI.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+C
+C W/s
+	INTEGER		IERR	! error return in FILEIO calls
+	INTEGER	        I,NCHS,J! temp. vars
+	INTEGER		OK      ! error status return
+	INTEGER		LINE	! to record file line number
+	BYTE		CHR	! for use with RDCHS
+	BYTE		CMDLIN(MAX_TXTLIM)! so as not to use TXTBUF
+	CHARACTER*20    TEXTAR(NUMOPT) ! option names
+	CHARACTER*20	RDNAME	! as read from the look up file
+	CHARACTER*7     OUR_TERM! terminal name read from file
+	INTEGER		OUR_LEN	! its length
+	LOGICAL		DEFAUL  ! open and read from the defaults file?
+	LOGICAL		INAME   ! we are in the middle of an option name
+	LOGICAL         TALLY   ! does supplied TEXT match a file opt. ?
+	LOGICAL		ALPHA	! are we on an Alpha/AXP?
+C
+C Functions:
+	INTEGER		FLROPN	! open file for LSLLIB FILEO	
+	INTEGER	 	FLRLIN	! to read a line from it
+	LOGICAL		RDCHS	! read character from line
+	LOGICAL		RDCH    ! to read one char.
+	INTEGER		SIGCHS	! significant characters in string
+	INTEGER		TRNALL	! translates log nam (recursive)
+	LOGICAL		IS_ALPHA_AXP
+C
+C Data:
+	DATA 	TEXTAR	/'S6100','S7000','VT100','T4010','T4014',
+     &			'T4105','T4106','T4107','T4109','T4115',
+     $			'MUART_T4014','TABLE','TRACKERBALL', 
+     &			'THUMBWHEELS', 'JOYSTICK', 'MUART_TABLE', 
+     &			'BITPAD','NOGRAPHICS','GPX','MOUSE'/
+C
+C ......................................................................
+C
+	OPTSEA=1		! assume all is well - so far!
+	ALPHA=IS_ALPHA_AXP()	! are we on an Alpha/AXP?
+C
+C ......................................................................
+C Attempt to translate logical name LSL$DTMCREATETERMINAL. If we can
+C then we use its translation as our current terminal ident (OUR_TERM)
+C thus overcoming the problems of LTxxx idents produced by a terminal
+C server.
+	OK=TRNALL('LSL$DTMCREATETERMINAL',OUR_TERM)
+	IF (OK) THEN				! log name translated!
+	   CALL STR$UPCASE(OUR_TERM,OUR_TERM)	! upper case the name
+	   OUR_LEN=SIGCHS(OUR_TERM)	   
+C
+C If no ':' on terminal translated from logical name, put one on
+	   IF (OUR_TERM(OUR_LEN:OUR_LEN).NE.':') THEN
+	      OUR_LEN=OUR_LEN+1
+	      OUR_TERM(OUR_LEN:OUR_LEN)=':'
+	   ENDIF
+	ELSE
+	   IF (OK.NE.SS$_NOLOGNAM) THEN	! report error
+	      CALL EXPAND(
+     &		'%S translating logical name LSL$DTMCREATETERMINAL',
+     &						ERROR)
+	      CALL OUTOPT(EXPDSC)	
+	      GOTO 320
+	   ELSE
+	      OUR_TERM=TERMINAL(:TERMLEN)
+	      OUR_LEN=TERMLEN
+	   ENDIF
+	ENDIF
+C
+C Open defaults lookup table
+	IF (DEFAUL) THEN
+	   TALLY=.TRUE.
+	   OK=FLROPN(CONLUN,'LSL$LOOKUP:CONFIGDEF.DAT',IERR)
+	   IF (.NOT.OK) THEN
+	      CALL OUTOPT(ERROR//
+     &         		'opening LSL$LOOKUP:CONFIGDEF.DAT;0')
+	      CALL LSL_GETMSG(OK,TEXT,I)	! what went wrong
+	      J=INDEX(TEXT,'!') - 1		! (ignore any FAO stuff)
+	      IF (J.LE.0) J=I
+	      CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	      CALL ALARMS(1,0,TEXT(:J))
+	   ENDIF
+	ELSE
+C Set up TALLY which is used to show selected option does'nt tally with
+C any of the options held in CONFIGURE.DAT
+	   TALLY=.FALSE.  
+C
+C Open user options lookup table
+	   OK=FLROPN(CONLUN,'LSL$LOOKUP:CONFIGURE.DAT',IERR)
+	   IF (.NOT.OK) THEN
+	      CALL OUTOPT(ERROR//
+     &         	'opening LSL$LOOKUP:CONFIGURE.DAT;0')
+	      CALL LSL_GETMSG(OK,TEXT,I)	! what went wrong
+	      J=INDEX(TEXT,'!') - 1		! (ignore any FAO stuff)
+	      IF (J.LE.0) J=I
+	      CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	      CALL ALARMS(1,0,TEXT(:J))
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C
+C read the lookup file line by line 
+	LINE = 0
+10	OK=FLRLIN(CMDLIN,NCHS,,IERR)
+	LINE=LINE+1
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      GOTO 320
+	   ELSE
+	      CALL EXPAND(
+     &		'%S reading lookup file at line %N',ERROR,LINE)
+	      CALL OUTOPT(EXPDSC)
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      GOTO 300
+	   ENDIF
+	ENDIF
+	IF (NCHS.EQ.0) GOTO 10  	! blank line
+C
+C Set up an auxillary byte buffer (CMDLIN) to read the file info. into
+C without upsetting the still needed contents of TXTBUF
+C
+	CALL SETAUX(CMDLIN,NCHS)
+	IF (RDCHS(CHR)) GOTO 10		! end of line
+	IF (CHR.EQ.'!') GOTO 10		! comment  - ignore
+C
+	CALL BSCH
+	DO 20 I=1,OUR_LEN
+	   IF (RDCH(CHR)) GOTO 10	! end of line
+	   RDNAME(I:I) = CHAR(CHR)
+20	CONTINUE
+	CALL STR$UPCASE(RDNAME,RDNAME)	! uppercase name read
+	IF (OUR_TERM(1:OUR_LEN) .EQ. RDNAME(1:OUR_LEN)) GOTO 30
+	GOTO 10  			! we must read another line 
+C
+C ......................................................................
+C
+C All chars of OUR_TERM match, we have found the right line. Now
+C read the available options
+C	
+30	IF(RDCHS(CHR)) GOTO 310
+	CALL BSCH
+	INAME=.FALSE.			! reset inside name flag
+	I=0			 	! and the length counter
+40	IF (RDCH(CHR)) THEN
+	   IF (INAME) GOTO 60		! e.o.l and in a name?
+	   GOTO 310
+	ENDIF
+	IF (CHR.EQ.'!') THEN		! comment?
+	   IF (INAME) THEN		! '!' at end of name
+	      GOTO 60
+	   ELSE				! '!' means e.o.l. here
+	      GOTO 310
+	   ENDIF
+	ENDIF
+	IF (CHR.NE.' '.AND.CHR.NE.0) GOTO 50
+	IF (INAME) GOTO 60		! we have a complete name 
+	GOTO 40
+50	INAME=.TRUE.			! we are inside an option name
+	I=I+1
+	RDNAME(I:I) = CHAR(CHR)
+	GOTO 40
+C
+C ......................................................................
+C
+60	CALL STR$UPCASE(RDNAME,RDNAME)	! uppercase name read
+	IF (DEFAUL) THEN ! Set up defaults for the present terminal
+	   DO 70 J=1,NUMOPT   
+	      IF (RDNAME(1:I).EQ.TEXTAR(J)(1:I)) GOTO 90
+70	   CONTINUE
+C
+	ELSE		! default is false - options have been selected
+C
+C We have an available option name.  Does this match the name supplied 
+C from CONFIG.  If it does well_and_good, set the appropriate flag 
+C in /TTTYPE/
+C
+	   IF (TEXT(1:TEXLEN).EQ.RDNAME(1:I)) THEN  ! option is valid
+	      DO 80 J=1,NUMOPT  ! set a flag for the selected option
+	         IF (RDNAME(1:I).EQ.TEXTAR(J)(1:I)) GOTO 90 
+80	      CONTINUE
+	   ENDIF
+	ENDIF
+C
+	GOTO 30
+C
+C ......................................................................
+C
+C
+90	TALLY=.TRUE.   
+C GOTO .....
+C 	s6100, s7000, vt100, t4010, t4014, t4105, t4106, t4107, 
+C	t4109, t4115, muart_t4014, table, trackerball,  thumbwheels,
+C	joystick,  muart_table,  bitpad, nographics  gpx, mouse .....
+C
+	GOTO (110, 120, 130, 140, 150, 160, 170, 180,
+     &	      190, 200, 210, 220, 230, 240, 250, 260, 270, 280,
+     &	      100, 290),  J
+C
+C Set appropriate option flags and check that mutually exclusive 
+C options have not been set. Unset previous flags as necessary.
+C
+C
+C GPX
+100	GPX=.TRUE.
+	VT100=.TRUE.
+	VTTEMP=.FALSE.  ! VT100 may have been temporarily set during
+C                            startup for error messages.
+	S6100=.FALSE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	! see if there are other defaults to set up
+C
+C Sigma 6100
+110	IF (ALPHA) GOTO 299
+	S6100=.TRUE.
+	GPX=.FALSE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	! see if there are other defaults to set up
+C
+C Sigma 7000
+120	IF (ALPHA) GOTO 299
+	S7000=.TRUE.
+	GPX=.FALSE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	S6100=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	
+C
+C VT100
+130	VT100=.TRUE.
+	VTTEMP=.FALSE.  ! VT100 may have been temporarily set during
+C                            startup for error messages.
+	GOTO 30	
+C
+C TEK 4010
+140	IF (ALPHA) GOTO 299
+	T4010=.TRUE.
+	GPX=.FALSE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	S6100=.FALSE.
+	S7000=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	
+C
+C TEK 4014
+150	IF (ALPHA) GOTO 299
+	T4014=.TRUE.
+	GPX=.FALSE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	S6100=.FALSE.
+	S7000=.FALSE.
+	T4010=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	
+C
+C TEK 4105
+160	IF (ALPHA) GOTO 299
+	T4105=.TRUE.
+	GPX=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	S6100=.FALSE.
+	S7000=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	
+C
+C TEK 4106
+170	IF (ALPHA) GOTO 299
+	T4106=.TRUE.
+	GPX=.FALSE.
+	T4105=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	S6100=.FALSE.
+	S7000=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	
+C
+C TEK 4107
+180	IF (ALPHA) GOTO 299
+	T4107=.TRUE.
+	GPX=.FALSE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	S6100=.FALSE.
+	S7000=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	
+C
+C TEK 4109
+190	IF (ALPHA) GOTO 299
+	T4109=.TRUE.
+	GPX=.FALSE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4115=.FALSE.
+	S6100=.FALSE.
+	S7000=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	
+C
+C TEK 4115
+200	IF (ALPHA) GOTO 299
+	T4115=.TRUE.
+	GPX=.FALSE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	S6100=.FALSE.
+	S7000=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GOTO 30	
+C
+C MUART driven TEK 4014
+210	IF (ALPHA) GOTO 299
+	MT4014=.TRUE.
+	GPX=.FALSE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	S6100=.FALSE.
+	S7000=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	GOTO 30	
+C
+C Digitising table
+220	IF (ALPHA) GOTO 299
+	TABLE=.TRUE.
+	IF (TKBALL) THEN
+	   TKBALL=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &	      ('*** WARNING - You can''t have a table and tracker ball')
+	   CALL OUTOPT('              Only table retained')
+	ELSEIF (JOYSTK) THEN
+	   JOYSTK=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &	      ('*** WARNING - You can''t have a table and joystick')
+	   CALL OUTOPT('              Only table retained')
+	ELSEIF (MOUSE) THEN
+	   MOUSE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &	      ('*** WARNING - You can''t have a table and a mouse')
+	   CALL OUTOPT('              Only table retained')
+	ELSEIF (THUMB) THEN
+	   THUMB=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &	      ('*** WARNING - You can''t have a table and thumbwheels')
+	   CALL OUTOPT('              Only table retained')
+	ELSEIF (SIGBIT) THEN
+	   THUMB=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &	      ('*** WARNING - You can''t have a table and bitpad.')
+	   CALL OUTOPT('              Only bitpad retained')
+	ENDIF
+	GOTO 30	
+C
+C Sigma tracker ball
+230	IF (ALPHA) GOTO 299
+	TKBALL=.TRUE.
+	IF ((MTABLE.OR.TABLE).AND.TKBALL) THEN
+	   MTABLE=.FALSE.
+	   TABLE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &	      ('*** WARNING - You can''t have a table and tracker ball')
+	   CALL OUTOPT('              Only tracker ball retained')
+	ELSEIF (MOUSE.AND.TKBALL) THEN
+	   MOUSE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &	      ('*** WARNING - You can''t have a mouse and tracker ball')
+	   CALL OUTOPT('              Only tracker ball retained')
+	ELSEIF ((TABLE.OR.MTABLE).AND.SIGBIT) THEN
+	   MTABLE=.FALSE.
+	   TABLE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &	      ('*** WARNING - You can''t have a table and bitpad')
+	   CALL OUTOPT('              Only bitpad retained')
+	ELSEIF (.NOT.S7000) THEN
+	   TKBALL=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &	      ('*** WARNING - A tracker ball needs the SIGMA 7000')
+	ENDIF
+	GOTO 30	
+C
+C TEK thumbwheels
+240	IF (ALPHA) GOTO 299
+	THUMB=.TRUE.
+	IF (TKBALL.AND.THUMB) THEN
+	   TKBALL=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	   '*** WARNING - You can''t have thumbwheels and tracker ball')
+	   CALL OUTOPT('              Only thumbwheels retained')
+	ENDIF
+	IF (JOYSTK.AND.THUMB) THEN
+	   JOYSTK=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	   '*** WARNING - You can''t have thumbwheels and a joystick.')
+	   CALL OUTOPT('              Only thumbwheels retained')
+	ENDIF
+	IF (SIGBIT.AND.THUMB) THEN
+	   SIGBIT=.FALSE.
+	   MTABLE=.FALSE.
+	   TABLE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	   '*** WARNING - You can''t have thumbwheels and a bitpad.')
+	   CALL OUTOPT('              Only thumbwheels retained')
+	ENDIF
+	IF (MOUSE.AND.THUMB) THEN
+	   SIGBIT=.FALSE.
+	   MTABLE=.FALSE.
+	   TABLE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	   '*** WARNING - You can''t have thumbwheels and a mouse.')
+	   CALL OUTOPT('              Only thumbwheels retained')
+	ENDIF
+	IF (.NOT.T4010.AND..NOT.T4014) THEN
+	   THUMB=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - Thumbwheels need a TEK 4000 series terminal')
+	ENDIF
+	GOTO 30	
+C
+C TEK joystick
+250	IF (ALPHA) GOTO 299
+	JOYSTK=.TRUE.
+	IF (MTABLE.OR.TABLE) THEN
+	   MTABLE=.FALSE.
+	   TABLE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - You can''t have a joystick and table')
+	   CALL OUTOPT('              Only joystick retained')
+	ENDIF
+	IF (SIGBIT) THEN
+	   SIGBIT=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - You can''t have a joystick and bitpad')
+	   CALL OUTOPT('              Only joystick retained')
+	ENDIF
+	IF (.NOT.(T4105.OR.T4106.OR.T4107.OR.T4109.OR.T4115)) THEN
+	   JOYSTK=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - A joystick needs a TEK 4100 series terminal')
+	ENDIF
+	GOTO 30	
+C
+C MUART driven digitising table
+260	IF (ALPHA) GOTO 299
+	MTABLE=.TRUE.
+	IF (TKBALL) THEN
+	   TKBALL=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - You can''t have a table and tracker ball')
+	   CALL OUTOPT
+     &		      ('              Only MUART driven table retained')
+	ELSEIF (SIGBIT) THEN
+	   SIGBIT=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - You can''t have a table and bitpad')
+	   CALL OUTOPT
+     &		      ('              Only MUART driven table retained')
+	ELSEIF (MOUSE) THEN
+	   MOUSE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - You can''t have a table and a mouse')
+	   CALL OUTOPT
+     &		      ('              Only MUART driven table retained')
+	ELSEIF (JOYSTK) THEN
+	   JOYSTK=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &		('*** WARNING - You can''t have a table and joystick')
+	   CALL OUTOPT
+     &  	('              Only MUART driven table retained')
+	ELSEIF (THUMB) THEN
+	   THUMB=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &		'*** WARNING - You can''t have a table and thumbwheels')
+	   CALL OUTOPT
+     &		      ('              Only MUART driven table retained')
+	ENDIF
+	GOTO 30	
+C
+C Sigmex bitpad option
+270	IF (ALPHA) GOTO 299
+	SIGBIT=.TRUE.
+	IF (TKBALL) THEN
+	   TKBALL=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - You can''t have a bitpad and tracker ball')
+	   CALL OUTOPT
+     &		      ('              Only bitpad retained')
+	ELSEIF (MTABLE.OR.TABLE) THEN
+	   MTABLE=.FALSE.
+	   TABLE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - You can''t have a table and bitpad')
+	   CALL OUTOPT
+     &		      ('              Only bitpad retained')
+	ELSEIF (JOYSTK) THEN
+	   JOYSTK=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &		('*** WARNING - You can''t have a bitpad and joystick')
+	   CALL OUTOPT
+     &  	('              Only bitpad retained')
+	ELSEIF (THUMB) THEN
+	   THUMB=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	       '*** WARNING - You can''t have a bitpad and thumbwheels')
+	   CALL OUTOPT
+     &		      ('              Only bitpad retained')
+	ENDIF
+	IF (.NOT.S6100) THEN
+	   SIGBIT=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - A bitpad needs a TEK 4100 series terminal')
+	ENDIF
+	GOTO 30	
+C
+C NOGRAPHICS option
+280	NOGRAF=.TRUE.
+	VT100=.TRUE.
+	T4105=.FALSE.
+	T4106=.FALSE.
+	T4107=.FALSE.
+	T4109=.FALSE.
+	T4115=.FALSE.
+	S6100=.FALSE.
+	S7000=.FALSE.
+	T4010=.FALSE.
+	T4014=.FALSE.
+	MT4014=.FALSE.
+	GPX=.FALSE.
+	GOTO 30	
+C
+C GPX mouse option
+290	MOUSE=.TRUE.
+	IF (TKBALL) THEN
+	   TKBALL=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - You can''t have a mouse and tracker ball')
+	   CALL OUTOPT
+     &		      ('              Only mouse retained')
+	ELSEIF (MTABLE.OR.TABLE) THEN
+	   MTABLE=.FALSE.
+	   TABLE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - You can''t have a table and mouse')
+	   CALL OUTOPT
+     &		      ('              Only mouse retained')
+	ELSEIF (JOYSTK) THEN
+	   JOYSTK=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT
+     &		('*** WARNING - You can''t have a mouse and joystick')
+	   CALL OUTOPT
+     &  	('              Only mouse retained')
+	ELSEIF (THUMB) THEN
+	   THUMB=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	       '*** WARNING - You can''t have a mouse and thumbwheels')
+	   CALL OUTOPT
+     &		      ('              Only the mouse retained')
+	ENDIF
+	IF (.NOT.GPX) THEN
+	   MOUSE=.FALSE.
+	   CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	   CALL OUTOPT(
+     &	    '*** WARNING - A mouse needs a GPX workstation')
+	ENDIF
+	GOTO 30	
+C
+C not available on Alpha/AXP...
+299	CALL LSL_WAIT(3,2)		! don't clear screen for 3 secs
+	CALL OUTOPT
+     & ('*** WARNING - '//RDNAME(1:I)//' is not available on Alpha/AXP')
+	GOTO 30
+C
+C ......................................................................
+C error on read..
+C
+300	CALL EXPAND('*** ERROR *** reading lookup file at line %N',LINE)
+	CALL OUTOPT(EXPDSC)
+	CALL EXPAND('*** <%A>',CMDLIN)
+	CALL OUTOPT(EXPDSC)
+	CALL EXPAND('*** %[ %]^',DCPTR-1)	! point to duff chr
+	CALL OUTOPT(EXPDSC)
+	OPTSEA = 2				! error
+C
+C ......................................................................
+C
+310	CALL FLRCLO(CONLUN)	 ! close the lookup file
+	IF (.NOT.TALLY) OPTSEA=3 ! we didn't find a match for the
+C                                ! selected option
+	GOTO 330
+320	OPTSEA=0		 ! terminal not found in lookup file
+C
+C This final call to BSLN will cancel the auxillary buffer (LINE)
+330	CALL BSLN
+	RETURN
+	END

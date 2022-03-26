@@ -1,0 +1,142 @@
+	.TITLE	$IFFCY
+	.IDENT	'23JL92'
+;
+; Copyright  Laser-Scan Laboratories Limited, Cambridge, England
+;
+; Author: Paul Hardy after PDP11 version by P. Cross.
+;
+
+; IFF basic copy function
+
+;Mod	Make B.VBNx long not word to allow big IFF files	PGH  23-Jul-1992
+
+; local data
+
+	DATA_PSECT	IFF
+
+INFCB:	.BLKL	1			; saved source IFCB address
+INVBN:	.BLKL	1			; and the current block number
+OUTLUN:	.BLKL	1			; output LUN
+
+	CODE_PSECT	IFF
+
+; IFFCPY(ILUN, NWDS, LWNO)
+;
+;  copy NWDS words from current file (at LWNO, default LPOSR)
+;	to file on ILUN at end of file
+
+	.ENTRY	IFFCPY,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	BSBB	IF$CPY
+	RET
+
+; fast version for 2 compulsory arguments
+	.ENTRY	IFFCP2,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10>
+	MOVL	LPOSR,R3	; reading position
+	MOVL	#1,R4		; 2nd arg is words
+	JSB	IF$AR2		; get arguments
+	BSBB	IF$CP2		; common code
+	RET
+	
+; MACRO entry
+IF$CPY:
+	MOVL	LPOSR,R3	; default reading position
+	MOVL	#1,R4		; 2nd arg is WORD count
+	JSB	IF$ARG		; get args to regs
+IF$CP2:
+	ASHL	#-1,R2,R2	; convert bytes to words
+	BNEQ	5$		; something to do then
+	RSB			; exit if nothing to do
+5$:	MOVB	I.LUN(R9),-(SP)	; save source LUN
+	MOVL	R9,INFCB	; and source IFCB
+	MOVL	R2,-(SP)	; and count
+	MOVZBL	(R5),OUTLUN	; and OUTPUT lun
+	MOVZBL	R3,R7		; and word nr in INPUT block
+	JSB	IF$CWB		; cvt to block/byte
+	CVTWL	IFOREL,R0	; length of header
+	ADDL2	R0,R3		; hence file VBN
+	MOVL	R3,INVBN
+	JSB	IF$LBF		; ensure block in core
+	BBC	#IFC_V_MAP,I.STS(R9),6$	; not mapped file
+	CMPL	R4,I.ADR+4(R9)		; address within section?
+	BGTRW	120$			; no
+6$:	MOVL	R4,-(SP)	; and save pointer
+	MOVL	OUTLUN,R1	; get destn file LUN
+	JSB	IF$SEL		; and select it
+	BCC	7$		; ok ?
+	TSTL	(SP)+		; unstack pointer
+	TSTL	(SP)+		; unstack count
+	BRW	45$		; reselect input and return
+7$:	MOVL	LPOSE,R3	; get EOF position
+	MOVZBL	R3,R8		; remember word nr in OUTPUT block
+	JSB	IF$CWB
+	CVTWL	IFOREL,R0	; length of header
+	ADDL2	R0,R3		; get output file VBN
+8$:	JSB	IF$LBF		; prepare output buffer
+	BBC	#IFC_V_MAP,I.STS(R9),9$	; not mapped file
+	CMPL	R4,I.ADR+4(R9)		; address within section?
+	BLEQ	9$			; yes
+	JSB	IF$EXT			; extend the file
+	BLBCW	R0,100$			; failed
+	BICL2	#^XFFFFFE00,R4		; byte offset
+	BRB	8$			; round again
+9$:	MOVL	(SP)+,R1	; recover input pointer
+	MOVL	(SP)+,R2	; and word count
+; copy loop
+10$:	MOVW	(R1)+,(R4)+	; copy next word
+	DECL	R2
+	BEQL	20$		; j if no more
+	INCB	R7
+	BNEQ	20$		; j unless end of input block
+	BSBB	60$		; get next block
+20$:	INCB	R8
+	BNEQ	30$		; j unless end of output block
+; dispose of output block
+	PUSHL	R1		; save input pointer
+	JSB	IF$WBF
+	INCL	R3		; next block
+	CLRL	R4		; byte zero
+28$:	JSB	IF$LBF
+	BBC	#IFC_V_MAP,I.STS(R9),29$; not mapped file
+	CMPL	R4,I.ADR+4(R9)		; address within section?
+	BLEQ	29$			; yes
+	JSB	IF$EXT			; extend the file
+	BLBC	R0,110$			; failed
+	BICL2	#^XFFFFFE00,R4		; byte offset
+	BRB	28$			; round again
+29$:	MOVL	(SP)+,R1	; restore input pointer
+30$:	TSTL	R2		; anything more ??
+	BGTR	10$		; yes
+
+; end of copy
+40$:	JSB	IF$WBF		; ensure last block written
+	JSB	IF$UPW		; and update positions
+45$:	MOVZBL	(SP)+,R1
+	JSB	IF$SEL		; reselect source file
+	RSB			; and exit
+
+; s/r to get next source file block
+60$:	PUSHR	#^M<R3,R4,R5,R9>
+	PUSHL	BUFPT		; save buffer address
+	MOVL	INFCB,R9	; input IFCB
+	INCL	INVBN		; next block
+	MOVL	INVBN,R3	; 
+	CLRL	R4		; byte zero
+	JSB	IF$LBF		; get it in
+	MOVL	R4,R1		; new pointer
+	MOVL	(SP)+,BUFPT
+	POPR	#^M<R3,R4,R5,R9>
+	RSB
+
+100$:	TSTL	(SP)+
+110$:	TSTL	(SP)+
+	MOVL	#^A'WRIT',IERCD		; extend fail
+	MOVL	R0,IERNM		; VMS error code
+	BRB	130$
+
+120$:	MOVL	#^A'REOF',IERCD		; read beyond EOF
+	MOVL	#1,IERNM		; no VMS error code
+130$:	JSB	IF$ERR			; moan
+	BRB	45$
+
+	.PSECT
+	.END

@@ -1,0 +1,157 @@
+	LOGICAL FUNCTION READ_NTF_CHUNK()
+
+***	IDENT	14JN96
+***	MODULE READ_NTF_CHUNK
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C	Author SG 15-July-1991
+C
+	IMPLICIT NONE
+C
+C	reads upto the next section-header record or VOLTERM
+C	First record in section header is remembered and is written to start
+C	of file when READ_NTF_CHUNK is next called
+C
+CMOD	remembers length of sechrec aswell		SG 16-July-1991
+CMOD	BS7567 (v2.0) support added (W93/13).
+C       This includes skipping over continuation
+C       volume records and the following VOLHDREC.	ST 08-June-1993
+CMOD    Implement CITF96 changes (WI/CC 1545)          TJM 12-Jun-1996
+C
+C
+C Message definitions
+C
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Common blocks
+C
+	INCLUDE 'FILE_REC.CMN'
+	INCLUDE 'LUNS.PAR'
+	INCLUDE 'ID_STORAGE.CMN'
+	INCLUDE 'CITF.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE 'RECORD.CMN'
+C
+	LOGICAL	OPEN_FILES
+	LOGICAL	READ_NTF_RECORD
+	LOGICAL STORE_RECID
+	LOGICAL IS_CONTINUATION
+C
+	LOGICAL	OK				! sucess flag
+	LOGICAL HAD_A_SECHREC
+	LOGICAL CONTVOL
+	INTEGER IOS				! I/O status
+	CHARACTER*2	NTF$_REC_DESCR
+	CHARACTER*6	NTF$_REC_ID
+C
+C..............................................................................
+C
+	HAD_VOLTERM = .FALSE.		! The last VOLTERM 
+	CONTVOL = .FALSE.		! An intermediate continuation VOLTERM
+	HAD_A_SECHREC = .FALSE.
+C
+	OK = OPEN_FILES('NEW')
+	IF (OK) THEN
+C
+C	.......................................................................
+C	   write out any kept SECHRECS as first record of section
+C
+	   IF (HAVE_SECH) THEN
+	      HAD_A_SECHREC = .TRUE.
+	      SECTION_NUM = SECTION_NUM+1 		! count section
+	      SEC_REC = 1				! record num
+	      REL_REC.REC(1:KEPT_SECH_LEN) = KEPT_SECH(1:KEPT_SECH_LEN)
+	      REL_REC.LEN = KEPT_SECH_LEN
+	      WRITE(IOSTAT= IOS, UNIT= REL_LUN, REC= SEC_REC) REL_REC
+	      HAVE_SECH = .FALSE.
+	   ENDIF  
+C
+C	   ....................................................................
+C	   read upto next section header (or volume termination)
+C
+	   DO WHILE ( OK.AND.( .NOT.HAD_VOLTERM ).AND.(.NOT.HAVE_SECH ) )
+	     OK = READ_NTF_RECORD()
+	     IF (OK) THEN
+	       NTF$_REC_DESCR = STRING(1:2)
+C
+C	       ................................................................
+C	       check for section header record
+C
+	       IF(NTF$_REC_DESCR.EQ.REC$_SECHREC) THEN
+		 HAD_A_SECHREC = .TRUE.
+		 HAVE_SECH = .TRUE.
+		 KEPT_SECH(1:LENGTH) = STRING(1:LENGTH)
+		 KEPT_SECH_LEN = LENGTH
+C
+C	       ................................................................
+C	       process as normal
+C
+	       ELSE
+C
+C Don't write a continuation 
+C
+		  IF (.NOT. IS_MAGTAPE .AND.
+     &		       NTF$_REC_DESCR.EQ.REC$_VOLTERM .AND.
+     &		       IS_CONTINUATION(STRING,LENGTH)) THEN
+		     CONTVOL = .TRUE.
+		  ELSEIF (.NOT. IS_MAGTAPE.AND.CONTVOL
+     &			  .AND. NTF$_REC_DESCR.EQ.REC$_VOLHEAD) THEN
+		     CONTVOL = .FALSE.
+		  ELSE
+C		 ..............................................................
+C		 extract data and write out
+C
+		     CONTVOL = .FALSE.
+		     SEC_REC = SEC_REC+1
+		     NTF$_REC_ID = STRING(3:8)
+		     REL_REC.LEN = LENGTH
+		     REL_REC.REC(1:LENGTH) = STRING(1:LENGTH)
+		     WRITE( UNIT = REL_LUN,IOSTAT = IOS,REC = SEC_REC) REL_REC
+		     OK = ( IOS.EQ.0 )
+C
+C		 ..............................................................
+C		 write relevent bits to indexed files (if need be)
+C
+		     IF (OK) THEN
+			OK = STORE_RECID(SEC_REC, NTF$_REC_DESCR, NTF$_REC_ID)
+			IF (OK) THEN
+			   IF (NTF$_REC_DESCR.EQ.REC$_VOLTERM) THEN
+			      HAD_VOLTERM = .NOT.IS_CONTINUATION(STRING,LENGTH)
+			   ENDIF
+			ELSE
+			   CALL WRITEF('%%NTF2I-E-MISC, error in routine STORE_ID')
+			ENDIF
+		     ELSE
+			CALL WRITEF('%%NTF2I-E-MISC, writing record %I',SEC_REC)
+			CALL WRITEF('-NTF2I-I-MISC, IOSTAT was %I',IOS)
+		     ENDIF
+		  ENDIF
+	       ENDIF
+	    ENDIF
+	 END DO
+C
+C	   ....................................................................
+C
+	   CALL CLOSE_FILES('KEEP',4)
+	   IF (LOG) CALL WRITEF('%%NTF2I-I-MISC, %I records read',SEC_REC -1)
+C
+C	.......................................................................
+C
+	ELSE
+	  CALL CLOSE_FILES('DELETE',6)
+	ENDIF
+C
+	IF ((HAD_CITF93.OR.HAD_CITF96) .AND.
+     &      .NOT.HAD_A_SECHREC) THEN
+	   CALL LSL_PUTMSG(NTF2I__NOSECHREC)
+	   OK = .FALSE.
+	ENDIF
+C
+C..............................................................................
+C
+	SECRECNUM = 0
+	IF (OK) SECRECNUM = SEC_REC
+	READ_NTF_CHUNK = OK
+	RETURN
+	END

@@ -1,0 +1,416 @@
+	SUBROUTINE TDYIFF(ILUN,OLUN,MAP)
+C
+***	IDENT	12JA96
+***	MODULE  TDYIFF
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					PGH	20-DEC-1984
+C
+C	LITES2 IFF tidy up pass for EXIT command
+C
+C	Copies all entries, removing voids and deleted features.
+C	Will apply selections if SELECT OUTPUT given
+C
+	IMPLICIT NONE
+C
+C arguments
+	INTEGER		ILUN,OLUN	! IFF luns for two files
+	INTEGER		MAP		! map number (-1 = don't know)
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/		! moan constants
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:REGPAR/
+***	PARAMETER/CMN:ACS/
+C
+***	COMMON/CMN:ACS/
+***	COMMON/CMN:ACSEL/
+***	COMMON/CMN:CB/
+***	COMMON/CMN:CNSTRN/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:FCS/
+***     COMMON/CMN:GEOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/CMN:LAYERS/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:REGCMN/
+***	COMMON/CMN:STRIKE/
+C
+C functions called
+	INTEGER		FNDOVR
+	LOGICAL		LIB$EXTZV
+	LOGICAL		TSTREG
+	LOGICAL		ISELAC
+	LOGICAL		ISELCS
+	LOGICAL		TSTGEOM
+C
+C w/s
+	INTEGER*2	IECODE,IELEN	! IFF entry info
+	INTEGER*4	FSN		! longword FSN
+	INTEGER*2	ISQ		! internal sequence
+	INTEGER*2	FSARR(4)	! FS stuff
+	INTEGER*2	INO		! temporary NO number
+	INTEGER*2	THISNO		! the NO number in hand
+	INTEGER*2	NEXTNO		! next NO number to search for
+	INTEGER*2	LASTNO		! last NO number seen on input
+	INTEGER*2	CURRNO		! NO number of current output
+	INTEGER*2	PREVNO		! previous NO number output
+	INTEGER*2	TOPNO		! highest encountered NO number
+	INTEGER*2	LOWNO		! lowest encountered NO number
+	INTEGER*4	T_LPOSNO	! position of previous NO entry
+	INTEGER*4	LPOSEO		! position of matching EO entry
+	INTEGER*4	LPOSFS		! position of FS entry
+	INTEGER*4	NOPTR		! pointer to current NO
+	INTEGER*4	NFPTR		! pointer to start of feature
+	INTEGER*4	I		! temporary
+	REAL		RNGE(4)	! range entry
+	LOGICAL		HADNO		! already had an NO entry
+	LOGICAL		OVMPTY		! layer empty
+	LOGICAL		EDITED		! has the feature been edited?
+	LOGICAL		DELETED		! is the feature deleted?
+	LOGICAL		ISRELEVANT
+	INTEGER*2	ACTYP		! AC type
+	INTEGER*4	ACVAL		! AC value
+	BYTE		BUF(6)		! AC
+	EQUIVALENCE	(ACTYP,BUF(1)),(ACVAL,BUF(3))
+	INTEGER		PACK(PAKLEN)	/PAKLEN*0/
+C
+	PACK(PAKMAP) = MAP
+	HADNO = .FALSE.
+	EDITED = .FALSE.
+	THISNO = -1
+	NEXTNO = 32767
+	LASTNO = -1
+	CURRNO = -1
+	PREVNO = -1
+	TOPNO = -1
+	LOWNO = 32767
+	FSN = 0				! zero longword FSN
+	RNGE(1) = 1E38			! initialise range
+	RNGE(2) = -1E38
+	RNGE(3) = 1E38
+	RNGE(4) = -1E38
+C
+C skip through all overlays to find range of overlay numbers
+C
+6	CALL IFFSEL(ILUN)
+	CALL IFFRWD
+	CALL IFFNXC('NO',IELEN)		! get to first NO
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_IFFPOSNO)	! error in positioning to NO
+	   CALL COLAPS(MSG_IFFPOSNO)
+	   GOTO 990			! give up
+	ENDIF
+	NOPTR = LPOSH			! remember its position
+20	CALL EIHR(INO,1,1)		! overlay no
+	CALL EIHRL(LPOSEO,1,3)		! forward pointer
+	IF (INO.GT.TOPNO) TOPNO = INO	! highest so far
+	IF (INO.LT.LOWNO) LOWNO = INO	! lowest so far
+	CALL IFFPKE(IECODE,IELEN,LPOSEO) ! leap forward to EO
+	IF (IECODE.NE.'EO') THEN
+	   CALL NASTY(MSG_IFFPOSEO)	! error in positioning to EO
+	   CALL COLAPS(MSG_IFFPOSEO)
+	   GOTO 990			! give up
+	ENDIF
+	CALL IFFNXT(IECODE,IELEN)	! next entry should be NO or EM
+	IF (IECODE.EQ.'NO') GOTO 20	! keep looking
+C
+C end of overlay scan - output the header stuff first
+C
+	THISNO = LOWNO
+	CALL IFFRWD
+C
+C loop for entries not in overlays (RA,MH...,EM,EJ)
+C get next entry and dispatch
+C
+100	CALL IFFSEL(ILUN)		! select input file
+110	CALL IFFNXT(IECODE,IELEN)	! get next entry
+	IF (IELEN.EQ.-1) GOTO 990	! end of the file
+	IF (IECODE.EQ.'VO') GOTO 110	! skip voids
+	IF (IECODE.EQ.'NO') GOTO 120
+	IF (IECODE.EQ.'EJ') GOTO 995
+C
+C anything we are not interested in we just copy
+C
+	CALL EIHCPY(OLUN)
+	GOTO 110
+C
+C NO - new overlay (fragment ?)
+C join here after EO to look for the overlay fragments we want now
+C
+120	CALL EIHR(INO,1,1)		! get overlay no
+	CALL EIHRL(LPOSEO,1,3)		! and forward pointer
+	IF (INO.EQ.THISNO) THEN		! its what we want
+	   IF (SELOUT.AND..NOT.SALAYS) THEN	! select layers
+	      I = FNDOVR(INO)		! get internal number
+	      IF (I.LT.0) THEN
+	         CALL NASTY(MSG_LAYNOTEXIST,INO)
+	         CALL COLAPS(MSG_LAYNOTEXIST)
+	         GOTO 125
+	      ENDIF
+	      IF (.NOT.OVSEL(I)) GOTO 125	! not selected
+	   ENDIF
+	   NFPTR = 0			! no current feature
+	   IF (THISNO.EQ.CURRNO) THEN
+	      GOTO 500			! more of same - copy it
+	   ELSE
+	      GOTO 130			! a NEW overlay
+	   ENDIF
+	ENDIF
+C
+C we don't want this bit (yet ?) so leap over it and keep looking
+C
+125	CONTINUE
+C
+C Is this layer the next lowest so far? If so, remember it
+	IF (INO.GT.THISNO.AND.INO.LT.NEXTNO) NEXTNO = INO
+	CALL IFFPKE(IECODE,IELEN,LPOSEO)! leap forward to EO
+	IF (IECODE.NE.'EO') THEN
+	   CALL NASTY(MSG_IFFPOSEO)	! error in positioning to EO
+	   CALL COLAPS(MSG_IFFPOSEO)
+	   GOTO 990			! give up
+	ENDIF
+	GOTO 560
+C
+C close current overlay (if any)
+C
+130	CALL IFFSEL(OLUN)
+	IF (HADNO) THEN			! something to close off
+	   IF (OVMPTY) THEN			! layer empty
+	      CALL IFFUPP(0,LPOSM,LPOSH,T_LPOSNO) ! throw away NO
+	   ELSE					! not empty
+	      CALL IFFUNO(T_LPOSNO)		! update the NO
+	      IF (IERCD.NE.0) CALL NASTY(MSG_IFFPOSNO)
+	      CALL IFFEO			! output EO
+	   ENDIF
+	ENDIF
+	IF (PREVNO.GE.TOPNO) GOTO 600	! all overlays done 
+C
+C open new current overlay 
+C
+	T_LPOSNO=LPOSE		! remember NO position for EO pointer
+	CALL IFFNO(INO,0,0)	! output NO with dummy EO pointer
+	THISNO = INO
+	CURRNO = INO
+	HADNO = .TRUE.			! overlay open now
+	OVMPTY = .TRUE.			! overlay empty
+	CALL INFORM(MSG_OUTLAY,INO)	! keep user informed
+C
+C copy this overlay fragment 
+C get next entry and dispatch
+C
+500	CALL IFFSEL(ILUN)		! select input file
+510	CALL IFFNXT(IECODE,IELEN)	! get next entry
+	IF (IELEN.EQ.-1) GOTO 990	! end of the file
+511	IF (IECODE.EQ.'VO') GOTO 510	! skip voids
+	IF (IECODE.EQ.'NF') GOTO 520
+	IF (IECODE.EQ.'FS') GOTO 530
+	IF (IECODE.EQ.'CB') GOTO 540
+	IF (IECODE.EQ.'EF') GOTO 550
+	IF (IECODE.EQ.'EO') GOTO 560
+C
+C anything we are not interested in we just copy
+	IF (NFPTR.EQ.0) THEN		! nothing yet this feature
+	   CALL IFFSEL(OLUN)
+	   NFPTR = LPOSE		! remember start of feature
+	   CALL IFFSEL(ILUN)
+	ENDIF
+	CALL EIHCPY(OLUN)
+	OVMPTY = .FALSE.		! layer not empty
+	GOTO 510
+C
+C NF - get info for looking at when we get FS
+520	IF (SELOUT.AND.ANDOPT.AND.MRSEL) GOTO 535 ! no features selected
+	IF (SELOUT.AND..NOT.SAREGS) THEN ! selecting regions
+	   IF (.NOT.TSTREG()) GOTO 535
+	ENDIF
+	IF (SELOUT.AND..NOT.SAGEOMS) THEN ! selecting geometries
+	   IF (.NOT.TSTGEOM()) GOTO 535
+	ENDIF
+	CALL EIHR(FSN,1,1)		! feature no
+	PACK(PAKFSN) = FSN
+	IF (SELOUT.AND..NOT.SAFSNS) THEN! selecting FSNs
+	   I = FSN/32			! longword in bitmap
+	   IF (.NOT.LIB$EXTZV(FSN-I*32,1,FSNMAP(I+1))) GOTO 535
+	ENDIF
+C
+C NB - only map and FSN are filled in the PACK
+C (hopefully all that the relevant routine is interested in)
+	IF (SELOUT.AND.RELVNTAD.NE.0.AND.PACK(PAKMAP).GE.0) THEN
+	   CALL CALLR(PACK,ISRELEVANT,%VAL(RELVNTAD))
+	   IF (.NOT.ISRELEVANT) GOTO 535
+	ENDIF
+	CALL EIHR(ISQ,1,2)		! internal sequence no
+	CALL IFFSEL(OLUN)
+	IF (NFPTR.EQ.0) NFPTR = LPOSE	! remember start of feature
+	CALL IFFNF(FSN,ISQ)		! output NF stuff
+	OVMPTY = .FALSE.		! layer not empty
+	GOTO 500
+C
+C FS - get FC and output feature if relevant
+530	CALL EIHR(FSARR,MIN0(IELEN,4),1)! get FS stuff
+C
+C is the feature deleted?
+	DELETED=(IAND(FSARR(2),16).NE.0)
+C ignore deleted stuff 
+	IF((DELETED).AND.
+C only if
+C       not selected deleted, not in select mode , flags unset
+     &	((.NOT.SELDEL).OR.(.NOT.FLGSLC).OR.(.NOT.EDTOPT))) GOTO 535
+	EDITED = (IAND(FSARR(4),1).NE.0)
+	IF (SELOUT) THEN
+C
+C selection of deleted features
+	   IF(EDTOPT) THEN
+	      IF (SELDEL) THEN		! selected deleted features
+	         IF(DELETED) THEN
+	            FSARR(2) = IAND(FSARR(2),NOT(16))  ! unset flag
+   		    GOTO 532 			       !include
+	         ENDIF
+	      ELSE
+	         IF(DELETED) GOTO 535 !discard
+	      ENDIF
+C	   
+C selection of edited features
+	      IF (SELEDT) THEN
+	         IF (EDITED) THEN
+	            FSARR(4) = IAND(FSARR(4),NOT(1))       !unset flag
+	            GOTO 532  				!include
+	         ENDIF
+	      ENDIF
+C
+C selection of unedited features
+	      IF (SELUDT) THEN
+	         IF (.NOT. EDITED) GOTO 532  !include
+	      ENDIF
+C
+	      GOTO 535			!discard
+	   ENDIF
+C
+C select by feature code
+532	   IF (.NOT. SAFCS ) THEN
+	      I = FSARR(1)/32		! longword in bitmap
+	      IF (.NOT.LIB$EXTZV(FSARR(1)-I*32,1,FCMAP(I+1))) GOTO 535
+	   ENDIF
+	ELSE				! .not. selout
+C
+C only discard deleted features if ENABLE EDITED not set
+	   IF (.NOT. EDTOPT) THEN
+	      IF(DELETED) GOTO 535 !discard
+	   ENDIF
+	ENDIF
+C
+C check for selection by text category and style
+	IF (SELOUT.AND..NOT.ISELCS(FSARR,.TRUE.)) GOTO 535
+C	
+C This FC wanted - continue to copy to output
+	CALL IFFSEL(OLUN)
+	CALL IFFFS(FSARR)		! output FS stuff
+C
+C Check for selection on ACs
+	IF (SELOUT.AND..NOT.SAACS) THEN
+	   CALL IFFSEL(ILUN)
+	   LPOSFS = LPOSH			! remember FS position
+	   IF (.NOT.ISELAC()) GOTO 535		! reject feature
+	   CALL IFFPKE(IECODE,IELEN,LPOSFS)	! back to FS
+	ENDIF
+	IF (DATOPT.AND.(DELETED.OR.EDITED)) THEN
+C
+C look at ACs and see if we've got an EDIT type
+	   CALL IFFSEL(ILUN)
+533	   CALL IFFNXT(IECODE,IELEN)
+	   IF (IELEN.EQ.-1) GOTO 990
+	   IF (IECODE.EQ.'VO') GOTO 533
+	   IF (IECODE.EQ.'AC') THEN
+	      CALL EIHR(BUF,3,1)
+	      IF (ACTYP.NE.ACEDTP) THEN
+		 CALL EIHCPY(OLUN)    ! so copy it
+                 GOTO 533		! try the next one
+	      ENDIF
+	      CALL IFFSEL(OLUN)	! select output
+	      CALL IFFAC(ACEDTP,DATINT)	! output AC with new date
+	      GOTO 500			! off for next entry
+	   ENDIF
+C
+C there isn't an existing edit date AC so put one in
+	   CALL IFFSEL(OLUN)
+	   CALL IFFAC(ACEDTP,DATINT)
+	   CALL IFFSEL(ILUN)
+	   GOTO 511			! deal with current entry
+	ENDIF
+	GOTO 500
+C
+C FSN or FC not wanted, throw feature away
+535	CALL IFFNXC('EF',IELEN)		! skip what remains on input
+	CALL IFFSEL(OLUN)
+	IF (NFPTR.NE.0) CALL IFFUPP(0,LPOSM,LPOSH,NFPTR)! zap output
+	NFPTR = 0			! not in a feature now
+	GOTO 500
+C
+C ST (CB) - check range, then output it
+540	CALL EIHRCB_HEAD(CBH)
+	IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	   CALL EIHRCB_DATA(RIXY)
+	   CALL IFFSEL(OLUN)
+	   CALL IFFCB(CBH,RIXY)
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract RIXY
+	   CALL IFS_CB_READ(CBH,CBD,RIXY,2,COLHXY,1,CBH.NROW)
+	   CALL IFFSEL(OLUN)
+	   CALL IFFCB(CBH,CBD)
+	ENDIF
+	DO 545 I=1,CBH.NROW
+	   IF (RIXY(1,I).LT.RNGE(1)) RNGE(1) = RIXY(1,I)
+	   IF (RIXY(1,I).GT.RNGE(2)) RNGE(2) = RIXY(1,I)
+	   IF (RIXY(2,I).LT.RNGE(3)) RNGE(3) = RIXY(2,I)
+	   IF (RIXY(2,I).GT.RNGE(4)) RNGE(4) = RIXY(2,I)
+545	CONTINUE
+	GOTO 500
+C
+C EF - don't use EIHCPY because of in-feature markers
+550	CALL IFFSEL(OLUN)
+	CALL IFFEF			! output end of feature
+	NFPTR = 0			! not in a feature now
+	GOTO 500
+C
+C EO - end of this overlay part
+560	LASTNO = INO			! remember overlay we were in
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 990
+	IF (IECODE.NE.'NO') THEN	! end of this pass
+	   PREVNO = THISNO
+	   THISNO = NEXTNO
+	   NEXTNO = 32767
+	   LASTNO = -1
+	   IF (PREVNO.GE.TOPNO) GOTO 130! all done - close overlay etc
+	   CALL IFFPKE(IECODE,IELEN,NOPTR) ! go back to first NO
+	ENDIF
+	GOTO 120			! rejoin code for NO
+C
+C come here to add final EM,EJ after all overlays copied
+C
+600	CALL IFFSEL(OLUN)
+	CALL IFFEM
+C
+C all done
+C
+990	CONTINUE			! severe errors join here
+995	CALL IFFSEL(OLUN)		! only empty files come in here
+	CALL IFFEJ
+C
+C back to patch the RA entry
+	CALL IFFRWD
+	CALL IFFNXC('RA',IELEN)
+	IF (IELEN.NE.-1) CALL EIHWR(RNGE,4,1)
+	HAD_EXIT_RANGE = .TRUE.
+	EXIT_RANGE(1) = EXIT_ORGXY(1)+RNGE(1)
+	EXIT_RANGE(2) = EXIT_ORGXY(1)+RNGE(2)
+	EXIT_RANGE(3) = EXIT_ORGXY(2)+RNGE(3)
+	EXIT_RANGE(4) = EXIT_ORGXY(2)+RNGE(4)
+	RETURN
+	END

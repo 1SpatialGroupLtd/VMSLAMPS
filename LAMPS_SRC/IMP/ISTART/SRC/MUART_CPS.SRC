@@ -1,0 +1,224 @@
+	INTEGER*4 FUNCTION MUART_CPS
+C
+***	MODULE	MUART_CPS
+***	IDENT	08DE86
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C
+CMOD	CPCLOSE function added				TJH 24-Nov-1986
+C Author						TJH 19-Sep-1986
+C
+C MUART_CPS prompts for 4 control points which define a map and reads
+C their digitised position from a Laser-Scan MUART driven Altek table.
+C The results are returned via /IFF_ENT/ CPARRY.
+C
+C Any button may be used to digitise a point except:
+C
+C	(A) button NOBUTT (number of buttons supplied via /BUTTONS) 
+C	    which means abandon whole session.
+C	(B) button (NOBUTT-1) which means abandon current point.
+C
+C
+C By default:
+C
+C	/BUTTONS=(NUMBER:NOBUTT) = 16  (buttons 0 through 15).
+C	/BUTTONS=(BASE:LOWB)     = 1   (add to all button press id's)
+C
+C
+C Function returns set to SS$_NORMAL if all is well, or ISTART__ABA
+C if the session was abandoned.
+C
+	IMPLICIT NONE
+C
+C Parameters:
+C
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'LSL$CMNISTART:ISTARTMSG.PAR'
+C
+	INTEGER*4 X,Y			! coordinate array indices
+	PARAMETER (X=3)
+	PARAMETER (Y=4)
+C
+	INTEGER*4 SS$_NORMAL
+	EXTERNAL  SS$_NORMAL		! normal successful completion
+C
+C Common:
+C
+	INCLUDE	'LSL$CMNISTART:COMMAND.CMN'
+	INCLUDE	'LSL$CMNISTART:IFF_ENT.CMN'
+C
+C Integer*2:
+	INTEGER*2 TABPTR	! pointer to end (demanded by TKREAD)
+	INTEGER*2 TABBUF(7)	! buffer into which tablet data is put
+	INTEGER*2 TABLIN	! line number
+	INTEGER*2 TABBUT	! button pressed (word)
+C
+C Integer*4:
+	INTEGER   BUTTON	! button pressed (longword)
+	INTEGER	  CORNER	! the corner we are on
+	INTEGER   I,LOOP	! temp. vars.
+C
+C Real*4:
+	REAL	  SUMX,SUMY	! sums of coords. for mean centre calc.
+	REAL      TABX,TABY	! position
+	REAL	  TOL		! tolerance for CPCLOSE
+C
+C Character:
+	CHARACTER*40 TMPSTR	! for logical name translation
+C
+C Function:
+	LOGICAL	  CPCLOSE	! control points too close?
+	LOGICAL	  TAB_INTRO	! /LEARNER introduction
+	LOGICAL	  TOOFAR	! for proximity test
+	INTEGER   TRNALL	! translate logical name
+	INTEGER	  TRNBUT	! normalise button press number
+C
+	EQUIVALENCE (TABLIN,TABBUF(1)),(TABBUT,TABBUF(2)),
+     &              (TABX  ,TABBUF(3)),(TABY  ,TABBUF(5))
+C
+C ......................................................................
+C
+C
+	MUART_CPS=%LOC(SS$_NORMAL)
+C
+C Calc. tolerance for CPCLOSE. This is dependent upon the conversion
+C coefficient between table counts and mm. Minimum size of CPs is 20 mm.
+C
+	TOL=20.0/MMCOEF
+C
+C Output text if user has asked for additional hand-holding
+C
+C
+C Output text if user has asked for additional hand-holding
+C
+	IF (LEARNER) THEN
+	  MUART_CPS=TAB_INTRO()
+	ENDIF
+	IF (MUART_CPS) THEN
+C
+C Set up the TEK
+	  MUART_CPS=TRNALL('LSL$TK',TMPSTR)  ! check LSL$TK assignment
+	  IF (.NOT.MUART_CPS) THEN
+	    CALL LSL_PUTMSG(ISTART__FLDTOTRANS,'LSL$TK')
+	  ELSE
+	    CALL TKINIT(7,,0)
+	    CALL TKIDEV(3,2,)
+	    CALL LDCMPL
+C
+C Initialise corner counter
+C
+	    CORNER=0
+C
+C ......................................................................
+C
+C Main digitising loop starts here.
+C
+10	    CORNER=CORNER+1
+	    IF (CORNER.EQ.5) GOTO 40
+	    LOOP=0
+	    SUMX=0.0
+	    SUMY=0.0
+20  	    LOOP=LOOP+1
+C
+C Give appropriate button press prompt for the user
+C
+	    CALL PRESS_HLP(LOOP,CORNER)
+C
+C Set up a read from the table to set event flag 4 ...
+C
+30	    CALL TKREAD(2,TABBUF,13,TABPTR,4)
+C
+C and wait for something to happen to event flag 4
+C
+	    CALL SYS$WAITFR(%VAL(4))
+	    CALL TKPING
+C
+C Got something, clear event flag
+C
+	    CALL SYS$CLREF(%VAL(4))
+C
+C Here we have got coordinates from table
+	    BUTTON=TABBUT		! convert to longword
+	    BUTTON=TRNBUT(BUTTON)	! normalise button number
+
+C Check which cursor button was used
+C
+	    IF (BUTTON.EQ.-1) THEN
+	      CALL WRITEF
+	      CALL LSL_PUTMSG(ISTART__INVBUT)
+	      CALL TKPING
+	      IF (LEARNER) THEN
+	        CALL BUTTONS_HLP
+	      ENDIF
+	      GOTO 30
+	    ENDIF
+C
+C Abandon point option...
+	    IF (BUTTON.EQ.NOBUTT-1) THEN
+	      IF (LOOP.NE.1) THEN
+	         CALL WRITEF
+	         CALL LSL_PUTMSG(ISTART__PNTABA)
+	         CALL TKPING
+	      ENDIF
+	      IF (LEARNER) THEN
+	         CALL ABANDON_HLP(CORNER)
+	      ENDIF
+	      CORNER=CORNER-1
+	      GOTO 10
+	    ENDIF
+C
+C Abandon whole session?
+C
+	    IF (BUTTON.EQ.NOBUTT) THEN
+	      CALL WRITEF
+	      MUART_CPS=ISTART__ABA
+	      CALL LSL_PUTMSG(MUART_CPS)
+	      CALL TKPING
+	      GOTO 40
+	    ENDIF
+C
+C
+C ......................................................................
+C
+C Test that the current co-ordinates are not too far from the mean 
+C location. If yes then reject the point as the operator has probably 
+C gone to another control point by mistake
+C
+	    IF (LOOP.EQ.1) THEN
+	      IF (CPCLOSE(CPARRY,CORNER,TABX,TABY,TOL)) THEN
+	        CALL TKRASP
+	        LOOP=LOOP-1	! discount the bad current button press
+	      ELSE
+	        SUMX=SUMX+TABX
+	        SUMY=SUMY+TABY
+	      ENDIF
+	    ELSE
+	      IF (TOOFAR(SUMX,SUMY,TABX,TABY,LOOP,MMCOEF)) THEN
+	        CALL TKRASP
+	        LOOP=LOOP-1	! discount the bad current button press
+	      ELSE
+	        SUMX=SUMX+TABX
+	        SUMY=SUMY+TABY
+	      ENDIF
+	    ENDIF
+C
+C Have we had all the repeat measurements for this point yet?
+C
+	    IF (LOOP.NE.REPEAT) THEN
+	      GOTO 20
+	    ELSE
+	      CPARRY(X,CORNER)=SUMX/REPEAT
+	      CPARRY(Y,CORNER)=SUMY/REPEAT
+	    ENDIF
+	    GOTO 10			! do next control point
+	  ENDIF				! INITEK ok
+	ENDIF				! TAB_INTRO ok
+C
+C ......................................................................
+C
+C Ensure that we return with SS$_NORMAL if all was well
+C
+40	IF (MUART_CPS) MUART_CPS=%LOC(SS$_NORMAL)
+C
+	RETURN
+	END

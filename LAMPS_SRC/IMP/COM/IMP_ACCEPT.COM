@@ -2,7 +2,9 @@ $	ver_status=f$verify(0)
 $!
 $! IFF Map Processing package 'IMP' acceptance test command procedure.
 $!
-$! 					ATT 11-Dec-1986
+$!Author						ATT 11-Dec-1986
+$!MOD1312	Generally improved			ST  25-Oct-1993
+$!
 $	on error then continue
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $!
@@ -10,7 +12,7 @@ $	ws="write sys$output"
 $	b_on = "[0m[1m" 	! bold on
 $	b_of ="[0m"		! bold off
 $ 	i_on ="[0m[7m"	! inverse video on
-$ 	bell =""			! ding ding
+$ 	bell =""		! ding ding (round one..)
 $!
 $! If we have a non VT100 terminal then switch off bolding etc...
 $!
@@ -23,10 +25,15 @@ $!
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $lets_go:
 $!
-$ ws " "
-$ ws "''b_on'=====           Laser-Scan Ltd.          ============"
-$ ws "============  IFF Map Processing package 'IMP'  ============"
+$ ws "''b_on'"
+$ ws "============================================================"
+$ ws "============           Laser-Scan Ltd.          ============"
+$ ws "============    IFF Map Processing package IMP  ============"
 $ ws "============  Acceptance test command procedure ============"
+$ ws "============================================================"
+$	date_time=f$time()
+$ ws "============  Starting ''date_time'  ============"
+$ ws "============================================================"
 $ ws " "
 $ ws "''b_of'"
 $!
@@ -36,13 +43,13 @@ $	if f$getdvi("TT:","TT_AVO") then goto imp_init
 $ ws "''i_on'"
 $ WS "The IMP modules are:                                                            "
 $ ws "                                                                                "
-$ ws "ICHECK      IDIFFERENCE      IFILTER      IFIXAREA      IFROMTEXT     IINFO     "
+$ ws "ICHECK      ICUT             IDIFFERENCE      IFILTER      IFIXAREA      IFROMTEXT "
 $ ws "                                                                                "
-$ ws "ILAYFC      IMEND            IMERGE       IPATCH        IRECODE       IRENUMBER "
+$ ws "IINFO       ILAYFC           IMEND            IMERGE       IPATCH        IRECODE   "
 $ ws "                                                                                "
-$ ws "IREPORT     ISELAC           ISELECT      ISORT         ISTART        ITOTEXT   "
+$ ws "IRENUMBER   IREPORT          ISELAC           ISELECT      ISORT         ISTART    "
 $ ws "                                                                                "
-$ ws "ITRANS      IWINDOW                                                             "
+$ ws "ITOTEXT     ITRANS           IWINDOW                                                             "
 $ ws "                                                                                "
 $ ws "''b_of'"
 $!
@@ -53,33 +60,86 @@ $ imp_init:
 $ ws " "
 $ ws "Defining the IMP symbols and setting up logical names. "
 $ ws " "
-$!
-$! Impini is now invoked in lslogin!
-$!	set verify
-$!	impini 
 $	set noverify
 $!
 $ ws " "
-$	inquire/nopunc customer "Customer name : "
-$	if customer .eqs. "" then customer = "General" 
 $!
-$! and their choice of file 
-$ get_file:
-$ ws " "
-$	inquire/nopunc in_file "''customer' IFF file : "
-$	if in_file .nes. "" then goto check_file
+$	@lsl$com:impini
+$	Define sys$error nl:
+$	Define sys$output nl:
+$	Define LSL$FRT	LSL$PUBLIC_ROOT:[IMP.ACCEPT]	
+$	Define LSL$IMP_ACCEPT  LSL$PUBLIC_ROOT:[IMP.ACCEPT]	
+$!
+$	deassign sys$output
+$	deassign sys$error
+$!
+$	in_iff_file="LSL$IMP_ACCEPT:IMPTEST.IFF"
+$	frt_file="LSL$IMP_ACCEPT:IMPTEST.FRT
+$!
+$	copied_iff_file="LSL$IF:IMPTEST.IFF"
+$!
+$!============================================================================
+$! Check the input acceptance test files exist
+$!
+$	if f$search(in_iff_file) .nes. "" then goto in_iff_file_ok
+$	ws " ''bell'"
+$	ws "Initial file could not be found, tests abandoned."
+$	ws "Input file was ''in_iff_file'"
+$	ws " "
 $	goto tidy_exit
 $!
-$! Check the file exists
+$ in_iff_file_ok:
+$	if f$search(frt_file) .nes. "" then goto feedback
+$	ws " ''bell'"
+$	ws "Initial file could not be found, tests abandoned."
+$	ws "Input file was ''frt_file'"
+$	ws " "
+$	goto tidy_exit
+$!
+$ feedback:
+$!
+$	ws "... Input test data files successfully found"
+$	ws "... Input files were:
+$	ws "          ''in_iff_file'"
+$	ws " "
+$	ws "... Input test lookup files successfully found"
+$	ws "... Input file were:
+$	ws "          ''frt_file'"
+$	ws " "
+$	ws "... Copying them to working LSL$IF and LSL$DTI directories"
+$!
+$! Create new ".IFF" files for manipulation during the tests
+$!
+$	copy/nolog/noconfirm 'in_iff_file' 'copied_iff_file'
+$	if $status then goto check_copied_iff_ok
+$	ws " ''bell'"
+$	ws "Failed to copy initial file to LSL$IF:, tests abandoned."
+$	ws "Input file was ''in_iff_file'"
+$	ws "Output was to ''copied_iff_file'"
+$	ws " "
+$	goto tidy_exit
+$ check_copied_iff_ok:
+$	iff_search_file=f$search(copied_iff_file)
+$	if $status then goto iff_copied_file_ok
+$	ws " ''bell'"
+$	ws "Failed to find copied file in LSL$IF:, tests abandoned."
+$	ws "File was ''copied_iff_file'"
+$	ws " "
+$	goto tidy_exit
+$ iff_copied_file_ok:
+$!
+$	ws "... All copied data files successfully found"
+$	ws " "
+$	ws "... Initialisation and environment checks complete"
+$	ws " "
 $check_file:
-$	chkd_file = f$parse(in_file,"lsl$if:iff.iff")
+$	chkd_file = f$parse(copied_iff_file,"lsl$if:iff.iff")
 $	if f$search(chkd_file) .nes. "" then goto go_for_it
-$ ws " "
-$ ws "''bell' ''in_file' could not be found "
-$ ws " "
-$ ws "Check spelling and file specification "
-$ ws "To exit type <RETURN> when prompted for filename "
-$	goto get_file
+$	ws " ''bell'"
+$	ws "Failed to find copied file in LSL$IF:, tests abandoned."
+$	ws "File was ''copied_iff_file'"
+$	ws " "
+$	goto tidy_exit
 $!
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $! Checks complete lets go !!!
@@ -90,6 +150,7 @@ $! Create a file ".REN" for output
 $	device = f$parse("''chkd_file'",,,"DEVICE")
 $	dirnam = f$parse("''chkd_file'",,,"DIRECTORY")
 $	filenam = f$parse("''chkd_file'",,,"NAME")
+$!
 $	ren_file = device+dirnam+filenam+".REN"
 $ ws " "
 $ ws "''b_on'IRENUMBER "
@@ -268,9 +329,14 @@ $	gosub go_on
 $!
 $ ws " "
 $!
-$ 	ass/user tt: sys$input
+$!!!!! 	ass/user tt: sys$input
 $	set verify
-$	ISTART/LOG/LEARNER/SYMBOL 'strt_file' 
+$	ISTART/LOG/SYMBOL 'strt_file'
+1250
+0 500
+0 0
+500 0
+500 500
 $	DCL_STATUS = $STATUS
 $	set noverify
 $	gosub chk_status
@@ -500,6 +566,7 @@ $!
 $!
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $! Now ISELAC to select AC's.
+$!
 $	selac_file = device+dirnam+filenam+".SAC"
 $ ws " "
 $ ws "''b_on'ISELAC"
@@ -508,6 +575,10 @@ $ ws " "
 $ ws "The input IFF file is the fixed file  ''fix_file'"
 $ ws " "
 $ ws "The output IFF file is                ''selac_file'"
+$ ws " "
+$ ws "Use the commands:               FROM  ''fix_file'"
+$ ws "                                TO    ''selac_file'"
+$ ws "                                GO"
 $ ws " "
 $ ws "''b_of'"
 $!
@@ -628,13 +699,40 @@ $	gosub chk_status
 $!
 $ 	gosub go_on
 $!
+$!
+$!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+$! Now ICUT to trim the features
+$	cut_file = device+dirnam+filenam+".CUT"
+$ ws " "
+$ ws "''b_on'ICUT"
+$ ws "(to trim the data)."
+$ ws " "
+$ ws "The input IFF file is the thinned file ''thin_file'"
+$ ws " "
+$ ws "The output IFF file is                 ''cut_file'"
+$ ws " "
+$ ws "The /LOG qualifier is specified to send supplementary messages to the screen."
+$ ws "The /NEWFC qualifier causes the data to be output in a global feature code."
+$ ws "The /POINTS qualifier sets the maximum number of pointer per output feature."
+$ ws "''b_of'"
+$!
+$ 	gosub go_on
+$!
+$	set verify
+$	ICUT/LOG/POINTS=50/NEWFC=1 'thin_file' 'cut_file'
+$	DCL_STATUS = $STATUS
+$	set noverify
+$	gosub chk_status
+$!
+$ 	gosub go_on
+$!
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $! Now IINFO to check contents of file
 $ ws " "
 $ ws "''b_on'IINFO"
 $ ws "(to check contents of the file)."
 $ ws " "
-$ ws "The input IFF file is the thinned file ''thin_file'"
+$ ws "The input IFF file is the cut file ''cut_file'"
 $ ws " "
 $ ws "The /MAP_DESCRIPTOR qualifier is specified to give information about the MD"
 $ ws "(Map Descriptor) entry and the /TIMINGS qualifier gives information about"
@@ -644,7 +742,7 @@ $!
 $ 	gosub go_on
 $!
 $	set verify
-$	IINFO/MAP_DESCRIPTOR/TIMINGS 'thin_file'
+$	IINFO/MAP_DESCRIPTOR/TIMINGS 'cut_file'
 $	DCL_STATUS = $STATUS
 $	set noverify
 $	gosub chk_status
@@ -672,6 +770,7 @@ $ ws " ILAYFC    A recoded file           ''lay_file'"
 $ ws " ISORT     A sorted file            ''sort_file'"
 $ ws " ITRANS    A transformed file       ''tran_file'"
 $ ws " IFILTER   A thinned file           ''thin_file'"
+$ ws " ICUT      A cut file               ''cut_file'"
 $ ws " ISTART    A 'new' type IFF file    ''strt_file'"
 $ ws " "
 $ ws " ICHECK, IINFO, IPATCH and IREPORT have also been used to check the validity"

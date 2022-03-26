@@ -1,0 +1,609 @@
+	LOGICAL*4 FUNCTION GET_DATA( PT,CC,NXT,PRV,PT_PR_FTR,
+     &				FTR_PTS,FTR_START,FTR_IFC2,FTR_LAYER,
+     &				FTR_INFTR,FTR_ORIG_PR_FTR,PNT_FTR,
+     &				IN_FTR_STATUS,IN_FTR_ADDR,
+     &				MAXPTS,MAXINFTRS,MAXOUTFTRS)
+
+***	MODULE	GET_DATA
+***	IDENT	25MY93
+
+C	Copyright: Laser-Scan Ltd., Cambridge, England
+
+CMOD1232 Give message BADMINTOL if the given mintol value is
+C	 below the dataset resolution			 JB 25-May-1993
+C
+CMOD1073 Make COORD_TOL equal to max coord /2E6 rather than
+C	 max coord / 0.5E6 				 JB 08-Mar-1993
+
+CMOD1114 Remove NUM from ADD_FTR argument list (never used, 
+C	 esp. as a BYTE!)				 JB 08-May-1992
+
+CMOD1060 Get MD offset if HAD_ABS for /ABSOLUTE		 JB 07-Nov-1991
+
+CMOD974	Ignore NO entry if an immediate continuation of the same
+C	layer (trying to avoid overrunning the internal layer array
+C	limits), and output new message TOOMNYLAYERS and exit if 
+C	there are still too many
+C	Do not output the message NOFCFRT if already output for the
+C	previous feature (avoiding multiple outputs of the same 
+C	message)
+C	Use new dynamic FRTLIB				 JB 05-Mar-1991
+C
+CMOD	Bug-fix - ensure COORD_TOL is POSITIVE!		WJJ 26-Jan-1990
+CMOD	Converted to use Point Accuracy Codes		ACM 05-Dec-1988
+CMOD	Forced all ftrs containing TX entries to be
+C	transfered rather than processed		ACM 06-Sep-1988
+CMOD	Output range for writing to LCM files now
+C	taken from input coordinates rather than from
+C	input RA entry, so that ftrs in layer 0 which
+C	are discarded with /STRUCTURE do not give rise
+C	to RA in .LCM >> RA in corresponding output IFF	ACM 01-Aug-1988
+CMOD	Converted to accept CB in place of ST entries	ACM 06-Apr-1988
+CMOD	Stopped it creating 2 copies of every feature	ACM 18-Aug-1987
+CMOD	Made a function					TJH 29-May-1987
+C
+C	Created   : ACM					       Nov 1986
+
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+	INCLUDE		'LSL$CMNLSL:LSLLIBMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE		'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE		'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINKCHAR.CMN'
+
+C Data in/out
+	INTEGER*4	MAXPTS,MAXINFTRS,MAXOUTFTRS
+	INTEGER*4	NXT(MAXPTS),PRV(MAXPTS)
+	INTEGER*4	PT_PR_FTR(MAXPTS)
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_START(MAXOUTFTRS)
+	INTEGER*4	FTR_INFTR(MAXOUTFTRS)
+	INTEGER*4	FTR_ORIG_PR_FTR(MAXOUTFTRS)
+	INTEGER*4	IN_FTR_ADDR(MAXINFTRS)
+	INTEGER*2	FTR_IFC2(MAXOUTFTRS)
+	INTEGER*2	FTR_LAYER(MAXOUTFTRS)
+	BYTE		IN_FTR_STATUS(MAXINFTRS)
+	LOGICAL*1	PNT_FTR(MAXOUTFTRS)
+	REAL*4		PT(2,MAXPTS)
+	INTEGER*4	CC(MAXPTS)
+
+C Workspace
+	INTEGER*2	IECODE,IELEN	! for IFFNXT
+	INTEGER*2	ISTAT(4)	! for IFFFS
+	INTEGER*2	WORD		! a word
+	INTEGER*4	I,J,K		! misc integers
+	INTEGER*4	FSN		! ftr sequ number
+	INTEGER*4	ISN		! ftr sequ number
+	INTEGER*4	OSN		! layer number
+	INTEGER*4	FC		! *4 feature code
+	INTEGER*4	IFC		! FC index in FCS4 array
+	INTEGER*4	ILI		! layer index in LAYER array
+	INTEGER*4	NPTS		! No. of pts in a ftr
+	INTEGER*4	FTRS_IN_LAYER	! No. of ftrs in a layer
+	INTEGER*4	SECDIM		! No. of x/y node sectors
+	INTEGER*4	C_STA,C_FIN	! end pt capture codes
+	INTEGER*4	LAST_NO		! last overlay no.
+	INTEGER*4	LAST_FC		! last FC
+	INTEGER*4	NUM		! CB count within input ftr
+
+	LOGICAL*4	HAD_NO		! had LAST_NO
+	LOGICAL*4	MES_FC		! had NOFCFRT output for LAST_FC
+	LOGICAL*4	OK
+	LOGICAL*4	TAKE_FTR	! feature to be processed?
+	LOGICAL*4	TAKE_LAYER	! ftrs for processing in layer?
+	LOGICAL*4	HADFS,HADCB,HADRA ! had entry?
+	LOGICAL*4	HAD_WARNING1	! had warning no.1?
+	LOGICAL*4	LAST_STRING	! last separate string in ftr?
+
+	REAL*8		DATA_RESN	! dataset resolution
+	REAL*4		RANGE(4)	! coord limits
+	REAL*4		SECSIZ		! node-sector size
+	REAL*4		X,Y		! point coords
+	REAL*4		STA(2),FIN(2)	! ftr end pt coords
+
+	BYTE		FEATURE_STATUS	! ftr status
+
+C Functions
+	LOGICAL*4	ISEARCH		! binary search
+	LOGICAL*4	GET_CB		! get CB string
+	LOGICAL*4	ADD_FTR
+	LOGICAL*4	FRTFND
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Reads through input IFF file, noting each feature start address
+C	and, if POINTS is .TRUE., also reads in all points for each
+C	feature to be processed.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	GET_DATA = SS$_NORMAL	! assume success
+ 
+C Initialise
+
+	HAD_NO = .FALSE.		! not yet had NO
+	MES_FC = .FALSE.		! not yet had FC
+	HADRA  = .FALSE.		! not had RA from input yet
+	TAKE_FTR   = .FALSE.
+	TAKE_LAYER = .FALSE.
+	N_IN_FTRS   = 0			! no ftrs seen yet
+	N_OT_FTRS   = 0			! no ftrs taken in yet
+	N_IN_LAYERS = 0			! no layers seen yet
+	OUT_RANGE(1) = 1.0E36
+	OUT_RANGE(2) = -OUT_RANGE(1)
+	OUT_RANGE(3) = OUT_RANGE(1)
+	OUT_RANGE(4) = -OUT_RANGE(1)
+
+	CALL IFFSEL(INLUN)
+
+C Loop for each IFF entry
+
+10	CALL IFFNXT(IECODE,IELEN)	! start here for each IFF entry
+
+	IF (IELEN.EQ.-1) THEN		! end-of-file encountered
+	  GET_DATA = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(GET_DATA,INFILE(:IN_LEN))
+	  GOTO 999
+	ENDIF
+
+	IF (IECODE.EQ.'NF') GOTO 20
+	IF (IECODE.EQ.'FS') GOTO 30
+	IF (IECODE.EQ.'CB') GOTO 40
+	IF (IECODE.EQ.'EF'.AND. .NOT.HADCB) GOTO 60 ! reject if no CB
+	IF (IECODE.EQ.'NO') GOTO 80
+	IF (IECODE.EQ.'EO') GOTO 90
+	IF (IECODE.EQ.'RA') GOTO 100
+	IF (IECODE.EQ.'EJ') GOTO 110	! return
+
+	GOTO 10				! get next entry
+C ----------------------------------------------------------------------
+
+60	FEATURE_STATUS = REJECT
+	IN_FTR_STATUS(N_IN_FTRS) = REJECT
+	CALL LSL_PUTMSG(ILINK__BADFTR,FSN,ISN,OSN)
+	IF (HAD_MONITOR) CALL WRITEF
+
+	GOTO 10				! get next entry
+
+C ----------------------------------------------------------------------
+C NF entry
+
+C Check for input-feature-storage overflow - should never, because
+C storage is supposed to have been allocated as required.
+
+20	IF (N_IN_FTRS.EQ.MAXINFTRS) THEN
+	  GET_DATA = ILINK__INTRNLERR
+	  CALL LSL_PUTMSG(GET_DATA,1,'GET_DATA')
+	  GOTO 999
+	END IF
+
+	NPTS = 0
+	N_IN_FTRS = N_IN_FTRS+1		! count input ftrs
+	FTRS_IN_LAYER = FTRS_IN_LAYER+1
+	IN_FTR_ADDR(N_IN_FTRS) = LPOSH	! note IFF address
+	HADFS = .FALSE.			! not seen FS yet
+	HADCB = .FALSE.			! not seen CB yet
+	TAKE_FTR = .FALSE.
+	FSN = 0				! clear longword
+	CALL EIHRI(WORD,1,1)		! read FSN
+	FSN = WORD			! convert word to long
+	ISN = 0				! clear longword
+	CALL EIHRI(WORD,1,2)		! read internal seq. no.
+	ISN = WORD			! convert word to long
+
+	GOTO 10				! get next entry
+
+C ----------------------------------------------------------------------
+C FS entry
+
+30	FC = 0				! clear longword
+	CALL EIHR(WORD,1,1)		! read feature code
+	FC = WORD			! convert word to long
+
+	IF (TAKE_LAYER) THEN
+
+C If FCPFILE was given then only features with feature codes specified
+C in this file will be processed
+
+	  IF (HAD_FCP) THEN
+	    TAKE_FTR = ISEARCH(FCS4,N_FCS,FC,IFC)
+	  ELSE
+	    TAKE_FTR = .TRUE.
+	  END IF
+
+C Reject features with FCs not in FRT file
+
+	  IF (TAKE_FTR) THEN
+	     IF (HAD_FRT) THEN
+C Search for FC, with no message if not found
+		OK = FRTFND(FC, .FALSE.)
+		IF (.NOT.OK) GOTO 36	! found FC
+C
+		TAKE_FTR = .FALSE.	! FC not in FRT file
+C
+C If had message for this FC, skip the message being repeated
+		IF (MES_FC .AND. FC.EQ.LAST_FC) GOTO 36
+C
+		CALL LSL_PUTMSG(ILINK__NOFCFRT, FC)
+C
+		LAST_FC = FC
+		MES_FC = .TRUE.
+	     ENDIF
+
+C Check for features to be rejected as having a graphical-type which
+C cannot (currently) be sensibly processed by ILINK
+
+36	     IF (TAKE_FTR.AND.HAD_REJFCS) THEN
+		IF (ISEARCH(REJFCS,N_REJFCS,FC,I)) TAKE_FTR = .FALSE.
+	     ENDIF
+	  ENDIF
+	ELSE
+	  TAKE_FTR = .FALSE.	! layer not selected for processing
+	ENDIF
+
+	IF (TAKE_FTR) THEN
+	  FEATURE_STATUS = PROCESS
+	  IF (HAD_STRFCS) THEN
+C Check for features to be treated as symbol-strings
+	    IF (ISEARCH(STRFCS,N_STRFCS,FC,I)) THEN
+	      IF (HAD_LPJOIN) THEN
+	        HAD_SYMBOL_STRING = .TRUE.
+	        FEATURE_STATUS = SYMBOL_STRING
+	      ELSE
+	        TAKE_FTR = .FALSE.
+	        FEATURE_STATUS = TRANSFER
+	      END IF
+	    END IF
+	  END IF
+	ELSE
+	  FEATURE_STATUS = TRANSFER
+	END IF
+
+	IN_FTR_STATUS(N_IN_FTRS) = FEATURE_STATUS
+
+	GOTO 10				! get next entry
+
+C ----------------------------------------------------------------------
+C CB entry
+
+40	NUM = 0				! count separate pen-up
+
+50	NUM = NUM+1			! ftrs within ftr
+
+	LAST_STRING = GET_CB(CBH,BIG_CBD)
+	NPTS = CBH.NROW
+
+	IF (FEATURE_STATUS.GE.PROCESS) THEN
+	  IF (NEED_DATA_PER_POINT) THEN
+	    CALL IFS_CB_READ(CBH,BIG_CBD,PWK,2,COLH_XY,1,NPTS)
+	    CALL IFS_CB_READ(CBH,BIG_CBD,CWK,1,CAP_CODE,1,NPTS)
+	    DO 55 I = 1,NPTS
+	      IF (CWK(I).EQ.IFF_ABSENT) CWK(I) = MIN_PAC-1
+55	    CONTINUE
+	  ELSE
+	    CALL IFS_CB_READ(CBH,BIG_CBD,STA,2,COLH_XY,1,1)
+	    CALL IFS_CB_READ(CBH,BIG_CBD,FIN,2,COLH_XY,NPTS,NPTS)
+	    CALL IFS_CB_READ(CBH,BIG_CBD,C_STA,1,CAP_CODE,1,1)
+	    CALL IFS_CB_READ(CBH,BIG_CBD,C_FIN,1,CAP_CODE,NPTS,NPTS)
+	    IF (C_STA.EQ.IFF_ABSENT) C_STA = MIN_PAC-1
+	    IF (C_FIN.EQ.IFF_ABSENT) C_FIN = MIN_PAC-1
+	  END IF
+	END IF
+
+C Don't count void CBs, and reject ftrs to be transfered if process is
+C /STRUCTURE
+
+	HADCB = NPTS.GE.1
+	IF (.NOT.HADCB.OR.
+     &	    (FEATURE_STATUS.EQ.TRANSFER.AND.HAD_STRUCTURE)) THEN
+70	  FEATURE_STATUS = REJECT
+	  IN_FTR_STATUS(N_IN_FTRS) = REJECT
+	  CALL LSL_PUTMSG(ILINK__BADFTR,FSN,ISN,OSN)
+	  IF (HAD_MONITOR) CALL WRITEF
+	  GOTO 10			! get next entry
+	END IF
+
+C Note coord range limits for all features which are to find their way
+C into the IFF output file, i.e. which are to be processed or transfered
+
+	IF (FEATURE_STATUS.EQ.TRANSFER.OR.FEATURE_STATUS.EQ.PROCESS)THEN
+	  DO 75 I = 1,NPTS*CBH.NCOL,CBH.NCOL
+	    OUT_RANGE(1) = MIN(OUT_RANGE(1),BIG_CBD.R(I))
+	    OUT_RANGE(2) = MAX(OUT_RANGE(2),BIG_CBD.R(I))
+	    OUT_RANGE(3) = MIN(OUT_RANGE(3),BIG_CBD.R(I+1))
+	    OUT_RANGE(4) = MAX(OUT_RANGE(4),BIG_CBD.R(I+1))
+75	  CONTINUE
+	END IF
+
+77	IF (FEATURE_STATUS.EQ.TRANSFER) THEN
+
+C Count each type of ftr to be transferred
+
+	  IF (NPTS.EQ.1) THEN
+	    N_TR_PFTRS = N_TR_PFTRS+1	! point-ftrs
+	  ELSE
+	    N_TR_OFTRS = N_TR_OFTRS+1	! other ftrs
+	  END IF
+	ELSE IF (FEATURE_STATUS.GE.PROCESS) THEN
+
+C Ftrs containing TX entries must be transfered, so look ahead for TX
+
+	  CALL EIHMK(1)			! place marker
+
+78	  IF (IECODE.EQ.'EF') GOTO 79	! no TX in ftr
+	  IF (IECODE.EQ.'NF') GOTO 79	! no TX in ftr
+	  IF (IECODE.EQ.'NO') GOTO 79	! no TX in ftr
+	  IF (IECODE.EQ.'EO') GOTO 79	! no TX in ftr
+	  IF (IECODE.EQ.'EJ') GOTO 79	! no TX in ftr
+
+	  IF (IECODE.EQ.'TX') THEN	! TX entry found
+	    FEATURE_STATUS = TRANSFER	! so transfer ftr
+	    IN_FTR_STATUS(N_IN_FTRS) = TRANSFER
+	    GOTO 77
+	  END IF
+
+	  CALL IFFNXT(IECODE,IELEN)	! move on to next entry
+	  IF (IELEN.EQ.-1) THEN
+	    GET_DATA = ILINK__UNEXPEOF
+	    CALL LSL_PUTMSG(GET_DATA,INFILE(:IN_LEN))
+	    GOTO 999
+	  END IF
+	  GOTO 78
+
+79	  CALL IFFRWM			! rewind to marker
+	  CALL EIHMK(0)			! remove marker
+
+	  IF (NEED_DATA_PER_POINT) THEN
+
+C Remove any duplicate points with COORD_TOL = 0
+
+	    CALL DEL_DUPPTS_FRM_ARY(
+     &	      PWK,CWK,NPTS,LINKPTS,LINKCCS,NLPTS,COORD_TOL)
+	    STA(1) = LINKPTS(1,1)
+	    STA(2) = LINKPTS(2,1)
+	    C_STA = LINKCCS(1)
+	    FIN(1) = LINKPTS(1,NLPTS)
+	    FIN(2) = LINKPTS(2,NLPTS)
+	    C_FIN = LINKCCS(NLPTS)
+	  ELSE
+	    NLPTS = NPTS
+	  END IF
+
+C Count each type of ftr to be processed
+
+	  IF (NLPTS.EQ.1) THEN
+	    N_ORIG_PR_PFTRS = N_ORIG_PR_PFTRS+1	! point-ftrs
+	  ELSE IF( NLPTS.GE.2
+     &	     .AND.(STA(1).NE.FIN(1).OR.STA(2).NE.FIN(2))) THEN
+	    N_ORIG_PR_OFTRS = N_ORIG_PR_OFTRS+1	! open-ftrs
+	  ELSE IF (NLPTS.GE.3) THEN
+	    N_ORIG_PR_CFTRS = N_ORIG_PR_CFTRS+1	! closed-ftrs
+	  END IF
+
+C Add ftr to list of ftrs to be processed
+
+	  GET_DATA = ADD_FTR(FC,IFC,ILI,N_IN_FTRS,
+     &			PT,CC,NXT,PRV,PT_PR_FTR,FTR_PTS,FTR_START,
+     &			FTR_IFC2,FTR_LAYER,FTR_INFTR,
+     &			FTR_ORIG_PR_FTR,PNT_FTR,
+     &			MAXPTS,MAXINFTRS,MAXOUTFTRS)
+
+	  IF (.NOT.GET_DATA) GOTO 999
+	END IF
+
+C Count each type of ftr encountered for transfering or processing
+
+	IF (NPTS.EQ.1) THEN
+	  N_IN_PFTRS = N_IN_PFTRS+1	! point-ftrs
+	ELSE
+	  N_IN_OFTRS = N_IN_OFTRS+1	! other ftrs
+	END IF
+
+C Split compound features for processing up into separate features, each
+C with the same ftr-status and input-address as the first
+
+	IF (FEATURE_STATUS.GE.PROCESS.AND..NOT.LAST_STRING) THEN
+	  N_IN_FTRS = N_IN_FTRS+1
+	  IN_FTR_STATUS(N_IN_FTRS) = IN_FTR_STATUS(N_IN_FTRS-1)
+	  IN_FTR_ADDR(N_IN_FTRS) = IN_FTR_ADDR(N_IN_FTRS-1)
+	  GOTO 50			! get further pen-up ftrs
+	END IF
+
+	GOTO 10				! get next entry
+
+C ----------------------------------------------------------------------
+C NO entry
+
+80	OSN = 0				! clear longword
+	CALL EIHR(WORD,1,1)		! read layer number
+	OSN = WORD			! convert word to long
+C
+C Check if continuation of same overlay
+C
+	IF (HAD_NO) THEN
+	   IF (OSN.EQ.LAST_NO) GOTO 10  ! ignore if immediate continuation 
+	ENDIF				! of same layer
+C
+	LAST_NO = OSN
+	HAD_NO  = .TRUE.
+C
+C Check that there aren't too many different layers
+C
+	IF (N_IN_LAYERS.EQ.MAXLAYERS) THEN
+	   GET_DATA = ILINK__TOOMNYLAYERS
+	   CALL LSL_PUTMSG (GET_DATA,MAXLAYERS)
+	   GOTO 999
+	ENDIF
+C
+	N_IN_LAYERS = N_IN_LAYERS + 1
+	LAYER_NUMBER(N_IN_LAYERS) = OSN
+	FTRS_IN_LAYER = 0
+
+C Find whether layer may contain ftrs to be taken in for processing
+
+	IF (PROCESS_ALL_LAYERS) THEN
+	  TAKE_LAYER = OSN.GT.0		! don't process layer 0
+	ELSE IF (NEED_DATA_PER_FEATURE) THEN
+	  TAKE_LAYER = ISEARCH(LAYER,N_LAYERS,OSN,ILI)
+	ELSE
+	  TAKE_LAYER = .FALSE.
+	END IF
+
+	GOTO 10				! get next entry
+
+C ----------------------------------------------------------------------
+C EO entry
+
+90	LAST_INFTR_IN_LAYER(N_IN_LAYERS) = N_IN_FTRS	! overwritten at very
+							! last EO for current
+							! layer (N_IN_LAYERS
+							! won't have changed)
+	IF (HAD_MONITOR)
+     &	  WRITE(*,'(X,I7,'' features seen in layer '',I6)')
+     &	  FTRS_IN_LAYER, OSN
+
+	GOTO 10				! get next entry
+
+C ----------------------------------------------------------------------
+C RA entry
+
+100	CALL EIHRR(RANGE,4,1)		! read X and Y ranges
+	XMIN = RANGE(1)
+	XMAX = RANGE(2)
+	YMIN = RANGE(3)
+	YMAX = RANGE(4)
+
+	IF (XMAX.LE.XMIN+1) THEN
+	  XMAX = XMAX+1
+	  XMIN = XMIN-1
+	END IF
+
+	IF (YMAX.LE.YMIN+1) THEN
+	  YMAX = YMAX+1
+	  YMIN = YMIN-1
+	END IF
+
+	XRANGE = XMAX-XMIN
+	YRANGE = YMAX-YMIN
+	IF (XRANGE.LT.-ZEROPLUS .OR. YRANGE.LT.-ZEROPLUS) THEN
+	  GET_DATA = ILINK__BADRANGE
+	  CALL LSL_PUTMSG(GET_DATA,XMIN,XMAX,YMIN,YMAX)
+	  GOTO 999
+	END IF
+
+	XRANGE = ABS(XRANGE)
+	YRANGE = ABS(YRANGE)
+	HADRA  = .TRUE.
+
+C Set minimum size of coordinate value to be regarded as significant
+
+CCC Bug-fix - allow for negative coordinates
+CCC	COORD_TOL = MAX(XMAX,YMAX)/0.5E6
+
+	COORD_TOL = MAX(ABS(XMAX),ABS(YMAX))
+	COORD_TOL = MAX(COORD_TOL,ABS(XMIN))
+	COORD_TOL = MAX(COORD_TOL,ABS(YMIN))
+
+	DATA_RESN = COORD_TOL/2.0E7		! resn approx 1/25 e 6
+	COORD_TOL = COORD_TOL/2.0E6
+C
+C This MINTOL value defines the minimum distance between vectors to 
+C enable the user to prevent points being filtered when COORD_TOL is
+C too coarse. As COORD_TOL is being adjusted before JNTOL and VRTOL are
+C calculated, it is setting a minumum value on all tolerances.
+C To maintain upward compatibility, the program behaves as before if the
+C /MINTOL is not used.
+C
+	IF (HAD_MINTOL) THEN
+	   IF (MINTOL.LT.DATA_RESN)
+     &		CALL LSL_PUTMSG(ILINK__BADMINTOL,MINTOL,DATA_RESN)
+	   COORD_TOL = MINTOL
+	ENDIF
+
+	JNTOL = MAX(JNTOL,COORD_TOL)
+	VRTOL = MAX(VRTOL,COORD_TOL)
+
+	JNTOL_SQ = JNTOL*JNTOL
+	VRTOL_SQ = VRTOL*VRTOL
+
+	JNTOL_PLUS = JNTOL+10*ZEROPLUS
+	EXJNTOL    = MAX(EXTOL,JNTOL)
+	EXJNTOL_SQ = EXJNTOL*EXJNTOL
+	VER_RANGE  = JNTOL-VRTOL
+
+C Get MD if had /ABSOLUTE
+
+	IF (HAD_ABS) THEN
+	   CALL IFFNXC('MD',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      GET_DATA = ILINK__MDABSENT
+	      CALL LSL_PUTMSG(ILINK__MDABSENT)
+	      GOTO 999
+	   ELSEIF (IELEN.NE.MD2LEN) THEN
+	      CALL LSL_PUTMSG(ILINK__MDDEFAULT)	  ! no MD2 available
+	      MD2LOC(1) = 0
+	      MD2LOC(2) = 0
+	   ELSE
+	      CALL EIHR(MD2ARR,MD2LEN,1)
+	      IF (MATV2.NE.2) THEN
+		 CALL LSL_PUTMSG(ILINK__MDDEFAULT) ! no MD2 available
+		 MD2LOC(1) = 0
+		 MD2LOC(2) = 0
+	      ENDIF
+	   ENDIF
+	ENDIF
+
+	GOTO 10				! get next entry
+
+C ----------------------------------------------------------------------
+C EJ entry, or end of file
+
+110	IF (.NOT.HADRA) THEN
+	  GET_DATA = ILINK__NOIFFRA
+	  CALL LSL_PUTMSG(GET_DATA)
+	  GOTO 999
+	END IF
+
+C Decide number of X and Y sectors to use, so that expected max No. of
+C nodes in each sector is < MAXNDSINSCT, while not exceeding the max No.
+C of sectors available, and not using fewer than is reasonable.
+
+	SECDIM = SQRT(2*N_PR_FTRS/REAL(MAXNDSINSCT))
+	SECDIM = MIN(MAXSECDIM,SECDIM+1)	! round up - not too far
+	SECDIM = MAX(5,SECDIM)			! at least 5x5 sectors
+
+	SECSIZ = MAX(XRANGE,YRANGE)/SECDIM	! squarish sectors
+
+	NXSECTORS = (XRANGE-COORD_TOL)/SECSIZ+1
+	NXSECTORS = MAX(1,MIN(MAXSECDIM,NXSECTORS))
+
+	NYSECTORS = (YRANGE-COORD_TOL)/SECSIZ+1
+	NYSECTORS = MAX(1,MIN(MAXSECDIM,NYSECTORS))
+
+	XSECSIZ = XRANGE/NXSECTORS
+	YSECSIZ = YRANGE/NYSECTORS
+
+C If /FREE_ENDS qualifier was used without layer or fc, then set
+C  FREE_ENDS_LAYER to max input layer number+1.
+
+	IF (HAD_FREE_ENDS .AND. .NOT.HAD_FREE_ENDS_LAYER) THEN
+	  DO 120 I = 1,N_IN_LAYERS
+	    FREE_ENDS_LAYER = MAX(FREE_ENDS_LAYER,LAYER_NUMBER(I))
+120	  CONTINUE
+	  FREE_ENDS_LAYER = FREE_ENDS_LAYER+1
+	END IF
+
+999	IF (GET_DATA) GET_DATA = SS$_NORMAL
+
+	RETURN
+	END
+

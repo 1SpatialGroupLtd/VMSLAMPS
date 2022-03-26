@@ -1,6 +1,6 @@
 	PROGRAM I2MAPDATA
 C
-CDEC$	IDENT	'22SE94'
+CDEC$	IDENT	'12OC94'
 C
 C	Copyright (C) Laser-Scan Ltd., Cambridge, England.
 C

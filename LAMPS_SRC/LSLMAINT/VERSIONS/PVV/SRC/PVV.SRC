@@ -1,0 +1,208 @@
+	PROGRAM PVV
+C
+***	MODULE PVV
+***	IDENT	30JA95
+C
+	IMPLICIT CHARACTER*1 (A-Z)
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England
+C Author R. Fairbairns
+C
+C Coded July 1981
+C
+CMOD Modified to patch AXP object files. Mod 1460.	ST	30-Jan-1995
+C
+C Program to edit VMS and AXP object modules to update the
+C module version entries
+C
+***	COMMON/RMSCTL/
+C
+C special TXTC with vast TXTBUF
+***	COMMON/TXTC/
+C
+C layout, etc., parameters
+C
+C record types
+	PARAMETER OBJ$C_HDR	= 0	! header record
+	PARAMETER OBJ$C_EOM	= 3	! end of module record
+	PARAMETER EOBJ$C_EMH	= 8	! AXP header module
+C
+C header record types
+	PARAMETER OBJ$C_HDR_MHD	= 0	! module header record
+	PARAMETER OBJ$C_HDR_LNM	= 1	! langauge name header record
+C
+C IDENT array storage space
+	PARAMETER IDEFUL = 50		! number of entries
+					! pessimistic assumption about
+					! what's required
+	PARAMETER IDEBYT = 800		! bytes in modname/IDENT array
+					! 7 (ave) per module name +
+					! 7 per IDENT +
+					! 100 rounding error
+C
+C w/s
+	BYTE RECTYP,HDRTYP		! types of records
+	INTEGER*4 RECPTR		! record pointer
+	INTEGER*4 NAMPTR		! name pointer
+	INTEGER*4 NXTPTR		! used in record update
+	INTEGER*4 I, D
+	CHARACTER*1 HDR_CONT		! patched by calls to EXT_HDREC
+	CHARACTER*80 FILE_TITLE		! for call to GET_FILE
+	LOGICAL*1 KNOWN_MOD		! TRUE iff current module
+					!  was in ADC.IDE
+C
+C stuff for holding IDENTs, etc
+	INTEGER*4 MAXIDE		! total number of IDENTs read in
+					!   (set by RDIDE)
+	INTEGER*4 IDEPTR(IDEFUL)	! ptrs to modname/IDENT entries
+	BYTE IDETXT(IDEBYT)		! texts of entries
+	LOGICAL*1 USEDID(IDEFUL)	! diagnosis of having seen ident
+C
+C function called
+	LOGICAL CF_STR
+C
+C preset logicals
+	DATA USEDID/IDEFUL*.FALSE./
+C
+C-----------------------------------------------------------------------------
+C
+C initialise 'private' TXTC
+	TXTLIM = 8200
+C
+C get file title
+	CALL GET_FILE(FILE_TITLE, 'Title: ')
+C
+C read IDENT file
+	CALL RD_IDE(IDEFUL, IDEBYT, IDEPTR, MAXIDE, IDETXT)
+D	CALL WRITEF('%N entries read', MAXIDE)
+C
+C set RMS reading up
+	CALL RD_OPEN(FILE_TITLE)
+	CALL RD_CONNECT
+C
+C and writing
+	CALL WT_CREATE(FILE_TITLE)
+	CALL WT_CONNECT
+C
+C loop to read records of the input object file
+10	CALL RD_GET			! all defaults applied
+	IF (RDEOFF) GOTO 300
+C
+C switch on type of record
+D	CALL WRITEF('Record type %^B%N length %^W%N',
+D     &                          RECTYP,      TXTPTR  )
+	RECTYP = TXTBUF(1)
+	IF (RECTYP .EQ. OBJ$C_HDR) GOTO 30
+	IF (RECTYP .EQ. EOBJ$C_EMH) GOTO 30
+	IF (RECTYP .EQ. OBJ$C_EOM) GOTO 20
+C
+C diagnose 'unknown' record type
+
+	GOTO 200
+C
+C end of module record
+20	CONTINUE
+D	CALL WRITEF('End of module record length %N',
+D     &                                       TXTPTR  )
+	GOTO 200
+C
+C module header record - switch on header type
+30	IF (RECTYP .EQ. EOBJ$C_EMH) THEN
+	   HDRTYP = TXTBUF(5)		! AXP version has 2 bytes per field
+	ELSE				! and so starts further into file.
+	   HDRTYP = TXTBUF(2)
+	ENDIF
+	IF (HDRTYP .EQ. OBJ$C_HDR_MHD) GOTO 50
+	IF (HDRTYP .EQ. OBJ$C_HDR_LNM) GOTO 40
+D	CALL WRITEF('Header type %^B%N length %^W%N',
+D     &                          HDRTYP,      TXTPTR  )
+	GOTO 200
+C
+C language name header
+40	CALL EXT_HDREC(HDR_CONT)
+D	CALL WRITEF('Language name: %AD', HDR_CONT)
+	GOTO 200
+C
+C module header record
+50	IF (RECTYP .EQ. EOBJ$C_EMH) THEN
+	   RECPTR = 21			! AXP version has 2 bytes per field
+	ELSE
+	   RECPTR = 6
+	ENDIF
+D	CALL WRITEF('Mod hdr, str lvl %^B%N, max rec %^W%N',
+D     &                            TXTBUF(3),     TXTBUF(4)  )
+D	CALL WRITEF('Mod name: %AC', TXTBUF(RECPTR))
+C
+C is this name in the table?
+	IF (MAXIDE .EQ. 0) GOTO 65
+	DO 60 I = 1,MAXIDE
+	NAMPTR = IDEPTR(I)
+	IF (CF_STR(TXTBUF(RECPTR), IDETXT(NAMPTR))) GOTO 70
+60	CONTINUE
+C
+C not in the table
+65	KNOWN_MOD = .FALSE.
+	CALL WRITEF('''%AC'' not in module table', TXTBUF(RECPTR))
+	GOTO 80
+C
+C in the table
+70	KNOWN_MOD = .TRUE.
+D	CALL WRITEF('Table offset %N', I)
+	IF (USEDID(I)) CALL WRITEF
+     &                  ('Module ''%AC'' met twice', TXTBUF(RECPTR))
+	USEDID(I) = .TRUE.
+C
+C advance to IDENT in file record
+80	RECPTR = RECPTR+TXTBUF(RECPTR)+1
+C  and in IDETXT
+	NAMPTR = NAMPTR+IDETXT(NAMPTR)+1
+D	CALL WRITEF('Mod version: %AC', TXTBUF(RECPTR))
+	IF (.NOT. KNOWN_MOD) GOTO 160
+C
+C known module - how do we have to shift the record?
+	D = TXTBUF(RECPTR)-IDETXT(NAMPTR)
+	NXTPTR = RECPTR+TXTBUF(RECPTR)+1
+	IF (D) 90,140,110
+C
+C shift record up (object smaller than patch)
+90	DO 100 I = TXTPTR,NXTPTR,-1
+100	TXTBUF(I-D) = TXTBUF(I)
+	GOTO 130
+C
+C shift record down (object larger than patch (?))
+110	DO 120 I = NXTPTR,TXTPTR
+120	TXTBUF(I-D) = TXTBUF(I)
+C
+C adjust size of record
+130	TXTPTR = TXTPTR-D
+C
+C copy in new IDENT
+140	DO 150 I = 0,IDETXT(NAMPTR)
+150	TXTBUF(RECPTR+I) = IDETXT(NAMPTR+I)
+D	CALL WRITEF('New version: %AC', TXTBUF(RECPTR))
+160	RECPTR = RECPTR+TXTBUF(RECPTR)+1
+D	CALL WRITEF('Date: %AZ17', TXTBUF(RECPTR))
+C
+C common route for all types of record: write out to file
+200	CALL WT_PUT
+	GOTO 10
+C
+C eof found on input - close and wind up
+300	CALL RD_CLOSE
+D	CALL WRITEF('Eof encountered')
+	CALL WT_CLOSE
+C
+C diagnose any modules not seen
+	IF (MAXIDE .EQ. 0) CALL EXIT
+	DO 310 I = 1,MAXIDE
+	IF (USEDID(I)) GOTO 310
+	NAMPTR = IDEPTR(I)
+	NXTPTR = NAMPTR+IDETXT(NAMPTR)+1
+	CALL WRITEF('Module ''%AC'' IDENT ''%AC'' not seen',
+     &           IDETXT(NAMPTR), IDETXT(NXTPTR) )
+310	CONTINUE
+C
+C toodle-pip!
+	CALL EXIT
+C
+	END

@@ -1,0 +1,522 @@
+	LOGICAL FUNCTION CHECK0(IFFIN_NUM)
+C
+***	MODULE	CHECK0
+***	IDENT	01JN92
+C	
+C Copyright Laser-Scan, Cambridge, England.
+C
+C Modified from MCE in module TCHECK		by	ALB 19-Feb-1988
+C
+CMOD	Now tests that no feature has more than MAX_XY_ARRAY
+C	coordinates 					TJH 09-Jan-1989
+C
+CMOD1120Increase NUMCON array sizes from 8000 to 32767, and issue error
+C	messages if about to overrun			 JB 29-May-1992
+C
+C Subroutine for ITCHECK to:-
+C
+C save start/ends, bounding rectangles, sequence number,
+C height, number of points, and LPOSH pointer to NF entry.
+C Called before any of the checking routines.
+C
+	IMPLICIT NONE
+C	
+C parameters
+C
+        INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+        INCLUDE 'LSL$CMNIFF:IFFMSG.PAR'
+        INCLUDE 'LSL$CMNITCHECK:CONSTANTS.PAR'
+C
+C common blocks
+C
+        INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+        INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE 'LSL$CMNITCHECK:ATTRIB.CMN'
+	INCLUDE 'LSL$CMNITCHECK:CONTROL.CMN'
+	INCLUDE 'LSL$CMNITCHECK:BOUNDS.CMN'
+	INCLUDE 'LSL$CMNITCHECK:GROUP.CMN'
+	INCLUDE 'LSL$CMNITCHECK:SHEET.CMN'
+	INCLUDE 'LSL$CMNITCHECK:SELECT.CMN'
+C
+C structures
+C
+        INCLUDE 'LSL$CMNIFF:CB.STR'
+C
+C records
+	RECORD /IFF_CBH/ CBH
+	RECORD /IFF_CBD/ CBD
+C
+C arguments
+	INTEGER		IFFIN_NUM	! IFF file number
+C
+C W/S
+	REAL		DATA_BUFF(2,IFF_MAXCBROW) ! buffer x y values from CB
+	INTEGER		IHEAD_BUFF(2)	! buffer for CB headers	
+	INTEGER		FIRST_ROW	! first row to read (always 1)
+	INTEGER		LAST_ROW	! last row to read (got from CB header)
+C
+	INTEGER*4	LAY_PTR		! element in LAYMAP containing 
+					! layer number to test
+	INTEGER*4	LAY_OFFSET	! offset in element to test LAYER bit
+	INTEGER*4	FSN_PTR		! element in FSNMAP containing 
+					! FSN to test
+	INTEGER*4	FSN_OFFSET	! offset in element to test FSN bit
+	INTEGER*4	FC_PTR		! element in FCMAP containing FC to test
+	INTEGER*4	FC_OFFSET	! offset in element to test FC bit
+	LOGICAL		BIT,FS_BIT	! used in FSNMAP LAYMAP GRPFCT & FCMAP 
+	LOGICAL		IN_RIVER	! TRUE if bit set in GRPFCT for RIVER
+	LOGICAL		IN_RIDGE	! TRUE if bit set in GRPFCT for RIDGE
+C
+	REAL		XMAX		! bounding
+	REAL		YMAX		! rectangle values
+	REAL		XMIN		! for current
+	REAL		YMIN		! feature.
+	REAL		RCVAL		! real height value (AC 3)
+	REAL		IN_CORNERS(4,4)	! input of sheet border for file
+	INTEGER*2	LUN		! IFF logical unit number
+	INTEGER		NUM_LTRS	! Number of letters in group name
+	INTEGER*2	LAY_NUM		! Layer number for overlay
+	INTEGER*2	FEAT_CODE	! Graphical Code (FS entry)
+	INTEGER*4	CODES(GRPMAX)	! Counter for each FS
+	INTEGER*4	ACTYPE		! AC type
+        INTEGER*4       CVAL            ! contour value (AC 2)
+	INTEGER*4	NPTS		! Number of points in ST
+	INTEGER*4	TOTPTS		! total number of pts.
+	INTEGER*2	IECODE		! IFF entry code
+	INTEGER*2	IELEN		! IFF entry length
+        INTEGER*2       IENDS           ! additional string variable
+        INTEGER*2	ISEQ            ! feature sequence number
+	INTEGER*4	I		! loop counter
+	INTEGER*4	J,FS_J		! loop counters
+	INTEGER*4	MODE		! set mode for SHSELE subroutine
+	LOGICAL		HADAC		! has the feat an AC entry?
+	LOGICAL		OK		! return code
+	LOGICAL		IN_WINDOW	! TRUE if feature in window
+C
+C functions
+	LOGICAL		IFFOPEN
+	LOGICAL		LIB$EXTZV
+C
+C*************************************************************************
+C
+	CHECK0 = .TRUE.			! assume success
+C
+C*************************************************************************
+C get LUN for input IFF file
+C
+	LUN = IFFIN_LUN			! get IFF LUN
+C
+C ************************** open and initialise ************************** 
+C re-open IFF file using file ID
+C
+	OK = IFFOPEN(LUN,IFFIN_FNAME(IFFIN_NUM),
+     &				IFFIN_FID(1,IFFIN_NUM),,1)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(OK,
+     &			IFFIN_FNAME(IFFIN_NUM)(1:IFFIN_LEN(IFFIN_NUM)))
+	   CHECK0 = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C select file and rewind
+C
+	CALL IFFSEL(LUN)		! select IFF file	
+	CALL IFFRWD			! rewind input file
+C
+	IF(IFFIN_NUM.EQ.1) THEN		! for first IFF file
+	   NUM_FC=0			! initialise total feat count
+	   DO 50 J=1,GRPMAX
+	      CODES(J)=0		! initialise individual FC counter
+50	   CONTINUE			
+	ENDIF
+
+C
+C ******************* initialise header buffer for CB read ****************** 
+C
+	IHEAD_BUFF(1) = IFF_C_X
+	IHEAD_BUFF(2) = IFF_C_Y
+C
+C ************************** get next entry in IFF ************************** 
+C
+90	CONTINUE
+C
+	CALL IFFNXT(IECODE,IELEN)
+C
+	IF(IELEN.EQ.-1)GOTO 800		! end of file
+C
+C put file level tests below here (call this level 1) 
+C
+	IF(IECODE.EQ.'RA') GOTO 100	! range
+	IF(IECODE.EQ.'EJ') GOTO 199	! end of file
+C
+C ......................... map level tests ........................
+C
+C ! none
+C
+C ......................... section level tests ....................
+C
+	IF(IECODE.EQ.'CP') GOTO	330	! map corner points
+C
+C ......................... layer level tests ......................
+C
+	IF(IECODE.EQ.'NO') GOTO	410	! 
+C
+C ......................... feature level tests ....................
+C
+	IF(IECODE.EQ.'NF') GOTO 510 	! new feature
+	IF(IECODE.EQ.'FS') GOTO	520	! feature status
+	IF(IECODE.EQ.'AC') GOTO	530	! ancillary code (height)
+	IF(IECODE.EQ.'CB') GOTO	540	! coordinate block
+	IF(IECODE.EQ.'EF') GOTO	599	! end of feature
+C
+C .................................................................
+C
+	GOTO 90				! no more entries of interest
+C
+C ************************** File level ************************** 
+C
+100	CONTINUE
+	CALL EIHRR(RANGE,4,1)		! get range
+	GOTO 90
+C
+199	CONTINUE			! 'EJ' found 
+C
+	GOTO 800		
+C
+C ************************** Section level ************************** 
+C
+330	CONTINUE			! 'CP' found 
+C
+	CALL EIHRR(IN_CORNERS,IELEN/2,1)! Read in map corners
+C
+	CALL CPMINMAX(IN_CORNERS)	! calculate min max cp values
+C
+	GOTO 90
+C
+C ************************** Layer level ************************** 
+C
+410	CONTINUE			! 'NO' found 
+C
+	CALL IFFRLA(.TRUE.)		! switch on look ahead
+	CALL EIHRI(LAY_NUM,1,1)		! layer number
+C
+C	and check if this LAYER number is in bit map
+C
+	LAY_PTR = (LAY_NUM)/32 + 1	! element in LAYMAP
+	LAY_OFFSET = MOD(LAY_NUM,32)	! offset in LAYMAP element
+C
+C extract bit from LAYER bit map
+C
+	BIT = LIB$EXTZV(LAY_OFFSET,1,LAYMAP(LAY_PTR))
+	IF(.NOT.BIT) THEN		! Skip this layer
+           CALL IFFNXC('EO',IELEN)
+           IF(IELEN.EQ.-1) GOTO 800
+	   GOTO 90
+	ENDIF	
+C
+	GOTO 90
+C
+C ************************** Feature level ************************** 
+C
+510	CONTINUE			! 'NF' found 
+C
+	IF(HAD_WINDOW) THEN
+	   IN_WINDOW = .FALSE.
+	ENDIF
+C
+	HADAC=.FALSE.		  	! not yet had associated height
+C					! value
+	CALL EIHRI(ISEQ,1,1)		! sequence number
+C
+C	and check if this FSN is in bit map
+C
+	FSN_PTR = (ISEQ)/32 + 1		! element in FSNMAP
+	FSN_OFFSET = MOD(ISEQ,32)	! offset in FSNMAP element
+C
+C extract bit from FSN bit map
+C
+	BIT = LIB$EXTZV(FSN_OFFSET,1,FSNMAP(FSN_PTR))
+	IF(.NOT.BIT) THEN		! Skip this sequence number
+           CALL IFFNXC('EF',IELEN)
+           IF(IELEN.EQ.-1) GOTO 800
+	   GOTO 90
+	ENDIF	
+C
+	TOTPTS=0			! and total points 
+C
+C Check that NUM_FC does not overrun arrays
+C
+	NUM_FC = NUM_FC+1			! increment feature count
+C
+	IF (NUM_FC.GT.NUMCON) THEN
+	   CALL WRITEF
+	   CALL WRITEF('%S Too many Contours, maximum number is %N', 
+     &						ERROR, NUMCON)
+	   CHECK0 = .FALSE.
+	   NUM_FC = NUM_FC - 1
+	   GOTO 800
+	ENDIF
+C
+	TENTRY(NUM_FC)		 = NUM_FC		
+	IATTRIB_TABLE(NUM_FC,12) = LPOSH	! save LPOSH
+	IATTRIB_TABLE(NUM_FC,2 ) = ISEQ		! and feature sequence number
+	IATTRIB_TABLE(NUM_FC,14) = IFFIN_NUM	! save IFF file number
+C
+	GOTO 90
+C
+C ........................................................................
+C
+520	CONTINUE			! 'FS' found 
+C
+	CALL EIHRI(FEAT_CODE,1,1)	! read in feature code
+C
+C	and check if this FEAT_CODE is in bit map
+C
+	FC_PTR = (FEAT_CODE)/32 + 1	! element in FCMAP
+	FC_OFFSET = MOD(FEAT_CODE,32)	! offset in FCMAP element
+C
+C extract bit from bit map
+C
+	BIT = LIB$EXTZV(FC_OFFSET,1,FCMAP(FC_PTR))
+	IF(.NOT.BIT) THEN		! Skip this feature
+	   NUM_FC=NUM_FC-1
+           CALL IFFNXC('EF',IELEN)
+           IF(IELEN.EQ.-1) GOTO 800
+	   GOTO 90
+	ENDIF	
+C	
+	IATTRIB_TABLE(NUM_FC,1) = FEAT_CODE	! save feature code
+	DO 525 FS_J=1,GRPMAX
+	   FS_BIT = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,FS_J))
+	   IF(FS_BIT) THEN
+	      CODES(FS_J) = CODES(FS_J) + 1	! increment FS type counter
+	      GOTO 90
+	   ENDIF
+525	CONTINUE
+C
+	GOTO 90
+C
+C ........................................................................
+C
+530	CONTINUE			! 'AC' found 
+C
+	CALL EIHRI(ACTYPE,1,1)
+C
+	IF(ACTYPE.EQ.2)THEN		! integer height
+	   CALL EIHRI(CVAL,1,2)
+	   ATTRIB_TABLE(NUM_FC,3)=FLOAT(CVAL)!save height
+	   HADAC=.TRUE.			! now had height value
+           GOTO 90
+	END IF
+C
+	IF(ACTYPE.EQ.3)THEN		! real height
+	   CALL EIHRR(RCVAL,1,2)	! read in
+C
+C and truncate to 3 decimal places before saving
+C
+	   ATTRIB_TABLE(NUM_FC,3)=NINT(RCVAL*1000)/1000.0
+	   HADAC=.TRUE.			! now had height value
+	   GOTO 90
+	ENDIF
+C
+	IF(ACTYPE.EQ.80)THEN		! cliff height LHS
+	   CALL EIHRR(RCVAL,1,2)	! read in
+C
+C and truncate to 3 decimal places before saving
+C
+	   ATTRIB_TABLE(NUM_FC,3)=NINT(RCVAL*1000)/1000.0
+	   HADAC=.TRUE.			! now had LHS height value for cliff
+           GOTO 90
+	END IF
+C
+	IF(ACTYPE.EQ.81)THEN		! cliff height RHS
+	   CALL EIHRR(RCVAL,1,2)	! read in
+C
+C and truncate to 3 decimal places before saving
+C
+	   ATTRIB_TABLE(NUM_FC,15)=NINT(RCVAL*1000)/1000.0
+	   HADAC=.TRUE.			! now had RHS height value for cliff
+           GOTO 90
+	END IF
+C
+	GOTO 90
+C
+C ........................................................................
+C
+540	CONTINUE			! 'CB' found 
+C
+	CALL EIHRCB_HEAD(CBH)
+	CALL EIHRCB_DATA(CBD)
+C
+	FIRST_ROW = 1
+	LAST_ROW = CBH.NROW		! get the last row from the header
+	CALL IFS_CB_READ(CBH,CBD,DATA_BUFF,2,IHEAD_BUFF,
+     &		FIRST_ROW,LAST_ROW)
+C
+	DO 541 I=FIRST_ROW,LAST_ROW
+	   IF (TOTPTS+1.GT.MAX_XY_ARRAY) THEN
+	      CALL WRITEF
+      	      CALL WRITEF(
+     &	      '%SFeature with FSN %^W%N has more than %^L%N coordinates'
+     &		,WARNING	   ,ISEQ,		MAX_XY_ARRAY)
+	      CALL WRITEF(
+     &	      '                Feature will be excluded from all checks')
+C
+C Un-save all the data we have on this feature so far
+	      NUM_FC=NUM_FC-1
+	      IF (FS_BIT) CODES(FS_J)=CODES(FS_J) - 1
+              CALL IFFNXC('EF',IELEN)
+              IF(IELEN.EQ.-1) GOTO 800
+	      GOTO 90
+	   ELSE
+	      TOTPTS=TOTPTS+1
+	   ENDIF
+C
+C find out whether any part of the feature is within window if the
+C window command has been set
+C
+	   IF((HAD_WINDOW).AND.(.NOT.IN_WINDOW)) THEN
+	      IF((DATA_BUFF(1,I).GE.WINDOW(1,1)).AND.
+     &	      (DATA_BUFF(1,I).LE.WINDOW(1,2)).AND.
+     &	      (DATA_BUFF(2,I).GE.WINDOW(2,1)).AND.
+     &	      (DATA_BUFF(2,I).LE.WINDOW(2,2))) THEN
+		 IN_WINDOW = .TRUE.
+	      ENDIF
+	   ENDIF
+C
+C Save start/ends and calculate min and max x,y values
+C
+	   IF(TOTPTS.EQ.1)THEN
+	      ATTRIB_TABLE(NUM_FC,4)=DATA_BUFF(1,I)
+	      ATTRIB_TABLE(NUM_FC,5)=DATA_BUFF(2,I)
+C
+	      XMAX=DATA_BUFF(1,I)
+	      MAX_TABLE(NUM_FC,1)=DATA_BUFF(2,I)
+	      IMAX_TABLE(NUM_FC,5)=1
+C
+	      YMAX=DATA_BUFF(2,I)
+	      MAX_TABLE(NUM_FC,2)=DATA_BUFF(1,I)
+	      IMAX_TABLE(NUM_FC,6)=1
+C
+	      XMIN=DATA_BUFF(1,I)
+	      MAX_TABLE(NUM_FC,3)=DATA_BUFF(2,I)
+	      IMAX_TABLE(NUM_FC,7)=1
+C
+	      YMIN=DATA_BUFF(2,I)
+	      MAX_TABLE(NUM_FC,4)=DATA_BUFF(1,I)
+	      IMAX_TABLE(NUM_FC,8)=1
+C
+	      IF(LAST_ROW.EQ.1) THEN	 !single point feature
+		 ATTRIB_TABLE(NUM_FC,6)=DATA_BUFF(1,I)
+		 ATTRIB_TABLE(NUM_FC,7)=DATA_BUFF(2,I)
+		 ATTRIB_TABLE(NUM_FC,8)=XMAX
+		 ATTRIB_TABLE(NUM_FC,9)=YMAX
+		 ATTRIB_TABLE(NUM_FC,10)=XMIN
+		 ATTRIB_TABLE(NUM_FC,11)=YMIN
+		 IATTRIB_TABLE(NUM_FC,13)=TOTPTS
+	      ENDIF
+C
+	   ELSE
+C
+	      IF(DATA_BUFF(1,I).GT.XMAX)THEN
+	         XMAX=DATA_BUFF(1,I)
+	         MAX_TABLE(NUM_FC,1)=DATA_BUFF(2,I)
+	         IMAX_TABLE(NUM_FC,5)=TOTPTS
+	      ENDIF
+C
+	      IF(DATA_BUFF(2,I).GT.YMAX)THEN
+	         YMAX=DATA_BUFF(2,I)
+	         MAX_TABLE(NUM_FC,2)=DATA_BUFF(1,I)
+	         IMAX_TABLE(NUM_FC,6)=TOTPTS
+	      ENDIF
+C 
+              IF(DATA_BUFF(1,I).LT.XMIN)THEN
+	         XMIN=DATA_BUFF(1,I)
+	         MAX_TABLE(NUM_FC,3)=DATA_BUFF(2,I)
+	         IMAX_TABLE(NUM_FC,7)=TOTPTS
+	      ENDIF
+C
+	      IF(DATA_BUFF(2,I).LT.YMIN)THEN
+	         YMIN=DATA_BUFF(2,I)
+	         MAX_TABLE(NUM_FC,4)=DATA_BUFF(1,I)
+	         IMAX_TABLE(NUM_FC,8)=1
+	      ENDIF
+C
+	   END IF
+541	CONTINUE
+C
+	GOTO 90
+C
+C ........................................................................
+C
+599	CONTINUE			! 'EF' found 
+C
+C Last point
+C
+	IF(IATTRIB_TABLE(NUM_FC,1).EQ.0)THEN
+	   NUM_FC=NUM_FC-1
+	   GOTO 90
+	ENDIF 	  
+C
+C decrement NUM_FC if HAD_WINDOW and previous feature not in window
+C
+	IF((HAD_WINDOW).AND.(.NOT.IN_WINDOW)) THEN
+	   NUM_FC = NUM_FC - 1
+	   GOTO 90
+	ENDIF
+C
+C if not river or ridge then check whether had AC
+C
+	IN_RIVER = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,RIVER))
+	IN_RIDGE = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,RIDGE))
+	IF(IN_RIVER.OR.IN_RIDGE) THEN
+	   ATTRIB_TABLE(NUM_FC,3)= 999999.0 		!undefined height
+	ELSE
+	   IF(.NOT.HADAC)THEN
+	      CALL WRITEF('%S no AC entry associated with item '//
+     &		'%^W%I0 feature code %I0',WARNING,ISEQ,FEAT_CODE)
+	      CALL WRITEF('Item will not be used in any checks')
+	      NUM_FC=NUM_FC-1
+	      GOTO 90
+	   ENDIF
+	ENDIF	    
+C
+	ATTRIB_TABLE(NUM_FC,6)=DATA_BUFF(1,LAST_ROW)
+	ATTRIB_TABLE(NUM_FC,7)=DATA_BUFF(2,LAST_ROW)
+	ATTRIB_TABLE(NUM_FC,8)=XMAX
+	ATTRIB_TABLE(NUM_FC,9)=YMAX
+	ATTRIB_TABLE(NUM_FC,10)=XMIN
+	ATTRIB_TABLE(NUM_FC,11)=YMIN
+	IATTRIB_TABLE(NUM_FC,13)=TOTPTS
+C
+	GOTO 90
+C
+C****************************************************************************
+C
+800	CONTINUE
+C
+	CALL IFFRLA(.FALSE.)		! switch off look ahead
+	CALL IFFCLO(LUN)		! close IFF
+C
+C print out summary on last file
+C
+	IF (IFFIN_NUM.EQ.NUM_IFFIN) THEN
+	   CALL WRITEF(' ')
+	   CALL WRITEF('  IFF Feature Code Summary')
+	   MODE = 4
+	   DO 900 J=1,GRPMAX
+	      IF(GRPDEF(J)) THEN
+	         CALL SHSELE(MODE,J)
+	         NUM_LTRS = INDEX(GRPNAM(J),' ') - 1
+	         CALL WRITEF('Group name: %S number of items: %N',
+     &		   GRPNAM(J)(:NUM_LTRS),CODES(J))
+	      ENDIF
+900	   CONTINUE
+	   CALL WRITEF(' ')
+	ENDIF
+C
+999	CONTINUE
+C
+	RETURN
+	END
+C

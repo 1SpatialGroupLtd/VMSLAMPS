@@ -1,4 +1,4 @@
-	  INTEGER*4  FUNCTION PROCESS()
+	  INTEGER*4  FUNCTION PROCESS_GR()
 C
 CDEC$	IDENT	'22AP91'
 C
@@ -51,10 +51,11 @@ C
 	INTEGER*4	IERR	! for error return	
 	INTEGER*4	OK
 C
-	REAL*4		COORD(3)
-	REAL*4		RAC(3)
+	REAL*4		COORD(1000,3)
+	REAL*4		RAC(1000,3)
 	REAL*8		RVAL
-	CHARACTER*80	TXTAC,SVAL
+	CHARACTER*80	TXTAC(1000),SVAL
+	INTEGER*4	NUM
 	LOGICAL		RREAL8
 	LOGICAL		FOUND
 	INTEGER*4	PTR
@@ -75,8 +76,10 @@ C
 	INTEGER*4	DTYPES(10,4)		! 1=type 2=r,3=wid,4=decimals
 	INTEGER*4	LINES(10,10)
 C
-	CHARACTER*4	FCODE(1000)
+	CHARACTER*4	CODE
+	CHARACTER*4	FCODE(2000)
 	INTEGER*4	NUM_FCODES
+	INTEGER*2	NF
 
 	CHARACTER*80	STR
 	BYTE		STRBUF(80)
@@ -112,7 +115,7 @@ C
 C
 C Interpret 001, format record
 C
-1	IF (TXTSTR(1:3).EQ.'999'.OR.TXTSTR(1:6).EQ.'FINISH') GOTO 221
+1	IF (TXTSTR(1:3).EQ.'999'.OR.TXTSTR(1:6).EQ.'FINISH') GOTO 220
 C
 	IF (TXTSTR(1:9).EQ.'001FORMAT') THEN
 	   DO 6 I = 1,10
@@ -201,23 +204,35 @@ C
 C produce list of feature codes
 C
 	IF (TXTSTR(1:3).EQ.'080') THEN
-	   FOUND = .FALSE.
-	   DO 90 I = 1,NUM_FCODES
-	      IF (FCODE(I)(1:4).EQ.TXTSTR(5:8)) THEN
-		 FOUND=.TRUE.
-		 GOTO 91
-	      ENDIF
-90	   CONTINUE
-91	   IF (.NOT.FOUND) THEN
-	      NUM_FCODES = NUM_FCODES + 1
-	      FCODE(NUM_FCODES)(1:4) = TXTSTR(5:8)
+!	   FOUND = .FALSE.
+!	   DO 90 I = 1,NUM_FCODES
+!	      IF (FCODE(I)(1:4).EQ.TXTSTR(5:8)) THEN
+!		 FOUND=.TRUE.
+!		 GOTO 91
+!	      ENDIF
+!90	   CONTINUE
+!91	   IF (.NOT.FOUND) THEN
+!	      NUM_FCODES = NUM_FCODES + 1
+!	      FCODE(NUM_FCODES)(1:4) = TXTSTR(5:8)
+!	   ENDIF
+	   CODE(1:4) = TXTSTR(5:8)
+	   IF (NF.GT.0) THEN 
+	      CALL EXPAND('EF')
+	      CALL FLWLIN(EXPBUF)
 	   ENDIF
+	   NF = NF + 1
+	   CALL FLWSEL(TXTLUN)
+	   CALL EXPAND('NF %^W%I0 %^W%I0',NF,NF)
+	   CALL FLWLIN(EXPBUF)
+	   CALL EXPAND('FS 1 0 0 0')
+	   CALL FLWLIN(EXPBUF)
+	   CALL EXPAND('AC 1 0 "%S"',CODE(1:4))
+	   CALL FLWLIN(EXPBUF)
 	   OK = FLRLIN(TXT,,80,)
 	   IF (OK.EQ.LSL__EOF) GOTO 220
 	   CALL BSLN
 	ELSE
-	   CALL FLWSEL(TXTLUN)
-C          CALL FLWSTR('NF',)
+	   NUM = NUM + 1
 	   DO 200 I = 1,NLINE	! only two lines for jiffy
 	      PTR = 1
 	      CALL SETAUX(TXT,80)
@@ -232,12 +247,12 @@ C          CALL FLWSTR('NF',)
 		    ENDIF
 		    PTR = PTR + DTYPES(LINES(I,J),3)
 		    IF (I.EQ.1) THEN
-		       COORD(J) = REAL(RVAL)
+		       COORD(NUM,J) = REAL(RVAL)
 		    ELSEIF (I.EQ.2) THEN
 		       IF (DTYPES(LINES(I,J),1).EQ.TYPE_ASC) THEN
-			  IF (LEN.GT.0) TXTAC(1:LEN) = SVAL(1:LEN)
+			  IF (LEN.GT.0) TXTAC(NUM)(1:LEN) = SVAL(1:LEN)
 		       ELSE
-			  RAC(J) = REAL(RVAL)
+			  RAC(NUM,J) = REAL(RVAL)
 		       ENDIF
 		    ENDIF
 		 ENDIF
@@ -246,6 +261,34 @@ C          CALL FLWSTR('NF',)
 	      IF (OK.EQ.LSL__EOF) GOTO 220
 	      CALL BSLN
  200	   CONTINUE
+	   IF (COORD(NUM,1).EQ.0.0.AND.COORD(NUM,2).EQ.0.0) THEN
+	      NUM = NUM - 1
+	      CALL EXPAND('CB FL 0')
+	      CALL FLWLIN(EXPBUF)
+	      CALL EXPAND('   GT 1')
+	      CALL FLWLIN(EXPBUF)
+	      CALL EXPAND('   NR %^W%I0',NUM)
+	      CALL FLWLIN(EXPBUF)
+	      CALL EXPAND('   NC %^W%I0',3)
+	      CALL FLWLIN(EXPBUF)
+!	      CALL EXPAND('   NA %^W%I0',2)
+!	      CALL FLWLIN(EXPBUF)
+	      CALL EXPAND('   HC 91 92 92')
+	      CALL FLWLIN(EXPBUF)
+	      CALL EXPAND('   DA %F11.1 %F11.1 %F11.1',COORD(1,1),
+     &		                                       COORD(1,2),
+     &		                                       COORD(1,3))
+	      CALL FLWLIN(EXPBUF)
+	      IF (NUM.GT.1) THEN 
+		 DO 199 I = 2,NUM
+		    CALL EXPAND('      %F11.1 %F11.1 %F11.1',COORD(I,1),
+     &		                                             COORD(I,2),
+     &		                                             COORD(I,3))
+		    CALL FLWLIN(EXPBUF)
+ 199		 CONTINUE
+	      ENDIF
+	      NUM = 0
+	   ENDIF
 	ENDIF
 C
 C Got round again
@@ -259,9 +302,9 @@ C			E R R O R S
 C
 C Unexpected end of file
 220	CALL WRITEF('Unexpected EOF')
-221	DO 225 I = 1,NUM_FCODES
-	   CALL FLWSTR(FCODE(I)(1:4),)
-225	CONTINUE
+!221	DO 225 I = 1,NUM_FCODES
+!	   CALL FLWSTR(FCODE(I)(1:4),)
+!225	CONTINUE
 	GOTO 260
 C
 C Failed to read a line from input file
@@ -285,7 +328,7 @@ C
 C
 C ......................................................................
 C
-260	PROCESS = .FALSE.
+260	PROCESS_GR = .FALSE.
 400	IF (PROCESS) PROCESS=%LOC(SS$_NORMAL)
 	RETURN
 	END

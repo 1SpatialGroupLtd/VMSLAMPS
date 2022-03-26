@@ -1,0 +1,422 @@
+	PROGRAM IFNODE
+C
+***	MODULE	IFNODE
+***	IDENT	13MY85
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+CMOD	Commands like 'T100' are NOT ambiguous	 DM	13-May-1985
+CMOD	Max NF number up to 65535		ACM	26-Mar-1985
+CMOD	Treat IN1 differently to IN 1, etc.	 DM	22-Jan-1985
+CMOD	Use CMDLIB error names, not numbers	 DM	01-Oct-1984
+CMOD	Enforce '/' except with FROM and TO	 DM	29-Mar-1984
+C	Created 				 DM	02-Mar-1984
+C
+C Extracts nodes from junction IFF files. Each node becomes a separate
+C point feature in the output IFF file, which is of type NDE by default.
+C
+C Command syntax:
+C
+C   IFNODE [/OVERLAY=n] [/CODE=n] [/SIZE=n] [FROM] infile [[TO] outfile]
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNVIO:CMDCOM/
+***	COMMON/EXPC/
+***	COMMON/TXTC/
+C
+	LOGICAL*4 OK		! return status
+	COMMON /IFFERR/ OK
+C
+	INCLUDE '($RMSDEF)'
+	INCLUDE '($SSDEF)'
+C
+	BYTE	  ICH		! temporary variable
+	BYTE	  NSBUF(80)	! announce ourselves in the NS entry
+	CHARACTER*20  DEFIN	! default input file name
+	CHARACTER*12  RELOUT	! 'related' output file name
+	CHARACTER*80  IPFILE	! input file name
+	CHARACTER*80  OPFILE	! output file name
+	CHARACTER*80  TMPFLI	! temporary storage for i/p file name
+	CHARACTER*80  TMPFLO	! temporary storage for o/p file name
+	CHARACTER*256 ERRMES	! error message (also used as temp var.)
+	INTEGER*2 DEFLNI,RELENO	! lengths of default file names
+	INTEGER*2 FCODE		! feature code in output file
+	INTEGER*2 IECODE,IELEN	! IFF entry code and length
+	INTEGER*2 IPLUN,OPLUN	! i/p and o/p LUNs (channels)
+	INTEGER*2 ISTAT(4)	! FS entry
+	INTEGER*2 ITHK		! TH entry
+	INTEGER*2 J,M		! temporary variables
+	INTEGER*4 NF		! NF (and internal sequence) number
+	INTEGER*2 OVLAY		! overlay number in output file
+	INTEGER*2 ZERO		! zilch
+	INTEGER*4 COMAND	! command number
+	INTEGER*4 CREATD(2)	! argument for IFFINQ
+	INTEGER*4 I,K,L		! temporary variables
+	INTEGER*4 IMPCMD	! position-implied command number
+	INTEGER*4 IPLEN,OPLEN	! lengths of expanded file names
+	INTEGER*4 LPOSNO	! position of NO
+	INTEGER*4 PTR		! saved value of DCPTR
+	INTEGER*4 REVISD(2)	! argument for IFFINQ
+	INTEGER*4 TMPLNI,TMPLNO	! lengths of temporary file names
+	LOGICAL*1 AMBIG		! had an ambiguous file name ?
+	LOGICAL*1 HADJB		! had any JB entries at all ?
+	LOGICAL*1 HDSLSH	! just had '/command' ?
+	REAL	  CFT(10,2)	! cubic coefficients
+	REAL	  JUNPOS(2)	! position of junction
+C
+C command table:
+	INTEGER*4 IFNODE_CMD_TABLE
+	EXTERNAL  IFNODE_CMD_TABLE
+C
+C functions:
+	INTEGER*4 EXPAND
+	INTEGER*4 RDCOMM
+	INTEGER*4 RDSTR
+	INTEGER*4 TXTCML
+	LOGICAL*4 GETFIL	! parses a file specification
+	LOGICAL*4 RDCH
+C
+	EXTERNAL  IFFREP	! handles IFF error reporting
+C
+	DATA DEFIN /'LSL$IF:IFF.IFF;'/
+	DATA RELOUT /'LSL$IF:.NDE'/
+	DATA DEFLNI,RELENO /15,11/
+	DATA IPLUN,OPLUN /1,2/
+	DATA ISTAT /1,0,0,0/
+	DATA ZERO /0/
+C
+C ......................................................................
+C
+	OK=SS$_NORMAL				! assume success
+	TXTCLI=0
+	NOMESS=.TRUE.				! no CMDLIB messages
+	CALL IDENT				! identify ourselves
+C
+C ... get the command line (if any), else prompt for a command.
+10	IF (TXTCLI.EQ.1) GO TO 430		! already had command ?
+	I=TXTCML('IFNODE> ')			! no - prompt for one
+	IF (I) 430,10,20			! EOF (^Z), nothing, OK
+C
+C ... command line seems to be OK.
+20	IMPCMD=1				! allow implied 'FROM'
+	TMPFLI=DEFIN				! initialise file names
+	TMPLNI=DEFLNI
+	TMPFLO=RELOUT
+	TMPLNO=RELENO
+	OVLAY=1					! set up defaults
+	FCODE=1
+	LPOSNO=-1				! no NO entry output yet
+	NF=0
+	ITHK=0
+C
+C ... so decode it.
+30	ERRNUM=0				! clear the error flag
+	HDSLSH=.FALSE.
+40	CALL DCPSAV(PTR)			! remember where we are
+	COMAND=RDCOMM(IFNODE_CMD_TABLE)		! read a command
+	IF (ERRNUM.GT.0) GO TO 70
+	IF (COMAND.LE.0) GO TO 250
+	IF (COMAND.GT.2.AND..NOT.HDSLSH) THEN	! can omit / for FROM,TO
+	   ERRNUM=ERRUXS
+	   GO TO 90				! might be a file name
+	ENDIF
+50	IF (RDCH(ICH)) GO TO 60			! skip spaces and tabs
+	IF (ICH.EQ.' '.OR.ICH.EQ.9) GO TO 50
+	CALL BSCH
+60	ICH=TXTBUF(MAX(1,DCPTR-1))
+	IF (ICH.NE.' '.AND.ICH.NE.9.AND.ICH.NE.'='.AND.ICH.NE.','.AND.
+     &	    DCPTR.LE.TXTPTR.AND.TXTBUF(DCPTR).NE.'/') THEN
+	   IF (COMAND.LE.2.AND.IMPCMD.GT.0) THEN
+	      CALL DCPSET(PTR)			! assume it's a filename
+	      COMAND=IMPCMD
+	   ELSE
+	      ERRNUM=ERRUXC
+	      DCPTR=MIN(TXTPTR+1,DCPTR+1)
+	      GO TO 360
+	   ENDIF
+	ENDIF
+	CALL DCPSAV(PTR)			! remember where we are
+	GO TO (100,150,200,210,220),COMAND
+C
+C ... command error of some kind (but we might know better).
+70	IF (ERRNUM.NE.ERRUXC) GO TO 90		! unexpected character ?
+	IF (HDSLSH) GO TO 360			! forbid '/,' etc
+	IF (TXTBUF(MAX(1,DCPTR-1)).NE.'/') GO TO 80	! is it a '/' ?
+	IF (RDCH(ICH)) GO TO 360		! yes - allow '/command'
+	HDSLSH=.TRUE.
+	CALL BSCH
+	GO TO 40				! get the actual command
+C
+80	IF (TXTBUF(MAX(1,DCPTR-1)).NE.',') GO TO 90    ! is it a comma ?
+	IMPCMD=MOD(IMPCMD,2)*2			! bump or kill IMPCMD
+	GO TO 30				! and swallow the comma
+C
+90	IF (IMPCMD.LE.0.OR.HDSLSH.OR.ERRNUM.GT.ERRAMB) GO TO 360
+	CALL DCPSET(PTR)			! deal with implied cmds
+	GO TO (100,150),IMPCMD
+C
+C ... FROM/INPUT.
+100	TMPLNI=RDSTR(TMPFLI,' ')		! read the file name
+	I=0
+	IF (TMPLNI.EQ.0) GO TO 110		! use default if none
+	K=INDEX(TMPFLI(:TMPLNI),',') - 1	! found a comma ?
+	L=INDEX(TMPFLI(:TMPLNI),'/') - 1	! found a slash ?
+	I=MIN(K,L)
+	IF (I.EQ.-1) I=MAX(K,L)
+	IF (I) 140,110,120
+110	TMPFLI=DEFIN				! had FROM, or FROM/
+	TMPLNI=DEFLNI				! ... reset defaults
+	GO TO 130
+120	TMPLNI=I				! we've swallowed one
+130	CALL DCPSET(PTR+I)			! ... go back to it
+140	IF (IMPCMD.GT.0) IMPCMD=2		! bump IMPCMD if needed
+	GO TO 240				! check for trailing ','
+C
+C ... TO/OUTPUT.
+150	TMPLNO=RDSTR(TMPFLO,' ')		! read the filename
+	I=0
+	IF (TMPLNO.EQ.0) GO TO 160		! use default if none
+	K=INDEX(TMPFLO(:TMPLNO),';')		! version number given ?
+	IF (K.GT.0.AND.K.LT.TMPLNO) GO TO 370	! duff spec if so
+	K=INDEX(TMPFLO(:TMPLNO),',') - 1	! found a comma ?
+	L=INDEX(TMPFLO(:TMPLNO),'/') - 1	! found a slash ?
+	I=MIN(K,L)
+	IF (I.EQ.-1) I=MAX(K,L)
+	IF (I) 190,160,170
+160	TMPFLO=RELOUT				! had TO, or TO/
+	TMPLNO=RELENO				! ... reset defaults
+	GO TO 180
+170	TMPLNO=I				! we've swallowed one
+180	CALL DCPSET(PTR+I)			! ... go back to it
+190	IMPCMD=0				! kill IMPCMD regardless
+	GO TO 240				! check for trailing ','
+C
+C ... OVERLAY - specify the overlay in the output file.
+200	OVLAY=INTARG(1)
+	GO TO 230
+C
+C ... CODE - specify the feature code to be used in the output file.
+210	FCODE=INTARG(1)
+	GO TO 230
+C
+C ... SIZE - specify the size of the symbol to be plotted.
+220	ITHK=INTARG(1)
+C
+C ... check the argument for validity.
+230	IF (INTARG(1).GE.0) GO TO 240
+	ERRNUM=-1				! not a CMDLIB error
+	GO TO 360
+C
+C ... check for a trailing comma.
+240	IF (RDCH(ICH)) GO TO 250
+	IF (ICH.NE.',') CALL BSCH		! swallow it if there
+	GO TO 30				! carry on decoding
+C
+C ......................................................................
+C
+C ... try to open the input file.
+250	OK=GETFIL(TMPFLI,TMPLNI,IPFILE,IPLEN,DEFIN,' ',AMBIG)
+	IF (AMBIG) GO TO 420
+	IF (.NOT.OK) GO TO 380
+	CALL IFFERM(.FALSE.)			! turn off IFF messages
+	CALL IFFTDY(IFFREP)
+	CALL IFFOPN(IPLUN,IPFILE(:IPLEN),0)
+	IF (.NOT.OK) GO TO 380
+	CALL IFFRWD
+	CALL IFFRLA(.TRUE.)			! turn on look-ahead
+C
+C ... try to open the output file.
+C ... construct the default filename from the input filename.
+	I=MAX(INDEX(IPFILE(:IPLEN),':'),INDEX(IPFILE(:IPLEN),'>'),
+     &	      INDEX(IPFILE(:IPLEN),']')) + 1	! ignore directory spec.
+	L=INDEX(IPFILE(I:IPLEN),'.') - 1	! and file type
+	IF (L.LE.0) L=IPLEN - I
+	OK=GETFIL(TMPFLO,TMPLNO,OPFILE,OPLEN,IPFILE(I:I+L),RELOUT,AMBIG)
+	IF (AMBIG) GO TO 410
+	IF (OK.EQ.RMS$_FNF) OK=SS$_NORMAL	! FNF is perfectly OK
+	IF (.NOT.OK) GO TO 400
+	I=INDEX(OPFILE,';')			! strip off version no.
+	IF (I.NE.0) OPLEN=I - 1
+	CALL IFFOPN(OPLUN,OPFILE(:OPLEN))
+	IF (.NOT.OK) GO TO 400
+	CALL IFFINQ(OPFILE,J,CREATD,REVISD,M)
+	CALL IFFERM(.TRUE.)			! turn on IFF messages
+	OPLEN=J
+C
+C ... report the filenames.
+	I=1
+	IF (IPFILE(1:1).EQ.'_') I=2
+	CALL WRITEF('Input file:  %S',IPFILE(I:IPLEN))
+	I=1
+	IF (OPFILE(1:1).EQ.'_') I=2
+	CALL WRITEF('Output file: %S',OPFILE(I:OPLEN))
+C
+C ......................................................................
+C
+C ... let's process !
+	CALL EXPAND('Created by IFNODE on ')	! set up the NS message
+	CALL DATE(EXPBUF(EXPLEN+1))
+	EXPLEN=EXPLEN + 9
+	EXPBUF(EXPLEN+1)=0
+	CALL APPEND(' at ')
+	CALL TIME(EXPBUF(EXPLEN+1))
+	EXPBUF(EXPLEN+9)=0
+	CALL EXPAND('%W%A80',NSBUF,EXPBUF)
+	HADJB=.FALSE.				! no JBs yet
+C
+260	CALL IFFSEL(IPLUN)
+270	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.LT.0) GO TO 390
+	IF (IECODE.EQ.'JB') GO TO 320
+	IF (IECODE.EQ.'CC') GO TO 290
+	IF (IECODE.EQ.'CP') GO TO 310
+	IF (IECODE.EQ.'MH') GO TO 280
+	IF (IECODE.EQ.'MD') GO TO 280
+	IF (IECODE.EQ.'RA') GO TO 280
+	IF (IECODE.EQ.'EJ') GO TO 330
+	GO TO 270
+C
+C ... copy this entry into the output file.
+280	CALL EIHCPY(OPLUN)
+	GO TO 270
+C
+C ... output our own NS before each CC.
+C ... first of all, we terminate any existing overlay.
+290	CALL EIHRR(CFT,20,1)			! read the CC entry
+	CALL IFFSEL(OPLUN)			! select the output file
+	IF (LPOSNO.LT.0) GO TO 300
+	CALL IFFPKE(IECODE,IELEN,LPOSNO)	! move to NO (if any)
+	CALL EIHWL(LPOSE,1,3)			! patch in the pointer
+	CALL IFFEO				! then create the EO
+	LPOSNO=-1				! no current overlay now
+300	CALL IFFNS(NSBUF)			! create the NS entry
+	CALL IFFCC(CFT)				! then the CC entry
+	GO TO 260
+C
+C ... had a CP entry - copy it then create a new overlay.
+310	CALL EIHCPY(OPLUN)
+	CALL IFFSEL(OPLUN)
+	LPOSNO=LPOSE				! remember pos of NO
+	CALL IFFNO(OVLAY,ZERO,ZERO)		! no EO pointer yet
+	GO TO 260
+C
+C ... found a JB entry - get all the junctions out of it.
+320	CALL IFJNXT(JUNPOS(1),JUNPOS(2),J)
+	IF (J.LE.0) GO TO 270			! no more in this block
+	HADJB=.TRUE.				! got some junction info
+C
+C ... create a new (point) feature.
+	CALL IFFSEL(OPLUN)
+	NF=NF + 1				! bump the NF number
+	CALL IFFNF(NF,NF)
+	ISTAT(1)=FCODE				! enter the feature code
+	CALL IFFFS(ISTAT)
+	CALL IFFTH(ITHK)
+	CALL IFFST(JUNPOS,1,ZERO)		! output the junction pt
+	CALL IFFEF				! terminate the feature
+	CALL IFFLSH				! flush the buffers
+	CALL IFFSEL(IPLUN)
+	GO TO 320				! go get next entry
+C
+C ... found EJ entry - terminate the output file.
+330	IF (.NOT.HADJB) CALL WRITEF(
+     &	   '%%IFNODE-W-NOJUNCTNS, input file contains no junctions')
+	CALL IFFSEL(OPLUN)
+	IF (LPOSNO.LT.0) GO TO 340
+	CALL IFFPKE(IECODE,IELEN,LPOSNO)	! move to NO (if any)
+	CALL EIHWL(LPOSE,1,3)			! patch in the pointer
+	CALL IFFEO				! then create the EO
+340	CALL IFFEM
+	CALL IFFEJ
+C
+C ... close everything down.
+	CALL IFFCLO(OPLUN)
+350	CALL IFFCLO(IPLUN)
+	IF (OK) GO TO 10
+	GO TO 430
+C
+C ......................................................................
+C
+C ... we blew it !
+C ... error in command line.
+360	CALL WRITEF('%%IFNODE-F-BADCMD, error in command line')
+	IF (ERRNUM.LT.0) THEN
+	   IF (ARGMSG) THEN
+	      CALL WRITEF('No argument found for %S',CMDNST)
+	   ELSE
+	      CALL WRITEF('Illegal value specified for %S',CMDNST)
+	   ENDIF
+	ELSE
+	   CALL CMDERR(ERRNUM)
+	ENDIF
+	OK=.FALSE.
+	GO TO 440
+C
+C ... version number not allowed in output file specification.
+370	CALL EXPAND('%%IFNODE-F-BADOPSPEC, version number not ')
+	CALL WRITAP('allowed in output file specification')
+	OK=.FALSE.
+	GO TO 440
+C
+C ... couldn't open input file.
+380	I=EXPAND('%WS%%IFNODE-F-ERROPIN, error opening file ',ERRMES)
+	L=EXPAND('%WS%S for input',ERRMES(I+1:),IPFILE(:IPLEN))
+	WRITE (6,*) ERRMES(:I+L)
+	GO TO 430
+C
+C ... unexpected end-of-file.
+390	CALL WRITEF('%%IFNODE-F-UNEXPEND, unexpected end of IFF file')
+	GO TO 330			! try to tidy up and exit
+C
+C ... couldn't open output file.
+400	I=EXPAND('%WS%%IFNODE-F-ERROPOUT, error opening file ',ERRMES)
+	L=EXPAND('%WS%S for output',ERRMES(I+1:),OPFILE(:OPLEN))
+	WRITE (6,*) ERRMES(:I+L)
+	GO TO 350				! OK tells us why
+C
+C ... ambiguous file specification.
+410	TMPFLI=TMPFLO
+	TMPLNI=TMPLNO
+420	I=EXPAND('%WS%%IFNODE-F-AMBFIL, file specification ',ERRMES)
+	L=EXPAND('%WS%S is ambiguous',ERRMES(I+1:),TMPFLI(:TMPLNI))
+	WRITE (6,*) ERRMES(:I+L)
+C
+C ... report secondary error (if any).
+430	IF (.NOT.OK) THEN
+	   CALL SYS$GETMSG(%VAL(OK),J,ERRMES,,)	! what went wrong ?
+	   I=INDEX(ERRMES,'!') - 1		! (ignore any FAO stuff)
+	   IF (I.LT.0) I=J
+	   ERRMES(1:1)='-'
+	   WRITE (6,*) ERRMES(:I)
+	ENDIF
+440	OK=OK.OR.'10000000'X			! suppress the message
+	CALL EXIT(OK)				! but set $STATUS
+	END
+C
+	SUBROUTINE IFFREP
+C
+***	MODULE	IFFREP
+***	IDENT	02MR84
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+C	Created 				 DM	02-Mar-1984
+C
+C IFF error handler - returns IERNM (VMS error code) in OK.
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/
+C
+	LOGICAL*4 OK		! return status
+	COMMON /IFFERR/ OK
+C
+	OK=IERNM
+	RETURN
+	END

@@ -1,0 +1,258 @@
+	PROGRAM POLY
+C
+***	IDENT	17OC84
+***	MODULE	POLY
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 11 September 1984
+C
+C This is the test program for working out how to break up a polygon
+C into bits...
+C
+C Draws the IFF file on a Sigma ARGS display (for ease of use)
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/	! common for handling IFF files
+***	COMMON/LSL$CMNVIO:TXTC/		! and for the command line
+C
+C functions
+C
+	INTEGER*2	TXTCML		! read command line
+	LOGICAL		RDFILN		! parse a file name
+	LOGICAL		RDYES		! ask a Yes/No question
+C
+C workspace
+C
+	INTEGER*2	IECODE		! IFF code read in
+	INTEGER*2	IELEN		! length of entry / end of file
+	INTEGER*2	IENDS		! pen up/down
+	INTEGER*2	IFFLUN		! lun to read IFF file on
+C
+	INTEGER*2	FSN		! feature serial number
+	INTEGER*2	NPTS		! number of points in ST
+	INTEGER*2	STPTR		! 'next free' pointer for STBUF
+	LOGICAL		STFULL		! have we filled STBUF?
+C
+	PARAMETER	STMAX = 1000	! arbitrary large number
+C
+	REAL		STBUF(2,STMAX)	! buffer for points from STs
+C
+	BYTE		INSIDE(STMAX)	! buffer to record states
+C
+	REAL		RANGE(4)	! range of map coordinates
+	REAL		XSIZE, YSIZE	! size of screen in cms
+	REAL		XSCALE,YSCALE	! scaling for screen
+	REAL		SCALE		! final scale for drawing
+	REAL		X0, Y0		! X,Y origin
+C
+	INTEGER*4	RETCOD		! return code from RDFILN
+	INTEGER*4	IERR		! system type error
+	INTEGER		I		! DO loop variable
+	INTEGER		LOOP		! DO loop upper bound
+C
+	LOGICAL		OPNIFF		! is IFF file open?
+	LOGICAL		INISIG		! have we inited the display?
+	LOGICAL		START		! is this first ST of feature?
+C
+	CHARACTER*80	IFFTIT		! IFF file name
+	INTEGER*2	IFFLEN		! length of file name
+C
+C set up for IFFLIB - choose a LUN, and set the 'tidy' state
+C
+	IFFLUN = 1
+	CALL IFFTDY
+	OPNIFF = .FALSE.
+	INISIG = .FALSE.
+C
+C find out what file we are to use
+C
+	IF ( TXTCML( 'IFF file: ' ) .LE. 0 ) GOTO 9999
+C
+C and read in the IFF file name
+C
+	IF ( RDFILN( IFFTIT, IFFLEN, TXTDSC, 'LSL$IF:.IFF',
+     &		     .TRUE., RETCOD, IERR ) ) THEN
+C
+C	 error in the file parsing
+C
+	   CALL ERRFLN( RETCOD, IERR )
+	   GOTO 9999
+	ENDIF
+C
+C and then open the IFF file
+C	
+	CALL IFFOPN( IFFLUN, IFFTIT(1:IFFLEN), 0 )	! read only
+C
+	IF ( IERCD.NE.0 .OR. IERNM.NE.1 ) THEN
+	   CALL WRITEF('Can''t open file "%S"',IFFTIT(1:IFFLEN))
+	   GOTO 9999
+	ENDIF
+C
+	OPNIFF = .TRUE.
+C
+C so let us initialise the display...
+C
+	CALL VSINIT(7)
+C
+	INISIG = .TRUE.
+C
+C *********************************************************************
+C
+C and now read through the IFF file - entry by entry
+C
+20	CONTINUE
+C
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.LT.0) GOTO 9000	! unexpected end of IFF file
+C
+	IF (IECODE.EQ.'RA') GOTO 1000	! range - define screen
+	IF (IECODE.EQ.'NO') GOTO 1500	! new overlay
+C
+	IF (IECODE.EQ.'NF') GOTO 2000	! start of next feature
+	IF (IECODE.EQ.'ST') GOTO 3000	! next ST entry
+	IF (IECODE.EQ.'EF') GOTO 4000	! end of feature
+C
+	IF (IECODE.EQ.'EJ') GOTO 8000	! end of job / file
+	GOTO 20				! ignore everything else
+C
+C *********************************************************************
+C
+C *** RA - range entry - thus we can deduce the scale we wish to use
+C
+1000	CALL EIHRR(RANGE,4,1)		! read the range entry
+C
+C determine the screen size
+C
+	CALL VSSIZE( XSIZE, YSIZE )
+C
+C and thus work out our scales...
+C
+	XSCALE = XSIZE/(RANGE(2)-RANGE(1))
+	YSCALE = YSIZE/(RANGE(4)-RANGE(3))
+C
+C take the minimum of those as what we shall use
+C
+	SCALE = MIN(XSCALE,YSCALE)
+C
+C set up the origin of the screen
+C
+	CALL VSORGN( -XSIZE/2, -YSIZE/2 )
+C
+C and the units to work in
+C
+	CALL VSUNIT(SCALE)
+C
+	GOTO 20
+C
+C *********************************************************************
+C
+C *** NO - new overlay - just tell about it
+C
+1500	CALL EIHRI( I, 1, 1 )
+	CALL WRITEF('- Overlay number %N',I)
+	GOTO 20
+C
+C *********************************************************************
+C
+C *** NF - new feature - note as much
+C
+2000	CALL EIHRI( FSN, 1, 1 )
+	START  = .TRUE.			! next ST will be first
+	STFULL = .FALSE.		! and the point buffer is empty
+	STPTR  = 1			! nothing in buffer yet
+	GOTO 20
+C
+C *********************************************************************
+C
+C *** ST - string of coords to be drawn
+C
+3000	IF (STFULL) GOTO 20		! if buffer full, ignore it
+C
+	CALL EIHRS(NPTS,IENDS)		! find out how many points
+C
+C is this the first ST of a feature? - if so then we must filter out
+C anything with too few points (assume that this test works!)
+C
+	IF (START) THEN
+	   IF ( NPTS.LE.2 ) THEN	! ignore the feature
+	      CALL IFFNXC('EF',IELEN)	! move to next EF
+	      GOTO 20
+	   ELSE				! enough points to interest us
+	      START = .FALSE.		! and no longer first
+	   ENDIF
+	ENDIF
+C
+C is there room for the new points?
+C
+	IF ( (STPTR+NPTS).GE.STMAX ) THEN
+	   CALL WRITEF('Too many points in feature %N (at least %N)',
+     &						   FSN,  STPTR+NPTS-1 )
+	   CALL WRITEF('Not reading any more - already have %N',
+     &							    STPTR-1 )
+	   STFULL = .TRUE.
+	   GOTO 20
+	ENDIF
+C
+C read in the ST...
+C
+	CALL EIHRR( STBUF(1,STPTR), NPTS*2, 1 )
+C
+C and note that we have filled the ST buffer a bit more
+C
+	STPTR = STPTR + NPTS
+C
+	GOTO 20
+C
+C *********************************************************************
+C
+C *** EF - end feature - plot our accumulated STs
+C
+4000	CALL VSCLR(1)
+	CALL VSMTO( STBUF(1,1), STBUF(2,1) )
+C
+	LOOP = STPTR-1
+	IF ( STBUF(1,LOOP).EQ.STBUF(1,1) .AND.
+     &	     STBUF(2,LOOP).EQ.STBUF(2,1) ) LOOP = LOOP-1
+C
+	DO 4020 I = 2,LOOP
+	   CALL VSLTO( STBUF(1,I), STBUF(2,I) )
+4020	CONTINUE
+C
+	CALL VSLTO( STBUF(1,1), STBUF(2,1) )
+C
+	CALL VSGEN
+C
+C and now the 'clever' bit - do we want to attempt our polygon filling?
+C
+	CALL WRITEF('Feature %N has %N points',FSN,STPTR-1)
+	IF ( RDYES('Attempt to polygon fill it') ) THEN
+	   CALL POLYFILL( STBUF, INSIDE, STPTR-1 )
+	ENDIF
+C
+C and that is the end of this feature
+C
+	GOTO 20
+C
+C *********************************************************************
+C
+C *** EJ - end of job
+C
+8000	CALL WRITEF('EJ - End of file - no more features')
+	GOTO 9999
+C
+C *********************************************************************
+C
+C EOF - end of file
+C
+9000	CALL WRITEF('Unexpected end of IFF file')
+C
+C and here to close things down
+C
+9999	CALL WRITEF('Good-bye')
+	IF ( OPNIFF ) CALL IFFCLO(IFFLUN)
+	IF ( INISIG ) CALL VSINIT(0)
+	CALL EXIT
+C
+	END

@@ -1,0 +1,312 @@
+	.TITLE IFF_COORDS
+	.IDENT 	/18JA89/
+
+;Copyright Laser Scan Laboratories Ltd., Cambridge, England
+;Author Clarke Brunt, 5-Oct-1988
+;
+; Fast IFF coordinate reading routine
+;
+
+	DATA_PSECT	IFF
+
+LSTADR:	.BLKL	1	; last IFF block address used
+NFIX:	.BLKL	1	; CB fixed attributes
+NCOL:	.BLKL	1	; CB columns
+XCOL:	.BLKL	1	; CB X column index
+YCOL:	.BLKL	1	; CB Y column index
+X:	.BLKL	1	; CB X value
+Y:	.BLKL	1	; CB Y value
+
+LONG:			; workspace
+WORD1:
+BYTE1:	.BLKB	1
+BYTE2:	.BLKB	1
+WORD2:	.BLKW	1
+
+	CODE_PSECT	IFF
+
+; Register usage
+; R0  - memory address of next IFF word
+; R1  - IFF (word) address of next IFF word
+; R2  - word offset in block (low byte of R1)
+; R3  - workspace used when reading IFF word
+; R4  - workspace for reading words into, and counter
+; R5  - entry code, workspace, address of XY array
+; R6  - counter of CB columns
+; R7  - size of ATT arrays (MATT)
+; R8  - address of ATTV array, value of NATT
+
+; macro to retrieve next data word, advancing pointers
+	.MACRO	GETWRD	DST,?L1
+	MOVW	(R0)+,DST	; get next word
+	INCL	R1		; inc IFF address
+	INCB	R2		; inc word offset in block
+	BNEQ	L1		; not end of block
+	BSBW	GETBLK		; get next block
+L1:
+	.ENDM	GETWRD
+
+; return with R0 = address containing IFF word R1
+; output: R0
+;  input: R1 (preserved)
+;   uses: R2,R3
+GETBLK:	MOVL	LSTBLK,R0	; last block address
+	MOVZBL	R1,R2		; extract word offset
+	BICL3	R2,R1,R3	; reduce address to block boundary
+	CMPL	R3,LSTADR	; same block address as last time?
+	BNEQ	10$		; no
+	CMPL	LSTPT,IFFPT	; same IFF file current?
+	BEQL	20$		; yes
+10$:	MOVL	R3,LSTADR	; save latest IFF address
+	PUSHAL	LSTADR
+	CALLS	#1,G^IFFRAD	; get address
+	MOVL	R0,LSTBLK	; save block address
+	MOVL	IFFPT,LSTPT	; and current IFF selection
+	BISL3	R2,R3,R1	; restore R1 (IFF address)
+20$:	MOVAW	(R0)[R2],R0	; address of data word
+	RSB
+
+
+;
+; LOGICAL FUNCTION IFF_COORDS(IFFADD,NROW,FLAGS,XY,NATT,MATT,ATTC,ATTV)
+; INTEGER*4	IFFADD	! input IFF file address, output next address
+; INTEGER*4	NROW	! output number of points
+; INTEGER*4	FLAGS	! output flags
+; REAL*4	XY(2,NROW)	! output NROW rows of x/y
+; INTEGER*4	NATT	! output number of atts other than x/y
+; INTEGER*4	MATT	! input, size of ATTC,ATTV arrays
+; INTEGER*4	ATTC(MATT)	! output NATT column headers
+; INTEGER*4	ATTV(MATT,NROW)	! output NROW rows of NATT cols
+;
+	IFFADD = 4
+	NROW = 8
+	FLAGS = 12
+	XY = 16
+	NATT = 20
+	MATT = 24
+	ATTC = 28
+	ATTV = 32
+
+	.ENTRY	IFF_COORDS,^M<R2,R3,R4,R5,R6,R7,R8>
+;
+; is address the same as last time
+	MOVL	@IFFADD(AP),R1	; IFF address
+	CLRL	@NROW(AP)	; flag no points so far
+	CLRL	@NATT(AP)	; no extra attributes so far
+10$:	BSBW	GETBLK
+
+15$:	CVTBL	1(R0),R5	; next entry code
+	CMPB	R5,#-1		; is it EF
+	BEQL	999$		; EF, so return .TRUE.
+	BLSS	16$		; other negative code (eg VO) so skip
+	CMPB	R5,#31
+	BLSS	17$		; ST or ZS
+	CMPB	R5,#40
+	BEQL	17$		; CB
+16$:	MNEGB	#1,R5		; mark as entry to skip
+	BRB	18$
+17$:	TSTL	@NROW(AP)	; if 0, then not read ST yet
+	BEQL	18$
+	CLRL	R0		; return .FALSE., there is more data
+	BRB	1000$
+999$:	MNEGL	#1,R0		; return .TRUE.
+1000$:	MOVL	R1,@IFFADD(AP)	; return new IFF address
+	RET
+
+; here with either a coordinate entry to read (R5 = entry code)
+; or some other entry to skip (R5 = -1)
+18$:	GETWRD	R4		; read next entry
+	MOVZBL	R4,R4		; length of entry
+	BNEQ	20$		; LB format
+	GETWRD	R4		; ZB format
+	DECL	R4
+20$:	DECL	R4
+	TSTB	R5		; test entry code
+	BGEQ	30$		; coordinate entry
+	ADDL2	R4,R1		; skip over entry
+	BRB	10$
+
+30$:	CMPB	R5,#15
+	BGTR	50$		; not an ST
+
+; ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST ST
+	ASHL	#-2,R4,@NROW(AP); return number of data points
+	MOVL	R5,@FLAGS(AP)	; return flags field
+35$:	MOVAL	@XY(AP),R5	; address of destination array
+40$:	GETWRD	(R5)+		; retrieve data
+	SOBGTR	R4,40$
+	BRW	15$		; back to check next entry
+
+50$:	CMPB	R5,#31
+	BLEQ	51$		; ZS
+	BRW	70$		; must be CB
+
+; ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS ZS
+51$:	DIVL2	#6,R4		; number of data points
+	MOVL	R4,@NROW(AP)	; return it
+	BICL3	#16,R5,@FLAGS(AP); return flags field
+	MOVL	@MATT(AP),R7	; size of ATT arrays
+	BLEQ	57$		; no space for Z
+	MOVL	#1,@NATT(AP)	; one attribute
+	MOVL	#93,@ATTC(AP)	; Z
+57$:	MOVAL	@ATTV(AP),R8	; address of ATTV array
+	MOVAL	@XY(AP),R5	; address of XY array
+60$:	GETWRD	(R5)+		; retrieve X data
+	GETWRD	(R5)+
+	GETWRD	(R5)+		; Y
+	GETWRD	(R5)+
+	TSTL	@NATT(AP)	; space for Z?
+	BEQL	65$		; no
+	GETWRD	(R8)		; retrieve Z
+	GETWRD	2(R8)
+	MOVAL	(R8)[R7],R8	; step on index into ATTV
+	SOBGTR	R4,60$
+	BRW	15$		; back to check next entry
+65$:	ADDL2	#2,R1
+	BSBW	GETBLK		; skip Z
+	SOBGTR	R4,60$
+	BRW	15$		; back to check next entry
+
+; CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB CB
+70$:	GETWRD	R5		; get flags and gt
+	MOVZBL	R5,@FLAGS(AP)	; return flags
+	GETWRD	WORD1		; get nfix and ncol
+	MOVZBL	BYTE1,NFIX	; calculate nrow...
+	MULL3	#3,NFIX,R5
+	ADDL2	#2,R5
+	SUBL2	R5,R4
+	MOVZBL	BYTE2,NCOL	; ncol
+	DIVL2	NCOL,R4
+	DIVL2	#2,R4		; nrow = (len - 3*nfix -2) / (2*ncol)
+	MOVL	R4,@NROW(AP)	; return it
+
+; scan column headers for x and y
+	MOVL	@MATT(AP),R7	; size of ATT arrays
+	CLRL	R8		; initialise NATT
+	CLRL	XCOL
+	CLRL	YCOL
+	MOVL	#1,R4
+75$:	GETWRD	R5
+	CMPL	R5,#91		; x
+	BNEQ	76$
+	MOVL	R4,XCOL
+	BRB	77$
+76$:	CMPL	R5,#92		; y
+	BNEQ	761$
+	MOVL	R4,YCOL
+	BRB	77$
+761$:	CMPL	R8,R7		; space for another attribute?
+	BGEQ	77$		; no
+	MOVL	R5,@ATTC(AP)[R8]; yes, store attribute code
+	INCL	R8		; one more attribute
+77$:	AOBLEQ	NCOL,R4,75$
+
+; scan fixed attributes
+; If find X or Y, then read into storage
+80$:	TSTL	NFIX
+	BGTR	81$
+	BRW	90$
+
+81$:	MOVL	#1,R4
+85$:	GETWRD	R5
+	GETWRD	WORD1		; retrieve attribute value
+	GETWRD	WORD2
+	CMPL	R5,#91		; x
+	BNEQ	86$
+	MOVL	LONG,X
+	BRB	89$
+86$:	CMPL	R5,#92		; y
+	BNEQ	87$
+	MOVL	LONG,Y
+	BRB	89$
+
+; some other attribute, check if already had it
+; If so, ignore, otherwise add to list
+87$:	TSTL	R8		; no. of atts so far
+	BLEQ	881$
+	CLRL	R3		; init loop counter
+88$:	CMPL	R5,@ATTC(AP)[R3]
+	BEQL	89$		; had already - ignore it
+	AOBLSS	R8,R3,88$
+
+; not had attribute already - try to add it
+881$:	CMPL	R8,R7		; space for another attribute?
+	BGEQ	89$		; no, so skip
+	MOVL	R5,@ATTC(AP)[R8]; yes, store attribute code
+	MOVL	LONG,@ATTV(AP)[R8] ; get value into first row of ATTV
+	INCL	R8		; one more attribute
+
+89$:	INCL	R4
+	CMPL	R4,NFIX
+	BGTR	90$
+	BRW	85$		; loop for all fixed attributes
+
+; check for simple format CBs (i.e. ST format or ZS format)
+90$:	MOVL	R8,@NATT(AP)	; store NATT away
+	MOVL	@NROW(AP),R4	; number of rows
+	CMPL	XCOL,#1
+	BNEQ	92$
+	CMPL	YCOL,#2
+	BNEQ	92$
+
+; so X and Y are in columns 1 and 2
+	CMPL	NCOL,#2
+	BNEQ	91$		; not 2 columns
+	TSTL	R8
+	BNEQ	92$		; two X/Y columns, but a fixed att
+	ASHL	#2,R4,R4	; so it's ST format; set number of words
+	BRW	35$		; join ST format code
+
+91$:	CMPL	NCOL,#3
+	BNEQ	92$		; not 3 columns
+	CMPL	R8,#1
+	BNEQ	92$		; more than 1 attribute
+	CMPL	@ATTC(AP),#93
+	BNEQ	92$		; one attribute not Z
+	BRW	57$		; join ZS format code
+
+; retrieve x and y columns
+92$:	MOVAL	@XY(AP),R5	; address of XY array
+	MOVAL	@ATTV(AP),R8	; address of ATTV array
+
+; loop for each row
+921$:	DECL	R4
+	BGEQ	93$
+	BRW	15$		; back to check next entry
+
+93$:	MOVL	#1,R6
+
+; loop for each column
+94$:	GETWRD	WORD1
+	GETWRD	WORD2
+	CMPL	R6,XCOL		; x column
+	BNEQ	95$
+	MOVL	LONG,X
+	BRB	97$
+95$:	CMPL	R6,YCOL		; y column
+	BNEQ	96$
+	MOVL	LONG,Y
+	BRB	97$
+96$:	SUBL3	#2,R6,R3	; non-XY column number
+	CMPL	R3,R7		; compare with MATT
+	BGTR	97$		; too big, so discard attr.
+	MOVL	LONG,(R8)+	; other attribute column into ATTV
+97$:	AOBLEQ	NCOL,R6,94$	; next column
+
+	MOVL	X,(R5)+		; return X and Y values
+	MOVL	Y,(R5)+
+
+; return fixed attributes
+	SUBL3	#2,NCOL,R3	; number of non-XY columns
+	CMPL	R3,@NATT(AP)
+	BGEQ	99$		; no fixed attributes
+
+98$:	MOVL	@ATTV(AP)[R3],(R8)+
+	AOBLSS	@NATT(AP),R3,98$
+
+; advance R8 to start of next row (R7 = MATT ?better use)
+99$:	SUBL3	@NATT(AP),R7,R3
+	MOVAL	(R8)[R3],R8
+	BRW	921$		; back for next row
+
+	.END

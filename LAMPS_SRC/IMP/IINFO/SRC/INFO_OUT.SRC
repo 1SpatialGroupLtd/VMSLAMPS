@@ -1,0 +1,1333 @@
+	INTEGER*4 FUNCTION INFO_OUT(MAP,TIME,PRINTER,HEIGHT,LAYER)
+C
+***	MODULE	INFO_OUT
+***	IDENT	08FE99
+C
+C Copyright Laser-Scan Limited, Cambridge, Engalnd.
+C
+CMOD1349 MIN_INT_CONT & MAX_INT_CONT are now output using	ST 15-Mar-1994
+C       the correct FORMAT statement to prevent an output
+C       conversion error. SPR 2630.
+C
+CMOD1318 Detect if the times in the HI are blanks and	 	ST 18-Nov-1993
+C       don't call TOTAL if they are.
+C
+CMOD956 Use MD2LOC for RA and CP entry info only if /ABS given
+C	Window out points from statistics if /NORTH=n etc. given
+C	Output statistics to DCL symbols if had /SYMBOLS
+C							 	JB 15-Jan-1991
+C
+CMOD898 /ABSOLUTE qualifier added				CAB 13-Jun-1990
+C	3D line length no longer accounts for deltaz		CAB 13-Jun-1990
+C
+CMOD	Number of records in CB read into I*4, max pts
+C	in CB reduced from 10000 to 200, unused
+C	IFFHAN.CMN removed					TJH 26-Feb-1990
+CMOD	Set HAD_Z when we have had Z !				PGH 17-Mar-1989
+CMOD	Changed to use FLWRTF instead of WRITEF,
+C	/LAYER output now only when /LAYER specified!		TJH 16-Jan-1989
+CMOD	Changed to use WRITEF instead of WRITE			ACM 15-Dec-1988
+CMOD	Changed over to CBs					ACM 07-Dec-1988
+CMOD	To give the /LAYER information				IM  27-Apr-1988
+CMOD	To find and display max/min height information  	JMB 25-Nov-1987
+CMOD	Made a function. Explicit calls to EXIT removed.
+C	Line-length header re-formatted				TJH 03-Dec-1986
+CMOD	Total points in file counters made longword		TJH 25-Nov-1986
+CMOD	Message symbols changed to include 'LAYER' rather
+C	than 'OVERLAY'						TJH 06-Nov-1986
+C
+C	Created							LAJ 11-Jun-1986
+C
+C***********************************************************************
+C***********************************************************************
+C
+C This routine does the donkey-work of searching the IFF file supplied 
+C for the required information and outputting it to the current output 
+C device.  It uses the /MAP_DESCRIPTOR and /TIMINGS switches to 
+C determine whether these additional pieces of information are required,
+C and calls routines to handle them as necessary.
+C
+C***********************************************************************
+C***********************************************************************
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+	INCLUDE	'LSL$CMNIFF:IFFMSG.PAR'
+	INCLUDE '($SSDEF)'
+	INCLUDE 'LSL$CMNIINFO:IINFOMSG.PAR'	! Message file
+C
+C Common blocks
+C
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'		! Type 2 map descriptors
+	INCLUDE 'LSL$CMNIFF:MAPDES.CMN'		! Type 1 map descriptors
+	INCLUDE 'LSL$CMNIINFO:INFCMN.CMN'	! Common block for IINFO
+C
+C Arguments
+C
+	LOGICAL  	MAP		! Map descriptor flag
+	LOGICAL  	TIME		! Timings flag
+	LOGICAL  	PRINTER		! Output direction
+	LOGICAL  	HEIGHT		! Max/min height flag
+	LOGICAL  	LAYER		! Output by layer
+C
+C Parameters
+C
+	PARAMETER	MAXPTS = 200	! Max. no. 2 or 3-D 
+C					! points per CB
+C Variables
+C
+	RECORD/	IFF_CBH/CBH		! CB header
+	RECORD/	IFF_CBD/CBD		! CB data
+
+	LOGICAL   	HAD_RA		! True if found a range entry
+	LOGICAL   	HAD_HIST	! True if found a history entry	
+	LOGICAL   	HAD_CP		! True if found a control point 
+C					! entry
+	LOGICAL   	NFTR		! New feature flag
+	LOGICAL   	HEADER
+	LOGICAL  	HAD_Z		! True if had Z coord
+	LOGICAL  	HAD_INT_CONT	! True if had integer contour ht
+	LOGICAL  	HAD_REAL_CONT	! True if had real contour ht
+C
+	LOGICAL*4	Z_PRESENT	! CB contains Z attribute?
+
+	INTEGER*2	K,I,JJ
+	INTEGER*2	INDEX		! Position of required feature 
+C					! code
+	INTEGER*2	IECODE		! IFF entry code
+	INTEGER*2	IELEN		! IFF entry length
+	INTEGER*2	IENDS		! IFF end of string parameter
+	INTEGER*4	ISQ		! internal sequence number
+	INTEGER*2	EL_HOURS	! Elapsed time variables
+	INTEGER*2	EL_MINS
+	INTEGER*2	EL_SECS
+	INTEGER*2	CPU_HOURS	! CPU time variables
+	INTEGER*2	CPU_MINS
+	INTEGER*2	CPU_SECS
+	INTEGER*2	OVDONE		! Number of lowest layer 
+C					! output
+	INTEGER*2	NXTOV		! Temporary store for layer 
+C					! pointer
+	INTEGER*2	NOVNO		! Temporary store for layer 
+C					! number
+	INTEGER*4	NO2DPF		! No. 2-D points/feature
+	INTEGER*4	NO3DPF		! No. 3-D points/feature
+C
+	INTEGER*4	NPTS		! no of points in CB
+	INTEGER*4	NFNUM		! Feature number
+	INTEGER*4	FTRCOD		! Feature code
+	INTEGER*4	T2DPTS		! Total 2-D points
+	INTEGER*4	T3DPTS		! Total 3-D points
+	INTEGER*4	T2DPALF		! Total 2-D points at last 
+C					! feature
+	INTEGER*4	T3DPALF		! Total 3-D points at last 
+C					! feature
+	INTEGER*4	LTOTF		! Last total of features
+	INTEGER*4	LTOT2DP		! Last total of 2-D points
+	INTEGER*4	LTOT3DP		! Last total of 3-D points
+	INTEGER*4	BOTTOM		! Total no. of feature codes
+	INTEGER*4	N,J
+	INTEGER*4	OVLNUM		! Layer number
+	INTEGER*4	AC_CODE		! Temp for processing ACs
+	INTEGER*4	AC_INT		! ditto
+	INTEGER*4	MAX_INT_CONT    ! Maximum integer contour
+	INTEGER*4	MIN_INT_CONT	! Minimum integer contour
+	INTEGER*4	RET		! Function return code
+C
+	REAL		AC_REAL		! Temp for processing ACs
+	REAL		MAX_REAL_CONT	! Maximum real contour
+	REAL		MIN_REAL_CONT	! Minimum real contour
+	REAL		MAX_Z		! Maximum point height
+	REAL		MIN_Z		! Minimum point height
+	REAL		CPBUF(4,4)	! Control points buffer
+	REAL		RABUF(4)	! Range buffer
+	REAL		PT_X(MAXPTS)	! Buffer of X coords
+	REAL		PT_Y(MAXPTS)	! Buffer of Y coords
+	REAL*4		PT_Z(MAXPTS)	! Buffer of Z coords
+	INTEGER*4	PT_IZ(MAXPTS)	! and as integers
+	EQUIVALENCE	(PT_Z,PT_IZ)
+	REAL		LASTX		! (3-D) coords of last point
+	REAL		LASTY
+	REAL		DX		! Difference in (3-D) coords
+	REAL		DY
+	REAL		LL2DPF		! 2-D line-length/feature
+	REAL		LL3DPF		! 3-D line-length/feature
+	REAL		T2DLLALF	! Total 2-D line-length at last
+C					! feature
+	REAL		T3DLLALF	! Total 3-D line-length at last 
+C					! feature
+	REAL		LINL2D		! Total 2-D line-length
+	REAL		LINL3D		! Total 3-D line-length
+	REAL		LTOT2DL		! Last 2-D line-length
+	REAL		LTOT3DL		! Last 3-D line-length
+	REAL		SQ_LEN		! Square vector length
+	CHARACTER*20	STRING		! temporary string
+	CHARACTER*17	TIMESTR		! To hold TIMING info
+C
+C Function
+C
+	INTEGER*2	SEARCH
+	INTEGER*4	IFS_CB_READ
+C
+C***********************************************************************
+C
+C	START OF CODE
+C
+C***********************************************************************
+C
+	INFO_OUT=SS$_NORMAL	! assume we will succeed
+C
+C Initialisation
+C
+	T2DPTS = 0
+	T3DPTS = 0
+	LTOTF  = 0
+	LTOT2DP = 0
+	LTOT3DP = 0
+	LTOT2DL = 0.0
+	LTOT3DL = 0.0
+	T2DPALF = 0
+	T3DPALF = 0
+	T2DLLALF = 0.0
+	T3DLLALF = 0.0
+	INDEX  = 0
+	BOTTOM = 0
+	LINL2D = 0.0
+	LINL3D = 0.0
+C
+	HEADER = .FALSE.
+	HAD_CP = .FALSE.
+	HAD_HIST = .FALSE.
+	HAD_RA = .FALSE.
+	HAD_Z = .FALSE.
+	MIN_Z = +1E38
+	MAX_Z = -1E38
+	HAD_INT_CONT = .FALSE.
+	HAD_REAL_CONT = .FALSE.
+C
+	EL_HOURS = 0
+	EL_MINS = 0
+	EL_SECS = 0
+	CPU_HOURS = 0
+	CPU_MINS = 0
+	CPU_SECS = 0
+C
+	DO 10 I=1,LIMOV
+	   FTCNT(I) = 0
+	   PTCNT2D(I) = 0
+	   PTCNT3D(I) = 0
+	   LL2D(I) = 0.0
+	   LL3D(I) = 0.0
+10	CONTINUE
+C
+	COVPTR = 0
+	NXTOV  = 0
+	MD2LOC(1) = 0.0
+	MD2LOC(2) = 0.0
+C
+C Delete all the DCL symbols prior to run
+C
+	IF (SYMBOL) THEN
+	   CALL LIB$DELETE_SYMBOL('IINFO_RA_YMAX',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_RA_YMIN',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_RA_XMAX',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_RA_XMIN',	! symbol name
+     &					2)		! global (1 local)
+C
+	   CALL LIB$DELETE_SYMBOL('IINFO_WIN_YMAX',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_WIN_YMIN',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_WIN_XMAX',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_WIN_XMIN',	! symbol name
+     &					2)		! global (1 local)
+C
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_NW1',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_NW2',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_NW3',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_NW4',	! symbol name
+     &					2)		! global (1 local)
+C
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_SW1',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_SW2',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_SW3',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_SW4',	! symbol name
+     &					2)		! global (1 local)
+C
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_SE1',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_SE2',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_SE3',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_SE4',	! symbol name
+     &					2)		! global (1 local)
+C
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_NE1',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_NE2',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_NE3',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_CP_NE4',	! symbol name
+     &					2)		! global (1 local)
+C
+	   CALL LIB$DELETE_SYMBOL('IINFO_MINZ',		! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_MAXZ',		! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_MIN_INTZ',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_MAX_INTZ',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_MIN_REALZ',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_MAX_REALZ',	! symbol name
+     &					2)		! global (1 local)
+C
+	   CALL LIB$DELETE_SYMBOL('IINFO_NUM_LAY',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_NUM_FTR',	! symbol name
+     &					2)		! global (1 local)
+C
+	   CALL LIB$DELETE_SYMBOL('IINFO_NUM_2DPTS',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_NUM_3DPTS',	! symbol name
+     &					2)		! global (1 local)
+C
+	   CALL LIB$DELETE_SYMBOL('IINFO_LEN_2DLIN',	! symbol name
+     &					2)		! global (1 local)
+	   CALL LIB$DELETE_SYMBOL('IINFO_LEN_3DLIN',	! symbol name
+     &					2)		! global (1 local)
+	ENDIF
+C
+C End of initialisation
+C***********************************************************************
+C Now to start processing the file
+C
+	IF (HAD_ABS) THEN			! If absolute qualifier
+	   CALL IFFNXC('MD',IELEN)		! Then find the MD and 
+	   IF (IELEN .EQ. -1) THEN		! its length. 
+	      INFO_OUT = IINFO__MDNOTFOUND
+	      CALL LSL_PUTMSG(INFO_OUT)
+	      GOTO 400				! Unexpected end of file
+	   ENDIF				! - exit
+C
+	   IF (IELEN .EQ. MD2LEN) THEN		! Equal to MD2 length?
+	      CALL EIHR(MD2ARR,MD2LEN,1)	! Then find the local
+	   ENDIF				! origin etc. and finally
+	   CALL IFFRWD				! rewind
+	ENDIF
+C
+20	CALL IFFNXT(IECODE, IELEN)		! Read next entry
+	IF (IELEN .EQ. -1) GOTO 390		! Unexpected end of file
+C						! - exit
+	IF (IECODE .EQ. 'RA') GOTO 30		! Range
+	IF (IECODE .EQ. 'HI') GOTO 40		! History
+	IF (IECODE .EQ. 'CP') GOTO 60		! Control points
+	IF (IECODE .EQ. 'MD') GOTO 70		! Map descriptor
+	IF (IECODE .EQ. 'NO') GOTO 80		! New layer
+	IF (IECODE .EQ. 'NF') GOTO 140		! New feature
+	IF (IECODE .EQ. 'FS') GOTO 150		! Feature status
+	IF (IECODE .EQ. 'CB') GOTO 160		! Coordinate block
+	IF (IECODE .EQ. 'EF') GOTO 190		! End of feature
+	IF (IECODE .EQ. 'EO') GOTO 200		! End of layer
+	IF (IECODE .EQ. 'AC') GOTO 210		! Ancil.code (contours)
+	IF (IECODE .EQ. 'EJ') GOTO 220		! Expected end of file
+	GOTO 20					! Ignore other codes
+C
+C***********************************************************************
+C
+C Here we are to start handling all the entries we are interested in.
+C
+C***********************************************************************
+C First the range.
+C
+30	HAD_RA = .TRUE.
+C
+	CALL EIHRR(RABUF,4,1)			! Read range coords
+	CALL FLWRTF				! Blank line
+	CALL FLWRTF				! Blank line
+	CALL FLWRTF(' Range Information')	! Write range header
+	CALL FLWRTF(' -----------------')
+	CALL FLWRTF
+C
+C Output range data, and adjust the values if HAD_ABS
+C
+	IF (HAD_ABS) THEN
+	   RABUF(1) = RABUF(1) + MD2LOC(1)
+	   RABUF(2) = RABUF(2) + MD2LOC(1)
+	   RABUF(3) = RABUF(3) + MD2LOC(2)
+	   RABUF(4) = RABUF(4) + MD2LOC(2)
+	ENDIF
+C
+	CALL FLWRTF(' Xmin = %F12.3      Xmax = %F12.3',
+     &	   RABUF(1), RABUF(2))
+C
+	CALL FLWRTF(' Ymin = %F12.3      Ymax = %F12.3',
+     &	   RABUF(3), RABUF(4))
+C
+	IF (SYMBOL) THEN
+	   WRITE (STRING,111) RABUF(4)		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_RA_YMAX',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) RABUF(3)		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_RA_YMIN',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) RABUF(2)		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_RA_XMAX',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) RABUF(1)		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_RA_XMIN',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	ENDIF
+C
+	CALL FLWRTF				! Blank line
+	CALL FLWRTF				! Blank line
+	CALL FLWRTF(' Window Information')	! Write window header
+	CALL FLWRTF(' ------------------')
+	CALL FLWRTF
+C
+C Use Range values (adjusted if HAD_ABS) for window bounds if not given with 
+C a qualifier
+C
+	IF (.NOT.HAD_NORTH) NBOUND = RABUF(4)
+	IF (.NOT.HAD_SOUTH) SBOUND = RABUF(3)
+	IF (.NOT.HAD_EAST) EBOUND = RABUF(2)
+	IF (.NOT.HAD_WEST) WBOUND = RABUF(1)
+C
+	CALL FLWRTF(' X window min = %F12.3      X window max = %F12.3',
+     &	   WBOUND, EBOUND)
+C
+	CALL FLWRTF(' Y window min = %F12.3      Y window max = %F12.3',
+     &	   SBOUND, NBOUND)
+C
+C Write the bounds to DCL symbols if had /SYMBOL
+C
+	IF (SYMBOL) THEN
+	   WRITE (STRING,111) NBOUND		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_WIN_YMAX',! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) SBOUND		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_WIN_YMIN',! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) EBOUND		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_WIN_XMAX',! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) WBOUND		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_WIN_XMIN',! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	ENDIF
+C
+C If /ABS qualifier given, adjust bounds internally for comparison with the
+C coordinates
+C
+	IF (HAD_ABS) THEN
+	   NBOUND = NBOUND - MD2LOC(2)
+	   SBOUND = SBOUND - MD2LOC(2)
+	   WBOUND = WBOUND - MD2LOC(1)
+	   EBOUND = EBOUND - MD2LOC(1)
+	ENDIF
+C
+	GOTO 20
+C
+C***********************************************************************
+C History entry
+C
+40	HAD_HIST = .TRUE.
+	CALL FLWRTF				! Output header data
+	CALL FLWRTF
+	CALL FLWRTF(' History Record Information')	! Heading
+	CALL FLWRTF(' --------------------------')
+	CALL FLWRTF('Date        Time  Username     Program   '
+     &	   //'Function     Elapsed  CPU      STATUS ')
+	CALL FLWRTF
+	CALL FLWRTF	
+C
+	CALL EIHR(K,1,1)			! Read no. of history 
+	IF (K .EQ. 0) THEN
+	   IF (.NOT. PRINTER) CALL FLWRTF
+	   CALL LSL_PUTMSG(IINFO__NOHIST)	! Say no records
+	   GOTO 20
+	ENDIF
+C
+C Now loop through the entries, adding up the times if /TIMINGS is set, 
+C and print out the buffers 
+C
+	DO 50 I=1,K
+	   CALL	EIHR(BUFF,40,(I-1)*40+2)	! Read the record
+	   IF (TIME) THEN
+C
+C Get ELAPSED and CPU times as a string to check for it being blank when
+C IFFLIB puts "HI Overflow. Records lost." in HI entry.
+C
+	      DO 45 JJ = 1,17
+C
+C ELAPSED time is in character positions 55 to 62 of BUFF (1  to  8 of TIMESTR)
+C CPU     time is in character positions 64 to 71 of BUFF (10 to 17 of TIMESTR)
+C
+		 TIMESTR(JJ:JJ) = CHAR(BUFF(JJ+54))
+45	      CONTINUE
+C
+C Work out the new elapsed and CPU total times
+C Elapsed total first
+C
+	      ELAPSED = .TRUE.
+	      IF (TIMESTR(1:8).NE.'        ') THEN
+		 CALL TOTAL(EL_HOURS, EL_MINS, EL_SECS)
+	      ENDIF
+C
+C Now CPU total
+C
+	      IF (TIMESTR(10:17).NE.'        ') THEN
+		 CALL TOTAL(CPU_HOURS, CPU_MINS, CPU_SECS)
+	      ENDIF
+	   ENDIF
+C
+C Now print the record anyway
+C
+	   CALL FLWRTF('%A80',BUFF)		! Write data
+50	CONTINUE
+	GOTO 20
+C
+C***********************************************************************
+C Control Point entry
+C
+60	IF (HAD_CP) THEN
+	   IF (.NOT. PRINTER) CALL FLWRTF
+	   CALL LSL_PUTMSG(IINFO__MULCP)	! Multiple CP entries
+	ENDIF
+C
+	HAD_CP = .TRUE.
+	CALL FLWRTF				! Blank line
+	CALL FLWRTF				! Blank line
+	CALL FLWRTF(' Control Point Information')
+	CALL FLWRTF(' -------------------------')
+	CALL FLWRTF				! Blank line
+	CALL EIHRR(CPBUF,16,1)
+C
+C Write CP data
+C
+	IF (HAD_ABS) THEN
+	   DO 99 K=1,4
+	      CPBUF(1,K) = CPBUF(1,K) + MD2LOC(1)
+	      CPBUF(2,K) = CPBUF(2,K) + MD2LOC(2)
+	      CPBUF(3,K) = CPBUF(3,K) + MD2LOC(1)
+	      CPBUF(4,K) = CPBUF(4,K) + MD2LOC(2)
+99	   CONTINUE
+	ENDIF
+C
+	CALL FLWRTF('  NW    %F11.3    %F11.3    %F11.3    %F11.3',
+     &	   CPBUF(1,1), CPBUF(2,1),
+     &	   CPBUF(3,1), CPBUF(4,1))
+C
+	CALL FLWRTF('  SW    %F11.3    %F11.3    %F11.3    %F11.3',
+     &	   CPBUF(1,2), CPBUF(2,2),
+     &     CPBUF(3,2), CPBUF(4,2))
+C
+	CALL FLWRTF('  SE    %F11.3    %F11.3    %F11.3    %F11.3',
+     &	   CPBUF(1,3), CPBUF(2,3),
+     &     CPBUF(3,3), CPBUF(4,3))
+C
+	CALL FLWRTF('  NE    %F11.3    %F11.3    %F11.3    %F11.3',
+     &	   CPBUF(1,4), CPBUF(2,4),
+     &     CPBUF(3,4), CPBUF(4,4))
+C
+	IF (SYMBOL) THEN
+	   WRITE (STRING,111) CPBUF(1,1)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_NW1',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(2,1)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_NW2',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(3,1)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_NW3',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(4,1)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_NW4',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) CPBUF(1,2)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_SW1',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(2,2)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_SW2',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(3,2)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_SW3',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(4,2)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_SW4',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) CPBUF(1,3)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_SE1',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(2,3)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_SE2',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(3,3)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_SE3',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(4,3)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_SE4',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) CPBUF(1,4)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_NE1',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(2,4)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_NE2',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(3,4)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_NE3',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	   WRITE (STRING,111) CPBUF(4,4)	! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_CP_NE4',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	ENDIF
+C
+	GOTO 20
+C
+C***********************************************************************
+C Map descriptor entry - only output if /MAP_DESCRIPTOR is set.
+C
+70	IF (MAP) THEN
+	   IF (IELEN .EQ. MD2LEN) THEN
+	      CALL OUT_MD2(PRINTER)		! Output type 2 MD
+	   ELSE 
+	      CALL OUT_MD1			! Output type 1 MD
+	   ENDIF
+	ENDIF					! Else ignore this entry
+	GOTO 20					! Get next entry
+C
+C***********************************************************************
+C New Layer entry
+C
+80	IF (HAD_NO .EQ. .TRUE.) THEN		! If we're already in
+	   INFO_OUT = IINFO__BADLAY		! a layer there must
+	   CALL LSL_PUTMSG(IINFO__BADLAY,OVLNUM)
+	   GOTO 400				! be trouble, so return.
+	ENDIF
+C
+	CALL EIHRI(OVLNUM,1,1)			! Read layer number
+	HAD_NO = .TRUE.				! Say we're in one now
+C
+	IF (NXTOV .EQ.0) GOTO 100		! If this is the first
+C
+C Find a slot for this layer
+C
+	DO 90 I=1,NXTOV
+	   IF (OVNOS(I) .EQ. OVLNUM) GOTO 110	! Already in the table
+90	CONTINUE
+C
+C Allocate slot in table
+C
+100	IF (NXTOV .GE. LIMOV) GOTO 120		! No room
+	NXTOV = NXTOV + 1			! Next free space
+	OVNOS(NXTOV) = OVLNUM			! Put number in table
+C
+	I = NXTOV				! To join with code for
+C						! layer already in table
+C Set up pointer to this layer
+C
+110	COVPTR = I
+	GOTO 130
+C
+120	CALL FLWRTF				! Say too many layers
+	CALL FLWRTF(' No room to analyse layer %I4',OVLNUM)
+C
+130	GOTO 20					! Go for next entry
+C
+C***********************************************************************
+C New Feature entry
+C
+140	IF (HAD_NF .EQ. .TRUE.) THEN		! If we're alredy in a
+	   INFO_OUT = IINFO__BADNF
+	   CALL LSL_PUTMSG(INFO_OUT,NFNUM,ISQ)	! feature, there must be
+	   GOTO 400				! trouble, return.
+	ENDIF
+C
+	CALL EIHRI(NFNUM,1,1)			! Read feature number
+	CALL EIHRI(ISQ,1,2)			! and internal seq no.
+	HAD_NF = .TRUE.				! Say we're in one now
+	NFTR = .TRUE.				! Say just starting this
+C						! feature
+	FTCNT(COVPTR) = FTCNT(COVPTR) + 1	! Update count of
+C						! features this layer
+	GOTO 20					! Go for next entry
+C
+C***********************************************************************
+C Feature Status entry
+C
+150	CALL EIHRI(FTRCOD,1,1)			! Read feature code
+	NO2DPF = 0				! Initialise feature 
+	NO3DPF = 0				! parameters
+	LL2DPF = 0.0
+	LL3DPF = 0.0
+	INDEX = SEARCH(FTRCOD,BOTTOM)		! Find FC position in table
+	IF (.NOT.FOUND) THEN			! Not already there - 
+	   CALL MOVE(INDEX,BOTTOM)		! Either put at end of table or
+C						! shift everything else down to
+C						! make room for this one
+	   FCARR(1,INDEX) = FTRCOD		! Save code
+	   FCARR(2,INDEX) = 1			! Init count of features
+C						! with this code
+	   BOTTOM = BOTTOM + 1			! Update count of FC's
+	ELSE
+	   FCARR(2,INDEX) = FCARR(2,INDEX) + 1	! One more feature with 
+C						! this code
+	ENDIF
+	GOTO 20					! Go for next entry
+C
+C***********************************************************************
+C 'CB' - Coordinate block
+C
+160	CALL EIHRCB_HEAD(CBH)			! Read CB header
+	CALL EIHRCB_DATA(CBD)			! Read CB data
+	NPTS = CBH.NROW				! Note no. of pts in CB
+C
+C Set X, Y and Z (if present) coords into nice simple arrays
+C
+	CALL IFS_CB_READ(CBH,CBD,PT_X,1,IFF_C_X,1,NPTS)
+	CALL IFS_CB_READ(CBH,CBD,PT_Y,1,IFF_C_Y,1,NPTS)
+	RET = IFS_CB_READ(CBH,CBD,PT_Z,1,IFF_C_Z,1,NPTS)
+C
+	Z_PRESENT = RET.NE.IFF__MISSING		! Z coord present?
+C
+	IF (.NOT.HAD_WIN) THEN
+	   IF (Z_PRESENT) THEN			! 3D points
+	      T3DPTS = T3DPTS + NPTS
+	   ELSE
+	      T2DPTS = T2DPTS + NPTS
+	   ENDIF
+	ENDIF
+C
+C Calculate line length by Pythagoras
+C
+	DO 180 K = 1,NPTS
+C
+C Check if the point is within the window, if given, and skip if so
+C
+	   IF (HAD_WIN) THEN
+	      IF (PT_X(K).GT.EBOUND .OR. PT_X(K).LT.WBOUND .OR.
+     &		  PT_Y(K).GT.NBOUND .OR. PT_Y(K).LT.SBOUND) GOTO 180
+C
+	      IF (Z_PRESENT) THEN
+		 T3DPTS = T3DPTS + 1
+	      ELSE
+	         T2DPTS = T2DPTS + 1
+	      ENDIF
+	   ENDIF
+C
+	   IF (Z_PRESENT .AND. PT_IZ(K).NE.IFF_ABSENT) THEN
+	      HAD_Z = .TRUE.
+	      MAX_Z = MAX(MAX_Z,PT_Z(K))	! Update Z limits
+	      MIN_Z = MIN(MIN_Z,PT_Z(K))
+	   ENDIF
+C
+	   IF (NFTR) GOTO 170			! Get start if new
+C
+	   DX = PT_X(K) - LASTX			! Change in X
+	   DY = PT_Y(K) - LASTY			! and in Y
+	   SQ_LEN = DX*DX + DY*DY
+C
+	   IF (Z_PRESENT) THEN
+	      LINL3D = LINL3D + SQRT(SQ_LEN)	! 3D length so far
+	   ELSE
+	      LINL2D = LINL2D + SQRT(SQ_LEN)	! 2D length so far
+	   ENDIF
+C
+170	   LASTX = PT_X(K)			! Update current pos
+	   LASTY = PT_Y(K)
+	   NFTR = .FALSE.			! continue with this ftr
+180	CONTINUE
+C
+	GOTO 20					! Go for next entry
+C
+C***********************************************************************
+C End of Feature
+C
+190	NO2DPF = T2DPTS - T2DPALF		! No. 2-D pts in ftr
+	NO3DPF = T3DPTS - T3DPALF		! And 3-D
+	LL2DPF = LINL2D - T2DLLALF		! 2-D Line length
+	LL3DPF = LINL3D - T3DLLALF		! 3-D
+	T2DPALF = T2DPTS			! Update 'last' values
+	T3DPALF = T3DPTS
+	T2DLLALF = LINL2D
+	T3DLLALF = LINL3D
+	IF (.NOT. FOUND) THEN			! Update arrays appropriately
+	   FCARR(3,INDEX) = NO2DPF
+	   FCARR(4,INDEX) = NO3DPF
+	   LLARR(1,INDEX) = LL2DPF
+	   LLARR(2,INDEX) = LL3DPF
+	ELSE
+	   FCARR(3,INDEX) = FCARR(3,INDEX) + NO2DPF
+	   FCARR(4,INDEX) = FCARR(4,INDEX) + NO3DPF
+	   LLARR(1,INDEX) = LLARR(1,INDEX) + LL2DPF
+	   LLARR(2,INDEX) = LLARR(2,INDEX) + LL3DPF
+	ENDIF
+	HAD_NF = .FALSE.			! Allow NF again
+	GOTO 20					! Go for next entry
+C
+C***********************************************************************
+C End of Layer
+C
+200	PTCNT2D(COVPTR) = PTCNT2D(COVPTR) + (T2DPTS - LTOT2DP)
+C						! 2-D points/layer
+	PTCNT3D(COVPTR) = PTCNT3D(COVPTR) + (T3DPTS - LTOT3DP)
+C						! and 3-D
+	LL2D(COVPTR) = LL2D(COVPTR) + (LINL2D - LTOT2DL)
+C						! 2-D line-length/layer
+	LL3D(COVPTR) = LL3D(COVPTR) + (LINL3D - LTOT3DL)
+C						! and 3-D
+	LTOT2DP = T2DPTS			! Update totals
+	LTOT3DP = T3DPTS
+	LTOT2DL = LINL2D
+	LTOT3DL = LINL3D
+	HAD_NO = .FALSE.			! Allow NO again
+	GOTO 20					! Go for next entry
+C
+C***********************************************************************
+C Ancillary codes. Looking for max/min integer and real contour heights
+C AC 2 int
+C AC 3 real.
+C
+C First check if have either of required codes 2 or 3
+C
+210	CALL EIHR(AC_CODE, 1, 1)
+	IF (AC_CODE.EQ.2) THEN
+C
+C Integer contour
+	   CALL EIHRL(AC_INT, 1, 2)
+C
+C Check if first
+	   IF (.NOT.HAD_INT_CONT) THEN
+	      MIN_INT_CONT = AC_INT
+	      MAX_INT_CONT = AC_INT
+	      HAD_INT_CONT = .TRUE.
+	   ENDIF
+C
+C Check if new min/max
+	   IF (AC_INT.LT.MIN_INT_CONT) MIN_INT_CONT = AC_INT
+	   IF (AC_INT.GT.MAX_INT_CONT) MAX_INT_CONT = AC_INT
+C
+	ELSEIF (AC_CODE.EQ.3) THEN
+C
+C Real contour
+	   CALL EIHRL(AC_REAL, 1, 2)
+C
+C Check if first one
+	   IF(.NOT.HAD_REAL_CONT) THEN
+	      MIN_REAL_CONT = AC_REAL
+	      MAX_REAL_CONT = AC_REAL
+	      HAD_REAL_CONT = .TRUE.
+	   ENDIF
+C
+C Check if new max/min
+	   IF (AC_REAL.LT.MIN_REAL_CONT) MIN_REAL_CONT = AC_REAL
+	   IF (AC_REAL.GT.MAX_REAL_CONT) MAX_REAL_CONT = AC_REAL
+	ENDIF
+C
+	GOTO 20
+C
+C***********************************************************************
+C End of Job
+C
+C We've reached the end of file, so now to output the remaining 
+C information.
+C
+C First check to see if we have had a history entry - report if not
+C
+220	IF (.NOT.HAD_HIST) THEN
+	   CALL FLWRTF				! Output header data
+	   CALL FLWRTF
+	   CALL FLWRTF(' History Record Information')	! Heading
+	   CALL FLWRTF(' --------------------------')
+	   CALL FLWRTF
+C Report
+	   CALL FLWRTF(' This IFF file contains no history entry')
+	ENDIF
+C
+C Write out max/min point and contour height information
+C
+	IF (HEIGHT) THEN
+	   CALL FLWRTF
+	   CALL FLWRTF
+	   CALL FLWRTF(' Height Range Information')
+	   CALL FLWRTF(' ------------------------')
+	   CALL FLWRTF
+	   CALL FLWRTF
+C
+C Check a relevant entry for each height has been found
+C
+C Point height
+	   IF (HAD_Z) THEN
+	      CALL FLWRTF(' Minimum Z              = %F18.3',MIN_Z)
+	      CALL FLWRTF(' Maximum Z              = %F18.3',MAX_Z)
+C
+	      IF (SYMBOL) THEN
+		 WRITE (STRING,111) MIN_Z		! convert to char
+		 CALL LIB$SET_SYMBOL ('IINFO_MINZ',	! DCL symbol name
+     &					STRING,		! value
+     &					2)		! global (1 for local)
+C
+		 WRITE (STRING,111) MAX_Z		! convert to char
+		 CALL LIB$SET_SYMBOL ('IINFO_MAXZ',	! DCL symbol name
+     &					STRING,		! value
+     &					2)		! global (1 for local)
+	      ENDIF
+	   ELSE
+	      CALL FLWRTF(' No Z information')
+	   ENDIF
+C
+C Integer contour height
+	   IF (HAD_INT_CONT) THEN
+	      CALL FLWRTF(' Minimum integer height = %I14',MIN_INT_CONT)
+	      CALL FLWRTF(' Maximum integer height = %I14',MAX_INT_CONT)
+C
+	      IF (SYMBOL) THEN
+		 WRITE (STRING,112) MIN_INT_CONT	! convert to char
+		 CALL LIB$SET_SYMBOL ('IINFO_MIN_INTZ', ! DCL symbol name
+     &					STRING,		! value
+     &					2)		! global (1 for local)
+C
+		 WRITE (STRING,112) MAX_INT_CONT	! convert to char
+		 CALL LIB$SET_SYMBOL ('IINFO_MAX_INTZ',	! DCL symbol name
+     &					STRING,		! value
+     &					2)		! global (1 for local)
+	      ENDIF
+	   ELSE
+	      CALL FLWRTF(' No integer height information')
+	   ENDIF
+C Point height
+	   IF (HAD_REAL_CONT) THEN
+	      CALL FLWRTF(' Minimum real height    = %F18.3',
+     &	         MIN_REAL_CONT)
+	      CALL FLWRTF(' Maximum real height    = %F18.3',
+     &	         MAX_REAL_CONT)
+C
+	      IF (SYMBOL) THEN
+		 WRITE (STRING,111) MIN_REAL_CONT	! convert to char
+		 CALL LIB$SET_SYMBOL ('IINFO_MIN_REALZ',! DCL symbol name
+     &					STRING,		! value
+     &					2)		! global (1 for local)
+C
+		 WRITE (STRING,111) MAX_REAL_CONT	! convert to char
+		 CALL LIB$SET_SYMBOL ('IINFO_MAX_REALZ',! DCL symbol name
+     &					STRING,		! value
+     &					2)		! global (1 for local)
+	      ENDIF
+	   ELSE
+	      CALL FLWRTF(' No real height information')
+	   ENDIF
+	ENDIF
+C
+C Write out layer information, sorting the layers into numeric order
+C
+	IF (NXTOV .EQ. 0) THEN
+	   IF (.NOT. PRINTER) CALL FLWRTF
+	   CALL LSL_PUTMSG(IINFO__NOLAYERS)	! No layers
+	   GOTO 270				! Return with totals
+	ELSE
+	   CALL FLWRTF				! Write header information
+	   CALL FLWRTF
+	   CALL FLWRTF(' Information per Layer')
+	   CALL FLWRTF(' ---------------------')
+	   CALL FLWRTF
+	   CALL FLWRTF(' Layer    No. of     No. of      No. of'
+     &	      //'           2-D                3-D')
+	   CALL FLWRTF(' Number  Features  2-D Points  3-D Points'
+     &	      //'        Line-Length        Line-Length')
+	   CALL FLWRTF
+C
+C Now sort them out
+C
+	   OVDONE = -1
+C
+C Loop through layers, picking out lowest no. first	
+C
+230	   NOVNO = 32767
+	   DO 240 I = 1, NXTOV
+	      IF (OVNOS(I) .LE. OVDONE .OR. OVNOS(I) .GE. NOVNO) 
+     &		GOTO 240
+	      NOVNO = OVNOS(I)
+	      COVPTR = I
+240	   CONTINUE
+C
+	   IF (NOVNO .EQ. 32767) THEN
+	      GOTO 250				! Do the features
+	   ELSE
+	      OVDONE = NOVNO			! Update lowest layer
+C						! done
+C Output data for this layer
+	      CALL FLWRTF('  %^W%I4    %^L%I5     %I8    %I8  %F18.3 '
+     &	        //'%F18.3',
+     &		OVNOS(COVPTR),
+     &		FTCNT(COVPTR),
+     &		PTCNT2D(COVPTR),
+     &		PTCNT3D(COVPTR),
+     &		LL2D(COVPTR),
+     &		LL3D(COVPTR))
+	   ENDIF
+	   GOTO 230				! Until all layers
+	ENDIF
+C
+C Now the data per feature code
+C
+250	IF (INDEX .EQ. 0) THEN
+	   IF (.NOT. PRINTER) CALL FLWRTF
+	   CALL LSL_PUTMSG(IINFO__NOFT)		! Say no features
+	ELSE
+	   CALL FLWRTF				! Output header
+	   CALL FLWRTF
+	   CALL FLWRTF(' Information per Feature Code')
+	   CALL FLWRTF(' ----------------------------')
+	   CALL FLWRTF
+	   CALL FLWRTF(' Feature  No. of     No. of      No. of'
+     &	      //'           2-D                3-D')
+	   CALL FLWRTF('  Code   Features  2-D Points  3-D Points'
+     &	      //'        Line-Length        Line-Length')
+	   CALL FLWRTF
+C
+	   DO 260 INDEX = 1,BOTTOM	! Write out all feature data
+	      CALL FLWRTF('  %I5   %I5     %I8    %I8  %F18.3 %F18.3',
+     &			FCARR(1,INDEX),
+     &			FCARR(2,INDEX),
+     &			FCARR(3,INDEX),
+     &			FCARR(4,INDEX),
+     &			LLARR(1,INDEX),
+     &			LLARR(2,INDEX))
+260	   CONTINUE
+	ENDIF
+C
+C Write out totals information
+C
+270	DO 280 I = 1,NXTOV			! Add up no. of features
+	   LTOTF = LTOTF + FTCNT(I)
+280	CONTINUE
+C
+	CALL FLWRTF
+	CALL FLWRTF
+	CALL FLWRTF
+	CALL FLWRTF(' Totals Information')
+	CALL FLWRTF(' ------------------')
+	CALL FLWRTF
+C
+C No. of layers
+	CALL FLWRTF(' Total number of layers =             %^W%I5',
+     &	   NXTOV)
+C
+C No. of features
+	CALL FLWRTF(' Total number of features =        %I8',LTOTF)
+C
+C No. of 2-D points
+	CALL FLWRTF(' Total number of 2-D points =    %I10',T2DPTS)
+C
+C No. of 3-D points
+	CALL FLWRTF(' Total number of 3-D points =    %I10',T3DPTS)
+C
+C 2-D line-length
+	CALL FLWRTF(' Total 2-D line-length = %F18.3',LINL2D)
+C
+C 3-D line-length
+	CALL FLWRTF(' Total 3-D line-length = %F18.3',LINL3D)
+C
+C Output to DCL symbols if requested
+C
+	IF (SYMBOL) THEN
+	   WRITE (STRING,112) NXTOV		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_NUM_LAY',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,112) LTOTF		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_NUM_FTR',	! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,112) T2DPTS		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_NUM_2DPTS', ! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,112) T3DPTS		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_NUM_3DPTS', ! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) LINL2D		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_LEN_2DLIN', ! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+C
+	   WRITE (STRING,111) LINL3D		! convert to char
+	   CALL LIB$SET_SYMBOL('IINFO_LEN_3DLIN', ! DCL symbol name
+     &				STRING,		! value
+     &				2)		! global (1 for local)
+	ENDIF
+C
+C ................................................................
+C If /LAYER set then re-scan the file to get the necessary info
+C
+	IF (.NOT.LAYER) GOTO 380
+C
+	CALL IFFRWD			! Rewind to start of file
+C
+	HAD_NO=.FALSE.			! We haven't found a layer yet
+C
+	CALL FLWRTF			! Write header
+	CALL FLWRTF
+	CALL FLWRTF(' Information per Feature Code/Layer')
+	CALL FLWRTF(' ----------------------------------')
+C
+C ..................................................................
+C
+	CALL IFFNXC ('NO',IELEN)	! find the start of the first overlay
+C
+290	IF (HAD_NO) THEN		! If we're already in
+	   INFO_OUT=IINFO__BADLAY
+	   CALL LSL_PUTMSG(INFO_OUT,OVLNUM)	! a layer there must
+	   GOTO 400				! be trouble, so return.
+	ENDIF
+C
+	CALL EIHRI(OVLNUM,1,1)		! Read layer number
+	HAD_NO = .TRUE.			! Say we're in one now
+	BOTTOM = 0			! No features yet
+C
+	CALL FLWRTF
+	CALL FLWRTF('   Layer %I4',OVLNUM)
+	CALL FLWRTF('   ----------')
+	CALL FLWRTF
+	CALL FLWRTF(' Feature  No. of     No. of      No. of'
+     &	   //'           2-D                3-D')
+	CALL FLWRTF('  Code   Features  2-D Points  3-D Points'
+     &	   //'        Line-Length        Line-Length')
+	CALL FLWRTF
+C
+C ..................................................................
+C
+300	CALL IFFNXT(IECODE,IELEN)
+	IF (IECODE .EQ. -1) GOTO 390
+C
+C ..................................................................
+C
+	IF ( IECODE .EQ. 'FS') GOTO 310
+	IF ( IECODE .EQ. 'CB') GOTO 320
+	IF ( IECODE .EQ. 'EF') GOTO 350
+	IF ( IECODE .EQ. 'EO') GOTO 360
+	IF ( IECODE .EQ. 'EJ') GOTO 380
+	IF ( IECODE .EQ. 'NO') GOTO 290
+	GOTO 300
+C
+C ..................................................................
+C 'FS'
+C
+310	IF (HAD_NF) THEN		! If we're already in a
+	   INFO_OUT=IINFO__BADNF	! feature, there must be
+	   CALL LSL_PUTMSG(INFO_OUT,NFNUM,ISQ)	
+	   GOTO 400			! trouble, return.
+	ENDIF
+C
+	HAD_NF=.TRUE.			! We're in one now
+	CALL EIHRI(FTRCOD,1,1)		! Read feature code
+	NO2DPF = 0			! Initialise feature 
+	NO3DPF = 0			! parameters
+	LINL2D = 0.0
+	LINL3D = 0.0
+	NFTR = .TRUE.
+	INDEX = SEARCH(FTRCOD,BOTTOM)	! Find FC position in table
+	IF (FOUND .EQ. .FALSE.) THEN	! Not already there - 
+	   CALL MOVE(INDEX,BOTTOM)	! Either put at end of table or
+C					! shift everything else down to
+C					! make room for this one
+	   FCARR(1,INDEX) = FTRCOD	! Save code
+	   FCARR(2,INDEX) = 1		! Init count of features
+C					! with this code
+	   BOTTOM = BOTTOM + 1		! Update count of FC's
+	ELSE					! Another ftr with
+	   FCARR(2,INDEX) = FCARR(2,INDEX) + 1	! this code
+	ENDIF
+C
+	GOTO 300
+C
+C ..................................................................
+C 'CB'
+C
+320	CALL EIHRCB_HEAD(CBH)			! Read CB header
+	CALL EIHRCB_DATA(CBD)			! Read CB data
+	NPTS = CBH.NROW				! Note No. of pts in CB
+C
+C Set X, Y and Z (if present) coords into nice simple arrays
+C
+	CALL IFS_CB_READ(CBH,CBD,PT_X,1,IFF_C_X,1,NPTS)
+	CALL IFS_CB_READ(CBH,CBD,PT_Y,1,IFF_C_Y,1,NPTS)
+	RET = IFS_CB_READ(CBH,CBD,PT_Z,1,IFF_C_Z,1,NPTS)
+C
+	Z_PRESENT = RET.NE.IFF__MISSING		! Z coord present?
+C
+	IF (.NOT.HAD_WIN) THEN
+	   IF (.NOT.Z_PRESENT) THEN
+	      NO2DPF = NO2DPF + NPTS	! Add up 2D points
+	   ELSE
+	      NO3DPF = NO3DPF + NPTS
+	   ENDIF
+	ENDIF
+C
+C Calculate line length by Pythagoras
+C
+	DO 340 K = 1,NPTS
+C
+C Check if the point is within the window, if given, and skip if so
+C
+	   IF (HAD_WIN) THEN
+	      IF (PT_X(K).GT.EBOUND .OR. PT_X(K).LT.WBOUND .OR.
+     &		  PT_Y(K).GT.NBOUND .OR. PT_Y(K).LT.SBOUND) GOTO 340
+C
+	      IF (Z_PRESENT) THEN
+		 NO3DPF = NO3DPF + 1
+	      ELSE
+	         NO2DPF = NO2DPF + 1
+	      ENDIF
+	   ENDIF
+C
+	   IF (NFTR) GOTO 330			! Get start if new
+C
+	   DX = PT_X(K) - LASTX			! Change in X
+	   DY = PT_Y(K) - LASTY			! and in Y
+	   SQ_LEN = DX*DX + DY*DY
+C
+	   IF (Z_PRESENT) THEN
+	      LINL3D = LINL3D + SQRT(SQ_LEN)	! 3D length so far
+	   ELSE
+	      LINL2D = LINL2D + SQRT(SQ_LEN)	! 2D length so far
+	   ENDIF
+C
+330	   LASTX = PT_X(K)			! Update current pos
+	   LASTY = PT_Y(K)
+	   NFTR = .FALSE.			! continue with this ftr
+340	CONTINUE
+C
+	GOTO 300					! Go for next entry
+C
+C ..................................................................
+C 'EF'
+C
+350	IF (.NOT. FOUND) THEN			! Update arrays 
+C						! appropriately
+	   FCARR(3,INDEX) = NO2DPF
+	   FCARR(4,INDEX) = NO3DPF
+	   LLARR(1,INDEX) = LINL2D
+	   LLARR(2,INDEX) = LINL3D
+	ELSE
+	   FCARR(3,INDEX) = FCARR(3,INDEX) + NO2DPF
+	   FCARR(4,INDEX) = FCARR(4,INDEX) + NO3DPF
+	   LLARR(1,INDEX) = LLARR(1,INDEX) + LINL2D
+	   LLARR(2,INDEX) = LLARR(2,INDEX) + LINL3D
+	ENDIF
+	HAD_NF = .FALSE.			! Allow NF again
+C
+	GOTO 300
+C
+C ..................................................................
+C 'EO'
+C
+C Write out totals for this layer
+C
+360	DO 370 INDEX=1,BOTTOM
+C
+	   CALL FLWRTF('  %I5   %I5     %I8    %I8  %F18.3 %F18.3',
+     &		FCARR( 1,INDEX),
+     &		FCARR( 2,INDEX),
+     &		FCARR( 3,INDEX),
+     &		FCARR( 4,INDEX),
+     &		LLARR( 1,INDEX),
+     &		LLARR( 2,INDEX))
+C
+370	CONTINUE
+C
+	HAD_NO = .FALSE.			! Allow NO again
+C
+	GOTO 300
+C
+C ..................................................................
+C 'EJ'
+C
+380	CONTINUE
+C
+C ..................................................................
+C Finally see if /TIMINGS was set - output this data if so
+C
+	IF (HAD_HIST) THEN
+	   IF (TIME) THEN
+	      CALL FLWRTF
+	      CALL FLWRTF
+	      CALL FLWRTF(' Timings Information')
+	      CALL FLWRTF(' -------------------')
+	      CALL FLWRTF
+	      CALL FLWRTF(' Total elapsed time = '
+     &	        //'%P0%^W%I4:%P0%I2:%P0%I2',EL_HOURS,EL_MINS,EL_SECS)
+	      CALL FLWRTF
+	      CALL FLWRTF(' Total CPU time     = '
+     &	        //'%P0%^W%I4:%P0%I2:%P0%I2',CPU_HOURS,CPU_MINS,CPU_SECS)
+	      CALL FLWRTF
+	   ENDIF
+	ENDIF
+	GOTO 400
+C
+C***********************************************************************
+C Unexpected end of file. Tell user and return.
+C
+390	IF (.NOT.PRINTER) CALL FLWRTF
+	INFO_OUT=IINFO__UNEXPEOF
+	CALL LSL_PUTMSG(INFO_OUT)
+C
+111	FORMAT (F20.3)
+112	FORMAT (I20)
+C
+400	RETURN
+	END
+C

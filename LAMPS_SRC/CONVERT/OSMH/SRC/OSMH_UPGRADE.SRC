@@ -1,0 +1,164 @@
+	LOGICAL FUNCTION OSMH_UPGRADE
+C
+***	IDENT	18JA89
+***	MODULE	OSMH_UPGRADE
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RJH	29-Nov-1988
+C
+C	OS Map Header Library - Upgrade Map Header
+C
+C Description
+C
+C	Upgrades map header by transferring things to new fields
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+C
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C Common Blocks
+C
+	INCLUDE	'LSL$CMNIFF:MHDMB.CMN'	! OS map header
+C
+C Functions called
+C
+	LOGICAL		OSMH_TO_BINDAY	! convert date to ICL binary day
+	LOGICAL		OSMH_CID_ZERO	! is contractors ID zero ?
+C
+C Local Variables
+C
+	INTEGER*4	DAY		! day for date
+	INTEGER*4	MONTH1		! month for 1st or earlier date
+	INTEGER*4	YEAR1		! year for 1st or earlier date
+	INTEGER*4	MONTH2		! month for 2nd or later date
+	INTEGER*4	YEAR2		! year for 2nd or later date
+	INTEGER*4	I		! counter
+	LOGICAL		SUCCESS		! success code
+	BYTE		CONTR(4)	! contractors ID string
+C
+C Initialise ourselves
+C
+	SUCCESS = SS$_NORMAL
+C
+C First transfer things from old fields into new ones
+C
+C If the new field is empty, we assume we have an old format header, 
+C and transfer things from the appropriate places. Then clear the old 
+C field, to ensure that it doesn't get transferred again (e.g. if after 
+C updating, the new field is then cleared by OSMHED). Note that if the 
+C old field is already blank, we still transfer it rather than 
+C bothering to check it first (transferring the blank field has no 
+C effect anyway)
+C
+C MHMHWM - High Water Mark Dates - if there isn't a double date, assume 
+C there is a single date, and transfer it
+C
+	CALL OSMH_GETHALVES(MHMHWM,YEAR1,YEAR2)
+	IF (YEAR1 .LE. 0 .AND. YEAR2 .LE. 0) THEN   ! no double date
+	   CALL OSMH_PUTHALVES(MHMHWM,MHHWMD,0)	    ! so use single date
+	ENDIF
+C
+C MHMLWM - Low Water Mark Dates - do the same
+C
+	CALL OSMH_GETHALVES(MHMLWM,YEAR1,YEAR2)
+	IF (YEAR1 .LE. 0 .AND. YEAR2 .LE. 0) THEN   ! no double date
+	   CALL OSMH_PUTHALVES(MHMLWM,MHLWMD,0)	    ! so use single date
+	ENDIF
+C
+C MHOSUR - Original Survey Dates - if there are none, then if there is 
+C an old double date (Multiple Survey Date) use that, otherwise use the 
+C old single date (Survey Date)
+C
+	CALL OSMH_GETMY(MHOSUR(1),MONTH1,YEAR1)
+	CALL OSMH_GETMY(MHOSUR(2),MONTH2,YEAR2)
+	IF (YEAR1 .LE. 0 .AND. YEAR2 .LE. 0) THEN   ! no new date
+	   CALL OSMH_GETHALVES(MHMULS,YEAR1,YEAR2)
+	   IF (YEAR1 .LE. 0 .AND. YEAR2 .LE. 0) THEN! no double date
+	      MHOSUR(1) = MHSURD		    ! so use single date
+	   ELSE					    ! use double date
+	      MONTH1 = 0			    ! OS requested 0 !
+	      MONTH2 = 0
+	      IF (YEAR1 .GT. 0) CALL OSMH_PUTMY(MHOSUR(1),MONTH1,YEAR1)
+	      IF (YEAR2 .GT. 0) CALL OSMH_PUTMY(MHOSUR(2),MONTH2,YEAR2)
+	   ENDIF
+	ENDIF
+C
+C MHSDUP - Digital Update Date - if there isn't (a new single) one, 
+C then find the latest of the old Digital Update Dates
+C
+	IF (MHSDUP .EQ. 0) THEN			    ! no new date
+	   YEAR2  = 0
+	   MONTH2 = 0
+	   DO 100 I=1,6
+	      CALL OSMH_GETMY(MHDUPD(I),MONTH1,YEAR1)
+	      IF (YEAR1 .GT. YEAR2) THEN		 ! later year
+	         YEAR2  = YEAR1
+	         MONTH2 = MONTH1
+	      ELSEIF (YEAR1 .EQ. YEAR2) THEN	   	 ! same year
+	         IF (MONTH1 .GT. MONTH2) MONTH2 = MONTH1 ! later month ?
+	      ENDIF
+100	   CONTINUE
+C
+C Now get the old Selected Revision Date and find the latest of that 
+C and the latest of the old Digital Update Dates
+C
+	   CALL OSMH_GETMY(MHSRVD,MONTH1,YEAR1)
+	   IF (YEAR1 .GT. YEAR2) THEN		 	 ! later year
+	      YEAR2  = YEAR1
+	      MONTH2 = MONTH1
+	   ELSEIF (YEAR1 .EQ. YEAR2) THEN	   	 ! same year
+	      IF (MONTH1 .GT. MONTH2) MONTH2 = MONTH1	 ! later month ?
+	   ENDIF
+C
+C The resulting date is the one we use
+C
+	   IF (YEAR2 .GT. 0) THEN
+	      IF (MONTH2 .LE. 0) MONTH2 = 1	! <= 0 very unlikely
+	      DAY = 1				! OS want 0 but get 1
+	      SUCCESS = OSMH_TO_BINDAY(MHSDUP,DAY,MONTH2,YEAR2)
+	      IF (.NOT. SUCCESS) MHSDUP = 0
+	   ENDIF
+	ENDIF
+C
+C MHCONT - Contractors Identity - if the (new) primary and secondary 
+C codes are both zero, convert the old contractors identity into a 
+C character string and store it in the new field.
+C
+	IF (OSMH_CID_ZERO(MHCID)) THEN		! both codes zero
+	   IF (MHCONT .NE. 0) THEN		! and have old ID
+	      CALL EXPAND('%W%P0%I4',CONTR,MHCONT) ! expand as a string
+	      CALL OSMH_PUTCHAR(CONTR,MHCID,4)	! convert to ICL
+	   ENDIF
+	ENDIF
+C
+C Clear all the superceded fields
+C
+	MHHWMD = 0			! Mean High Water Mark Date
+	MHLWMD = 0			! Mean Low  Water Mark Date
+	MHMULS = 0			! Multiple Survey Dates
+	MHSURD = 0			! Survey Date
+	MHSRVD = 0			! Selected Revision Date
+	DO 200 I=1,6
+	   MHDUPD(I) = 0		! Digital Update Dates
+200	CONTINUE
+	MHCONT = 0			! contractors ID
+C
+C Clear all the obsolete fields
+C
+	MHSQN  = 0			! 10km Square Number
+	MHLOCN = 0			! Location Number in 10km square
+	MHDLA  = 0			! Date of Last Amendment
+	MHGEN  = 0			! Generation Number
+	MHNSUP = 0			! Number of Setup Points
+C
+C Assign function value
+C
+	OSMH_UPGRADE = SUCCESS
+C
+C Return
+C
+	RETURN
+	END

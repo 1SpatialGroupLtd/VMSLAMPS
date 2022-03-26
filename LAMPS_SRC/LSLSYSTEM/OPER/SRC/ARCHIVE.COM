@@ -10,6 +10,7 @@ $!  Rehashed				V3.0	PGH	19-Feb-1990
 $!  Saveset names shorter		V3.1	PGH	27-Feb-1990
 $!  Know about Exabyte			V3.2	PGH	23-Jun-1990
 $!  Avoid spaces in labels		V3.3	PGH	26-Sep-1990
+$!  Handle alloclass eg $1$DKA700:	V3.4	PGH	25-Nov-1992
 $!
 $! Note:
 $!  This file is provided as an example of a command procedure to
@@ -150,9 +151,11 @@ $	month=f$extract(0,2,month)
 $	day='f$extract(0,minus,date)'
 $	if day.lt.10 then day:=0'day'
 $	day:='day'
+$	devlen=f$len(device)
 $	colpos=f$locate(":",device)
 $	dolpos=f$locate("$",device)
-$	if dolpos.eq.f$len(device)
+$	if dolpos.eq.0 then dolpos=f$locate("$",f$extract(1,devlen-1,device))+1
+$	if dolpos.eq.devlen
 $	then
 $	   devpos=2
 $	else
@@ -184,12 +187,16 @@ $	tape = f$getdvi(f$elem(0,":",line),"FULLDEVNAM")
 $	if f$getdvi(tape,"DEVCLASS") .ne. 2 then goto 72
 $	devtype=f$getdvi(tape,"MEDIA_NAME")
 $	devtype_explain="(Unknown type)"
-$	if devtype.eqs."TK50" then devtype_explain="(Cartridge tape)"
-$	if devtype.eqs."TK70" then devtype_explain="(Cartridge tape)"
+$	if devtype.eqs."TK50" then devtype_explain="(95MB Cartridge tape)"
+$	if devtype.eqs."TZ30" then devtype_explain="(95MB Cartridge tape)"
+$	if devtype.eqs."TK70" then devtype_explain="(296MB Cartridge tape)"
 $	if devtype.eqs."TU81" then devtype_explain="(Half inch magtape)"
 $	if devtype.eqs."TU78" then devtype_explain="(Half inch magtape)"
 $	if devtype.eqs."TE16" then devtype_explain="(Half inch magtape)"
 $	if devtype.eqs."TS11" then devtype_explain="(Half inch magtape)"
+$	if devtype.eqs."TLZ04" then devtype_explain="(1.2GB DAT tape)"
+$	if devtype.eqs."TLZ06" then devtype_explain="(4GB DAT tape)"
+$	if devtype.eqs."TKZ08" then devtype_explain="(Exabyte tape)"
 $	if devtype.eqs."MKX00" then devtype_explain="(SCSI tape)"
 $	tape=tape-"_"
 $	ws "Device ",tape," is a ",devtype," drive ",devtype_explain

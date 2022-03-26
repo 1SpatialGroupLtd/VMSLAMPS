@@ -1,0 +1,423 @@
+	PROGRAM PRIM2RASTER
+C
+**	MODULE	PRIM2RASTER
+**	IDENT	11MR92
+C
+C Copyright Laser-Scan Labs., Ltd., Cambridge, England.
+C
+C Author J.H.Rees
+C
+C	Main program for the IFF-to-Raster conversion program
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'($JPIDEF)'
+***	PARAMETER/CMN:PRIM2RASTERMSG/
+C
+***	COMMON/CMN:COORD/
+***	COMMON/CMN:FORMAT/
+***	COMMON/CMN:PRIM2RASTER/
+***	COMMON/PRIM_CMN:MH_IFF_PRIMITIVE/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNLSL:CLD/
+C
+C functions:
+C
+	EXTERNAL	PRIM2RASTER_CLD
+	INTEGER		DCL_STARTUP
+	INTEGER		DCL_QUAL
+	INTEGER		DCL_INT
+	INTEGER		DCL_REAL
+	INTEGER		DCL_STR
+	INTEGER		DCL_FILE
+	INTEGER		SIGCHS
+	INTEGER		SYS$EXPREG
+	INTEGER		LIB$GETJPI
+	INTEGER		TRNALL
+	LOGICAL		RDCHS,RDLONG
+C
+	INTEGER		READ_IFF		! reads the IFF-file.
+	INTEGER		EXPLOIT_SECTORS		! creates the raster-data.
+	INTEGER		FORMAT_INIT		! init output device
+	INTEGER		FORMAT_CLOSE		! close output device
+C
+C w/s:
+C
+	INTEGER		STATUS		! functions return.
+	LOGICAL		ABSENT		! filename absent?
+	LOGICAL		PRESENT		! had local  qualifier?
+	LOGICAL		NEGATED		! qualifier negated?
+	INTEGER*4	RETADR(2)
+	INTEGER		I
+	LOGICAL		OPNIFF
+	INTEGER		WSEXT,PGFILCNT,FREPTE
+	CHARACTER*8	TRAN
+	INTEGER		GFAPAG		! number of pages for GFA memory
+	BYTE		CH
+C
+	CHARACTER*(*)	DEFAULT_MAG_TAPE
+	PARAMETER	(DEFAULT_MAG_TAPE = 'MUA0:')
+C
+	INTEGER		DEFAULT_DENSITY
+	PARAMETER	(DEFAULT_DENSITY = 1600)
+C
+	INTEGER		DEFAULT_BLOCKSIZE
+	PARAMETER	(DEFAULT_BLOCKSIZE = 1024)
+C
+	INTEGER		DEFAULT_FORMAT_ID
+	PARAMETER	(DEFAULT_FORMAT_ID = 1)
+C
+	INTEGER		MAX_FORMAT_COUNT
+	PARAMETER	(MAX_FORMAT_COUNT = 2)
+C
+	REAL		SCITEX_RES_DEFAULT		! for the SCITEX
+	PARAMETER	(SCITEX_RES_DEFAULT = 0.25)	! - in mm.
+C
+	CHARACTER*20	AVAILABLE_FORMATS(MAX_FORMAT_COUNT)
+	DATA	AVAILABLE_FORMATS/'MDP','TDP'/
+C
+	REAL	DEFAULT_RESOLUTION(MAX_FORMAT_COUNT)
+	DATA	DEFAULT_RESOLUTION/0.01,		! HELL MDP
+     &				   0.01/		! HELL TDP
+	LOGICAL	DEFAULT_MIRROR(MAX_FORMAT_COUNT)
+	DATA	DEFAULT_MIRROR/.TRUE.,			! HELL MDP
+     &			       .TRUE./			! HELL TDP
+C
+C   initialise:
+C
+	CALL LSL_INIT
+	OPNIFF = .FALSE.
+	FORMAT_ID = DEFAULT_FORMAT_ID
+	NGETVM = 0
+C
+	TAPE_MOUNTED = .FALSE.
+	FILE1_OPEN = .FALSE.
+	FILE2_OPEN = .FALSE.
+	HEADER_WRITTEN = .FALSE.
+C
+C miter limit (as in PostScript) is the maximum ratio of the width
+C across a miter join to the line thickness (>=1).
+C It is related to the maximum angle between successive line segments (A)
+C by 1/MITER_LIMIT = COS (A/2).
+C Squaring this, and using COS(A/2) ** 2 = (1 + COS(A))/2, we arrive at a value
+C (MITER_TEST) to compare with COS(A) which we know.
+	MITER_LIMIT = 10.0
+	MITER_TEST = 2/MITER_LIMIT**2 - 1
+C
+C...get the command-line...
+C
+	STATUS = DCL_STARTUP(
+     &		'PRIM2RASTER',.FALSE.,PRIM2RASTER_CLD,.TRUE.)
+	IF ( .NOT. STATUS ) GOTO 999
+C
+C...logging enabled?
+C
+	STATUS = DCL_QUAL('LOG',LOGGING,PRESENT,NEGATED,.TRUE.)
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+C check sizes of graphics buffers here
+C get the maximum number of fill area points to be used
+	GFAMAX = DEFAULT_GFAMAX
+	IF (TRNALL('LSL$FILL_POINTSMAX',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),LEN(TRAN))
+	   IF (RDLONG(GFAMAX)) GFAMAX = DEFAULT_GFAMAX
+	   IF (.NOT.RDCHS(CH)) GFAMAX = DEFAULT_GFAMAX
+	   GFAMAX = GFAMAX + 1 		! one more than the user expected!!!
+	ENDIF
+C
+C don't allow too few points
+	GFAMAX = MAX(200,GFAMAX)
+C
+C get the maximum number of intersections to be allowed
+C
+	GFASCT = DEFAULT_GFASCT
+	IF (TRNALL('LSL$FILL_CUTSMAX',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),LEN(TRAN))
+	   IF (RDLONG(GFASCT)) GFASCT = DEFAULT_GFASCT
+	   IF (.NOT.RDCHS(CH)) GFASCT = DEFAULT_GFASCT
+	ENDIF
+C
+C don't allow too few intersections
+	GFASCT = MAX(10,GFASCT)
+C
+C amount of memory required for graphics buffer is
+C 4 * 7 * GFAMAX + 4 * 5 * GFASCT bytes
+C
+	GFAPAG = ((4*7*GFAMAX + 4*5*GFASCT)-1)/512 + 1
+C
+	IF (LOGGING) CALL WRITEF(
+     &		'Allocating %F0.2 megabytes memory for area fill buffers',
+     &		GFAPAG/2048.0)
+	STATUS = SYS$EXPREG(%VAL(GFAPAG),RETADR,,)
+	IF (.NOT.STATUS) THEN
+	  CALL LSL_PUTMSG(P2R__NOFILLMEM)
+	  CALL LSL_PUTMSG(STATUS)
+	  GOTO 999
+	ENDIF
+C
+	COORDS_ADR = RETADR(1)
+	SIDES_ADR = COORDS_ADR + 4*2*GFAMAX
+	SIDPTR_ADR = SIDES_ADR + 4*4*GFAMAX
+	INTSCT_ADR = SIDPTR_ADR + 4*1*GFAMAX
+	INTPTS_ADR = INTSCT_ADR + 4*4*GFASCT
+CCC end of INTPTS = INTPTS_ADR + 4*1*GFASCT
+C
+C...get the IFF-file we are to convert to raster.
+C
+	STATUS = DCL_FILE('IN_FILE_SPEC', 'LSL$IF:IFF.PRIM;0'
+     &			  ,ABSENT , .FALSE., .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999
+	IFFTIT = FILARY(1)(:FIL_LEN(1))
+	IFFLEN = FIL_LEN(1)
+C
+C...get the raster format we are to use
+C
+	STATUS = DCL_STR('FORMAT', .TRUE.)
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+	IF (NUMSTR.GT.0) THEN
+C
+C...look for a match between what has been requested, and what we can support.
+C
+	  CALL STR$UPCASE(CARRAY(1)(:STR_LEN(1)),CARRAY(1)(:STR_LEN(1)))
+	  DO 11 I = 1, MAX_FORMAT_COUNT
+	    IF ( CARRAY(1)(:STR_LEN(1)) .EQ. AVAILABLE_FORMATS(I) )  THEN
+	      FORMAT_ID = I
+	      GOTO 12
+	    ENDIF
+11	  CONTINUE
+	  CALL LSL_PUTMSG(P2R__BADFORMAT,CARRAY(1)(:STR_LEN(1)))
+	  GOTO 999
+	ENDIF
+C
+C...get the mag-tape we are to o/p to.
+C
+12	STATUS = DCL_STR('MAGTAPE', .TRUE.)
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+	IF ( NUMSTR.GT.0 )  THEN
+	  MAG_TAPE = CARRAY(1)(:STR_LEN(1))
+	  MAG_LEN = STR_LEN(1)
+	ELSE
+	  MAG_TAPE = DEFAULT_MAG_TAPE		! use default tape.
+	  MAG_LEN = LEN(DEFAULT_MAG_TAPE)
+	ENDIF
+C
+C...get the tape density
+C
+	STATUS = DCL_INT('DENSITY', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	IF ( NUMINT.GT.0 )  THEN
+	  DENSITY = IARRAY(1)
+	ELSE
+	  DENSITY = DEFAULT_DENSITY		! use default res.
+	ENDIF
+	IF (DENSITY.EQ.800) THEN
+	  DENSITY = 0
+	ELSEIF (DENSITY.EQ.1600) THEN
+	  DENSITY = -1
+	ELSEIF (DENSITY.EQ.6250) THEN
+	  DENSITY = -2
+	ELSE
+	  CALL LSL_PUTMSG(P2R__BADDENS)
+	  GOTO 999
+	ENDIF
+C
+C...get the resolution
+C
+	STATUS = DCL_REAL('RESOLUTION', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	IF ( NUMREA.GT.0 )  THEN
+	  RESOLUTION = RARRAY(1)
+	  GOTO 13
+	ENDIF
+C
+	STATUS = DCL_REAL('LPMM', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	IF ( NUMREA.GT.0 )  THEN
+	  IF (RARRAY(1).EQ.0.0) THEN
+	    CALL LSL_PUTMSG(P2R__BADRES)
+	    GOTO 999
+	  ENDIF
+	  RESOLUTION = 1.0/RARRAY(1)
+	  GOTO 13
+	ENDIF
+C
+	STATUS = DCL_REAL('LPI', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	IF ( NUMREA.GT.0 )  THEN
+	  IF (RARRAY(1).EQ.0.0) THEN
+	    CALL LSL_PUTMSG(P2R__BADRES)
+	    GOTO 999
+	  ENDIF
+	  RESOLUTION = 25.4/RARRAY(1)
+	  GOTO 13
+	ENDIF
+C
+	RESOLUTION = DEFAULT_RESOLUTION(FORMAT_ID)	! use default res.
+	IF ( LOGGING )
+     &	    CALL WRITEF('Using default resolution: %F0.8', RESOLUTION)
+C
+13	IF (RESOLUTION.LE.0.0) THEN
+	  CALL LSL_PUTMSG(P2R__BADRES)
+	  GOTO 999
+	ENDIF
+C
+C...mirror required?
+C
+	STATUS = DCL_QUAL('MIRROR',MIRROR,PRESENT,NEGATED,.TRUE.)
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+	MIRROR = MIRROR.XOR.DEFAULT_MIRROR(FORMAT_ID)
+C
+C...get the tape blocksize
+C
+	CHECK = .FALSE.
+	STATUS = DCL_INT('BLOCKSIZE', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	IF ( NUMINT.GE.0 )  THEN
+	  BLOCKSIZE = IARRAY(1)
+	  IF (BLOCKSIZE.EQ.0) THEN
+	    CHECK = .TRUE.
+	  ELSEIF (BLOCKSIZE.LT.128) THEN
+	    CALL LSL_PUTMSG(P2R__BADBLOSIZ,128)
+	    GOTO 999
+	  ENDIF
+	ELSE
+	  BLOCKSIZE = DEFAULT_BLOCKSIZE		! use default
+	ENDIF
+C
+C...get the raster buffer size
+C
+	STATUS = DCL_REAL('MEMORY', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	IF ( NUMREA.GT.0 )  THEN
+	  IF (RARRAY(1).LE.0.0.OR.RARRAY(1).GT.1000.0) THEN
+	    CALL LSL_PUTMSG(P2R__BADMEMSIZ,0,1000)
+	    GOTO 999
+	  ENDIF
+	  BUF_SIZE = RARRAY(1)*2048		! convert to pages
+	ELSE
+C
+C get default according to system settings
+C
+	  STATUS = LIB$GETJPI(JPI$_WSEXTENT,,,WSEXT)
+	  BUF_SIZE = WSEXT*0.9
+C
+	  IF (LOGGING) CALL WRITEF(
+     &	'Default /MEMORY (90%% of WSEXTENT) is %F0.2 megabytes',
+     &					FLOAT(BUF_SIZE)/2048.0)
+	ENDIF
+C
+C check if need to further restrict buffer size
+	STATUS = LIB$GETJPI(JPI$_PAGFILCNT,,,PGFILCNT)
+	PGFILCNT = PGFILCNT*0.9
+	STATUS = LIB$GETJPI(JPI$_FREPTECNT,,,FREPTE)
+	FREPTE = FREPTE*0.9
+	IF (BUF_SIZE.GT.MIN(PGFILCNT,FREPTE)) THEN
+	  IF (PGFILCNT.LT.FREPTE) THEN
+	    BUF_SIZE = PGFILCNT
+	    IF (LOGGING) CALL WRITEF(
+     &	'Maximum /MEMORY (90%% of free PGFLQUO) is %F0.2 megabytes',
+     &					FLOAT(BUF_SIZE)/2048.0)
+	  ELSE
+	    BUF_SIZE = FREPTE
+	    IF (LOGGING) CALL WRITEF(
+     &'Maximum /MEMORY (90%% of free VIRTUALPAGECNT) is '//
+     &'%F0.2 megabytes',FLOAT(BUF_SIZE)/2048.0)
+	  ENDIF
+	ENDIF
+	BUF_SIZE = BUF_SIZE*512		! convert to bytes
+C
+C...foreground option for binary mapping of colours requested?
+C
+	BINARY = .FALSE.
+	STATUS = DCL_INT('FOREGROUND', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	IF ( NUMINT.GT.0 )  THEN
+	  BINARY = .TRUE.
+	  FOREGROUND = IARRAY(1)
+	ENDIF
+C
+C...background colour specified
+C
+	BACKGROUND = 0
+	STATUS = DCL_INT('BACKGROUND', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	IF ( NUMINT.GT.0 )  THEN
+	  BACKGROUND = IARRAY(1)
+	ENDIF
+C
+C...mask colour specified
+C
+	MASK = 0
+	STATUS = DCL_INT('MASK', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	IF ( NUMINT.GT.0 )  THEN
+	  MASK = IARRAY(1)
+	ENDIF
+C
+C...border width to allow around range
+C
+	STATUS = DCL_REAL('BORDER', .TRUE.)
+	IF ( .NOT. STATUS )  GOTO 999		! failed - give up with status
+	BORDER = 0.0
+	IF ( NUMREA.GT.0 )  THEN
+	  BORDER = RARRAY(1)
+	  IF (BORDER.LT.0.0) THEN
+	    CALL LSL_PUTMSG(P2R__BADBORDER)
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C Open IFF
+C
+	CALL IFFOPN(IFFLUN,IFFTIT(:IFFLEN),0)
+	IF (IERCD.NE.0) THEN
+	  CALL LSL_PUTMSG(P2R__ERROPIFF,IFFTIT(:IFFLEN))
+	  GOTO 999
+	ENDIF
+	IF (LOGGING) CALL IFFVER
+	OPNIFF = .TRUE.
+C
+C initialise the output device
+C
+	STATUS = FORMAT_INIT()
+	IF ( .NOT. STATUS )  THEN
+	  CALL LSL_PUTMSG(STATUS)		! error
+	  GOTO 999
+	ENDIF
+C
+	IF (LOGGING) THEN
+	  I = SIGCHS(AVAILABLE_FORMATS(FORMAT_ID))
+	  CALL WRITEF('Converting to %S format at resolution %F0.8 mm',
+     &		AVAILABLE_FORMATS(FORMAT_ID)(:I),RESOLUTION)
+	  CALL WRITEF('Background value %N',BACKGROUND)
+	  IF (BINARY) CALL WRITEF(
+     &	'Binary output requested with foreground value %N',FOREGROUND)
+	  IF (MASK.NE.0) CALL WRITEF(
+     &	'Colour index %N will appear in the background colour',MASK)
+	ENDIF
+C
+C and process the IFF-file.
+C
+	STATUS = READ_IFF(%VAL(COORDS_ADR))
+	IF ( .NOT. STATUS )  THEN
+	  CALL LSL_PUTMSG(STATUS)		! error
+	  GOTO 999
+	ENDIF
+C
+C...now use the sector-list we've built-up to create the raster.
+C
+	STATUS = EXPLOIT_SECTORS(%VAL(COORDS_ADR))
+	IF ( .NOT. STATUS ) THEN
+	  CALL LSL_PUTMSG(STATUS)
+	  GOTO 999
+	ENDIF
+C
+C terminate the output
+C
+999	STATUS = FORMAT_CLOSE()
+	IF ( .NOT. STATUS )  CALL LSL_PUTMSG(STATUS)	! error
+C
+	IF (OPNIFF) CALL IFFCLO(IFFLUN)
+C
+	CALL LSL_EXIT
+	END

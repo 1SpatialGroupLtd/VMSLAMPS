@@ -1,0 +1,331 @@
+	SUBROUTINE DOTRAN
+C
+***	IDENT	09MY96
+***	MODULE	DOTRAN
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written				Ron Russell	8-June-1987
+C
+C	LITES2 cartographic editor TRANSFER command
+C
+        IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CONSTS/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:PROCESS/
+***	PARAMETER/CMN:REGPAR/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:DOUT/
+***	COMMON/CMN:MASTER/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/CMN:REGCMN/
+***	COMMON/CMN:STATE/
+***	COMMON/CMN:STRIKE/
+***	COMMON/CMN:TRANSFORM/
+***	COMMON/CMN:VARIAT/
+C
+	EXTERNAL	NASTY,MOAN
+C
+C functions called
+	LOGICAL		CHKPRT,DEFREG
+C
+C working storage
+	INTEGER*4	CURPPT
+	INTEGER		REG
+	LOGICAL		FINISHED
+	REAL		LINE(2,2)	! vector
+	REAL		XSTART,YSTART	! first point in region
+	REAL		DIST
+	LOGICAL		IFFUNT		! expecting IFF units ?
+C
+	REAL		SCLFAC_LTD	! maximum scale factor
+	PARAMETER	(SCLFAC_LTD = 1000.0)
+C
+C
+	IFFUNT = .TRUE.			! expecting IFF units
+C
+C Despatch according to secondary command
+	GOTO (100,200,300,400,500,600), DSECN
+C
+C Secondary command number out of range
+	IF (DSECN.EQ.0) GOTO 400	! default is FEATURE
+	CALL MSGCMD(NASTY,MSG_ERRSECIND)
+	GOTO 999
+C
+C :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C TRANSFER AC (is now TAKE AC) is not valid in READY, ON or MODIFY state
+C
+100	CONTINUE
+	IF (SINDEX.EQ.STATE_READY.OR.SINDEX.EQ.STATE_ON.OR.
+     &	    SINDEX.EQ.STATE_MODIFY) GOTO 990
+C
+C write a message, and then let DOTAKE take care of it
+	CALL INFORM(MSG_COMMANDREPLACE,'TRANSFER AC','TAKE AC')
+	CALL INFORM(MSG_COMMANDWITHDRAW,'TRANSFER AC')
+	CALL DOTAKE
+	GOTO 1000
+C
+C :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C TRANSFORM FROM
+C
+200	CONTINUE
+C
+C is it a vector?
+	IF (ABS(DREALS(1)-DREALS(3)).LT.LINWDTH.AND.
+     &	    ABS(DREALS(2)-DREALS(4)).LT.LINWDTH) THEN
+	   CALL MSGCMD(MOAN,MSG_NOTVALIDVECTOR)
+	   GOTO 999
+	ENDIF
+C
+C convert from sheet mms to IFF units if required
+	CALL TSTUNT(IFFUNT,4,DREALS)	! sheet mms given?
+C
+C store these values
+	TRNS_FROMA(1) = DREALS(1)
+	TRNS_FROMA(2) = DREALS(2)
+	TRNS_FROMB(1) = DREALS(3)
+	TRNS_FROMB(2) = DREALS(4)
+	TRNS_FROM = .TRUE.
+	TRNS_COEFF= .FALSE.
+	GOTO 350		! have we enough to compute transform?
+C
+C :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C TRANSFORM TO
+C
+300	CONTINUE
+C
+C is it a vector?
+	IF (ABS(DREALS(1)-DREALS(3)).LT.LINWDTH.AND.
+     &	    ABS(DREALS(2)-DREALS(4)).LT.LINWDTH) THEN
+	   CALL MSGCMD(MOAN,MSG_NOTVALIDVECTOR)
+	   GOTO 999
+	ENDIF
+C
+C convert from sheet mms to IFF units if required
+	CALL TSTUNT(IFFUNT,4,DREALS)	! sheet mms given?
+C
+C store these values
+	TRNS_TOA(1) = DREALS(1)
+	TRNS_TOA(2) = DREALS(2)
+	TRNS_TOB(1) = DREALS(3)
+	TRNS_TOB(2) = DREALS(4)
+	TRNS_TO = .TRUE.
+	TRNS_COEFF= .FALSE.
+C
+C compute transform, if there are two vectors
+350	CONTINUE
+	IF (.NOT.(TRNS_TO.AND.TRNS_FROM)) GOTO 1000
+C
+360	CALL ORTHOG(TRNS_FROMA,TRNS_FROMB,TRNS_TOA,TRNS_TOB,
+     &              TRNS_A,TRNS_B,TRNS_C1,TRNS_C2)
+C
+C compute other form, if not defined by coefficients
+	IF (.NOT.TRNS_COEFF) THEN
+	   TRNS_SCL = SQRT(TRNS_A**2 + TRNS_B**2)
+	   TRNS_ROT = ATAN2(TRNS_B,TRNS_A)
+	   IF (TRNS_ROT.LT.0.0) TRNS_ROT = TRNS_ROT + TWOPI
+	   TRNS_XORG = 0.0
+	   TRNS_YORG = 0.0
+	   TRNS_XOFF = TRNS_C1
+	   TRNS_YOFF = TRNS_C2
+	ENDIF
+	GOTO 1000
+C
+C :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C TRANSFORM FEATURE
+C
+400	CONTINUE
+C
+C is there a feature to transform?
+	IF (SINDEX.EQ.STATE_READY) GOTO 990
+C
+C is there a transformation set up?
+	IF (.NOT.(TRNS_FROM.AND.TRNS_TO).AND..NOT.TRNS_COEFF) THEN
+	   CALL MOAN(MSG_NOTRANSFORMDEF)
+	   CALL LEARN(MSG_SETUPTRANSFORM)
+	   GOTO 999
+	ENDIF
+C
+C split off here, if transforming text or symbols
+C
+	IF (SINDEX.EQ.STATE_TEXT.OR.SINDEX.EQ.STATE_SYMBOL.OR.
+     &	    SINDEX.EQ.STATE_MODIFY) THEN
+	   CALL TRNSTXT
+	   GOTO 1000
+	ENDIF
+C
+C If performing a part operation, check that MOVE, REVERSE, FILTER  or
+C OFFSET have not already been given
+C
+	IF ((SINDEX .EQ. STATE_ON) .AND. 
+     &	         (CHOFF.OR.CHREV.OR.CHPOS.OR.CHFILT)) THEN
+	   CALL MOAN(MSG_ILLEGLCMDSEQ)
+	   GOTO 999
+	ENDIF
+C
+C Set transform and process code flags, and set new process code
+C
+	CHTRAN = .TRUE.
+	CHPC = .TRUE.
+C
+C If transforming whole feature, do it now
+C
+	IF (SINDEX  .NE. STATE_ON) THEN
+	   CHCOPY = .TRUE.		! always an implicit copy
+	   IF (CHKPRT(.TRUE.)) THEN
+	      CALL NOCHAN
+	      CALL IGNCMD
+	   ELSE
+	       NEWPC = WHOLE_TRANSFORM
+	       CALL HANDLE
+	       CALL CHPART(.TRUE.)
+	       CALL ABANDN
+	   ENDIF
+	ELSE
+	   NEWPC = PART_TRANSFORM
+	ENDIF
+C
+	GOTO 1000
+C
+C :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C TRANSFORM REGION
+C
+500	CONTINUE
+C
+C is there a transformation set up?
+	IF (.NOT.(TRNS_FROM.AND.TRNS_TO).AND..NOT.TRNS_COEFF) THEN
+	   CALL MOAN(MSG_NOTRANSFORMDEF)
+	   CALL LEARN(MSG_SETUPTRANSFORM)
+	   GOTO 999
+	ENDIF
+C
+C is there a region defined?
+	IF (.NOT.DEFREG(DINTS(1))) GOTO 999	! not defined
+C	
+C when region is transformed, region selection will change
+	IF (.NOT.SAREGS) CHASEL = .FALSE.
+C
+	REG = DINTS(1)
+C
+C region is not yet sectored
+	REGDEF(REG) = REGDEF(REG).AND..NOT.REGDEF_SEC
+C
+C get first point of region and initialise loop
+	CURPPT=REGPTR(1,REG)
+	FINISHED = .FALSE.
+	CALL PUTLNG(%VAL(CURPPT+OFFX),LINE(1,2))
+	CALL PUTLNG(%VAL(CURPPT+OFFY),LINE(2,2))
+C
+C transform and write back
+	CALL TRNSFRM(LINE(1,2),LINE(1,2))
+	CALL PUTLNG(LINE(1,2),%VAL(CURPPT+OFFX))
+	CALL PUTLNG(LINE(2,2),%VAL(CURPPT+OFFY))
+C
+	XSTART=LINE(1,2)
+	YSTART=LINE(2,2)
+C
+C set up limits for this region
+	REGLIM(1,REG)=XSTART		! minx
+	REGLIM(2,REG)=XSTART		! maxx
+	REGLIM(3,REG)=YSTART		! miny
+	REGLIM(4,REG)=YSTART		! maxy
+C
+C  loop to get and transform each vector of region
+C
+520	CONTINUE
+	IF (FINISHED) GOTO 1000		! end of region
+C
+C move onto next vector
+C
+	LINE(1,1)=LINE(1,2)
+	LINE(2,1)=LINE(2,2)
+C
+C get next point from region, or if at end of region, use the start
+C point
+C
+	CALL PUTLNG(%VAL(CURPPT),CURPPT)
+	IF (CURPPT.NE.REGPTR(2,REG)) THEN
+	   CALL PUTLNG(%VAL(CURPPT+OFFX),LINE(1,2))
+	   CALL PUTLNG(%VAL(CURPPT+OFFY),LINE(2,2))
+C
+C transform and write back
+	   CALL TRNSFRM(LINE(1,2),LINE(1,2))
+	   CALL PUTLNG(LINE(1,2),%VAL(CURPPT+OFFX))
+	   CALL PUTLNG(LINE(2,2),%VAL(CURPPT+OFFY))
+	ELSE
+	   FINISHED=.TRUE.
+	   LINE(1,2)=XSTART
+	   LINE(2,2)=YSTART
+	ENDIF
+C
+C update REGLIM
+	REGLIM(1,REG) = MIN(REGLIM(1,REG),LINE(1,2))
+	REGLIM(2,REG) = MAX(REGLIM(2,REG),LINE(1,2))
+	REGLIM(3,REG) = MIN(REGLIM(3,REG),LINE(2,2))
+	REGLIM(4,REG) = MAX(REGLIM(4,REG),LINE(2,2))
+C
+C go onto next point in region
+	GOTO 520
+C
+C :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C TRANSFORM COEFFICIENTS 
+C - angle, scale, x-origin, y-origin, x-shift, y-shift
+C
+600	CONTINUE
+C
+C only allow positive scale factors
+	IF (DREALS(2).LT.1.0/SCLFAC_LTD.OR.
+     &	      DREALS(2).GT.SCLFAC_LTD) THEN
+	   CALL MOAN(MSG_ILLEGALSCALE,1/SCLFAC_LTD,SCLFAC_LTD)
+	   GOTO 999
+	ENDIF
+C
+C convert from sheet mms to IFF units if required
+	CALL TSTUNT(IFFUNT,4,DREALS(3))	! sheet mms given?
+C
+	TRNS_ROT = DREALS(1)/180.0*PI
+	TRNS_SCL = DREALS(2)
+	TRNS_XORG = DREALS(3)
+	TRNS_YORG = DREALS(4)
+	TRNS_XOFF = DREALS(5)
+	TRNS_YOFF = DREALS(6)
+	DIST = (LIMITS(2) - LIMITS(1))*0.5	!  a reasonable distance
+C
+	TRNS_FROMA(1) = TRNS_XORG
+	TRNS_FROMA(2) = TRNS_YORG
+	TRNS_FROMB(1) = TRNS_XORG + DIST
+	TRNS_FROMB(2) = TRNS_YORG
+C
+	DIST = DIST * TRNS_SCL
+	TRNS_TOA(1) = TRNS_XORG + TRNS_XOFF
+	TRNS_TOA(2) = TRNS_YORG + TRNS_YOFF
+	TRNS_TOB(1) = TRNS_XORG + COS(TRNS_ROT)*DIST + TRNS_XOFF
+	TRNS_TOB(2) = TRNS_YORG + SIN(TRNS_ROT)*DIST + TRNS_YOFF
+C
+C tranformation set up
+	TRNS_COEFF = .TRUE.
+	TRNS_FROM  = .FALSE.
+	TRNS_TO    = .FALSE.
+	GOTO 360
+C
+C :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C exits
+C
+C command not valid in this state
+990	CONTINUE
+	IF (DSECN .EQ. 0) THEN		! no secondary command
+	   DSECN = 1			! so lie
+	   DSEC  = 'FEATURE'
+	   DSECL = 7
+	ENDIF
+	CALL MSGCMD(MOAN,MSG_CMDNOTVALID)
+C
+999	CALL IGNCMD
+C
+1000	RETURN
+	END

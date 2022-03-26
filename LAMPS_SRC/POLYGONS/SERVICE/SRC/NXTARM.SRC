@@ -1,0 +1,424 @@
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL FUNCTION NXTARM(
+     &		NARMS,STPOSN,STEND,JBX,JBY,FSN,UNWOUND,
+     &		CLOSE_PTR,CLOSED,CLOCK,ONE_USE,NXTPTR)
+C
+***	MODULE	NXTARM
+***	IDENT	30AP92
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+C	Arguments:
+		INTEGER*2 NARMS		! number of arms at junction.
+		INTEGER*4 STPOSN	! position of current arm and -
+C					! - returns position of next arm.
+		INTEGER*2 STEND		! end of next arm connecting junction.
+		REAL 	  JBX,JBY	! position of junction.
+		INTEGER	  FSN		! current feature FSN in FORM_POLYGONS
+		LOGICAL	  UNWOUND	! stack completely unwound - poly abort
+		INTEGER	  CLOSE_PTR	! 1st closure STACK_PTR value
+C
+C
+	LOGICAL*4	ACTUAL_NXTARM
+C
+C	........................................................................
+C
+	NXTARM = ACTUAL_NXTARM(
+     &			NARMS,STPOSN,STEND,JBX,JBY,FSN,UNWOUND,
+     &			CLOSE_PTR,CLOSED,CLOCK,ONE_USE,NXTPTR,
+     &			POLMAX, TABMAX,
+     &			%VAL(PTR$_INARM_STACK),
+     &			%VAL(PTR$_JUNC_STACK),
+     &			%VAL(PTR$_OFFSET_STACK),
+     &			%VAL(PTR$_POLY_STACK),
+     &			%VAL(PTR$_SEGTAB),
+     &			%VAL(PTR$_SIDE_STACK),
+     &			%VAL(PTR$_STTAB),
+     &			%VAL(PTR$_TRIEDARM_STACK)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL FUNCTION ACTUAL_NXTARM(
+     &		NARMS,STPOSN,STEND,JBX,JBY,FSN,UNWOUND,CLOSE_PTR,CLOSED,
+     &		CLOCK,ONE_USE,NXTPTR,
+     &		POLMAX,TABMAX,
+     &		INARM_STACK, JUNC_STACK, OFFSET_STACK, POLY_STACK, 
+     &		SEGTAB, SIDE_STACK, STTAB, TRIEDARM_STACK) 
+C
+***	MODULE	ACTUAL_NXTARM
+***	IDENT	30OC91
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Unreferenced declaration of VIOCLR removed. Now
+C	handles single point STs at beginning or end of
+C	multi-point feature				TJH 30-Mar-1989
+CMOD	Simplified use of /ONEARM= qualifier, removed bug
+C	in stack unwinding by introduction of the VALID_ARM()
+C	array						AC  11-Aug-1988
+CMOD	Extra level of indirection required for BBSC	AC  10-Aug-1988
+C	Created 					TJH 07-Sep-1987
+C
+C
+C Function to return the position (STPOSN) and direction (STEND)
+C of the next arm at the junction at position NXTJB. Next arm is
+C selected in either an anticlockwise direction (default) or clockwise
+C if /CLOCKWISE specifed on command line). Assume no particular
+C ordering. 
+C
+C Great care has to be taken to ensure that a single point feature is
+C no chosen as the next 'arm' out of the junction.
+C
+C Function returns SS$_NORMAL if successful, POLY__NOARM if a bad arm
+C is found or if no different arm is found.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNPOLYGONS:POLYGONSMSG.PAR'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:STACKS.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+C
+C Arguments:
+	INTEGER*2 NARMS		! number of arms at junction.
+	INTEGER*4 STPOSN	! position of current arm and -
+C				! - returns position of next arm.
+	INTEGER*2 STEND		! end of next arm connecting junction.
+	REAL 	  JBX,JBY	! position of junction.
+	INTEGER	  FSN		! current feature FSN in FORM_POLYGONS
+	LOGICAL	  UNWOUND	! stack completely unwound - poly abort
+	INTEGER	  CLOSE_PTR	! 1st closure STACK_PTR value
+C
+C If CLOSE_PTR has non 0 then poly. has already closed once at that
+C STACK_PTR value but the first and closure segment STPOSN's
+C didn't tally. We could however, close poly. if further growth is not
+C possible due to 1 arm junctions. 
+	LOGICAL	  CLOSED	! polygon closed?
+	LOGICAL	  CLOCK		! form clockwise polygons?
+	LOGICAL	  ONE_USE	! /ONEARM=USE specified?
+	INTEGER	  NXTPTR	! current segment pointer
+C
+	INTEGER*4	POLMAX
+	INTEGER*4	TABMAX
+	BYTE		INARM_STACK(TABMAX)
+	INTEGER		JUNC_STACK(TABMAX)
+	INTEGER*2	OFFSET_STACK(TABMAX)
+	INTEGER		POLY_STACK(TABMAX)
+	INTEGER*4	SEGTAB(2,TABMAX)
+	BYTE		SIDE_STACK(TABMAX)
+	INTEGER*4	STTAB(2,TABMAX)
+	BYTE		TRIEDARM_STACK(JARMS_MAX,TABMAX)
+C W/s.
+	INTEGER*4 ADDRESS	! address of ST
+	INTEGER*2 CURARM	! current arm into junction.
+	INTEGER*2 ARM,I,IARM,MINARM,MAXARM
+	INTEGER*4 POSN(10)
+	INTEGER*2 ENDPTR(10),PTR,NPTS,IENDS,IECODE,IELEN
+	REAL XY(2,10),ANGLE(10)
+	REAL CURANG,MINDIF,MAXDIF,DIF,TWOPI
+C
+	CHARACTER*256 MESTXT	! error message text
+	INTEGER*2 MESLEN	! its length
+	INTEGER	  TMPPTR	! temporary segment pointer
+	REAL 	  COORD(2)	! position of junction.
+	LOGICAL*1 VALID_ARM(10)	! going round node is this arm a potential
+C				! way out?
+C
+C Functions:
+	LOGICAL   BBSC		! clear one bit
+	LOGICAL	  BINSEA	! binary search
+	INTEGER*2 EXPAND	! expands text
+C
+C ......................................................................
+C
+	ACTUAL_NXTARM=%LOC(SS$_NORMAL)
+	CLOSED=.FALSE.
+	UNWOUND=.FALSE.
+C
+	TWOPI=6.2831853
+C
+10	CURARM=INARM_STACK(STACK_PTR)
+C
+C By default cannot exit on any arm
+	DO 20 I=1,JARMS_MAX
+	   VALID_ARM(I) = .FALSE.
+20	CONTINUE
+C
+C Read in all the arms of the junction.
+	ARM=0
+	DO 50 I=1,NARMS
+C
+C Has arm already been used before - if so ignore
+	   IF (TRIEDARM_STACK(I,STACK_PTR).EQ.1) GOTO 50
+	   CALL JIHR(I,POSN(I),ENDPTR(I))
+	   IF (POSN(I).EQ.0) GOTO 60
+C
+C Can use this arm - note it and increment poss. number of arms out
+	   VALID_ARM(I) = .TRUE.
+	   ARM=ARM+1
+C
+C Get the positions of the 2nd pts of each string.
+	   CALL IFFPKE(IECODE,IELEN,POSN(I))
+	   IF ((IECODE.NE.'ST').OR.(IELEN.LE.0)) GOTO 110
+	   CALL EIHRS(NPTS,IENDS)
+C
+	   IF (NPTS.LT.1) GOTO 110	    ! Gosh! no points in ST!
+C
+C An arm defined by a single pont ST can mean one of 2 things:-
+C 	1) This is a node, a symbol or text location point for example
+C	2) the real worry; this is a single point ST tacked onto the
+C	   beginning of a multiple ST feature.
+C In case 1) we need to ignore the "arm". Case 2) is a major pest as it
+C has to be identified and a 2nd coordinate from an ST for which we
+C don't directly have the address is required
+	   IF (NPTS.EQ.1) THEN		    ! single point ST
+C
+C See if the single point ST is actually part of a multi-ST feature. Get
+C index of feature
+	      COORD(1)=JBX
+	      COORD(2)=JBY
+	      IF (.NOT.(BINSEA(TMPPTR,POSN(I),
+     &			SEGTAB(1,NXTPTR),COORD))) THEN
+	         GOTO 110
+	      ENDIF
+C
+C Index of segment defining this "1 point" arm is now in TMPPTR. See
+C if it is part of a multi point ST
+	      IF (STTAB(2,TMPPTR).EQ.0) THEN
+	         TRIEDARM_STACK(I,STACK_PTR)=1 ! arm really is a single 
+C					       ! point feature - ignore
+	         VALID_ARM(I) = .FALSE.
+	         ARM=ARM-1		       ! don't even consider it
+	      ELSE
+C
+C Arm is really a multi point ST after all. We now have the problem of
+C getting the second or penultimate point which will be in a different ST
+C
+C Single point ST is at the start of the multi-ST feature
+	         IF (POSN(I).EQ.STTAB(1,TMPPTR)) THEN
+	            CALL IFFNXC('ST',IECODE,IELEN)
+	            IF ((IECODE.NE.'ST').OR.(IELEN.LE.0)) GOTO 110
+	            CALL EIHRR(XY(1,I),2,1)	! first point in 2nd ST
+	         ELSE
+C Single point ST is at the end of the multi-ST feature. Painfully step
+C through the STs from first ST (at address STTAB(1,TMPPTR)) to the
+C last ST (at address STTAB(2,TMPPTR)). What we want is the address of
+C the penultimate ST.
+	            ADDRESS=STTAB(1,TMPPTR)
+C
+C Go to start ST of feature
+	            CALL IFFPKE(IECODE,IELEN,ADDRESS)
+	            IF ((IECODE.NE.'ST').OR.(IELEN.LE.0)) GOTO 110
+C Next ST until reached end of ftr
+30	            CALL IFFNXC('ST',IECODE,IELEN)
+	            IF (LPOSH.EQ.STTAB(2,TMPPTR)) GOTO 40
+	            ADDRESS=LPOSH
+	            GOTO 30		  
+C
+C The last coordinate in the ST at address ADDRESS is the one we want
+40	            CALL IFFPKE(IECODE,IELEN,ADDRESS)
+	            CALL EIHRS(NPTS,IENDS)
+	            PTR=NPTS*4-3	    ! point to last pt in ST
+	            CALL EIHRR(XY(1,I),2,PTR)
+C Ensure that end pointer ENDPTR is not set to 1 ("1st point in ftr")
+C which would be the case if there was a single pt ST at end of ftr
+		    ENDPTR(I)=0
+	         ENDIF
+	      ENDIF
+	   ELSE
+C
+C get point on ST next to junction
+	      IF (ENDPTR(I).EQ.1) THEN
+	         PTR=5			    ! point to 2nd pt in ST.
+	      ELSE
+	         PTR=NPTS*4-7 		    ! point to 2nd last pt in ST
+	      ENDIF
+	      CALL EIHRR(XY(1,I),2,PTR)
+	   ENDIF
+C
+C Jump back from the ST to the junction that we were reading
+	   CALL IFJPKJ(JBX,JBY,IARM,JUNC_STACK(STACK_PTR),
+     &					OFFSET_STACK(STACK_PTR))
+50	CONTINUE
+
+60	IF (ARM.EQ.0) THEN	! zero arm junct.? Something VERY wrong!
+	   ACTUAL_NXTARM=POLY__NOARM
+	   CALL LSL_PUTMSG(ACTUAL_NXTARM,FSN)
+	   GOTO 120
+	ENDIF
+C
+C Only one arm available for exit - the one we came in on
+	IF (ARM.EQ.1) THEN
+C
+C Not /ONEARM=USE set?
+	   IF (.NOT.ONE_USE) THEN
+C
+C If ARM is greater than 1 then there are arms that we could possibly
+C follow out of this junction that we haven't tried before for this
+C polygon. If, however, ARM = 1 we are in a one arm junction situation,
+C either actually at this junction or as a result of having found 
+C one arm junctions somewhere else further down in the polygon stack.
+C Our only option is to pop this junction off the stack and try again
+C for a new arm in the junction previous to this one.
+C
+C Unset the "used this segment on this side" flag in LRUSED
+	      ACTUAL_NXTARM=BBSC(SEGTAB(1,IABS(POLY_STACK(STACK_PTR))),
+     &			LRUSED(1,SIDE_STACK(STACK_PTR)))
+	      IF (.NOT.ACTUAL_NXTARM) THEN
+	         ACTUAL_NXTARM=POLY__BADFLAG
+	         CALL LSL_PUTMSG(ACTUAL_NXTARM)
+	         GOTO 120
+	      ENDIF
+C
+C Clear "tried arms" flags for the aborted junction
+	      DO 70 I=1,JARMS_MAX
+	         TRIEDARM_STACK(I,STACK_PTR)=0
+70	      CONTINUE
+C
+C Pop stack
+	      STACK_PTR=STACK_PTR-1
+C
+C Already had a plausible closure for this polygon?
+	      IF (CLOSE_PTR.NE.0) THEN
+C
+C Yes and we have returned to it - it must be true!
+	         IF (STACK_PTR.EQ.CLOSE_PTR) THEN
+	            CLOSED=.TRUE.
+	            GOTO 120
+	         ENDIF
+	      ENDIF
+C
+C No plausible polygon closure had yet, keep trying - unless we have run
+C out of stack.
+	      IF (STACK_PTR.EQ.0) THEN
+	         UNWOUND=.TRUE.
+	         GOTO 120
+	      ENDIF
+C
+C Poke onto new "last" junction and try again
+	      CALL IFJPKJ(JBX,JBY,NARMS,JUNC_STACK(STACK_PTR),
+     &					OFFSET_STACK(STACK_PTR))
+	      GOTO 10	
+	   ELSE
+C One arm junction and /ONEARM=(USE) was specified. Go out of the 
+C junction down the same arm that we came in on 
+	      STPOSN=POSN(CURARM)
+	      STEND=ENDPTR(CURARM)
+	      TRIEDARM_STACK(CURARM,STACK_PTR)=1
+	      GOTO 120
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C
+C Work out the angles in radians. Angle is from 0 to 2*PI clockwise from
+C north.
+	DO 80 I=1,NARMS
+C
+C Has arm already been used before - or is a single point feature - if 
+C so ignore
+	   IF (.NOT.VALID_ARM(I)) GOTO 80
+	   ANGLE(I)=ATAN2(XY(1,I)-JBX,XY(2,I)-JBY)
+	   IF (ANGLE(I).LT.0) ANGLE(I)=TWOPI+ANGLE(I)
+80	CONTINUE
+C
+C Choose next arm.
+	CURANG=ANGLE(CURARM)
+C
+C If /CLOCKWISE selected turn right to make clockwise polygons
+	IF (CLOCK) THEN
+	   MAXDIF=-999
+	   DO 90 I=1,NARMS
+C
+C Has arm already been used before - or is a single point feature - if 
+C so ignore
+	      IF (.NOT.VALID_ARM(I)) GOTO 90
+	      IF (I.EQ.CURARM) GOTO 90 ! don't choose the same arm.
+	      DIF=ANGLE(I)-CURANG	! what is the angle difference?
+	      IF (CURANG.GT.ANGLE(I)) DIF=DIF+TWOPI
+	      IF (DIF.LE.MAXDIF) GOTO 90	! is this a better arm?
+	      MAXDIF=DIF
+	      MAXARM=I
+90	   CONTINUE
+	   IF (MAXDIF.EQ.-999) GOTO 110	! has different arm been chosen
+C
+C Get the next one.
+	   STPOSN=POSN(MAXARM)
+	   STEND=ENDPTR(MAXARM)
+	   TRIEDARM_STACK(MAXARM,STACK_PTR)=1
+	ELSE
+C
+C By default turn left to make anticlockwise polygons
+	   MINDIF=999
+	   DO 100 I=1,NARMS
+C
+C Has arm already been used before - or is a single point feature - if 
+C so ignore
+	      IF (.NOT.VALID_ARM(I)) GOTO 100
+	      IF (I.EQ.CURARM) GOTO 100 ! don't choose the same arm.
+	      DIF=ANGLE(I)-CURANG	! what is the angle difference?
+	      IF (CURANG.GT.ANGLE(I)) DIF=DIF+TWOPI
+	      IF (DIF.GE.MINDIF) GOTO 100	! is this a better arm?
+	      MINDIF=DIF
+	      MINARM=I
+100	   CONTINUE
+	   IF (MINDIF.EQ.999) GOTO 110	! has different arm been chosen
+C
+C Get the next one.
+	   STPOSN=POSN(MINARM)
+	   STEND=ENDPTR(MINARM)
+	   TRIEDARM_STACK(MINARM,STACK_PTR)=1
+	ENDIF
+	GOTO 120
+C
+C ......................................................................
+C
+C Error.
+110	ACTUAL_NXTARM=POLY__NOARM
+	IF (HAD_LITES) THEN
+	   CALL FLWSEL(LITESLUN)
+	   CALL FLWRTF('%%MESSAGE Polygon formation error:')
+	ENDIF
+	MESLEN=EXPAND('%WS'//
+     &	   'No junction arms to follow in feature with '
+     &	   //'FSN %N - polygon abandoned',MESTXT,FSN)
+	COORD(1)=JBX
+	COORD(2)=JBY
+	CALL MES_OUT(COORD(1),MESTXT,MESLEN)
+C
+C ......................................................................
+C
+120	RETURN
+	END

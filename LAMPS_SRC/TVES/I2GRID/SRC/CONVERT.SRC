@@ -1,0 +1,334 @@
+  	SUBROUTINE CONVERT()
+
+***	IDENT  01MY91
+***	MODULE CONVERT
+
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C	Author: D Catlow
+C	Created: 20 May 1986
+
+C	Routine for I2GRID to search input IFF file for
+C	relevant entry codes, and pass STs for encoding.
+
+	IMPLICIT NONE
+
+	INCLUDE 'LSL$CMNDTI:DTIPAR.PAR'
+
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'
+
+	INCLUDE 'LSL$CMNI2GRID:CULTRE.CMN'
+	INCLUDE 'LSL$CMNI2GRID:SELECT.CMN'
+
+	REAL		RACVAL		!real AC value
+	INTEGER*4	ACVAL		!AC value
+	INTEGER*4	ENTRY
+	INTEGER*4	FSVAL		!feature code value
+	INTEGER*4	ISQ
+	INTEGER*4	I		!counter
+	INTEGER*4	SEC		!secondary code
+	INTEGER*4	ERRNUM		!error number 0 = O.K.
+	INTEGER*2	LAYNUM		!overlay value
+	INTEGER*2	IECODE
+	INTEGER*2	IELEN
+	INTEGER*2	ACTYPE		!AC numeric type value
+	LOGICAL		VALSET		!value preset for this feat
+	LOGICAL		WANTED		!is this item selected?
+	LOGICAL		DFADP		!DFAD point string
+C
+	CHARACTER*1024  ACTXT_BUF	!AC text component
+	INTEGER*4	ACTXT_BUF_LEN	!length of AC text
+
+C Functions
+	LOGICAL		LIB$EXTZV	!test bit-map
+	LOGICAL		FRTFND		!find entry in FRT
+	LOGICAL		RDLONG		!read longword
+	LOGICAL		DECODE_DFAD	!to decode DFAD ac text
+	LOGICAL		TEST_VALUE	!test if att value will fit
+C
+C***********************************************************************
+C
+	CALL IFFRWD			!rewind to start of input file
+	CALL IFFNXC('NO',IELEN)		!skip header information
+	IF (IELEN.EQ.-1) GOTO 999	!unexpected EOF detected
+
+C-----------------------------------------------------------------------
+C
+100	CALL IFFNXT(IECODE,IELEN)
+	IF (IECODE.EQ.'EJ') GOTO 999		!end of job
+	IF (IELEN.EQ.-1) GOTO 999		!unexpected EOF detected
+
+C-----------------------------------------------------------------------
+
+	IF (IECODE.EQ.'NO') THEN
+	   CALL EIHRI(LAYNUM,1,1)
+	   I = LAYNUM				! convert to long
+	   WANTED = LIB$EXTZV(I,1,LAYMAP)
+
+	   IF (.NOT.WANTED) THEN
+	     CALL IFFNXC('EO',IELEN)		! Skip by setting to EO
+	     IF (IELEN.EQ.-1)   GOTO 999
+	   END IF
+	   GOTO 100
+	END IF
+
+C-----------------------------------------------------------------------
+C
+	IF (IECODE.EQ.'NF') THEN
+C Read in Feature Serial Number
+C
+	  CALL EIHR(FSN,1,1)		!NF number
+
+C Initialise feature type etc.
+	  FTYPE = 1		!default is to treat as a line
+	  VALSET = .FALSE.	!no value for this feature yet
+
+C Is this feature number selected or not ?
+	  I = FSN
+	  WANTED = LIB$EXTZV(I,1,FSNMAP)
+	  IF (.NOT.WANTED) THEN
+	     CALL IFFNXC('EF',IELEN)		! Skip by setting to EF
+	     IF (IELEN.EQ.-1)   GOTO 999
+	     GOTO 100
+	  END IF
+
+	  IF (PARAM_NUMBER.EQ.-1) THEN		! Output value is FSN
+	    VAL = FSN
+	    VALSET = .TRUE.
+	  END IF
+
+	  IF (USE_PRESET.AND.(NFSET_ARRAY(FSN).GT.0)) THEN! Preset Value
+	    VAL = SET_VALUES(NFSET_ARRAY(FSN))
+	    VALSET = .TRUE.
+	  END IF
+
+C--------------------------------------------------------------------
+150	  CALL IFFNXT(IECODE,IELEN)
+
+	  IF (IECODE.EQ.'EF') GOTO 100	
+
+C---------------------------------------------------------------------
+
+	  IF (IECODE.EQ.'FS') THEN		
+	    CALL EIHRI(FSVAL,1,1)	
+
+C Test if this feature is selected
+	    I = FSVAL			! convert to long
+	    WANTED = LIB$EXTZV(I,1,FCMAP)
+	    IF (.NOT.WANTED) THEN
+	      CALL IFFNXC('EF',IELEN)	! Skip by setting to EF
+	      IF (IELEN.EQ.-1)   GOTO 999
+	      GOTO 100
+	    END IF
+
+	    IF (AREA.EQ.2) THEN
+	      IF (AREA_ARRAY(FSVAL).EQ.1) THEN
+	        FTYPE = 2				!area feature
+	      ELSE
+	        FTYPE = 1
+	      END IF
+	    END IF
+
+	    IF (AREA.EQ.3) THEN
+C Look up feature code in the FRT
+	      IF (FRTFND(FSVAL)) THEN
+	        CALL WRITEF
+     &	          ('Unable to find entry in FRT for fc %N',FSVAL)
+	        FTYPE = 1
+	      ELSE
+	        IF (FRTARE) THEN
+	          FTYPE = 2
+	        ELSE
+	          FTYPE = 1
+	        END IF
+	      END IF
+	    END IF
+
+	    IF ((PARAM_NUMBER.EQ.-2).AND.(.NOT.VALSET)) THEN
+C Value is feature code
+	      VAL = FSVAL
+	      VALSET = .TRUE.
+	    END IF
+
+C Test whether this is a feature code to be treated specially
+	    IF (USE_PRESET.AND.(FCSET_ARRAY(FSVAL).GT.0)) THEN
+	      VAL = SET_VALUES(FCSET_ARRAY(FSVAL))
+	      VALSET = .TRUE.
+	      GOTO 150
+	    END IF
+
+	    GOTO 150			!return for next entry
+	  END IF
+
+C-----------------------------------------------------------------------
+C AC entry
+	  IF(IECODE.EQ.'AC')THEN
+C
+C Don't go any further if we are not interested in the AC or its
+C associated text component
+	    IF(PARAM_NUMBER.NE.-4.AND.PARAM_NUMBER.NE.-5)GOTO 150
+C
+C Read AC type
+	    CALL EIHR(ACTYPE,1,1)
+C
+C Check that the AC is of the required type
+	    IF(ACTYPE.NE.AC_SELECTED)GOTO 150
+C
+C AC of right type.
+C Read the associated value if we are interested
+	    IF     (PARAM_NUMBER.EQ.-4)THEN
+C
+C Read as real
+	      IF(ACD_DATA_TYPE.EQ.ACD_DATATYPE_R)THEN	       
+	        CALL EIHRR(RACVAL,1,2)
+		VAL = RACVAL
+	      ELSE
+C Read as integer
+		CALL EIHR (ACVAL,1,2)
+	        VAL = ACVAL
+	      END IF
+	      VALSET=.TRUE.
+C
+C Read the associated text - if we are interested in it
+	    ELSE IF(PARAM_NUMBER.EQ.-5)THEN
+C
+C Text is read into ACTXT_BUF
+	      CALL EIHR(%REF(ACTXT_BUF),IELEN-3,4)
+C
+C Set up txtptr
+	      ACTXT_BUF_LEN = (IELEN-3)*2
+	      IF(ICHAR(ACTXT_BUF(ACTXT_BUF_LEN:ACTXT_BUF_LEN)).EQ.0) 
+     &        ACTXT_BUF_LEN = ACTXT_BUF_LEN - 1
+C
+C Uppercase the AC text
+	      CALL STR$UPCASE(ACTXT_BUF(:ACTXT_BUF_LEN),
+     &                        ACTXT_BUF(:ACTXT_BUF_LEN))
+C
+C Find match with the user selected text string using INDEX
+	      ENTRY = 0
+	      ENTRY = INDEX(ACTXT_BUF(:ACTXT_BUF_LEN),
+     &                      ACTEXT(:ACTEXT_LEN))
+	      IF(ENTRY.EQ.0)GOTO 150		!attribute not found
+C
+C Read the associated INTEGER value
+	      CALL SETAUX(%REF(ACTXT_BUF),ACTXT_BUF_LEN)
+	      CALL SETWIN(ENTRY+ACTEXT_LEN)
+	      IF(RDLONG(ACVAL))GOTO 150
+	      VAL=ACVAL
+	      VALSET=.TRUE.
+	    ENDIF  
+C
+C If DFAD then we now need to extract other relevant information
+	    IF(DFAD)THEN
+              IF(.NOT.DECODE_DFAD(ACTXT_BUF,ACTXT_BUF_LEN))THEN
+C
+C Skip by setting to the EF entry
+	        CALL IFFNXC('EF',IELEN)	
+	        IF(IELEN.EQ.-1)GOTO 999
+	        GOTO 100
+	      ENDIF
+	    ENDIF
+C
+	    GOTO 150
+	  ENDIF
+
+C-----------------------------------------------------------------------
+C
+	  IF (IECODE.EQ.'ST') THEN
+C
+C Test if value will fit into the ouput data type
+	      IF(.NOT.TEST_VALUE(TRUNCATE))THEN
+	        IF(LOG)THEN
+	          CALL WRITEF
+     & ('Feature %I6 not converted - 
+     &attribute value too small or too large',
+     & FSN)
+	        ENDIF
+	        GOTO 100
+	      ENDIF
+C
+	      IF (SETWID.AND.WIDEN) THEN
+	        WIDTH = DEFWID	!set width to default width
+	        WIDEN = .TRUE.
+	      END IF
+
+	      IF (VALSET) THEN
+	        ERRNUM = 0
+
+C Do we have a DFAD point string?	     
+	        IF (FTYPE.EQ.0.AND.DFAD) THEN
+	          DFADP = .TRUE.
+	        ELSE
+	          DFADP = .FALSE.
+	        END IF
+C
+                CALL TRANSFORM_ST(ERRNUM,DFADP)
+	        IF (ERRNUM.EQ.1) GOTO 100
+	        IF (LOG) THEN
+	          IF(DTYPE.EQ.DATA_REAL)THEN
+	            CALL WRITEF
+     &	            ('Feature %I6 converted   value %F9.2',FSN,VAL)
+	          ELSE
+	            CALL WRITEF
+     &	            ('Feature %I6 converted   value %I6',FSN,INT(VAL))
+	          ENDIF
+	        ENDIF
+	      ELSE
+	        IF (LOG) CALL WRITEF
+     & ('Feature %I6 not converted - selected attribute not found',
+     & FSN)
+	      END IF
+	      GOTO 100
+	    END IF
+C-----------------------------------------------------------------------
+C 
+	    IF (IECODE.EQ.'ZS') THEN
+C
+	      IF (PARAM_NUMBER.NE.-3)THEN
+	        IF (.NOT.VALSET)THEN
+	          IF (LOG) CALL WRITEF
+     & ('Feature %I6 not converted - selected attribute not found',
+     & FSN)
+	         GOTO 100
+	        ELSE
+C Test if value will fit into the ouput data type
+	          IF(.NOT.TEST_VALUE(TRUNCATE))THEN
+	            IF(LOG)THEN
+	              CALL WRITEF
+     & ('Feature %I6 not converted - 
+     &attribute value too small or too large',
+     & FSN)
+	            ENDIF
+	            GOTO 100
+	          ENDIF
+	        ENDIF
+	      ENDIF
+C
+	      IF (SETWID.AND.WIDEN) THEN
+	        WIDTH = DEFWID	!set width to default width
+	        WIDEN = .TRUE.
+	      END IF
+	      ERRNUM = 0
+              CALL TRANSFORM_ZS(ERRNUM)
+	      IF (ERRNUM.EQ.1) GOTO 100
+	      IF(LOG)THEN
+	        IF(DTYPE.EQ.DATA_REAL)THEN
+	          CALL WRITEF
+     &	          ('Feature %I6 converted   value %F9.2',FSN,VAL)
+	        ELSE
+	          CALL WRITEF
+     &	          ('Feature %I6 converted   value %I6',FSN,INT(VAL))
+	        ENDIF
+	        GOTO 100
+	      ENDIF
+	    END IF
+
+	    GOTO 150
+	  END IF
+C
+	GOTO 100
+C
+999	RETURN
+	END

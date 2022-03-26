@@ -1,0 +1,315 @@
+	SUBROUTINE INTERP(IOPT)
+C
+***	MODULE	INTERP
+***	IDENT	12JL88
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Converted to LLSLLIB for TRIDER			TJH 19-Nov-1987
+CMOD	Graphics added					TJH 30-Jul-1986
+CMOD	Triangle limits calc. using 300000 not 320000
+C	as the start value, separate under (UREST) and
+C	overshoot (OREST) variables added for individual
+C	triangle interpolation restriction.		TJH 25-Feb-1986
+CMOD	Bug fix. Shell and box interp. now 
+C	Z=IABS(MD(3,J)) not 3,K.   Also at lab. 122
+C	sign carried over correctly via ZZ.		TJH 06-Jan-1986
+CMOD	Diagnostic printout modulus now varied with
+C	size of dataset					TJH 05-Jul-1985
+CMOD	Some double precision added to overcome
+C	integer overflow			    	TJH 20-Jun-1985
+C	Standardised/incorporated into LSL DTMCREATE  	TJH 30-May-1985
+C
+C
+C Calculate a distance weighted interpolation from the data
+C point numbers held on file for each of the imaginary points.
+C
+C NB: Z-interpolation is not allowed outside the range given by 
+C upper/bottom when dealing with the imaginary points just as for the 
+C final grid interpolations.
+C
+C For IOPT=2 (layers) data points in layer 1 will be assumed to
+C restrict the interpolation limits further. The limitation will
+C then be appled to the range of values in that layer.
+C
+C Also for IOPT=2 if adjacent discontinuities are observed in the
+C data in layer 1, they are checked for being the same value. If so,
+C and the imaginary point location lies between them,
+C then the value of the imaginary point is set to that z-value. This
+C is an attempt to ensure valleys and ridge tops leaving the area
+C remain so along the border.
+C
+C Furthermore, if IOPT=2, and all layer 1 nodes are discontinuous
+C that are not imaginary, and also have the same value, then the
+C imaginary point is set to that value.
+C
+C Parameters:
+	INCLUDE 'LSL$CMNTRIDER:TRIDERMSG.PAR'
+C
+C Common:
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:CONTRL.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:FINDIT.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:STORAG.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:TRYVAR.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:ZONVAR.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:GRAFDEV.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:RESOLUTION.CMN'
+C
+	REAL*4		DIX,DIY
+	REAL*8		DDIX,DDIY
+	LOGICAL		HADMES		! had warning message
+	LOGICAL		OK		! function return
+C
+C Function:
+	LOGICAL RDUNF		! efficient unformatted Fortran read
+C
+C ......................................................................
+C
+C To prevent duplicated messages
+	HADMES=.FALSE.
+C
+C Tell user of our progress
+	IF (DIAG) THEN
+	  IF (GRAPHICS.AND..NOT.GPX) THEN
+	   CALL EXPAND
+     &	   ('Imaginary point interpolation - interpolation phase')
+	   CALL TXTOUT(.TRUE.)
+	  ELSE
+	   CALL FRAMED_MES(2,0)
+	  ENDIF
+	  CALL PERCENT('of imaginary points interpolated',
+     &		0,LIMPOL,10,-1)
+	   IF (GRAPHICS) CALL COLOUR(3,.FALSE.)	! restore colour for DOT
+	ENDIF
+C
+C Go through the point lists calculating interpolations.
+C NB: There are no imaginary points in the lists.
+	DO 200 IPOS=1,LIMPOL
+	   IF (DIAG) THEN
+	      CALL PERCENT('of imaginary points interpolated',
+     &		IPOS,LIMPOL,10,0)
+	      IF (GRAPHICS) CALL COLOUR(3,.FALSE.)!restore colour for DOT
+	   ENDIF
+C
+C Set limitations on z-value range under the assumption that none
+C are set
+	   ZMIN=BOTTOM
+	   ZMAX=UPPER
+	   READ(LGC1)N,KDIST
+	   OK=RDUNF(LGC1,NTEM,N)
+C
+C Error during unformatted read?
+	   IF (.NOT.OK) THEN
+	      CALL LSL_GETMSG(TRIDER__RDSCR,MESSAGE,MESLEN)
+	      CALL EXPAND('%'//MESSAGE(:MESLEN))
+	      CALL TXTOUT(.FALSE.)
+	      CALL ERRSNS(,I,J)		! find out what the problem is
+	      IF (J.EQ.0) J=I
+	      CALL LSL_GETMSG(J,MESSAGE,MESLEN)
+	      J=INDEX(MESSAGE,'!') - 1		! (ignore any FAO stuff)
+	      IF (J.LT.0) J=MESLEN
+	      CALL ALARMS(MESSAGE(:MESLEN))	! close down & exit
+	   ENDIF
+C
+C Check for layer 1 range of z values, or the whole range if IOPT=1.
+C Find first positive number in NTEM
+	   DO 10 K=1,N
+	      IF(NTEM(K).GT.0)GOTO 20
+10	   CONTINUE
+	   K=N
+C
+C If K IS not 1 then we have a layer structure and will look
+C only that far (less 1) to find the interpolation limits.
+20	   LIM=N
+	   IF(K.EQ.1)GOTO 90
+	   LIM=K-1
+C
+C Check for more than one point in layer 1, then check for any pair of
+C equi-valued discontinuity points, as the order of layer 1 has been
+C preserved in the rotational order in the node file (but only layer 1).
+	   IF(LIM.EQ.1)GOTO 70
+C
+C Get node number and z-value for first point.
+	   K=IABS(NTEM(1))
+	   KA=MD(3,K)
+	   DO 60 J=2,LIM
+	      L=IABS(NTEM(J))
+	      LA=MD(3,L)
+C
+C Check for 1st point being continuous, or not equal to 2nd point.
+	      IF(KA.GT.0.OR.KA.NE.LA)GOTO 50
+C
+C Found a pair next to each other. check their position in relation to
+C the imaginary point
+	      DO 30 M=1,2
+	         MA=MD(M,IPOS)
+	         IF(MA.LE.MD(M,K).AND.MA.GE.MD(M,L))GOTO 40
+	         IF(MA.LE.MD(M,L).AND.MA.GE.MD(M,K))GOTO 40
+30	      CONTINUE
+C
+C Real points are not either side of our imaginary point
+	      GOTO 50
+C
+C They are either side of the imaginary point, so pick up z-value and
+C Complete this imaginary point cycle
+40	      Z=MD(3,K)
+	      GOTO 190
+C
+C Check next pair of layer 1 neighbours
+50	      KA=LA
+	      K=L
+60	   CONTINUE
+C
+C Check for all neighbours being discontinuous and having the same
+C z-value. Zero the number of discontinuous equal valued points
+C (NCONT).
+70	   NCONT=0
+C
+C Set z-value cycle holders to zero.
+	   KA=0
+	   LA=0
+C
+C Go through all points
+	   DO 80 J=1,LIM
+	      L=IABS(NTEM(J))
+	      JA=MD(3,L)
+C
+C Go away if any points are not discontinuous
+	      IF(JA.GT.0)GOTO 90
+C
+C Pick up first point as a special case, and then check whether
+C last discontinuous neighbour agrees with this one.
+	      IF(KA.EQ.0)KA=JA
+	      LA=JA
+	      IF(KA.EQ.LA)NCONT=NCONT+1
+C
+C Swap values of known discontinuous points ready for next node
+	      KA=LA
+80	   CONTINUE
+C
+C Check whether the number of equal-valued discontinuous nodes is
+C equal to the total in the first layer of neighbours.
+	   IF(NCONT.NE.LIM)GOTO 90
+C
+C They have the same value, so assign it to the imaginary point
+	   Z=KA
+	   GOTO 190
+C
+C Check whether restricted range has been set.
+CCC90	   IF(OREST.GT.299999.0.AND.UREST.GT.299999.0)GOTO 110
+90	   IF(OREST.GT.(MAX_RES_REAL-1.0).AND.
+     &	      UREST.GT.(MAX_RES_REAL-1.0)) GOTO 110
+C
+C Go through the neighbours upto LIM and find the z-limits
+CCC	   IZMIN=300000
+	   IZMIN=MAX_RES_INT
+	   IZMAX=0
+	   DO 100 J=1,LIM
+	      K=IABS(NTEM(J))
+	      K=IABS(MD(3,K))
+	      IZMIN=MIN0(IZMIN,K)
+	      IZMAX=MAX0(IZMAX,K)
+100	   CONTINUE
+C
+C Set interpolation limits.
+	   ZMIN=AMAX1(FLOAT(IZMIN)-UREST,ZMIN)
+	   ZMAX=AMIN1(FLOAT(IZMAX)+OREST,ZMAX)
+C
+C Get weighting range.
+110	   S=KDIST*1.414
+C
+C Make a distance weighted interpolation using the data point numbers
+C stored in NTEM (N of them), for data location IPOS in MD, and using
+C a radius of search S. The distance weighting function, held in KWT,
+C Is either 0, 1, 2, or 4th power of distance.
+	   ZN=0.0
+	   ZD=0.0
+	   NZ=0
+	   IXPOS=MD(1,IPOS)
+	   IYPOS=MD(2,IPOS)
+C
+C Set up weighting maximum
+	   R=S
+	   RS=R*R
+	   IF(KWT-2)140,130,120
+120	   R=RS
+130	   R=R*R
+C
+C Gather bits and pieces
+140	   DO 180 I=1,N
+	      J=IABS(NTEM(I))
+C
+C Omit any imaginary points from consideration
+	      IF(J.LE.LIMPOL)GOTO 180
+C
+C Calculate the distance to the point from the interpolation
+C position
+	      IX=IXPOS-MD(1,J)
+	      IY=IYPOS-MD(2,J)
+C
+C Convert to real and double precision for later calcs.
+	      DIX=FLOAT(IX)
+	      DIY=FLOAT(IY)
+	      DDIX=DFLOAT(IX)
+	      DDIY=DFLOAT(IY)
+	      D=FLOAT(IX)**2+FLOAT(IY)**2
+	      IF(D.EQ.0.OR.D.GE.RS)GOTO 180
+C
+C Distance is inside the weighting circle so check for type of
+C weighting to use
+	      IF(KWT-2)150,170,160
+150	      D=SQRT(D)
+	      GOTO 170
+160	      D=D*D
+C Calculate the weighting to use for point J
+170	      W=R/D-1.
+	      NZ=NZ+1
+C
+C Accumulate the numerator and denominator of the function.
+C NB: For imaginary points the derivative estimates may be linear.
+C The pointer to the correct slope storage position is held 
+C in MD(4,N)
+	      K=MD(4,J)
+	      Z=IABS(MD(3,J))+DPROD(DIX,SLP(1,K))
+     &			+DPROD(DIY,SLP(2,K))
+     &			+DDIX*DPROD(DIX,SLP(3,K))
+     &			+DDIX*DPROD(DIY,SLP(4,K))
+     &			+DDIY*DPROD(DIY,SLP(5,K))
+	      ZN=ZN+Z*W
+	      ZD=ZD+W
+180	   CONTINUE
+C
+C Check there are enough points for an interpolation
+	   IF (NZ.LT.2) THEN	! problems
+	      IF (DIAG.OR..NOT.HADMES) THEN
+	         CALL LSL_GETMSG(TRIDER__INSUFFPT,MESSAGE,MESLEN)
+	         CALL EXPAND('%'//MESSAGE(:MESLEN))
+	         CALL TXTOUT(.TRUE.)
+	         IF (GRAPHICS) CALL COLOUR(3,.FALSE.)! restore colour
+	         HADMES=.TRUE.	! flag that we've output this message
+	      ENDIF
+C
+C Take a central value instead
+	      Z=(BOTTOM+UPPER)*0.5
+	   ELSE			! all well
+	      Z=ZN/ZD
+	   ENDIF
+190	   ZZ=ABS(Z)
+	   ISI=SIGN(1.5,Z)
+	   CALL DOT(MD(1,IPOS),MD(2,IPOS))
+	   MD(3,IPOS)=AMIN1(AMAX1(Z+0.5,ZMIN),ZMAX)*ISI
+200	CONTINUE
+	IF (DIAG) THEN
+	   CALL PERCENT('of imaginary points interpolated',
+     &		IPOS,LIMPOL,10,1)
+C
+C Give final summary statistic
+	   CALL EXPAND('%N imaginary points interpolated',LIMPOL)
+	   CALL TXTOUT(.TRUE.)
+	   IF (GRAPHICS)  CALL COLOUR(3,.FALSE.)  ! restore colour
+	ENDIF
+	RETURN
+	END

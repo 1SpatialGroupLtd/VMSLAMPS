@@ -1,0 +1,329 @@
+	.TITLE PACKER
+	.IDENT 	/25OC94/
+
+;Copyright Laser Scan Laboratories Ltd., Cambridge, England
+;Author Clarke Brunt, 9-Mar-1984
+;
+; Routines to mediate between 'internal' and 'external'
+; LITES2 data pack formats (and other macro jiffies)
+;
+; NB a deleted pack is written by PUTPAK with a pointer to the
+;    next deleted pack in its first field (PAKLNK). This field
+;    is read by ADDPAK using PUTLNG, the implication of which
+;    is that the first field must always be a straight MOVL
+;    transfer.
+
+	.LIBRARY	/LSL$LIBRARY:LSLMACLIB/
+	CODE_PSECT	LITES
+
+; definition of location of flag entry in an internal pack
+; these should agree with actual location defined in code below
+; and also with PACK.PAR
+	FLGOFF = 22			; byte offset from start of pack
+
+;
+; 4 bits each would suffice for GT and map, rather than 8.
+; 23 bytes used at present, rounded up to 24 to align
+;
+; PUTPAK (external, internal)
+; move the external array of longwords to the internal packed array
+;
+	.ENTRY	PUTPAK,^M<>
+	MOVAL	@4(AP), R0		; external address
+	MOVAL	@8(AP), R1		; internal address
+;
+	MOVL	(R0)+, (R1)+		; back link pointer
+	MOVL	(R0)+, (R1)+		; NF pointer
+	MOVL	(R0)+, (R1)+		; ST pointer or other value
+	MOVW	(R0),  (R1)+		; FSN
+	MOVW	4(R0), (R1)+		; Feature Code
+	MOVW	8(R0), (R1)+		; Segment number
+	MOVB	12(R0), (R1)+		; Vertex number
+	MOVB	16(R0), (R1)+		; Overlay number
+	MOVB	20(R0), (R1)+		; Graphical type
+	MOVB	24(R0), (R1)+		; Map
+	MOVB	28(R0), (R1)		; Flags
+;
+	RET
+
+;
+; GETPAK (external, internal)
+; move the internal packed array to the external longword array
+;
+	.ENTRY	GETPAK, ^M<>
+	MOVAL	@4(AP), R0		; external address
+	MOVAL	@8(AP), R1		; internal address
+;
+	MOVL	(R1)+, (R0)+		; back link pointer
+	MOVL	(R1)+, (R0)+		; NF pointer
+	MOVL	(R1)+, (R0)+		; ST pointer or other value
+	MOVZWL	(R1)+, (R0)+		; FSN
+	MOVZWL	(R1)+, (R0)+		; Feature Code
+	MOVZWL	(R1)+, (R0)+		; Segment number
+	MOVZBL	(R1)+, (R0)+		; Vertex number
+	MOVZBL	(R1)+, (R0)+		; Overlay number
+	MOVZBL	(R1)+, (R0)+		; Graphical type
+	MOVZBL	(R1)+, (R0)+		; Map
+	CVTBL	(R1), (R0)		; Flags
+;
+	RET
+
+;
+; CLRFLG (mask, pack)
+; to clear bits in the flag entry of pack
+;
+	.ENTRY	CLRFLG, ^M<>
+	MOVAB	@8(AP), R0		; pack address
+	BICB2	@4(AP),FLGOFF(R0)
+	RET
+;
+; GETFLG (flag,pack)
+; read flag entry of pack into longword flag
+;
+	.ENTRY	GETFLG, ^M<>
+	MOVAL	@8(AP), R0		; pack address
+	CVTBL	FLGOFF(R0), @4(AP)
+	RET
+;
+; SETFTR (mask,link)
+; to set bits in the flag entry in all packs on the chain for a
+; particular feature, first pack at address LINK.
+; Could be done by SCNFTR with routine to set flags
+;
+	.ENTRY	SETFTR, ^M<R2,R3>
+	MOVB	@4(AP), R3		; mask
+	MOVL	@8(AP), R2		; starting address
+	MOVL	R2, R1			; another copy
+10$:	BISB2	R3, FLGOFF(R1)		; set flags
+	MOVL	(R1), R1		; address of next pack
+	CMPL	R1, R2			; where we started?
+	BNEQ	10$			; no, so loop
+	RET
+
+;
+; PUTLNG (source, destination)
+; move a longword from source to destination
+;
+	.ENTRY	PUTLNG, ^M<>
+	MOVL	@4(AP), @8(AP)
+	RET
+
+;
+; EFWM (mask, flag [,flag...] )
+; to build up an event flag wait mask
+;
+	.ENTRY	EFWM, ^M<R10,R11>
+	JSB	G^VIO$1ST
+	JSB	G^VIO$GNA		; get mask address
+	MOVAL	(R0),R10		; save it
+1$:	JSB	G^VIO$GNA		; see if any more efns
+	BCS	2$			; no more if CS
+	MOVZWL	(R0),R1
+	BICL2	#^XFFFFFFE0,R1		; mask to 5 bits
+	INSV	#1, R1, #1, (R10)	; insert bit in mask
+	BRB	1$			; try for another
+2$:	RET
+
+;
+; CMPSTR(string1,string2)
+; to compare two strings (passed by descriptor), returning 0 if same
+; length and contents, else -1
+;
+	.ENTRY	CMPSTR, ^M<R2,R3>
+	MOVQ	@4(AP),R0		; descriptor 1
+	MOVQ	@8(AP),R2		; descriptor 2
+	CMPW	R0,R2			; compare lengths
+	BNEQ	5$
+	CMPC3	R0,(R1),(R3)		; compare strings
+	BEQL	10$			; if equal, then R0=0
+5$:	MNEGL	#1,R0			; else return -1	
+10$:	RET
+;
+; CALLR(arg1,arg2...,routine)
+; Calls routine passing the same argument list as we are passed
+; Intended to call things whose address we have in a Fortran variable
+;
+	.ENTRY	CALLR, ^M<>
+	MOVZBL	(AP),R0			; number of arguments
+	MOVL	(AP)[R0],R0		; last argument (routine)
+	CALLG	(AP),(R0)
+	RET
+
+;
+; GETARR (arr, index)
+; move a longword from array at specified index
+;
+	.ENTRY	GETARR, ^M<>
+	SUBL3	#1,@8(AP),R0
+	MOVL	@4(AP)[R0], R0
+	RET
+
+;
+; PUTARR (source, arr, index)
+; move a longword from array at specified index
+;
+	.ENTRY	PUTARR, ^M<>
+	SUBL3	#1,@12(AP),R0
+	MOVL	@4(AP),@8(AP)[R0]
+	RET
+
+; Macro version of Fortran in LDTI.SRC for efficiency
+;	INTEGER*4 FUNCTION LDTI_COPY_BIT_DATA
+;     &                     ( YSIZE, OFFSET, USER_ARRAY, X_POSN ,Y_POSN, 
+;     &			     X_NUMBER, Y_NUMBER, SAMPLE, DTI_ARRAY)
+;
+;	LITES2 version of DTILIB Function. Reads sampled data.
+;
+;	INTEGER*4		YSIZE		!Y size of DTI_ARRAY
+;	INTEGER*4		OFFSET		!offset into DTI_ARRAY
+;	INTEGER*4		X_NUMBER	!number of columns
+;	INTEGER*4		Y_NUMBER	!number of rows
+;	INTEGER*4		X_POSN		!start column value
+;	INTEGER*4		Y_POSN		!start row value
+;	INTEGER*4		SAMPLE		!sampling value
+;	INTEGER*4		USER_ARRAY(*)
+;	INTEGER*4		DTI_ARRAY(*)
+
+	YSIZE = 4
+	OFFSET = 8
+	USER_ARRAY = 12
+	X_POSN = 16
+	Y_POSN = 20
+	X_NUMBER = 24
+	Y_NUMBER = 28
+	SAMPLE = 32
+	DTI_ARRAY = 36
+
+	.ENTRY	LDTI_COPY_BIT_DATA,^M<R2,R3,R4,R5,R6,R7,R8>
+
+	CLRL	R5
+	MOVL	@X_NUMBER(AP), R2	; outer loop counter
+	SUBL3	#1, @Y_POSN(AP), R0	; Y_POSN-1
+	SUBL3	#2, @X_POSN(AP), R1	; X_POSN-2
+	MULL2	@YSIZE(AP), R1		; *YSIZE
+	ADDL2	R1, R0
+	MOVL	@SAMPLE(AP), R8
+	MULL2	R8, R0			; *SAMPLE
+	ADDL3	@OFFSET(AP), R0, R1	; +OFFSET, store as base
+	MOVAL	@DTI_ARRAY(AP), R6
+	MOVAL	@USER_ARRAY(AP), R7
+
+10$:
+	MULL3	@YSIZE(AP), R8, R0	; YSIZE*SAMPLE
+	ADDL2	R0, R1			; add to base
+	MOVL	R1, R3
+	MOVL	@Y_NUMBER(AP), R4	; inner loop counter
+
+20$:
+	EXTZV	R3, #1, (R6), R0 
+	INSV	R0, R5, #1, (R7)
+
+	ADDL2	R8, R3 			; add STEP
+	INCL	R5
+
+	SOBGTR	R4, 20$
+	SOBGTR	R2, 10$
+
+	MOVL	#1, R0
+	RET
+
+; Macro routine for efficient DTI warping (see DISP_RAS_WARP.SRC)
+;	SUBROUTINE LDTI_WARP_DATA(
+;     &		DTIB,NPIX,X,Y,DX,DY,
+;     &		IMAGE_COLUMNS(IM),IMAGE_ROWS(IM),SHIFT,IBITL,
+;     &		DATA_ADDR,P_OFFSET,P_STEP(1),P_STEP(2),DATA_TYPE)
+;
+;	BYTE			DTIB(*)		!output array
+;	INTEGER*4		NPIX		!pixels in scanline
+;	REAL*4			X,Y		!start position
+;	REAL*4			DX,DY		!increments
+;	INTEGER*4		COLS,ROWS,	!size of image
+;	INTEGER*4		SHIFT,IBITL,	!shift and mask
+;	INTEGER*4		DATA_ADDR	!start of data
+;	INTEGER*4		P_OFFSET	!offset of bl corner
+;	INTEGER*4		P_STEPX		!step in X
+;	INTEGER*4		P_STEPY		!step in Y
+;	INTEGER*4		DATA_TYPE	!bit, byte etc.
+
+	DTIB = 4
+	NPIX = 8
+	X = 12
+	Y = 16
+	DX = 20
+	DY = 24
+	COLS = 28
+	ROWS = 32
+	SHIFT = 36
+	IBITL = 40
+	DATA_ADDR = 44
+	P_OFFSET = 48
+	P_STEPX = 52
+	P_STEPY = 56
+	DATA_TYPE = 60
+
+	.ENTRY	LDTI_WARP_DATA,^M<R2,R3,R4,R5,R6,R7,R8,R9>
+
+; clear out the array to allow for pixels outside image
+;;;	MOVC5	#0,(SP),#0,@NPIX(AP),@DTIB(AP)
+
+	MOVF	@X(AP),R2
+	MOVF	@Y(AP),R4
+	MOVL	@DATA_ADDR(AP),R6
+	MOVL	DTIB(AP),R7
+	MOVL	@NPIX(AP),R8
+	CLRL	R9
+
+; repeat NPIX
+; round to pixel number and check within image
+1$:	CLRL	R0
+	CVTRFL	R2,R3
+	BLSS	200$
+	CMPL	R3,@COLS(AP)
+	BGEQ	200$
+	CVTRFL	R4,R5
+	BLSS	200$
+	CMPL	R5,@ROWS(AP)
+	BGEQ	200$
+
+; calculate pixel offset (measured in pixels so far)
+	MULL3	R3,@P_STEPX(AP),R0
+	MULL3	R5,@P_STEPY(AP),R1
+	ADDL2	R1,R0
+	ADDL2	@P_OFFSET(AP),R0
+
+	CASEL	@DATA_TYPE(AP),#1,#2	; allow 0 (bit) to fall through
+2$:	.WORD	10$-2$
+	.WORD	20$-2$
+	.WORD	30$-2$
+;bit
+	EXTZV	R0,#1,(R6),R0
+5$:	INSV	R0,R9,#1,(R7)
+	INCL	R9
+	BRB	110$
+;byte
+10$:	MOVZBL	(R6)[R0],R0
+	BRB	100$
+;word
+20$:	MOVZWL	(R6)[R0],R0
+	BRB	90$
+;long
+30$:	MOVL	(R6)[R0],R0
+
+; word and long are shifted and masked
+90$:	ASHL	@SHIFT(AP),R0,R0
+	BICL2	@IBITL(AP),R0
+
+100$:	MOVB	R0,(R7)+
+
+110$:	ADDF2	@DX(AP),R2
+	ADDF2	@DY(AP),R4
+
+	SOBGTR	R8,1$
+	RET
+
+; point outside image
+200$:	TSTL	@DATA_TYPE(AP)
+	BEQL	5$	; bit data
+	BRB	100$	; other data
+
+	.END

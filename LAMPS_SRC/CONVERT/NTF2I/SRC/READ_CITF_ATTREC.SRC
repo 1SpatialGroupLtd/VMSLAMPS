@@ -1,0 +1,474 @@
+	LOGICAL FUNCTION READ_CITF_ATTREC(IS_POINT)
+C
+***     MODULE READ_CITF_ATTREC
+***     IDENT	16OC96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C       Author							ST  20-Nov-1992
+C
+C Description
+C
+C A parallel routine to READ_ATTREC which just handle CITF files.
+C It is intended to deal with CITF attributes.
+C
+CMOD	Prevent int overflow when assigning the result		ST  27-Apr-1994
+C       of ICHAR to a byte by first assigning it to an
+C	int equivalenced onto a byte. (Mod 1359).
+C
+CMOD    Implement CITF96 changes (WI/CC 1545)                   TJM 13-Jun-1996
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	LOGICAL		IS_POINT		! Is this a point feature
+C
+C Common:
+	INCLUDE 	'LSL$CMNFRT:FRTCOM.CMN'	! general FRT stuff
+	INCLUDE 	'LSL$CMNFRT:FRTACD.CMN'	! default attribute info
+	INCLUDE 	'CITF.CMN'		! General CITF stuff
+	INCLUDE 	'CITFATTS.CMN'		! CITF Att. desc. table
+	INCLUDE 	'COMBATTS.CMN'		! Combined attributes
+	INCLUDE 	'ATTRIBUTE.CMN'		! Att. desc. table
+	INCLUDE 	'ATTCMN.CMN'		! Atribute data for feature
+	INCLUDE 	'RECORD.CMN'		! STRING etc read from NTF
+	INCLUDE 	'NTFDATA.CMN'		! for DIVIDER
+	INCLUDE 	'NTF2IMSG.PAR'
+C
+C Functions:
+C
+	LOGICAL		RDLONG
+	LOGICAL		RDINT
+	LOGICAL		RDREAL
+	LOGICAL		CVT_DATE
+	INTEGER*2	GET_NEXT_ATTR		! Return the start of the
+						! next attribute
+C
+C Workspace:
+C
+	INTEGER		I
+	INTEGER		ATTR_LEN
+	INTEGER		ATTR_WIDTH
+	INTEGER		ATTR_TYPE
+	INTEGER		ATTR_MULT
+	INTEGER*2	ATNO		! Pointer to the attribute table
+	INTEGER*2	ACTYPE		! Type of AC
+	EQUIVALENCE	( ACTYPE, RDARR(1) )
+	INTEGER*2	IMONTH		! Month in integer format 1..12
+	INTEGER*2	RDARR(3)	! Temp storage for ACTYPE,LCODE
+	INTEGER*2	START		! Start pos of AC field
+	INTEGER*2	CURPOS		! Current pos. in AC field
+	INTEGER*2	AC_COUNT	! How many AC for this feature
+	INTEGER*2	AC_PTR		! Where we are in AC table
+C
+	INTEGER		AC_NOS( MAX_ATTR_NUM )		! AC types read
+	INTEGER		AC_VALUE ( MAX_ATTR_NUM )	! The values
+	CHARACTER*2	AC_MNEM ( MAX_ATTR_NUM )	! The mnemonics
+	INTEGER		UNUSED				! Unused argument
+	INTEGER		ACD_DATATYPE_TX		! Optional text datatype
+	PARAMETER	( ACD_DATATYPE_TX = 6 )	! Fudge to look like FRTLIB
+	INTEGER*4	LCODE			! Value ( interpretation depends
+						!         on the AC type )
+	EQUIVALENCE	( LCODE , RDARR(2) )
+C
+	LOGICAL		OK		! Success flag
+	LOGICAL		TRY_TIME	! NTF has no date format, if user
+	DATA 	TRY_TIME /.TRUE./	! Initialise it
+	SAVE 	TRY_TIME		! and remember it
+C
+	REAL		PI
+	PARAMETER	(PI=3.1415926)
+	REAL		R_VALUE		! Temp storage ( AC value
+C
+	CHARACTER*4	C_VALUE		!   ""
+	EQUIVALENCE	( LCODE, R_VALUE )
+	EQUIVALENCE	( LCODE, C_VALUE )
+c
+	CHARACTER*255	CBUFF			! Temp storage
+	BYTE		BBUFF(255)		!  "
+	EQUIVALENCE	( CBUFF,BBUFF(1) )
+C
+	CHARACTER*2	NTF_MNEM	! NTF attribute mnemonic
+	CHARACTER*12	DATE		! Temp storage
+C
+	CHARACTER*3	MONTHS(12)	! JAN, FEB,...,DEC
+C
+	DATA MONTHS /	'JAN','FEB','MAR','APR','MAY','JUN',
+     &			'JUL','AUG','SEP','OCT','NOV','DEC' /
+C
+	BYTE		AC_TEXT  ( 255,MAX_ATTR_NUM )	! Optional text
+	LOGICAL		FIND_DIV
+	LOGICAL		COMBINED
+	INTEGER*4	COMBIND
+	INTEGER*4	COMBNUM
+	INTEGER		CHARLONG
+	BYTE		CHARBYTE
+	EQUIVALENCE	(CHARLONG,CHARBYTE)
+C
+C.........................................................................
+C Initialise everything
+C
+	OK = .TRUE.
+	AC_COUNT = 0
+	IF (HAD_CITF93) THEN
+	   START = 5
+	ELSEIF (HAD_CITF96) THEN
+	   START = 7
+	ENDIF
+	ATTR_LEN = 0
+C.........................................................................
+C Get the attribute code ( type )
+C
+250	CURPOS = START + 2
+C
+	NTF_MNEM = STRING(START:START+1)
+	COMBINED = .FALSE.
+	COMBIND = 0
+	COMBNUM = 0
+	DO 5 I=1,COMB_ATT_PTR
+	   IF ( NTF_MNEM.EQ.COMB_ATT(I) ) THEN
+	      COMBINED = .TRUE.
+	      COMBNUM = I
+	      GOTO 6
+	   ENDIF
+5	CONTINUE
+6	IF (COMBINED) THEN
+	   COMBIND = COMBIND + 1
+	   IF (COMBIND.GT.COMB_ATT_NUM_COMP(COMBNUM)) GOTO 250
+	   NTF_MNEM = COMB_ATT_COMP(COMBIND,COMBNUM)
+	ENDIF
+C .........................................................................
+C Do we know about it (was it defined in the ATTDESC?)
+C
+10	DO 150 I=1,ATTR_PTR
+	   IF ( NTF_MNEM.EQ.NTF_ATT_NAME(I) ) THEN
+	      IF (FIELD_WIDTH(I).EQ.0) THEN
+		 CALL LSL_PUTMSG(NTF2I__NOATTDESC,NTF_MNEM)
+		 CONT_VOL = .FALSE.	! force program to end
+		 OK=.FALSE.
+		 GOTO 9999
+	      ELSE
+		 ATTR_TYPE = ATTR_TRANS(I)
+		 ATTR_WIDTH = FIELD_WIDTH(I)
+		 ATTR_LEN = FIELD_WIDTH(I)
+		 ATTR_MULT = ATT_R_MULT(I)
+		 GOTO 151
+	      ENDIF
+	   ENDIF
+150	CONTINUE
+C
+C Do we know about it (is it default CITF attribute?)
+C
+	DO 171 I=1,NUM_CITF_ATTS
+	   IF (NTF_MNEM.EQ.CITF_DEF_ATT(I)) THEN
+	      ATTR_TYPE = CITF_DEF_TYPE(I)
+	      ATTR_WIDTH = CITF_DEF_WIDTH(I)
+	      ATTR_LEN = CITF_DEF_WIDTH(I)
+	      ATTR_MULT = CITF_DEF_MULT(I)
+	      GOTO 151
+	   ENDIF
+171	CONTINUE
+C 
+C We aren't meant to be translating it, make sure it was in the ATTDESC
+C 
+	DO 160 I=1,IGN_PTR
+	   IF ( NTF_MNEM.EQ.NTF_NAM_IGN(I) ) THEN
+	      ATTR_LEN = NTF_LEN_IGN(I)
+	      GOTO 161
+	   ENDIF
+160	CONTINUE
+C
+C Unrecognised attribute, no idea what this is or how long it is.
+C look for a DIVIDER or start on the next record. Warn the user.
+C
+	DO 170 I=1,UNKN_PTR
+	   IF (UNKN_ATT(I).EQ.NTF_MNEM) GOTO 180	! warned already
+170	CONTINUE
+	UNKN_PTR = UNKN_PTR + 1
+	IF (UNKN_PTR.GT.UNKN_MAX) GOTO 175
+	UNKN_ATT(UNKN_PTR) = NTF_MNEM
+175	CALL LSL_PUTMSG(NTF2I__NOTRANS,NTF_MNEM)
+180	START = GET_NEXT_ATTR( CURPOS, 0, .FALSE.)
+	IF ( START.EQ.0 ) GOTO 900		! No more
+	GOTO 250	! Back up to read next one
+C .......................................................................
+C We've found the definition of the attribute so skip over it's length
+C to the next one
+C
+161	START = GET_NEXT_ATTR( CURPOS,ATTR_LEN,.FALSE.)
+	IF ( START.EQ.0 ) GOTO 900		! No more
+	GOTO 250	! Back up to read next one
+C ........................................................................
+C We know what the attribute is and we are going to (try to) convert it
+C
+151	ATNO = I	! We know it
+C
+C See if we have had one already ( value or text )
+C  This is because we may have a value and a text string to go from 
+C  separate NTF attributes into the same IFF AC.
+C
+C Remove this check for CITF 96, where all attributes go into
+C the text string, and some occur several times.
+	IF (.NOT.HAD_CITF96) THEN
+	   DO 210 AC_PTR = 1,AC_COUNT
+	      IF  (AC_NOS(AC_PTR).EQ.IFF_ATT_NUM(ATNO) .AND.
+     &	           IFF_ATT_NUM(ATNO).NE.0) GOTO 152
+210	   CONTINUE
+	ENDIF
+C
+C Not had it before, add to end of list
+C
+	AC_COUNT = AC_COUNT + 1
+	AC_PTR = AC_COUNT
+	AC_NOS( AC_PTR ) = IFF_ATT_NUM( ATNO )
+	AC_MNEM ( AC_PTR ) = NTF_MNEM
+	AC_VALUE ( AC_PTR ) = 0
+	AC_TEXT ( 1,AC_PTR ) = 0
+C .......................................................................
+C So read the value 
+C
+C Integer
+C
+152	IF ( ATTR_TYPE.EQ.ACD_DATATYPE_I ) THEN	
+C
+C Pull out the value
+C
+	   CALL SETAUX(%REF(STRING(CURPOS:)),ATTR_WIDTH)
+	   IF (RDLONG(LCODE)) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+	   AC_VALUE( AC_PTR ) = LCODE
+C .......................................................................
+C Real
+C
+	ELSEIF ( ATTR_TYPE.EQ.ACD_DATATYPE_R ) THEN
+	   CALL SETAUX(%REF(STRING(CURPOS:)),ATTR_WIDTH)
+	   IF (RDREAL(R_VALUE)) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+	   R_VALUE = R_VALUE / ATTR_MULT
+C
+	   AC_VALUE( AC_PTR ) = LCODE		! Equiv. to R_VALUE
+C .......................................................................
+C Character
+C
+	ELSEIF ( ATTR_TYPE.EQ.ACD_DATATYPE_C ) THEN
+	   C_VALUE = STRING ( CURPOS:CURPOS+ATTR_WIDTH-1)
+	   AC_VALUE( AC_PTR ) = LCODE		! Equivalenced to C_VALUE
+C .......................................................................
+C Date
+C
+	ELSEIF ( ATTR_TYPE.EQ.ACD_DATATYPE_D ) THEN
+C
+C The date needs some converting, it comes as a character string
+C in the form yyymmdd, but IFF wants dd-mmm-yyyy
+C
+C Rewrite in new order translating the month to chars ( e.g. 'APR' ) 
+C from integer ( '03' )
+C
+	   CALL SETAUX(%REF(STRING(CURPOS+4:CURPOS+5)),2)
+	   IF (RDINT( IMONTH )) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+103	   CALL EXPAND ( '%WS%S2% -%S3% -%S4',DATE,
+     &						STRING(CURPOS+6:CURPOS+7),
+     &						MONTHS( IMONTH ),
+     &						STRING(CURPOS:CURPOS+3))
+C
+C And put the converted date into the longword ready for the AC
+C
+	   IF (.NOT.CVT_DATE ( DATE, LCODE, UNUSED )) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+	   AC_VALUE( AC_PTR ) = LCODE
+C .......................................................................
+C And Time
+C
+	ELSEIF ( ATTR_TYPE.EQ.ACD_DATATYPE_T ) THEN
+C
+C There is no time format in NTF so we don't know what to expect
+C try to read it as VMS time - make sure we don't moan too often
+C
+	   IF ( TRY_TIME ) THEN
+	      IF (.NOT.CVT_DATE (STRING(CURPOS:CURPOS+ATTR_WIDTH),
+     &			 UNUSED, LCODE)) THEN
+ 	         CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	 	 CALL LSL_ADDMSG(NTF2I__BADTIME)
+	         OK=.FALSE.
+	         TRY_TIME = .FALSE.
+	         GOTO 9999
+	      ENDIF
+	   ENDIF
+C
+	   AC_VALUE( AC_PTR ) = LCODE
+C ....................................................................
+C Optional text string
+C We read a text attribute until we reach a terminating DIVIDER or 
+C we have read ATTR_WIDTH characters ( 255 for variable length field ).
+C The field may well spill over onto subsequent records.
+C
+C
+	ELSEIF ( ATTR_TYPE.EQ.ACD_DATATYPE_TX ) THEN
+C
+C .....................................................................
+C Read the text string
+C
+	   DO 110 I=1,ATTR_WIDTH
+C
+C If we are at the end of a record - get a new one
+C
+	      IF (CURPOS.EQ.(LENGTH-1)) THEN
+		 CURPOS = GET_NEXT_ATTR(CURPOS,0,.FALSE.)
+	         IF (CURPOS.EQ.0) GOTO 112
+	      ENDIF
+C
+C Have we had a record divider
+C
+	      IF ( STRING(CURPOS:CURPOS).EQ.DIVIDER ) GOTO 112
+C
+C No so store this character in the text buffer
+C
+	      CHARLONG = ICHAR(STRING(CURPOS:CURPOS))
+	      AC_TEXT( I, AC_PTR ) = CHARBYTE
+	      CURPOS = CURPOS + 1
+110	   CONTINUE
+C
+	   I = ATTR_WIDTH+1
+	   CURPOS = CURPOS - ATTR_WIDTH
+C
+112	   ATTR_LEN = I-1
+C
+C We have the string - add terminating character
+C
+	   AC_TEXT( ATTR_LEN+1, AC_PTR ) = 0
+C .......................................................................
+C We have gone through the normal cases. If we get here then the
+C data has to be converted in some way
+C
+	ELSEIF ( ATTR_TYPE.EQ. 7 ) THEN	
+C
+C Comes as a real but IFF attribute is an iteger
+C
+	   CALL SETAUX(%REF(STRING(CURPOS:)),ATTR_WIDTH)
+	   IF (RDREAL(R_VALUE)) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+	   LCODE = NINT( R_VALUE / ATTR_MULT)
+C
+	   AC_VALUE( AC_PTR ) = LCODE
+C .......................................................................
+C
+	ELSEIF ( ATTR_TYPE.EQ. 8 ) THEN
+C
+C Should be real but came as an integer
+C
+	   CALL SETAUX(%REF(STRING(CURPOS:)),ATTR_WIDTH)
+	   IF (RDLONG(LCODE)) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+	   R_VALUE = REAL( LCODE )
+C
+	   AC_VALUE( AC_PTR ) = LCODE		! Equiv. to R_VALUE
+C .......................................................................
+C
+C
+	ENDIF
+C .......................................................................
+C Have we any more records/fields to read
+C
+	IF (COMBNUM.GT.0) THEN
+	   FIND_DIV = ((.NOT.COMBINED).OR.
+     &	               (COMBINED.AND.(COMBIND.EQ.COMB_ATT_NUM_COMP(COMBNUM))))
+	ELSE
+	   FIND_DIV = .NOT.COMBINED
+	ENDIF
+	START = GET_NEXT_ATTR(CURPOS,ATTR_LEN,FIND_DIV)
+C
+C Head back up to the top and read it
+C
+	IF (( START.GT.0 ).AND.(START.LT.LENGTH-2) ) THEN
+	   IF (COMBINED) THEN
+	      IF (START.EQ.3) THEN	! ie we've just read a new line
+		 CURPOS = 3
+	      ELSE
+		 IF (ATTR_TYPE.EQ.ACD_DATATYPE_TX) THEN
+		    CURPOS = START
+		 ELSE
+		    CURPOS = CURPOS + ATTR_WIDTH
+		 ENDIF
+	      ENDIF
+	      GOTO 6
+	   ENDIF
+	   GOTO 250
+	ENDIF
+C .......................................................................
+C We are now ready to output any AC's we have read
+C 
+900	DO 901 AC_PTR = 1, AC_COUNT
+C
+C Was it undefined
+C
+	   IF (AC_NOS(AC_PTR).EQ.0) THEN
+	      CALL LSL_PUTMSG(NTF2I__NOACCODE,AC_MNEM(AC_PTR))
+	      GOTO 901
+	   ENDIF
+C
+C Check for DT and OR attributes which determine the feature as a scaled symbol
+C
+	   IF (AC_MNEM(AC_PTR).EQ.'DT') THEN
+	      HAD_DT = .TRUE.
+	      IF (HAD_CITF96) THEN
+	         CALL SETAUX(AC_TEXT(1,AC_PTR),255)
+	         DT = 100.0
+	         IF (.NOT.RDLONG(LCODE)) DT = FLOAT(LCODE)
+	      ELSE
+	         DT = FLOAT(AC_VALUE(AC_PTR))
+	      ENDIF
+	      DT = DT/100.0
+	      IF (IS_POINT) GOTO 901
+	   ENDIF
+	   IF (AC_MNEM(AC_PTR).EQ.'OR') THEN
+	      HAD_OR = .TRUE.
+	      IF (HAD_CITF96) THEN
+	         CALL SETAUX(AC_TEXT(1,AC_PTR),255)
+	         OR = 0.0
+	         IF (.NOT.RDLONG(LCODE)) OR = FLOAT(LCODE)
+	      ELSE
+	         OR = FLOAT(AC_VALUE(AC_PTR))
+	      ENDIF
+	      OR = OR/10.0 * PI/180.0
+	      IF (IS_POINT) GOTO 901
+	   ENDIF
+C
+	   IF (AC_TEXT(1,AC_PTR).EQ.0) THEN
+	      CALL IFFAC ( AC_NOS( AC_PTR ), 		! Type
+     &			   AC_VALUE( AC_PTR ))		! Value 
+	   ELSE
+	      CALL IFFAC ( AC_NOS( AC_PTR ), 		! Type
+     &			   AC_VALUE( AC_PTR ),		! Value 
+     &			   AC_TEXT( 1,AC_PTR ))		! Optional text
+	   ENDIF
+C
+901	CONTINUE
+C.........................................................................
+C
+9999	READ_CITF_ATTREC = OK
+	RETURN
+	END

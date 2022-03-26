@@ -1,0 +1,311 @@
+	INTEGER FUNCTION EVLXPR(STR,NCHRS,VAL,NVALS,ANSWER)
+C
+***	IDENT	06AU92
+***	MODULE	EVLXPR
+C
+C	Copyright	Laser-Scan Ltd., Cambridge, England
+C	Author		Andrew Morris			25-Apr-1985
+C
+CMOD	Added MAX,MIN,IFTHEN,logical, binary ops	SG 11-Apr-1991
+CMOD	Fixed bug in original code to detect end of evaluation
+C							SG 12-Apr-1991
+CMOD	Standardised op_symbols for binary and logical operators
+C							SG 17-Apr-1991
+CMOD	Comma operator redundant, removed by parse	SG 18-Apr-1991
+CMOD	Added relational operator evaluation		SG 18-Apr-1991
+CMOD	Changed so that all non-zero values have logical
+C	values of TRUE					SG  7-May-1991
+C
+CMOD	Fixed error in order of assignment of IF expression outputs
+C	from FALSE,TRUE to TRUE,FALSE			SG  9-Jul-1992
+C
+CMOD1133Don't use NULL values in max,min calculations, but allow a
+C	value to be calculated from the remaining values
+C							JB 04-Aug-1992
+
+	IMPLICIT NONE
+C
+***	PARAMETER/HERE:XPRPAR/			! has PLS,MNS,etc.
+	INCLUDE	'LSL$CMNDTICOMBINE:CONTROL.CMN'
+C
+
+C workspace
+	REAL		PI
+	INTEGER		MAXVALS			! max No of VALs allowed
+
+	PARAMETER	( PI=3.14159265)
+	PARAMETER	( MAXVALS = 100)
+
+C external variables and constant declaration
+	INCLUDE		'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE		'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE		'LSL$CMNDTI:DTIPAR.PAR'
+C
+C Common
+	INCLUDE		'LSL$CMNLSL:EXCEPTION.CMN'
+C
+C arguments in
+	INTEGER		NCHRS		! No of chars in expression
+	BYTE		STR(NCHRS)	! expression in RP-form
+	INTEGER		NVALS		! No of values in expression
+	REAL		VAL(NVALS)	! values in expression
+C
+C arguments out
+	REAL		ANSWER		! value of expression
+C
+C workspace
+	INTEGER		I
+	INTEGER		ICHR		! index into STR
+	INTEGER		I_NUM		! index into VAL
+	INTEGER		NV		! value-stack height
+	INTEGER		N_OPS		! binary op count
+	INTEGER		PARAMS		! number of args
+	INTEGER		ARG_LOOP	! loop variable
+	REAL		STK(MAXVALS)	! value-stack
+	BYTE		CHR		! char from STR
+	LOGICAL		IS_NUM		! CHR a number?
+	LOGICAL		IS_OPR		! CHR a uranary operator (func)?
+	LOGICAL		IS_LIT		! CHR a literal char
+	LOGICAL		TRIV		! trivial case?
+
+	LOGICAL		L1,L2,L3	! temp logical variables
+	INTEGER*2	TMP1,TMP2,TMP3	! temporary variables
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C	Evaluates expression in byte array STR, returning value
+C	in ANSWER. Function result is
+C
+C		-1	for success
+C		 0	NULLS present
+C		 1	for invalid RP-syntax
+C		 2	for too few values in expression
+C		 3	for invalid character in expression
+C		 4	incorrect num of values in expression
+C		 5	class enabled prohibits logical ops
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+	EVLXPR = -1		! assume success
+C
+C Don't evaluate anything if there is a NULL in the input list, unless
+C NULL_HANDLING has been turned on (for MAX,MIN at present)
+C
+	DO 5 I = 1,NVALS
+	   IF (VAL(I).EQ.DTI_NULL_REAL) THEN
+	      EVLXPR = 0
+C
+	      IF (.NOT.NULL_HANDLING) GOTO 20		! exit
+	   ENDIF
+5	CONTINUE
+C
+	CHR = STR(1)
+C
+	IF  ((CHR.NE.NUM).OR.(NVALS.LT.1)) THEN
+	   EVLXPR = 1			! invalid syntax for RP-form
+	   GOTO 20			! return
+	END IF
+	I_NUM  = 0
+	NV     = 0			! nothing on stack yet
+	ICHR   = 0
+	N_OPS  = 0			! no binary ops done yet
+	PARAMS = -1			! no variable arg funcs yet
+
+10	ICHR = ICHR+1
+	IF (ICHR.GT.NCHRS) THEN
+	   EVLXPR = 2			! too few number values
+	   GOTO 20			! return
+	END IF
+C
+	CHR = STR(ICHR)			! get token
+	IS_OPR = ((CHR.GE.PLS).AND.(CHR.LE.IFTHEN))
+	IS_NUM = CHR.EQ.NUM
+	IS_LIT = CHR.EQ.LIT
+C
+	IF (IS_OPR) THEN
+C Unary operator?
+	   IF (CHR.EQ.UNA) THEN				!uminus
+	      STK(NV) = -STK(NV)
+	   ELSEIF (CHR.EQ.ABB) THEN			!abs
+	      STK(NV) = ABS(STK(NV))
+	   ELSEIF (CHR.EQ.ACO) THEN			!acos
+	      STK(NV) = ACOS(STK(NV))*180.0/PI
+	   ELSEIF (CHR.EQ.ASI) THEN			!asin
+	      STK(NV) = ASIN(STK(NV))*180.0/PI
+	   ELSEIF (CHR.EQ.ATA) THEN			!atan
+	      STK(NV) = ATAN(STK(NV))*180.0/PI
+	   ELSEIF (CHR.EQ.CSI) THEN			!cos
+	      STK(NV) = COS(STK(NV)*PI/180.0)
+	   ELSEIF (CHR.EQ.NIN) THEN			!nearest integer
+	      STK(NV) = NINT(STK(NV))			
+	   ELSEIF (CHR.EQ.SNE) THEN			!sine
+	      STK(NV) = SIN(STK(NV)*PI/180.0)
+	   ELSEIF (CHR.EQ.TNG) THEN			!tan
+	      STK(NV) = TAN(STK(NV)*PI/180.0)
+	   ELSEIF (CHR.EQ.LNOT) THEN			!logical not
+	      IF (CLASS_ENABLED) THEN
+		EVLXPR = 5
+		GOTO 20
+	      ENDIF
+C
+	      IF (STK(NV).EQ.0) THEN
+		STK(NV) = DTI_FALSE
+	      ELSE
+		STK(NV) = DTI_TRUTH
+	      ENDIF
+	   ELSEIF (CHR.EQ.BNOT) THEN			! bitwise not
+	      TMP1 = NINT(STK(NV))
+	      TMP2 = .NOT.TMP1
+	      STK(NV) = REAL(TMP2)
+	   ELSEIF ((CHR.GE.MAX).AND.(CHR.LE.IFTHEN)) THEN   ! Variable args
+C
+	      IF (CHR.EQ.MAX .OR. CHR.EQ.MIN) THEN
+		 IF (PARAMS.EQ.-1) THEN
+		   EVLXPR = 2				!too few operands
+		   GOTO 20
+		 ENDIF
+C
+		 IF (PARAMS.NE.0) THEN
+ 		    DO 12 ARG_LOOP = 1,PARAMS,1
+		       IF (CHR.EQ.MAX) THEN			!max
+			  IF (STK(NV-1).EQ.DTI_NULL_REAL) THEN
+			     STK(NV-1) = STK(NV)
+			  ELSEIF (STK(NV).EQ.DTI_NULL_REAL) THEN
+			     STK(NV) = STK(NV-1)
+			  ELSE
+			     IF (STK(NV).GT.STK(NV-1)) STK(NV-1) = STK(NV)
+			  ENDIF
+C
+		       ELSE					!min
+			  IF (STK(NV-1).EQ.DTI_NULL_REAL) THEN
+			     STK(NV-1) = STK(NV)
+			  ELSEIF (STK(NV).EQ.DTI_NULL_REAL) THEN
+			     STK(NV) = STK(NV-1)
+			  ELSE
+			     IF (STK(NV).LT.STK(NV-1)) STK(NV-1) = STK(NV)
+			  ENDIF
+		       ENDIF
+12	            NV = NV-1
+C
+		    N_OPS= N_OPS + PARAMS
+		 ENDIF
+C
+	      ELSEIF (CHR.EQ.IFTHEN) THEN		!if then else
+		IF (PARAMS.NE.2) THEN
+	  	   EVLXPR = 4
+		   GOTO 20
+		ENDIF
+C
+		IF (STK(NV-2).EQ.DTI_FALSE) THEN
+		   STK(NV-2) = STK(NV)			! FALSE
+		ELSE	
+   	   	   STK(NV-2) = STK(NV-1)		! TRUE
+		ENDIF
+	        N_OPS = N_OPS +2
+	        NV = NV-2
+	      ENDIF
+	      PARAMS = -1
+	   ELSE
+C
+C Binary operator?
+	      IF (CHR.EQ.PLS) THEN			!addition
+	         STK(NV-1) = STK(NV-1)+STK(NV)
+	      ELSE IF (CHR.EQ.MNS) THEN			!subtraction
+	         STK(NV-1) = STK(NV-1)-STK(NV)
+	      ELSE IF (CHR.EQ.TMS) THEN			!multiplication
+	         STK(NV-1) = STK(NV-1)*STK(NV)
+	      ELSE IF (CHR.EQ.DVD) THEN			!division
+	         STK(NV-1) = STK(NV-1)/STK(NV)
+	      ELSE IF (CHR.EQ.EXP) THEN			!exponentiation
+	         STK(NV-1) = STK(NV-1)**STK(NV)
+	      ELSE IF ((CHR.GE.LXOR).AND.(CHR.LE.LAND))  THEN
+		 IF (CLASS_ENABLED) THEN
+		    EVLXPR = 5
+		    GOTO 20
+		 ENDIF
+C
+		 L1 = .FALSE.
+		 L2 = .FALSE.
+		 IF (STK(NV).NE.0.0) L1 = .TRUE.
+		 IF (STK(NV-1).NE.0.0) L2 = .TRUE.
+C
+	         IF (CHR.EQ.LOR) THEN			!logical and
+		    L3 = L1.OR.L2
+		 ELSE IF (CHR.EQ.LAND) THEN		!logical and
+		    L3 = L1.AND.L2
+	      	 ELSE IF (CHR.EQ.LXOR) THEN		!logical xor
+		    L3 = L1.NEQV.L2
+		 ENDIF	
+		 IF (L3) THEN			!convert back from fortran
+		    STK(NV-1) = DTI_TRUTH
+		 ELSE
+		    STK(NV-1) = DTI_FALSE
+		 ENDIF
+C
+	      ELSE IF ((CHR.GE.BXOR).AND.(CHR.LE.BAND))  THEN
+		 TMP1 = NINT(STK(NV))
+		 TMP2 = NINT(STK(NV-1))
+	 	 IF (CHR.EQ.BOR) THEN			!bitwise or
+		    TMP3  =  TMP1.OR.TMP2
+	         ELSE IF (CHR.EQ.BAND) THEN		!bitwise and
+		    TMP3 =  TMP1.AND.TMP2
+	        ELSE IF (CHR.EQ.BXOR) THEN		!bitwise xor
+		    TMP3 =  TMP1.NEQV.TMP2
+		 ENDIF
+		 STK(NV-1) = REAL(TMP3)
+C
+	      ELSE IF ((CHR.GE.LTN).AND.(CHR.LE.EQU))  THEN
+		 IF (CHR.EQ.LTN) THEN			! less than
+		    L3 = STK(NV-1).LT.STK(NV)
+		 ELSE IF(CHR.EQ.GTR) THEN		! greater than
+		    L3 = STK(NV-1).GT.STK(NV)
+		 ELSE IF(CHR.EQ.EQU) THEN		! equal to
+		    L3 = STK(NV-1).EQ.STK(NV)
+		 ENDIF
+		 IF (L3) THEN			!convert back from fortran
+		    STK(NV-1) = DTI_TRUTH
+		 ELSE
+		    STK(NV-1) = DTI_FALSE
+		 ENDIF
+C
+	      ELSE IF ((CHR.GE.LTE).AND.(CHR.LE.NEQ))  THEN
+		 IF (CHR.EQ.LTE) THEN
+		    L3 = STK(NV-1).LE.STK(NV)
+		 ELSE IF(CHR.EQ.GTE) THEN
+		    L3 = STK(NV-1).GE.STK(NV)
+		 ELSE IF(CHR.EQ.NEQ) THEN
+		    L3 = STK(NV-1).NE.STK(NV)
+		 ENDIF
+		 IF (L3) THEN			!convert back from fortran
+		    STK(NV-1) = DTI_TRUTH
+		 ELSE
+		    STK(NV-1) = DTI_FALSE
+		 ENDIF
+	      ENDIF
+C
+	      NV = NV-1
+	      N_OPS = N_OPS+1		! count binary operations
+	   END IF
+C
+	   IF ((ICHR.EQ.NCHRS).AND.(NV.EQ.1).AND.(N_OPS.EQ.NVALS-1)) THEN
+C	      EVLXPR = -1			! success
+	      ANSWER = STK(1)
+	      GOTO 20				! return
+	   END IF
+C
+	ELSE IF (IS_NUM) THEN
+	   I_NUM = I_NUM+1
+	   NV = NV+1
+	   STK(NV) = VAL(I_NUM)
+C
+ 	ELSEIF (CHR.EQ.LIT) THEN			!next symbol a number
+	   ICHR = ICHR+1				!skip over this one
+	   PARAMS = STR(ICHR) 
+	ELSE
+	   EVLXPR = 3
+	ENDIF
+C
+	GOTO 10
+C
+20	RETURN
+	END
+C	

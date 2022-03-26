@@ -1,0 +1,780 @@
+	LOGICAL FUNCTION PROCESS_TAPE()
+C
+***	MODULE	PROCESS_TAPE
+***	IDENT	25NO96
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD1535 To produce DTED compatible DTI files for the GRID
+C	 UHL1 option						JDB 18-Mar-1996
+C
+CMOD	Don't insist on checking offsets in Change 2 tapes	PGH 29-May-1991
+CMOD	Allow offset areas, and set them to null in DTI file	RJH 27-Oct-1989
+C Include MESPAR.PAR from 'LSL$DTMCONVERTSYS' now.		FJB 21-Jun-1988
+C Included as a function in DTED2DTI				FJB 26-Feb-1988
+C Modified to support DTED tapes with missing profiles and correctly
+C handle partially filled profiles.				SAB 20-Aug-1996
+C Author							CCB  5 Oct 1983
+C
+C Function to read a DMA DLMS DTED (Defense Mapping Agency  Digital
+C Land Mass Simulation  Digital Terrain Elevation Data) mag tape and
+C copy the information to a DTI file on disc.
+C
+C A change 2 tape will produce a UHL1 type DTI file
+C whilst a change 3/4 tape will produce a TED4 type DTI.
+C If GRID option is used, the UHL1 type is always produced.
+C
+	IMPLICIT NONE
+C
+C parameter file
+	INCLUDE 'LSL$CMNDLMS:FORMAT.PAR'	! for angle formats
+	INCLUDE 'LSL$CMNDTI:DTIDEF.PAR'         ! DTI file layout
+	INCLUDE 'LSL$CMNDTI:DTILIBMSG.PAR'      ! DTI messages
+C
+C for messages:
+	INCLUDE 'LSL$CMNDTED2DTI:DTED2DTIMSG.PAR'! specific error messages
+	INCLUDE	'LSL$CMNLSL:TXTC.CMN'            ! text buffer
+     	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'       ! LSL messages
+	INCLUDE 'LSL$DTMCONVERTSYS:MESPAR.PAR'   ! ERROR/WARNING messages
+C
+C common blocks
+	INCLUDE 'LSL$DTMCONVERTSYS:BLOCKY.CMN'	! block types
+	INCLUDE 'LSL$DTMCONVERTSYS:DTEDBUF.CMN'	! tape input buffer, UHL buffer
+	INCLUDE 'LSL$DTMCONVERTSYS:DTIFILE.CMN'	! DTI file maintenance
+	INCLUDE 'LSL$CMNDTED2DTI:OPTIONS.CMN'	! requested details
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+C                      
+	INCLUDE '($SSDEF)/NOLIST'
+C                   
+	REAL		DEGRAD		! degrees to radians conversion
+	PARAMETER	(DEGRAD=0.017 453 2925)
+C
+C functions called
+	LOGICAL		RDFANG		! read formatted angle (LSLDLMSLIB)
+	LOGICAL		RDINT
+	LOGICAL		RDLONG
+	LOGICAL		READLL
+	LOGICAL		RDGRID
+C
+C DTI related functions:
+	INTEGER*4	DTI_CREATE
+	INTEGER*4	DTI_INIT_DATA
+	INTEGER*4	DTI_COPY_DATA
+	INTEGER*4	DTI_COPY_BYTE_HEADER
+	INTEGER*4	DTI_MINMAX_DATA
+	INTEGER*4	DTI_PRINT_HEADER
+	INTEGER*4	DTI_CLOSE
+	INTEGER*4	DTI_OPEN
+C
+C workspace
+	INTEGER*4	TMPINT
+	INTEGER		III, JJJ	! do loops
+	INTEGER*4	OK              ! error flag
+	INTEGER*4	IERR		! error flag
+	INTEGER*4	LATOFF,LONOFF	! offsets of SW corner
+	LOGICAL*1	HADDSI		! had a DSI block
+	LOGICAL*1	HADACC		! had an ACC block
+	INTEGER*4	BLKCHK		! calculated checksum
+	INTEGER*4	CHKSUM		! tape checksum
+
+C
+	BYTE		CHKBYT(0:3)	! as bytes
+	EQUIVALENCE	(CHKSUM, CHKBYT)
+C
+	INTEGER*2	DUMINT		! dummy value for DTI file
+	INTEGER*2	RECLEN		! expected record length
+	INTEGER*2	RECLN3		! ditto but next multiple of 3
+	INTEGER		DATLEN		! data length
+	INTEGER*4	LATDIF		! latitude diff. from SW corner
+	INTEGER*2	RECDIF		! diff. in standard record size
+	INTEGER*2	MINSAV, MAXSAV	! for saving heights
+C	LOGICAL*1	CHKOFF		! check data offsets?
+	REAL		SECONDS
+	LOGICAL		DTIOPEN		! DTI file opened?
+	LOGICAL		DEVMNT_OK	! check tape mounted ok
+	INTEGER*2	COLCNT		! percentage of columns written
+	INTEGER*2	BLKCNT		! block counter
+	INTEGER*2	COLOFF		! column offset
+	INTEGER*4	NELEVS		! number of elevations per profile
+	INTEGER*4	NPAD		! number of elevs missing from the
+					! end of a profile
+C                          
+C statement function to calculate size of DTI file in blocks
+C
+	INTEGER*4	TWO
+	PARAMETER	(TWO=2)		! to make sure integer*4
+C
+C	INTEGER*4	SIZE
+C	SIZE(DATA_OFFSET) = (TWO*EEXT*NEXT+DATA_OFFSET+511)/512
+C
+C-----------------------------------------------------------------------
+C
+	PROCESS_TAPE = .FALSE.		! assume failure
+	DTIOPEN      = .FALSE.		! no DTI file open yet
+	DUMINT       = -32767		! dummy value for null points
+C
+C-----------------------------------------------------------------------
+C No block type yet
+C
+	BLKTYP = NONE
+ 	CALL WRITEF('Reading from magnetic tape device %S',DEVICE)
+C
+	IF (.NOT.DTEDOPN) THEN		! initialise default tape MTA0:
+	   OK = DEVMNT_OK()
+	   IF (.NOT.OK) THEN
+	      PROCESS_TAPE=SS$_ABORT
+	      GOTO 999
+	   ENDIF
+C
+	   DTEDOPN = .TRUE.
+ 	ENDIF
+C
+	CALL RDMAG(DEBUG)		! get the first block
+C
+C--------------------------------------------------------------------VOL
+	IF (BLKTYP.NE.VOL .AND. MANNUM.EQ.0) THEN
+	   CALL WRITEF(
+     &		'%S - First block is not a volume header label',WARNING)
+	ENDIF
+C
+C skip to next User header label                                       
+C
+C------------------------------------------------------------------AFTER
+C
+1100	IF (BLKTYP.EQ.AFTER) THEN
+	   IF (SKIP) THEN
+	      IF (SERNUM) THEN
+		 CALL EXPAND('%S Manuscript %N not found - ',
+     &						 WARNING, SKIPTO)
+		 CALL WRITAP('only %N manuscripts on the tape',MANNUM)
+C
+	      ELSE
+		 CALL EXPAND('%S Manuscript with required',WARNING)
+C
+		 IF (.NOT.GRID)THEN
+		   IF (SERLAT) CALL APPEND(' latitude')
+		   IF (SERLAT.AND.SERLON) CALL APPEND(' and')
+		   IF (SERLON) CALL APPEND(' longitude')
+c
+		 ELSE
+		   IF (SERLON) CALL APPEND(' easting')
+		   IF (SERLAT.AND.SERLON) CALL APPEND(' and')
+		   IF (SERLAT) CALL APPEND(' northing')
+		 ENDIF
+C
+		 CALL WRITAP(' not found')
+	      ENDIF
+	   ENDIF
+C
+	   CALL WRITEF('%S End of tape - rewind or exit program',
+     &							WARNING)
+	   GOTO 2000
+	ENDIF
+C
+C--------------------------------------------------------------------UHL
+C
+	IF (BLKTYP.NE.UHL) THEN
+	   CALL RDMAG(DEBUG)
+	   GOTO 1100
+	ENDIF
+C
+	IF (DIAG) CALL WRITEF( '%A80', BYTBUF )
+C
+	MANNUM = MANNUM+1		! count it
+	IF(DEBUG)CALL WRITEF(
+     &		'DEBUG: MANNUM = %N ,SKIPTO = %N',MANNUM,SKIPTO)
+C
+C if we are skipping to a particular manuscript, we must
+C check to see if this is it
+C
+	IF ( SKIP .AND. SERNUM ) THEN
+	   IF (SKIPTO.NE.MANNUM) THEN
+	      BLKTYP = NONE		! force it to find next UHL
+	      GOTO 1100			! no, get next UHL
+	   ELSE
+	      SKIP = .FALSE.		! yes, no longer skipping
+	   ENDIF
+	ENDIF
+C
+C set up BYTBUF as auxiliary text buffer
+C
+	CALL SETAUX( BYTBUF, 80 )
+C
+C Get the origin fields from the UHL
+C
+	CALL SETWIN( 5, )
+	IF (GRID) THEN
+	   CALL RDGRID( LONORI(DTILUN) )
+C
+	ELSE
+	   OK = RDFANG( DDD, NOTENTH, HEMI, LONORI(DTILUN) )
+	   IF (.NOT.OK) THEN
+	      CALL WRITEF('%S Reading longitude of origin',ERROR)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+	LONGO = FLOAT(LONORI(DTILUN))
+C
+	IF (GRID) THEN
+	   CALL RDGRID( LATORI(DTILUN) )
+C
+	ELSE
+	   OK = RDFANG( DDD, NOTENTH, HEMI, LATORI(DTILUN) )
+	   IF (.NOT. OK) THEN
+	      CALL WRITEF('%S Reading latitude of origin',ERROR)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+	LATO = FLOAT(LATORI(DTILUN))
+C
+	LATREC(1,DTILUN) = LATORI(DTILUN)
+	LONREC(1,DTILUN) = LONORI(DTILUN)
+C
+C If searching by origin, then see if found correct manuscript
+C
+	IF (SKIP) THEN		! must be SERLON or SERLAT
+	   IF ( SERLAT .AND. (SKLAT .NE.LATO) .OR.
+     &		SERLON .AND. (SKLONG.NE.LONGO) ) THEN
+	      BLKTYP = NONE	! force it to find next UHL
+	      GOTO 1100		! no, get next UHL
+C
+	   ELSEIF (SERLAT.AND.SERLON) THEN	! must be SERLAT AND SERLON
+	      IF ((SKLAT.NE.LATO) .OR.
+     &	         (SKLONG.NE.LONGO)) THEN
+	         BLKTYP = NONE			! force it to find next UHL
+	         GOTO 1100			! no, get next UHL
+	      ENDIF
+C
+	   ELSE           
+ 	      SKIP = .FALSE.			! yes, no longer skipping
+C
+	   ENDIF
+	ENDIF
+C
+C output the manuscript
+C assume that it is Change 2
+C
+	CHANGE = 2		! assume no DSI or ACC block
+C	CHKOFF = .FALSE.	! not checking offsets yet
+	LATOFF = 0		! assume lat and lon offsets of zero
+	LONOFF = 0		! for change 2 tape
+	HADDSI = .FALSE.
+	HADACC = .FALSE.
+C
+C first decode the extents in the UHL
+C
+	CALL SETWIN( 48, 4 )
+	IF (RDINT(EEXT)) THEN
+	   CALL WRITEF('%S Failed to read East extent in UHL',ERROR)
+	   GOTO 999
+	ENDIF                                                      
+C
+	CALL SETWIN( , 4 )
+	IF (RDINT(NEXT)) THEN
+	   CALL WRITEF('%S Failed to read North extent in UHL',ERROR)
+	   GOTO 999
+	ENDIF
+C
+C now read units
+	CALL SETWIN(21,4)
+	IF (RDLONG(LONINT(DTILUN))) THEN	! .1 secs of Easting
+	   CALL WRITEF(
+     &		'%S Failed to read East interval in UHL',ERROR)
+	   GOTO 999
+	ENDIF
+C
+	CALL SETWIN(,4)
+	IF (RDLONG(LATINT(DTILUN))) THEN	! .1 secs of Northing
+	   CALL WRITEF(
+     &		'%S Failed to read North interval in UHL',ERROR)
+	   GOTO 999
+	ENDIF
+C
+C if FULL is enabled override E-W and N-S dimensions of the target DTI file
+	IF (FULL) THEN
+	  EEXT = 36000 / LONINT(DTILUN) + 1
+	  NEXT = 36000 / LATINT(DTILUN) + 1
+	ENDIF
+C
+C set values for DSI file
+	IF (GRID) THEN				! already grid units
+	   EINT = LONINT(DTILUN)/10.0		! convert to metres
+	   NINT = LATINT(DTILUN)/10.0
+	ELSE					! convert to ground metres
+	   EINT = 6 371 229.3 * COS((LATO/36000.)*DEGRAD)
+     &                  * FLOAT(LONINT(DTILUN))*DEGRAD / 36 000.0
+	   NINT = 6 371 229.3 
+     &			* FLOAT(LATINT(DTILUN))*DEGRAD / 36 000.0
+	ENDIF
+C
+	X_GRID(DTILUN) = EINT
+	Y_GRID(DTILUN) = NINT
+C
+C save the UHL record for later use
+C
+	CALL VIOMV3( BYTBUF, 80, UHLBUF )
+C
+C set the expected length of data records
+C
+	DATLEN = NEXT*2			! data part
+	RECLEN = DATLEN+12		! plus extra bits
+	RECLN3 = ((RECLEN+2)/3)*3	! next multiple of three
+C
+ 	CALL RDMAG(DEBUG)		! should be tapemark
+C
+C---------------------------------------------------------------TAPEMARK
+C
+	IF (BLKTYP.NE.TAPEMK) THEN
+	   CALL WRITEF('%S Tapemark missing after UHL record',WARNING)
+	   GOTO 1210
+	ENDIF
+C
+C Now expecting a data record if change 2, or a DSI record
+C if change 3/4. We will deal with either or both of ACC and DSI
+C in any order, but any other block causes a return to the prompt.
+C
+1200	CALL RDMAG(DEBUG)
+C
+C-------------------------------------------------------------------DATA
+C
+1210	IF (BLKTYP.EQ.DATBLK) THEN       
+C
+C Here with only having read a UHL block? - then start a Change 2 file
+	   IF (CHANGE.EQ.2) THEN
+C
+C Now ready to open DTI file
+C
+	      IF (DEBUG) CALL WRITEF('DEBUG: EEXT=%N NEXT=%N',EEXT,NEXT)
+C
+	      OK = DTI_CREATE(DTILUN,DTINAM,DTILEN,2,,2,EEXT,NEXT,IERR)	! UHL1
+	      IF (.NOT.OK) THEN
+		CALL WRITEF('%S Failed to open (UHL1 type) DTI file %S',
+     &				ERROR,DTINAM(:DTILEN))
+		CALL LSL_PUTMSG(OK)
+		IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+C
+	        GOTO 999
+	      ENDIF
+C
+	      DTIOPEN = .TRUE.
+C
+	      CALL WRITEF('Change 2 manuscript found')
+	      CALL EXPAND('Writing a UHL1 ')
+	      IF (GRID) CALL APPEND('GRID ')
+	      CALL WRITAP('type DTI file to %S',DTINAM(:DTILEN))
+C
+C Write header to DTI file
+	      OK = DTI_COPY_BYTE_HEADER(1,UHLBUF,.TRUE.,80,0,IERR)
+	      IF (.NOT.OK) THEN
+		 CALL LSL_PUTMSG(OK)
+		 IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+		 GOTO 999
+	      ENDIF
+C
+C Otherwise report any missing blocks from a Change 3/4 
+	   ELSE
+	      IF (.NOT.HADDSI) THEN
+	         CALL WRITEF('%S DSI record missing',WARNING)
+C
+	      ELSEIF (.NOT.HADACC) THEN
+	         CALL WRITEF('%S ACC record missing',WARNING)
+	      ENDIF
+	   ENDIF
+C
+C initialise min and max height
+C
+	   MINHT = 32767
+	   MAXHT = -32767
+C
+C initialize block counter and column offset
+C	
+	   BLKCNT = 0
+	   COLOFF = 0
+C
+	   DO WHILE (BLKTYP.EQ.DATBLK.AND.COLOFF.LT.EEXT)
+	      BLKCHK = 0		! zero checksum
+	      MINSAV = MINHT		! why do we do this ?
+	      MAXSAV = MAXHT
+C
+C swop the byte count, latitude and longitude counts so we can use them
+C
+	      CALL SWPCPY(BYTBUF, BYTBUF, 4, BLKCHK)
+C
+C check the data block number
+C
+	      IF (BLKNO.NE.BLKCNT) CALL WRITEF(
+     &				'%S Incorrect block number',WARNING)
+C make lat and long counts relative to SW corner of MBR
+	      IF (.NOT.FULL) THEN
+	        LONCNT = LONCNT - LONOFF
+	        LATCNT = LATCNT - LATOFF
+	      ENDIF
+C
+C check that the record length does not exceed the maximum expected length
+C
+	      IF (BYTCNT.GT.RECLEN) THEN
+	        IF (BYTCNT.NE.RECLN3) THEN
+	          CALL WRITEF('%S Incorrect data record length',ERROR)
+	        ENDIF
+	        BYTCNT = RECLEN
+	      ENDIF
+C
+C calculate number of elevations contained in data record
+C
+	      NELEVS = (BYTCNT - 12) / 2
+C
+C check that the current profile falls within the bounds of the DTI file
+C
+	      IF ((LATCNT+NELEVS).GT.NEXT) THEN
+	        CALL WRITEF('%S Incorrect latitude count',WARNING)
+C truncate to fit
+	        IF (LATCNT.LT.NEXT) THEN
+	          NELEVS = NEXT - LATCNT
+	        ELSE
+	          LATCNT = 0
+	          IF (NELEVS.GT.NEXT) NELEVS = NEXT
+	        ENDIF
+	      ENDIF
+	      IF (LONCNT.GE.EEXT.OR.LONCNT.LT.COLOFF) THEN
+	        CALL WRITEF('%S Incorrect longitude count',WARNING)
+C assume next in line
+	        LONCNT = COLOFF
+	      ENDIF
+C
+	      MINHT = MINSAV		! why do we do this, too ?
+	      MAXHT = MAXSAV
+C
+C fill any missing profiles with null elevations
+	      DO WHILE (COLOFF.LT.LONCNT)
+	         OK = DTI_INIT_DATA(DTILUN,DUMINT,COLOFF+1,1,1,NEXT)
+	         IF (.NOT.OK) THEN
+		    CALL LSL_PUTMSG(OK)
+		    IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+		    GOTO 999
+	         ENDIF
+	         COLOFF = COLOFF + 1
+	      ENDDO
+C
+C output nulls at the beginning of an offset profile
+	      IF (LATCNT.GT.0) THEN
+		 TMPINT = LATCNT	! assign to INTEGER*2
+	         OK = DTI_INIT_DATA(DTILUN,DUMINT,COLOFF+1,1,1,TMPINT)
+	         IF (.NOT.OK) THEN
+		    CALL LSL_PUTMSG(OK)
+		    IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+		    GOTO 999
+	         ENDIF
+	      ENDIF
+C
+C output real elevation data
+	      CALL SWPCPY(BYTBUF(9),BYTBUF(9),NELEVS,BLKCHK)
+	      TMPINT = LATCNT	! assign to INTEGER*2
+	      OK = DTI_COPY_DATA(DTILUN,BYTBUF(9),.TRUE.,COLOFF+1,
+     &	                               TMPINT+1,1,NELEVS,IERR)
+	      IF (.NOT.OK) THEN
+		 CALL LSL_PUTMSG(OK)
+		 IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+		 GOTO 999
+	      ENDIF
+C
+C output nulls at the end of a truncated profile
+	      NPAD = NEXT - NELEVS - LATCNT
+	      IF (NPAD) THEN
+		 TMPINT = LATCNT	! assign to INTEGER*2
+	         OK = DTI_INIT_DATA(DTILUN,DUMINT,COLOFF+1,
+     &			NELEVS+TMPINT+1,1,NPAD)
+	         IF (.NOT.OK) THEN
+		    CALL LSL_PUTMSG(OK)
+		    IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+		    GOTO 999
+	         ENDIF
+	      ENDIF
+C
+C retrieve the checksum for the tape input record
+C
+	      DO 1215 JJJ=0,3
+	         CHKBYT(JJJ) = BYTBUF(BYTCNT-JJJ)
+1215	      CONTINUE
+C
+C and check against our calculated one
+C
+	      IF (BLKCHK.NE.CHKSUM) THEN
+	         CALL WRITEF('%S Incorrect checksum',WARNING)
+C
+		 IF (DEBUG) CALL WRITEF(
+     &			'BLKCHK = %N, CHKSUM = %N',BLKCHK,CHKSUM)
+	      ENDIF
+C
+C data record completed
+C
+C Report progress to user
+C
+              IF (DIAG) THEN
+      	         COLCNT=JNINT((FLOAT(COLOFF+1)/FLOAT(EEXT))*100.0)
+	         IF (IMOD(COLCNT,10).LE.1 )CALL WRITEF(
+     &						'%N %% complete',COLCNT)
+	      ENDIF
+C
+	      CALL RDMAG(DEBUG)
+	      BLKCNT = BLKCNT + 1
+	      COLOFF = COLOFF + 1
+C
+	   ENDDO
+C
+C if profiles are missing from the end of the manuscript fill up with nulls
+C
+	   DO WHILE (COLOFF.LT.EEXT)
+	      OK = DTI_INIT_DATA(DTILUN,DUMINT,COLOFF+1,1,1,NEXT)
+	      IF (.NOT.OK) THEN
+		 CALL LSL_PUTMSG(OK)
+		 IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+		 GOTO 999
+	      ENDIF
+	      COLOFF = COLOFF + 1
+	   ENDDO
+C
+C--------------------------------------------------------------TAPEMARK
+C
+	   IF (BLKTYP.NE.TAPEMK) THEN
+	      IF (BLKTYP.EQ.DATBLK) THEN
+	         CALL WRITEF('%S Too many data records',WARNING)
+C
+	      ELSE
+	         CALL WRITEF('%S Tapemark missing after data',WARNING)
+	      ENDIF
+	   ENDIF
+C
+	   GOTO 2000			! finished the manuscript         
+	ENDIF
+C
+C-------------------------------------------------------------------DSI
+C
+	IF (BLKTYP.EQ.DSI) THEN
+	   IF (GRID) THEN
+	      CALL WRITEF('%S Ignoring DSI record for GRID data',WARNING)
+	      GOTO 1200
+	   ENDIF
+C
+	   IF (HADDSI) THEN
+	      CALL WRITEF('%S Already had a DSI record',WARNING)
+	      GOTO 1200
+	   ENDIF
+C
+	   HADDSI = .TRUE.
+C
+	   IF (HADACC) THEN
+	      CALL WRITEF('%S DSI found after ACC record',WARNING)
+C
+	   ELSE
+	      CHANGE = 4
+C
+C Now ready to open DTI file
+C
+	      IF (DEBUG) CALL WRITEF('DEBUG: EEXT=%N NEXT=%N',EEXT,NEXT)
+C
+	      OK = DTI_CREATE(DTILUN,DTINAM,DTILEN,3,,2,EEXT,NEXT,IERR)	! TED4
+	      IF (.NOT.OK) THEN
+	         CALL WRITEF('%S Failed to open (DTED 3/4) DTI file %S',
+     &				ERROR,DTINAM(:DTILEN))
+		 CALL LSL_PUTMSG(OK)
+		 IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+C
+		 GOTO 999
+	      ENDIF
+C
+	      DTIOPEN = .TRUE.
+	      CALL WRITEF('Change 3/4 manuscript found')
+	      CALL WRITEF('Writing a TED4 type DTI file to %S',
+     &						DTINAM(:DTILEN))
+ 	   ENDIF
+C
+	   OK =  DTI_COPY_BYTE_HEADER(1,BYTBUF,.TRUE.,648,DTI_TED_DSI,IERR)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+	      GOTO 999
+	   ENDIF
+C               
+C Get the SW corner of bounding rectangle (if geographical), so we
+C can check the latitude and longitude offsets in the data records
+C
+	   CALL SETAUX( BYTBUF, DTI_TED_DSISZ )
+	   CALL SETWIN( 205, 15 )
+C
+	   IF (.NOT.RDFANG(DD,NOTENTH,HEMI,LATREC(1,DTILUN)))THEN
+	   	CALL WRITEF('%S Failed to read latitude of SW corner',
+     &          ' in DSI record',WARNING)
+	 	GOTO 1250
+           ENDIF
+C
+	   IF (.NOT.RDFANG(DDD,NOTENTH,HEMI,LONREC(1,DTILUN)))THEN
+	   	CALL WRITEF('%S Failed to read longitude of SW corner',
+     &          ' in DSI record',WARNING)
+	 	GOTO 1250
+           ENDIF
+C
+C read OK so...
+	   LATOFF = (LATREC(1,DTILUN)-LATORI(DTILUN))/LATINT(DTILUN)
+	   LONOFF = (LONREC(1,DTILUN)-LONORI(DTILUN))/LONINT(DTILUN)
+C	   CHKOFF = .TRUE.		! now checking offsets
+C
+C and then read the rest of the corners
+C
+	   CALL SETWIN( 220, 15 )
+C
+	   IF (.NOT.RDFANG(DD,NOTENTH,HEMI,LATREC(2,DTILUN)))THEN
+		CALL WRITEF('%S Failed to read latitude of NW corner',
+     &          ' in DSI record',WARNING)
+		GOTO 1250
+           ENDIF
+C
+	   IF (.NOT.RDFANG(DDD,NOTENTH,HEMI,LONREC(2,DTILUN)))THEN
+		CALL WRITEF('%S Failed to read longitude of NW corner',
+     &          ' in DSI record',WARNING)
+		GOTO 1250
+           ENDIF                                             
+C
+	   CALL SETWIN( 235, 15 )
+	   IF (.NOT.RDFANG(DD,NOTENTH,HEMI,LATREC(3,DTILUN))) THEN
+		CALL WRITEF('%S Failed to read latitude of NE corner',
+     &          ' in DSI record',WARNING)
+		GOTO 1250
+           ENDIF
+C
+	   IF (.NOT.RDFANG(DDD,NOTENTH,HEMI,LONREC(3,DTILUN))) THEN
+		CALL WRITEF('%S Failed to read longitude of NE corner',
+     &          ' in DSI record',WARNING)
+		GOTO 1250
+           ENDIF                                              
+C
+	   CALL SETWIN( 250, 15 )
+C
+	   IF (.NOT.RDFANG(DD,NOTENTH,HEMI,LATREC(4,DTILUN))) THEN
+		CALL WRITEF('%S Failed to read latitude of SE corner',
+     &          ' in DSI record',WARNING)
+		GOTO 1250
+           ENDIF
+C
+	   IF (.NOT.RDFANG(DDD,NOTENTH,HEMI,LONREC(4,DTILUN))) THEN
+		CALL WRITEF('%S Failed to read longitude of SE corner',
+     &          ' in DSI record',WARNING)
+		GOTO 1250
+           ENDIF
+C
+1250	   CALL BSLN			! ditch auxiliary buffer
+C
+C--------------------------------------------------------------------ACC
+C
+	ELSEIF (BLKTYP.EQ.ACC) THEN
+
+	   IF (GRID) THEN
+		CALL WRITEF(
+     &		'%S Ignoring ACC record in manuscript %N for GRID data',
+     &				      			WARNING, MANNUM)
+		GOTO 1200
+	   ENDIF
+C
+	   IF (HADACC) THEN
+	      CALL WRITEF('%S Already had an ACC record',WARNING)
+	      GOTO 1200
+	   ENDIF
+C
+	   HADACC = .TRUE.
+C
+	   IF (.NOT.HADDSI) THEN
+	      CHANGE = 4
+C	      DTISIZ = SIZE(DTI_TED_DATA) ! N.B. statement function
+C
+C Now ready to open DTI file
+C
+	      IF (DEBUG) CALL WRITEF('DEBUG: EEXT=%N NEXT=%N',EEXT,NEXT)
+C
+	      OK = DTI_CREATE(DTILUN,DTINAM,DTILEN,3,,2,EEXT,NEXT,IERR)	! TED4
+	      IF (.NOT.OK) THEN
+	         CALL WRITEF('%S Failed to open (DTED 3/4) DTI file %S',
+     &				ERROR,DTINAM(:DTILEN))
+		 CALL LSL_PUTMSG(OK)
+		 IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+C
+	         GOTO 999
+	      ENDIF
+C
+	      DTIOPEN = .TRUE.
+	      CALL WRITEF('Change 3/4 manuscript found')
+	      CALL WRITEF('Writing a TED4 type DTI file to %S',
+     &						DTINAM(:DTILEN))
+	   ENDIF
+C
+	   OK = DTI_COPY_BYTE_HEADER(1,BYTBUF,.TRUE.,2700,DTI_TED_ACC,IERR)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      IF (OK.EQ.DTI__SYSERR) CALL LSL_PUTMSG(IERR)
+	      GOTO 999
+	   ENDIF
+C
+C----------------------------------------------------------------UNKNOWN
+C
+	ELSE
+	   CALL WRITEF('%S Unexpected record',ERROR)
+	   GOTO 999		! give up on this manuscript            
+	ENDIF
+C
+C Go back up and read next block (of data?)
+	GOTO 1200
+C
+C Close file
+2000   	PROCESS_TAPE = .TRUE.
+C
+999	IF (DTIOPEN) THEN
+	   OK = DTI_MINMAX_DATA(DTILUN,.TRUE.,IERR)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(OK)                                      
+	      IF (OK.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+	      PROCESS_TAPE = .FALSE.
+	   ENDIF
+C
+C Do not write out the UHL1 record again for GRID enabled
+C
+	   IF (GRID) THEN
+	      OK = DTI_CLOSE(DTILUN,.FALSE.,.TRUE.,IERR)
+	   ELSE
+	      OK = DTI_CLOSE(DTILUN,.TRUE.,.TRUE.,IERR)
+	   ENDIF
+C
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(DTED2DT__CLDTI,DTINAM(:DTILEN))
+	      IF (OK.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+	      PROCESS_TAPE = .FALSE.
+	   ENDIF
+C
+C If DIAGNOSTIC/DEBUG mode reopen DTI file and write out header details
+C
+	   IF (OK) THEN
+	      IF (DIAG .OR. DEBUG) THEN
+		OK = DTI_OPEN(DTILUN,DTINAM,DTILEN,.FALSE.,IERR)
+	        IF (.NOT.OK) THEN
+		   CALL LSL_PUTMSG(OK)
+		   IF (OK.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+     	        ENDIF
+C
+	        OK = DTI_PRINT_HEADER(DTILUN,4)
+		IF (.NOT.OK) CALL LSL_PUTMSG(OK)
+C
+	        OK = DTI_CLOSE(DTILUN,.FALSE.,.TRUE.,IERR)
+	        IF (.NOT.OK) THEN
+		   CALL LSL_PUTMSG(DTED2DT__CLDTI,DTINAM(:DTILEN))
+		   IF (OK.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+		   PROCESS_TAPE = .FALSE.
+     	        ENDIF
+	      ENDIF
+	   ENDIF
+C
+ 	   DTIOPEN = .FALSE.
+	   HADDTI  = .FALSE.
+     	ENDIF
+C
+	RETURN
+	END
+C

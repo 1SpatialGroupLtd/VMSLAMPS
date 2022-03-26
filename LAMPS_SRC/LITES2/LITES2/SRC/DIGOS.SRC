@@ -1,0 +1,366 @@
+	SUBROUTINE DIGOS(SET,CPTS,ABORT,EXSTSU)
+C
+***	IDENT	28SE94
+***	MODULE	DIGOS
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RWR	 8-Feb-1985
+C
+C Description
+C
+C	Subroutine to do OS type setup, and to return corner points
+C	of map
+C
+	IMPLICIT NONE
+C
+C Arguments
+C
+	INTEGER*4	SET
+	REAL		CPTS(4,4)	! corner point values as follows
+					! x1,y1,x2,y2 NW
+					! x1,y1,x2,y2 SW
+					! x1,y1,x2,y2 SE
+					! x1,y1,x2,y2 NE  where
+					! x1,y1 are digitiser coords
+					! x2,y2 are coords from IFF file
+	LOGICAL		ABORT		! flag for abort
+	LOGICAL		EXSTSU		! flag to use existing set up
+C
+C Included Parameter Files
+C
+***     PARAMETER/CMN:EFNLUN/		! event flags and luns
+***	PARAMETER/CMN:MACMEN/
+***     PARAMETER/CMN:MOANMESS/		! moan constants
+***     PARAMETER/CMN:TRNTYP/		! transformation types
+C
+C Common Blocks
+C
+***     COMMON/CMN:MAPS/		! all about the maps
+***	COMMON/CMN:OSCOEF/		! OS transformation
+***	COMMON/CMN:OTRANS/		! rest of transformation stuff
+***	COMMON/CMN:PTOLERANCE/
+***     COMMON/CMN:WORKS/		! info about worksatation
+C
+C Local Variables
+C
+	INTEGER*4	REPEAT,ROW,COL,	! counters
+     &			I
+	INTEGER*4	POS		! position in one dimensional
+					! array
+	REAL*4		GRDSZX,GRDSZY	! size of boxes used for
+					! setup in IFF units
+	REAL*4		GRUNIT		! smaller of GRDSZ's
+	INTEGER*4	INTX,INTY	! current grid intersection
+	INTEGER*4	DEVICE,BUTTON	! device and button digitised
+	REAL*4		DIGPTS(2,MAXREP,(CPMAXX+1)*(CPMAXY+1))
+					! record of digitised points
+	LOGICAL*1	GOODPT((CPMAXX+1)*(CPMAXY+1))
+					! flag for each point, after 
+					! test of mean
+	REAL*4		XMEAN,YMEAN,	! for computing means
+     &			XMEAN1,YMEAN1
+	INTEGER*4	BADPTS,HITCNT	! counters for bad points, and
+					! points within limit
+	REAL*4		XY(2)		! currently digitisd points
+	REAL*4		XYPT(2)		! last digitised point
+	REAL*4		CRPTS(4,4)	! corner points (for each box)
+	INTEGER*4	P(4)		! index of corner points
+	LOGICAL*1	DOSEPR		! flag to control repeat
+					! observations
+	INTEGER*4	X,Y		! to read 2 dimensional coords
+	PARAMETER	(X=1,Y=2)
+	REAL		XEXT,YEXT	! extents
+C
+C check that values in OSSET are reasonable.
+C
+	IF (CPFULX.GT.CPMAXX.OR.CPFULY.GT.CPMAXY	! size of boxes
+     &	         .OR.CPREP.GT.MAXREP			! repeat count
+     &	         .OR.CPMOK.GT.CPREP) THEN		! ok cont
+	   CALL NASTY(MSG_INPVALUES,'OSSETUP')
+	   CALL COLAPS(MSG_INPVALUES)			! go into debug
+	   ABORT=.TRUE.					! allow to
+	   GOTO 999					! continue with
+							! no map setup
+C
+C check that corner points define a rectangular area
+C
+	ELSEIF((CPTS(3,4)-CPTS(3,1)).NE.(CPTS(3,3)-CPTS(3,2)).OR.
+     &	       (CPTS(4,1)-CPTS(4,2)).NE.(CPTS(4,4)-CPTS(4,3))) THEN
+	   CALL MOAN(MSG_NONRECTCPTS)
+	   CALL LEARN(MSG_USE4PT)
+	   ABORT=.TRUE.				! continue with
+	   GOTO 999				! no map setup
+	ENDIF
+C
+C initialisation - work out the steps in X & Y
+C
+	GRDSZX=(CPTS(3,4)-CPTS(3,1))/CPFULX
+	GRDSZY=(CPTS(4,1)-CPTS(4,2))/CPFULY
+C
+C compute extents
+C
+	XEXT=ABS(MAX(CPTS(3,4)-CPTS(3,1),CPTS(3,3)-CPTS(3,2)))
+	YEXT=ABS(MAX(CPTS(4,1)-CPTS(4,2),CPTS(4,4)-CPTS(4,3)))
+C
+C write header
+C
+	CALL INFORM(MSG_BLANK)
+	CALL INFORM(MSG_OSMAPSETUP,IFFNAM(1,MAP_SETUP(SET)))
+C
+C digitise each point the required number of times
+C
+	DO 40, REPEAT=1,CPREP
+	   DO 30, ROW=1,CPFULY+1
+	      CALL INFORM(MSG_BLANK)
+	      INTY=(ROW-1)*GRDSZY	! get y value of intersection
+	      DO 20, COL=1,CPFULX+1
+	         INTX=(COL-1)*GRDSZX	! get x value of intersection
+	         POS=(ROW-1)*(CPFULX+1)+COL	! get position in
+						! 1 dimension matrix
+	         IF (REPEAT.EQ.1) THEN
+	            GOODPT(POS)=.FALSE.	! this point has not passed
+	         ENDIF			! test yet
+C
+C	         - come here if need to try to digitise again
+C
+   10	         CONTINUE
+	         CALL PING			! attract attention
+C
+C	         put next digitised point in array of observations
+C
+	         CALL INFORM(MSG_DIGGRID,INTX,INTY,REPEAT)
+	         CALL GTDGXY(DEVICE,BUTTON,DIGPTS(1,REPEAT,POS),
+     &				EXSTSU,ABORT)
+C
+C	         check for ABORT, or use existing setup
+C
+	         IF (ABORT) GOTO 999	      ! (perhaps a bit drastic!)
+	         IF (EXSTSU) THEN
+	            IF (OMPDEF(SET).AND.OSMDEF(SET)) THEN
+	               IF (TRNTYP.NE.MAPTRNTYP(SET)) 
+     &	                  CALL INFORM(MSG_TRANWARN,
+     &	          TR_TYPE(MAPTRNTYP(SET))(1:TR_TYPE_LEN(MAPTRNTYP(SET))),
+     &	          TR_TYPE(TRNTYP)(1:TR_TYPE_LEN(TRNTYP)))
+	               IF (CPFULX.NE.MAPCPFULX(SET).OR.
+     &	                     CPFULY.NE.MAPCPFULY(SET)) 
+     &	                     CALL INFORM(MSG_CPFULWARN,
+     &	                     MAPCPFULX(SET),MAPCPFULY(SET),CPFULX,CPFULY)
+	               GOTO 999			! ok, use existing setup
+	            ELSE
+	               CALL MOAN(MSG_NOEXSTVAL)
+	               CALL LEARN(MSG_DGNEWVALS)
+	               GOTO 10			! digitise this point
+	            ENDIF			! again
+	         ENDIF
+C
+C	         check for correct device (maps can only be on table)
+C
+	         IF (DEVICE.EQ.BITLIN) THEN
+	            CALL INFORM(MSG_MAPONTABLE)
+	            GOTO 10
+	         ENDIF
+   20	      CONTINUE
+   30	   CONTINUE
+   40	CONTINUE
+C
+C check if observations are good enough
+C
+   50	CONTINUE
+	BADPTS=0			! keep count of bad points
+C
+C go through each grid intersection
+C
+	DO 100, ROW=1,CPFULY+1
+	   DO 90, COL=1,CPFULX+1
+	      POS=(ROW-1)*(CPFULX+1)+COL	! get position in 
+						! 1 dimension array
+	      IF (.NOT.GOODPT(POS)) THEN	! only check unchecked
+						! points
+	         GOODPT(POS)=.TRUE.		! assume this point will
+						! be OK
+	         XMEAN=0.0
+	         YMEAN=0.0
+C
+C	         mean CPREP observations at this intersection
+C
+	         DO 70, REPEAT=1,CPREP
+	            XMEAN=XMEAN+DIGPTS(X,REPEAT,POS)
+	            YMEAN=YMEAN+DIGPTS(Y,REPEAT,POS)
+   70	         CONTINUE
+	         XMEAN=XMEAN/CPREP
+	         YMEAN=YMEAN/CPREP
+
+C
+C	         see if each distance is within tolerance
+C
+	         HITCNT=0		! count the number within range
+	         XMEAN1=0.0		! for mean of good observations
+	         YMEAN1=0.0
+	         DO 80, REPEAT=1,CPREP
+	            IF (SQRT((DIGPTS(X,REPEAT,POS)-XMEAN)**2  ! dx**2
+     &	                    +(DIGPTS(Y,REPEAT,POS)-YMEAN)**2) ! dy**2
+     &				.LT.(CPTOL/TABLE_COUNTS)) THEN
+	               HITCNT=HITCNT+1	! one more good point
+	               XMEAN1=XMEAN1+DIGPTS(X,REPEAT,POS) ! update new
+	               YMEAN1=YMEAN1+DIGPTS(Y,REPEAT,POS) ! new mean
+	            ENDIF
+   80	         CONTINUE
+C
+C	         see if enough points were good
+C
+	         IF (HITCNT.EQ.CPREP) THEN	! all good
+	            DIGPTS(X,1,POS)=XMEAN	! use original mean
+	            DIGPTS(Y,1,POS)=YMEAN
+	         ELSEIF (HITCNT.GE.CPMOK) THEN	! enough are OK
+	            DIGPTS(X,1,POS)=XMEAN1/HITCNT ! use new mean
+	            DIGPTS(Y,1,POS)=YMEAN1/HITCNT
+	         ELSE				! need to reobserve
+	            GOODPT(POS)=.FALSE.
+	            BADPTS=BADPTS+1
+	         ENDIF
+	      ENDIF				! if .NOT.GOODPT(POS)
+   90	   CONTINUE
+  100	CONTINUE
+C
+C work out the smallest side of a box in table units
+C
+	GRUNIT=SQRT((DIGPTS(X,1,POS)-DIGPTS(X,1,1))**2+
+     &	           (DIGPTS(Y,1,POS)-DIGPTS(Y,1,1))**2)/
+     &	       SQRT((CPTS(3,4)-CPTS(3,2))**2+(CPTS(4,4)-CPTS(4,2))**2)
+	GRUNIT=MIN(ABS(GRDSZX),ABS(GRDSZY))*GRUNIT
+C
+C reobserve any grid point that is outside specification
+C
+	IF (BADPTS.EQ.0) GOTO 300		! all points are good
+C
+	CALL PING
+	CALL INFORM(MSG_BLANK)
+	CALL INFORM(MSG_NUMBADPTS,BADPTS)
+	DO 200, ROW=1,CPFULY+1
+	   INTY=(ROW-1)*GRDSZY
+	   CALL INFORM(MSG_BLANK)
+	   DO 190, COL=1,CPFULX+1
+	      INTX=(COL-1)*GRDSZX
+	      POS=(ROW-1)*(CPFULX+1)+COL
+	      IF (.NOT.GOODPT(POS)) THEN	! only reobserve bad
+	         DO 180, REPEAT=1,CPREP	! points
+	            DOSEPR=.FALSE.		! expect grid point
+  150	            CONTINUE
+	            CALL PING	               
+	            IF (DOSEPR) THEN			! observe some-
+	               CALL INFORM(MSG_OTHERPOINT)	! thing else
+	            ELSE
+	               CALL INFORM(MSG_REDIGGRID,INTX,INTY,REPEAT)
+	            ENDIF
+C
+C	            get digitised point
+C
+	            CALL GTDGXY(DEVICE,BUTTON,XY,EXSTSU,ABORT)
+C
+C	            check for abort or use existing points
+C
+	            IF (ABORT) GOTO 999
+	            IF (EXSTSU) THEN
+	               IF (OMPDEF(SET).AND.OSMDEF(SET)) THEN
+	                  IF (TRNTYP.NE.MAPTRNTYP(SET)) 
+     &	                  CALL INFORM(MSG_TRANWARN,
+     &	          TR_TYPE(MAPTRNTYP(SET))(1:TR_TYPE_LEN(MAPTRNTYP(SET))),
+     &	          TR_TYPE(TRNTYP)(1:TR_TYPE_LEN(TRNTYP)))
+	                  IF (CPFULX.NE.MAPCPFULX(SET).OR.
+     &	                     CPFULY.NE.MAPCPFULY(SET)) 
+     &	                     CALL INFORM(MSG_CPFULWARN,
+     &	                     MAPCPFULX(SET),MAPCPFULY(SET),CPFULX,CPFULY)
+	                  GOTO 999		! ok, use existing setup
+	               ELSE
+	                  CALL MOAN(MSG_NOEXSTVAL)
+	                  CALL LEARN(MSG_DGNEWVALS)
+	                  GOTO 150		! digitise this point
+	               ENDIF
+	            ENDIF			! again
+C
+C	         check for correct device (maps can only be on table)
+C
+	            IF (DEVICE.EQ.BITLIN) THEN
+	               CALL INFORM(MSG_MAPONTABLE)
+	               GOTO 150
+	            ENDIF
+C
+	            IF (DOSEPR) THEN		! extra point
+	               IF (SQRT((XY(X)-XYPT(X))**2+
+     &	                        (XY(Y)-XYPT(Y))**2).LT.GRUNIT) THEN
+	                  CALL MOAN(MSG_PTTOOCLOSE)
+	                  GOTO 150		! not far enough away
+						! try again
+	               ENDIF
+	            ELSE			! grid point
+	               DIGPTS(X,REPEAT,POS)=XY(X)
+	               DIGPTS(Y,REPEAT,POS)=XY(Y)
+	               XYPT(X)=XY(X)		! save for comparison
+	               XYPT(Y)=XY(Y)
+	               DOSEPR=.TRUE.		! now get separator
+	               IF (REPEAT.NE.CPREP) THEN
+	                  GOTO 150		! (if not last of set)
+	               ENDIF
+	            ENDIF
+  180	         CONTINUE
+	      ENDIF
+  190	   CONTINUE
+  200	CONTINUE
+	GOTO 50			! go and check these observations
+C 
+C now observations are all correct, set up transformation parameters for
+C each box
+C
+  300	CONTINUE
+	DO 400, ROW=1,CPFULY		! squares this time, not 
+	   DO 390, COL=1,CPFULX		! grid intersections
+	      POS=(ROW-1)*CPFULX+COL
+	      P(1)=ROW*(CPFULX+1)+COL		! NW grid intersection
+	      P(2)=(ROW-1)*(CPFULX+1)+COL	! SW grid intersection
+	      P(3)=P(2)+1			! SE grid intersection
+	      P(4)=P(1)+1			! NE grid intersection
+C
+C	      fill in corner points; observations from DIGPTS,
+C	      fixed coordinates from size of box being used
+C
+	      DO 380, REPEAT=1,4
+	         CRPTS(X,REPEAT)=DIGPTS(X,1,P(REPEAT))
+	         CRPTS(Y,REPEAT)=DIGPTS(Y,1,P(REPEAT))
+  380	      CONTINUE
+C
+	      CRPTS(3,2)=CPTS(3,2)+(COL-1)*GRDSZX
+	      CRPTS(4,2)=CPTS(4,2)+(ROW-1)*GRDSZY
+	      CRPTS(3,1)=CRPTS(3,2)
+	      CRPTS(4,1)=CRPTS(4,2)+GRDSZY
+	      CRPTS(3,3)=CRPTS(3,2)+GRDSZX
+	      CRPTS(4,3)=CRPTS(4,2)
+	      CRPTS(3,4)=CRPTS(3,3)
+	      CRPTS(4,4)=CRPTS(4,1)
+C
+C	      do transformation - (should not fail)
+C
+	      CALL TRNSET(TRNTYP,CRPTS,OSCOEF(1,1,POS,SET),
+     &	                  XEXT,YEXT,.FALSE.)
+  390	   CONTINUE
+  400	CONTINUE
+C
+C save number of colums and rows
+	MAPCPFULX(SET) = CPFULX
+	MAPCPFULY(SET) = CPFULY
+C
+C fill in observed CPTS entries
+C
+	P(1)=CPFULY*(CPFULX+1)+1
+	P(2)=1
+	P(3)=CPFULX+1
+	P(4)=(CPFULX+1)*(CPFULY+1)
+	DO 500, REPEAT=1,4
+	   DO 490, I=1,2
+	      CPTS(I,REPEAT)=DIGPTS(I,1,P(REPEAT))
+  490	   CONTINUE
+  500	CONTINUE
+C
+  999	CONTINUE
+	RETURN
+	END

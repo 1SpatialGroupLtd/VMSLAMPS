@@ -1,0 +1,224 @@
+	LOGICAL*4 FUNCTION VOLDFL
+C
+***	MODULE	VOLDFL
+***	IDENT	14JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+C	Created 				 DM	26-Jun-1986
+C
+C Overlay the contents of a 'very old file' (i.e. digitised using the
+C pre-converged programs) onto our output space.
+C Such files must be in 'map space', not HRD space.
+C Function value is .TRUE. if we fail for some reason.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/IFFPAR/
+***	PARAMETER/PARAMS/
+C
+	REAL*8	  CPCOEF(4,2)
+	COMMON/CPCOM/CPCOEF	! to hold the transform coefficients
+***	COMMON/DIGC/
+***	COMMON/IFFHAN/
+***	COMMON/IFFJUN/
+***	COMMON/JCRCOM/
+***	COMMON/MASTER/
+C
+	INTEGER*2 IECODE,IELEN	! IFF entry
+	INTEGER*2 JIPOS		! offset obtained from JB
+	INTEGER*2 N		! temporary variable
+	INTEGER*2 NARMS		! number of arms belonging to junction
+	INTEGER*2 NPTS,IENDS	! ST entry details
+	INTEGER*4 I,J,K		! temporary variables
+	INTEGER*4 JLPOS		! position obtained from JB
+	LOGICAL*1 LSTFUL	! in-core junction list full ?
+	LOGICAL*1 NEWJUN	! new junction in in-core list ?
+	REAL	  CPCOFP(4,2)	! private 4-point transform coeffs
+	REAL	  CPNEW(4,4)	! control point data from IFF file
+	REAL	  JPOS(2)	! junction position
+	REAL	  XTEMP		! temporary variable
+C
+C function:
+	LOGICAL*4 CPSET		! sets up 4-point transform
+C
+C ......................................................................
+C
+	VOLDFL=.TRUE.				! assume we fail
+	LSTFUL=.FALSE.
+C
+C ... calculate 4-point transform from map space to o/p space.
+	DO 10 I=1,4				! exchange CP sides
+	   CPNEW(1,I)=CPTS(3,I)
+	   CPNEW(2,I)=CPTS(4,I)
+	   CPNEW(3,I)=CPTS(1,I)
+	   CPNEW(4,I)=CPTS(2,I)
+10	CONTINUE
+C
+	IF (CPSET(CPNEW)) GO TO 100		! get coefficients
+C
+	DO 20 I=1,4				! take private copy
+	   CPCOFP(I,1)=SNGL(CPCOEF(I,1))
+	   CPCOFP(I,2)=SNGL(CPCOEF(I,2))
+20	CONTINUE
+C
+C ......................................................................
+C
+C ... now read the IFF file.
+	CALL IFFRWD				! rewind it first
+C
+30	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GO TO 230		! found end of file ?
+	IF (IECODE.EQ.'ST') GO TO 110
+	IF (IECODE.EQ.'NF') GO TO 170
+	IF (IECODE.EQ.'JB') GO TO 140
+	IF (IECODE.EQ.'NO') GO TO 180
+	IF (IECODE.EQ.'CP') GO TO 80
+	IF (IECODE.EQ.'CC') GO TO 40
+	IF (IECODE.EQ.'EM') GO TO 190
+	IF (IECODE.EQ.'EJ') GO TO 200
+	GO TO 30
+C
+C ......................................................................
+C
+C ... CC entry - check old coefficients are unity.
+40	CALL EIHRR(CCOLD,20,1)			! get old CC entry
+C
+	DO 60 J=1,2
+	   DO 50 I=1,10
+	      IF (CCOLD(I,J).NE.UNICFT(I,J)) GO TO 70
+50	   CONTINUE
+60	CONTINUE
+C
+	CALL EIHWR(BCOEFF,20,1)			! insert backward coeffs
+	GO TO 30
+C
+70	CALL WRITEF('OLD file has non-unity CC entry - unprocessed ?')
+	GO TO 250				! failure
+C
+C ......................................................................
+C
+C ... CP entry - calculate new 4-point transform for this section.
+80	CALL EIHRR(CPNEW,16,1)
+C
+	DO 90 I=1,4				! get r.h.s. in op space
+	   XTEMP    = CPCOFP(1,X) +
+     &		      CPNEW(3,I)*CPCOFP(2,X) +
+     &		      CPNEW(4,I)*CPCOFP(3,X) +
+     &		      CPNEW(3,I)*CPNEW(4,I)*CPCOFP(4,X)
+	   CPNEW(4,I)=CPCOFP(1,Y) +
+     &		      CPNEW(3,I)*CPCOFP(2,Y) +
+     &		      CPNEW(4,I)*CPCOFP(3,Y) +
+     &		      CPNEW(3,I)*CPNEW(4,I)*CPCOFP(4,Y)
+	   CPNEW(3,I)=XTEMP			! l.h.s. is in map space
+90	CONTINUE
+C
+	IF (CPSET(CPNEW)) GO TO 100		! get coefficients
+C
+	CALL EIHWR(CPTS,16,1)			! patch in new CP values
+	GO TO 30
+C
+100	CALL WRITEF('*** Bad control points%C',7)
+	GO TO 250				! failure
+C
+C ......................................................................
+C
+C ... ST entry - transform to output space.
+110	CALL EIHRS(NPTS,IENDS)
+	K=0
+120	J=MIN(NPTS,MAXST)
+	CALL EIHRR(STPNTS,2*J,4*K+1)
+	DO 130 I=1,J				! transform the points
+	   CALL	CPUSE(STPNTS(X,I),STPNTS(Y,I))	! (to o/p space)
+130	CONTINUE
+	CALL EIHWR(STPNTS,2*J,4*K+1)		! rewrite transformed ST
+	NPTS=NPTS - J
+	IF (NPTS.EQ.0) GO TO 30			! read it all now
+	K=J
+	GO TO 120
+C
+C ......................................................................
+C
+C ... JB entry - transform to output space.
+140	CALL IFJNXT(JPOS(X),JPOS(Y),NARMS)
+	   IF (NARMS.EQ.-1) GO TO 30		! found end of JB ?
+	   CALL CPUSE(JPOS(X),JPOS(Y))		! new output space
+	   CALL EIHWR(JPOS(X),1,IFPOSJ+JEPOSX)	! patch coordinates back
+	   CALL EIHWR(JPOS(Y),1,IFPOSJ+JEPOSY)
+C
+C ... set up the in-core list.
+	   IF (LSTFUL) GO TO 140		! list already full ?
+	   NEWJUN=.FALSE.
+	   DO 150 I=1,MAXBRA
+	      JCRANG(I,JCRNUM+1)=-361
+150	   CONTINUE
+	   DO 160 I=1,NARMS
+	      CALL JIHR(I,JLPOS,JIPOS)
+	      IF (JLPOS.NE.0) GO TO 160
+	      JCRANG(I,JCRNUM+1)=JIPOS		! arm angle
+	      NEWJUN=.TRUE.
+160	   CONTINUE
+	   IF (.NOT.NEWJUN) GO TO 140		! get next junction
+	   JCRNUM=JCRNUM + 1
+	   JCRPOS(X,JCRNUM)=JPOS(X)
+	   JCRPOS(Y,JCRNUM)=JPOS(Y)
+	   JCRARM(JCRNUM)=NARMS
+	   JCRLPS(JCRNUM)=LPOSH
+	   JCRIPS(JCRNUM)=IFPOSJ
+	   IF (JCRNUM.LT.MAXJCR) GO TO 140	! get next junction
+	   CALL WRITEF('No room to buffer junction%C',7)
+	   JCRNUM=MAXJCR - 20
+	   LSTFUL=.TRUE.
+	GO TO 140			
+C
+C ......................................................................
+C
+C ... NF entry - record largest feature numbers.
+170	CALL EIHRI(N,1,1)
+	IF (OVRNUM.GT.0.AND.N.GE.FNUM(OVRNUM)) FNUM(OVRNUM)=N + 1
+	GO TO 30
+C
+C ......................................................................
+C
+C ... NO entry - set up for overlay.
+180	CALL EIHRI(N,1,1)
+	CALL SETOVR(N,.FALSE.)
+	IF (OVRLAY(OVRNUM).EQ.CNROVR) HADTIK=.TRUE.
+	GO TO 30
+C
+C ......................................................................
+C
+C ... EM entry - mark for (perhaps) later VOMming.
+190	CALL EIHMK(1)
+	GO TO 30
+C
+C ......................................................................
+C
+C ... EJ entry - tidy up end of file.
+200	IF (LPOSM.EQ.0) CALL EIHMK(1)		! mark the EJ
+210	CALL IFFNXT(IECODE,IELEN)		! move to next entry
+	IF (IELEN.EQ.-1) GO TO 220
+	CALL WRITEF('Entry "%C" found after "EJ" - deleted',IECODE)
+	GO TO 210
+C
+220	CALL IFFVOM				! remove the EJ
+	CALL EIHMK(0)				! remove marker
+C
+C ... create sector header if none.
+	IF (IFSHSZ.EQ.0) CALL IFFSH(-5.0E37,-5.0E37,1.0E38,1.0E38,1,1)
+C
+C ... report on overlays.
+	IF (OVRLAY(OVRNUM).EQ.CNROVR) OVRNUM=-1
+	IF (OVRNUM.GT.0) CALL WRITEF('Layer %N selected',OVRLAY(OVRNUM))
+	GO TO 240
+C
+C ......................................................................
+C
+C ... end of file - moan and exit.
+230	CALL WRITEF('Unexpected end of IFF file')
+C
+240	VOLDFL=.FALSE.				! success
+250	RETURN
+	END

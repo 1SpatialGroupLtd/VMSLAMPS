@@ -1,7 +1,7 @@
 	PROGRAM LSLDAEMON
 C
 ***	MODULE LSLDAEMON
-***	IDENT 17OC91
+***	IDENT 05FE90
 C
 C Created (Based on QUO by AJW et al)			PGH	17-Aug-1988
 C (V0.1) Completed					PGH	28-Nov-1988
@@ -10,8 +10,7 @@ C (V0.3) keep count of idle time			PGH	 1-Dec-1988
 C (V1.1) use Config file and actually delete processes 	PGH	10-Jan-1989
 C (V1.2) add settle time to Config			PGH	13-Jan-1989
 C (V1.3) allow excluded users				PGH	14-Feb-1989
-C (V1.4) allow safe programs 				PGH	15-Jan-1991
-C (V1.5) allow sleep and wake times			PGH	17-Oct-1991
+C (V1.4) sum activity of subprocesses into parent	PGH	 5-Feb-1990
 C
 C Program to act as an idle process killer daemon
 C
@@ -26,7 +25,6 @@ C functions:
 	INTEGER SYS$BRDCST	! send message
 	INTEGER SYS$DELPRC	! Delete process
 	INTEGER INDEX		! locate character
-	REAL	SECNDS		! time since midnight
 C
 C parameters:
 	INCLUDE '($SSDEF)'
@@ -34,7 +32,6 @@ C parameters:
 	PARAMETER MAXPROC	=100	! maximum processes
 	PARAMETER MAXIDLE	=50	! maximum idle processes
 	PARAMETER MAXEXCLUDE	=10	! maximum excluded users
-	PARAMETER MAXSAFE	=10	! maximum safe programs
 	PARAMETER SCH$C_COLPG	= 1
 	PARAMETER SCH$C_MWAIT	= 2
 	PARAMETER SCH$C_CEF	= 3
@@ -81,9 +78,6 @@ C
 	INTEGER	      INTERVAL	! time interval in minutes
 	INTEGER	      WARNINGS	! number of warnings before kill
 	INTEGER	      SETTLE	! settling time in secs
-	INTEGER	      SLEEP	! sleep time in secs
-	INTEGER	      WAKE	! wake time in secs
-	INTEGER	      NOW	! time now in secs since midnight
 	INTEGER	      T_VALUE	! temporary value
 	INTEGER	      PURGE(2)	! address range to purge
 	CHARACTER*128 IMAGNAME	! name of image being executed
@@ -94,7 +88,7 @@ C
 	CHARACTER*15  PROCNAME	! name of process
 	INTEGER       PROCLEN	! no. of chars
 	INTEGER       MODE	! process mode
-	INTEGER       PRCCNT	! process count
+	INTEGER       SUBPRCCNT	! subprocess count
 	INTEGER       STATE	! Process state (current,COM,LEF,etc)
 	CHARACTER*7   TERMINAL	! terminal name
 	INTEGER       TERMLEN	! no. of chars
@@ -126,17 +120,19 @@ C
 	INTEGER	      PREVCNT		! count of idle processes
 	INTEGER	      EXCLUDECNT	! count of excluded users
 	CHARACTER*15  EXCLUDED(MAXEXCLUDE)	! excluded users
-	INTEGER	      SAFECNT		! count of safe programs
-	CHARACTER*40  SAFEPROG(MAXSAFE)	! safe programs
-	INTEGER	      SAFELEN		! length of safe program name
 	LOGICAL       SUSPND		! this processes is suspended
 	LOGICAL	      SEEN(MAXPROC)	! this process seen recently
 	LOGICAL       KILLTHIS		! kill this process
 	LOGICAL	      KILLING		! not just looking on this pass
-	LOGICAL	      SLEEPING		! sleeping this pass
 	CHARACTER*1   KILLMARK		! marker character
 	CHARACTER*25  PROBLEM		! problem found
 	CHARACTER*50  MESSAGE		! message to output
+	INTEGER	      PROCCNT		! count of observed processses
+	INTEGER	      CURPID(MAXPROC)	! current info about processes
+	INTEGER	      CURCPU(MAXPROC)	! current info about processes
+	INTEGER	      CURBUF(MAXPROC)	! current info about processes
+	INTEGER	      CURDIR(MAXPROC)	! current info about processes
+	INTEGER	      CURPAG(MAXPROC)	! current info about processes
 C
 C presets:
 C
@@ -174,7 +170,7 @@ C
 C
 	ITMLST2(25)  =4
 	ITMLST2(26)  =JPI$_PRCCNT
-	ITMLST (27/2+1)=%LOC(PRCCNT)
+	ITMLST (27/2+1)=%LOC(SUBPRCCNT)
 	ITMLST (29/2+1)=%LOC(RETLEN)
 C
 	ITMLST2(31)  =7
@@ -221,20 +217,16 @@ C
 C
 	PROCESSES = 0			! no processes so far
 	EXCLUDECNT = 0			! no excluded users so far
-	SAFECNT = 0			! no safe programs so far
-	SLEEP = 24*60*60		! sleep at midnight
-	WAKE = 0			! and wake immediately after
 	KILLING = .FALSE.		! only looking first time
 	OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='NEW',
      &        CARRIAGECONTROL='LIST')
 	CALL SYS$ASCTIM(,DATE,,)	! get date and time
 	WRITE(1,1000)DATE
-1000	FORMAT('LSLDAEMON at ',A,' Starting version V1.5')
+1000	FORMAT('LSLDAEMON at ',A,' Starting version V1.3')
 	CLOSE (UNIT=1)
 	OPENERR=0
 	IDLECNT=0
 	PREVCNT=0
-	SLEEPING=.FALSE.
 C
 C get timing information from Config file
 C
@@ -303,22 +295,6 @@ C
 	   ELSE
 	      SETTLE=T_VALUE
 	   ENDIF
-	ELSEIF (COMMAND.EQ.'SLEE') THEN  	! SLEEP command
-	   READ(LINE(STARTPOS:LINLEN),2010,ERR=920)T_VALUE
-	   IF (T_VALUE.LT.0.OR.T_VALUE.GT.24) THEN
-	      PROBLEM='Config invalid SLEEP'
-	      GOTO 905
-	   ELSE
-	      SLEEP=T_VALUE*60*60 ! in seconds
-	   ENDIF
-	ELSEIF (COMMAND.EQ.'WAKE') THEN  	! WAKE command
-	   READ(LINE(STARTPOS:LINLEN),2010,ERR=920)T_VALUE
-	   IF (T_VALUE.LT.0.OR.T_VALUE.GT.24) THEN
-	      PROBLEM='Config invalid WAKE'
-	      GOTO 905
-	   ELSE
-	      WAKE=T_VALUE*60*60 ! in seconds
-	   ENDIF
 	ELSEIF (COMMAND.EQ.'EXCL') THEN  	! EXCLUDE command
 	   IF (EXCLUDECNT.GE.MAXEXCLUDE) THEN
 	      PROBLEM='Config invalid EXCLUDE'
@@ -327,15 +303,6 @@ C
 	   ELSE
 	      EXCLUDECNT = EXCLUDECNT+1
 	      EXCLUDED(EXCLUDECNT)=LINE(STARTPOS:LINLEN)
-	   ENDIF
-	ELSEIF (COMMAND.EQ.'SAFE') THEN  	! SAFE command
-	   IF (SAFECNT.GE.MAXSAFE) THEN
-	      PROBLEM='Config invalid SAFE'
-	      T_VALUE=MAXSAFE
-	      GOTO 905
-	   ELSE
-	      SAFECNT = SAFECNT+1
-	      SAFEPROG(SAFECNT)=LINE(STARTPOS:LINLEN)
 	   ENDIF
 	ELSE
 	   PROBLEM='Config invalid COMMAND'
@@ -369,15 +336,9 @@ C
 	WRITE(1,1093)INTERVAL,WARNINGS,SETTLE
 1093	FORMAT('...       Interval',I5,' mins, Warnings',I3,
      &         ', Settle',I3,' secs')
-	WRITE(1,1094)SLEEP/60/60,WAKE/60/60
-1094	FORMAT('...       Sleep at ',I2,', Wake at ',I2)
 	DO I=1,EXCLUDECNT
-	   WRITE(1,1095)EXCLUDED(I)
-1095	   FORMAT('...       Excluded ',A)
-	ENDDO
-	DO I=1,SAFECNT
-	   WRITE(1,1096)SAFEPROG(I)
-1096	   FORMAT('...       Safe program ',A)
+	   WRITE(1,1094)EXCLUDED(I)
+1094	   FORMAT('...       Excluded ',A)
 	ENDDO
 	CLOSE (UNIT=1)
 	PROBLEM=' '
@@ -385,38 +346,18 @@ C
 C loop back to here at time intervals
 C
 5	PIDADR=-1			! to start a wildcard GETJPI search
-C
-C see if we should be asleep
-C
-	NOW=SECNDS(0.0)
-	SLEEPING=((NOW.GE.SLEEP).AND.(NOW.LE.WAKE))
-	IF (SLEEPING) THEN
-	   KILLING=.FALSE.
-	   OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='OLD',
-     &           ACCESS='APPEND', CARRIAGECONTROL='LIST', ERR=910)
-	   OPENERR=0
-	   CALL SYS$ASCTIM(,DATE,,)	! get date and time
-	   WRITE(1,1010)DATE
-1010	   FORMAT('LSLDAEMON at ',A,' Asleep, but listening')
-	ENDIF
-C
-C start a new log entry
-C
 	IF (KILLING) THEN
 	   OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='OLD',
      &           ACCESS='APPEND', CARRIAGECONTROL='LIST', ERR=910)
 	   OPENERR=0
 	   CALL SYS$ASCTIM(,DATE,,)	! get date and time
-	   WRITE(1,1011)DATE
-1011	   FORMAT('LSLDAEMON at ',A,' Now checking processes')
+	   WRITE(1,1010)DATE
+1010	   FORMAT('LSLDAEMON at ',A,' Now checking processes')
 	ENDIF
 C
-C loop back to here for each process
+C loop back to here to get info about each process
 C
-10	CONTINUE
-C
-C	queue the inquiry request
-	IERR=SYS$GETJPI(%VAL(0),	! efn
+10	IERR=SYS$GETJPI(%VAL(0),	! efn
      &                  PIDADR,		! pidadr
      &                  ,		! prcnam
      &                  ITMLST,		! itmlst
@@ -425,48 +366,93 @@ C	queue the inquiry request
      &                  ,)		! astprm
 C
 C check that it queued OK
-	SUSPND=(IERR.EQ.SS$_SUSPENDED)
-	IF (IERR.NE.SS$_NORMAL.AND..NOT.SUSPND) GOTO 900
+	IF (IERR.NE.SS$_NORMAL) THEN
+C here if GETJPI failed to queue
+	   IF (IERR.EQ.SS$_SUSPENDED) GOTO 10	! OK if suspended
+	   IF (IERR.EQ.SS$_NOPRIV) GOTO 10	! OK if no privilege
+C if no more processes, loop back
+	   IF (IERR.EQ.SS$_NOMOREPROC) THEN
+	      KILLING=.NOT.KILLING
+	      IF (.NOT.KILLING) THEN	! we were killing on this pass
+	         CLOSE (UNIT=1)		! finished recording
+	         DO 100 I=1,IDLECNT
+		   PREVPID(I)=IDLEPID(I)! save info on warned processes
+		   PREVNUM(I)=IDLENUM(I)
+100	         CONTINUE
+	         PREVCNT=IDLECNT
+	         IDLECNT=0
+	         PROCESSES=0		! about to go and remember again
+	         CALL LIB$WAIT(SETTLE*1.0)	! but let things settle first
+	      ELSE
+	         OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='OLD',
+     &                 ACCESS='APPEND', CARRIAGECONTROL='LIST',ERR=910)
+	         CALL SYS$ASCTIM(,DATE,,)	! get date and time
+	         WRITE(1,1030)DATE
+1030	         FORMAT('LSLDAEMON at ',A,' Now hibernating')
+	         CLOSE (UNIT=1)
+	         CALL SYS$PURGWS(PURGE)
+	         CALL LIB$WAIT((INTERVAL*60.0)-SETTLE)
+	      ENDIF
+	      GOTO 5
+	   ENDIF
+	   GOTO 950
+	ENDIF
 C
 C wait for the information to come back
 	IERR=SYS$WAITFR(%VAL(0))
 	IF (IERR.NE.SS$_NORMAL) GOTO 950	! exit if failed
 C
 C did the request complete OK ? - exit if it failed
-	IF (IOSBW(1).EQ.SS$_NORMAL) GOTO 15
-        IF (IOSBW(1).NE.SS$_SUSPENDED) THEN
-	   IERR=IOSBW(1)
-	   GOTO 950				! exit if failed
+	IF (IOSBW(1).NE.SS$_NORMAL) THEN
+           IF (IOSBW(1).NE.SS$_SUSPENDED) THEN
+	      IERR=IOSBW(1)
+	      GOTO 950				! exit if failed
+	   ENDIF
+	   SUSPND=.TRUE.
+	   IMAGNAME='N/A (suspended)'
+	   IMAGELEN=15
 	ENDIF
-	SUSPND=.TRUE.
-	IMAGNAME='N/A (suspended)'
-	IMAGELEN=15
 C
 C discard any detached processes etc
 C
-15	IF (MODE.NE.JPI$K_INTERACTIVE) GOTO 10
+	IF (MODE.NE.JPI$K_INTERACTIVE) GOTO 10
+C ********** buffer this process here *********
+	GOTO 10
+C
+C run through all processes we have seen, adding activity of children 
+C
+C *** for all buffered processes, 
+C	add subprocess quantities to senior parent,
+C	increment child count
+15	CONTINUE
+C
+C loop back to here check all processes we have seen for death
+C
+16	CONTINUE
 C
 C discard any processes in irrelevant states
 C
-	IF (STATE.EQ.SCH$C_COLPG) GOTO 10 
-	IF (STATE.EQ.SCH$C_MWAIT) GOTO 10
+C ******** ignore children here *******
+	IF (STATE.EQ.SCH$C_COLPG) GOTO 16 
+	IF (STATE.EQ.SCH$C_MWAIT) GOTO 16
 	IF (STATE.EQ.SCH$C_CEF) GOTO 20
-	IF (STATE.EQ.SCH$C_PFW) GOTO 10
+	IF (STATE.EQ.SCH$C_PFW) GOTO 16
 	IF (STATE.EQ.SCH$C_LEF) GOTO 20
 	IF (STATE.EQ.SCH$C_LEFO) GOTO 20
 	IF (STATE.EQ.SCH$C_HIB) GOTO 20
 	IF (STATE.EQ.SCH$C_HIBO) GOTO 20
-	IF (STATE.EQ.SCH$C_SUSP) GOTO 10
-	IF (STATE.EQ.SCH$C_SUSPO) GOTO 10
-	IF (STATE.EQ.SCH$C_FPG) GOTO 10
-	IF (STATE.EQ.SCH$C_COM) GOTO 10
-	IF (STATE.EQ.SCH$C_COMO) GOTO 10
-	IF (STATE.EQ.SCH$C_CUR) GOTO 10
+	IF (STATE.EQ.SCH$C_SUSP) GOTO 16
+	IF (STATE.EQ.SCH$C_SUSPO) GOTO 16
+	IF (STATE.EQ.SCH$C_FPG) GOTO 16
+	IF (STATE.EQ.SCH$C_COM) GOTO 16
+	IF (STATE.EQ.SCH$C_COMO) GOTO 16
+	IF (STATE.EQ.SCH$C_CUR) GOTO 16
+	TYPE *,'*** Unknown state ',STATE
 C
 C discard any processes with subprocesses, or no terminal
 C
-20	IF (PRCCNT.NE.0) GOTO 10
-	IF (TERMLEN.EQ.0) GOTO 10
+20	IF (SUBPRCCNT.NE.0) GOTO 16
+	IF (TERMLEN.EQ.0) GOTO 16
 C
 C sanitise the fields
 C
@@ -495,14 +481,6 @@ C
 	USERNAME=USERNAME(1:USERLEN)
 	PROCNAME=PROCNAME(1:PROCLEN)
 	TERMINAL=TERMINAL(1:TERMLEN)
-C
-C discard any processes running a safe program
-C
-	DO I=1,SAFECNT
-	   SAFELEN=INDEX(SAFEPROG(I),' ')-1
-	   IF (IMAGNAME(IMAGESTART:IMAGESTART+SAFELEN-1).EQ.
-     &         SAFEPROG(I)(1:SAFELEN)) GOTO 10
-	ENDDO
 C
 C compare with previous
 C
@@ -616,37 +594,8 @@ C
 C
 C end of loop for this process
 C
-90	GOTO 10			! and go back for the next process
+90	GOTO 16			! and go back for the next process
 C
-C here if GETJPI failed to queue
-900	CONTINUE
-	IF (IERR.EQ.SS$_NOPRIV) GOTO 10		! OK if no privilege
-C if no more processes, loop back
-	IF (IERR.EQ.SS$_NOMOREPROC) THEN
-	   KILLING=.NOT.KILLING
-	   IF (.NOT.KILLING) THEN	! we were killing on this pass
-	      CLOSE (UNIT=1)		! finished recording
-	      DO 100 I=1,IDLECNT
-		PREVPID(I)=IDLEPID(I)	! save info on warned processes
-		PREVNUM(I)=IDLENUM(I)
-100	      CONTINUE
-	      PREVCNT=IDLECNT
-	      IDLECNT=0
-	      PROCESSES=0		! about to go and remember again
-	      CALL LIB$WAIT(SETTLE*1.0)	! but let things settle first
-	   ELSE
-	      OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='OLD',
-     &              ACCESS='APPEND', CARRIAGECONTROL='LIST',ERR=910)
-	      CALL SYS$ASCTIM(,DATE,,)	! get date and time
-	      WRITE(1,1030)DATE
-1030	      FORMAT('LSLDAEMON at ',A,' Now hibernating')
-	      CLOSE (UNIT=1)
-	      CALL SYS$PURGWS(PURGE)
-	      CALL LIB$WAIT((INTERVAL*60.0)-SETTLE)
-	   ENDIF
-	   GOTO 5
-	ENDIF
-	GOTO 950
 C here with error on log file open - retry 10 times, then exit
 910	CALL LIB$WAIT(60.0)
 	OPENERR=OPENERR+1

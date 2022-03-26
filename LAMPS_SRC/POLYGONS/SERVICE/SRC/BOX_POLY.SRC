@@ -1,0 +1,349 @@
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL*4 FUNCTION BOX_POLY()
+C
+***	MODULE	BOX_POLY
+***	IDENT	30AP92
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+	LOGICAL*4	ACTUAL_BOX_POLY
+C
+C	........................................................................
+C
+	BOX_POLY = ACTUAL_BOX_POLY(
+     &			POLMAX,PCOVER_MAX,PBMAX,
+     &			%VAL( PTR$_POLY_RANGE),
+     &			%VAL( PTR$_PCOVER_START),
+     &			%VAL( PTR$_PCOVER_BOX),
+     &			%VAL( PTR$_POLBOX),
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL*4 FUNCTION ACTUAL_BOX_POLY(
+     &		POLMAX,PCOVER_MAX,PBMAX,
+     &		POLY_RANGE,PCOVER_START,PCOVER_BOX,POLBOX)
+C
+***	MODULE	ACTUAL_BOX_POLY
+***	IDENT	28AU91
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Bug fixed in routine which puts sorted PCOVER_BOX
+C	into POLBOX (IBOX=SORTEDNO in wrong place)	ST   28-Aug-1991
+CMOD	Now uses BOXROUNDX & BOXROUNDY for box rounding
+C	error rather than 0.001 constant		TJH  09-May-1991
+CMOD	Split up functionality - part moved to GET_BOUNDARY_BOXES
+C	allows boxes inside the polygon to be checked by a single 
+C	point-in-polygon test				AC   29-Sep-1988
+C	Author						TJH  26-Feb-1987
+C
+C
+C Function to form the sectored spatial index for POLYGONS. This is
+C needed both for for seed point and nested polygon
+C determination. The boxes are allocated using the segment data range.
+C
+C Two spatial indices are set up:
+C 
+C   1) The polygons (or part polygons) contained in each box,
+C      this is stored in /SECTOR/POLBOX
+C   2) The boxes covered (or partly covered) by each polygon,
+C      this is stored in /SECTOR/PCOVER
+C
+C Function returns SS$_NORMAL if all is well or one of a variety of
+C IPOLYGON error codes on failure.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INTEGER*2	X,Y
+	PARAMETER 	(X=1, Y=2)
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNPOLYGONS:POLYGONSMSG.PAR'
+	INTEGER		SS$_ENDOFFILE
+	EXTERNAL	SS$_ENDOFFILE	! end of file
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:SECTOR.CMN'
+C
+C	Arguments
+		INTEGER*4	POLMAX
+		INTEGER*4	PCOVER_MAX
+		INTEGER*4	PBMAX
+C
+		INTEGER		PCOVER_BOX(PCOVER_MAX)
+		INTEGER		PCOVER_START(POLMAX+1)
+		INTEGER		POLBOX(PBMAX)
+		REAL		POLY_RANGE(4,POLMAX)
+C
+C W/s
+	INTEGER*2	KEY_BUF(5)	! key buffer for SOR$BEGIN_SORT
+	INTEGER*2	LRL		! longest record length in sort
+C Data:
+	DATA		LRL/8/		! sort record length (bytes)
+C
+	INTEGER   	CSIGN		! sign of poly. box coverage
+	INTEGER	  	IN		! for point in pol return
+	INTEGER   	IBOX		! found box no.
+	INTEGER   	MARK		! sets sign of box contents
+	INTEGER		PDIF		! for POLBOX_START calc
+	INTEGER   	I,J,K,L,N	! loop vars.
+	INTEGER   	PINDEX		! temp.  "
+	INTEGER   	ISTARTX,ISTARTY ! coverage start in box struct.	
+	INTEGER   	ISTOPX,ISTOPY	! coverage stop in box struct.	
+	INTEGER		N_BLOCKS	! determines size of sort
+	INTEGER	  	NX,NY		! for box calc.
+	LOGICAL   	HADBOX(BOXMAX)	! had box in the polygon before?
+	INTEGER   	POLY_INDX	! current polygon
+	INTEGER*4	PROCESS		! record interface
+	INTEGER		PSTART		! general pointer
+	INTEGER		PSTOP		! general pointer
+	INTEGER*2	SORTEDNO	! sorted number
+	INTEGER*2	SORTED(2)	! to receive sort output
+	INTEGER*4	UNDESC(2)	! dummy descriptor for UNSORT
+	INTEGER*2	UNSORT(2)	! array to be sorted
+	INTEGER*2	POLYGON		! polygon in box
+C
+	REAL	  	POINT(2)	! box corner position
+	INTEGER*4	OPTIONS		! sort options
+C
+	EQUIVALENCE	(SORTEDNO,SORTED(1)),(POLYGON,SORTED(2))
+C
+C External Declarations
+	EXTERNAL        DSC$K_DTYPE_W	! signed word
+	EXTERNAL        SOR$GK_RECORD	! specifies record sort
+	EXTERNAL	SOR$M_NODUPS	! delete duplicate features
+	EXTERNAL	SOR$M_STABLE	! keep duplicate features
+C
+C SORT function names:
+	INTEGER*4	SOR$BEGIN_SORT
+	INTEGER*4	SOR$SORT_MERGE
+	INTEGER*4	SOR$RELEASE_REC
+	INTEGER*4	SOR$RETURN_REC
+	INTEGER*4	SOR$END_SORT
+C
+C
+C Functions:
+	INTEGER   GET_POLY	! gets & orders a polygons coordinates
+	INTEGER	  PNTPOL	! point in polygon test
+	INTEGER	  GET_BOUNDARY_BOXES ! implicates boxes passed thru by 
+C				! polygon boundary
+C
+C ......................................................................
+C
+	ACTUAL_BOX_POLY=%LOC(SS$_NORMAL)
+C
+C Calculate box structure origin and grid step
+	CALL BOX_INIT
+	PSTART=0
+	CSIGN=1
+	MARK=1
+C
+C ......................................................................
+C    L O O P    F O R    E  A C H    P O L Y G O N   I N    T U R N
+C
+	DO 90 POLY_INDX=1,NUM_POLY
+C
+C Reset flags for construction of polygon coverage tables PCOVER_BOX
+C and PCOVER_START
+	   CALL VIOCLR(HADBOX(1),4*NUMBOX*NUMBOY,0)
+C
+C No coordinates for this polygon - yet.
+	   POLY_PTS=0
+C
+C Get the coordinates which define the polygon POLY_INDX. The
+C function GET_POLY() returns the (/POLYGONS/POLY_PTS) coordinates for
+C polygon POLY_INDX in /POLYGONS/POLY_BUF
+	   ACTUAL_BOX_POLY=GET_POLY(POLY_INDX)
+	   IF (.NOT.ACTUAL_BOX_POLY) GOTO 150
+C
+C Now find out which boxes are implicated by the polygon boundary
+	   ACTUAL_BOX_POLY=GET_BOUNDARY_BOXES(HADBOX)
+	   IF (.NOT.ACTUAL_BOX_POLY) GOTO 150
+C
+C ......................................................................
+C
+C We appear to have finished the polygon coordinate tests.
+C Take pains to allow for boxes which are entirely enclosed by the
+C polygon, but which have none of the coordinates which define the
+C polygon running through them. 
+C
+C Using the polygon range in POLY_RANGE determine the start and stop
+C box coverage of the polygon. 
+	   ISTARTX=((POLY_RANGE(1,POLY_INDX)-BOXROUNDX-BOXORIX)
+     &			/BOXSTPX)
+	   ISTOPX =((POLY_RANGE(2,POLY_INDX)+BOXROUNDX-BOXORIX)
+     &			/BOXSTPX)
+	   ISTARTY=((POLY_RANGE(3,POLY_INDX)-BOXROUNDY-BOXORIY)
+     &			/BOXSTPY)
+	   ISTOPY =((POLY_RANGE(4,POLY_INDX)+BOXROUNDY-BOXORIY)
+     &			/BOXSTPY)
+C
+C For each box in the rectangular coverage of the polygon....
+	   IF (POLY_INDX.NE.BOUND_POL) THEN
+	      DO 50 I=ISTARTX,ISTOPX
+	         POINT(X)=BOXSTPX*(I+0.5)+BOXORIX
+	         DO 40 J=ISTARTY,ISTOPY
+C
+C If the box is already included then need do nothing
+	            IBOX=J*NUMBOX + I + 1
+		    IF (HADBOX(IBOX)) GOTO 40
+C
+C Otherwise get POINT in middle of box and test for inclusion in polygon
+	            POINT(Y)=BOXSTPY*(J+0.5)+BOXORIY
+	            IN=PNTPOL(POINT,POLY_BUF,POLY_PTS)
+	            IF (IN.GE.0) HADBOX(IBOX)=.TRUE.
+40	         CONTINUE
+50	      CONTINUE
+	   ENDIF
+C
+C ......................................................................
+C
+C The HADBOX array now has a list of all the boxes covered by polygon
+C POLY_INDX. Append the list of boxes covered by
+C this polygon to PCOVER_BOX and update PCOVER_START (the pointer to
+C the start of each polygons box coverage within PCOVER_BOX) 
+	   PCOVER_START(POLY_INDX)=PSTART+1
+	   CSIGN=-CSIGN
+	   DO 70 I=1,NUMBOX*NUMBOY
+	      IF (HADBOX(I)) THEN
+	         PSTART=PSTART+1
+	         PCOVER_BOX(PSTART)=I*CSIGN
+	      ENDIF
+70	   CONTINUE
+90	CONTINUE
+C
+C ......................................................................
+C
+C
+C We now know (in PCOVER_BOX) all the boxes coverd by each polygon.
+C We also need to know which polygons are contained in each box, which
+C we can get by sorting PCOVER_BOX.
+C
+C Set up descriptor for UNSORT
+C
+	UNDESC(1)=4				! length of, (in bytes),
+	UNDESC(2)=%LOC(UNSORT)			! and address of array
+C						! to be sorted
+C
+C Key buffer 
+	KEY_BUF(1)=1				! number of sort keys
+	KEY_BUF(2)=%LOC(DSC$K_DTYPE_W) 		! signed longword
+	KEY_BUF(3)=0				! ascending order
+	KEY_BUF(4)=0				! no offset
+	KEY_BUF(5)=2				! length of key(4 bytes)
+C
+C Setup sort options for SOR$BEGIN_SORT
+C
+	OPTIONS = %LOC(SOR$M_STABLE)		! keep duplicate's order
+C
+	PROCESS=%LOC(SOR$GK_RECORD)		! record interface
+C
+C Estimate the amount of memory/sort file needed for the sort
+C PSTART is the number of entries in PCOVER_BOX, 4 is number of bytes
+C in each record put into sort.
+	N_BLOCKS=1+(PSTART*4)/512
+C
+C Set up sorting across record interface
+	ACTUAL_BOX_POLY=
+     &	     SOR$BEGIN_SORT(KEY_BUF(1),LRL,OPTIONS,N_BLOCKS,,,PROCESS)
+	IF (.NOT.ACTUAL_BOX_POLY) THEN
+	   CALL LSL_PUTMSG(ACTUAL_BOX_POLY)
+	   GOTO 150
+	ENDIF
+C
+C Pass the sort routine the records
+	DO 110 POLY_INDX=1,NUM_POLY
+	   PINDEX=PCOVER_START(POLY_INDX)	! start of polygon
+	   PSTOP=PCOVER_START(POLY_INDX+1)   	! end of polygon
+100	   UNSORT(1)=ABS(PCOVER_BOX(PINDEX))	! box number
+	   UNSORT(2)=POLY_INDX			! polygon number
+	   ACTUAL_BOX_POLY=SOR$RELEASE_REC(UNDESC)	! add record 
+	   IF (.NOT.ACTUAL_BOX_POLY) THEN
+	      CALL LSL_PUTMSG(ACTUAL_BOX_POLY)
+	      GOTO 150
+	   ENDIF
+	   IF (PINDEX+1.EQ.PSTOP.OR.PCOVER_BOX(PINDEX+1).EQ.0) GOTO 110
+	   PINDEX=PINDEX+1
+	   GOTO 100
+110	CONTINUE
+C
+C Do the sort
+	ACTUAL_BOX_POLY=SOR$SORT_MERGE()
+C
+C We have now sorted the polygons on the basis of which box they lie in
+C Put this information into /POLYGONS/POLBOX
+C
+	POLY_INDX=0
+	PBOX_START(1)=0			! assume empty box
+	PINDEX=0
+	IBOX=0
+C
+120	ACTUAL_BOX_POLY=SOR$RETURN_REC(%DESCR(SORTED))
+	IF (.NOT.ACTUAL_BOX_POLY) THEN
+	   IF (ACTUAL_BOX_POLY.EQ.%LOC(SS$_ENDOFFILE)) THEN
+	      GOTO 140			 	! last record
+	   ELSE
+	      CALL LSL_PUTMSG(ACTUAL_BOX_POLY)
+	      GOTO 150				! return
+	   ENDIF
+	ENDIF
+	IF (SORTEDNO.NE.IBOX) THEN
+C
+C Error: This line should not be here because PDIF will always be zero!!!
+C
+C	   IBOX=SORTEDNO
+C
+	   MARK=-MARK
+	   PDIF=SORTEDNO-IBOX
+	   IF (PDIF.GT.1) THEN
+	      DO 130 I=1,(PDIF-1)
+	         POLY_INDX=POLY_INDX+1
+	         PBOX_START(POLY_INDX)=0		! empty box
+130	      CONTINUE
+	   ENDIF
+	   IBOX=SORTEDNO
+	   POLY_INDX=POLY_INDX+1
+	   PBOX_START(POLY_INDX)=PINDEX+1
+	ENDIF
+	PINDEX=PINDEX+1
+	POLBOX(PINDEX)=POLYGON*MARK
+	GOTO 120
+C
+C End the sort
+140	ACTUAL_BOX_POLY=SOR$END_SORT()
+	IF (.NOT.ACTUAL_BOX_POLY) THEN
+	   CALL LSL_PUTMSG(ACTUAL_BOX_POLY)
+	ENDIF
+C
+150	RETURN
+	END

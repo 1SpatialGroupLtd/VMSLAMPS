@@ -1,0 +1,296 @@
+C-----------------------------------------------
+C
+C	FAULT
+C
+C	Check for duplicates
+C	Check library
+C	Check that each pin in schedule has real status
+C	Check all ICs in ICLIST
+C	Check that each pin is 'OK by the rules'
+C-----------------------------------------------
+	SUBROUTINE FAULT(NMAX)
+C
+***	MODULE FAULT
+***	IDENT 30OC84
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'WIREWRAP.HDR'
+C
+C argument:
+	INTEGER		NMAX		! fill pointer on ISHED
+C
+C workspace:
+	INTEGER		I1, I2, I3, IFW	! for splitting pin descriptors
+	INTEGER		IVCC(MAXICS)	! incidence of VCC pins
+	INTEGER		IGND(MAXICS)	!	       GND in schedule
+	INTEGER		LAST,THIS	! bits of ISHED
+	INTEGER		I, II		! loop variables
+	INTEGER		ICNO, IPIN	! used like i1, i2
+	INTEGER		STPIN		! ISHED index of node start pin
+	INTEGER		ISERR, ISTTUS
+	INTEGER		IS, IJ, JST, ICUR, ISH
+	INTEGER		L1, L2		! for format loops
+	INTEGER		LEN1, LEN2	! extent of data in the PINs
+	BYTE		PIN1(9), PIN2(9)! characters of pin names
+	LOGICAL		MLTIC		! the node in hand spans more
+C					!	than one IC
+C
+C functions called:
+	INTEGER		FORM		! form pin name from ISHED entry
+	INTEGER		JSTAT
+	INTEGER		JCLIST
+C
+	LOGICAL		ICFT,WARN
+C
+	WRITE  (3,10)
+10	FORMAT(//' ***Errors***',//)
+C
+	DO I=1,MAXICS
+	  IVCC(I) = 0
+	  IGND(I) = 0
+	ENDDO
+C
+	LAST = 0
+	MLTIC = .FALSE.
+C
+C scan the whole schedule-so-far
+	DO I=1,NMAX-1
+	  THIS = ISHED(I)
+	  IF(THIS.EQ.-1)GOTO 90
+	  IF(THIS.EQ.GND)GOTO 70
+	  IF(THIS.EQ.VCC)GOTO 80
+	  IF (THIS.GE.256 .AND. LAST.GE.256) THEN
+	    IF (THIS/256 .NE. LAST/256) MLTIC = .TRUE.
+	  ENDIF
+C
+C look for repeats of the pin-in-hand
+	  DO II = I+1,NMAX-1
+	    IF (THIS.EQ.ISHED(II)) THEN		! a repeat
+	      LEN1 = FORM(PIN1, I)-3
+	      WRITE (3,30) (PIN1(L1), L1=1,LEN1)
+30	      FORMAT (' ', <LEN1>A1, ' duplicated')
+	    ENDIF
+	  ENDDO
+	  GOTO 95
+C
+C GND pin case
+70	  IF (LAST.EQ.VCC) THEN
+	    LEN1 = FORM(PIN1, STPIN)-3
+	    WRITE (3,71) (PIN1(L1), L1=1,LEN1)
+71	    FORMAT (' ', 'Both VCC and GND in node ', <LEN1>A1)
+C
+	  ELSE IF (LAST.GE.256) THEN		! count GND wraps on IC
+	    I1 = LAST/256
+	    IGND(I1) = IGND(I1)+1
+	  ENDIF
+C
+C check for multiple-IC GND nodes
+	  IF (MLTIC) THEN
+	    LEN1 = FORM(PIN1, STPIN)-3
+	    WRITE (3,72) (PIN1(L1), L1=1,LEN1)
+72	    FORMAT (' ', 'Multiple-IC GND node ', <LEN1>A1)
+	  ENDIF
+	  GOTO 95
+C
+C VCC pin case
+80	  I1 = LAST/256
+	  IF (I1.GT.0) IVCC(I1) = IVCC(I1) + 1
+C
+C check for multiple-IC VCC nodes
+	  IF (MLTIC) THEN
+	    LEN1 = FORM(PIN1, STPIN)-3
+	    WRITE (3,81) (PIN1(L1), L1=1,LEN1)
+81	    FORMAT (' ', 'Multiple-IC VCC node ', <LEN1>A1)
+	  ENDIF
+	  GOTO 95
+C
+C node separator
+90	  STPIN = I+1			! remember 1st pin of node
+	  MLTIC = .FALSE.		! no ICs yet this node
+C
+C save previous pin designator
+95	  LAST = THIS
+	ENDDO
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+	IFW = 3				! field width
+	IF (POS3DG) IFW = 4		!  for position nos
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C check no wires connected to 'internally unconnected' pins on ics
+	CALL LIBSCN(NMAX)
+	DO 120 I=1,NMAX-1
+	  THIS = ISHED(I)
+	  IF (THIS.EQ.-1) GOTO 120	! ignore separators,
+	  IF (THIS.EQ.GND) GOTO 120	! ground pins,
+	  IF (THIS.EQ.VCC) GOTO 120	! VCC pins,
+	  IF (THIS.LE.255) GOTO 120	! edge pins,
+	  IF (JSTAT(I).NE.0) GOTO 120	! and connected pins
+	  I1=THIS/256
+	  I2=MOD(THIS,256)
+	  WRITE (3,100)I1,I2
+100	  FORMAT (' ',I<IFW>,'.',I2,' internally N.C.')
+120	CONTINUE
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+	DO 520 ISERR=1,2
+	  WARN = .FALSE.
+	  IF (ISERR.EQ.1) GOTO 160
+	  WARN=.TRUE.
+	  WRITE (3,130)
+130	  FORMAT(///' ***Warnings***',//)
+C
+C Test for duplicate Vcc /Gnd pins:
+	   DO 150 I=1,MAXICS
+	     IF (IGND(I).GT.1) WRITE (3,140) I,'GND',IGND(I)
+	     IF (IVCC(I).GT.1) WRITE (3,140) I,'VCC',IVCC(I)
+140	     FORMAT(X,'IC',I<IFW>,2X,A3,'  has',I3,'  wraps.')
+150	   CONTINUE
+C
+160	   DO 510 ICNO=1,MAXICS
+	     IF(ICLIST(ICNO,1).EQ.0)GOTO 510
+	     DO 500 IPIN=1,ICPINS(ICPTR(ICNO))
+	     ISTTUS=JCLIST(ICNO,IPIN)
+	     IF (ISTTUS.EQ.0 .OR. ISTTUS.EQ.NOCHK) GOTO 500
+	     ISH=ICNO*256+IPIN
+	     DO 170 II=1,NMAX-1
+	       IF(ISHED(II).EQ.ISH)GOTO 250
+170	     CONTINUE
+	     IF (.NOT.WARN) GOTO 500
+	     IF(ISTTUS.EQ.VCC)GOTO 190
+	     IF(ISTTUS.EQ.GND)GOTO 210
+	     IF ((ISTTUS.AND.PINPUT).NE.0) GOTO 230
+C
+	     WRITE(3,180)ICNO,IPIN
+180	     FORMAT(' ','Output',I<IFW>,'.',I2,' Not used?')
+	     GOTO 500
+190	     WRITE(3,200)ICNO,IPIN
+200	     FORMAT(' ','VCC to',I<IFW>,'.',I2,' Added')
+	     ISHED(NMAX)=VCC
+	     GOTO 490
+210	     WRITE(3,220)ICNO,IPIN
+220	     FORMAT(' ','GND to',I<IFW>,'.'I2,' Added')
+	     ISHED(NMAX)=GND
+	     GOTO 490
+230	     WRITE(3,240)ICNO,IPIN
+240	     FORMAT(' ','Input ',I<IFW>,'.',I2,' Not connected?')
+	     GOTO 500
+C
+C pin found in schedule
+250	     IF (WARN) GOTO 500  	! any errors are serious and
+C					!  have already been found
+	     IJ=II
+260	     IJ=IJ-1
+	     IF(IJ.EQ.0)GOTO 270
+	     IF(ISHED(IJ).EQ.-1)GOTO 270
+	     GOTO 260
+270	     IF(ISTTUS.EQ.VCC)GOTO 280
+	     IF(ISTTUS.EQ.GND)GOTO 310
+	     IF ((ISTTUS.AND.PINPUT).NE.0) GOTO 340
+	     IF ((ISTTUS.AND.TRIST).NE.0)  GOTO 450
+	     GOTO 370
+C
+C pin is a VCC
+280	     IJ=IJ+1
+	     IF(II.EQ.IJ)GOTO 280
+	     IF(ISHED(IJ).EQ.-1)GOTO 290
+	     IF(ISHED(IJ).EQ.VCC)GOTO 500
+	     GOTO 280
+290	     WRITE(3,300)ICNO,IPIN
+300	     FORMAT(' ','Pin   ',I<IFW>,'.',I2,' Should be VCC')
+	     GOTO 500
+C
+C pin is a GND
+310	     IJ=IJ+1
+	     IF(II.EQ.IJ)GOTO 310
+	     IF(ISHED(IJ).EQ.-1)GOTO 320
+	     IF(ISHED(IJ).EQ.GND)GOTO 500
+	     GOTO 310
+320	     WRITE(3,330)ICNO,IPIN
+330	     FORMAT(' ','Pin   ',I<IFW>,'.',I2,' Should be GND')
+	     GOTO 500
+C
+C pin is an input
+340	     IJ=IJ+1
+	     IF(II.EQ.IJ)GOTO 340
+	     IF(ISHED(IJ).EQ.-1)GOTO 350
+	     IF(ISHED(IJ).EQ.GND)GOTO 500
+	     IF(ISHED(IJ).EQ.VCC)GOTO 500
+	     IF(ISHED(IJ).LE.255)GOTO 500
+	     JST = JSTAT(IJ)
+	     IF (JST.EQ.0) GOTO 340  !! ignore nc
+	     IF (JST.EQ.GND .OR. JST.EQ.VCC .OR. JST.EQ.NOCHK) GOTO 500
+	     IF ((JST.AND.PINPUT).NE.0) GOTO 340 !! another input
+	     GOTO 500	!! anything else
+350	     WRITE(3,360)ICNO,IPIN
+360	     FORMAT(' ','Input ',I<IFW>,'.',I2,' No signal source')
+	     GOTO 500
+C
+C pin is an output
+370	     ICUR=0
+	     ICFT=.FALSE.
+380	     IJ=IJ+1
+	     IF(II.EQ.IJ)GOTO 380
+	     IF(ISHED(IJ).EQ.-1)GOTO 390
+	     IF(ISHED(IJ).EQ.GND)GOTO 410
+	     IF(ISHED(IJ).EQ.VCC)GOTO 410
+	     IF(ISHED(IJ).LE.255)GOTO 380
+	     JST = JSTAT(IJ)
+	     IF (JST.EQ.0 .OR. JST.EQ.NOCHK) GOTO 380
+	     IF (JST.EQ.GND .OR. JST.EQ.VCC) GOTO 430
+	     IF ((JST.AND.PINPUT).EQ.0) GOTO 430
+C		if checkable value but not input: else input
+	     ICUR = ICUR + (JST-PINPUT)
+	     GOTO 380
+C
+390	     IF (ISTTUS*10.GE.ICUR) GOTO 500
+	     WRITE(3,400)ICNO,IPIN
+400	     FORMAT(' ','Output',I<IFW>,'.',I2,' Overloaded')
+	     GOTO 500
+410	     WRITE(3,420)ICNO,IPIN
+420	     FORMAT(' ','Output',I<IFW>,'.',I2,' Shorted')
+	     GOTO 500
+430	     IF(ICFT)GOTO 380
+	     WRITE(3,440)ICNO,IPIN
+440	     FORMAT(' ','Output',I<IFW>,'.',I2,' Conflict')
+	     ICFT=.TRUE.
+	     GOTO 380
+C	Tristate output : all checks except that no conflict
+C					is recognized
+450	     ISTTUS = ISTTUS - TRIST
+	     ICUR = 0
+C
+460	     IJ = IJ+1
+	     IF (IJ.EQ.II) GOTO 460
+	     IF (ISHED(IJ).EQ.-1) GOTO 480
+C
+	     IF (ISHED(IJ).EQ.VCC .OR. ISHED(IJ).EQ.GND) GOTO 410
+	     IF (ISHED(IJ).GT.255) GOTO 470
+C
+	     GOTO 460
+C
+470	     JST = JSTAT(IJ)
+	     IF (JST.EQ.VCC .OR. JST.EQ.GND) GOTO 460
+	     IF (JST.EQ.NOCHK) GOTO 460
+	     IF ((JST.AND.PINPUT).EQ.0) GOTO 460  ! anything bar input
+C
+C	else input: count fanout
+	     ICUR = ICUR + (JST - PINPUT )
+	     GOTO 460
+C
+480	     GOTO 390
+C
+490	     IF (NMAX.GT.MAXSHED-3) CALL MOAN(
+     &			'too many entries - cannot add link')
+	     ISHED(NMAX+1)=ISH
+	     ISHED(NMAX+2)=-1
+	     NMAX=NMAX+3
+500	     CONTINUE
+510	   CONTINUE
+520	CONTINUE
+	RETURN
+	END

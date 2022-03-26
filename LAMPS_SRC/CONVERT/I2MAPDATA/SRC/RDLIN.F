@@ -1,6 +1,6 @@
 	INTEGER*4 FUNCTION RDLIN(LINE)
 C
-CDEC$	IDENT	'21SE94'
+CDEC$	IDENT	'04OC94'
 C
 C	Copyright (C) Laser-Scan Ltd., Cambridge, England.
 C
@@ -103,7 +103,8 @@ C
 C
 C Despatch according to command
 C
-	GOTO (100,200,300,400,500,600,700,800,900,1000) RESULT
+	GOTO (100,200,300,400,500,600,700,800,900,
+     &	      950,950,950,950,950,1000) RESULT
 C
 	CALL LSL_PUTMSG(I2MD__UNKCMD,CMDNST)	! unknown command
 	GOTO 9999
@@ -202,6 +203,13 @@ C
 	IF (CMDICT .GT. 0) DIVISOR = INTARG(1)
 C
 	GOTO 10000
+C
+C Various MAPDATA2I keywords - to be ignored
+C
+950	CONTINUE
+C
+	GOTO 10000
+
 C
 C CODE - FC definition
 C

@@ -1,0 +1,300 @@
+	.TITLE	TKOD
+	.IDENT	/29MR82/
+ 
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+; Author Susan Manning from originals by R. Fairbairns
+;		from originals by P.A.Woodsford, P.Cross, et al.
+ 
+; Date as .IDENT
+ 
+; T e k t r o n i x   4 0 1 x   g r a p h i c   l i b r a r y   o d d m e n t s
+ 
+; Conditional assembly by variable C4014; non-0 if supporting 4014 with
+;   enhanced graphics, or a 4016
+ 
+	CODE_PSECT	TKW
+ 
+; User access to variables
+ 
+; LDFPPM as HRD manual
+ 
+; meaningless values returned zero
+ 
+; extra entry:
+;   ISW=4: R7:=?,  R8,R9:=screen extent
+ 
+ .ENTRY		LDFPPM,^M<R6,R7,R9,R10>
+$LDFPP:: MOVW	@4(AP),R10
+	DECW	R10
+	BEQL	1$
+	DECW	R10
+	BEQL	2$
+	DECW	R10
+	BEQL	3$
+ 
+; not 1, 2, or 3 - treat as 4
+	MOVAB	TKEXT,R10
+	BRB	4$
+ 
+; 1 - intensity, UX, UY
+1$:	MOVAB	TKRUX,R10
+4$:	CLRF	R6	; meaningless first result
+	BRB	5$
+ 
+; 2 - scale, OX,OY
+2$:	MOVF	TKSCF,R6
+	MOVAB	TKRUOX,R10
+5$:	MOVF	(R10)+,R7
+	MOVF	(R10),R9
+	BRB	6$
+ 
+; 3 - CH, CX, CY - totally meaningless!
+3$:	CLRF	R6
+	CLRF	R7
+	CLRF	R9
+6$:	MOVF	R6,@8(AP)	; return results
+	MOVF	R7,@12(AP)
+	MOVF	R9,@16(AP)
+	RET
+ 
+ 
+; Origin change
+; currently supports only '-1' version of LDLIB 'ORIGIN'
+ 
+ .ENTRY		ORIGIN,^M<R2,R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R7
+	MOVF	@8(AP),R9
+	BSBB	O$RIG
+	RET
+ 
+ 
+O$RIG:	MOVAB	TKRDOX,R10
+	MOVF	R7,(R10)+	; preserve display values
+	MOVF	R9,(R10)+
+	MOVF	TKSCF,R6	; current scale
+SETUO:	DIVF3	R6,R7,(R10)+	; user values
+	DIVF3	R6,R9,(R10)
+ 
+; move to new origin
+$MOVT0:: CLRF	R7
+	CLRF	R9
+	JSB	$MOVTO
+	RSB
+ 
+ 
+; Units change
+ 
+ .ENTRY		UNITS,^M<R2,R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R6
+	BSBB	U$NIT
+	RET
+ 
+ 
+U$NIT:	MOVF	R6,TKSCF	; preserve new scale
+	MOVAB	BASETR,R10	; basic transformation screen cm.->counts
+	MOVAB	TKTR,R1
+	MOVL	#4,R2
+1$:	MOVF	(R10)+,R7	; derive TKTR = BASETR * TKSCF
+	MULF3	R6,R7,(R1)+
+	SOBGTR	R2,1$
+ 
+; adjust user origin to new units
+	MOVAB	TKRDOX,R10
+	MOVF	(R10)+,R7
+	MOVF	(R10)+,R9
+	BRB	SETUO
+ 
+ 
+; TKSTYL - set Tek line style
+ 
+; CALL TKSTYL(S)  (integer S)
+ 
+; S = 0 => full line
+;    = 1 => dotted
+;    = 2 => dot dash
+;    = 3 => short dash
+;    = 4 => long dash
+;    (>4, <0 => ignore call)
+ 
+ .ENTRY	TKSTYL, ^M<R2,R5,R10,R11>
+	.IF NE C4014	; only if 4014-plus
+	MOVW	@4(AP),R1
+	BLSS	STRTS		; -ve arg  - ignore
+	CMPW	R1,#T.MXST
+	BGTR	STRTS		; also if out of range
+	CMPW	R1,TKCSTY	; same as what we have already?
+	BEQL	STRTS		; yes - ignore
+	MOVW	R1,TKCSTY	; set up new current style
+	JSB	$TKLCE		; set LCE
+	BISB3	TKCSTY, #TG.STY, R10 ; add this style to style contrl bits
+	JSB	$TKWCH		; and go to appropriate style
+STRTS:	.ENDC
+	RET
+ 
+ 
+; TKCHSZ - set Tek character size
+ 
+; CALL TKCHSZ(S)  (integer S)
+ 
+; S = 0-3 for max-min sizes
+; S,0 or S>3  ignore call
+ 
+ .ENTRY		TKCHSZ,^M<R2,R5,R10,R11>
+MOVW	@4(AP),R1		; ars S
+	BLSS	SZRTS		; -ve arg   - ignore
+	CMPW	R1,#T.MXCS
+	BGTR	SZRTS		; or if out of range
+	JSB	$TKCS1
+SZRTS:	RET
+ 
+; set character size to R6
+$TKCS1:: CMPW	R1,TKCCHS	; current size
+	BEQL	SZRTS		; same - ignore it
+	MOVW	R1,TKCCHS	; set up new size
+	JSB	$TKLCE		; set LCE
+	BISB3	TKCCHS,#TG.CHS,R10	; add size value to size control bits
+	JSB	$TKWCH		; and set appropriate style
+	RSB
+ 
+ 
+; TKINIT - initialise display
+ 
+; CALL TKINIT(SW, EFN?)
+ 
+; SW coded bitwise:
+; d0 =0 => complete drawing, disable, detach display
+;    =1 => attach, enable display, decode other bits (such as they are)
+; d1 =1 => clear screen
+; d2 =2 => set default scale, origin
+ 
+; EFN is the first of three consecutive event flags to use
+ 
+; (EFN ignored if d0=0, or if display already on)
+ 
+LDINIT::
+ .ENTRY		TKINIT,^M<R2,R4,R5,R6,R7,R8,R9,R10,R11>
+$TKINI:: MOVW	@4(AP),R10	; SW argument
+	BLBS	R10,10$	
+	BRW	OFF		; if d0=0 - switch off
+10$:	MOVW	R10,-(SP)	; preserve arg for later
+	TSTB	TKENBL		; already on?
+	BNEQ	ONOK		; yes
+	MOVZWL	@12(AP),R6	; first event flag
+	MOVL	R6,R1
+	MOVW	R6,TKNEFN	; next output event flag to use
+	INCL	R6		; get other output flag
+	ADDW3	R6,R1,TKOEFS	; preserve sum of two output flags
+	INCL	R6		; hard copy timer flag
+	MOVW	R6,TKHTEF	; only needed in one place
+	INCL	R6		; get input flag
+	MOVL	R6,QI.EFN	; also only needed in one place
+ 
+; now set up CHAN for our use
+	$ASSIGN_S DEVNAM=TKDESC,CHAN=QI.CHAN	; assign CHAN to Tek
+	BLBS	R0,1$
+	BRW	SIGERR
+1$:	MOVL	QI.CHAN,QO.CHAN	; same CHAN for input and output
+	DECB	TKENBL		; Tek now thought to be enabled
+ 
+; Tek was already on - ensure not refreshing
+ONOK:	JSB	$ESCE0
+ 
+; look at other bits
+	BBC	#1,(SP),1$
+	CALLS	#0,TKCLR	; clear screen
+1$:	BBC	#2,(SP)+,2$
+	MOVF	#^F1.0,R6		; default scale
+	BSBW	U$NIT		; set scale
+	CLRF	R7		; default origin
+	CLRF	R9
+	BSBW	O$RIG		; set origin
+2$:	RET
+ 
+; to switch Tek off
+ 
+OFF:	TSTB	TKENBL		; already off?
+	BEQL	OFFOK		; yes
+	TSTW	$REFNG		; refreshing
+	BEQL	1$		; no
+	CALLS	#0,RFSTOP	; stop refresh
+	BRB	2$
+1$:	JSB	$ESCE0	; use refresh buffer to restore ALPHA mode
+2$:	JSB	$FLSHW		; get last buffer out and wait for it
+	CLRB	TKENBL		; display off
+ 
+OFFOK:	RET
+ 
+ 
+; TKCLR - clear Tektronix screen
+ 
+ .ENTRY		TKCLR,^M<R2,R5,R10,R11>
+	JSB	$TKW2C		; transmit instruction
+	.BYTE	AS.ESC,AS.FF
+	JSB	$FLUSH		; ensure it's on it's way
+	CLRB	TKGRAF		; Tek reset => alpha mode
+	MOVL	TKCLWT,WAITIME	; clear screen settle time
+	BRB	TKWAIT		; and set up the wait
+ 
+ 
+; TKCOPY - make hard copy of screen
+ 
+ .ENTRY		TKCOPY,^M<R2,R5,R10,R11>
+	JSB	$TKW2C		; transmit instruction
+	.BYTE	AS.ESC,AS.ETB
+	JSB	$FLUSH		; ensure its out
+	MOVL	TKHCWT,WAITIME	; hardcopy settle time
+ 
+; and fall through into ...
+ 
+; TKWAIT will set up mark time etc for wait
+ 
+TKWAIT:	MOVZWL	TKHTEF,TK.EFN	; set event flag for mark time
+	$SETIMR_G	TKHTDP	; set up mark time
+	BLBS	R0,1$
+	BRB	SIGERR
+1$:	MOVB	#-1,TKWHDC	; mark waiting
+	RET
+ 
+ 
+; AST for processing end of hard copy wait time
+ 
+ .ENTRY		TKCAST,^M<>
+	CLRB	TKWHDC		; not waiting
+	RET
+ 
+ 
+; set time of hard copy delay
+ 
+ .ENTRY		TKCTIM,^M<>
+	MOVZWL	@4(AP),R0		; stretch the time in seconds
+	MULL3	R0,WAITMUL,TKHCWT	; and convert to ticks
+	RET
+ 
+; general error exit
+SIGERR:	PUSHL	R0
+	CALLS	#1,LIB$SIGNAL
+	RET
+
+ 
+; Local workspace:
+	
+	DATA_PSECT	TKW
+ 
+; define DPB for mark time
+ 
+TKHTDP:	$SETIMR		DAYTIM=WAITIME,AST=TKCAST,-
+		EFN=0,REQIDT=0
+ 
+TK.EFN = TKHTDP + SETIMR$_EFN
+TK.DAYTIM = TKHTDP + SETIMR$_DAYTIM
+ 
+WAITMUL =  -10*1000*1000
+WAITIME: .LONG	WAITMUL * TKDCTI, -1
+ 
+TKHCWT:	.LONG	WAITMUL * TKDCTI	; hardcopy time in ticks
+TKCLWT:	.LONG	WAITMUL * TKCLTI	; clear screen time in ticks
+ 
+	.PSECT
+ 
+	.END

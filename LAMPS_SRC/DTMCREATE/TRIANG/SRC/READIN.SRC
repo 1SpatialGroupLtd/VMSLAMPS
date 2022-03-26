@@ -1,0 +1,258 @@
+	LOGICAL FUNCTION READIN(NPER,NP,NPBOX,LAX,KAFFIR,ISTRNG,OPNERR)
+C
+***	MODULE	READIN
+***	IDENT	11AU99
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Now ALWAYS reads projection info from first file
+C	even if it falls outside of the window		TJH 06-Nov-1991
+CMOD	Now reads projection info from MD 		TJH 01-Mar-1989
+CMOD	Now tests for IFF file wholly outside window
+C	and reads MD before first string		TJH 21-Dec-1988
+CMOD	MARK.CMN no longer initialised in READIN, this led 
+C	to occasional string merging in MD when multiple
+C	files were read in!				TJH 01-Feb-1988
+C	Created from PANICs READIN			TJH 27-Jul-1987
+C
+C Read-in all basic data the DTM and then the contour strings
+C MD is the data array with NPMAX points.
+C KAD holds the pointer for the box structure, and IND is the
+C index to the first point in each box. The box structure is
+C created as the data is read into memory. NAX is the maximum
+C number of boxes in the structure.
+C NP on exit is the number of points in MD, and NPBOX is supplied
+C to the routine as the number of points to be allowed in one box.
+C
+C Function returns TRUE if succesful, otherwise FALSE
+C 
+	IMPLICIT NONE
+C
+C Arguments
+	INTEGER	  NP		! number of pts. in MD
+	INTEGER   NPBOX         ! number of pts. in box
+	INTEGER	  NPER 		! Numb. of  peripheral points
+	INTEGER   LAX 		! The of data points that can be held 
+C				  is reduced from NPMAX to LAX by
+C 				  the number of imaginary frame points
+C				  that are included - one
+C				  in every box around the periphery
+	INTEGER	  ISTRNG	! number of strings input
+	INTEGER	  KAFFIR	! no. cliff lines
+	LOGICAL	  OPNERR	! i/p file failed to open
+C
+C Parameter:
+	INTEGER    NSTRNG	! max number of input strings allowed
+	PARAMETER  (NSTRNG=100000) 
+C
+C W/s:
+	LOGICAL	  AMBIG		! file-spec is ambiguous?
+	INTEGER	  COLUMN	! current DTI column number
+	LOGICAL	  FINISHED	! finished input file yet?
+	INTEGER	  I		! loop variable
+	INTEGER*2 IELEN		! length of IFF entry
+	INTEGER	  NF(2)		! feature FSN and internal seq. #
+	LOGICAL	  OK,IERR	! for error reporting
+	LOGICAL	NEW_FEATURE	! new string feature?
+C
+C Functions:
+	LOGICAL	CP_CHECK	! checks IFF CPs for squareness
+	LOGICAL	DEFINE_FRAME	! init. box struct. & frame of imag. pts
+	LOGICAL	OPNDTI		! open DTI file
+	LOGICAL	DTI_LIMITS	! determine limits for DTI file
+	LOGICAL	DTIBDY		! get input from DTI file
+	LOGICAL	END_INPUT	! print summary/close input file
+	LOGICAL	IFFBDY		! get input from IFF file
+	LOGICAL	INSERT_STRING	! insert string into data structure
+	LOGICAL IFFOPEN		! open IFF file for readonly
+C
+C Parameters
+	INCLUDE 'LSL$CMNTRIANG:TRIANGMSG.PAR'
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+C
+C common blocks...
+	INCLUDE 'LSL$CMNTRIANG:COORDS.CMN'
+	INCLUDE 'LSL$CMNTRIANG:CONTRL.CMN'
+	INCLUDE 'LSL$CMNTRIANG:DTIFIL.CMN'
+	INCLUDE 'LSL$CMNTRIANG:STORAG.CMN'
+	INCLUDE 'LSL$CMNTRIANG:ZONVAR.CMN'
+	INCLUDE 'LSL$CMNTRIANG:FINDIT.CMN'
+	INCLUDE 'LSL$CMNTRIANG:STACKA.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFDEV.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+C
+C ......................................................................
+C
+	OPNERR=.FALSE.	! assume files open OK
+	READIN=.TRUE.	! assume success
+	GONOFF=.FALSE.	! graphics device not initialised yet
+	KANGE=15	! for pnt coincidence test (integer grid units)
+C
+C If FIRFIL is false this is not the first file... therefore all 
+C initialisation will be done
+	IF (FIRFIL) THEN
+	   OK=DEFINE_FRAME(NPER,NP,NPBOX)
+	   IF (.NOT.OK) THEN
+	      GOTO 40
+	   ENDIF
+	ENDIF
+C
+C Using IFF or DTI file? Open IFF file (name supplied via CONTRL.CMN)
+C readonly 
+	IF (IFFILE) THEN
+	   OK=IFFOPEN(INLUN,INNAM(:INLEN),,.FALSE.)
+	   IF (OK) THEN
+	      CALL IFFINQ(INNAM,INLEN)
+	      CALL WRITEF('IFF file %S opened for read',INNAM(:INLEN))
+C
+C Dragoon the IFF input revision level to 1 - treat all CB, ST and
+C ZS entries as if they are CBs 
+	      CALL IFFIRV(1)
+	      CALL IFFRWD
+	   ELSE
+	      OPNERR=.TRUE.	! qualified success on return
+	      GOTO 50
+	   ENDIF
+	ELSE
+	   OK=OPNDTI(INLUN,INNAM,INLEN)
+	   IF (OK) THEN		! get precise file-spec
+	      	CALL GETSPEC(INNAM,INLEN,INNAM,INLEN,'.DTI',' ',AMBIG)
+	   ELSE
+	      OPNERR=.TRUE.	! qualified success on return
+	      GOTO 50
+	   ENDIF
+C
+C Put the start and stop col/row limits in /MATLIM/ for that portion of
+C the DTI file that lies within the DTI WINDOW. 
+	   OK=DTI_LIMITS(FINISHED,COLUMN)
+	   IF (.NOT.OK) GOTO 40			! error?
+C
+C At this stage we can determine whether any of the DTI file data lies
+C within the triangulation WINDOW. If not then we can save ourselves
+C a lot of work!
+	   IF (FINISHED) THEN
+	      OK=END_INPUT(NP)			! close down DTI file
+	      IF (.NOT.OK) GOTO 40		! error?
+	      GOTO 50				! no, return & re-prompt
+	   ENDIF	
+	ENDIF
+C
+C Reassure user
+	IF (DIAG) THEN
+	   CALL WRITEF
+	   IF (IFFILE) THEN		! if input from IFF
+	      CALL FRAMED_MES(1,0)
+	   ELSE 
+	      CALL FRAMED_MES(2,0)
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C Read IFF header info
+	IF (IFFILE) THEN
+C Get the IFF range
+	   CALL IFFNXC(%REF('RA'),IELEN)
+	   IF (IELEN.LE.-1) THEN
+	      CALL LSL_PUTMSG(TRIANG__UNEXPEOF)
+	      GOTO 40
+	   ENDIF
+	   CALL EIHRR(RANGE,4,1)
+C
+C Read the MD - Map descriptor to get origin offset information
+	   CALL IFFNXC(%REF('MD'),IELEN)
+	   IF (IELEN.LE.-1) THEN
+	      CALL LSL_PUTMSG(TRIANG__UNEXPEOF)
+	      GOTO 40
+	   ENDIF
+	   IF (IELEN.NE.MD2LEN) THEN
+	      CALL LSL_PUTMSG(TRIANG__NOV2MD,INNAM(:INLEN))
+	   ELSE
+	      CALL EIHR(MD2ARR,MD2LEN,1)
+	      IF (MATV2.NE.2) THEN		! no MD available
+	         CALL LSL_PUTMSG(TRIANG__UNSETMD,INNAM(:INLEN))
+	      ENDIF
+	   ENDIF
+C
+C Take a copy of the Map Descriptor to pass through to to TRIGRID
+C to place it's output DTI file header
+	   IF (FIRFIL.AND.IELEN.EQ.MD2LEN) THEN
+	      PROJAR_ORIGIN(1)=MD2LOC(1)
+	      PROJAR_ORIGIN(2)=MD2LOC(2)
+	      PROJAR_SAMPLE(1)=0.0
+	      PROJAR_SAMPLE(2)=0.0
+	      PROJAR_UNITS=MD2UNT
+	      PROJAR_SPHEROID=MD2SPH
+	      PROJAR_PROJECTION=MD2PRJ
+	      PROJAR_USER_SPHEROID(1)=MD2USP(1)
+	      PROJAR_USER_SPHEROID(2)=MD2USP(2)
+	      DO 10 I=1,15
+	         PROJAR_PROJ_PARAMS(I)=MD2PAR(I)
+10	      CONTINUE
+	   ENDIF
+C
+C Do a rapid test to see whether we have any data within the IFF
+C file that lie within the WINDOW area
+	   IF (RANGE(2)+MD2LOC(1).LT.VMIN(1)
+     &		.OR.RANGE(4)+MD2LOC(2).LT.VMIN(2)
+     &		.OR.RANGE(1)+MD2LOC(1).GT.VMAX(1)
+     &		.OR.RANGE(3)+MD2LOC(2).GT.VMAX(2)) THEN
+	      CALL WRITEF(
+     &	    '%S No IFF coordinates lie within triangulation extent'
+     &					,WARNING)
+	      FINISHED=.TRUE.		! nothing to read
+	      GOTO 20			! report and return
+	   ENDIF
+C
+C ......................................................................
+C If square map space is to be expected (default) make sure that
+C the corners are really square, If not whinge and return with error.
+	   OK=CP_CHECK()
+	   IF (.NOT.OK) GOTO 40
+	ENDIF
+C
+C ......................................................................
+	DO 30 I=1,NSTRNG+1
+	   IF (IFFILE) THEN
+C
+C Loop through the IFF file using ISTRNG to keep track of the number 
+C of strings encountered (maximum of NSTRNG strings in any file)
+C and putting the result into /COORDS/
+	      OK=IFFBDY(FINISHED,NF,NEW_FEATURE)
+	      IF (.NOT.OK) GOTO 40
+	   ELSE 
+C
+C Using DTI file for input (for edge matching). Read every post in turn
+C that lies within the area defined by the users WINDOW, and convert to
+C real as we go, putting the result into /COORDS/
+	      OK=DTIBDY(FINISHED,COLUMN)
+	      NEW_FEATURE=.TRUE.	! new string feature
+	      IF (.NOT.OK) GOTO 40
+	   ENDIF
+C
+C If we have finished, print summary and close input file. Otherwise
+C process the string, inserting its data points into the box structure
+20	   IF (FINISHED) THEN
+	      OK=END_INPUT(NP)
+	      IF (.NOT.OK) THEN
+	         GOTO 40
+	      ELSE
+	         GOTO 50
+	      ENDIF
+	   ELSE
+	      OK=INSERT_STRING(NP,LAX,KAFFIR,ISTRNG,NF,NEW_FEATURE)
+	      IF (.NOT.OK) GOTO 40
+	   ENDIF	
+30	CONTINUE
+C
+C ......................................................................
+C We get here only as a result of disaster
+C
+40	IF (IFFILE) CALL IFFCLO(INLUN)
+	IF (OPNDTA) CLOSE(UNIT=LGC2,DISP='DELETE')
+	IF (OPNNOD) CLOSE(UNIT=LGC3,DISP='DELETE')
+	READIN=.FALSE.
+50	FIRFIL = .FALSE.  	! we have had a file now - come what may
+	RETURN
+	END

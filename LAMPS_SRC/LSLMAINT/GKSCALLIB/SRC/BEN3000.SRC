@@ -1,0 +1,589 @@
+C
+C Calcomp to BENSON 3000 support routines
+C =======================================
+C
+C
+C***********************************************************************
+C Note that GOPWK is a replacement for the routine in GKSCAL5800LIB
+C
+	SUBROUTINE	GOPWK(WKID,CONID,WTYPE)
+C
+**	MODULE	GOPWK
+**	IDENT	19DE94
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-Jul-1983
+C Add initialise fill area update		TJI	27-Nov-1984
+C Versatec version				PGH	28-Feb-1988
+C
+C OPEN WORKSTATION   - sets up World Coordinates and Normalised Device
+C			  Coordinates to be 1 metre on the film with the
+C			  origin at the bottom left hand corner
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CONID			! connection-identifier
+	INTEGER	WTYPE			! workstation type
+C
+***	COMMON/GFADAT1/
+***	COMMON/GFABUF/
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Functions called
+	INTEGER	TRNALL		! LSLLIB, translate logical name
+	LOGICAL	RDREAL		! LSLLIB, read real number
+	LOGICAL	GKS_INIT_FILL_MEM
+C
+C Local variables
+	CHARACTER*10	TRAN
+	REAL	NULL
+	REAL	RX,RY,DX,DY
+	INTEGER	I
+	INTEGER	IERROR
+C
+	GKSERR	= 0			! no errors
+C
+	WKIDS = WKID
+	WTYPES = WTYPE
+	DEFER = GASTI	! deferral mode is At Some TIme
+	REGEN = GSUPPD	! implicit regeneration suppressed
+	UPTRN = .TRUE.	! update transformation
+	UPLIN = .TRUE.	! update polyline attributes
+	UPFA  = .TRUE.	! update fill area attributes
+C
+C decide whether overlays are wanted opaque or transparent
+	OPAQUE = .TRUE.
+	IF (TRNALL('LSL$BENSON_TRANSPARENT',TRAN)) OPAQUE = .FALSE.
+C
+	HWTHK = '7FFFFFFF'X		! always use hardware thick
+C
+C try for an expand factor from LSL$BENSON_EXPAND (default 1.0)
+	RASEXP = 1.0
+	IF (.NOT.TRNALL('LSL$BENSON_EXPAND',TRAN)) GOTO 10	! failed
+	CALL SETAUX(%REF(TRAN),10)
+	IF (RDREAL(RASEXP)) RASEXP = 1.0
+10	CONTINUE
+C
+C set size, and number of pixels
+	CALL LSG_SIZE('LSL$BENSON_SIZE:')
+C
+	MAXCOL = 255			! allow 0-255 (8 planes)
+	LSTPEN = 0			! no pens defined
+	GNOMLW = 25.4/254.0/1000.0	! width 1/254 inch
+C
+C set up plotter
+	CALL VPOPT(8,0,2.54,IERROR)	! units are cm
+C
+	CALL PLOTS(0,-1,1)
+	CALL FACTOR(100.0)		! change from cm. to m.
+	CALL LSG_SET_LUT(WKID,'LSL$BENSON_COLOUR:') ! load colour table
+C
+C set colour toning
+	CALL TONFLG(1)
+C
+C set superimposed mode initially, unless Workstation type 1000, in
+C which case use overlay mode
+	IF (WTYPE.EQ.1000) THEN
+	   CLEV = 1
+	   CALL OVRLAY(1)
+	ELSE
+	   CLEV = 0
+	   CALL OVRLAY(0)
+	ENDIF
+C
+	CCOLI = -1	! ensure colour set first time round
+	CLWID = 0.0	! and linewidth
+	TXCOLI = 1
+	CPATT = 0
+	LSTLEV = 0
+	CPEN = -1
+C
+C set maximum size of area that can be hatched (limit of 4096 in calcomp)
+C need to allocate the memory we are going to use
+C
+	MAX_HATCH = DEFAULT_GFAMAX
+	IF (MEMORY_FAIL) GOTO 999
+C
+	IF (GFAMAX .EQ.0) THEN
+	   MEMORY_FAIL = GKS_INIT_FILL_MEM()
+	   IF (MEMORY_FAIL) GOTO 999
+	ENDIF	      
+	MAX_HATCH = GFAMAX	! no known limit for HATCH/TONE
+C
+999	RETURN
+	END
+C
+C***********************************************************************
+C Replacement GSCR subroutine for that in GKSCAL5800LIB
+C
+	SUBROUTINE	GSCR(WKID,CI,RED,GREEN,BLUE)
+C
+**	MODULE	GSCR
+**	IDENT	26AU86
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	25-Jul-1985
+C
+C SET COLOUR REPRESENTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CI			! colour index
+	REAL	RED,GREEN,BLUE		! colour values
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C workspace
+C
+	GKSERR = 0
+C
+	IF (CI.LT.0.OR.CI.GT.MAXCOL)THEN
+	   GKSERR	= 93		! colour index is invalid
+	ELSEIF (RED.LT.0.0.OR.RED.GT.1.0.OR.
+     &		GREEN.LT.0.0.OR.GREEN.GT.1.0.OR.
+     &		BLUE.LT.0.0.OR.BLUE.GT.1.0) THEN
+	   GKSERR	= 96		! colour out of range
+	ELSE
+C
+C    save the colour
+	   RGB(CI,1) = RED
+	   RGB(CI,2) = GREEN
+	   RGB(CI,3) = BLUE
+C
+	ENDIF
+C
+	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GUPLIN
+C
+***	MODULE	GUPLIN
+***	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	26-April-1984
+C Take account of need to set UPFA	Tony J Ibbs	27-Nov-1984
+C
+C Update the polyline attributes
+C
+	IMPLICIT NONE
+C
+C local variables
+	INTEGER	NLTYPE,NCOLI,NPEN
+	REAL	NLWID
+	LOGICAL	FST
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+	IF (GASF(1).EQ.GBUNDL) THEN
+	   NLTYPE = PLTYPE(PLIND)
+	ELSE
+	   NLTYPE = ILTYPE
+	ENDIF
+C
+	IF (GASF(2).EQ.GBUNDL) THEN
+	   NLWID = PLWDTH(PLIND)
+	ELSE
+	   NLWID = ILWID
+	ENDIF
+C
+	IF (GASF(3).EQ.GBUNDL) THEN
+	   NCOLI = PLCOL(PLIND)
+	ELSE
+	   NCOLI = ICOLI
+	ENDIF
+C
+	IF (NCOLI.NE.0) THEN
+	   FST = .FALSE.
+10	   FST = .NOT.FST
+	   IF (POFF.NE.0) NCOLI = ISHFT(NCOLI,POFF)! apply offset
+	   NCOLI = NCOLI.AND.PSEL.AND.'FF'X	! apply mask
+	   IF (NCOLI.GT.MAXCOL.OR.NCOLI.EQ.0) THEN
+C
+C First time, try again with colour 1, otherwise just use 1
+	      NCOLI = 1
+	      IF (FST) GOTO 10
+	   ENDIF
+	   IF (NCOLI.EQ.0) NCOLI = 1
+	ENDIF
+C
+	IF (NLTYPE.NE.CLTYPE) THEN
+	   CLTYPE = NLTYPE
+	ENDIF
+C
+	IF (NLWID.NE.CLWID) THEN
+	   CLWID = MAX(1.0,NLWID)
+	   IF (NLWID.NE.FALWID) UPFA = .TRUE.	! check fill area
+	   NPEN = NINT(CLWID)
+	   IF (NPEN.NE.CPEN) THEN
+	      CPEN = NPEN
+	      CALL NEWPEN(CPEN)
+	      CCOLI = -1
+	   ENDIF
+	ENDIF
+C
+	IF (NCOLI.NE.CCOLI) THEN
+	   CCOLI = NCOLI
+	   UPFA  = .TRUE.			! and fill area update
+C
+	   CALL PENRGB(INT(255.0*RGB(CCOLI,1)),
+     &		       INT(255.0*RGB(CCOLI,2)),
+     &		       INT(255.0*RGB(CCOLI,3)) )
+	ENDIF
+C
+900	UPLIN = .FALSE.		! polyline now up to date
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE GUPFA
+C
+***	MODULE	GUPFA
+***	IDENT	30NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Tony J Ibbs	20-Nov-1984
+C
+C Update the fill area attributes
+C
+	IMPLICIT NONE
+C
+C local variables
+C
+	INTEGER	NINDEX,NCOLI,NSTYLE,NPEN
+	LOGICAL	FST
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+C ---------------------------------------------------------------------
+C
+C establish whether each attribute is to be taken as bundled
+C or individual
+C
+	IF (GASF(11).EQ.GBUNDL) THEN	! interior style
+	   NSTYLE = FAISTY(FAIND)
+	ELSE
+	   NSTYLE = IFASTY
+	ENDIF
+C
+	IF (GASF(12).EQ.GBUNDL) THEN	! style index
+	   NINDEX = FASTYI(FAIND)
+	ELSE
+	   NINDEX = IFASTX
+	ENDIF
+C
+	IF (GASF(13).EQ.GBUNDL) THEN	! colour index
+	   NCOLI = FACOL(FAIND)
+	ELSE
+	   NCOLI = IFACOL
+	ENDIF
+	IF (NCOLI.NE.0) THEN
+	   FST = .FALSE.
+10	   FST = .NOT.FST
+	   IF (POFF.NE.0) NCOLI = ISHFT(NCOLI,POFF)! apply offset
+	   NCOLI = NCOLI.AND.PSEL.AND.'FF'X	! apply mask
+	   IF (NCOLI.GT.MAXCOL.OR.NCOLI.EQ.0) THEN
+C
+C First attempt, try again with colour 1, otherwise just use 1
+	      NCOLI = 1
+	      IF (FST) GOTO 10
+	   ENDIF
+	   IF (NCOLI.EQ.0) NCOLI = 1
+	ENDIF
+C
+C ---------------------------------------------------------------------
+C
+C now update the current values for each thing
+C
+	IF (NSTYLE.NE.CFASTY) THEN
+	   CFASTY = NSTYLE		! update fill area style
+	ENDIF
+C
+	IF (NINDEX.NE.CFASTX) THEN
+	   CFASTX = NINDEX		! update fill area style index
+	ENDIF
+C
+	IF (CFASTY.EQ.GSOLID) THEN
+	   IF (NCOLI.NE.CPATT) THEN
+	      CPATT = NCOLI
+	      CALL TONRGB(INT(255.0*RGB(CPATT,1)),
+     &			  INT(255.0*RGB(CPATT,2)),
+     &			  INT(255.0*RGB(CPATT,3)) )
+	   ENDIF
+	ELSE
+C
+	   IF (CLWID.NE.FALWID) THEN	! check line width
+	      CLWID = MAX(1.0,FALWID)! set fill area line width
+	      UPLIN = .TRUE.		! changes polyline?
+	      NPEN = NINT(CLWID)
+	      IF (NPEN.NE.CPEN) THEN
+	         CPEN = NPEN
+	         CALL NEWPEN(CPEN)
+	         CCOLI = -1
+	      ENDIF
+	   ENDIF
+C
+	   IF (NCOLI.NE.CCOLI) THEN
+	      CCOLI = NCOLI
+	      UPLIN = .TRUE.		! may have clobbered polyline
+C
+	      CALL PENRGB(INT(255.0*RGB(CCOLI,1)),
+     &			  INT(255.0*RGB(CCOLI,2)),
+     &			  INT(255.0*RGB(CCOLI,3)) )
+	   ENDIF
+	ENDIF
+C
+C ---------------------------------------------------------------------
+C
+C and check whether we have the right line style
+C - polyline settings may have changed these under our feet
+C
+	IF (CLTYPE.NE.FALTYP) THEN		! check line type
+	   CLTYPE = FALTYP
+	ENDIF
+C
+	UPFA = .FALSE.		! fill area now up to date
+	RETURN
+	END
+C
+C Text functions
+C ==============
+C
+C *********************************************************************
+C
+C	TEXT OUTPUT PRIMITIVE
+C	=====================
+C
+C
+	SUBROUTINE	GTX(PX,PY,STRING)
+C
+**	MODULE	GTX
+**	IDENT	18NO87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	24-Jul-1985
+C
+C TEXT
+C
+	IMPLICIT NONE
+C
+C Arguments:
+C
+	REAL	PX			! X coord
+	REAL	PY			! Y coord
+	CHARACTER*(*) STRING		! text
+C
+C Functions
+	LOGICAL	GKCLIP
+C
+C Workspace
+	REAL	DX,DY			! device coordinate
+	INTEGER	NPEN,WID
+	REAL	CHWID
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	INTEGER	INTEQ			! dummy argument
+C
+	GKSERR	= 0			! no error (yet!)
+C
+C	 is this workstation active? - if not ignore it
+C
+	IF (.NOT.WSACT) GOTO 200
+C
+C	 ensure that our transformation is up to date
+C
+	IF (UPTRN) CALL GUPTRN		! update it
+C
+C	 is everything clipped (ie nothing visible)
+C
+	IF (CLPALL) GOTO 200
+	IF (ENCLIP) THEN
+	   IF (GKCLIP(PX,PY,PX,PY)) GOTO 200
+	ENDIF
+	CALL GKSW2D(1,PX,PY,DX,DY)
+	IF (TXCOLI.EQ.0) GOTO 200
+	CHWID = CHGT/10.0/GNOMLW
+C
+	IF (CHWID.NE.CLWID) THEN
+	   CLWID = MAX(1.0,CHWID)
+	   IF (CHWID.NE.FALWID) UPFA = .TRUE.	! check fill area
+	   NPEN = NINT(CLWID)
+	   IF (NPEN.NE.CPEN) THEN
+	      CPEN = NPEN
+	      CALL NEWPEN(CPEN)
+	      CCOLI = -1
+	   ENDIF
+	ENDIF
+C
+	IF (TXCOLI.NE.CCOLI) THEN
+	   CCOLI = TXCOLI
+	   UPLIN = .TRUE.			! polyline update
+	   UPFA  = .TRUE.			! and fill area update
+C
+	   CALL PENRGB(INT(255.0*RGB(CCOLI,1)),
+     &		       INT(255.0*RGB(CCOLI,2)),
+     &		       INT(255.0*RGB(CCOLI,3)) )
+	ENDIF
+	CALL SYMBOL(DX,DY,CHGT,%REF(STRING),CHANG,LEN(STRING))
+C
+200	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE HATCH(X,Y,N,ANG,DISTP,NUM)
+C
+**	MODULE	HATCH
+**	IDENT	28FE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	12MY88
+C
+C Emulation of Calcomp HATCH routine on BENSON 3000
+C For solid fill only
+C
+	IMPLICIT NONE
+C
+C arguments
+	REAL	X(*),Y(*)		! coordinates
+	INTEGER	N			! number
+	REAL	ANG,DISTP		! dummies
+	INTEGER	NUM			! dummy
+C
+	CALL TONE(X,Y,N,1)
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE RASFIL(SX,SY,COLS,ROWS,B)
+C
+**	MODULE	RASFIL
+**	IDENT	28FE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	12MY88
+C
+C Emulation of Calcomp RASFIL routine on BENSON 3000
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C arguments
+	REAL	SX,SY			! size of pixels
+	INTEGER	COLS,ROWS
+	INTEGER	B(*)			! array of values
+C
+C workspace
+	REAL	Y0,X,Y,X1,Y1		! drawing position
+	REAL	DUMMY
+	INTEGER	C,R,I
+	INTEGER	NCOLI
+C
+C get initial position
+	CALL WHERE(X,Y0,DUMMY)
+	I = 0
+	DO 20 C=1,COLS
+	   Y = Y0
+	   X1 = X+SX
+	   DO 10 R=1,ROWS
+	      Y1 = Y+SY
+	      I = I+1
+	      NCOLI = B(I)-1
+	      IF (NCOLI.NE.0) THEN
+	         IF (NCOLI.NE.CPATT) THEN
+	            CPATT = NCOLI
+	            CALL TONRGB(INT(255.0*RGB(CPATT,1)),
+     &				INT(255.0*RGB(CPATT,2)),
+     &				INT(255.0*RGB(CPATT,3)) )
+	         ENDIF
+	         CALL RECT(X,Y,X1,Y1,0)
+	      ENDIF
+	      Y = Y1
+10	   CONTINUE
+	   X = X + SX
+20	CONTINUE
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE NEWLVL(LEVEL)
+C
+**	MODULE	NEWLVL
+**	IDENT	28FE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	12MY88
+C
+C Emulation of Calcomp NEWLVL on Benson 3000
+C On the Calcomp we use level 0 for background, and all other
+C levels overlay (anything drawn into planes above bottom plane)
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C argument
+	INTEGER	LEVEL
+C
+C workspace
+	INTEGER	OVR
+C
+	IF (LEVEL.GT.1) LSTLEV = 1	! prevent levels running out
+	OVR = 0
+	IF (LEVEL.GT.0) OVR = 1
+	CALL OVRLAY(OVR)
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE VDUMMY()
+C
+**	MODULE	VDUMMY
+**	IDENT	28FE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Paul Hardy	28-Feb-1988
+C
+C CALCOMP (and other) dummy routines
+C
+	IMPLICIT NONE
+C
+C Calcomp HCBS
+	ENTRY	NEWPLT
+	ENTRY	SETLVL
+C
+C Internal software thick line
+	ENTRY	GKS_BEGIN_LINE
+	ENTRY	GKS_ADD_POINT
+	ENTRY	GKS_END_LINE
+C
+C all done
+	RETURN
+	END

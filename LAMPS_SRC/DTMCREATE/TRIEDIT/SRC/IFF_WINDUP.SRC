@@ -1,0 +1,226 @@
+	SUBROUTINE IFF_WINDUP(IOPT,KFIRST)
+C
+***	MODULE  IFF_WINDUP
+***	IDENT   01MR88
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England
+C
+C Created						TJH 01-Mar-1988
+C
+C Output triangulated data to IFF file on the basis of IOPT:
+C	1	ordinary strings
+C	2	breakline strings
+C	3	cliffline strings
+C
+C......................................................................
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER		IOPT	! see above
+	INTEGER		KFIRST	! index of first non imaginary point
+C
+C
+C Parameters
+	INCLUDE 'LSL$CMNTRIEDIT:DIMS.PAR'
+	INCLUDE 'LSL$CMNTRIEDIT:TRIEDITMSG.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C Common:
+	INCLUDE 'LSL$CMNTRIEDIT:COMMAND.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:DATQ.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:IFCTRL.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:RCONVI.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TPOLGY.CMN'
+C
+	INTEGER		LEFTZ,KITEZ	! left and right cliff Z 
+	INTEGER		NTEM(NTMSIZ)	! neighbour list
+	INTEGER		NUMNOD		! no. of nodes in neighbour list
+	INTEGER		INOD		! loop var
+	INTEGER		NPBAR		! for progress bar
+	INTEGER		I,J,K,M,N	! temp vars
+	INTEGER*2	IECODE, IELEN	! IFF entry and length
+	INTEGER		MARK		! string dimensionality flag
+	INTEGER		IZST		! height at start of string
+	BYTE		IFC		! Panacea feature code
+	INTEGER*2	FEATURE_CODE(2) ! IFF feature code, status bits
+	REAL		DAT(4)		! a point in real world coords
+	INTEGER		LAYERNO		! IFF layer number
+C
+C Bitmap to stop output of clifflines twice!
+	INTEGER		BITSIZE
+	PARAMETER	(BITSIZE=150000/32+1)
+	INTEGER		CLIFFBIT(BITSIZE)
+C
+C Function:
+	LOGICAL		BBCS		! branch on bit clear and set
+	LOGICAL		CLIFFPT		! is point part of a cliff?
+C
+C......................................................................
+C
+C Clear bitmap
+	CALL VIOCLR(CLIFFBIT,BITSIZE*4,0)
+C Set IFF layer for data type of IOPT
+	IF (IOPT.EQ.1) THEN		! ordinary strings
+	   LAYERNO=LAYER
+	ELSEIF (IOPT.EQ.2) THEN		! breakline strings
+	   LAYERNO=BREAKLINE_LAYER
+	ELSEIF (IOPT.EQ.3) THEN		! cliffline strings
+	   LAYERNO=CLIFF_LAYER
+	ENDIF
+C
+C Prserve index of 1st non-imaginary point
+	K=KFIRST
+	NPBAR=NP-KFIRST
+	DO 90 I=1,100000
+C Check that some real data is available
+	   IF (K.GT.NP) GOTO 100
+C Set the type marker to indicate contour type (identical z values)
+	   MARK=2
+C Get sequence sign of next string, z-value of first point in string
+C the string and feature code of first point in string
+	   M=ISIGN(1,MAC(4,K))
+	   IZST=IABS(MAC(3,K))
+	   IFC=TPOLGY(K)
+C Look for next string break point
+	   DO 10 J=K,NP
+	      CALL BAR(NPBAR,J+1-KFIRST,IOPT+8) ! record progress
+C Check for string break, or duff point - either leads to end of 
+C string
+	      IF (ISIGN(1,MAC(4,J)).NE.M.OR.
+     &	      	     IABS(MAC(5,J)).EQ.1) GOTO 20
+C This point is part of the string.  Check it for having the same
+C z-value as the other points found so far
+	      IF (IABS(MAC(3,J)).NE.IZST) THEN
+	         MARK=3
+	      ENDIF
+	      IF (TPOLGY(J).NE.IFC) GOTO 20
+10	   CONTINUE
+C If we get here, all the data has been gone through and this is
+C the last string
+	   J=NP+1
+C String break found at J. String starts at K. Get end of string
+20	   J=J-1
+C Determine number of points, if -ve or zero then we are dealing
+C a solitary duff point and can continue to the next string
+	   N=J-K+1
+	   IF (N.GT.0) GOTO 30
+C Hop past the duff point
+	   K=K+1
+	   GOTO 90
+C Some points exist in the string.
+C
+C ......................................................................
+C ORDINARY strings
+30	   IF (IOPT.EQ.1) THEN
+C Ignore breakline points and cliffline points
+	      IF (ISIGN(1,MAC(3,K)).NE.1) THEN
+	         K=J+1
+	         GOTO 90
+	      ENDIF
+C
+C ......................................................................
+C BREAKLINES
+	   ELSEIF (IOPT.EQ.2) THEN
+C Ignore normal points and cliffline points
+	      IF (ISIGN(1,MAC(3,K)).NE.-1) THEN
+	         K=J+1
+	         GOTO 90
+	      ENDIF
+C This point is flagged as a discontinuity. Is it a cliff line point?
+C If so the second to last but one point will have a perfect duplicate
+C in the current box. 
+	      IF (CLIFFPT(K+1,LEFTZ,KITEZ)) THEN
+C It is a cliff point. Waste whole string
+	         K=J+1
+	         GOTO 90
+	      ENDIF
+C
+C ......................................................................
+C CLIFFLINES
+	   ELSEIF (IOPT.EQ.3) THEN
+C Ignore normal and breakline points 
+	      IF (ISIGN(1,MAC(3,K)).NE.-1) THEN
+	         K=J+1
+	         GOTO 90
+	      ENDIF
+C
+C Check that we haven't already output the top or bottom of this cliff
+C already. If so we would be creating a duplicate IFF feature. Check 
+C bitmap
+	      IF (CLIFFPT(K,LEFTZ,KITEZ)) THEN
+	         IF (BBCS(K,CLIFFBIT)) THEN
+	            MARK=4
+	            GOTO 40
+	         ENDIF
+	      ENDIF
+	      K=J+1
+	      GOTO 90
+	   ENDIF
+C
+C Set IFF feature code to reflect Panacea internal feature code
+40	   IF (N.EQ.1) THEN			! single point string
+	      IF (TPOLGY(K).EQ.0) THEN		
+	         FEATURE_CODE(1)=POINT_FC	! ordinary
+	         FEATURE_CODE(2)='4000'X	! symbol bit
+	      ELSEIF (TPOLGY(K).EQ.1) THEN
+	         FEATURE_CODE(1)=RIVER_POINT_FC ! river
+	         FEATURE_CODE(2)='4000'X	! symbol bit
+	      ELSEIF(TPOLGY(K).EQ.2) THEN
+	         FEATURE_CODE(1)=RIDGE_POINT_FC ! ridgeline
+	         FEATURE_CODE(2)='4000'X	! symbol bit
+	      ENDIF
+	   ELSE					! multi-point string
+	      IF (MARK.EQ.4) THEN
+	         FEATURE_CODE(1)=CLIFF_STRING_FC
+	         FEATURE_CODE(2)='0000'X	! bits unset for linear
+	      ELSEIF (TPOLGY(K).EQ.0) THEN
+	         FEATURE_CODE(1)=STRING_FC	! ordinary
+	         FEATURE_CODE(2)='0000'X	! bits unset for linear
+	      ELSEIF (TPOLGY(K).EQ.1) THEN
+	         FEATURE_CODE(1)=RIVER_STRING_FC! river
+	         FEATURE_CODE(2)='0000'X	! bits unset for linear
+	      ELSEIF(TPOLGY(K).EQ.2) THEN
+	         FEATURE_CODE(1)=RIDGE_STRING_FC! ridgeline
+	         FEATURE_CODE(2)='0000'X	! bits unset for linear
+	      ENDIF
+	   ENDIF
+C
+C Convert first point in string into real world coords
+	   DO 50 N=1,3
+	      CALL IFF_VALUE(DAT(N),MAC(N,K),N)
+50	   CONTINUE
+	   IF (MARK.EQ.4) THEN
+	      CALL IFF_VALUE(DAT(3),LEFTZ,3)
+	      CALL IFF_VALUE(DAT(4),KITEZ,3)
+	   ENDIF
+C
+C Output the string header record, and first point in string
+	   CALL IFNWFT(DAT(1),DAT(2),DAT(3),DAT(4),
+     &				MARK,LAYERNO,FEATURE_CODE)
+C Now output the string itself
+	   DO 70 M=K+1,J
+	      DO 60 N=1,3
+	         CALL IFF_VALUE(DAT(N),MAC(N,M),N)
+60	      CONTINUE
+	      IF (MARK.EQ.4) THEN
+	         IF (.NOT.CLIFFPT(K,LEFTZ,KITEZ)) THEN
+	            GOTO 70	! skip point as not part of cliff
+	         ENDIF
+	         CALL IFF_VALUE(DAT(3),LEFTZ,3)
+	         CALL IFF_VALUE(DAT(4),KITEZ,3)
+	      ENDIF
+	      CALL IFADPT(DAT(1),DAT(2),DAT(3),DAT(4),MARK)
+70	   CONTINUE
+C
+C Update K for next string search
+80	   K=J+1
+C Flush the current string if any left in buffer
+	   CALL IFLUSH(.TRUE.,MARK)
+C Go and deal with the next string
+90	CONTINUE
+100	RETURN
+	END

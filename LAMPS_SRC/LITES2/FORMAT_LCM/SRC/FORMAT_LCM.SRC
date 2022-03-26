@@ -1,0 +1,442 @@
+ 	PROGRAM FORMAT_LCM
+C
+***	MODULE FORMAT_LCM
+***	IDENT 23MR89
+C
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C Author : I D Jenkinson
+C
+C Program to read .LCM files output from the Autopass digitising section
+C of VTRAK and output the error messages in a more useful format. The
+C map is broken down into cells - the size of which is determined by the
+C user who inputs the grid interval as an argument. The errors are
+C output in the order of which cell they are in, starting at the bottom 
+C left hand corner and working upwards in rows (output from left to
+C right). 
+C
+	IMPLICIT NONE
+C
+C Common blocks
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE	'LSL$CMNLSL:EXCEPTION.CMN'
+	INCLUDE '($SSDEF)'
+C
+C Functions
+C
+	INTEGER*4	DCL_FILE   ! reads & parses file title from DCL 
+C			           ! command line
+	INTEGER*4	DCL_INT   ! reads a real from DCL command line
+        INTEGER*4       DCL_STARTUP! looks for command line
+	INTEGER*4	FLROPN	   ! opens input file
+	INTEGER*4	FLWOPN	   ! opens output file
+	INTEGER*4	FLRLIN	   ! reads a line of characters from a file
+	INTEGER*4	FLWLIN	   ! writes a line of characters to a file
+	INTEGER*4	FLRCLO	   ! closes input file
+	INTEGER*4	FLWCLO	   ! closes output file
+	LOGICAL	TTRSTR			! Read a string into TXTBUF
+	LOGICAL	RDLONG			! Get an integer from TXTBUF
+	LOGICAL		RDCHS	   ! check for empty line
+	INTEGER*4	READSTR	   ! reads a string from TXTBUF
+	INTEGER*4	RDREAL	   ! reads a real from TXTBUF
+	INTEGER*2	EXPAND	   ! expand into output buffer
+C
+C CLD program block
+C
+	EXTERNAL	FORMAT_LCM_CLD	! Get command line
+C
+C W/s
+C	
+	INTEGER*4	MAX_MESS	! maximum number of entries
+	PARAMETER	(MAX_MESS=5000)
+	INTEGER*4	MAX_WIDTH	! max number of x_cells
+	PARAMETER	(MAX_WIDTH=20000)
+	LOGICAL*4	OK,IERR		! Error codes
+	INTEGER*4	I,J,K,Z		! Counters
+	CHARACTER*120	IFF_FILE	! IFF file
+	INTEGER*4	IFF_FILE_LEN	! Length of IFF_FILE
+	INTEGER*4	PREFIX_LEN	! Len IFF_FILE  before extension
+	CHARACTER*120	IN_LCM_FILE	! Unformatted .LCM file
+	INTEGER*4	LEN_IN_LCM_FILE	! length of above
+	CHARACTER*120	OUT_FILE	! Formatted file
+	INTEGER*4	OUT_FILE_LEN	! Length of OUT_FILE
+	REAL*4		X_GRID_INTERVAL	! Size of each cell
+	REAL*4		Y_GRID_INTERVAL	! Size of each cell
+	INTEGER*2	IELEN		! entry length (in words)
+	REAL*4		RANGE(4)	! Range of IFF data
+	REAL*4		MINX,MINY,MAXX,MAXY	! Ditto
+	EQUIVALENCE 	(RANGE(1),MINX)
+	EQUIVALENCE 	(RANGE(2),MAXX)
+	EQUIVALENCE 	(RANGE(3),MINY)
+	EQUIVALENCE 	(RANGE(4),MAXY)
+	REAL*4		WIDTH,HEIGHT
+	INTEGER*4	X_CELLS,Y_CELLS	! Number of cells in output 
+	LOGICAL		ABSENT	  	! .T. if file param. not found
+	LOGICAL		XYABSENT  	! .T. if file param. not found
+	LOGICAL		YABSENT	  	! .T. if file param. not found
+	BYTE		LINE(120)	! Line of chars from input file
+	INTEGER*4	LENGTH		! number of characers in line
+	INTEGER*4	LINE_LEN	! max line length
+	BYTE		MESSAGE(80,MAX_MESS)	! error message from .LCM
+	INTEGER*4	LEN_MESS(MAX_MESS)		! length of message
+	BYTE		ENTRY_LINE(80,4)	! last 4 lines of an entry
+	INTEGER*4	ENTRY_LINE_LENGTH(4)	! length of these
+	REAL*4		X(MAX_MESS),Y(MAX_MESS)	! position of this error
+	INTEGER*4	MAX_ENTRIES	! max errors in .LCM file
+	INTEGER*4	LEN		! length of input string
+	CHARACTER	CH
+	CHARACTER*80	STRING		! temporary storage
+	INTEGER*4	NUM_MESS(MAX_WIDTH)	! num. errors reported in .LCM
+	LOGICAL		MESSAGE_IN_CELL	! .T. if an error in this cell
+	INTEGER*2	LEN_STRING	! length of output string
+	REAL*4		CELL_XMIN,CELL_YMIN
+	REAL*4		CELL_XMAX,CELL_YMAX	! corners of region
+	REAL*4		CENTRE_X,CENTRE_Y	! middle of region
+	INTEGER*4	PREV_MESS(MAX_MESS)
+	INTEGER*4	NEXT_MESS(MAX_MESS)
+	INTEGER*4	FIRST_MESS(MAX_WIDTH),TEMP
+	INTEGER*4	LAST_MESS(MAX_WIDTH)
+	INTEGER*4	X_POS
+C
+C--------------------------------------------------------------------
+	CALL LSL_INIT			! Initialise library
+	LINE_LEN=120
+C
+C--------------------------------------------------------------------
+C
+C Get command line for verb FORMAT_LCM. DCL_STARTUP will return set to
+C SS$_NORMAL if all well.
+C
+	OK=DCL_STARTUP('FORMAT_LCM'    	! command verb
+     &      		,.FALSE.        ! don't split parameter lists
+     &      		,FORMAT_LCM_CLD    ! CLD module name
+     &      		,.TRUE.)        ! .T. -local error reporting
+        IF (.NOT.OK) GOTO 999 		! give up
+C
+C--------------------------------------------------------------------
+C
+C Get input file-spec
+	OK=DCL_FILE('P1'		! label
+     &	            ,'DEFAULT.IFF;0'	! default filespec
+     &	            ,ABSENT		! .T. if absent
+     &	            ,.FALSE.      	! don't expect list of files
+     &              ,.TRUE.)      	! .T.-local error reporting
+	IF (.NOT.OK) GOTO 999 		! give up
+C
+	IF (.NOT.ABSENT) THEN		! File specified
+	   IFF_FILE=FILARY(1)(1:FIL_LEN(1))
+	   IFF_FILE_LEN=FIL_LEN(1)
+	ENDIF
+C
+C Get output file-spec 
+	OK=DCL_FILE('P2'		! label
+     &	            ,'DEFAULT.LCM' 	! default filespec
+     &	            ,ABSENT		! .T. if absent
+     &	            ,.FALSE.      	! don't expect list of files
+     &              ,.TRUE.)      	! .T.-local error reporting
+	IF (.NOT.OK) GOTO 999 		! give up
+C
+	IF (.NOT.ABSENT) THEN		! File specified
+	   OUT_FILE=FILARY(1)(1:FIL_LEN(1))
+	   OUT_FILE_LEN=FIL_LEN(1)
+	ENDIF
+C
+C-------------------------------------------------------------------
+C  Open input IFF file 
+	CALL IFFOPN(1,IFF_FILE(:IFF_FILE_LEN))
+	IF ((IERNM .NE. 1 ) .OR. (IERCD .NE. 0)) THEN
+	   GOTO 999
+	ENDIF
+C
+C  Find the RAnge entry of the input IFF file
+	CALL IFFNXC('RA',IELEN)
+	IF ((IELEN .EQ. -1).OR.(IERCD .NE. 0).OR.(IERNM .NE. 1)) THEN
+	   CALL LSL_PUTMSG(IERNM)
+	   GOTO 990
+	ENDIF
+C
+C  Get the RAnge information
+	CALL EIHRR(RANGE,4,1)
+	IF ((IERNM .NE. 1) .OR. (IERCD .NE. 0))THEN
+	   CALL LSL_PUTMSG(IERNM)
+	   GOTO 990
+	ENDIF
+	IF ((MINX .GE. MAXX) .OR. (MINY .GE. MAXY)) GOTO 980
+	CALL IFFCLO(1)
+	WIDTH=MAXX-MINX
+	HEIGHT=MAXY-MINY
+	CALL WRITEF('Extent of IFF file is %F by %F',WIDTH,HEIGHT)
+C
+C-------------------------------------------------------------------
+C Get number of columns and rows
+C
+30	OK=TTRSTR(,,'_columns:',IERR)
+	IF (.NOT. OK) THEN			! Error
+	   IF (OK .EQ. LSL__EOF) GOTO 30	! If ctrl-z
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 999
+	ENDIF
+
+	CALL BSLN
+	IF (RDCHS(CH)) GOTO 30			! Empty line
+	CALL BSCH
+	IF (RDLONG(X_CELLS)) THEN		! Error decoding integer
+	   CALL WRITEF('*** ERROR *** Value entered is not an integer')
+	   GOTO 999
+	ENDIF
+	
+40	OK=TTRSTR(,,'_rows:',IERR)
+	 IF (.NOT. OK) THEN			! Error
+	    IF (OK .EQ. LSL__EOF) GOTO 40	! If ctrl-z
+	    CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 999
+	ENDIF
+C
+	CALL BSLN
+	IF (RDCHS(CH)) GOTO 40			! Empty line
+	CALL BSCH
+	IF (RDLONG(Y_CELLS)) THEN		! Error decoding integer
+	   CALL WRITEF('*** ERROR *** Value entered is not an integer')
+	   GOTO 999
+	ENDIF
+C	
+C-------------------------------------------------------------------
+	IF ((X_CELLS .LT. 1) .OR. (X_CELLS .GT. WIDTH) .OR.
+     &	 (X_CELLS .GT. MAX_WIDTH) .OR. (Y_CELLS .LT. 1) .OR. 
+     & 		(Y_CELLS .GT. HEIGHT)) THEN
+	   CALL WRITEF('*** ERROR *** Invalid number of cells value')
+	   GOTO 999
+	ENDIF
+C
+C   Calculate x grid interval
+	X_GRID_INTERVAL=WIDTH/X_CELLS
+C   Calculate y grid interval
+	Y_GRID_INTERVAL=HEIGHT/Y_CELLS
+C
+C
+C-------------------------------------------------------------------
+C  Swap the IFF file's  extension for .LCM and try to open this file
+C  for procesing along with the specified output .LCM file.
+	PREFIX_LEN=IFF_FILE_LEN
+	DO 100,I=1,IFF_FILE_LEN
+	   IF (IFF_FILE(I:I) .EQ. '.') THEN
+	      PREFIX_LEN=I-1
+	   ENDIF
+100	CONTINUE
+	IN_LCM_FILE=IFF_FILE(1:PREFIX_LEN)//'.LCM'
+	LEN_IN_LCM_FILE=PREFIX_LEN+4
+C
+C  Open input and output .LCM files
+C
+	OK=FLROPN(1,IN_LCM_FILE,IERR)
+	IF (.NOT. OK) THEN
+	   CALL WRITEF('*** ERROR *** Cant open input file %S',
+     &  		IN_LCM_FILE)
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 999
+	ENDIF
+	OK=FLWOPN(2,OUT_FILE,IERR)
+	IF (.NOT. OK) THEN
+	   CALL WRITEF('*** ERROR *** Cant open output file %S',
+     &			OUT_FILE)
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 975
+	ENDIF
+C
+C-------------------------------------------------------------------
+C  Successfully opened input and output files - do processing
+C  ...read first 3 lines (always same)
+C
+	DO 200,I=1,3
+	   OK=FLRLIN(LINE(1),LENGTH,LINE_LEN,IERR)
+	   IF (.NOT. OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      GOTO 970
+	   ENDIF
+	   OK=FLWLIN(LINE(1),LENGTH,IERR)
+	   IF (.NOT. OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      GOTO 970
+	   ENDIF
+200	CONTINUE	
+C
+C  clear NUM_MESS array
+	DO 250,I=1,MAX_WIDTH
+	   NUM_MESS(I)=0
+250	CONTINUE
+C
+C  read error message and position for each entry in .LCM file
+	DO 400,I=1,MAX_MESS
+C
+C  read MESSAGE line and put it into MESSAGE(n)
+	   OK=FLRLIN(MESSAGE(1,I),LENGTH,LINE_LEN,IERR)
+	   IF (OK .EQ. LSL__EOF) GOTO 500
+	   IF (.NOT. OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      GOTO 970
+	   ENDIF
+	   LEN_MESS(I)=LENGTH
+C
+C  read POSITION line and put co-ordinates into X(n), Y(n)
+	   OK=FLRLIN(,,,IERR)
+	   IF (.NOT. OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      GOTO 970
+	   ENDIF
+	   CALL BSLN
+	   IF (RDCHS(CH)) GOTO 970
+	   CALL BSCH
+	   LEN=READSTR(STRING,0,ON_SPACE,.TRUE.,IERR)
+	   IF (LEN.LT.1) THEN
+	     CALL LSL_PUTMSG(IERR)
+	     GOTO 970
+	   ENDIF
+	   IF (RDREAL(X(I))) THEN
+	      CALL LSL_PUTMSG(ERRNUM)
+	      CALL LSL_ADDMSG(LSL_EXCP)
+	      GOTO 970
+	   ENDIF
+	   IF (RDREAL(Y(I))) THEN
+	      CALL LSL_PUTMSG(ERRNUM)
+	      CALL LSL_ADDMSG(LSL_EXCP)
+	      GOTO 970
+	   ENDIF
+	   X_POS=(X(I)-MINX)/X_GRID_INTERVAL+1
+	   IF (NUM_MESS(X_POS) .EQ. 0) THEN
+	      FIRST_MESS(X_POS)=I
+	      PREV_MESS(I)=0
+	   ELSE
+	      NEXT_MESS(LAST_MESS(X_POS))=I
+	      PREV_MESS(I)=LAST_MESS(X_POS)
+	   ENDIF
+	   LAST_MESS(X_POS)=I
+	   NUM_MESS(X_POS)=NUM_MESS(X_POS)+1
+C
+C  read the four remaining lines in this entry
+	   DO 300,J=1,4
+	      OK=FLRLIN(LINE(1),LENGTH,LINE_LEN,IERR)
+	      IF (.NOT. OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 970
+	      ENDIF
+C
+C  if I=1 then save the last 4 lines of the entry for use in output
+	      IF (I .EQ. 1) THEN
+	         DO 260 K=1,LENGTH
+	            ENTRY_LINE(K,J)=LINE(K)
+260	         CONTINUE
+	         ENTRY_LINE_LENGTH(J)=LENGTH
+	      ENDIF
+300	   CONTINUE	
+400	CONTINUE
+C
+C
+C-------------------------------------------------------------------
+C  have got each message and the postion where that message occurs 
+C  in arrays -output messages in the appropriate place
+500	CONTINUE
+	DO 800,J=1,Y_CELLS
+	   CELL_YMIN=(J-1)*Y_GRID_INTERVAL+MINY
+	   CELL_YMAX=CELL_YMIN+Y_GRID_INTERVAL
+	   DO 700,I=1,X_CELLS
+	      CELL_XMIN=(I-1)*X_GRID_INTERVAL+MINX
+	      CELL_XMAX=CELL_XMIN+X_GRID_INTERVAL
+	      MESSAGE_IN_CELL=.FALSE.
+	      Z=FIRST_MESS(I)
+	      DO 600,K=1,NUM_MESS(I)
+	         IF ((X(Z).GE.CELL_XMIN) .AND. (X(Z).LT.CELL_XMAX) .AND.
+     &		    (Y(Z) .GE. CELL_YMIN) .AND. (Y(Z).LT.CELL_YMAX)) THEN
+	            OK=FLWLIN(MESSAGE(1,Z),LEN_MESS(Z),IERR)
+	            IF (.NOT. OK) THEN
+	               CALL LSL_PUTMSG(OK)
+	               CALL LSL_ADDMSG(IERR)
+	               GOTO 970
+	            ENDIF
+	            IF (.NOT. MESSAGE_IN_CELL) THEN
+	               CENTRE_X=X(Z)
+	               CENTRE_Y=Y(Z)
+	            ENDIF
+	            MESSAGE_IN_CELL=.TRUE.
+C
+C  Get rid of this entry
+	            TEMP=NEXT_MESS(Z)
+	            IF (PREV_MESS(Z) .EQ.0) THEN
+	               FIRST_MESS(I)=TEMP
+	            ENDIF
+	            PREV_MESS(TEMP)=PREV_MESS(Z)
+	            NEXT_MESS(PREV_MESS(Z))=TEMP
+	            Z=TEMP
+	            NUM_MESS(I)=NUM_MESS(I)-1
+	         ELSE
+	            Z=NEXT_MESS(Z)
+	         ENDIF
+600	      CONTINUE
+	      IF (MESSAGE_IN_CELL) THEN
+C
+C  Output position info.
+	         LEN_STRING=EXPAND('%W%%POSITION %F %F',LINE(1),
+     &				CENTRE_X,CENTRE_Y)
+	         OK=FLWLIN(LINE(1),LEN_STRING,IERR)
+	         IF (.NOT. OK) THEN
+	            CALL LSL_PUTMSG(OK)
+	            CALL LSL_ADDMSG(IERR)
+	            GOTO 970
+	         ENDIF
+C 
+C Output rest of entry
+	         DO 650,K=1,4
+	            OK=FLWLIN(ENTRY_LINE(1,K),ENTRY_LINE_LENGTH(K),IERR)
+	            IF (.NOT. OK) THEN
+	               CALL LSL_PUTMSG(OK)
+	               CALL LSL_ADDMSG(IERR)
+	               GOTO 970
+	            ENDIF
+650	         CONTINUE
+	      ENDIF
+700	   CONTINUE
+800	CONTINUE
+C
+C-------------------------------------------------------------------
+C Close input and output .LCM files
+970	OK=FLWCLO(2,IERR)
+	IF (.NOT. OK) THEN
+	 CALL WRITEF('*** ERROR *** Cant close output file %S',
+     &			OUT_FILE)
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	ENDIF
+975	OK=FLRCLO(1,IERR)
+	IF (.NOT. OK) THEN
+	   CALL WRITEF('*** ERROR *** Cant close input file %S',
+     &			IN_LCM_FILE)
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	ENDIF
+	GOTO 999
+C
+C-------------------------------------------------------------------
+C  Invalid range - cannot be a processed IFF file
+980	CALL WRITEF ('*** ERROR *** Range of IFF file is invalid 
+     &  - unprocessed file ?')
+C
+C-------------------------------------------------------------------
+C  Close IFF file
+990	CALL IFFCLO(1)
+C
+C-------------------------------------------------------------------
+C  Finish
+999	CALL LSL_EXIT
+	END	

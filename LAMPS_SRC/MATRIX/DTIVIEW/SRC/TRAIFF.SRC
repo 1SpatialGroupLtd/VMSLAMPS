@@ -1,0 +1,387 @@
+      	SUBROUTINE TRANSFORM_IFF
+C
+***	IDENT	06MR92
+***	MODULE	TRANSFORM_IFF
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Created   : 06JN85
+C	Author    : D R Catlow
+C
+C	Modified  : DRM
+CMOD888	IFF selection returned to input after output of invisible
+C	lines and areas.				29-May-1990 
+CMOD872 Format correction in FRT value error warning	03-Apr-1990
+C
+CMOD	Default symbol scale now handled in PLTSYM	30-Nov-1988
+C	Modified  : DRC					01-Nov-1988
+C		    To handle invisible lines
+C	Modified  : DRC					24-Jun-1988
+C		    To handle CB data
+C	Modified  : DRC                                    Jan-1988
+C                   Use with primary and secondary
+C                   graphics devices
+C
+C	MOD 11FE87	Modified to remove feature clipping
+C	MOD 07JL86	Modified to test against current selections
+C	MOD 08JL86	Control C handler added
+C
+C	Routine for DTVIEW to transform IFF coordinate points
+C	to the DTI coordinate system.
+C	Calls ENCODE_IFF to encode the culture data on the
+C	terrain model.
+C
+	IMPLICIT NONE
+C
+C Arguments:
+C commons
+***	COMMON/LSL$CMNIFF:CB.STR/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/LSL$CMNDTI:DTIHDR.CMN/
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+C
+***	COMMON/HERE:CB/
+C
+***	COMMON/HERE:DEVICE/
+***	COMMON/HERE:MODEL/
+***	COMMON/HERE:VIEW/
+***	COMMON/HERE:DTICMN/
+***	COMMON/HERE:CULTRE /
+***	COMMON/HERE:TRANS /
+***	COMMON/HERE:GKSCMN/
+***	COMMON/HERE:DRCTRL/
+***	COMMON/HERE:SELECT/
+C
+***	PARAMETER/HERE:GKSPAR/
+C
+	PARAMETER	MAXPTS=16392
+C
+	REAL		RANGEX,RANGEY	! X and Y IFF ranges
+	REAL		IFF_COORDS(MAXPTS)! line coords 
+	REAL		X1_IFF,Y1_IFF	! FROM IFF coord pair
+	REAL		X2_IFF,Y2_IFF	! TO   IFF coord pair
+	INTEGER*4	X1_DTI,Y1_DTI	! FROM DTI coord pair	
+	INTEGER*4	X2_DTI,Y2_DTI	! TO   DTI coord pair
+C
+	INTEGER*4	LAST_POINTS
+	INTEGER*4	POINTS		! Number of points in ST
+	INTEGER*4	TOTPTS		! Total no. of pts in feature
+	INTEGER*4	I		! counter
+	INTEGER*2	FVALUE		! feature code value
+	INTEGER*2	LAYNUM		! layer number
+	INTEGER*2	IECODE		! IFF entry code
+	INTEGER*2	IELEN		! IFF entry length
+        INTEGER*2       IENDS           ! additional string variable
+	LOGICAL		NEWLIN		! true if start of a new line?
+	LOGICAL		WANTED		! this item is wanted
+	LOGICAL		HAD_INVIS 	! invisible move to next coord
+	LOGICAL		FIRST_CB	! first CB of feature
+C
+C	Functions
+	LOGICAL		HADCTRLC
+	LOGICAL 	LIB$EXTZV	! test bit-map
+	LOGICAL		FRTFND
+C
+C************************************************************************
+C
+	NULL_FEATURE=.FALSE.
+C
+C	Set up CB header data
+	COLHXY(1)=IFF_C_X
+	COLHXY(2)=IFF_C_Y
+C
+C------------------------------------------------------------------------
+C
+	IF(PRIMARY.OR.SECONDARY)THEN
+	  CALL PLTPOS(.FALSE.,.FALSE.)
+	  CALL GSSGT
+	ENDIF
+C
+C	Select the second set of planes if drawing to a graphics
+C	device (unless a 4 planes device).
+	IF(PRIMARY)THEN
+	  IF(WTYPE(1).EQ.9900.OR.NOPLNS.EQ.4)THEN
+	    CALL LSG_PLANE_SELECT(1,PLANE_MASK)
+	    CALL LSG_PLANE_OFFSET(1,0)
+	    CALL LSG_PLANE_VISIBLE(1,-1)
+	  ELSE
+	    CALL LSG_PLANE_SELECT(1,.NOT.PLANE_MASK)
+	    CALL LSG_PLANE_OFFSET(1,NOPLNS)
+	    CALL LSG_PLANE_VISIBLE(1,-1)
+	  ENDIF
+	ENDIF
+C
+	IF(SECONDARY)THEN
+          IF(NOPLNS.EQ.4)THEN
+	    CALL LSG_PLANE_SELECT(2,PLANE_MASK)
+	    CALL LSG_PLANE_OFFSET(2,0)
+	    CALL LSG_PLANE_VISIBLE(2,-1)
+	  ELSE
+	    CALL LSG_PLANE_SELECT(2,.NOT.PLANE_MASK)
+	    CALL LSG_PLANE_OFFSET(2,NOPLNS)
+	    CALL LSG_PLANE_VISIBLE(2,-1)
+	  ENDIF
+	ENDIF
+C
+	IF(PLOT_IFF)THEN
+	   CALL IFFSEL(1)
+	   LPOSNO = LPOSE
+	   CALL IFFNO(LAYER,0,0)
+	   INFT = .FALSE.		! not in a feature
+	   VRTPT = 0			! (and none buffered)
+	   PLOT_IFF=.TRUE.		! 'IFF output'
+	ENDIF
+C
+	CALL IFFSEL(3)			! select input IFF file
+	CALL IFFRWD			! set to beginning
+C
+C************************************************************************
+C
+C	Main loop
+100	CALL IFFSEL(3)
+	CALL IFFNXT(IECODE,IELEN)
+	IF(IELEN.EQ.-1)   GOTO 999
+	IF(IECODE.EQ.'EJ')GOTO 999
+C
+C>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+C
+	IF(IECODE.EQ.'NO')THEN
+	   CALL EIHRI(LAYNUM,1,1)
+C
+C 	Skip layer 0 
+	   IF(LAYNUM.EQ.0)THEN
+	     CALL IFFNXC('EO',IELEN)
+	     IF(IELEN.EQ.-1)GOTO 999
+	     GOTO 100
+	   ENDIF
+C
+	   I = LAYNUM				! convert to long
+	   WANTED=LIB$EXTZV(I,1,LAYMAP)
+C
+	   IF(.NOT.WANTED)THEN
+	     CALL IFFNXC('EO',IELEN)		! Skip by setting to EO
+	     IF(IELEN.EQ.-1)   GOTO 999
+	   ENDIF
+	   GOTO 100
+	ENDIF
+C
+C>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+C
+	IF(IECODE.EQ.'NF')THEN		! new feature
+C
+C Has CTRL/C been pressed?
+C By putting it here we ensure that the plotting of a feature has been
+C completed.
+	  IF (HADCTRLC()) GOTO 999
+C
+	  CALL EIHRI(FTNUM,1,1)		! read feature number
+	  FTNUM = IAND(FTNUM,65535) 	! convert to unsigned longword
+	  IF (FTNUM.EQ.0) GOTO 140	! skip dummy feature
+C
+C Is this feature number selected or not ?
+	  WANTED=LIB$EXTZV(FTNUM,1,FSNMAP)
+	  IF (.NOT.WANTED) GOTO 140
+C
+	  NEWLIN=.TRUE.			! new line
+	  TOTPTS=0			! initialise pt count
+	  GOTO 100
+	ENDIF
+C
+C***********************************************************************
+C
+	IF(IECODE.EQ.'FS')THEN		! feature status
+	  CALL EIHRI(FVALUE,1,1)	! retrieve feature code
+C
+C	Test if this feature is selected
+	  I = FVALUE			! convert to long
+	  WANTED=LIB$EXTZV(I,1,FCMAP)
+	  IF (.NOT.WANTED) GOTO 140	! skip this feature
+C
+C	Look up this feature code in the FRT
+130	  IF(FRTFND(FVALUE))THEN
+	    CALL WRITEF('Unable to find entry in FRT for fc %^W%N',FVALUE)
+	    CALL WRITEF('Item will be skipped')
+C           Skip by setting to EF
+140	    CALL IFFNXC('EF',IELEN)
+	    IF(IELEN.EQ.-1)GOTO 999
+	    GOTO 100
+	  ENDIF
+	  CURFC=FVALUE
+	ENDIF
+C
+C**************************************************************************
+C	CB Entry
+C	We are only interested in the x and y.  (ie first 2 columns of 
+C	data)
+C
+	IF(IECODE.EQ.'CB')THEN	
+C
+	  LAST_POINTS=0
+	  TOTPTS=0
+	  FIRST_CB=.TRUE.
+	  HAD_INVIS=.FALSE.
+C
+150	  CALL EIHRCB_HEAD(CBH)
+	  POINTS=CBH.NROW
+	  IENDS =CBH.FLAGS
+	  IF(POINTS.LE.0)GOTO 100
+C
+	  IF(FIRST_CB)THEN
+	    FIRST_CB=.FALSE.
+	    GOTO 155
+	  ENDIF
+C
+
+	  IF(IENDS.EQ.0)THEN		!invisible move
+	    LAST_POINTS=POINTS
+	    HAD_INVIS=.TRUE.
+	    GOTO 160
+	  ENDIF
+C
+C	For the simple case we copy direct to IFF_COORDS
+155	  IF(SIMPLE_XY)THEN
+	    CALL EIHRCB_DATA(IFF_COORDS(TOTPTS+1))
+	    TOTPTS=TOTPTS+POINTS*2
+	  ELSE
+C	we first copy to a scratch array
+	    CALL EIHRCB_DATA(CBD)
+	    CALL IFS_CB_READ(CBH,CBD,IFF_COORDS(TOTPTS+1),2,
+     &                       COLHXY,1,POINTS)
+	    TOTPTS=TOTPTS+POINTS*2
+	  ENDIF
+C
+C	another CB?
+	  CALL IFFNXT(IECODE,IELEN)
+	  IF(IELEN.EQ.-1)GOTO 999
+	  IF(IECODE.EQ.'CB')GOTO 150	! yes
+	  IF(TOTPTS.EQ.0)GOTO 999
+C
+C---------------------------------------------------------------------
+C	Transfer coordinates to separate x and y arrays
+160	  POINTS=0
+	  DO 170 I=1,TOTPTS,2
+	    POINTS=POINTS+1
+	    XPTS(POINTS)=IFF_COORDS(I)
+	    YPTS(POINTS)=IFF_COORDS(I+1)
+170	  CONTINUE
+C
+C**********************************************************************
+C
+	  IF(FRTGT.EQ.STRTYP)THEN
+	    IF(DEBUG)
+     &      CALL WRITEF('*** New symbol string with %N symbols ***',
+     &      POINTS)
+C
+C	  Test if point is inside window
+	    DO 200 I=1,POINTS
+	      IF(XPTS(I).LT.WIND(1,1).OR.
+     & 	         XPTS(I).GT.WIND(2,1).OR.
+     &           YPTS(I).LT.WIND(1,2).OR.
+     &           YPTS(I).GT.WIND(2,2))GOTO 190
+C
+	      IF(DEBUG)CALL WRITEF('Symbol inside  window')
+	      CALL PLOT_SYMBOL(FVALUE,XPTS(I),YPTS(I),.TRUE.,.FALSE.,-1)
+	      GOTO 200
+C
+190	      IF(DEBUG)CALL WRITEF('Symbol outside window')
+C
+200         CONTINUE
+C
+	    GOTO 100
+	  ENDIF
+C
+C**********************************************************************
+C
+	  IF(FRTSYM)THEN
+	    IF(DEBUG)CALL WRITEF('*** New Point ***')
+	    IF(POINTS.NE.1)THEN
+	      CALL WRITEF
+     &		   ('Point symbol with more than 1 coordinate point')
+	      CALL WRITEF('Item will be skipped')
+	      GOTO 100
+	    ENDIF	    
+C
+	    IF(HADWIN)THEN		! test if inside IFF window
+	      IF(XPTS(1).LT.WIND(1,1).OR.
+     & 	         XPTS(1).GT.WIND(2,1).OR.
+     &           YPTS(1).LT.WIND(1,2).OR.
+     &           YPTS(1).GT.WIND(2,2))GOTO 100
+	    ENDIF	    
+C
+	    CALL PLOT_SYMBOL(FVALUE,XPTS(1),YPTS(1),.TRUE.,.FALSE.,-1)
+	    GOTO 100
+	  ENDIF
+C
+C********************************************************************
+C
+C
+	  IF(FRTLIN.AND.DEBUG)CALL WRITEF('*** New line ***')
+	  IF(FRTCUR.AND.DEBUG)CALL WRITEF('*** New curved line ***')
+	  IF(FRTARE.AND.DEBUG)CALL WRITEF('*** New area ***')
+C
+	  IF(FRTLIN.OR.FRTCUR)THEN
+            CALL PLOT_LINE(FVALUE,POINTS)
+            IF(HAD_INVIS)THEN
+	      TOTPTS=0
+	      HAD_INVIS=.FALSE.
+	      POINTS=LAST_POINTS
+              CALL IFFSEL(3)
+	      GOTO 155
+	    ELSE
+	      GOTO 100
+	    ENDIF
+	  ENDIF
+C
+	  IF(FRTARE)THEN
+            CALL PLOT_AREA(FVALUE,POINTS)
+            IF(HAD_INVIS)THEN
+	      TOTPTS=0
+	      HAD_INVIS=.FALSE.
+	      POINTS=LAST_POINTS
+              CALL IFFSEL(3)
+	      GOTO 155
+	    ELSE
+	      GOTO 100
+	    ENDIF
+	  ENDIF
+C
+	ENDIF
+C
+	GOTO 100
+C************************************************************************
+C
+999	IF(PRIMARY)CALL GUWK(1,GSUPP)
+	IF(SECONDARY)CALL GUWK(2,GSUPP)
+	IF(PLOT_IFF)THEN
+	  CALL EOPIC
+	  CALL ENDIFF
+	  PLOT_IFF=.FALSE.
+	ENDIF
+C
+C------------------------------------------------------------------------
+C	Reset to first set of planes (but still make both visible)
+	IF(PRIMARY.AND.(PRIMARY.NE.9900))THEN
+	  CALL LSG_PLANE_SELECT(1,PLANE_MASK)
+	  CALL LSG_PLANE_OFFSET(1,0)
+	  CALL LSG_PLANE_VISIBLE(1,-1)
+	ENDIF
+C
+	IF(SECONDARY)THEN
+	  CALL LSG_PLANE_SELECT(2,PLANE_MASK)
+	  CALL LSG_PLANE_OFFSET(1,0)
+	  CALL LSG_PLANE_VISIBLE(1,-1)
+	ENDIF
+C
+	RETURN
+C
+	END
+
+
+
+
+
+
+
+
+

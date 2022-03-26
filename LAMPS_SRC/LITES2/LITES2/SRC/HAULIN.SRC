@@ -1,0 +1,512 @@
+	SUBROUTINE HAULIN( OBJ )
+C
+***	MODULE	HAULIN
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author  Clarke Brunt
+C
+C Coded 19.iii.84
+C
+C To bring into memory some vertices of one of the struck items, making
+C it the found object, or to get different vertices of the existing
+C found object.
+C
+C OBJ is the index number of the object on the STRIKE OBJ arrays, ie
+C     >0 => index number of object in STRIKE OBJ arrays
+C     =0 => existing found object
+C
+C If hauling in a new found object, then a pass through all the STs
+C is made, to obtain both end coordinates, the total number of vertices,
+C and the absolute vertex number wanted. An index into the STs is
+C constructed.
+C A second pass is then made, as if the object was already found,
+C using the index to get the required vertices.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+C
+***	COMMON/CMN:CB/
+***	COMMON/CMN:CTXS/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/CMN:INDEX/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:STRIKE/
+C
+C argument
+	INTEGER OBJ
+C
+C w/s
+	INTEGER I		! temporary
+	INTEGER VSHFT		! amount to shift by
+	INTEGER	VCOPY		! number of vertices to read
+	INTEGER	IGNORE		! number not to read
+	INTEGER	START,STOP,STEP	! loop parameters
+	INTEGER	ROW,ATT		! more loop parameters
+	INTEGER	VRTX0		! required vertex offset
+	INTEGER	VRTX		! first vertex from IFF
+	INTEGER	NVRTS		! number wanted from IFF
+	INTEGER	FINAL		! final value of FOTOP
+	LOGICAL INDEX		! create ST index?
+	LOGICAL SEARCH		! searching for particular ST
+	INTEGER*2 IECODE,IELEN	! for IFF reading
+	INTEGER PST		! pointer to 'found' ST
+	INTEGER VRT		! required vertex rel. to start of ST
+	INTEGER	STVO		! vertex offset of ST
+	INTEGER*4 ST		! IFF address of ST
+	INTEGER*4 LPOSCB	! IFF address of current read CB
+	REAL	Z(3)		! temporary z values
+C
+C functions
+	LOGICAL		PLANE
+	LOGICAL		GEOG_TRANS_ARRAY
+C
+	LPOSCB = 0		! no current CB
+	IF (OBJ.NE.0) GOTO 50
+C
+C branch off if dealing with texts
+	   IF (FOPAK(PAKGT).EQ.TEXTYP) GOTO 600
+C
+C Existing found object
+C See if position of vertices needs adjusting at all
+	   IF (FOVRT-FOVO.LE.FOCRIT) THEN
+C
+C want earlier vertices
+	      IF (FOVO.EQ.0) GOTO 999	! there aren't any
+	      GOTO 10
+	   ENDIF
+C
+	   IF (FOVRT-FOVO.GT.FOTOP-FOCRIT) THEN
+C
+C want later vertices
+	      IF (FOVO+FOTOP.EQ.FOLST) GOTO 999	! there aren't any
+	      GOTO 10
+	   ENDIF
+C
+C present position OK so...
+	   GOTO 999
+C
+C position needs adjusting
+10	   VRTX0 = MIN0(FOVRT-FOVOFF,	! to place FOVRT at FOVOFF
+     &			FOLST-FOFULL )	! to place last vertex at FOFULL
+	   IF (VRTX0.LT.0) VRTX0 = 0
+C
+C can we use any vertices already in FOXY
+	   VSHFT = VRTX0-FOVO
+	   IF (VSHFT.GE.0) THEN
+C
+C Shift to lower indices
+	      START = 1
+	      STOP = MAX0(FOTOP-VSHFT,0)
+	      STEP = 1
+	      VRTX = STOP+VRTX0		! vertex wanted from IFF - 1
+	      NVRTS = MIN0(FOFULL,FOLST-VRTX0)-STOP	! number wanted
+	      FINAL = STOP+NVRTS		! final value of FOTOP
+	      FOTOP = STOP
+	   ELSE
+C
+C Shift to higher indices
+	      START = FOTOP
+	      STOP = 1-VSHFT
+	      STEP = -1
+	      VRTX = VRTX0		! vertex wanted from IFF - 1
+	      NVRTS = MIN0(STOP-1,FOFULL)		! number wanted
+	      FINAL = FOTOP			! final value of FOTOP
+	      FOTOP = 0
+	   ENDIF
+C
+C do the shifting (relying on loop doing nothing if necessary)
+	   DO 20 I=START,STOP,STEP
+	      FOXY(1,I) = FOXY(1,I+VSHFT)
+	      FOXY(2,I) = FOXY(2,I+VSHFT)
+	      FOFLG(I) = FOFLG(I+VSHFT)
+	      FOZI(I) = FOZI(I+VSHFT)
+	      DO 15 ATT=1,FONATT
+	         FOATTV(ATT,I) = FOATTV(ATT,I+VSHFT)
+15	      CONTINUE
+20	   CONTINUE
+	   FOVO = VRTX0			! new value of vertex offset
+	   INDEX = .FALSE.		! don't create index
+C
+C find a good ST to start from
+	   DO 30 I = 2,FOSTI
+	      IF (FOSTV(I).GT.VRTX) GOTO 40	! got one
+30	   CONTINUE
+	   I = FOSTI+1			! fallen off end
+40	   ST = FOSTP(I-1)		! pointer to ST
+	   STVO = FOSTV(I-1)		! its vertex offset
+	   SEARCH = .FALSE.
+	   GOTO 80
+C
+C hauling in a new found object
+50	CONTINUE
+C
+C copy over pack and auxiliary array
+	CALL CPYPAK(PAKLEN,OBJPAK(1,OBJ),FOPAK)
+C
+C auxiliary array for texts will be done later
+	IF (FOPAK(PAKGT).NE.TEXTYP) 
+     &	            CALL CPYPAK(AUXLEN,OBJAUX(1,OBJ),FOAUX)
+C
+C calculate the box surrounding circle arcs
+	IF (FOPAK(PAKGT).GE.CLOTYP.AND.FOPAK(PAKGT).LE.FULTYP)
+     &	   CALL BOXARC(FOAUX,FOARCBX(1),FOARCBX(2),FOARCBX(3),FOARCBX(4))
+C
+C and the cursor position
+	FOCXY(1) = OBJCXY(1,OBJ)
+	FOCXY(2) = OBJCXY(2,OBJ)
+	CALL PUTLNG(OBJCXY(3,OBJ),FOCXY(3))
+C
+C and the 'on a vertex' flags
+	FONVRT = OBJNVT(OBJ)
+	FOSTRT = OBJSTRT(OBJ)
+	FOEND  = OBJEND(OBJ)
+C
+C we are about to have a found object
+	FO = .TRUE.
+C
+C ST pointer and vertex are only valid for line, curve, symbol string
+	PST = FOPAK(PAKPST)		! 'found' ST pointer
+	VRT = FOPAK(PAKVRT)		! vertex number within ST
+	FOSTI = 0			! index empty
+	FONATT = 0			! no attributes (so far)
+C
+C ensure correct map
+	CALL SELIF(FOPAK(PAKMAP))
+C
+C position to start of feature
+	CALL IFFPKE( IECODE, IELEN, FOPAK(PAKPNF))
+	FOTC = 0		! assume no TCs
+	FOTCND = 0		! no end of TCs marker
+	FOTH = 0		! assume thickness is 0
+C
+C If on the NF, then no TCs, so off we go
+	IF (IECODE.EQ.'NF') GOTO 66
+C
+C See if there are any TCs
+	IF (IECODE.EQ.'TC'.OR.IECODE.EQ.'CH'.OR.IECODE.EQ.'VO') THEN
+	   FOTC = LPOSH		! address of TCs
+	ELSE
+	   CALL NASTY(MSG_BADPNF)
+	   CALL COLAPS(5)
+	   GOTO 999
+	ENDIF
+C
+C find the NF
+	CALL IFFNXC( 'NF', IELEN )
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_NONFENT)
+	   CALL COLAPS(5)
+	   GOTO 999
+	ENDIF
+C
+	FOTCND = LPOSH			! TCs end at the NF
+C
+C get the FS entry
+66	CALL IFFNXC( 'FS', IELEN )
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_NOFSENT)
+	   CALL COLAPS(60)
+	   GOTO 999
+	ENDIF
+	CALL EIHRI(FOFS,MIN0(IELEN,4),1)
+	FOFC = FOFS(1)
+C
+C check for any ACs (or a void into which ACs might go)
+	FOAC = 0			! no ACs yet
+	FOACND = 0			! no end of ACs marker
+72	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(5)
+	   GOTO 999
+	ENDIF
+C
+	IF (IECODE.EQ.'AC'.OR.IECODE.EQ.'VO') THEN
+	   IF (FOAC.EQ.0) FOAC = LPOSH	! AC position
+	ELSE
+	   IF (FOAC.NE.0.AND.FOACND.EQ.0) FOACND = LPOSH
+	ENDIF
+C
+	IF (IECODE.EQ.'TH') THEN
+	   CALL EIHR(FOTH,1,1)		! longword already cleared to 0
+	ENDIF
+C
+	IF (IECODE.NE.'CB') GOTO 72
+C
+C branch off if dealing with texts
+	IF (FOPAK(PAKGT).EQ.TEXTYP) GOTO 500
+C
+	STVO = 0			! no ST vertex offset either
+	INDEX = .TRUE.			! create index
+	SEARCH = .TRUE.			! search for ST
+	GOTO 90
+C
+C position to the selected ST, after ensuring correct map
+80	CALL SELIF(FOPAK(PAKMAP))
+	IF (ST.NE.LPOSH) THEN
+	   CALL IFFPKE( IECODE, IELEN, ST )
+	   IF (IECODE.NE.'CB') THEN
+	      CALL NASTY(MSG_BADPST)
+	      CALL COLAPS(5)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C loop for scanning all ST's
+90	CALL EIHRCB_HEAD(CBH)
+	IF (INDEX) THEN
+	   IF (FOSTI.EQ.0) GOTO 100
+	   IF (STVO.LE.FOSTV(FOSTI)) GOTO 110
+C
+C if the index is full, then compress it
+100	   IF (FOSTI.EQ.INDFUL) CALL CMPIND(FOSTP,FOSTV,FOSTI)
+	   FOSTI = FOSTI+1
+	   FOSTP(FOSTI) = LPOSH		! ST position
+	   FOSTV(FOSTI) = STVO		! vertex offset
+	ENDIF
+C
+C are we looking for a particular ST
+110	IF (SEARCH) THEN
+C
+C is this the first ST?
+	   IF (STVO.EQ.0) THEN
+	      CALL EIHRCB_DATA(CBD)
+	      LPOSCB = LPOSH
+	      CALL IFS_CB_READ(CBH,CBD,FOTHIS,2,COLHXY,1,1)
+C
+	      IF (ZOPT) THEN
+	         CALL IFS_CB_READ(CBH,CBD,FOTHIS(3),1,COLHZ,1,1)
+	      ELSE
+	         CALL PUTLNG(IFF_ABSENT,FOTHIS(3))
+	      ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	      IF (DO_FLY_TRANS) THEN
+	         IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                               CURR_UNIT,CURR_ORG,
+     &	                               LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                               LITES2UNIT,LITES2ORG,
+     &	                               1,FOTHIS)) GOTO 999
+	      ELSEIF (USE_ORG) THEN
+	         CALL ADDORG(ORGXY,FOTHIS,1)
+	      ENDIF
+C
+	      IF (FOPAK(PAKGT).NE.LINTYP .AND.
+     &		  FOPAK(PAKGT).NE.CURTYP .AND.
+     &		  FOPAK(PAKGT).NE.STRTYP .AND.
+     &		  FOPAK(PAKGT).NE.ARETYP ) THEN
+	         PST = LPOSH		! want this ST
+	         VRT = 1		! at first vertex
+	      ENDIF
+	   ENDIF
+	   IF (LPOSH.NE.PST) GOTO 130	! this isn't wanted ST
+C
+C found the ST we want, calculate desired vertex offset
+	   SEARCH = .FALSE.
+	   FOVRT = STVO+VRT		! absolute vertex number
+	   FOVO = 0
+	   FOTOP = 0			! FOXY empty
+	ENDIF
+C
+C do we want any vertices from this ST?
+	IF (.NOT.INDEX) THEN
+	   IF (STVO+CBH.NROW.GT.VRTX) THEN
+	      IGNORE = MAX0(0,VRTX-STVO)
+	      VCOPY = MIN0(NVRTS,CBH.NROW-IGNORE)
+	      IF (LPOSH.NE.LPOSCB) THEN
+	         CALL EIHRCB_DATA(CBD)
+	         LPOSCB = LPOSH
+	      ENDIF
+	      IF (SIMPLE_XY) THEN			! just ST format
+	         CALL VIOMV3(CBD.R(2*IGNORE+1),8*VCOPY,FOXY(1,FOTOP+1))
+C
+C clear out attributes
+	         IF (FONATT.GT.0) THEN
+	            DO 67 ROW=FOTOP+1,FOTOP+VCOPY
+	               FOZI(ROW) = IFF_ABSENT
+	               DO 67 ATT=1,FONATT
+	                  FOATTV(ATT,ROW) = IFF_ABSENT
+67	            CONTINUE
+	         ENDIF
+	      ELSE
+C
+C obtain X,Y and other attributes
+	         CALL GETATT(FOXY,FONATT,STR_MAX_ATTR,FOATTC,FOATTV,
+     &				FOTOP,IGNORE+1,IGNORE+VCOPY)
+	      ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	      IF (DO_FLY_TRANS) THEN
+	         IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                               CURR_UNIT,CURR_ORG,
+     &	                               LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                               LITES2UNIT,LITES2ORG,
+     &	                               VCOPY,FOXY(1,FOTOP+1))) GOTO 999
+	      ELSEIF (USE_ORG) THEN
+	         CALL ADDORG(ORGXY,FOXY(1,FOTOP+1),VCOPY)
+	      ENDIF
+C
+	      DO 120 I=FOTOP+1,FOTOP+VCOPY
+	         FOFLG(I) = 1		! all flags visible
+120	      CONTINUE
+	      IF (IGNORE.EQ.0) FOFLG(FOTOP+1) = CBH.FLAGS.AND.1
+C
+C get the column that Z is in, as it is rather special
+	      DO 121, I = 1,FONATT
+	         IF (FOATTC(I).EQ.IFF_C_Z) THEN
+	            FO_Z_COL = I
+	            GOTO 122
+	         ENDIF
+121	      CONTINUE
+C
+C no Z's present
+	      FO_Z_COL = -1
+122	      CONTINUE
+C
+C load the Z array
+	      DO 123 I=FOTOP+1,FOTOP+VCOPY
+	         IF (FO_Z_COL.GT.0) THEN
+	            FOZI(I) = FOATTV(FO_Z_COL,I)
+	         ELSE
+	            FOZI(I) = IFF_ABSENT
+	         ENDIF
+123	      CONTINUE
+C
+	      FOTOP = FOTOP+VCOPY
+	      NVRTS = NVRTS-VCOPY
+C
+C calculate the plane for circle arcs
+	      IF (FOPAK(PAKGT).GE.CLOTYP.AND.FOPAK(PAKGT).LE.FULTYP) THEN
+	         IF (FO_Z_COL.EQ.-1) THEN
+	            FOC_DEFINED = .FALSE.
+	         ELSE
+	            CALL PUTLNG(FOATTV(FO_Z_COL,1),Z(1))
+	            CALL PUTLNG(FOATTV(FO_Z_COL,2),Z(2))
+	            CALL PUTLNG(FOATTV(FO_Z_COL,3),Z(3))
+	            FOC_DEFINED=PLANE(FOXY,Z,FOCOEFFS)
+	         ENDIF
+	      ELSE
+	         FOC_DEFINED = .FALSE.
+	      ENDIF
+C
+C If no more vertices wanted, then can stop now
+	      IF (NVRTS.LE.0) THEN
+	         FOTOP = FINAL		! adjust FOTOP
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C Step to next ST
+130	STVO = STVO + CBH.NROW
+131	CALL IFFNXT( IECODE, IELEN )
+	IF (IECODE.EQ.'VO') GOTO 131
+	IF (IECODE.EQ.'CB') GOTO 90
+C
+C we have run out of STs
+C Error if still searching for found ST on first pass,
+C or still looking for vertices on second pass
+	IF (SEARCH.OR..NOT.INDEX) THEN
+	   CALL NASTY(MSG_NOMOREST)
+	   CALL COLAPS(35)
+	   GOTO 999
+	ENDIF
+C
+C position back to last ST
+	CALL IFFPKE( IECODE, IELEN, FOSTP(FOSTI) )
+	IF (IECODE.NE.'CB') THEN
+	   CALL NASTY(MSG_BADPST)
+	   CALL COLAPS(36)
+	   GOTO 999
+	ENDIF
+C
+C get last vertex
+	IF (LPOSH.NE.LPOSCB) THEN
+	   CALL EIHRCB_DATA(CBD)
+	   LPOSCB = LPOSH
+	ENDIF
+	CALL IFS_CB_READ(CBH,CBD,FOTHAT,2,COLHXY,CBH.NROW,CBH.NROW)
+C
+C add origin of map, or transform into LITES2 space, if required
+	      IF (DO_FLY_TRANS) THEN
+	         IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                               CURR_UNIT,CURR_ORG,
+     &	                               LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                               LITES2UNIT,LITES2ORG,
+     &	                               1,FOTHAT)) GOTO 999
+	      ELSEIF (USE_ORG) THEN
+	         CALL ADDORG(ORGXY,FOTHAT,1)
+	      ENDIF
+C
+	IF (ZOPT) THEN
+	   CALL IFS_CB_READ(CBH,CBD,FOTHAT(3),1,COLHZ,CBH.NROW,CBH.NROW)
+	ELSE
+	   CALL PUTLNG(IFF_ABSENT,FOTHAT(3))
+	ENDIF
+	FOLST = STVO			! number of vertices
+C
+C get EF pointer, point to entry AFTER the EF
+	CALL IFFNXC('EF',IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_NOEFENT)
+	   CALL COLAPS(5)
+	   GOTO 999
+	ENDIF
+C
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   FOEF = LPOSE		! end of file
+	ELSE
+	   FOEF = LPOSH		! entry after EF
+	ENDIF
+	GOTO 10			! make second pass to get vertices
+C
+C
+C========================================================================
+C
+C deal seperately with texts
+C
+C hauling in new feature
+500	CONTINUE
+	CALL GETCTX(FOPAK,FTRCTXD,.FALSE.)
+C
+C get EF pointer, point to entry AFTER the EF
+	CALL IFFPKE( IECODE, IELEN, FOPAK(PAKPNF)) ! get back to start
+	CALL IFFNXC('EF',IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_NOEFENT)
+	   CALL COLAPS(5)
+	   GOTO 999
+	ENDIF
+C
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   FOEF = LPOSE		! end of file
+	ELSE
+	   FOEF = LPOSH		! entry after EF
+	ENDIF
+C
+C load FO variables in strike, that HAULIN has not done already
+600	CONTINUE
+C
+C we want to use the data from the "home" text component - ie the one the
+C text was found by - so get it into CTXBUF
+	FTRCTXD(CTXD_CUR) = FTRCTXD(CTXD_HOME)
+	CALL THISCTX(FTRCTXD)
+C
+C now fill in the FO variables, (with out verification)
+	CALL LOADFO(.FALSE.)
+C
+999	RETURN
+	END

@@ -1,0 +1,395 @@
+	SUBROUTINE FLVIEW
+C
+***	MODULE	FLVIEW
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	23-July-1984
+C
+C To redraw the part of the IFF file within bounds contained
+C in WINDOW.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:GKSPAR/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:REGPAR/
+***	PARAMETER/CMN:SECTOR/
+C
+***	COMMON/CMN:ACSEL/
+***	COMMON/CMN:CNSTRN/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:FCS/
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:LAYERS/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:PLOT/
+***	COMMON/CMN:REGCMN/
+***	COMMON/CMN:RFCTRL/
+***	COMMON/CMN:SECMAP/
+***	COMMON/CMN:SETUP/
+***	COMMON/CMN:SORT/
+***	COMMON/LSL$CMNFRT:SRISCL/
+***	COMMON/CMN:STRIKE/
+***	COMMON/CMN:WORKS/
+C
+C functions for SCNSEC etc
+	EXTERNAL DRAWDP,SAVEDP
+	LOGICAL	 HADBREAK,SRTMEM
+	LOGICAL	 LIB$EXTZV
+C
+C w/s
+	REAL	RANGEX,RANGEY
+	INTEGER	I,J
+	INTEGER XLIM,YLIM
+	INTEGER	WKID,OWKID
+	REAL	VIEW(4)
+	REAL	PLOT_RANGE(2)
+	REAL	SAV_SCLDIS
+	REAL	SAV_NOMLW
+	LOGICAL	SAV_HWTOPT
+	LOGICAL	SAV_USESEG
+	REAL	SAV_WINDOW(4)
+	REAL	SAV_WFACX,SAV_WFACY
+C
+C do nothing if no displays
+	IF (NODISP) GOTO 999
+C
+C set flag to indicate we are in FLVIEW (e.g. for LSVIS)
+	VIEWNG = .TRUE.
+C
+C are we updating the status of a segmented workstation?
+	IF (UPDATE_SEG.AND..NOT.PLOT_ON) USESEG = NEW_USESEG
+C
+C don't use segments if plotting is on
+	IF (PLOT_ON) THEN
+	   SAV_USESEG = USESEG
+	   USESEG = .FALSE.
+	ENDIF
+C
+C if sorting by priority, draw features with multiple passes till next
+C call of FLVIEW
+	DRAW_PRIORITY = SRTOPT.AND.(SORIFF.EQ.SORT_BY_PRIORITY)
+	DRAW_PRIORITY = DRAW_PRIORITY.AND..NOT.USESEG
+C
+C calculate new display scale on larger (or only) screen
+	WKID = 1			! assume primary
+	IF (
+     &	 WKAC(1).AND..NOT.WKSUPP(1).AND.WKAC(2).AND..NOT.WKSUPP(2)) THEN
+	   IF (SCRNSX(2).GT.SCRNSX(1)) WKID = 2
+	ELSE				! only one active
+	   IF (WKAC(2).AND..NOT.WKSUPP(2)) WKID = 2	! must be secondary
+	ENDIF
+C
+C if plotting, then we want to preserve WINDOW, and WFACX/Y
+	IF (PLOT_ON) THEN
+	   CALL CPYPAK(4,WINDOW,SAV_WINDOW)
+	   SAV_WFACX = WFACX
+	   SAV_WFACY = WFACY
+	ENDIF
+C
+C if a transformation is set up (IMAGE SETUP) then transform the corners
+C of WINDOW into image/screen space, unless we already have an image
+C window saved from last time,
+	IF (SETUP.AND.WARP_TO_IMAGE.AND..NOT.HADIMG
+     &			) CALL TRXWIN(.TRUE.)
+C
+C adjust window if raster overlays are in use
+C (not needed if warping images)
+	WFACX = 1.0
+	WFACY = 1.0
+	IF (OVERLAYS_INUSE.AND..NOT.PLOT_ON.AND.
+     &		(.NOT.SETUP.OR.WARP_TO_IMAGE)) THEN
+C
+C can only do images properly on one workstation at a time - if both
+C in use, but one suppressed, then select the other
+	   OWKID = OVERLAY_WORKSTATION
+	   IF ((WKSUPP(OWKID).OR..NOT.WKAC(OWKID)).AND.
+     &		OVERLAY_SHARE.AND.WKAC(3-OWKID)) OWKID = 3-OWKID
+	   CALL ADJUST(OWKID,VIEW)
+C
+C squash world transformation to allow for non-square pixels
+	   WFACX = ( SCRSZX(OWKID)/RASTSX(OWKID)/PIXELSIZE(1) ) /
+     &		   ( SCRSZY(OWKID)/RASTSY(OWKID)/PIXELSIZE(2) )
+	   IF (WFACX.GT.1.0) THEN
+	      WFACY = 1.0/WFACX
+	      WFACX = 1.0
+	   ENDIF
+	ENDIF
+	CALL GSVP(1,0.0,NDCX*WFACX,0.0,NDCY*WFACY)
+C
+	RANGEX = WINDOW(2)-WINDOW(1)
+	RANGEY = WINDOW(4)-WINDOW(3)
+C
+	IF (PLOT_ON) THEN
+	   CALL SETUP_PLOT
+	   SAV_SCLDIS = SCLDIS
+	   SAV_NOMLW = NOMLW
+	   NOMLW = PLOT_LWIDTH
+	   SAV_HWTOPT = HWTOPT
+	   HWTOPT = PLOT_HWT
+	   IF (PLOT_RATIO.GT.0.0) THEN
+	      SCLDIS = SCLFRT/PLOT_RATIO
+	   ELSEIF (PLOT_SCALE.GT.0.0.AND.MAPSCL(0).GT.0) THEN
+	      SCLDIS = SCLFRT*PLOT_SCALE/MAPSCL(0)
+	   ELSE		! must be autoscale
+	      SCLDIS = MAX(RANGEX/(PLOT_VIEW(2)-PLOT_VIEW(1)),
+     &			   RANGEY/(PLOT_VIEW(4)-PLOT_VIEW(3)))/1000.0
+	   ENDIF
+C
+C calculate IFF range required to fill the plot area
+	   PLOT_RANGE(1) = (PLOT_VIEW(2)-PLOT_VIEW(1))*SCLDIS*1000.0
+	   PLOT_RANGE(2) = (PLOT_VIEW(4)-PLOT_VIEW(3))*SCLDIS*1000.0
+C
+C see if will fit in WINDOW
+	   IF (RANGEX.GT.PLOT_RANGE(1)) THEN
+	      WINDOW(2) = WINDOW(1)+PLOT_RANGE(1)
+	   ELSE
+	      PLOT_VIEW(2) = PLOT_VIEW(1)+RANGEX/SCLDIS/1000.0
+	      PLOT_VIEW(2) = MIN(PLOT_SCRSZX,PLOT_VIEW(2))
+	   ENDIF
+	   IF (RANGEY.GT.PLOT_RANGE(2)) THEN
+	      WINDOW(4) = WINDOW(3)+PLOT_RANGE(2)
+	   ELSE
+	      PLOT_VIEW(4) = PLOT_VIEW(3)+RANGEY/SCLDIS/1000.0
+	      PLOT_VIEW(4) = MIN(PLOT_SCRSZY,PLOT_VIEW(4))
+	   ENDIF
+C
+C set up image things
+	   IF (OVERLAYS_INUSE.AND.
+     &		(.NOT.SETUP.OR.WARP_TO_IMAGE)) CALL ADJUST(1,VIEW)
+	ELSE
+	   SCLDIS = MAX(RANGEX/SCRNSX(WKID),RANGEY/SCRNSY(WKID))/1000.
+	ENDIF
+C
+C adjust SCLDIS if we are scaling the picture
+	IF (SETUP.AND.WARP_TO_IMAGE) SCLDIS = SCLDIS/SETSCA
+C
+C save settings from CMN:SRISCL, and reset them to fix up hatch thickness
+C and spacing in texts/symbols. Leave ENLSCL alone - we do not alter the
+C number of points in circles/curves when we zoom
+	CALL SRIUNI(1.0/SCLDIS,SRISCL,SRIROT,ENLSCL)
+C
+C convey new nominal linewidth to FRTLIB
+	CALL SRISLW(NOMLW*SCLDIS/SCLFRT)
+C
+	IF (ZOOMNG) THEN		! efcrit varies
+	   EFCRIT = DFCRIT*SCLDIS
+	ELSE
+	   DFCRIT = EFCRIT/SCLDIS
+	ENDIF
+C
+C perform any desired temporary de-activations
+	DO 3 I=1,WSMAX
+	   IF (WKAC(I).AND.(WKSUPP(I).OR.PLOT_ON)) THEN
+	      CALL GDAWK(I)
+	      WKAC(I) = .FALSE.
+	   ENDIF
+3	CONTINUE
+C
+	IF (PLOT_ON) CALL GACWK(PLOT_WKID)	
+C
+C calculate appropriate workstation window
+	RANGEX = LIMITS(2)-LIMITS(1)
+	RANGEY = LIMITS(4)-LIMITS(3)
+	DO 5 WKID=1,WSMAX
+C
+C do nothing if inactive
+	   IF (.NOT.WKAC(WKID)) GOTO 5
+	   CALL GSWKWN(WKID,
+     &		(WINDOW(1)-LIMITS(1))*NDCX*WFACX/RANGEX,
+     &		(WINDOW(2)-LIMITS(1))*NDCX*WFACX/RANGEX,
+     &		(WINDOW(3)-LIMITS(3))*NDCY*WFACY/RANGEY,
+     &		(WINDOW(4)-LIMITS(3))*NDCY*WFACY/RANGEY )
+	   IF (.NOT.OVERLAYS_INUSE.OR.(SETUP.AND..NOT.WARP_TO_IMAGE)) THEN
+C
+C set default viewport (as opposed to calculated by ADJUST)
+C in case we set an 'adjusted' one last time round
+	      VIEW(1) = WKVSWX(WKID)*SCRSZX(WKID)
+	      VIEW(2) = WKVNEX(WKID)*SCRSZX(WKID)
+	      VIEW(3) = WKVSWY(WKID)*SCRSZY(WKID)
+	      VIEW(4) = WKVNEY(WKID)*SCRSZY(WKID)
+	   ENDIF
+	   CALL GSWKVP(WKID,VIEW(1),VIEW(2),VIEW(3),VIEW(4))
+C
+C clear the workstation if required(only if not using segments)
+	   IF (.NOT.CLEASUPP.AND.(.NOT.USESEG.OR.UPDATE_SEG)) THEN
+	      CALL GCLRWK(WKID,GALWAY)
+	      IF (FO) RFFSEG = 0 ! refresh segment has just been deleted
+	   ENDIF
+5	CONTINUE
+C
+	IF (PLOT_ON) THEN
+	   CALL GSWKWN(PLOT_WKID,
+     &		(WINDOW(1)-LIMITS(1))*NDCX*WFACX/RANGEX,
+     &		(WINDOW(2)-LIMITS(1))*NDCX*WFACX/RANGEX,
+     &		(WINDOW(3)-LIMITS(3))*NDCY*WFACY/RANGEY,
+     &		(WINDOW(4)-LIMITS(3))*NDCY*WFACY/RANGEY )
+C
+	   CALL GSWKVP(PLOT_WKID,
+     &		PLOT_VIEW(1),PLOT_VIEW(2),PLOT_VIEW(3),PLOT_VIEW(4))
+	ENDIF
+C
+C draw raster backdrop
+	IF (OVERLAYS_INUSE) CALL DISP_RAS
+C
+C suppress drawing vectors, if required
+	IF (OVERLAYS_INUSE.AND.(.NOT.VECOPT.OR.VECSUPP)) GOTO 35
+C
+C set up 'involved' bitmap (all involved if using segments)
+	IF (USESEG.AND..NOT.UPDATE_SEG) THEN
+	   CALL VIOCLR(%VAL(INVLVD),INVLVD_SIZE,-1)
+	ELSE
+	   CALL VIOCLR(%VAL(INVLVD),INVLVD_SIZE,0)
+	ENDIF
+C
+C if a transformation is set up (IMAGE SETUP) then transform the corners
+C of WINDOW from image/screen space back to IFF space
+	IF (.NOT.PLOT_ON) HADIMG = SETUP.AND.WARP_TO_IMAGE
+	IF (SETUP.AND.WARP_TO_IMAGE) THEN
+	   IF (.NOT.PLOT_ON) CALL CPYPAK(4,WINDOW,WINIMG)! save image window
+	   CALL TRXWIN(.FALSE.)
+	ENDIF
+C
+	IF (.NOT.USESEG.OR.UPDATE_SEG) THEN
+C
+C turn off clipping, if drawing whole thing
+	   IF (WINDOW(1).EQ.LIMITS(1).AND.WINDOW(2).EQ.LIMITS(2).AND.
+     &         WINDOW(3).EQ.LIMITS(3).AND.WINDOW(4).EQ.LIMITS(4)
+     &						) CALL GSCLIP(GNCLIP)
+	   YLIM = (WINDOW(4)-YOFF)/YSECTW
+	   IF (YLIM.GE.XRANGE) YLIM = XRANGE-1
+	   XLIM = (WINDOW(2)-XOFF)/XSECTW
+	   IF (XLIM.GE.YRANGE) XLIM = YRANGE-1
+C
+	   DO 20 J=
+     &         IFIX((WINDOW(3)-YOFF)/YSECTW)*YRANGE,YLIM*YRANGE,YRANGE
+	      DO 20 I=IFIX((WINDOW(1)-XOFF)/XSECTW)+1,XLIM+1
+	         CALL LIB$INSV(1,I+J,1,%VAL(INVLVD))
+CCCCC	         INVLVD(I+J) = .TRUE.
+20	   CONTINUE
+	ENDIF
+C
+C If using segments, and selections not changed, just redraw segments
+	IF (USESEG.AND..NOT.UPDATE_SEG.AND..NOT.CHASEL) GOTO 35
+C
+C If using segments, and all selected, then set all visible
+22	IF (USESEG.AND..NOT.UPDATE_SEG
+     &	      .AND.SAMAPS.AND.SALAYS.AND.SAFCS.AND.SAFSNS
+     &	      .AND.SAREGS.AND.SAFLGS.AND.SACATS.AND.SASTYS
+     &	      .AND.SAACS)  THEN
+C
+C set all segments (except limbo) visible
+	   CALL LSALLV
+	ELSE
+C
+C Either not using segments, or not all selected, so scan features
+C set all segments invisible
+	   IF (USESEG.AND..NOT.UPDATE_SEG) CALL LSALLI
+C
+C set up constraints for RELVNT
+	   PNFCNS = .FALSE.		! no NFs to be ignored
+	   AUXCNS = .FALSE.		! ditto
+C
+C clear DRAFLG bit in all packs in involved sectors
+C - if renewing data in segment store, flag all packs as not in segment
+C   store
+	   DO 25 I=1,TOPSEC
+	      IF (USESEG.AND.UPDATE_SEG) THEN
+	         CALL CLRSEC(DRAFLG.OR.SEGFLG,I)
+	      ELSE
+	         IF (LIB$EXTZV(I,1,%VAL(INVLVD))) CALL CLRSEC(DRAFLG,I)
+	      ENDIF
+25	   CONTINUE
+C
+C and off we go
+	   IF (SRTOPT) THEN		! want sorted by FSN
+C
+C make a pass saving the pack addresses
+	      IF (SRTMEM()) THEN	! get memory to sort in
+	         CALL MOAN(MSG_CANTSORT)
+	      ELSE
+	         DO 27 I=1,TOPSEC
+	            IF (LIB$EXTZV(I,1,%VAL(INVLVD))) 
+     &	                     CALL SCNSEC(I,SAVEDP,DRAFLG)
+C
+C if we have run out of sorting memory, need to start again by clearing flags
+C and getting more memory
+	            IF (SORPTR .GE. SORLIM) THEN
+	               SORFAC = SORFAC + (SORFAC * SORFAC_INC)
+	               GOTO 22
+	            ENDIF
+	            IF (HADBREAK()) GOTO 35 ! CTRL/C typed - abandon
+27	         CONTINUE
+	         CALL DRWSAV		! sort and draw them
+	      ENDIF
+	   ELSE				! just normal order
+C
+C make a pass actually drawing
+	      DO 30 I=1,TOPSEC
+	         IF (LIB$EXTZV(I,1,%VAL(INVLVD))) 
+     &	                  CALL SCNSEC(I,DRAWDP,DRAFLG)
+	         IF (HADBREAK()) GOTO 35 ! CTRL/C typed - abandon
+30	      CONTINUE
+	   ENDIF
+	ENDIF
+	CHASEL = .FALSE.		! changed selections done
+C
+C update the workstations, and restore temporary de-activations
+35	DO 40 WKID=1,WSMAX
+	   IF (WKOP(WKID)) THEN
+	      IF (WKAC(WKID)) THEN
+	         IF (USESEG.AND..NOT.UPDATE_SEG) THEN
+	            CALL LRSGWK(WKID)		! redraw segments
+	         ELSE
+	            CALL LUWK(WKID,GSUPP)	! update workstation
+	         ENDIF
+	      ELSE
+	         CALL GACWK(WKID)
+	         WKAC(WKID) = .TRUE.
+	         WKSUPP(WKID) = .FALSE.
+	      ENDIF
+	   ENDIF
+40	CONTINUE
+C
+	IF (PLOT_ON) THEN
+	   CALL LSG_PLANE_SELECT(PLOT_WKID,-1)
+	   CALL LSG_PLANE_OFFSET(PLOT_WKID,0)
+	   CALL LUWK(PLOT_WKID,GSUPP)
+	   CALL GDAWK(PLOT_WKID)
+	   USESEG = SAV_USESEG
+C
+C restore original setting of WINDOW and WFACX/Y
+	   CALL CPYPAK(4,SAV_WINDOW,WINDOW)
+	   WFACX = SAV_WFACX
+	   WFACY = SAV_WFACY
+	   CALL GSVP(1,0.0,NDCX*WFACX,0.0,NDCY*WFACY)
+C
+C restore scales and nominal linewidth to FRTLIB
+	   SCLDIS = SAV_SCLDIS
+	   NOMLW = SAV_NOMLW
+	   HWTOPT = SAV_HWTOPT
+	   CALL SRIUNI(1.0/SCLDIS,SRISCL,SRIROT,ENLSCL)
+	   CALL SRISLW(NOMLW*SCLDIS/SCLFRT)
+	ENDIF
+C
+	VECSUPP = .FALSE.
+	CLEASUPP = .FALSE.		! don't suppress next time
+	IF (KRSINI) CALL LUWK(MAXDISP+1,GSUPP)	! specially for KRISS
+C
+C ensure clipping on again
+	CALL GSCLIP(GCLIP)
+C
+C clear flag indicating we are in FLVIEW (e.g. for LSVIS)
+	VIEWNG = .FALSE.
+	IF (.NOT.PLOT_ON) UPDATE_SEG = .FALSE.
+C
+999	RETURN
+	END

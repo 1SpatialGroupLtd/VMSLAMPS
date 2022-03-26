@@ -1,0 +1,125 @@
+	.TITLE	TXM
+	.IDENT	/21FE84/
+
+
+;	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+
+; Interface to Tektronix 4010 terminal
+
+;MOD	TXFLSH added					AJW	21-Feb-1984
+;MOD	_PSECT FLF added				AJW	31-Mar-1982
+;MOD	WARNSIGNAL added				AJW	16-Dec-1980
+;MOD	TXWT, TXRD, FFIEFN  => long in R1		AJW	24-Nov-1980
+;MOD	TXRD mended (R1 not preserved across QIO)	MCF	30-Oct-1980
+;MOD	Created from RSX version by P. Cross		SCM	   Oct-1980
+
+
+	.LIBRARY	/LSL$LIBRARY:LSLMACLIB/
+
+	DATA_PSECT FLF
+
+; I/O status block
+TXISB:	.BLKL	2
+
+; 20ms wait
+
+MS20:	.LONG	-200000,-1
+
+; buffer for TXFLSH
+
+FLSHLEN=4
+FLSHBUF:	.BLKB	FLSHLEN
+
+	CODE_PSECT FLF
+
+; TXWT(CH,N) writes N bytes from byte array CH
+
+	.ENTRY	TXWT,^M<R2,R3>
+	MOVL	4(AP),R3		; buffer address
+	MOVZWL	@8(AP),R2		; word count
+	MOVZWL	FFOEFN,R1
+	$QIOW_S		FUNC=#IO$_WRITEVBLK!IO$M_NOFORMAT,- ; issue qio
+			CHAN=FFOLUN,-		  ; wait for completion
+			EFN=R1,-
+			IOSB=TXISB,-
+			P1=(R3),-
+			P2=R2
+	BLBC	R0,20$			; successfully queued ?
+	BLBS	TXISB,30$		; i/o successful ?
+	MOVZWL	TXISB,R0
+20$:	WARNSIGNAL
+30$:	RET
+
+
+; TXRD(CH,N) reads N bytes from 4010 to byte array CH
+
+	.ENTRY	TXRD,^M<R2,R3>
+	MOVL	4(AP),R3		; buffer address
+	MOVZWL	@8(AP),R2		; word count
+	MOVZWL	FFIEFN,R1
+	$QIOW_S		FUNC=#IO$_READVBLK!IO$M_NOFILTR, -
+			CHAN=FFILUN,--		; issue qio
+			EFN=R1,-		; and wait for completion
+			IOSB=TXISB,-
+			P1=(R3),-
+			P2=R2
+
+	BLBC	R0,20$			; successfully queued ?
+	BLBS	TXISB,10$		; i/o successful ?
+	MOVZWL	TXISB,R0
+20$:	WARNSIGNAL
+10$:	BICB2	#^O0200,(R3)+		; clear parity bit
+	SOBGTR	R2,10$			; for each byte
+	RET
+
+; TXFLSH flushes the type-ahead buffer
+
+	.ENTRY	TXFLSH,^M<R2>
+
+	MOVZWL	FFIEFN,R2
+
+	$SETIMR_S	EFN=R2,-	; wait for 20 milliseconds
+			DAYTIM=MS20
+	BLBC	R0,20$
+
+	$WAITFR_S	EFN=R2
+	BLBC	R0,20$
+
+; and do a read with zero time-out to flush the type-ahead buffer
+	$QIOW_S		FUNC=#IO$_READVBLK!IO$M_TIMED!IO$M_NOFILTR, -
+			CHAN=FFILUN,-		; issue qio
+			EFN=R2,-		; and wait for completion
+			IOSB=TXISB,-
+			P1=FLSHBUF,-		; buffer address
+			P2=#FLSHLEN,-		; buffer length
+			P3=#0			; timeout
+
+	BLBC	R0,20$			; successfully queued ?
+	MOVZWL	TXISB,R0
+	CMPL	R0,#SS$_TIMEOUT		; ok if time-out
+	BEQL	10$
+	BLBS	TXISB,10$		; i/o successful ?
+20$:	WARNSIGNAL
+10$:	RET
+
+
+; TXCODE(IX,IY,CH) where CH(4) is a byte array
+; converts (IX,IY) into 4 bytes for 4010 GRAPH mode
+
+	.ENTRY	TXCODE,^M<R2,R3,R4>
+	MOVZWL	@4(AP),R2		; IX
+	MOVZWL	@8(AP),R3		; IY
+	MOVL	12(AP),R4			; CH
+	EXTZV	#5,#5,R3,R1		; high Y
+	BISB3	#^O040,R1,(R4)+		; tag and save
+	EXTZV	#0,#5,R3,R1		; low Y
+	BISB3	#^O0140,R1,(R4)+	; tag and save
+	EXTZV	#5,#5,R2,R1		; high X
+	BISB3	#^O040,R1,(R4)+		; tag and save
+	EXTZV	#0,#5,R2,R1		; low X
+	BISB3	#^O0100,R1,(R4)		; tag and save
+	RET
+
+	.PSECT
+
+	.END

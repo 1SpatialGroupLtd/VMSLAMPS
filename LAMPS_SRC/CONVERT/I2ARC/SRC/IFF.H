@@ -12,6 +12,19 @@
 
 #define PEN_DOWN 1				/* used in ST entries */
 
+struct attvals {
+	int	intval;
+	float	realval;
+	char	text[256];
+	struct	attvals *next;
+	};
+
+struct attlist {
+	int	accode;
+	struct	attlist *next;
+	struct	attvals *vals;
+	};
+
 typedef struct range_tag {			/* range values */
 	float
 		xmin,	xmax,	ymin,	ymax;

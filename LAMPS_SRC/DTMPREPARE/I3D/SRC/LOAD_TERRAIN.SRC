@@ -1,0 +1,410 @@
+	LOGICAL FUNCTION LOAD_TERRAIN(
+     & 	  NOD_I,NOD_R,NOD_L,ARM_I,ARM_L,LNK_I,LNK_R,LNK_L,PUP_I,
+     &	  PDN_I,NET_I,STN_I,STN_R,STL_I,STL_L,MNX_I,MNX_R,PNT_I,PNT_R,
+     &	  MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+C
+***	MODULE	LOAD_TERRAIN
+***	IDENT	14JL92
+C	
+C Copyright Laser-Scan, Cambridge, England.
+C 	
+C Created 						ALB 19-Apr-1988
+C
+CMOD	 Changed the order in which I3D does things in 
+C	 so that the ONEARM stage is no longer required	ACM 21-Dec-1988
+C
+CMOD 889 Now passes pen control to CBINOUT		TJH 30-May-1990
+C
+C The purpose of this routine is to load CB's for line heighted line
+C features (eg contours) and test whether the rectangle overlaps or is
+C in close proximity (ie within touch tolerance) to river or ridge line 
+C feature.  If this condition is satisified intersection processing is
+C performed to calculate touching or intersection point.  If feature is 
+C found to touch or intersect river/ridgeline, a new logical node is
+C calculated.
+C
+	IMPLICIT NONE
+C	
+C Parameters
+        INCLUDE 'LSL$CMNIFF:IFFMSG.PAR'
+        INCLUDE 'LSL$CMNI3D:I3DMSG.PAR'
+        INCLUDE 'LSL$CMNI3D:CONSTANTS.PAR'
+C
+C Common blocks
+        INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+	INCLUDE 'LSL$CMNI3D:GROUP.CMN'
+	INCLUDE 'LSL$CMNI3D:SELECT.CMN'
+C
+C Structures
+        INCLUDE 'LSL$CMNIFF:CB.STR'
+C
+C Records
+	RECORD /IFF_CBH/ CBH
+	RECORD /IFF_CBD/ CBD
+C
+	INTEGER	MAXCBROW
+	PARAMETER	(MAXCBROW = IFF_MAXCBROW + 1) 
+C
+C Dynamically assigned array argument declarations
+	INCLUDE 'LSL$CMNI3D:VM_ARG_DECL.SRC'
+C
+C Workspace
+	REAL		R_HEIGHT(2)	! hgts from AC 3 or AC 80/81s
+	REAL		LNK_RBUFF(LNK_ATTRIBS)! real form of LNK buff
+	INTEGER		LNK_IBUFF(LNK_ATTRIBS)! integer form of LNK buff
+	INTEGER		I_HEIGHT	! height from AC 2 entry
+C
+C Buffer x y values from CB
+	REAL		DATA_RBUFF(3,IFF_MAXCBROW)
+	INTEGER		PNT_IBUFF(PNT_ATTRIBS,MAXCBROW)! terrain xy vals
+	REAL		PNT_RBUFF(PNT_ATTRIBS,MAXCBROW)! terrain xy vals
+	INTEGER		NROWS		! last row to read (from CB hdr)
+	INTEGER		FEAT_CODE	! Graphical Code (FS entry)
+	INTEGER		FSN		! feature number
+C
+	INTEGER		TOTPTS		! tot num of points in feature
+	REAL		XMIN		! minimum x value in feature
+	REAL		YMIN		! minimum y value in feature
+	REAL		XMAX		! max x value in feature
+	REAL		YMAX		! max y value in feature
+C
+	INTEGER		LAST_POINT	! last point in PNT_RBUFF for 
+					! previous CB in feature
+	INTEGER		PNT_OFFSET	! to offset by 1 into array for 
+					! 2nd and subsequent CB's in ftr
+C
+	LOGICAL		IN_CLIFF	! T if FC in cliff group
+	LOGICAL		IN_CONTOUR	! T if FC in contour group
+	LOGICAL		IN_INDEX	! T if FC in index group
+	LOGICAL		IN_LAKE		! T if FC in lake group
+	LOGICAL		IN_SPOTHEIGHT	! T if FC in spot height group
+	LOGICAL		IN_SUPPLE	! T if FC in supplementary group
+	LOGICAL		HAD_AC		! T if valid AC found
+	LOGICAL		AC_8081		! T if AC 80 or AC 81 found
+	LOGICAL		CHECK_OK	! T if check finds valid item
+	LOGICAL		REQUIRED_FC	! required FC (ie riv or ridg)
+	LOGICAL		FOUND_CB	! CB found for current feature
+	LOGICAL		FIRST_CB	! T at start of first CB in FSN
+	LOGICAL		PENDOWN		! CB pen control
+C
+	INTEGER*2	LUN		! IFF logical unit number
+	INTEGER*2	IECODE		! IFF entry code
+	INTEGER*2	IELEN		! IFF entry length
+        INTEGER*2       IENDS           ! additional string variable
+        INTEGER*2	ISEQ            ! feature number
+	INTEGER		ACTYPE		! AC type
+C 
+	INTEGER		II		! Subscr for PNT_RBUFF array
+	INTEGER		I		! loop counter
+	LOGICAL		OK		! return code
+C
+	EQUIVALENCE(	LNK_IBUFF, LNK_RBUFF)
+C
+C Functions
+	LOGICAL		IFFOPEN
+	LOGICAL		CHECK_LAYER
+	LOGICAL		CHECK_FSN
+	LOGICAL		CHECK_FC
+	LOGICAL		CHECK_GROUP
+	LOGICAL		INTSECT_SPOT
+	LOGICAL		INTSECT
+C
+C **********************************************************************
+C
+	LOAD_TERRAIN = .FALSE.			! assume failure
+C
+C .......................  initialise ..................................
+C
+C Get LUN for input IFF terrain file
+C
+	LUN = TERRAIN_LUN			! get IFF LUN
+C
+C .......................... open ......................................
+C
+C Re-open IFF file using file ID
+C
+	IF (.NOT.OPEN_TERRAIN) THEN
+	   OK = IFFOPEN(LUN,TERRAIN_FNAME(TERRAIN_NUM),
+     &	      		TERRAIN_FID(1,TERRAIN_NUM),,1)
+	   IF (.NOT.OK) THEN		
+	      CALL LSL_PUTMSG(OK)
+	      GOTO 999
+	   ENDIF
+	   OPEN_TERRAIN = .TRUE.
+	ENDIF
+C
+C Select file and rewind
+C
+	CALL IFFSEL(LUN)		! select IFF file	
+	CALL IFFRWD			! rewind input file
+C
+C .......................... get next entry in IFF .....................
+C
+90	CALL IFFNXT(IECODE,IELEN)
+C
+	IF (IELEN.EQ.-1) GOTO 700		! end of file
+C
+C Put file level tests below here (call this level 1) 
+C
+	IF (IECODE.EQ.'NF') GOTO 200 		! new feature
+	IF (IECODE.EQ.'FS') GOTO 300		! feature status
+	IF (IECODE.EQ.'AC') GOTO 350		! AC entry
+	IF (IECODE.EQ.'CB') GOTO 400		! coordinate block
+	IF (IECODE.EQ.'EF') GOTO 499		! end of feature
+	IF (IECODE.EQ.'EJ') GOTO 700		! end of file
+	IF (IECODE.EQ.'NO') GOTO 100		! new layer
+C
+C ----------------------------------------------------------------------
+C
+	GOTO 90				! no more entries of interest
+C
+C ----------------------------------------------------------------------
+C 'NO' found 
+C
+100	CALL IFFRLA(.TRUE.)			! switch on look ahead
+C
+	OK = CHECK_LAYER(CHECK_OK,.FALSE.)	! required layer?
+	IF (.NOT.OK) THEN
+	   GOTO 799
+	ENDIF
+C
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C 'NF' found 
+C
+200	HAD_AC = .FALSE.
+	OK = CHECK_FSN(FSN,CHECK_OK,.FALSE.)	! required FSN?
+	IF (.NOT.OK) THEN
+	   GOTO 799
+	ENDIF
+C
+	IF (CHECK_OK) THEN
+	   TOTPTS = 0
+	   FOUND_CB = .FALSE.
+	   FIRST_CB = .TRUE.
+	ENDIF
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C 'FS' found 
+C
+300	OK = CHECK_FC(FEAT_CODE,CHECK_OK,.FALSE.)	! required fc?
+	IF (.NOT.OK) THEN
+	   GOTO 799
+	ENDIF
+C
+C ......................................................................
+C Reject the feature if it is not in one of the following groups  
+C
+	IN_CLIFF      = .FALSE.
+	IN_CONTOUR    = .FALSE.
+	IN_INDEX      = .FALSE.
+	IN_LAKE       = .FALSE.
+	IN_SPOTHEIGHT = .FALSE.
+	IN_SUPPLE     = .FALSE.
+C
+	IF (CHECK_OK) THEN
+	   OK = CHECK_GROUP(FEAT_CODE,CLIFF,.FALSE.,
+     &	      IN_CLIFF,.FALSE.)				! cliff ?
+C
+	   IF (.NOT.OK) THEN
+	      GOTO 799
+	   ENDIF
+C
+	   IF (IN_CLIFF) GOTO 310
+C
+	   OK = CHECK_GROUP(FEAT_CODE,CONTOUR,.FALSE.,
+     &	      IN_CONTOUR,.FALSE.)			! contour ?
+C
+	   IF (.NOT.OK) THEN
+	      GOTO 799
+	   ENDIF
+C
+	   IF (IN_CONTOUR) GOTO 310
+C
+	   OK = CHECK_GROUP(FEAT_CODE,INDEX_C,.FALSE.,
+     &	      IN_INDEX,.FALSE.)				! index ?
+C
+	   IF (.NOT.OK) THEN
+	      GOTO 799
+	   ENDIF
+C
+	   IF (IN_INDEX) GOTO 310
+C
+	   OK = CHECK_GROUP(FEAT_CODE,LAKE,.FALSE.,
+     &	      IN_LAKE,.FALSE.)				! lake ?
+C
+	   IF (.NOT.OK) THEN
+	      GOTO 799
+	   ENDIF
+C
+	   IF (IN_LAKE) GOTO 310
+C
+	   OK = CHECK_GROUP(FEAT_CODE,SPOT,.FALSE.,
+     &	      IN_SPOTHEIGHT,.FALSE.)			! spot hgt ?
+C
+	   IF (.NOT.OK) THEN
+	      GOTO 799
+	   ENDIF
+C
+	   IF (IN_SPOTHEIGHT) GOTO 310
+C
+	   OK = CHECK_GROUP(FEAT_CODE,SUPPLEMENTARY,.TRUE.,
+     &        IN_SUPPLE,.FALSE.)			! supplementary?
+C
+	   IF (.NOT.OK) THEN
+	      GOTO 799
+	   ENDIF
+C
+	   IF (IN_SUPPLE) GOTO 310
+C
+	   CHECK_OK = .FALSE.				! not required
+	ENDIF
+C
+310	REQUIRED_FC = CHECK_OK
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C 'AC' found
+C
+350	CALL EIHRI(ACTYPE,1,1)
+C
+	IF (ACTYPE.EQ.2) THEN		! integer height
+	   AC_8081 = .FALSE.
+	   CALL EIHRI(I_HEIGHT,1,2)
+	   LNK_RBUFF(LNK_ZZZ) = FLOAT(I_HEIGHT)
+	   HAD_AC = .TRUE.
+	ELSEIF (ACTYPE.EQ.3) THEN	! real height
+	   AC_8081 = .FALSE.
+	   CALL EIHRR(R_HEIGHT(1),1,2)
+	   LNK_RBUFF(LNK_ZZZ) = R_HEIGHT(1)
+	   HAD_AC = .TRUE.
+	ELSEIF (IN_CLIFF.AND.(ACTYPE.EQ.80.OR.ACTYPE.EQ.81)) THEN
+	   IF (AC_8081) THEN
+	      CALL EIHRR(R_HEIGHT(2),1,2)
+	      IF (R_HEIGHT(2).GT.R_HEIGHT(1)) THEN
+		 LNK_RBUFF(LNK_ZZZ) = R_HEIGHT(1)
+	      ELSE
+		 LNK_RBUFF(LNK_ZZZ) = R_HEIGHT(2)
+	      ENDIF
+	      HAD_AC = .TRUE.
+	   ELSE
+	      CALL EIHRR(R_HEIGHT(1),1,2)
+	      AC_8081 = .TRUE.
+	   ENDIF
+	ELSEIF (.NOT.HAD_AC) THEN
+	   REQUIRED_FC = .FALSE.
+	ENDIF
+C
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C 'CB' found
+C
+400	IF (.NOT.REQUIRED_FC) GOTO 90	! bypass CB if LNK not required
+C
+C load CB data into DATA_RBUFF
+	CALL CBINOUT(DATA_RBUFF,.FALSE.,3,NROWS,PENDOWN)
+C
+C set FOUND_CB to .TRUE. if data found
+	IF (NROWS.GT.0) THEN
+	   FOUND_CB = .TRUE.
+C
+	   IF (FIRST_CB) THEN
+	      PNT_OFFSET = 0
+	      FIRST_CB = .FALSE.
+	      PNT_RBUFF(PNT_XXX,1) = DATA_RBUFF(1,1)
+	      PNT_RBUFF(PNT_YYY,1) = DATA_RBUFF(2,1)
+	   ELSE
+	      PNT_OFFSET = 1
+	      PNT_RBUFF(PNT_XXX,1) = PNT_RBUFF(PNT_XXX,LAST_POINT)
+	      PNT_RBUFF(PNT_YYY,1) = PNT_RBUFF(PNT_YYY,LAST_POINT)
+	   ENDIF
+C
+	   XMAX = PNT_RBUFF(PNT_XXX,1)
+	   YMAX = PNT_RBUFF(PNT_YYY,1)
+	   XMIN = PNT_RBUFF(PNT_XXX,1)
+	   YMIN = PNT_RBUFF(PNT_YYY,1)
+C
+	   DO 440 I = 1,NROWS
+	      TOTPTS = TOTPTS + 1
+	      IF (IN_SPOTHEIGHT) GOTO 441   ! intersect spot height LNKs
+C
+	      II = PNT_OFFSET + I
+	      IF (II.GT.1) THEN
+	         PNT_RBUFF(PNT_XXX,II) = DATA_RBUFF(1,I)
+	         PNT_RBUFF(PNT_YYY,II) = DATA_RBUFF(2,I)
+C
+	         IF (DATA_RBUFF(1,I).GT.XMAX) XMAX = DATA_RBUFF(1,I)
+	         IF (DATA_RBUFF(2,I).GT.YMAX) YMAX = DATA_RBUFF(2,I)
+	         IF (DATA_RBUFF(1,I).LT.XMIN) XMIN = DATA_RBUFF(1,I)
+	         IF (DATA_RBUFF(2,I).LT.YMIN) YMIN = DATA_RBUFF(2,I)
+	      ENDIF
+440	   CONTINUE
+C
+	   LAST_POINT = II
+	ENDIF
+C
+441	LNK_RBUFF(LNK_MXX) = XMAX
+	LNK_RBUFF(LNK_MXY) = YMAX
+	LNK_RBUFF(LNK_MNX) = XMIN
+	LNK_RBUFF(LNK_MNY) = YMIN
+	LNK_IBUFF(LNK_FIN) = TOTPTS
+C
+C ......................................................................
+C Call functions to do intersection processing on terrain vector
+C
+	IF (IN_SPOTHEIGHT) THEN		! intersect spot height LNKs
+	   OK = INTSECT_SPOT(
+     &			NROWS,
+     &			LNK_IBUFF,
+     &			LNK_RBUFF,
+     &			PNT_RBUFF,
+     &			NOD_I,
+     &			NOD_R,
+     &			NOD_L,
+     &			LNK_I,
+     &			LNK_R,
+     &			MNX_I,
+     &			PNT_I,
+     &			PNT_R,
+     &			MAX_NODS,
+     &			MAX_LNKS,
+     &			MAX_PNTS)
+	ELSE
+	   OK = INTSECT(NROWS,	! intersect line features
+     &			LNK_IBUFF,
+     &			LNK_RBUFF,
+     &			PNT_RBUFF,
+     &			LNK_I,
+     &			LNK_R,
+     &			MNX_I,
+     &			PNT_I,
+     &			PNT_R,
+     &			MAX_LNKS,
+     &			MAX_PNTS)
+	ENDIF
+C
+	IF (.NOT.OK) THEN
+	   GOTO 799
+	ENDIF
+C
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C
+499	GOTO 90				! 'EF' found
+C
+C ......................................................................
+C
+700	LOAD_TERRAIN = .TRUE.
+C
+799	CALL IFFRLA(.FALSE.)		! switch off look ahead
+	CALL IFFCLO(LUN)		! close IFF
+	OPEN_TERRAIN = .FALSE.
+C
+999	RETURN
+	END
+C

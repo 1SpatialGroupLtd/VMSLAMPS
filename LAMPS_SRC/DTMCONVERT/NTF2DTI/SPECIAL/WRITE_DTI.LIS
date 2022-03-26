@@ -1,0 +1,442 @@
+
+                                                                 6-Aug-1997 09:37:46	VAX FORTRAN V5.9-173                Page   1
+                                                                 6-Aug-1997 09:37:46	[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.FOR;3 
+
+00001   	LOGICAL FUNCTION DTI_WRITE
+00002   C
+00003   C
+00004   C Copyright Laser-Scan Ltd, Cambridge, England
+00005   C
+00006   C Author	IM	07-Apr-1988
+00007   C
+00008   C Opens and writes to the DTI file
+00009   C
+00010   CMOD	added messages to errors			SG	19-Aug-1991
+00011   C
+00012   	IMPLICIT NONE
+00013   C
+00014   C Messages:
+00015   	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+00288   	INCLUDE 'HERE:NTF2DTIMSG.PAR'
+00393   	INCLUDE 'LSL$CMNDTI:DTILIBMSG.PAR'
+00466   C
+00467   C Commons:
+00468   	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'
+00529   	INCLUDE	'HERE:FILENAME.CMN'
+00549   C
+00550   	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+00665   	INCLUDE 'LSL$CMNDTI:DTIPROJ.CMN'
+00799   C
+00800   	INCLUDE 'HERE:COMMANDS.CMN'
+00819   	INCLUDE	'HERE:RECORD.CMN'
+00842   	INCLUDE	'HERE:NTFDATA.CMN'
+00903   	INCLUDE	'HERE:LUNS.PAR'
+00913   C
+00914   C Functions:
+00915   	INTEGER*4	DTI_CREATE		! create a DTI file
+00916   	INTEGER*4	DTI_COPY_DATA		! copy data to DTI file
+00917   	INTEGER*4	DTI_CLOSE		! close DTI file
+00918   	LOGICAL		DTI_PRINT_HEADER
+00919   	LOGICAL		DTI_PRINT_PROJECTION
+00920   	LOGICAL		DTI_MINMAX_DATA
+00921   	LOGICAL		DTI_WRITE_PROJ_REC
+00922   	LOGICAL		READ_GRIDREC		! read the grid data
+00923   	LOGICAL		READ_NTF_RECORD		! read the next record
+00924   C
+00925   C Workspace:
+00926   	INTEGER		OK			! Success flag
+00927   	INTEGER		I			! DO loop counter
+00928   	INTEGER*4	IERR,RETVAL		! Error return
+00929   	INTEGER*4	BYTE_OFFSET		! offset of proj rec
+00930   	INTEGER		HEADER_SIZE		! Size of this header
+00931   	INTEGER		HEAD_SIZE(5)		! Sizes of the different headers
+00932   	INTEGER*4	COLUMN(32767)		! Current column to fill
+00933   	CHARACTER*80	MSG_STR
+00934   	CHARACTER	ESC
+00935   	PARAMETER	(ESC = CHAR(27))
+00936   C
+00937   	DATA HEAD_SIZE /256,256,3584,32,32/
+00938   C
+00939   C ..................................................................
+00940   	DTIOPEN = .FALSE.
+
+DTI_WRITE                                                        6-Aug-1997 09:37:46	VAX FORTRAN V5.9-173                Page   2
+                                                                 6-Aug-1997 09:37:46	[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.FOR;3 
+
+00941   C
+00942   C Calculate the header size
+00943   C
+00944   	IF (PROJECT) THEN
+00945   	   HEADER_SIZE=HEAD_SIZE(5)+DTIPROJ_RECORD_LENGTH
+00946   	ENDIF
+00947   C
+00948   C ..................................................................
+00949   C
+00950   	DATA_TYPE(1)=3				! longword word
+00951   	X_OFFSET(DTILUN) = X_ORIG
+00952   	Y_OFFSET(DTILUN) = Y_ORIG
+00953   	X_GRID(1) 	 = X_SAMP
+00954   	Y_GRID(1) 	 = Y_SAMP
+00955   	X_EXTENT(1) 	 = N_COLUMNS
+00956   	Y_EXTENT(1) 	 = N_ROWS
+00957   C
+00958   	RETVAL = DTI_CREATE(DTILUN,DTIFILE(1:DTILEN),DTILEN,
+00959        &			HEADER_TYPE(1),		! LSLA,Uhl1,Ted4
+00960        &			HEADER_SIZE,		! + 1600 if proj. rec.
+00961        &			DATA_TYPE(1),		! word data
+00962        &			N_COLUMNS,N_ROWS,	! From GRIDHREC
+00963        &			IERR)			! Error return
+00964   C
+00965   	OK = RETVAL		!.ne.lsl__normal
+00966   	IF (.NOT.OK) THEN
+00967   	   CALL LSL_PUTMSG(NTF2DTI__DTICREATE,DTIFILE(1:DTILEN))
+00968   	   CALL LSL_ADDMSG(RETVAL)
+00969   	   IF (RETVAL.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+00970   	   GOTO 9999
+00971   	ENDIF
+00972   C
+00973   	DTIOPEN = .TRUE.
+00974   	IF (LOG) CALL LSL_PUTMSG(NTF2DTI__DTIOPEN,DTIFILE(1:DTILEN))
+00975   C
+00976   C ..................................................................
+00977   C Now add the projection record (if required)
+00978   C
+00979   	IF (PROJECT.AND.HEADER_TYPE(1).EQ.5) THEN
+00980   C
+00981   C Set up the variables needed for a projection record
+00982   C
+00983   	   DTIPROJ_RECORD_OFFSET(1) = 32	! start of proj rec
+00984   	   DTIPROJ_ORIGIN(1,1) = X_ORIG		! origin
+00985   	   DTIPROJ_ORIGIN(2,1) = Y_ORIG
+00986   	   DTIPROJ_SAMPLE(1,1) = X_SAMP 		! grid interval
+00987   	   DTIPROJ_SAMPLE(2,1) = Y_SAMP
+00988   C
+00989   	   IF (IS_OS) THEN	! we haven't read these values from the files
+00990   	      DTIPROJ_UNITS(1) 	    = 2		! metres
+00991   	      DTIPROJ_SPHEROID(1)   = 9		! Airy
+00992   	      DTIPROJ_PROJECTION(1) = 101	! UK national
+00993   	   ENDIF
+00994   C
+00995   	   BYTE_OFFSET=32
+00996   C
+00997   	   OK=DTI_WRITE_PROJ_REC(DTILUN,BYTE_OFFSET,IERR)	
+
+DTI_WRITE                                                        6-Aug-1997 09:37:46	VAX FORTRAN V5.9-173                Page   3
+                                                                 6-Aug-1997 09:37:46	[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.FOR;3 
+
+00998   	   IF (.NOT.OK) THEN
+00999   	      CALL LSL_PUTMSG(NTF2DTI__PROJREC)
+01000   	      CALL LSL_ADDMSG(OK)
+01001   	      IF (OK.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+01002   	      GOTO 9999
+01003   	   ENDIF
+01004   	ENDIF
+01005   C
+01006   C......................................................................
+01007   C CLEAR the bottom bit of the screen for messages
+01008   C
+01009   	IF (LOG.AND.IS_TERM) THEN
+01010   	  CALL LIB$PUT_OUTPUT(ESC//'[23H')
+01011   	  CALL WRITEF()
+01012   	  CALL WRITEF()
+01013   	  CALL WRITEF()
+01014   	ENDIF	
+01015   C
+01016   C ..................................................................
+01017   C Now read through the grid records and output the data
+01018   C
+01019   	DO 10 I=1,N_COLUMNS
+01020   C	..............................................................
+01021   C	   read the data
+01022   C
+01023   	   OK=READ_GRIDREC(COLUMN)		!automatically sets next COLUMN
+01024   	   IF (.NOT.OK) THEN
+01025   	     CALL LSL_PUTMSG(NTF2DTI__GRIDREC, 'GRIDREC')
+01026   	     GOTO 9999
+01027   	   ENDIF
+01028   C
+01029   C	   ..............................................................
+01030   C	   write the data
+01031   C
+01032   	   RETVAL=DTI_COPY_DATA(DTILUN,COLUMN,.TRUE., I, 1, 1,N_ROWS,IERR)
+01033   C
+01034   	   OK = RETVAL.EQ.DTI__NORMAL
+01035   	   IF (OK) THEN
+01036   	     IF (LOG.AND.IS_TERM) THEN
+01037   	       CALL EXPAND('%WS %F6.2%% complete',
+01038        &				MSG_STR,  100.0*REAL(I)/REAL(N_COLUMNS) )
+01039   	       CALL LIB$PUT_OUTPUT(ESC//'[21H'//ESC//'[1m'//MSG_STR(1:17)//
+01040        &				ESC//'[0m')	
+01041   	     ENDIF
+01042   	   ELSE
+01043   	      CALL LSL_PUTMSG(NTF2DTI__DTICOPYDATA)
+01044   	      CALL LSL_ADDMSG(RETVAL)
+01045   	      IF (RETVAL.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+01046   	      GOTO 9999
+01047   	   ENDIF
+01048   C
+01049   	   IF (I.NE.N_COLUMNS) THEN
+01050   21	      OK=READ_NTF_RECORD()
+01051   	      IF (.NOT.OK) THEN
+01052   		CALL WRITEF('%%NTF2DTI-E-MISC, not enough GRID_DATA records')
+01053   		GOTO 9999
+01054   	      ENDIF
+
+DTI_WRITE                                                        6-Aug-1997 09:37:46	VAX FORTRAN V5.9-173                Page   4
+                                                                 6-Aug-1997 09:37:46	[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.FOR;3 
+
+01055   C
+01056   	      IF (STRING(1:2).NE.'51') THEN
+01057   		CALL WRITEF('%%NTF2DTI-W-MISC, GRID_DATA record not found')
+01058   		CALL LSL_ADDMSG(NTF2DTI__UNEXPREC, STRING(1:2), RECNUM)
+01059   		GOTO 21
+01060   	      ENDIF
+01061   	   ENDIF
+01062   10	CONTINUE	
+01063   C
+01064   C ..................................................................
+01065   C Update the Max and Min values
+01066   C
+01067   	OK = DTI_MINMAX_DATA(DTILUN,.FALSE.,IERR)
+01068   	IF (.NOT.OK) THEN
+01069   	   CALL LSL_PUTMSG(NTF2DTI__MINMAX,DTIFILE(1:DTILEN))
+01070   	   CALL LSL_ADDMSG(OK)
+01071   	   IF (OK.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+01072   	   GOTO 9999
+01073   	ENDIF
+01074   C
+01075   C ..................................................................
+01076   C And print out the header we have built
+01077   C
+01078   	IF (LOG) THEN
+01079   	   OK=DTI_PRINT_HEADER(DTILUN,2)
+01080   	   IF (.NOT.OK) THEN
+01081   	      CALL LSL_PUTMSG(NTF2DTI__HEADER,DTIFILE(1:DTILEN))
+01082   	      GOTO 9999
+01083   	   ENDIF
+01084   	ENDIF
+01085   C
+01086   	IF (PROJECT) CALL DTI_PRINT_PROJECTION (DTILUN)
+01087   C
+01088   C ..................................................................
+01089   C Close the DTI file
+01090   C
+01091   	IF (LOG) THEN
+01092   	   CALL WRITEF
+01093   	   CALL WRITEF('%%NTF2DTI-I-MISC, closing DTI file')
+01094   	ENDIF
+01095   C
+01096   	RETVAL = DTI_CLOSE(DTILUN,.TRUE.,.FALSE.,IERR)
+01097   	IF (OK) OK = RETVAL
+01098   C
+01099   	IF (.NOT.RETVAL) THEN
+01100   	   CALL LSL_PUTMSG(NTF2DTI__DTICLOSERR,DTIFILE(1:DTILEN))
+01101   	   CALL LSL_ADDMSG(RETVAL)
+01102   	   IF (RETVAL.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+01103   	ELSE
+01104   	   DTIOPEN = .FALSE.
+01105   	   IF (LOG) CALL LSL_PUTMSG(NTF2DTI__DTICLOSED)
+01106   	ENDIF
+01107   C
+01108   C ..................................................................
+01109   C rejoin errors
+01110   C
+01111   9999	DTI_WRITE=OK
+
+DTI_WRITE                                                        6-Aug-1997 09:37:46	VAX FORTRAN V5.9-173                Page   5
+                                                                 6-Aug-1997 09:37:46	[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.FOR;3 
+
+01112   C
+01113   	RETURN
+01114   	END
+
+
+
+
+PROGRAM SECTIONS
+
+    Name				 Bytes   Attributes
+
+  0 $CODE                                 1047   PIC CON REL LCL   SHR   EXE   RD NOWRT QUAD
+  1 $PDATA                                 227   PIC CON REL LCL   SHR NOEXE   RD NOWRT QUAD
+  2 $LOCAL                              131776   PIC CON REL LCL NOSHR NOEXE   RD   WRT QUAD
+  3 LSL_FNAM_STR                           210   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  4 LSL_FNAM_LOG                            24   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  5 LSL_FNAM_LEN                            24   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  6 FILE_INT                                16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  7 FILE_CHR                               868   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  8 DTIHDR                                2520   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  9 DTIPROJ                               1584   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 10 COMMANDS                                40   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 11 RECORD1                                 86   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 12 RECORD2                                  9   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 13 NTFDATA                                 16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 14 DTIDATA                                128   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+
+    Total Space Allocated               138575
+
+
+ENTRY POINTS
+
+    Address  Type  Name          
+
+  0-00000000  L*4  DTI_WRITE     
+
+
+VARIABLES
+
+    Address  Type  Name                                               Address  Type  Name                            
+
+  2-00020088  I*4  BYTE_OFFSET                                     14-0000005C  I*4  COL_END                         
+ 14-00000068  I*4  COL_INV                                         14-00000058  I*4  COL_START                       
+ 10-00000018  L*4  DEDUCE_FILE                                      7-000000D9  CHAR DEVICE                          
+  6-00000004  I*4  DEVLEN                                           7-000001B2  CHAR DTIFILE                         
+  6-00000008  I*4  DTILEN                                          10-00000024  L*4  DTIOPEN                         
+ 12-00000008  CHAR EOR_MARKER                                      14-00000078  I*4  FIELD_WIDTH                     
+ 13-0000000C  L*4  FIXED                                            4-00000004  L*4  HAD_DEV                         
+  4-00000008  L*4  HAD_DIR                                          4-00000010  L*4  HAD_EXT                         
+  4-0000000C  L*4  HAD_NAM                                          4-00000000  L*4  HAD_NOD                         
+  4-00000014  L*4  HAD_VER                                          2-0002008C  I*4  HEADER_SIZE                     
+  2-0002007C  I*4  I                                                2-00020080  I*4  IERR                            
+ 14-00000074  I*4  INTERPRET                                       13-00000004  I*4  INTVER                          
+ 10-0000001C  L*4  IS_MAGTAPE                                      10-00000010  L*4  IS_OS                           
+ 10-00000020  L*4  IS_TERM                                         12-00000004  I*4  LENGTH                          
+  5-00000004  I*4  LEN_DEV                                          5-00000008  I*4  LEN_DIR                         
+  5-00000010  I*4  LEN_EXT                                          5-0000000C  I*4  LEN_NAM                         
+
+DTI_WRITE                                                        6-Aug-1997 09:37:46	VAX FORTRAN V5.9-173                Page   6
+01                                                               6-Aug-1997 09:37:46	[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.FOR;3 
+
+  5-00000000  I*4  LEN_NOD                                          5-00000014  I*4  LEN_VER                         
+ 13-00000000  I*4  LEVEL                                           10-00000000  L*4  LOG                             
+  7-00000000  CHAR LOGFILE                                          6-00000000  I*4  LOGLEN                          
+  2-00020022  CHAR MSG_STR                                         11-00000054  CHAR NTF$_REC_DESCR                  
+  7-0000028B  CHAR NTFFILE                                          6-0000000C  I*4  NTFLEN                          
+ 14-0000007C  I*4  NUM_FIELD                                       14-0000002C  I*4  N_COLUMNS                       
+ 14-00000028  I*4  N_ROWS                                           2-00020078  I*4  OK                              
+ 14-00000070  I*4  ORDER                                           10-00000004  L*4  OUTPUT                          
+ 10-00000008  L*4  PROJECT                                         12-00000000  I*4  RECNUM                          
+  2-00020084  I*4  RETVAL                                          10-00000014  L*4  REWIND                          
+ 14-00000064  I*4  ROW_END                                         14-0000006C  I*4  ROW_INV                         
+ 14-00000060  I*4  ROW_START                                       10-0000000C  L*4  SECT                            
+ 11-00000000  CHAR STRING                                           3-00000006  CHAR STR_DEV                         
+  3-0000001A  CHAR STR_DIR                                          3-000000A5  CHAR STR_EXT                         
+ 11-00000050  I*4  STR_LEN                                          3-0000007E  CHAR STR_NAM                         
+  3-00000000  CHAR STR_NOD                                          3-000000CC  CHAR STR_VER                         
+ 13-00000008  R*4  VERSION                                         14-00000014  I*4  XMAX                            
+ 14-00000010  I*4  XMIN                                            14-00000000  I*4  XYLEN                           
+ 14-00000008  R*4  XY_MULT                                         14-00000004  I*4  XY_UNIT                         
+ 14-00000030  R*4  X_ORIG                                          14-00000020  I*4  X_SAMP                          
+ 14-0000001C  I*4  YMAX                                            14-00000018  I*4  YMIN                            
+ 14-00000034  R*4  Y_ORIG                                          14-00000024  I*4  Y_SAMP                          
+ 14-0000000C  R*4  Z_MULT                                         
+
+
+ARRAYS
+
+    Address  Type  Name                                  Bytes  Dimensions
+
+  2-00000020  I*4  COLUMN                               131068  (32767)
+  8-00000318  I*4  DATA_OFFSET                              36  (9)
+  8-00000384  I*4  DATA_TYPE                                36  (9)
+  8-0000084C  L*4  DTILUN_INUSE                             36  (9)
+  9-00000024  R*8  DTIPROJ_ORIGIN                          144  (2, 9)
+  9-00000144  I*4  DTIPROJ_PROJECTION                       36  (9)
+  9-000001F8  R*8  DTIPROJ_PROJ_PARAMS                    1080  (15, 9)
+  9-00000000  I*4  DTIPROJ_RECORD_OFFSET                    36  (9)
+  9-000000B4  R*4  DTIPROJ_SAMPLE                           72  (2, 9)
+  9-00000120  I*4  DTIPROJ_SPHEROID                         36  (9)
+  9-000000FC  I*4  DTIPROJ_UNITS                            36  (9)
+  9-00000168  R*8  DTIPROJ_USER_SPHEROID                   144  (2, 9)
+  8-000003A8  CHAR DTI_NAME                               1152  (9)
+  8-00000828  I*4  DTI_NAME_LENGTH                          36  (9)
+  8-00000990  I*4  DTI_ORDER_CORNER                         36  (9)
+  8-000009B4  I*4  DTI_ORDER_DIRECTION                      36  (9)
+  8-00000900  I*4  DTI_WINDOW_NEX                           36  (9)
+  8-00000924  I*4  DTI_WINDOW_NEY                           36  (9)
+  8-000008B8  I*4  DTI_WINDOW_SWX                           36  (9)
+  8-000008DC  I*4  DTI_WINDOW_SWY                           36  (9)
+  8-0000096C  L*4  HAD_PROJ_RECORD                          36  (9)
+  8-00000360  I*4  HEADER_TYPE                              36  (9)
+  2-0000000C  I*4  HEAD_SIZE                                20  (5)
+  8-00000288  I*4  LATINT                                   36  (9)
+  8-00000240  I*4  LATORI                                   36  (9)
+  8-00000120  I*4  LATREC                                  144  (4, 9)
+  8-000002AC  I*4  LONINT                                   36  (9)
+  8-00000264  I*4  LONORI                                   36  (9)
+
+DTI_WRITE                                                        6-Aug-1997 09:37:46	VAX FORTRAN V5.9-173                Page   7
+01                                                               6-Aug-1997 09:37:46	[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.FOR;3 
+
+  8-000001B0  I*4  LONREC                                  144  (4, 9)
+  8-000000B4  I*4  MAX_LVALUE                               36  (9)
+  8-0000006C  R*4  MAX_RVALUE                               36  (9)
+  8-0000034E  I*2  MAX_WVALUE                               18  (9)
+  8-00000090  I*4  MIN_LVALUE                               36  (9)
+  8-00000048  R*4  MIN_RVALUE                               36  (9)
+  8-0000033C  I*2  MIN_WVALUE                               18  (9)
+  8-00000948  L*4  READ_ONLY                                36  (9)
+  8-000002D0  I*4  SEC_ADDR                                 36  (9)
+  8-000002F4  I*4  SEC_SIZE                                 36  (9)
+  2-0002001C  CHAR STD_ATTR_CODES                            6  (3)
+  2-00000000  I*4  STD_ATTR_LEN                             12  (3)
+ 14-00000038  R*4  X_COORD                                  16  (4)
+  8-000000D8  I*4  X_EXTENT                                 36  (9)
+  8-00000000  R*4  X_GRID                                   36  (9)
+  8-00000870  R*4  X_OFFSET                                 36  (9)
+ 14-00000048  R*4  Y_COORD                                  16  (4)
+  8-000000FC  I*4  Y_EXTENT                                 36  (9)
+  8-00000024  R*4  Y_GRID                                   36  (9)
+  8-00000894  R*4  Y_OFFSET                                 36  (9)
+
+
+
+
+LABELS
+
+    Address   Label       Address   Label       Address   Label   
+
+  0-000002FC  10        0-000002B6  21        0-0000040E  9999    
+
+
+FUNCTIONS AND SUBROUTINES REFERENCED
+
+  Type  Name                              Type  Name                              Type  Name                            
+
+   CHAR CHAR                               I*4  DTI_CLOSE                          I*4  DTI_COPY_DATA                   
+   I*4  DTI_CREATE                         L*4  DTI_MINMAX_DATA                    L*4  DTI_PRINT_HEADER                
+        DTI_PRINT_PROJECTION               L*4  DTI_WRITE_PROJ_REC                      EXPAND                          
+        LIB$PUT_OUTPUT                          LSL_ADDMSG                              LSL_PUTMSG                      
+   L*4  READ_GRIDREC                       L*4  READ_NTF_RECORD                    R*4  REAL                            
+        WRITEF                          
+
+                                                                 6-Aug-1997 09:37:46	VAX FORTRAN V5.9-173                Page   8
+                                                                 6-Aug-1997 09:37:46	[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.FOR;3 
+
+00001   C
+
+
+COMMAND QUALIFIERS
+
+  FORTRAN/EXTEND/DEBUG/NOOPT/LIST WRITE_DTI
+
+  /CHECK=(NOBOUNDS,OVERFLOW,NOUNDERFLOW)
+  /DEBUG=(SYMBOLS,TRACEBACK)
+  /DESIGN=(NOCOMMENTS,NOPLACEHOLDERS)
+  /SHOW=(NODICTIONARY,NOINCLUDE,MAP,NOPREPROCESSOR,SINGLE)
+  /STANDARD=(NOSEMANTIC,NOSOURCE_FORM,NOSYNTAX)
+  /WARNINGS=(NODECLARATIONS,GENERAL,NOULTRIX,NOVAXELN)
+  /CONTINUATIONS=19  /NOCROSS_REFERENCE  /NOD_LINES  /EXTEND_SOURCE
+  /F77  /NOG_FLOATING  /I4  /NOMACHINE_CODE  /NOOPTIMIZE  /NOPARALLEL
+  /NOANALYSIS_DATA
+  /NODIAGNOSTICS
+  /LIST=LSL$SOURCE_ROOT:[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.LIS;3                                         
+  /OBJECT=LSL$SOURCE_ROOT:[DTMCONVERT.NTF2DTI.SPECIAL]WRITE_DTI.OBJ;5                                         
+
+
+COMPILATION STATISTICS
+
+  Run Time:           1.19 seconds
+  Elapsed Time:       1.69 seconds
+  Page Faults:        895
+  Dynamic Memory:     688 pages

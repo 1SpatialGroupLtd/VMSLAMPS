@@ -1,0 +1,211 @@
+	LOGICAL FUNCTION READ_CHAIN(OUT_COORDS,NUMPTS,MAXPTS,IDENT)
+C
+***     MODULE READ_CHAIN
+***     IDENT  22JL91
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author	VLG	15-Mar-1990
+C
+C Reads and converts coordinates from a CHAIN record
+C
+CMOD	removed redundant function declarations			Sg 25-June-1991
+C
+CMOD	removed SAVE_CHAIN as the record number associated with a particular ID
+C	is looked up in an indexed file. since the input is from a relative file
+C	(obtained by pre-reading a section of the NTF file), it becomes random
+C	access and the record is immediately available.		SG 22-july-1991
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER		MAXPTS		! the size of the buffer
+	REAL		OUT_COORDS(2,MAXPTS)! buffer up our coordinates
+	INTEGER		NUMPTS		! the actual number of points
+	INTEGER		IDENT		! CHAIN_ID of record
+C Commons:
+	INCLUDE 'HERE:NTF2IMSG.PAR'
+	INCLUDE 'HERE:COMMANDS.CMN'
+	INCLUDE	'HERE:RECORD.CMN'
+	INCLUDE	'HERE:STORE_RECORDS.CMN'
+	INCLUDE	'HERE:NTFDATA.CMN'
+	INCLUDE 'HERE:LUNS.PAR'
+	INCLUDE 'HERE:FILE_REC.CMN'
+C
+C Functions:
+C
+	LOGICAL		RDINT		! read integer from buffer
+	LOGICAL		RDLONG		! read long integer from buffer
+	LOGICAL		READ_RECORD	! read the next record
+	LOGICAL		READ_GEOMETRY
+	LOGICAL		READ_CONTINUE
+	LOGICAL		IS_CONTINUATION
+	REAL		XCONVERT
+	REAL		YCONVERT
+C
+C Workspace:
+C
+	INTEGER		OK			! Success flag
+	INTEGER		LOOP,LOOP2			! Loop counter
+	INTEGER		NUM_PARTS		! Number of links in the CHAIN
+	INTEGER		DIR			! are links clockwise?
+	INTEGER		GEOM_ID
+C
+	CHARACTER*4	NTF$_NUM_PARTS
+	CHARACTER*6	NTF$_GEOM_ID
+	CHARACTER*1	NTF$_DIR
+C
+	INTEGER		MAX_PTS
+	PARAMETER	(MAX_PTS=10000)
+	REAL		COORDS(2,MAX_PTS)	! hold coords from GEOM record
+	INTEGER		GEOM_NUMPTS		! how many coords from GEOM
+C
+	LOGICAL		JUMPED
+	INTEGER		INITIAL_REC
+	INTEGER		IOS
+	INTEGER		POSITION
+C
+C#############################################################################
+C
+	OK = .TRUE.
+	INITIAL_REC = SEC_REC
+	JUMPED = .FALSE.
+C
+C---------------------------------------------------------------------------
+C get the record associated with the CHAIN_ID
+C
+C
+C	....................................................................
+C	look up the record number containing the chain
+C
+	READ (CHAIN_LUN, KEY=IDENT, KEYID=0, IOSTAT = IOS) ID_REC
+	OK = (IOS.EQ.0)
+	IF (OK) THEN
+C
+C	  ..................................................................
+C	  get record details and position to there
+C
+	  SEC_REC = ID_REC.RECORD_NUM -1		!extract record number
+	  OK = READ_RECORD()				!get record
+	  IF (OK) THEN
+C
+C	    ..................................................................
+C	    remember that we are not at original record
+C
+	    JUMPED = .TRUE.
+	  ELSE
+C
+C	    ...................................................................
+C	    couldnt get the record, even though we did at first pass **ERROR**
+C
+	    CALL WRITEF('%%NTF2I-E-MISC, unable to get CHAIN record')
+	    CALL WRITEF('-NTF2I-W-MISC, data files are corrupt')
+	  ENDIF
+	ELSE
+C
+C	.......................................................................
+C	there was no CHAIN record corresponding to CHAIN_ID
+C
+	  CALL WRITEF('%%NTF2I-E-MISC, unable to find record for CHAIN_ID')
+	  CALL WRITEF('-NTF2I-I-MISC, CHAIN_ID was "%I"',IDENT)
+	ENDIF
+C
+	IF (.NOT.OK) GOTO 999
+C
+C------------------------------------------------------------------------------
+C we know its the one we want, read the number of parts
+C
+	NTF$_NUM_PARTS = STRING(9:12)
+C
+	CALL SETAUX( %REF(NTF$_NUM_PARTS),4)
+	OK = .NOT.RDINT(NUM_PARTS)
+	IF (.NOT.OK) THEN
+	  CALL WRITEF('%%NTF2I-E-MISC, error reading NUM_PARTS in CHAIN record')
+	  GOTO 999
+	ENDIF
+C
+C-----------------------------------------------------------------------------
+C We have now found the CHAIN record we needed
+C
+	NUMPTS = 0				! no points yet
+	POSITION =13				! set to first GEOM_ID
+C
+C	......................................................................
+C	for as many links in the chain
+C
+	DO 250 LOOP=1,NUM_PARTS
+C
+C	   ...................................................................
+C	   ensure that GEOM_ID and DIR will fit in record
+C
+	   IF ((POSITION+6).GE.LENGTH) THEN		! wont fit
+	     OK = IS_CONTINUATION(STRING,LENGTH)	! want another record
+	     IF (OK) OK = READ_CONTINUE('CHAIN')	! get record
+	     IF (OK) THEN
+	       POSITION = 3				! set new position
+	     ELSE					! no continuation
+	       CALL WRITEF('%%NTF2I-E-MISC, unable to get all coordinates')
+	       CALL WRITEF('-NTF2I-I-MISC, No continuation in CHAIN')
+	       GOTO 999
+	     ENDIF
+	   ENDIF
+C
+C	   ...................................................................
+C	   get details of current link in chain (character form)
+C
+	   NTF$_GEOM_ID = STRING(   POSITION:POSITION+5 )
+	   NTF$_DIR 	= STRING( POSITION+6:POSITION+6 )
+C
+C	   ...................................................................
+C	   convert details to integer form
+C
+	   CALL SETAUX( %REF(NTF$_GEOM_ID), 6 )			! set input buff
+	   OK = .NOT.RDLONG(GEOM_ID)				! try to read
+	   IF (OK) OK = GEOM_ID.GE.0				! validate
+	   IF (.NOT.OK) THEN
+	     CALL WRITEF('%%NTF2I-E-MISC, could not get GEOM_ID from CHAIN')
+	     CALL WRITEF('-NTF2I-I-MISC, GEOM_ID was "%S"',NTF$_GEOM_ID)
+	     GOTO 999
+	   ENDIF
+C
+C	   ...................................................................
+C	   get the coordinates for the particular GEOM_ID
+
+	   OK = READ_GEOMETRY(COORDS,GEOM_NUMPTS,MAX_PTS,GEOM_ID)
+	   IF (.NOT.OK) GOTO 999		! Geometry record not found
+C
+C	   .............................................................
+C	   Add these coords to the output array, but remember direction
+C
+	   IF (NTF$_DIR.EQ.'2') THEN			! reverse the coords
+	      DO 220 LOOP2=1,GEOM_NUMPTS
+		 OUT_COORDS(1,LOOP2+NUMPTS) = COORDS(1,(GEOM_NUMPTS-LOOP2+1))
+		 OUT_COORDS(2,LOOP2+NUMPTS) = COORDS(2,(GEOM_NUMPTS-LOOP2+1))
+220	      CONTINUE
+	   ELSE
+	      DO 230 LOOP2=1,GEOM_NUMPTS
+		 OUT_COORDS(1,LOOP2+NUMPTS) = COORDS(1,LOOP2)
+		 OUT_COORDS(2,LOOP2+NUMPTS) = COORDS(2,LOOP2)
+230	      CONTINUE
+	   ENDIF
+C
+C	   .............................................................
+C
+	   NUMPTS = NUMPTS + GEOM_NUMPTS		!increment counter
+	   POSITION = POSITION+7			!skip over
+250	CONTINUE
+C
+C------------------------------------------------------------------------------
+C finished, before we go, remember to jump back to the record we started from 
+C
+999	IF (JUMPED) THEN
+	  SEC_REC = INITIAL_REC -1			!set record
+	  CALL READ_RECORD()				!jump back
+	ENDIF
+C
+C	..................................................................
+C	finish up setting status
+C
+	READ_CHAIN = OK
+	RETURN
+	END

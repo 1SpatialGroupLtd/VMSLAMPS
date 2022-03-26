@@ -1,0 +1,475 @@
+C
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+	INTEGER*4 FUNCTION MERGE(SUBJ_INDEX,OBJ_INDEX,REAL_NEIGH, LASTNEST)
+C
+***	MODULE	MERGE
+***	IDENT	12MY92
+C
+	IMPLICIT NONE
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+C argument
+	INTEGER*4   SUBJ_INDEX	! the index of the subject poly
+	INTEGER*4   OBJ_INDEX	 ! object poly index
+	INTEGER*4   REAL_NEIGH   ! the real neighbour if not actually
+C				 ! OBJ_INDEX (a phantom)
+	INTEGER*4   LASTNEST	 ! pointer to last nested poly in subj
+C
+	INTEGER*4		ACTUAL_MERGE
+C
+C	........................................................................
+C
+	MERGE = ACTUAL_MERGE(SUBJ_INDEX,OBJ_INDEX,REAL_NEIGH, LASTNEST,
+     &			POLMAX,TABMAX,POLNEST_MAX, PARTS_MAX,
+     &			%VAL(LOC_PTR$_MOTHER_POINTER),
+     &			%VAL(PTR$_NEST_START),
+     &			%VAL(PTR$_POLNEST),
+     &			%VAL(PTR$_POLY_AREA),
+     &			%VAL(PTR$_POLY_PARTS),
+     &			%VAL(PTR$_POLY_RANGE),
+     &			%VAL(LOC_PTR$_POLY_OUTER),
+     &			%VAL(PTR$_POLY_PERIM),
+     &			%VAL(PTR$_POLY_START),
+     &			%VAL(LOC_PTR$_P_PTRS)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	INTEGER*4 FUNCTION ACTUAL_MERGE(
+     &		SUBJ_INDEX,OBJ_INDEX,REAL_NEIGH, LASTNEST,
+     &		POLMAX,TABMAX,POLNEST_MAX,PARTS_MAX,
+     &		MOTHER_POINTER,
+     &		NEST_START,
+     &		POLNEST,
+     &		POLY_AREA,
+     &		POLY_PARTS,
+     &		POLY_RANGE,
+     &		POLY_OUTER,
+     &		POLY_PERIM,
+     &		POLY_START,
+     &		PTRS
+     &	)
+C
+
+***	MODULE	ACTUAL_MERGE
+***	IDENT	14MY88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    26-Jun-1987
+C
+C MERGES a polygon into one of its neighbours
+C by one of the merging methods supplied by the user
+C some definitions to avoid confusion
+C subject polygon - the polygon that is current at the moment. It is
+C                   to be MERGEd into one of its neighbours
+C object polygon  - the polygon that has been chosen to be MERGEd into
+C                   its code will be preserved after merging 
+C polygon index   - the index of a polygon within the main array
+C implicated segment - the segment to be deleted in order to MERGE
+C                      two polygons
+C phantom	  - the phantom polygon is the inside boundary of 
+C		    its mother polygon. It runs in a clockwise direction
+C		    as opposed to the normal clockwise. If there is a
+C		   complete isolated poygon then the phantom poly will
+C		   be congruent with it. If an isolation is made up of
+C		   more than one polygon (ie its a candidate for 
+C		   merging ) then there is still only one phantom.
+C		   In certain circumstances we MERGE into the phantom
+C		   See diagrams in POLMERGE standards folder
+C 
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNPOLMERGE:POLMERGEMSG.PAR'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'LSL$CMNPOLMERGE:COMMAND.CMN'
+	INCLUDE		'LSL$CMNPOLMERGE:MERGE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:SECTOR.CMN'
+C
+C argument
+	INTEGER*4   SUBJ_INDEX	! the index of the subject poly
+	INTEGER*4   OBJ_INDEX	 ! object poly index
+	INTEGER*4   REAL_NEIGH   ! the real neighbour if not actually
+C				 ! OBJ_INDEX (a phantom)
+	INTEGER*4   LASTNEST	 ! pointer to last nested poly in subj
+C
+C Arguments
+	INTEGER*4	POLMAX
+	INTEGER*4	TABMAX
+	INTEGER*4	POLNEST_MAX
+	INTEGER*4	PARTS_MAX
+C
+	INTEGER		MOTHER_POINTER(POLMAX)
+	INTEGER		NEST_START(POLMAX+1)
+	INTEGER		POLNEST(2, POLNEST_MAX)
+	REAL		POLY_AREA(POLMAX)
+	INTEGER		POLY_PARTS(2,PARTS_MAX)
+	REAL		POLY_RANGE(4,POLMAX)
+	REAL		POLY_OUTER(POLMAX)
+	REAL		POLY_PERIM(POLMAX)
+	INTEGER		POLY_START(3,POLMAX)
+C
+C Functions
+	INTEGER*4   FIND_COMMON	!gets positional info about
+C				! the object poly
+	REAL	    LENGTH	!gets the length of the string
+	INTEGER*4   UPDATE_SEGMENTS !updates LR_SEGMANT after MERGE
+	INTEGER*4   GET_POLY    ! gets poly coords into buff
+	INTEGER*4   COMPLEX     ! deals with complex polygons
+	INTEGER*4   COMPLEX_PHAN ! deals with complex polies when
+C				 ! merging with a phantom
+	INTEGER*4   FIRST_NEST  ! gets 1st order nested polys
+	INTEGER*4   CHECK_ISOL   ! checks if poly is isolated
+C
+C Local Varaiables
+	INTEGER*4   OBJ_PREVPTR(BOUND_MAX)	! pointers to segment 
+C				 ! previous to the
+C                                ! implicated segment in object poly
+	INTEGER*4   OBJ_NEXTPTR(BOUND_MAX)	 ! pointer to segment 
+C				 ! following the
+C                                ! implicated segments in object poly
+	INTEGER*4   SUBJ_PREVPTR(BOUND_MAX) ! pointers to segment 
+C				 ! previous to the 
+C                                ! implicated segment in subject poly
+	INTEGER*4   SUBJ_NEXTPTR(BOUND_MAX)
+C				 ! pointer to segment following the
+C                                ! implicated segment in subject poly
+	INTEGER*4   OBJ_LASTPTR(BOUND_MAX)
+C				  ! pointer to last seg in object poly
+	INTEGER*4   SUBJ_LASTPTR ! pointer to last seg in subject poly
+	INTEGER*4   OBJ_FIRSTPTR  ! pointer to first seg in object poly
+	INTEGER*4   SUBJ_FIRSTPTR ! pointer to first seg in subject poly
+C
+	INTEGER*4   OBJ_FIRSTCOM(BOUND_MAX)
+C				 ! ptrs to first common segs in obj   
+	INTEGER*4   OBJ_LASTCOM(BOUND_MAX) 
+C				 ! ptrs to last common segs in obj   
+	INTEGER*4   SUBJ_FIRSTCOM(BOUND_MAX)
+C				 ! ptrs to first common segs in subj
+	INTEGER*4   SUBJ_LASTCOM(BOUND_MAX)
+C				 ! ptrs to last common segs in subj
+C
+	INTEGER*4   SUBJ_BOUND    ! number of boundaries in subj
+	INTEGER*4   OBJ_BOUND    ! number of boundaries in obj
+C				  ! should be the same
+	REAL        OUTER	 ! length of polygon strings
+	INTEGER*4	I,J                    ! counter
+	INTEGER*4   LASTNEST2	 ! pointer to last nested poly in obj
+	INTEGER*4   SAVOBJ       ! saved value of object index
+	INTEGER*4   SAVSUBJ      ! saved value of subject index
+	INTEGER*4   NNEST        ! number of nested pols
+	INTEGER*4   POLY_INDX	 ! polygon index
+	INTEGER*4       PTRS(POLNEST_MAX)    ! pointers to nested polys
+	INTEGER*4    DUMPTR	 ! dummy arg
+	INTEGER*4   ISOL_INDX	 ! isolated poly index
+	LOGICAL    USING_OREAL   ! using real neigh as object
+	LOGICAL	   USING_SREAL   ! using real neigh as subject
+	LOGICAL    IS_COMPLEX
+	LOGICAL    ISOLATED
+C
+C initialise
+	ACTUAL_MERGE = %LOC(SS$_NORMAL)
+	USING_OREAL = .FALSE.
+	USING_SREAL = .FALSE.
+	NNEST =0
+	IS_COMPLEX = .FALSE.
+C
+C the neighbour may either be a normal neighbour
+C or a nested polygon of the current polygon in which case the
+C object index is negative
+C
+C keep a copy of the originals
+	SAVOBJ = ABS(OBJ_INDEX)
+	SAVSUBJ = SUBJ_INDEX
+C
+	IF (OBJ_INDEX .LT. 0 ) THEN
+C
+C in this case we must store the index of the polygon 
+C  This is needed later so that the correct code can be 
+C determined for the polygon we have MERGEd into. 
+C
+	   POLY_START(2,SUBJ_INDEX) = POLY_START(1,ABS(OBJ_INDEX))
+	   SUBJ_INDEX = ABS(OBJ_INDEX)
+	   OBJ_INDEX = REAL_NEIGH
+C	   USING_OREAL = .TRUE.
+	   USING_SREAL = .TRUE.
+	ELSE
+C
+	   IF (REAL_NEIGH .NE. 0) THEN
+C
+C merging into mother poly - effectively into the phantom
+	      OBJ_INDEX = REAL_NEIGH
+	      USING_OREAL = .TRUE.
+	   ENDIF
+	ENDIF	   
+C
+C the normal case - find pointers to enable the merging to take place
+C first for the object polygon   
+	ACTUAL_MERGE =
+     &	      FIND_COMMON
+     &	      (ABS(OBJ_INDEX),SUBJ_INDEX,OBJ_PREVPTR,OBJ_NEXTPTR
+     &	      ,OBJ_BOUND,OBJ_FIRSTCOM,OBJ_LASTCOM,
+     &	      OBJ_FIRSTPTR,OBJ_LASTPTR)
+	IF (.NOT. ACTUAL_MERGE) GOTO 30
+C
+	
+C ... and the subject polygon
+	ACTUAL_MERGE =
+     &	      FIND_COMMON
+     &	      (SUBJ_INDEX,ABS(OBJ_INDEX),SUBJ_PREVPTR,SUBJ_NEXTPTR
+     &	      ,SUBJ_BOUND,SUBJ_FIRSTCOM,SUBJ_LASTCOM,
+     &	      SUBJ_FIRSTPTR,SUBJ_LASTPTR)
+	   IF (.NOT. ACTUAL_MERGE) GOTO 30
+C
+	IF (OBJ_BOUND .NE. SUBJ_BOUND) THEN   !normally equal
+	    IF (OBJ_BOUND .EQ. 0) THEN
+C
+C the object polygon is a polygon hanging by one node inside the
+C subject poly
+	      IF (USING_SREAL .OR. USING_OREAL) THEN
+	         POLY_PARTS(2,SUBJ_PREVPTR(1)) = 0
+	         POLY_START(1,OBJ_INDEX) = SUBJ_NEXTPTR(1)
+	         GOTO 10
+	      ELSE
+	         IF (SUBJ_NEXTPTR(1) .EQ. SUBJ_FIRSTPTR ) THEN
+	            POLY_PARTS(2,SUBJ_PREVPTR(1)) =0
+	            POLY_START(1,SUBJ_INDEX) = SUBJ_FIRSTPTR
+	         ELSE
+	            POLY_PARTS(2,SUBJ_PREVPTR(1)) =SUBJ_NEXTPTR(1)
+	         ENDIF
+	         POLY_START(2,SUBJ_INDEX) = POLY_START(1,ABS(OBJ_INDEX))
+	         POLY_START(1,SAVOBJ) = 0
+	         GOTO 20
+	      ENDIF
+	    ELSEIF (SUBJ_BOUND .EQ. 0) THEN
+C
+C the subject poly is hanging by one node inside the object
+	      IF (OBJ_NEXTPTR(1) .EQ. OBJ_FIRSTPTR )THEN
+	         POLY_PARTS(2,OBJ_PREVPTR(1)) = 0
+	         IF (POLY_START(1,ABS(OBJ_INDEX)) .LT. 0) THEN
+C
+C if we MERGE into an isolated phantom it must stay isolated.
+	            POLY_START(1,ABS(OBJ_INDEX)) = -OBJ_FIRSTPTR
+	         ELSE
+	             POLY_START(1,ABS(OBJ_INDEX)) = OBJ_FIRSTPTR
+	         ENDIF
+C
+	      ELSE
+	         POLY_PARTS(2,OBJ_PREVPTR(1)) =OBJ_NEXTPTR(1)
+	      ENDIF
+	      GOTO 10
+	    ELSE
+C
+C should not happen
+	      CALL LSL_PUTMSG(PMERGE__INTRNLERR,1,'MERGE')
+	      ACTUAL_MERGE = PMERGE__INTRNLERR
+	      GOTO 30
+	    ENDIF
+	ENDIF
+C 
+	IF (OBJ_BOUND .EQ. 0) THEN 
+C
+C this case happens when the polygon in fact has no neighbours
+C and so is isolated 
+	   IF (USING_SREAL) THEN
+	      POLY_START(1,ABS(SAVOBJ)) = 0
+	      POLY_START(1,REAL_NEIGH) = 0
+	      GOTO  20
+	   ELSE
+C	      CALL ISOL_POLY(SUBJ_INDEX)
+	      ACTUAL_MERGE = 0
+	      GOTO 30
+	   ENDIF
+	ENDIF
+C
+	IF (OBJ_BOUND .NE. 1) THEN
+C
+	   IF (USING_SREAL .OR. USING_OREAL) THEN
+	       IF (USING_OREAL) THEN
+	          ACTUAL_MERGE = FIRST_NEST
+     &		  (SAVOBJ,PTRS,NNEST,.TRUE.,LASTNEST2)
+	          IF(.NOT. ACTUAL_MERGE) GOTO 30
+	          ACTUAL_MERGE=COMPLEX_PHAN(SUBJ_INDEX,ABS(OBJ_INDEX),
+     &		          OBJ_PREVPTR,
+     &		          SUBJ_PREVPTR,OBJ_NEXTPTR,SUBJ_NEXTPTR,
+     &			  OBJ_FIRSTCOM,SUBJ_FIRSTCOM,
+     &			  OBJ_LASTCOM,SUBJ_LASTCOM,SUBJ_BOUND,LASTNEST2,
+     &	                  SAVOBJ)
+	       ELSE
+	          ACTUAL_MERGE=COMPLEX_PHAN(SUBJ_INDEX,ABS(OBJ_INDEX),
+     &                    OBJ_PREVPTR,
+     &		          SUBJ_PREVPTR,OBJ_NEXTPTR,SUBJ_NEXTPTR,
+     &			  OBJ_FIRSTCOM,SUBJ_FIRSTCOM,
+     &			  OBJ_LASTCOM,SUBJ_LASTCOM,SUBJ_BOUND,LASTNEST,
+     &	                  SAVSUBJ)
+	       ENDIF
+	       IF (.NOT. ACTUAL_MERGE) GOTO 30
+	       IS_COMPLEX = .TRUE.
+	   ELSE
+C
+C the complex case is when there is more than one boundary
+C note that object and subject switch over in COMPLEX for no
+C very good reason!
+C
+	      ACTUAL_MERGE=COMPLEX(SUBJ_INDEX,ABS(OBJ_INDEX),OBJ_PREVPTR,
+     &		          SUBJ_PREVPTR,OBJ_NEXTPTR,SUBJ_NEXTPTR,
+     &			  OBJ_FIRSTCOM,SUBJ_FIRSTCOM,
+     &			  OBJ_LASTCOM,SUBJ_LASTCOM,SUBJ_BOUND,LASTNEST)
+	      IF (.NOT. ACTUAL_MERGE) GOTO 30
+C 
+	   ENDIF
+	ELSE
+C
+C this is the easy case when there is only one boundary
+C What we are doing is fiddling about with the second dimension of 
+C POLY_PARTS which points to the following segment. We reset these 
+C pointers such that the segments
+C involved in merging now point to segments in the other polygon.
+C The actual boundary segments are lost because nothing points to
+C them any more. 
+C 
+	   IF (POLY_START(1,ABS(OBJ_INDEX)) .LT. 0) THEN
+C
+C if we MERGE into an isolated phantom it must stay isolated.
+	      POLY_START(1,ABS(OBJ_INDEX)) = -OBJ_FIRSTPTR
+	   ELSE
+	      POLY_START(1,ABS(OBJ_INDEX)) = OBJ_FIRSTPTR
+	   ENDIF
+C
+C reset the second field of POLY_PARTS for the two polygon node joins
+C
+	   POLY_PARTS(2,OBJ_PREVPTR(1)) = SUBJ_NEXTPTR(1)
+	   IF (OBJ_NEXTPTR(1) .EQ. OBJ_FIRSTPTR) THEN
+	      POLY_PARTS(2,SUBJ_PREVPTR(1)) = 0
+	   ELSE
+	      POLY_PARTS(2,SUBJ_PREVPTR(1)) = OBJ_NEXTPTR(1) 
+	   ENDIF
+C
+C the subject polygon will have a 0 pointer for
+C its last segment which should be reset 
+	   IF (SUBJ_LASTPTR .NE. SUBJ_PREVPTR(1)) THEN
+	      POLY_PARTS(2,SUBJ_LASTPTR) = POLY_START(1,SUBJ_INDEX)
+	   ENDIF
+	ENDIF
+C
+C can now reset POLY_START so that the object polygon is officially
+C null and void.
+C in effect the object polygon is retained but the index of the 
+C subject polygon is kept so that we don't repeat processing of
+C this polygon.
+10	IF (USING_SREAL) THEN
+	   POLY_START(1,SAVOBJ) = 0
+	ELSE
+	   POLY_START(1,SAVSUBJ) = POLY_START(1,SAVOBJ)
+C
+C MOD to make new polygon always get code from one its MERGEd into
+	   IF (POLY_START(2,SAVOBJ) .EQ. 0) THEN
+	      POLY_START(2,SAVSUBJ) = POLY_START(1,SAVOBJ)
+	   ELSE
+	      POLY_START(2,SAVSUBJ) = POLY_START(2,SAVOBJ)
+	   ENDIF
+C 
+C delete old poly
+	   POLY_START(1,SAVOBJ) = 0
+	ENDIF
+C
+C update the LR_SEGMENT array for MERGEd poly
+	IF (.NOT. USING_SREAL) THEN
+	   ACTUAL_MERGE = UPDATE_SEGMENTS(SAVSUBJ,SAVOBJ)
+	   IF (.NOT. ACTUAL_MERGE) GOTO 30
+	ENDIF
+C
+C also update LR_SEGMENT array for new phantom poly if
+C it has been created
+	IF (USING_OREAL.OR. USING_SREAL.AND. (.NOT. IS_COMPLEX)) THEN 
+	   ACTUAL_MERGE = UPDATE_SEGMENTS(ABS(OBJ_INDEX),SUBJ_INDEX)
+	   IF (.NOT. ACTUAL_MERGE ) GOTO 30
+	ENDIF
+C
+C 
+C update polygon range for new poly
+20	CALL UPDATE_RANGE(POLY_RANGE(1,SAVSUBJ),POLY_RANGE(1,SAVOBJ))
+C
+C
+C update nest lists
+	IF (LASTNEST .GT. 0) THEN
+	   POLNEST(2,LASTNEST) = NEST_START(SAVOBJ)
+	ELSE
+	   NEST_START(SAVSUBJ) = NEST_START(SAVOBJ)
+	ENDIF
+C
+	IF (USING_SREAL .OR. USING_OREAL.AND. (.NOT. IS_COMPLEX)) THEN
+C
+C check to see if reformed phantoms neighbours have become isolated
+	   IF (POLY_START(1,ABS(OBJ_INDEX)) .NE. 0) THEN
+	      ACTUAL_MERGE = CHECK_ISOL(ABS(OBJ_INDEX),ISOL_INDX,ISOLATED)
+	      IF (.NOT. ACTUAL_MERGE) GOTO 30
+	      IF (ISOLATED) THEN
+	         CALL ISOL_POLY(ISOL_INDX)
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C  update polygon area
+	POLY_AREA(SAVSUBJ) =
+     &	   POLY_AREA(SAVSUBJ) + POLY_AREA(ABS(SAVOBJ))
+C
+	IF (HAD_RATIO) THEN
+C
+C update ratios - note extra work having to use GET_POLY
+	   POLY_PTS = 0
+	   ACTUAL_MERGE = GET_POLY(SAVSUBJ)
+	   IF(.NOT. ACTUAL_MERGE) GOTO 30
+	   OUTER = LENGTH(POLY_PTS,POLY_BUF)
+	   POLY_PERIM(SAVSUBJ) = POLY_PERIM(SAVSUBJ)+ POLY_PERIM(SAVOBJ)
+     &	   +OUTER - POLY_OUTER(SAVSUBJ) - POLY_OUTER(SAVOBJ)
+	   POLY_OUTER(SAVSUBJ) = OUTER
+	ENDIF
+C
+C
+C finally check if the new subject polygon has become an isolation
+	ACTUAL_MERGE = CHECK_ISOL(SAVSUBJ,DUMPTR,ISOLATED)
+	IF (.NOT. ACTUAL_MERGE) GOTO 30
+	IF (ISOLATED) THEN
+	   CALL ISOL_POLY(SAVSUBJ)
+	ENDIF
+C
+C update pointer to mother polygon for nested polies
+	MOTHER_POINTER(SAVOBJ) = SAVSUBJ
+C
+	OBJ_INDEX = SAVOBJ
+	SUBJ_INDEX = SAVSUBJ
+C
+30	RETURN
+	END

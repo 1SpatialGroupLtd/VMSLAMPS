@@ -1,0 +1,320 @@
+	LOGICAL FUNCTION READ_CPOLY(CPOLY_ID)
+C
+***	MODULE READ_CPOLY
+***	IDENT	15NO96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C	Author	SG 01-August-1991
+CMOD	Prevent int overflow when assigning the result		ST  27-Apr-1994
+C       of ICHAR to a byte by first assigning it to an
+C	int equivalenced onto a byte. (Mod 1359).
+C
+C Description
+C
+C	generates a feature from specified CPOLY_ID. assumes that record has 
+C	allready been read. Code based on READ_COLLECT
+C
+	IMPLICIT NONE
+C
+	INTEGER		CPOLY_ID
+C
+	INCLUDE 'LUNS.PAR'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE 'FILE_REC.CMN'
+	INCLUDE 'ID_STORAGE.CMN'
+	INCLUDE 'RECORD.CMN'
+	INCLUDE 'NTFDATA.CMN'
+	INCLUDE 'LOOKUP.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+	LOGICAL		READ_NAMEREC
+	LOGICAL		GET_FC
+	LOGICAL		IS_CONTINUATION
+	LOGICAL		READ_CONTINUE
+	LOGICAL		RDINT
+	LOGICAL		RDLONG
+	LOGICAL		READ_RECORD
+	LOGICAL		WRITE_POLY
+	REAL		XCONVERT, YCONVERT
+C
+	LOGICAL		OK
+	CHARACTER*4 	NTF$_NUM_PARTS
+	CHARACTER*7	NTF$_ID
+	CHARACTER*6	 CPOLY$_POLY_ID
+	CHARACTER*1	 CPOLY$_SIGN
+	CHARACTER*6	NTF$_GEOM_ID
+	CHARACTER*6	NTF$_ATT_ID
+	CHARACTER*6	NTF$_NAME_ID
+C
+	INTEGER		ATT_ID
+	INTEGER		NAME_ID
+	INTEGER		NUMPARTS
+	INTEGER		FC_LEN
+	INTEGER		ISTAT(4)
+	BYTE		FC_STR(20)
+C
+	INTEGER		MAX_PARTS
+	PARAMETER  (MAX_PARTS=10000)
+C
+	INTEGER		INITIAL_RECORD
+	INTEGER		LOOP
+	CHARACTER*99	TEXT_STR
+	BYTE		BYTE_STR(99)
+	INTEGER		TEXT_LEN
+	INTEGER		CPOS
+	INTEGER		IOS
+	REAL		POLY_PART_COORDS(2,MAX_PARTS)
+	REAL		POLYX,POLYY
+	REAL		CPOLY_COORDS(2,1)
+C
+	INTEGER		FC
+	INTEGER		FC1
+	BYTE		FC2(4)
+	LOGICAL		IS_LABEL
+	LOGICAL		HAD_TXT
+C
+	INTEGER		CHARINT
+	BYTE		CHARBYTE
+	EQUIVALENCE	(CHARINT,CHARBYTE)
+C
+C
+C##############################################################################
+C
+	INITIAL_RECORD = SEC_REC		!remember where we started from
+C
+C------------------------------------------------------------------------------
+C Are we at a CPOLY record, dont take it on trust
+C
+	OK = STRING(1:2).EQ.REC$_CPOLY
+	IF (.NOT.OK) THEN
+	  CALL WRITEF('%%NTF2I-E-MISC, Not at CPOLY record as expected')
+	  CALL WRITEF('-NTF2I-E-MISC, error in reading routines')
+	  CALL WRITEF('-NTF2I-I-MISC, contact Laser Scan for advice')
+	  GOTO 999
+	ENDIF
+	
+C------------------------------------------------------------------------------
+C read how many features are contained in the CPOLY record
+C
+	NTF$_NUM_PARTS = STRING(9:12)		!get numparts
+	CALL SETAUX (%REF(NTF$_NUM_PARTS),4)
+	OK = .NOT.RDINT(NUMPARTS)
+C
+	IF (.NOT.OK) THEN
+	  CALL WRITEF('%%NTF2I-E-MISC, unable to read NUM_PARTS field')
+	  CALL WRITEF('-NTF2I-I-MISC, in CPOLY record, "%S"',NTF$_NUM_PARTS)
+	  GOTO 999
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C skip over feature details and get the feature code of the CPOLY record
+C
+	CPOS = 13
+C
+	DO 100 LOOP=1,NUMPARTS				! for as many data items
+	  IF (CPOS+6.GE.LENGTH) THEN			! no space for data
+	    OK = IS_CONTINUATION(STRING,LENGTH)		! should be a continua..
+	    IF (OK) OK = READ_CONTINUE('CPOLY')	! get the continuation
+	    IF (OK) THEN			
+	      CPOS =3					! reposition for data
+	    ELSE
+	      CALL WRITEF('%%NTF2I-E-MISC, Incomplete CPOLY record')
+	      GOTO 999
+	    ENDIF
+	  ENDIF
+	  CPOS = CPOS+7					! skip over data
+100	CONTINUE
+C
+C------------------------------------------------------------------------------
+C make sure there is space for the attribute_id and NAME_ID and GEOM_ID
+C
+	IF (CPOS+17.GE.LENGTH) THEN			! no space for data
+	  OK = IS_CONTINUATION(STRING,LENGTH)		! should be a continua..
+	  IF (OK) OK = READ_CONTINUE('CPOLY')		! get the continuation
+	  IF (OK) THEN			
+	    CPOS =3					! reposition for data
+	  ELSE
+	    CALL WRITEF('%%NTF2I-W-MISC, Incomplete CPOLY record')
+	    CALL WRITEF('-NTF2I-I-MISC, No room for ATT_ID, NAME_ID,GEOM_ID')
+	    CALL WRITEF('-NTF2I-I-DEF, defaulting to FC 0 "CPOLY"')
+	  ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C get data for locating position of feature code and the text
+C
+	IF (OK) THEN
+	  NTF$_GEOM_ID = STRING( CPOS   :CPOS+5)
+	  NTF$_ATT_ID  = STRING( CPOS+6 :CPOS+11)
+	  NTF$_NAME_ID = STRING( CPOS+12:CPOS+17)
+C
+C	  ----------------------------------------------------------------------
+C	  get the feature code which is contained in the ATTRIBUTE_ID
+C
+	  CALL SETAUX( %REF(NTF$_ATT_ID),6)
+	  OK = .NOT.RDLONG(ATT_ID)
+	  IF (OK) OK = GET_FC(ATT_ID,FC,FC_LEN,FC_STR)
+	  IF(.NOT.OK) THEN
+	    CALL WRITEF('%%NTF2I-E-MISC, feature code unobtainable from ATT_ID')
+	    CALL WRITEF('-NTF2I-I-MISC, ATT_ID was "%S"',NTF$_ATT_ID)
+	    GOTO 999
+	  ENDIF
+C
+	  ISTAT(1) = FC					! copy to output
+C
+C	  ----------------------------------------------------------------------
+C 	  get the text associated with the CPOLY record, so that it can be
+C	  matched with a text feature
+C
+	  CALL SETAUX( %REF(NTF$_NAME_ID),6)
+	  OK = .NOT.RDLONG(NAME_ID)
+C
+	  IF (OK) THEN
+C
+C	    ................................................................
+C	    get record associated with NAME_ID from indexed file
+C
+	    READ(NAME_LUN,KEY=NAME_ID,KEYID=0, IOSTAT=IOS) ID_REC
+	    OK = IOS.EQ.0				!was return status 0
+	    IF (OK) THEN				!yes, then ok
+C
+C	      ...............................................................
+C	      read record-number field and jump on the record
+C
+	      SEC_REC = ID_REC.RECORD_NUM -1		! set record number
+	      OK = READ_RECORD()			! get the record
+	      IF (OK) THEN
+C
+C	        .............................................................
+C	        get text, ignore forms of feature-code that READ_NAMEREC returns
+C
+	        HAD_TXT=READ_NAMEREC(FC1,TEXT_STR,TEXT_LEN,NAME_ID,FC2,IS_LABEL)
+	        IF (HAD_TXT) THEN
+C
+C		  ..............................................................
+C		  convert to a byte array so that IFFAC can deal with it
+C
+		  DO 200 LOOP = 1,TEXT_LEN
+		    CHARINT = ICHAR(TEXT_STR(LOOP:LOOP))
+		    BYTE_STR(LOOP) = CHARBYTE
+200		  CONTINUE		
+	        ENDIF
+	      ELSE
+	        CALL WRITEF('%%NTF2I-E-MISC, unable to get NAMEREC')
+	        CALL WRITEF('-NTF2I-W-MISC, temporary data files corrupt')
+	      ENDIF
+  	    ELSE
+	      CALL WRITEF('%%NTF2I-E-MISC, unable to find record for NAME_ID')
+	      CALL WRITEF('-NTF2I-I-MISC, NAME_ID was "%I"',NAME_ID)
+	    ENDIF
+	  ELSE
+	    CALL WRITEF('%%NTF2I-E-NAMPOS, bad field in record %I',SEC_REC)
+	    CALL WRITEF('-NTF2I-E-MISC, NAME_ID "%S"', NTF$_NAME_ID)
+	  ENDIF
+C
+	  IF (.NOT.OK) GOTO 999
+C
+	  IF (HAD_FC_LOOKUP .AND. (.NOT.IS_LABEL))		! translate?
+     &		CALL FC_TRANS(%VAL(LUT_BASE_ADDR), FC, ISTAT(1))
+
+C
+C------------------------------------------------------------------------------
+C default the FC to 0 with the NAME CPOLY
+C
+	ELSE
+	  ISTAT(1) = 0					!feature code 0
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C now write out the start of a new feature
+C
+	ISTAT(2) = 0
+	ISTAT(3) = 0					! LINE FEATURE
+	ISTAT(4) = 0
+C
+	FSN = FSN +1
+	CALL IFFNF (FSN,FSN)				! start the feature
+	CALL IFFFS ( ISTAT )				! its feature_code etc
+C
+C-----------------------------------------------------------------------------
+C Code deleted which always put an AC saying this was a complex polygon. 
+C It was originally put there under the assumption that this extra information 
+C could be removed by post processing if not required.
+C
+	IF (IS_LABEL) CALL IFFAC (1,0,FC_STR,FC_LEN)	! feature code as text
+C
+	IF (HAD_TXT) CALL IFFAC (6,0,BYTE_STR,TEXT_LEN)	!text associated with it
+C
+C------------------------------------------------------------------------------
+C goto start of the CPOLY record to get ready to process the feature data
+C
+	SEC_REC = INITIAL_RECORD -1
+	CALL READ_RECORD()
+C
+C------------------------------------------------------------------------------
+C process the data, use the POLY_ID and process like complex line. THe only
+C difference is that at The end of each polygon, we must remember the start
+C point and join the polygons with invisible lines 
+C
+	LOOP =0
+	CPOS = 13
+	OK = .TRUE.
+C
+C	......................................................................
+C	for as many parts in the CPOLY record
+C
+	DO WHILE (OK.AND.(LOOP.LT.NUMPARTS))
+	  LOOP = LOOP+1
+C
+C	  ....................................................................
+C	  check that there is space in this record for data
+C
+	  IF (CPOS+6.GE.LENGTH) THEN
+	    OK = IS_CONTINUATION(STRING,LENGTH)
+	    IF (OK) OK = READ_CONTINUE('CPOLY')
+	    IF (OK) CPOS = 3				! new position
+	  ENDIF	  
+C
+C	  ....................................................................
+C	  get the data for the constituent polygon
+C
+	  IF (OK) THEN
+	    NTF$_ID	   = STRING(CPOS:CPOS+6)	!get the data
+	    CPOLY$_POLY_ID = NTF$_ID(1:6)		!get REC_DESCR from data
+	    CPOLY$_SIGN    = NTF$_ID(7:7)		!get REC_IDENT from data
+	    OK = WRITE_POLY( CPOLY$_POLY_ID, CPOLY$_SIGN, POLYX, POLYY)
+	    IF (OK) THEN
+	      POLY_PART_COORDS(1,LOOP) = POLYX		!remember start point
+	      POLY_PART_COORDS(2,LOOP) = POLYY		!remember start_point
+	      CPOS = CPOS+7				!get ready for next data
+	    ENDIF
+	  ENDIF
+	END DO
+C
+C------------------------------------------------------------------------------
+C if everything was fine, generate invisible lines (pen-up) which work their
+C way back to the starting CPOLY, dont write last point of previous polygon
+C since that was the last coordinate we wrote before we got here
+C
+	IF (OK.AND.(NUMPARTS.GT.1)) THEN
+	  DO 500 LOOP = NUMPARTS-1,1,-1
+	    CPOLY_COORDS(1,1) = POLY_PART_COORDS(1,LOOP)
+	    CPOLY_COORDS(2,1) = POLY_PART_COORDS(2,LOOP)
+	    CALL IFFST(CPOLY_COORDS,1,0)		! write, pen up
+500	  CONTINUE
+	ENDIF
+
+C
+C------------------------------------------------------------------------------
+C must write out a EF since a feature is open
+C
+	CALL IFFEF()
+C
+C##############################################################################
+C
+999	READ_CPOLY = OK
+	RETURN
+	END
+
+

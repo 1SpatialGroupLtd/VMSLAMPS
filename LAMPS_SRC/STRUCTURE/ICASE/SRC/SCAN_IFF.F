@@ -1,6 +1,6 @@
 	LOGICAL FUNCTION SCAN_IFF
 C
-CDEC$	IDENT	'25OC91'
+CDEC$	IDENT	'05MA92'
 C
 C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
 C
@@ -69,173 +69,207 @@ C Read in next entry
 C
 100	CALL IFFSEL(INLUN)
 	CALL IFFNXT(IECODE,IELEN)
-	IF(IELEN.LT.0) GOTO 200		! end of input
+	IF (IELEN.LT.0) GOTO 9000
+	IF (IECODE.EQ.'NF') GOTO 200
+	IF (IECODE.EQ.'FS') GOTO 300
+	IF (IECODE.EQ.'JP') GOTO 400
+	IF (IECODE.EQ.'ST') GOTO 500
+	IF (IECODE.EQ.'EF') GOTO 600
+	IF (IECODE.EQ.'RA') GOTO 700
+	IF (IECODE.EQ.'HI') GOTO 800
+	IF (IECODE.EQ.'NO') GOTO 900
+	IF (IECODE.EQ.'EO') GOTO 1000
+	IF (IECODE.EQ.'EJ') GOTO 1100
+	IF (IECODE.EQ.'NS') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'MH') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'MD') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'CC') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'CP') CALL EIHCPY(OUTLUN)
+	GOTO 100
 C
-	IF(IECODE.EQ.'NF')THEN
+C-----------------------------------------------------------------------------
+C NF entry
 C
 C Get FSN and reset some flags
 C
-	   HADST=.FALSE.
-	   WARNED_NF = 0		! to prevent many warnings per feature
-	   CALL EIHRI(NF,1,1)
+200	HADST=.FALSE.
+	WARNED_NF = 0		! to prevent many warnings per feature
+	CALL EIHRI(NF,1,1)
+	GOTO 100
 C
-	ELSE IF(IECODE.EQ.'FS')THEN
+C-----------------------------------------------------------------------------
+C FS entry
 C
 C Get feature code
 C
-	   CALL EIHR(FSTAT,4,1)
-	   IFCODE=FSTAT(1)
+300	CALL EIHR(FSTAT,4,1)
+	IFCODE=FSTAT(1)
 C
 C If text or symbol bit are set, ignore the feature.
 C
-	   IF ((FSTAT(3).AND.'4000'X).NE.0) THEN      ! ignore symbol feature
-	      CALL IFFNXC('EF',IELEN)
-	      GOTO 100
-	   ELSEIF ((FSTAT(3).AND.'8000'X).NE.0) THEN  ! ignore text feature
-	      CALL IFFNXC('EF',IELEN)
-	      GOTO 100
-	   ENDIF
+	IF ((FSTAT(3).AND.'4000'X).NE.0) THEN ! ignore symbol feature
+	   CALL IFFNXC('EF',IELEN)
+	   GOTO 100
+	ELSEIF ((FSTAT(3).AND.'8000'X).NE.0) THEN ! ignore text feature
+	   CALL IFFNXC('EF',IELEN)
+	   GOTO 100
+	ENDIF
 C
 C If FC not in list in parameter file, ignore the feature.
+C       
+C	IF(STWID(1,IFCODE).LT.0.0 .OR. STWID(2,IFCODE).LT.0.0)THEN
+	IF (CASECODE(IFCODE).LT.0 .OR. AREACODE(IFCODE).LT.0) THEN
+	   CALL LSL_PUTMSG(ICASE__IGNORED,NF,IFCODE)
+	   CALL IFFNXC('EF',IELEN)
+	   GOTO 100
+	ENDIF
+	GOTO 100
 C
-	   IF(STWID(1,IFCODE).LT.0.0 .OR. STWID(2,IFCODE).LT.0.0)THEN
-	      CALL LSL_PUTMSG(ICASE__IGNORED,NF,IFCODE)
-	      CALL IFFNXC('EF',IELEN)
-	      GOTO 100
-	   ENDIF
-C
-	ELSE IF(IECODE.EQ.'JP')THEN
+C-----------------------------------------------------------------------------
+C JP entry
 C
 C extract JB position
 C
-	   CALL EIHRL(JBPOS,1,1)
-	   CALL EIHR (JBOFF,1,3)
+400	CALL EIHRL(JBPOS,1,1)
+	CALL EIHR (JBOFF,1,3)
 C
 C save current position
 C
-	   CURPOS=LPOSH
+	CURPOS=LPOSH
 C
 C get ST position if at start of feature
 C
-	   IF (.NOT.HADST) THEN    	! this is the first JP
-	      CALL IFFNXC('ST',IELEN)
-	      ST_ADDR=LPOSH
+	IF (.NOT.HADST) THEN	! this is the first JP
+	   CALL IFFNXC('ST',IELEN)
+	   ST_ADDR=LPOSH
 C
 C extract co-ords of junction for checking against co-ords at JB
 C
-	      CALL EIHRS(NPTS, IENDS)
-	      CALL EIHRR(XJUN,1,1)
-	      CALL EIHRR(YJUN,1,3)
+	   CALL EIHRS(NPTS, IENDS)
+	   CALL EIHRR(XJUN,1,1)
+	   CALL EIHRR(YJUN,1,3)
 C
 C Use first JP to get ST addresses of arms joining start of current line
 C
-	      STATUS = ADJACENT_ARM(JBPOS,JBOFF,ST_ADDR,-1,XJUN,YJUN,SEG1)
-	      IF (.NOT.STATUS) GOTO 999
-	      STATUS = ADJACENT_ARM(JBPOS,JBOFF,ST_ADDR,1,XJUN,YJUN,SEG4)
-	      IF (.NOT.STATUS) GOTO 999
+	   STATUS = ADJACENT_ARM(JBPOS,JBOFF,ST_ADDR,-1,XJUN,YJUN,SEG1)
+	   IF (.NOT.STATUS) GOTO 9999
+	   STATUS = ADJACENT_ARM(JBPOS,JBOFF,ST_ADDR,1,XJUN,YJUN,SEG4)
+	   IF (.NOT.STATUS) GOTO 9999
 C
-	   ELSE				! this is the second JP
+	ELSE			! this is the second JP
 C
 C Use second JP to get ST addresses of arms joining end of current line
 C
-	      STATUS = ADJACENT_ARM(JBPOS,JBOFF,ST_ADDR,1,XJUN,YJUN,SEG2)
-	      IF (.NOT.STATUS) GOTO 999
-	      STATUS = ADJACENT_ARM(JBPOS,JBOFF,ST_ADDR,-1,XJUN,YJUN,SEG3)
-	      IF (.NOT.STATUS) GOTO 999
+	   STATUS = ADJACENT_ARM(JBPOS,JBOFF,ST_ADDR,1,XJUN,YJUN,SEG2)
+	   IF (.NOT.STATUS) GOTO 9999
+	   STATUS = ADJACENT_ARM(JBPOS,JBOFF,ST_ADDR,-1,XJUN,YJUN,SEG3)
+	   IF (.NOT.STATUS) GOTO 9999
 C
-	   ENDIF
+	ENDIF
 C
 C go back to main body of file
 C
-	   CALL IFFPKE(IECODE,IELEN,CURPOS)
+	CALL IFFPKE(IECODE,IELEN,CURPOS)
+	GOTO 100
 C
-	ELSE IF(IECODE.EQ.'ST')THEN
+C-----------------------------------------------------------------------------
+C ST entry
 C
 C Record that ST has been seen, so that we know we are at the start
 C or end if a JP is encountered (these are the only possibilities)
 C
- 	   HADST=.TRUE.
-	   ST_ADDR = LPOSH
+500	HADST=.TRUE.
+	ST_ADDR = LPOSH
 C
-	   CALL EIHRS( NPTS, IENDS)
-	   IF(NPTS.LT.2)THEN		! Ignore single point features
-	      CALL IFFNXC('EF',IELEN)
-	      GOTO 100
-	   ENDIF
+	CALL EIHRS( NPTS, IENDS)
+	IF(NPTS.LT.2)THEN	! Ignore single point features
+	   CALL IFFNXC('EF',IELEN)
+	   GOTO 100
+	ENDIF
 C
 C Get last point to verify with point held at junction arm when get 2nd JP
 C
-	   CALL EIHRR(XJUN,1,NPTS*4-3)
-	   CALL EIHRR(YJUN,1,NPTS*4-1)
+	CALL EIHRR(XJUN,1,NPTS*4-3)
+	CALL EIHRR(YJUN,1,NPTS*4-1)
+	GOTO 100
 C
-	ELSE IF(IECODE.EQ.'EF') THEN
+C-----------------------------------------------------------------------------
+C EF entry
 C
 C save current position
 C
-	   CURPOS=LPOSH
+600	CURPOS=LPOSH
 C
 C Create casings 
 C
-	   IF (HAD_CASINGS) THEN
-	      CALL CREATE_CASINGS(SEG1,SEG2,SEG3,SEG4,ST_ADDR,FSTAT(1))
-	   ENDIF
+	IF (HAD_CASINGS) THEN
+	   CALL CREATE_CASINGS(SEG1,SEG2,SEG3,SEG4,ST_ADDR,FSTAT(1))
+	ENDIF
 C
 C Create road fills
 C
-	   IF (HAD_FILLS) THEN
-	      CALL CREATE_FILLS(SEG1,SEG2,SEG3,SEG4,ST_ADDR,FSTAT(1))
-	   ENDIF
+	IF (HAD_FILLS) THEN
+	   CALL CREATE_FILLS(SEG1,SEG2,SEG3,SEG4,ST_ADDR,FSTAT(1))
+	ENDIF
 C
 C go back to main body of file
 C
-	   CALL IFFPKE(IECODE,IELEN,CURPOS)
-
-	ELSE IF(IECODE.EQ.'RA') THEN
+	CALL IFFPKE(IECODE,IELEN,CURPOS)
+	GOTO 100
+C       
+C-----------------------------------------------------------------------------
+C RA entry
 C
 C Save address of range entry to patch in later
 C
-	   RAPOS=LPOSH
-	   CALL EIHCPY(OUTLUN)
-C
-C Copy all header info as is to output file.
-C
-	ELSE IF(IECODE.EQ.'HI') THEN
-	   CALL IFFSEL(OUTLUN)
-	   CALL IFFHI
-	ELSE IF(IECODE.EQ.'MH'
-     &	    .OR.IECODE.EQ.'MD'
-     &	    .OR.IECODE.EQ.'CP'
-     &	    .OR.IECODE.EQ.'CC'
-     &	    .OR.IECODE.EQ.'NS') THEN
-	   CALL EIHCPY(OUTLUN)
-	ELSE IF(IECODE.EQ.'NO') THEN
-	   CALL IFFSEL(OUTLUN)
-	   IOVNUM=1
-	   NOPOS=LPOSE
-	   CALL IFFNO(IOVNUM,IOVS,0)
-	ELSE IF(IECODE.EQ.'EO') THEN
-	   CALL IFFSEL(OUTLUN)
-	   CALL IFFUNO(NOPOS)
-	   CALL IFFEO
-	ENDIF
-
+700	RAPOS=LPOSH
+	CALL EIHCPY(OUTLUN)
 	GOTO 100
+C
+C-----------------------------------------------------------------------------
+C HI entry
+C
+C
+800	CALL IFFSEL(OUTLUN)
+	CALL IFFHI
+	GOTO 100
+C
+C-----------------------------------------------------------------------------
+C NO entry
+C
+900	CALL IFFSEL(OUTLUN)
+	IOVNUM=1
+	NOPOS=LPOSE
+	CALL IFFNO(IOVNUM,IOVS,0)
+	GOTO 100
+C
+C-----------------------------------------------------------------------------
+C EO entry
+C
+1000	CALL IFFSEL(OUTLUN)
+	CALL IFFUNO(NOPOS)
+	CALL IFFEO
+	GOTO 100
+C
+C-----------------------------------------------------------------------------
+C EJ entry
+C
+1100	CALL IFFSEL(OUTLUN)
+	CALL IFFEM
+	CALL IFFEJ
 C
 C now go back and set the RA entry
 C
-200	CALL IFFSEL(OUTLUN)
+9000	CALL IFFSEL(OUTLUN)
 	CALL IFFPKE(IECODE,IELEN,RAPOS)
 	IF (IECODE.NE.'RA') THEN
 	   STATUS=ICASE__NORA
 	   CALL LSL_PUTMSG(ICASE__NORA)
-	   GOTO 999
+	   GOTO 9999
 	ELSE
 	   CALL EIHWR(RANGE,4,1)
 	ENDIF
 C
-	CALL IFFEM
-	CALL IFFEJ
-C
-999	SCAN_IFF = STATUS
+9999	SCAN_IFF = STATUS
 	RETURN
 	END

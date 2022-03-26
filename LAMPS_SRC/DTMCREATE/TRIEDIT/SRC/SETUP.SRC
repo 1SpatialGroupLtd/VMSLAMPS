@@ -1,0 +1,236 @@
+	SUBROUTINE SETUP(ITLE,ITLEN,HADTOP)
+C
+***	MODULE	SETUP
+***	IDENT	27MR92
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	SETWIN now called SETWINDOW to avoid symbol
+C	replacement by LSLSHR's SETWIN			TJH  19-Jan-1989
+CMOD	Converted for TRIEDIT				TJH  07-Dec-1987
+CMOD	ITLE arg. to NEWFIL now given explicit length	TJH  06-Aug-1986
+CMOD	Feature codes in TPOLGY() added.		TJH  25-Mar-1986
+CMOD	Number of points in triangulation,
+C	pre-TRIEDIT, now read from end of .DTA
+C	file for use by VECTOR command.			TJH  11-Oct-1985
+CMOD	File version numbers explicitly forced	  	TJH  18-Jun-1985
+CMOD	New device types supported			 DM  03-Apr-1985
+CMOD	NEWFIL became a logical function		TJH  14-Dec-1984
+CMOD	Additional arg. added to NEWFIL calls   	TJH  06-Dec-1984
+CMOD    Table init. failure prompt changed      	TJH  06-Dec-1984
+CMOD    DISKFL flag added for mid session scratch
+CMOD    file opening					TJH  24-Jul-1984
+CMOD    RECL for scratch file changed to 11   	  	TJH  24-Jul-1984
+CMOD	NTEM dimensioned to NTMSIZ via DIMS.PAR		 DM  05-Jul-1984
+CMOD	TEXTOT replaced by OUTOPT			 DM  03-Jul-1984
+CMOD    TABLE setup call included			TJH  29-Jun-1984
+CMOD    ITLE now passed in arg. list            	TJH  02-Jun-1984
+CMOD	INDB and NAYB now in MAC			 DM  29-May-1984
+C	Standardised					TJH  25-May-1984
+C
+C Get a data set from file. ask the user which one, open it,
+C get data into memory, put neighbours into a random file (on
+C disk or in memory depending on space available, and size of
+C data set), and compute the points in window
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	CHARACTER*(*)ITLE	! file-spec
+	INTEGER	     ITLEN	! length of file-spec
+	LOGICAL      HADTOP	! .T. if feature codes were input
+C
+C Parameters:
+	INCLUDE 'LSL$CMNTRIEDIT:DIMS.PAR'
+	INCLUDE 'LSL$CMNTRIEDIT:TRIEDITMSG.PAR'
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+	INCLUDE '($RMSDEF)/NOLIST'
+C
+C Common:
+	INCLUDE 'LSL$CMNTRIEDIT:DATQ.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:RCONVI.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TPOLGY.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TTTYPE.CMN'
+	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C W/s
+	INTEGER	NUMN		! number of neighbours
+	INTEGER	NTEM(NTMSIZ)	! for neighbours
+	INTEGER	I,J		! temp vars
+	INTEGER	NBOX		! number of boxes
+	INTEGER	IERR		! status
+	LOGICAL	JERR		! error return
+	INTEGER	IPNT		! a node
+	INTEGER	ISHELL		! dummy
+C
+C Functions:
+	LOGICAL	  RDUNF		! efficient Fortran reads
+	LOGICAL	  INIDIG        ! initialise the digitising table
+	LOGICAL	  NEWFIL	! for file opening
+C
+	INTEGER	  NLONG		! for efficient reads
+	INTEGER	  LONGWD(37500) ! for efficient reads
+C
+	EQUIVALENCE	(TPOLGY(1),LONGWD(1))
+C
+C ......................................................................
+C
+	HADTOP=.TRUE.		! assume that TPOLGY() is available
+C
+C If table has been selected initialise the table, setting CPs to the
+C values supplied by the user
+	IF (TABLE.OR.MTABLE) THEN
+	   IF (INIDIG(.TRUE.)) THEN
+	      CALL OUTOPT('Try using the ENABLE TABLE command '//
+     &			'again after initialisation.')
+	      IF (.NOT.VT100) CALL LSL_WAIT(5,2)	! wait for 5 seconds
+	      TABLE=.FALSE.
+	      MTABLE=.FALSE.
+	   ENDIF
+	ENDIF	
+C ......................................................................
+C
+C Setup and open file-specs
+	CALL SCNCLR 			! clear the screen
+C 1) the data transfer file (.DTA)
+	IF (NEWFIL(LGC1,ITLE(:ITLEN),1,0,1,0)) CALL LSL_EXIT(SS$_ABORT)
+C
+C
+C Read it into memory - first the data set details
+	READ(LGC1,END=70,ERR=80)LIMPOL,NP,NPMAX,NBI,NBJ,MX2,MY2,
+     &	   MXI,MYI,ISHELL,(VMIN(I),VMAX(I),VSCAL(I),OFFSET(I),I=1,3)
+	NBOX=NBI*NBJ
+C
+C Check number of data points is not too large
+	IF (NP.GE.NMAX) THEN
+	   CALL LSL_GETMSG(TRIEDIT__NODOVR,MESSAGE,MESLEN)
+	   CALL ALARMS(1,0,MESSAGE(1:MESLEN))	! close down & exit
+	ENDIF
+C
+C Check number of boxes is not too large
+	IF (NBOX.GT.NAX) THEN
+	   CALL LSL_GETMSG(TRIEDIT__BOXOVR,MESSAGE,MESLEN)
+	   CALL ALARMS(1,0,MESSAGE(1:MESLEN))	! close down & exit
+	ENDIF
+C
+C Now read the data and its associated index
+	JERR=RDUNF(LGC1,MAC,5*NP)
+	IF (.NOT.JERR) GO TO 90
+C
+C Store the sign of the last string in the data set
+	LASTSN=ISIGN(1,MAC(4,NP))
+C
+C Now read the box structure
+	JERR=RDUNF(LGC1,IN,NBOX)
+	IF (.NOT.JERR) GO TO 90
+C
+C Finally read in the number of points in the pre-TRIEDIT 
+C triangulation. 
+	READ(LGC1,END=10) NPANIC
+	GOTO 20
+C NPANIC wasn't there! Must be a pre 11-10-1985 .DTA file
+10	NPANIC=-32767		
+C
+C Finally the feature code byte array TPOLGY() - equivalenced onto
+C LONGWD(). If EOF detected this is not a new pattern .DTA file which
+C would contain feature code information.
+20	NLONG=NP/4
+	IF (MOD(NP,4).NE.0) NLONG=NLONG+1
+	JERR=RDUNF(LGC1,LONGWD,NLONG)
+	IF (JERR.EQ.RMS$_EOF) THEN
+	   CALL OUTOPT(WARNING//
+     &	   'Reading old pattern .DTA file. No Feature code')
+	   CALL OUTOPT('    information available.')
+	   HADTOP=.FALSE.
+	ELSE IF (.NOT.JERR.AND.JERR.NE.RMS$_EOF) THEN
+	   GOTO 90 		! report error and exit
+	ENDIF	   
+C 2) The node transfer file
+	CALL PUTFLN(ITLE(1:ITLEN))
+	STR_EXT='NOD'
+	CALL EXPFLN(ITLE,ITLEN)
+	IF (NEWFIL(LGC1,ITLE(:ITLEN),1,0,1,0)) CALL LSL_EXIT(SS$_ABORT)
+C
+C Open the random scratch file that is to hold the neighbours
+C ready for use as needed. NB: record length needs to be
+C 11*(standard integer length in operation, in this one). This
+C gives the length in bytes. NB: if there is enough room in memory
+C for the data set, then the system automatically dispenses with
+C the random file. If there is not enough room im memory then the
+C whole of memory is used, and than whatever disk space is needed.
+	IF (NFREES.LE.NP) THEN
+	   OPEN(UNIT=LGC2,FILE='TRIEDIT.TMP',STATUS='SCRATCH',
+     1		ACCESS='DIRECT',FORM='UNFORMATTED',RECL=11,ERR=60)
+	   DISKFL=.TRUE.
+	ENDIF
+C
+C Set up a border object for the anti-kick bar
+	CALL NEWOBJ(3)
+	CALL BAR(NP,0,1)
+C
+C Fill the stack up from 1 to NSTACK
+	DO 30 I=1,NSTACK
+	   ISTACK(I)=I
+30	CONTINUE
+C
+C Set the stack pointer to no records being used yet, starting
+C with record 2, as record 1 is used in MAC(5,...) to indicate no
+C entry is present.
+	IPSTCK=2
+C
+C Set entry point into the structure to indicate record 1 (unused)
+C for each node
+	DO 40 I=1,NMAX
+	   MAC(5,I)=1
+40	CONTINUE
+C
+C Get neighbours in for each point in turn and write a random file.
+C Complete node/neighbour list is stored in NTEM. There are NUMN
+C neighbours for point IPNT.
+	IERR=-1
+	DO 50 I=1,NP
+	   CALL REDNOD(LGC1,IPNT,1,IERR)
+	   CALL REDNOD(LGC1,NUMN,1,IERR)
+	   IF (NUMN.GT.NTMSIZ) THEN
+	      CALL LSL_GETMSG(TRIEDIT__TOMNYNEIB,MESSAGE,MESLEN)
+	      CALL ALARMS(1,0,MESSAGE(1:MESLEN))
+	   ENDIF
+	   CALL REDNOD(LGC1,NTEM,NUMN,IERR)	! read neighbour record
+	   CALL PUTNAY(IPNT,NTEM,NTMSIZ,NUMN)	! store them away
+	   CALL BAR(NP,I,1)			! update anti-kick bar
+50	CONTINUE
+C
+C Set full window coverage as the default situation
+	CALL SETWINDOW
+C
+C Determine point/window coverage from scratch
+	CALL WINDOW(0)
+	GOTO 110				! all done
+C
+C File handling errors.
+60	CALL ERRSNS(,I,JERR)
+	IF (JERR.EQ.0) JERR=I
+	CALL OUTOPT(' ')
+	CALL LSL_GETMSG(TRIEDIT__OPNSCR,MESSAGE,MESLEN)
+	CALL OUTOPT(MESSAGE(1:MESLEN))
+	GO TO 100
+C
+70	JERR=RMS$_EOF			! we know it's EOF
+	GO TO 90			! tell him all about it
+C
+80	CALL ERRSNS(,I,JERR)		! find out what the problem is
+	IF (JERR.EQ.0) JERR=I
+90	CALL OUTOPT(' ')
+	CALL LSL_GETMSG(TRIEDIT__RDDTA,MESSAGE,MESLEN)
+	CALL OUTOPT(MESSAGE(1:MESLEN))
+100	CALL LSL_GETMSG(JERR,MESSAGE,I)	! what went wrong
+	J=INDEX(MESSAGE,'!') - 1	! (ignore any FAO stuff)
+	IF (J.LE.0) J=I
+	CALL ALARMS(1,0,MESSAGE(:J))	! close down & exit
+110	RETURN
+	END

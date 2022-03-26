@@ -1,0 +1,386 @@
+C
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL*4 FUNCTION OUTPUT_PIP()
+C
+***	MODULE	OUTPUT_PIP
+***	IDENT	12MY92
+C
+	IMPLICIT NONE
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+	LOGICAL*4	ACTUAL_OUTPUT_PIP
+C
+C	........................................................................
+C
+	OUTPUT_PIP = ACTUAL_OUTPUT_PIP(
+     &			POLMAX,TABMAX,POLNEST_MAX, PARTS_MAX,
+     &			%VAL(PTR$_DUFF_POLYGON),
+     &			%VAL(PTR$_NEST_START),
+     &			%VAL(PTR$_POLY_AREA),
+     &			%VAL(PTR$_POLY_START),
+     &			%VAL(PTR$_TREE_IN_POLY),
+     &			%VAL(LOC_PTR$_T_PTRS),
+     &			%VAL(LOC_PTR$_P_PTRS)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL*4 FUNCTION ACTUAL_OUTPUT_PIP(
+     &		POLMAX,TABMAX,POLNEST_MAX,PARTS_MAX,
+     &		DUFF_POLYGON,
+     &		NEST_START,
+     &		POLY_AREA,
+     &		POLY_START,
+     &		TREE_IN_POLY,
+     &		T_PTRS,
+     &		P_PTRS
+     &	)
+C
+***	MODULE	ACTUAL_OUTPUT_PIP
+***	IDENT	01NO91
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD1056 Send abs coords to LITES2 if requested		  JB 01-Nov-1991
+C
+CMOD728 /PIP=(CONTAIN_LABEL_AC=n) now outputs AC of
+C	type 'n' not POL_LABEL_AC (zero!)		 TJH 09-Oct-1990
+CMOD	Now outputs a warning and continues after a pip
+C	generation failure				 TJH 06-Mar-1990
+CMOD	Now passes IFF output file LUN to GET_POLY_LABEL TJH 29-Mar-1989
+C
+C	Created						  AC 18-May-1988
+C
+C	Function for writing point-features to a previously created IFF file.
+C	These point features are located such that exactly one lies within
+C	each polygon (taking into account first order nesting). The bounding
+C	polygon does not have a point generated for it.
+C
+C .........................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+	INTEGER		SS$_ABORT
+	EXTERNAL	SS$_ABORT	! failure
+	INTEGER		STS$K_WARNING
+	EXTERNAL	STS$K_WARNING
+	INCLUDE		'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNIPOLYGON:IPOLYGONMSG.PAR'
+	INCLUDE 	'LSL$CMNPOLYGONS:POLYGONSMSG.PAR'
+C
+C Commons:
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:SECTOR.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:COVERAGES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TREES.CMN'
+	INCLUDE		'LSL$CMNIPOLYGON:COMMAND.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE		'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE		'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 	'LSL$CMNLSL:STATUS.CMN'
+C
+C Arguments
+	INTEGER*4	POLMAX
+	INTEGER*4	TABMAX
+	INTEGER*4	POLNEST_MAX
+	INTEGER*4	PARTS_MAX
+C
+	INTEGER		DUFF_POLYGON((POLMAX+31)/32)
+	INTEGER		NEST_START(POLMAX+1)
+	REAL		POLY_AREA(POLMAX)
+	INTEGER		POLY_START(3,POLMAX)
+	INTEGER		TREE_IN_POLY(POLMAX)
+C
+C W/s:
+	LOGICAL		LASTPTR		! pointer to last nested poly
+C					! (unused)
+	INTEGER*2 	MESLEN		! temporary variables
+	INTEGER		POLY_INDX	! current polygon
+	REAL		GEN_POINT(2)	! generated location of point-in-poly
+	INTEGER*2	ISTAT(4)	! array for setting up point feature
+	INTEGER*2	NPTS		! data for setting up point feature
+	INTEGER*2	IENDS		! data for setting up point feature
+	INTEGER		LPOSNO		! address of NO
+	INTEGER*2	IFN,ISQ		! var for setting up point feature
+	CHARACTER*255	TEXT(COVMAX)	! polygon labels/identifier
+	CHARACTER*256 	MESTXT		! error message text
+	INTEGER*2	LENGTH(COVMAX)	! lengths of TEXT
+	LOGICAL		UNDEF		! able to get label?
+	INTEGER		DUFPOL		! # polygons omitted from output
+	INTEGER		UNDEFPOL	! # of polygons without label
+	INTEGER		PIPOUT		! # of point-in-poly generated
+	INTEGER		P_PTRS(POLNEST_MAX) ! nested polygons
+	INTEGER		NNEST		! # of nested polygons
+	INTEGER		T_PTRS(POLNEST_MAX) ! nested trees 
+	INTEGER		NTREE		! # of nested trees
+	INTEGER		I		! tmp var.
+	REAL		APOINT(2)	! a coordinate
+	REAL	  	DOUGHNUT_AREA	! poly area less nests
+C
+C Functions:
+	INTEGER*2 	EXPAND		! text expansion
+	LOGICAL		EXT1V		! check on a single bit
+	LOGICAL*4	GEN_PNT_IN_POLY	! generate a point in a polygon
+	LOGICAL*4	IFF_HEADER	! copy across IFF header information 
+C					! from input IFF file to PIP file
+	INTEGER		GET_POLY_LABEL	! get polygon label
+	INTEGER		GET_POLY_IDENT	! get polygon identifier
+	INTEGER		IFFMODIFY	! open IFF file for modification
+	INTEGER		FIRST_NEST	! get polygons nested in current poly
+	INTEGER		NESTED_TREES	! get trees nested in current poly
+	LOGICAL		PROCESS_AC_TEXT	! modify propagated AC text
+	INTEGER   	GET_POLPNT	! gets a single polygon coordinate
+C
+C
+C ................................................................
+C
+	ACTUAL_OUTPUT_PIP = %LOC(SS$_NORMAL)
+C
+	CALL FRAMED_MES('Writing Point-in-Polygon File',29)
+C
+	ACTUAL_OUTPUT_PIP=IFFMODIFY(PIPLUN,PIP_FILE(:PIP_LEN),,
+     &						PIP_FILE_ID,.FALSE.)
+	IF (.NOT.ACTUAL_OUTPUT_PIP) THEN
+	   ACTUAL_OUTPUT_PIP=%LOC(SS$_ABORT)
+	   DELETE=.TRUE.
+	   GOTO 50				
+	ENDIF
+
+	IFN=0
+	ISTAT(1) = PIP_FC
+	ISTAT(2) = 0
+	ISTAT(3) = '4000'X
+	ISTAT(4) = 0
+	NPTS = 1
+	IENDS = 0
+C
+C Reset counter for total points output
+	DUFPOL = 0
+	UNDEFPOL = 0
+	PIPOUT = 0
+C
+C Make all the header entries (including layer 0)
+	ACTUAL_OUTPUT_PIP=IFF_HEADER(PIPLUN,.FALSE.,.FALSE.,.TRUE.)
+	IF (.NOT.ACTUAL_OUTPUT_PIP) GOTO 50
+C
+C Create polygon layer (1 by default)
+	CALL IFFSEL(PIPLUN)
+	LPOSNO=LPOSE
+	IFN = 0
+	CALL IFFNO(PIP_LAY,0,0)
+C
+C ................................................................
+C    L O O P   F O R   E A C H   P O L Y G O N   I N   T U R N
+C
+	DO 40 POLY_INDX=1,NUM_POLY
+C
+C Ensure this is not a duff polygon
+	   IF (EXT1V(POLY_INDX,DUFF_POLYGON(1))) THEN
+	      DUFPOL = DUFPOL+1
+	      GOTO 40
+	   ENDIF
+C
+C Is this an unwanted isolated polygon? If so ignore it.
+	   IF (POLY_START(1,POLY_INDX).LT.0) GOTO 40
+C
+C Is this the bounding polygon? If so ignore it.
+	   IF (POLY_INDX.EQ.BOUND_POL) GOTO 40
+	   CALL IFFSEL(INLUN)
+C
+C If we are taking first-order nesting into account then go get them
+	   NNEST=0
+	   IF (NEST_START(POLY_INDX).GT.0) THEN
+	      ACTUAL_OUTPUT_PIP=FIRST_NEST(POLY_INDX,P_PTRS,NNEST,
+     &			.TRUE.,LASTPTR)
+	      IF (.NOT.ACTUAL_OUTPUT_PIP) GOTO 50
+	   ENDIF
+C
+C If we are taking one-armed junctions into account then may include some 
+C trees
+	   NTREE=0
+	   IF (ONE_USE.AND.HAD_NEST) THEN
+	      IF (TREE_IN_POLY(POLY_INDX).GT.0) THEN
+	         ACTUAL_OUTPUT_PIP=NESTED_TREES(POLY_INDX,T_PTRS,NTREE)
+	         IF (.NOT.ACTUAL_OUTPUT_PIP) GOTO 50
+	      ENDIF
+	   ENDIF
+C
+C Calculate area taking into account nesting
+	   DOUGHNUT_AREA=0.0
+	   IF (HAD_AREA) THEN
+	      DOUGHNUT_AREA=POLY_AREA(POLY_INDX)
+	      IF (HAD_NEST.AND.(NNEST.GT.0)) THEN
+	         DO 10 I=1,NNEST
+	            DOUGHNUT_AREA=DOUGHNUT_AREA-POLY_AREA(P_PTRS(I))
+10	         CONTINUE
+	      ENDIF
+	   ENDIF
+C
+C Generate the point-in-polygon location
+	   ACTUAL_OUTPUT_PIP = GEN_PNT_IN_POLY(POLY_INDX,P_PTRS,NNEST,
+     &				T_PTRS,NTREE,CLOCK,GEN_POINT,PIP_ITERATE)
+	   IF (.NOT.ACTUAL_OUTPUT_PIP) THEN
+	      IF (ACTUAL_OUTPUT_PIP.EQ.POLY__PIPFAIL) THEN
+	         CALL GET_POLPNT(APOINT,POLY_INDX)
+	         IF (HAD_LITES) THEN
+	            CALL FLWSEL(LITESLUN)
+	            CALL FLWRTF('%%MESSAGE PIP generation error:')
+	         ENDIF
+C
+		 IF (HAD_ABS) THEN
+		    MESLEN=EXPAND(
+     &		 '%WSUnable to generate a point inside polygon with '//
+     &			'ID %N and containing coordinate (%F,%F)',
+     &			 MESTXT,POLY_INDX,APOINT(1)+MD2LOC(1),
+     &					  APOINT(2)+MD2LOC(2))
+		 ELSE
+		    MESLEN=EXPAND(
+     &		 '%WSUnable to generate a point inside polygon with '//
+     &			'ID %N and containing coordinate (%F,%F)',
+     &			 MESTXT,POLY_INDX,APOINT(1),APOINT(2))
+		 ENDIF
+C
+	         CALL MES_OUT(APOINT,MESTXT,MESLEN)
+	         ACTUAL_OUTPUT_PIP = %LOC(SS$_NORMAL)	! reset from warning
+	         GOTO 40
+	      ELSE
+	         GOTO 50
+	      ENDIF
+	   ENDIF
+C
+C Output the point-in-polygon feature
+	   CALL IFFSEL(PIPLUN)
+	   PIPOUT = PIPOUT+1
+	   ISQ = 0
+	   IFN = IFN+1
+	   CALL IFFNF(IFN,ISQ)
+	   CALL IFFFS(ISTAT)
+C
+C If labels are to be written out then...
+	   IF (PIP_LABEL) THEN
+	      ACTUAL_OUTPUT_PIP=GET_POLY_LABEL(POLY_INDX,TEXT,
+     &					LENGTH,UNDEF,.FALSE.,PIPLUN)
+	      IF (.NOT.ACTUAL_OUTPUT_PIP) GOTO 40
+	      IF (UNDEF) UNDEFPOL=UNDEFPOL+1
+	      CALL IFFSEL(PIPLUN)
+	      IF(HAD_PROP)THEN
+C
+C modify texts: IN_PREFIX text --> OUT_PREFIX text
+	         ACTUAL_OUTPUT_PIP=PROCESS_AC_TEXT(TEXT,LENGTH)
+	         IF (.NOT.ACTUAL_OUTPUT_PIP) GOTO 40
+C
+C output an AC for each cover, unless concatenating
+	         DO 20 I=1,NUM_COVER
+	            TXTPTR=LENGTH(I)
+	            CALL COPY_STRING(TEXT(I),TXTDSC)
+	            CALL IFFAC(PIP_CVR_AC(I),DOUGHNUT_AREA,TXTBUF,LENGTH(I))
+	            IF(HAD_CONCAT.AND.I.EQ.1)GOTO 30	! stop after first
+20	         CONTINUE
+30	         CONTINUE
+	      ELSE
+	         TXTPTR=LENGTH(1)
+	         CALL COPY_STRING(TEXT(1),TXTDSC)
+	         CALL IFFAC(PIP_LABEL_AC,DOUGHNUT_AREA,TXTBUF,LENGTH(1))
+	      ENDIF
+	   ENDIF
+C
+C If idents are to be written out then...
+	   IF (PIP_IDENT) THEN
+	      ACTUAL_OUTPUT_PIP=GET_POLY_IDENT(POLY_INDX,TEXT,LENGTH)
+	      IF (.NOT.ACTUAL_OUTPUT_PIP) GOTO 40
+	      CALL IFFSEL(PIPLUN)
+	      TXTPTR=LENGTH(1)
+	      CALL COPY_STRING(TEXT(1),TXTDSC)
+	      CALL IFFAC(PIP_IDENT_AC,DOUGHNUT_AREA,TXTBUF,LENGTH(1))
+	   ENDIF
+
+	   CALL IFFST(GEN_POINT,NPTS,IENDS)
+	   CALL IFFEF
+C
+40	CONTINUE
+C
+C End layer etc
+	CALL IFFSEL(PIPLUN)
+	CALL IFFUNO(LPOSNO)
+	CALL IFFEO
+	CALL IFFEM
+	CALL IFFEJ
+
+50	IF (DELETE.OR..NOT.ACTUAL_OUTPUT_PIP.OR.
+     &	      (IBITS(LSL_STATUS,0,3).EQ.%LOC(STS$K_WARNING))) THEN
+	   CALL IFFCLO(PIPLUN,%LOC(SS$_ABORT)) ! close output file
+	ELSE
+	   CALL IFFCLO(PIPLUN,%LOC(SS$_NORMAL))! close output file
+	ENDIF
+
+	IF (IERCD.NE.0) THEN			! error?
+	   ACTUAL_OUTPUT_PIP=IPOL__CLPIPIFF		! error closing file
+	   CALL LSL_PUTMSG(ACTUAL_OUTPUT_PIP,PIP_FILE(:PIP_LEN))!tell user
+	ENDIF
+
+	IF (.NOT.ACTUAL_OUTPUT_PIP) THEN
+	   ACTUAL_OUTPUT_PIP=%LOC(SS$_ABORT)
+	ELSE
+	   IF (HAD_LOG) THEN
+	      CALL EXPAND(
+     &	      'Number of points output to /PIP file ............... %N',
+     &								PIPOUT)
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+	      IF (DUFPOL.GT.0) THEN
+	         CALL EXPAND(
+     &	      'Number of duff polygons omitted from output ........ %N',
+     &							      	DUFPOL)
+	         IF (HAD_LIS) THEN
+	            CALL FLWLIN
+	         ELSE
+	            CALL TTWLIN
+	         ENDIF
+	      ENDIF
+	      IF (UNDEFPOL.GT.0) THEN
+	         CALL EXPAND(
+     &	      'Number of polygons with undefined labels ........... %N',
+     &							     	UNDEFPOL)
+	         IF (HAD_LIS) THEN
+	            CALL FLWLIN
+	         ELSE
+	            CALL TTWLIN
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C finished...
+	RETURN
+	END
+C

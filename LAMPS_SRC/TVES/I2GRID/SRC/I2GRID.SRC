@@ -1,0 +1,549 @@
+	PROGRAM I2GRID
+C
+***	MODULE I2GRID
+***	IDENT  03AU93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England
+C Author: 	D R Catlow.
+C Created:	May 1986
+C
+CMOD1253 Remove fudge in plot_area and implement the edge
+C	 fill algorithm better, coping with invisible moves
+C	 and horizontal line sections				  JB 03AU93
+C
+CMOD	Stop program exit for invalid width command   		MWSR 29JA89
+CMOD	Extensively revised and modularised, and command interface
+C	brought into line with other TVES utilites		 DRC 10DE88
+CMOD	To use ACDs						 DRC 24NO88
+CMOD	Parameter DTI_DTED replaced by DTI_TED4  		 DRC 18AU88
+CMOD    To use IFF range rather than CP entry			 DRC   AP88
+C
+C------------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***	PARAMETER/LSL$CMNLSL:READSTR/
+C
+***	PARAMETER/HERE:BELLS/
+C
+***	COMMON/LSL$CMNLSL:CMDCOM/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/LSL$CMNFRT:FRTACD/
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+***	COMMON/HERE:CULTRE/
+***	COMMON/HERE:SELECT/
+C
+C 	Local
+	INTEGER*4	CMD		! decoded command number
+	INTEGER*4	I		! counter
+	INTEGER*4	IERR		! function return code
+	INTEGER*4	RETVAL		! function return code
+	INTEGER*4	LEN		! no. of characters read
+C
+	BYTE		CH		! single character
+C
+	LOGICAL		HAD_EGRID	! had output grid values?
+	LOGICAL		HAD_NGRID
+	LOGICAL		DIRECT		! .f. if from command file
+C
+	CHARACTER*128	ICFNAM		! indirect command file name
+	INTEGER*4	ICFLEN		! command file name length
+	CHARACTER*128	FRTTIT		! FRT name
+	CHARACTER*80	LINE
+C
+C 	Command tables
+	EXTERNAL	GRID_CMD_TABLE
+	EXTERNAL	HTYPE_CMD_TABLE
+	EXTERNAL	DTYPE_CMD_TABLE
+C
+C Functions called
+	INTEGER*4	RDCH		! to read a single character
+	INTEGER*4       RDCHS		! ditto
+	INTEGER*4	BSLN		! backspace
+	INTEGER*4	RDCOMM		! read keyboard command line
+	INTEGER*4	GETFILNAM	! parse filename
+	INTEGER*4	TTRSTR		! real line from terminal
+C
+	LOGICAL		OPEN_DTI_FILE	! to open an existing DTI file 
+	LOGICAL		CREATE_DTI_FILE	! to create a new DTI file
+	LOGICAL		TEST_VALUE	! test a value against data type
+	LOGICAL		GET_DTINAME	! parse filename
+	LOGICAL		OPEN_DTI	! open DTI file
+	LOGICAL		FRTINI		! to read FRT file
+	INTEGER*4	LIB$SPAWN	! to spawn DCL command
+	INTEGER*4	FLRLIN		! read line from command file
+	INTEGER*4 	FLROPN		! to open the command file
+	INTEGER*4 	FLRCLO		! to close the command file
+C
+C----------------------------------------------------------------------------
+C
+C	Initialise the various libraries
+	CALL LSL_INIT
+	CALL DTI_INIT
+C
+C	Read in default ACDs.
+	CALL FRT_ACDINI
+C
+C	Announce ourselves
+	CALL DTMJPI
+C
+C	Set up I2GRID Defaults
+C	Header and data types,
+	HTYPE = DTI_LSLA
+	HEADER_TYPE(1) = HTYPE
+	DTYPE = DATA_WORD
+	DATA_TYPE(1) = DTYPE
+	HAD_EGRID  = .FALSE.		! not had DTI e grid value
+	HAD_NGRID  = .FALSE.		! not had DTI n grid value
+C
+	PARAM_NUMBER = -1	  	!output attribute is FSN
+	PRIORITY = 2			!priority is given to current feature
+	AREA = 2			!areas defined by feature code
+	AC_SELECTED = 0
+	ABSOLUTE=.TRUE.			!absolute coordinates
+	DFAD    = .FALSE.
+	SETWID = .FALSE.
+	DEFWID = 0
+	LOG = .TRUE.
+	USE_PRESET = .TRUE.
+	TRUNCATE = .TRUE.
+	NUMBER_CONSTANTS = 1
+C
+	HADIFF 	   = .FALSE.		! not had input IFF file
+C
+C Initialise all selections (ie. no restriction on what is plotted)
+	LYSMOD = .FALSE.
+	FCSMOD = .FALSE.
+	FSNMOD = .FALSE.
+	CALL VIOCLR(LAYMAP,LAYMAX*4,-1)	 ! reset the whole bit-map.
+	CALL VIOCLR(FCMAP,FCMAX*4,-1)	 ! reset the whole bit-map.
+	CALL VIOCLR(FSNMAP,FSNMAX*4,-1)	 ! reset the whole bit-map.
+C
+	DIRECT=.TRUE.
+C
+C-------------------------------------------------------------------------
+C	Read a command from the terminal
+10	IF (DIRECT) THEN
+	   RETVAL = TTRSTR(,,'I2GRID> ',IERR)
+C
+	   IF(.NOT.RETVAL)THEN
+	     IF(RETVAL.EQ.LSL__EOF)GOTO 999	! ^Z
+	     CALL LSL_PUTMSG(RETVAL)
+	     GOTO 10
+	   ENDIF
+C
+	   IF(TXTPTR.EQ.0)GOTO 10			! Blank line
+	ELSE				
+C
+C-------------------------------------------------------------------------
+C	Read a line from the command file
+	  RETVAL = FLRLIN()
+	  IF(RETVAL.NE.LSL__NORMAL)THEN
+	     IF(RETVAL.NE.LSL__EOF)THEN
+	       CALL WRITEF('%S Reading from command file',ERRBELL)
+               CALL WRITEF('Returning to terminal input')
+	     ELSE
+	       CALL WRITEF('%S Reading from command file',ERRBELL)
+	       CALL WRITEF('End of command file detected')
+	     ENDIF
+	     GOTO 2350		!to close the file 
+	  ELSE
+C	Echo the command on the terminal
+	     CALL BSLN
+	     CALL EXPAND('I2GRID> ')
+	     CALL APPEND(TXTDSC)
+	     CALL TTWSTR
+	  ENDIF
+	END IF
+C
+C------------------------------------------------------------------------
+C	Check for ! or @ on command line
+	CALL BSLN
+	IF(RDCHS(CH))GOTO 10	! next command
+	IF(CH.EQ.'!')GOTO 10	! next command
+	IF(CH.EQ.'@')GOTO 50
+C
+C------------------------------------------------------------------------------
+C 	Decode the command
+	CALL BSLN
+	CMD = RDCOMM(GRID_CMD_TABLE)	! read keyboard command line
+	IF (CMD.LE.0) THEN
+	  CALL WRITEF('%S unrecognised command',ERRBELL)
+	  GOTO 10
+	END IF
+C
+C-----------------------------------------------------------------------
+C	Branch according to the command
+	GOTO (100,   150,   200,   250,   300,
+C	      IFF,   IFW,   CRE,   HEL,   GRI,
+     &        450,   500,   999,   550,   600,
+C             ATT,   PRE,   EXI,   PRI,   SHO,
+     &        650,   700,   750,   800,   850,
+C	      ARE,   ENA,   DIS,   WID,   SEL,
+     &	      900,   950,  1000,  1010,  1020,
+C	      DES,   FRT,   OPE,   HTY,   DTY,  
+     &       1050,  2000,  2100,  2200,  2300)CMD
+C	       GO,   BAC,   WAI    SPA    RET
+C
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	@ command
+50	IF(.NOT.DIRECT)THEN
+	  CALL WRITEF('%S Specifying command @',ERRBELL)
+	  CALL WRITEF('Nested command files not supported')
+	  GOTO 10
+	ENDIF
+C
+	IF(RDCHS(CH))THEN
+	  CALL WRITEF('%S Specifying command @',ERRBELL)
+	  CALL WRITEF('Command file specification is missing')
+	  GOTO 10
+	ENDIF
+C
+	CALL BSCH
+C	Parse the filename
+	RETVAL = GETFILNAM(ICFNAM,ICFLEN,'SYS$DISK:[].COM;0',.TRUE.)
+	IF (.NOT.RETVAL) THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  GOTO 10
+	ENDIF
+C
+C 	Open the indirect command file
+	RETVAL = FLROPN(1,ICFNAM,IERR)
+	IF(.NOT. RETVAL)THEN
+	  CALL WRITEF
+     &    ('%S Unable to open indirect command file %S',
+     &    ERRBELL,ICFNAM(1:ICFLEN))
+	  CALL LSL_PUTMSG(RETVAL)
+	  GOTO 10		!get next command from terminal
+	ENDIF
+C
+	DIRECT = .FALSE.	!signal that input is from a command file
+	GOTO 10			!get next command from the file
+C
+C-----------------------------------------------------------------------
+C 	IFF command
+C
+C 	Open Input IFF file
+100	CALL OPEN_IFF
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C 	IFFWINDOW command
+C
+150	CALL SET_IFF_WINDOW
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C 	CREATE command
+C	Get the output DTI file specification
+200	CALL GET_DTINAME(.TRUE.)
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	HELP command
+250	CALL HELP
+	GOTO 10
+C
+C------------------------------------------------------------------------
+C 	GRID command	
+300	IF(CMDACT.NE.2)THEN
+	  CALL WRITEF('%S Specifying command GRID',ERRBELL)
+	  CALL WRITEF('Command requires 2 real arguments')
+	  GOTO 10
+	ENDIF
+C
+	IF(REALAR(1).LE.0.OR.REALAR(2).LE.0)THEN
+	  CALL WRITEF('%S Specifying command GRID',ERRBELL)
+	  CALL WRITEF('Command requires 2 real numbers greater than 0')
+	  GOTO 10
+	ENDIF
+C
+C	Transfer to local variables
+	EGRID = REALAR(1)
+	NGRID = REALAR(2)
+	HAD_EGRID = .TRUE.
+	HAD_NGRID = .TRUE.
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	ATTRIBUTE command
+450     CALL ATTRIBUTE_CMD
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C 	PRESET command
+C	preset value output for items with given attributes
+500	CALL PRESET_CMD
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	PRIORITY command
+550	CALL PRIORITY_CMD
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C 	SHOW command
+600	CALL SHOW_CMD
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C 	AREA command
+650	CALL AREA_CMD
+	GOTO 10
+C
+C-------------------------------------------------------------------------
+C	ENABLE command
+700	CALL ENABLE_CMD(.TRUE.)
+	GOTO 10
+C
+C-------------------------------------------------------------------------
+C	DISABLE command
+750	CALL ENABLE_CMD(.FALSE.)
+	GOTO 10
+C
+C-------------------------------------------------------------------------
+C 	WIDTH command
+800	IF(CMDRCT.NE.1)THEN
+	  CALL WRITEF('%S Specifying command WIDTH',ERRBELL)
+	  CALL WRITEF('Command requires a real argument')
+	  GOTO 10
+	ENDIF
+C
+	IF(REALAR(1).LE.0)THEN
+	  CALL WRITEF('%S Specifying command WIDTH',ERRBELL)
+	  CALL WRITEF('Command requires a width value greater than 0')
+	  GOTO 10
+	ENDIF
+C	   	  
+	SETWID = .TRUE.
+	DEFWID = REALAR(1)
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	SELECT command
+850	CALL SELECT_CMD(.TRUE.)
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	DESELECT command
+900	CALL SELECT_CMD(.FALSE.)
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C 	FRT command
+C
+950	IF(RDCHS(CH))THEN
+	  CALL WRITEF('%S Specifying command FRT',ERRBELL)	
+	  CALL WRITEF('FRT Filename is missing')
+	  GOTO 10
+	ENDIF
+C
+	CALL BSCH
+C
+C
+	RETVAL = GETFILNAM(FRTTIT,LEN,'LSL$FRT:FRT.FRT;0',.TRUE.)
+	IF (.NOT.RETVAL) THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  GOTO 10
+	ENDIF
+C
+	IF(FRTINI(FRTTIT(:LEN)))GOTO 10
+	AREA = 3			!assume areas are defined by GT
+	CALL WRITEF
+     &	('Areas are defined by means of the FRT graphical type entry')
+C
+	GOTO 10
+C----------------------------------------------------------------------
+C	OPEN command
+C	First parse the filename
+1000	IF (.NOT.GET_DTINAME(.FALSE.)) GOTO 10
+C
+C	Test that the file exists and can be opened
+	IF(.NOT.OPEN_DTI_FILE())THEN
+	  HADDTI=.FALSE.
+	ENDIF
+C
+	GOTO 10
+C
+C-------------------------------------------------------------------------
+C 	HEADER_TYPE
+1010	CMD = RDCOMM(HTYPE_CMD_TABLE)
+	IF (CMD.LE.0) THEN
+	  CALL WRITEF
+     &	  ('%S Specifying command HEADER_TYPE',ERRBELL)
+	  CALL WRITEF('Valid qualifiers are LSLA, TED4 or UHL1')
+	  GOTO 10
+	ENDIF
+C
+	GOTO (1011,1012,1013) CMD
+1011	HTYPE = DTI_UHL1
+	GOTO 1015
+1012	HTYPE = DTI_TED4
+	GOTO 1015
+1013	HTYPE = DTI_LSLA
+	GOTO 1015
+1015	CONTINUE
+
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C 	DATA_TYPE
+1020	CMD = RDCOMM(DTYPE_CMD_TABLE)
+	IF (CMD.LE.0) THEN
+	  CALL WRITEF('%S Specifying command DATA_TYPE',ERRBELL)
+	  CALL WRITEF
+     &    ('Valid qualifiers are BIT, BYTE, LONGWORD, REAL or WORD')
+	  GOTO 10
+	ENDIF
+C
+	DTYPE=CMD
+C
+	GOTO 10
+C
+C-------------------------------------------------------------------------
+C 	GO
+C 	Start encoding the data
+1050	IF (.NOT.HADDTI) THEN
+	  CALL WRITEF('%S Specifying command GO',ERRBELL)
+	  CALL WRITEF('No output DTI file has been defined')
+	  CALL WRITEF('Use the command OPEN or CREATE')
+	  GOTO 10
+	END IF	   
+C
+	IF (.NOT.HADIFF)THEN
+	  CALL WRITEF('%S Specifying command GO',ERRBELL)
+	  CALL WRITEF('No input IFF file has been defined')
+	  CALL WRITEF('Use the command IFF')
+	  GOTO 10
+	ENDIF
+C
+	IF (.NOT.HAD_EGRID.AND.(CREATE_DTI))THEN
+	  CALL WRITEF('%S Specifying command GO',ERRBELL)
+	  CALL WRITEF('Matrix grid intervals are not defined')
+	  CALL WRITEF('Use the command GRID')
+	  GOTO 10
+	ENDIF
+C
+C Test that the background value is valid
+	VAL = BACKGROUND_VALUE
+	IF((CREATE_DTI).AND.(.NOT.DTYPE.EQ.DATA_REAL))THEN
+	  DATA_TYPE(1)=DTYPE
+	  IF(.NOT.TEST_VALUE(.FALSE.))THEN
+	    CALL WRITEF('%S Specifying command GO',ERRBELL)
+	    CALL WRITEF
+     &      ('Background value %N invalid for output data type',
+     &      INT(BACKGROUND_VALUE))
+	    CALL WRITEF
+     &      ('Redefine the value using the BACKGROUND command')
+	    GOTO 10
+	  ENDIF
+C
+	  IF     (DATA_TYPE(1).EQ.DATA_BYTE.OR.
+     &            DATA_TYPE(1).EQ.DATA_BIT.OR.
+     &            DATA_TYPE(1).EQ.DATA_WORD)THEN
+	    WORD_BACKGROUND=INT(BACKGROUND_VALUE)
+	  ELSE IF(DATA_TYPE(1).EQ.DATA_LONG)THEN
+	    LONG_BACKGROUND=INT(BACKGROUND_VALUE)
+	  ENDIF
+C
+	ENDIF
+C
+C	Create or open the output matrix.
+	IF(CREATE_DTI)THEN
+          IF(.NOT.CREATE_DTI_FILE())GOTO 10
+	ENDIF
+C
+	CALL SETUP_TRANSFORMATION
+C
+C Encode
+	CALL CONVERT()			! covert IFF to DTI
+C
+	CALL UPDATE_HEADER
+	GOTO 10
+C
+C**********************************************************************
+C	Background command
+C	Check for the required argument
+2000	IF(CMDACT.NE.1)THEN
+	  CALL WRITEF('%S Specifying command BACKGROUND',ERRBELL)
+	  CALL WRITEF('Command requires an integer or real argument')
+	  GOTO 10
+	ENDIF
+C
+C	Transfer to common variable
+	BACKGROUND_VALUE=REALAR(1)
+	GOTO 10
+C
+C--------------------------------------------------------------------------
+C	WAIT command
+C	Hibernate for specified number of seconds
+2100	IF(CMDRCT.NE.1)THEN
+	  CALL WRITEF('%S Specifying command WAIT',ERRBELL)
+	  CALL WRITEF('Command requires a real argument')
+	  GOTO 10
+	ENDIF
+C
+	CALL LIB$WAIT (REALAR(1))
+	GOTO 10
+C
+C----------------------------------------------------------------------------
+C	SPAWN DCL process - primarily designed for file management
+2200	I=0
+2210	IF(RDCH(CH))THEN
+	  GOTO 2220
+	ELSE	
+	  I=I+1
+	  IF(I.GT.80)THEN
+	    CALL WRITEF('%S Specifying command SPAWN',ERRBELL)
+	    CALL WRITEF('DCL command line cannot exceed 80 characters')
+	    GOTO 10
+	  ENDIF	  
+	  LINE(I:I)=CHAR(CH)
+	  GOTO 2210
+	ENDIF
+C
+2220	IF(I.EQ.0)THEN
+	  CALL WRITEF('%S Specifying command SPAWN',ERRBELL)
+	  CALL WRITEF('Command requires a valid DCL command')
+	  GOTO 10
+	ENDIF
+C
+	IERR= LIB$SPAWN ( LINE(1:MIN(I,80)))
+	IF(.NOT.IERR)THEN
+          CALL LIB$SIGNAL(%VAL(IERR)) !error
+	  CALL WRITEF('%S Unable to spawn command, returning to I2GRID',
+     &              ERRBELL)
+	ENDIF
+	CALL WRITEF
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	RETURN
+2300	IF(DIRECT)THEN
+	  CALL WRITEF('%S Specifying command RETURN',ERRBELL)
+	  CALL WRITEF
+     &    ('The RETURN command is only valid in a command file')
+	  GOTO 10
+	ENDIF
+C
+	CALL WRITEF('Returning to terminal input')
+C
+2350	RETVAL=FLRCLO(1)
+	IF(.NOT.RETVAL)CALL LSL_PUTMSG(RETVAL)
+	DIRECT=.TRUE.
+	GOTO 10
+C
+C------------------------------------------------------------------------
+C EXIT/QUIT
+
+999	IF (HADIFF) CALL IFFCLO(1)
+
+	IF (HADDTI.OR.DTILUN_INUSE(1)) CALL CLOSE_DTI()
+
+	CALL LSL_EXIT()
+	END

@@ -1,0 +1,5 @@
+$	COLDISP == 0
+$	HRD == 0
+$	WHATFOR	== "LITES2 Editor"
+$	LITES2_DEP == "TEK_ARGS"
+$	TRFILE	== "EXE:LITES2TR.MAR"

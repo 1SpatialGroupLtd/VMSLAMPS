@@ -1,0 +1,209 @@
+	LOGICAL FUNCTION READ_NTF_RECORD
+C
+***	IDENT	29AP94
+***	MODULE	READ_NTF_RECORD
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C
+C Author TJ Ibbs, 7 October 1987
+C Modified for variable length records 
+C	Iain McLeman	, 21 August 1989
+C
+C	To read the next NTF record and its' length into /RECORD/
+C	- returns TRUE if it succeeds, FALSE if it fails
+C	NB end-of-file (tapemark) does not cause an error to be output,
+C	but does cause FALSE to be returned
+C
+CMOD	Handle NTF 1.1					VLG	31-Oct-1989
+CMOD	adjust for NTF files without CR at end of line
+CMOD    source moved from READ_RECORD			SG	09-Jul-1991
+CMOD	bug fix in reading from mag_tape	        SG	16-Jul-1991
+CMOD	BS7567 (v2.0) support added (W93/13)		ST	02-Jun-1993
+CMOD    Checks for a zero-length NTF file by testing	ST	29-Apr-1994
+C	for LSL__EOF on the first line of the file and
+C	returns the new warning, EMPTYFILE. Mod 1360.
+CMOD    Implement CITF96 changes (WI/CC 1545)          TJM      17-Jun-1996
+C
+	IMPLICIT NONE
+C
+C Message definitions
+C
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'NTF2IMSG.PAR'
+C
+C Common files
+C
+	INCLUDE	'LSL$CMNLSL:MTIVCM.CMN'		! for MTIERR, MTINBL
+	INCLUDE	'CITF.CMN'			! for CITF
+	INCLUDE	'COMMANDS.CMN'			! for IS_MAGTAPE
+	INCLUDE	'RECORD.CMN'			! for STRING
+	INCLUDE	'NTFDATA.CMN'			! for EOR_MARKER
+C
+C Define the size of the blocks to be read from magnetic tape
+C
+	INTEGER 	BLOCKSIZE		!  num of bytes in each block 
+	PARAMETER	(BLOCKSIZE=2000)
+C
+	CHARACTER*(BLOCKSIZE)	BUFFER		! Buffer to be output
+	BYTE		BLOCK( BLOCKSIZE )
+	EQUIVALENCE	( BLOCK, BUFFER )
+C
+	INTEGER*2	BUFFER_PTR		! Where we are
+C 
+C Save these value ( i.e. Local common )
+C
+	DATA		BUFFER_PTR / BLOCKSIZE /
+	SAVE		BUFFER,BUFFER_PTR
+C
+C Functions
+C
+	LOGICAL		MTIRDB				! read block from tape
+	LOGICAL		FLRSTR				! read string from file
+	LOGICAL		RECOGNISED			! IS REC_DESCR VALID
+C
+C Workspace
+C
+	INTEGER		BYTCNT				! number of bytes read
+	LOGICAL		OK				! function result
+	LOGICAL		BUFFER_IS_EMPTY
+	INTEGER		IERR				! ditto
+	INTEGER		I				! Loop counter
+C
+C *****************************************************************************
+C
+10	OK = .TRUE.		! assume the best
+	RECNUM = RECNUM + 1	! count the record
+C
+C..............................................................................
+C what are we reading from, tape or disk
+C
+C	---------------------------TAPE---------------------------------------
+C	See if we need to read a new block, a space is used to signal a null
+C	record  used to pad out a block if there is no room for a new record
+C
+	IF ( IS_MAGTAPE ) THEN
+C
+
+C	  ....................................................................
+C	  is the buffer empty? do we need to read from tape
+C
+CMOD
+	   IF ( BUFFER_PTR.GE.BLOCKSIZE-3 ) THEN
+	     BUFFER_IS_EMPTY = .TRUE.
+	   ELSEIF (BLOCK(BUFFER_PTR) .EQ. ' ') THEN
+	     BUFFER_IS_EMPTY = .TRUE.
+	   ELSE
+	     BUFFER_IS_EMPTY = .FALSE.
+	   ENDIF
+CMOD
+	   IF (BUFFER_IS_EMPTY) THEN
+	      OK = MTIRDB( %REF(BUFFER), BLOCKSIZE, BYTCNT )	
+	      IF ( .NOT.OK ) THEN
+		 CALL LSL_PUTMSG(NTF2I__READBLK,MTINBL)
+		 CALL LSL_ADDMSG(OK)
+		 IF (OK.EQ.LSL__SYSERR) CALL LSL_ADDMSG(MTIERR)
+	      ELSE IF ( BYTCNT.NE.BLOCKSIZE ) THEN
+		 CALL LSL_PUTMSG(NTF2I__SHORTBLK,MTINBL,BYTCNT)
+		 OK = .FALSE.
+	      ENDIF
+	      BUFFER_PTR = 1
+	   ENDIF
+C
+C 	 ......................................................................
+C	   we have a block read in - get a record
+C
+	   IF ( FIXED ) THEN				! fixed length
+	      STRING = BUFFER( BUFFER_PTR: BUFFER_PTR + 79 )
+	      LENGTH = 80
+C
+C	   ...................................................................
+C	   variable length,try to find the end of the buffer
+C
+	   ELSE
+	      DO 100 I = BUFFER_PTR, MIN( BLOCKSIZE, BUFFER_PTR+80 )
+	         IF ( BUFFER(I:I) .EQ. EOR_MARKER ) GOTO 200
+100	      CONTINUE
+C
+C	      ..............................................................
+C 	      No terminating characters found => badly constructed record,
+C 	      error, Unless it is the volume header record which should always
+C	      be 66 or 80 characters long and which defines the character to
+C	      be used as EOR_MARKER
+C
+	      IF ( BUFFER( BUFFER_PTR:BUFFER_PTR+1 ).EQ.'01' ) THEN
+		 IF ( BUFFER( BUFFER_PTR+62:BUFFER_PTR+62 ).EQ.'F' ) THEN
+	            I = BUFFER_PTR + 80
+	         ELSE
+		    IF (BUFFER(59:59).EQ.'2') THEN
+		       EOR_MARKER = BUFFER(63:63)
+		       I = BUFFER_PTR + 65
+		    ELSE
+		       I = BUFFER_PTR + 66
+		    ENDIF
+	         ENDIF
+	      ELSE
+	         CALL LSL_PUTMSG( NTF2I__READREC,RECNUM )
+	         CALL LSL_ADDMSG( NTF2I__NOTERMCR )
+	         I = BUFFER_PTR + 80
+	      ENDIF
+C
+200	      LENGTH = I - BUFFER_PTR + 1
+	      LENGTH = MIN(80,LENGTH)
+	      STRING = BUFFER( BUFFER_PTR : BUFFER_PTR + LENGTH - 1 )
+	   ENDIF
+C
+	   BUFFER_PTR = BUFFER_PTR + LENGTH
+C
+C	---------------------------FILE---------------------------------------
+C
+	ELSE			! read from a file
+	   OK = FLRSTR( STRING, LENGTH, IERR )			! read string
+	   IF ( .NOT.OK ) THEN					! problem
+	      IF (OK.EQ.LSL__EOF.AND.RECNUM.EQ.1) THEN
+		 OK = NTF2I__EMPTYFILE
+		 CALL LSL_PUTMSG(OK)
+		 SEC_REC = 1	! force /LOG to output the correct number
+		 		! of records read (ie SEC_REC-1)
+		 GOTO 999
+	      ENDIF
+	      CALL LSL_PUTMSG(NTF2I__READREC,RECNUM)
+	      CALL WRITEF('-NTF2I-I-MISC, physically bad record')
+	      IF (OK.EQ.LSL__SYSREAD) CALL LSL_ADDMSG(MTIERR)
+	   ELSE IF ( (LENGTH.NE.80).AND.FIXED ) THEN		! fixed record
+	      CALL LSL_PUTMSG(NTF2I__SHORTREC,RECNUM,LENGTH)	! not 80 chars
+	      OK = .FALSE.
+	   ENDIF
+	ENDIF
+C
+C..............................................................................
+C is the record type recognised? if not try to get another
+C
+	IF ( .NOT. RECOGNISED(STRING) ) THEN
+	  CALL LSL_PUTMSG (NTF2I__UNEXPREC,STRING(1:2),RECNUM)
+	  CALL LSL_ADDMSG (NTF2I__RETRY)
+	  GOTO 10
+	ENDIF
+C
+C..............................................................................
+C adjust for the lack of a carriage return at the end of the string
+C
+	IF (STRING(1:2).EQ.'01' .AND. STRING(59:59).EQ.'2') VERSION = 2.0
+	IF ((HAD_CITF93.OR.HAD_CITF96) .OR.
+     &       VERSION.EQ.2.0) THEN
+	   IF (STRING(1:2).EQ.'01') THEN
+	      IF (STRING(63:63).NE.' ') THEN
+		 EOR_MARKER = STRING(63:63)
+	      ELSE
+		 EOR_MARKER = '%'
+	      ENDIF
+	   ENDIF
+	ENDIF
+	IF (STRING(LENGTH:LENGTH).NE.EOR_MARKER) THEN
+	   IF (LENGTH.LT.80) LENGTH = LENGTH +1
+	   STRING(LENGTH:LENGTH) = EOR_MARKER
+	ENDIF
+C..............................................................................
+C
+999	READ_NTF_RECORD = OK
+	RETURN
+	END

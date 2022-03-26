@@ -1,0 +1,370 @@
+	OPTIONS /NOCHECK
+	SUBROUTINE CONTOR(DTI_STEP,HGT_STEP,DTI)
+C
+***	IDENT	14FE85
+***	MODULE	CONTOR
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C
+C	Author	  : Andrew Morris
+C	Created   : Nov 1984
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/HERE:DTEPAR/
+C
+***	COMMON/HERE:DTECMN/		! has NX_DTI,NY_DTI
+***	COMMON/LSL$CMNVIO:EXPC/		! has EXPDSC
+***	COMMON/HERE:TRANS/		! has DTI_TO_TEK
+C
+C parameters in
+	INTEGER		DTI_STEP		! DTI step interval
+	INTEGER		HGT_STEP		! contour interval
+C
+	INTEGER*2	DTI(NY_DTI,NX_DTI)	! mapped DTI file
+C
+C workspace
+	INTEGER		X_DTI,Y_DTI	! DTI coords
+	INTEGER		X_DTI_1		! X_DTI+XSTEP
+	INTEGER		H1,H2		! DTI heights
+	INTEGER		HMIN,HMAX	! min and max hgts
+	INTEGER		SMIN,SMAX	! min and max contour step index
+	INTEGER		LEFT,RITE	! alternating array indices
+	INTEGER		LAST_X_DTI,LAST_Y_DTI	! loop terminator consts
+	INTEGER		X_SW,Y_SW	! contour window SW corner
+	INTEGER		X_NE,Y_NE	! contour window NE corner
+	INTEGER		DX_WIN,DY_WIN	! contour window dimensions
+C
+	REAL		X_TEK,Y_TEK	! TEK coords
+	REAL		RX,RY		! real DTI coords
+	REAL		H		! contour height
+	REAL		YINT(MAXDTI,0:1) ! Y contour int coords
+	REAL		XINT2,XINT4	! X int coords
+	REAL		XSTEP,YSTEP	! X and Y real step intervals
+	REAL		LLTX,LLTY	! TEK window LL TEK coords
+	REAL		URTX,URTY	! TEK window UR TEK coords
+C
+	LOGICAL		Q(MAXDTI,0:1)	! int. on vertical edge(s)?
+	LOGICAL		Q1,Q2,Q3,Q4	! int(s) on edges 1..4?
+	LOGICAL		YUP(MAXDTI,0:1) ! heights increasing in Y?
+	LOGICAL		U1,U2,U3,U4	! hgts incr in X/Y on edges 1-4?
+C
+C functions
+	LOGICAL		HADCTRLC	! had a ^C ?
+C
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C
+C Draws DTI contours at height intervals of HGT_STEP, sampling
+C DTI matrix elements with an interval of DTI_STEP.
+C
+C Contours are drawn over the whole map, or over the map edit window
+C only (depending on LIM_CON), with the following algorithm:
+C
+C ***	For each set of four DTI points which are the corners of a
+C 	square with side DTI_STEP, find whether the height interval over
+C	each edge contains any contour heights.
+C
+C ***	If it does, find the position that the maximum height contour
+C	cuts this edge by linear interpolation bewteen its ends.
+C
+C ***	If two adjacent edges are cut in this way, and have height
+C	increasing in oppsoite directions of rotation around the square,
+C	then join the two cut points with a straight line.
+C
+C ***	If there remains a pair of end points neither yet joined to any
+C	other, which are on opposite sides of the square, then join them
+C
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C
+C if old contours need scrubbing or map border and file title have not
+C yet been drawn, then call BORDER to start a new display
+	IF(GOT_CONTORS.OR..NOT.GOT_BORDER) CALL BORDER
+	GOT_CONTORS = .TRUE.
+	CALL DISMOD(0)		! select stored-line mode
+C
+C set contour window
+	IF (LIM_CON) THEN
+	  IF (.NOT.WINDOW_SET) THEN
+	    CALL EXPAND('%SWindow not yet defined',BELL)
+	    CALL DTEMSG(EXPDSC)
+	    GOTO 100			! return
+	  END IF
+	  X_SW = XMIN_DTI
+	  Y_SW = YMIN_DTI
+	  X_NE = XMAX_DTI
+	  Y_NE = YMAX_DTI
+	ELSE
+	  X_SW = 1
+	  Y_SW = 1
+	  X_NE = NX_DTI
+	  Y_NE = NY_DTI
+	END IF
+C
+	DX_WIN = X_NE-X_SW+1
+	DY_WIN = Y_NE-Y_SW+1
+C
+C set default values for DTI_STEP and HGT_STEP, if necessary
+	IF (DTI_STEP.LE.0) THEN
+	  DTI_STEP = MAX0(1,MIN0(DX_WIN,DY_WIN)/100)
+C	  DTI_STEP = MIN0(4,DTI_STEP)
+	END IF
+C
+	DTI_STEP = MIN0(DTI_STEP,DX_WIN,DY_WIN)	! fit into DTI window
+C
+	IF (HGT_STEP.LE.0) HGT_STEP = 50*DTI_STEP
+C
+C note coords of farthest NE point within this grid
+	LAST_X_DTI = X_SW-1+DTI_STEP*(DX_WIN/DTI_STEP-1)
+	LAST_Y_DTI = Y_SW-1+DTI_STEP*(DY_WIN/DTI_STEP-1)
+C
+C show DTI filename (BORDER should do this, but...)
+	CALL MOVTO(-XRANGE_TEK,YRANGE_TEK-1.0)
+	CALL CHARS('DTI file :')
+	CALL MOVTO(-XRANGE_TEK,YRANGE_TEK-3.0)
+	CALL EXPAND('%S',FILENAME)
+	CALL CHARS(EXPDSC)
+C
+C display contour DTI step and height step being used
+	CALL MOVTO(-XRANGE_TEK,YRANGE_TEK-7.0)
+	CALL EXPAND('DTI step   :%I',DTI_STEP)
+	CALL CHARS(EXPDSC)
+	CALL MOVTO(-XRANGE_TEK,YRANGE_TEK-9.0)
+	CALL EXPAND('Height step:%I',HGT_STEP)
+	CALL CHARS(EXPDSC)
+	CALL LDCMPL			! flush drawing buffer
+C
+C set information on first DTI column
+	H2 = DTI(Y_SW,X_SW)
+	LEFT = 0
+	RITE = 1-LEFT
+C
+C find Y intersections down leftmost DTI column edge
+	YSTEP = DTI_STEP
+	Y_DTI = Y_SW
+10	H1 = H2				! start Y_DTI loop here
+	H2 = DTI(Y_DTI+YSTEP,X_SW)
+	YUP(Y_DTI,RITE) = H2.GT.H1
+	HMIN = MIN0(H1,H2)
+	HMAX = MAX0(H1,H2)
+	SMIN = HMIN/HGT_STEP
+	SMAX = HMAX/HGT_STEP
+	IF (HMIN.LE.0) SMIN = SMIN-1
+	IF (HMAX.LE.0) SMAX = SMAX-1
+	Q(Y_DTI,RITE) = SMIN.NE.SMAX
+	IF (Q(Y_DTI,RITE)) THEN
+	  H = SMAX*HGT_STEP
+	  YINT(Y_DTI,RITE) = Y_DTI+YSTEP*(H1-H)/(H1-H2)
+	END IF
+C
+	Y_DTI = Y_DTI+DTI_STEP
+	IF (Y_DTI.LT.LAST_Y_DTI) GOTO 10
+	IF (Y_DTI.LT.Y_NE) THEN
+	  YSTEP = Y_NE-Y_DTI
+	  GOTO 10
+	END IF
+C
+C process each DTI column, alternating column indices 0 and 1 between
+C index variables LEFT and RITE, as a mechanism for avoiding the
+C duplication of calculating Q,YUP and YINT for each column.
+	XSTEP = DTI_STEP
+	X_DTI = X_SW
+C
+C start X_DTI loop here
+16	X_DTI_1 = X_DTI+XSTEP		! just to save duplication
+	LEFT = 1-LEFT
+	RITE = 1-LEFT
+C
+C find information on next column
+	H2 = DTI(Y_SW,X_DTI_1)
+C
+	YSTEP = DTI_STEP
+	Y_DTI = Y_SW
+20	H1 = H2				! start Y_DTI loop here
+	H2 = DTI(Y_DTI+YSTEP,X_DTI_1)
+	YUP(Y_DTI,RITE) = H2.GT.H1
+	HMIN = MIN0(H1,H2)
+	HMAX = MAX0(H1,H2)
+	SMIN = HMIN/HGT_STEP
+	SMAX = HMAX/HGT_STEP
+	IF (HMIN.LE.0) SMIN = SMIN-1
+	IF (HMAX.LE.0) SMAX = SMAX-1
+	Q(Y_DTI,RITE) = SMIN.NE.SMAX
+	IF (Q(Y_DTI,RITE)) THEN
+	  H = SMAX*HGT_STEP
+	  YINT(Y_DTI,RITE) = Y_DTI+YSTEP*(H1-H)/(H1-H2)
+	END IF
+C
+	Y_DTI = Y_DTI+DTI_STEP
+	IF (Y_DTI.LT.LAST_Y_DTI) GOTO 20
+	IF (Y_DTI.LT.Y_NE) THEN
+	  YSTEP = Y_NE-Y_DTI
+	  GOTO 20
+	END IF
+C
+C initialise loop for the final processing of this column
+	H1 = DTI(Y_SW,X_DTI)
+	H2 = DTI(Y_SW,X_DTI+XSTEP)
+	U2 = H2.GT.H1
+	HMIN = MIN0(H1,H2)
+	HMAX = MAX0(H1,H2)
+	SMIN = HMIN/HGT_STEP
+	SMAX = HMAX/HGT_STEP
+	IF (HMIN.LE.0) SMIN = SMIN-1
+	IF (HMAX.LE.0) SMAX = SMAX-1
+	Q2 = SMIN.NE.SMAX
+	IF (Q2) THEN
+	  H = SMAX*HGT_STEP
+	  XINT2 = X_DTI+XSTEP*(H1-H)/(H1-H2)
+	END IF
+C
+C loop for each DTI row
+	YSTEP = DTI_STEP
+	Y_DTI = Y_SW
+30	U4 = U2				! start Y_DTI loop here
+	Q4 = SMIN.NE.SMAX
+	XINT4 = XINT2
+C
+	H1 = DTI(Y_DTI+YSTEP,X_DTI)
+	H2 = DTI(Y_DTI+YSTEP,X_DTI_1)
+	U2 = H2.GT.H1
+	HMIN = MIN0(H1,H2)
+	HMAX = MAX0(H1,H2)
+	SMIN = HMIN/HGT_STEP
+	SMAX = HMAX/HGT_STEP
+	IF (HMIN.LE.0) SMIN = SMIN-1
+	IF (HMAX.LE.0) SMAX = SMAX-1
+	Q2 = SMIN.NE.SMAX
+	IF (Q2) THEN
+	  H = SMAX*HGT_STEP
+	  XINT2 = X_DTI+XSTEP*(H1-H)/(H1-H2)
+	END IF
+C
+C now for the centre of this process, where bits of contour lines
+C are actually drawn accross the square which has four neighbouring
+C DTI points as its corners
+C
+C join any diagonally adjacent cuts first
+C
+	Q1 = Q(Y_DTI,RITE)
+	Q3 = Q(Y_DTI,LEFT)
+	U1 = YUP(Y_DTI,RITE)
+	U3 = YUP(Y_DTI,LEFT)
+C
+	IF (Q1.OR.Q2.OR.Q3.OR.Q4) THEN	! any contour intersections?
+	  IF (Q1) THEN
+	    IF (Q2.AND.(U1.EQV.U2)) THEN
+	      Q1 = .FALSE.
+	      Q2 = .FALSE.
+	      RX = X_DTI+XSTEP
+	      RY = YINT(Y_DTI,RITE)
+	      CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	      CALL MOVTO(X_TEK,Y_TEK)
+	      RX = XINT2
+	      RY = Y_DTI+YSTEP
+	      CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	      CALL LINTO(X_TEK,Y_TEK)
+	    ELSE IF (Q4.AND.(U4.NEQV.U1)) THEN
+	      Q1 = .FALSE.
+	      Q4 = .FALSE.
+	      RX = X_DTI+XSTEP
+	      RY = YINT(Y_DTI,RITE)
+	      CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	      CALL MOVTO(X_TEK,Y_TEK)
+	      RX = XINT4
+	      RY = Y_DTI
+	      CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	      CALL LINTO(X_TEK,Y_TEK)
+	    END IF
+	  END IF
+	  IF (Q3) THEN
+	    IF (Q2.AND.(U3.NEQV.U2)) THEN
+	      Q3 = .FALSE.
+	      Q2 = .FALSE.
+	      RX = X_DTI
+	      RY = YINT(Y_DTI,LEFT)
+	      CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	      CALL MOVTO(X_TEK,Y_TEK)
+	      RX = XINT2
+	      RY = Y_DTI+YSTEP
+	      CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	      CALL LINTO(X_TEK,Y_TEK)
+	    ELSE IF (Q4.AND.(U3.EQV.U4)) THEN
+	      Q3 = .FALSE.
+	      Q4 = .FALSE.
+	      RX = X_DTI
+	      RY = YINT(Y_DTI,LEFT)
+	      CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	      CALL MOVTO(X_TEK,Y_TEK)
+	      RX = XINT4
+	      RY = Y_DTI
+	      CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	      CALL LINTO(X_TEK,Y_TEK)
+	    END IF
+	  END IF
+C
+C now join any horizontally or vertically opposite cuts which remain
+C
+	  IF (Q1.AND.Q3) THEN
+	    RX = X_DTI
+	    RY = YINT(Y_DTI,LEFT)
+	    CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	    CALL MOVTO(X_TEK,Y_TEK)
+	    RX = X_DTI+XSTEP
+	    RY = YINT(Y_DTI,RITE)
+	    CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	    CALL LINTO(X_TEK,Y_TEK)
+	  ELSE IF (Q2.AND.Q4) THEN
+	    RX = XINT4
+	    RY = Y_DTI
+	    CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	    CALL MOVTO(X_TEK,Y_TEK)
+	    RX = XINT2
+	    RY = Y_DTI+YSTEP
+	    CALL TRANSF(DTI_TO_TEK,RX,RY,X_TEK,Y_TEK)
+	    CALL LINTO(X_TEK,Y_TEK)
+	  END IF
+	END IF
+C
+C loop for next row
+	Y_DTI = Y_DTI+DTI_STEP
+	IF (Y_DTI.LT.LAST_Y_DTI) GOTO 30
+	IF (Y_DTI.LT.Y_NE) THEN
+	  YSTEP = Y_NE-Y_DTI
+	  GOTO 30
+	END IF
+C
+	CALL LDCMPL				! flush drawing buffer
+C
+	IF (HADCTRLC()) THEN			! abort on ^C ?
+	  CALL EXPAND('%SCONTOR aborted by CRTL/C',BELL)
+	  CALL DTEMSG(EXPDSC)
+	  GOTO 99				! return
+	END IF
+C
+C loop for next column
+	X_DTI = X_DTI+DTI_STEP
+	IF (X_DTI.LT.LAST_X_DTI) GOTO 16
+	IF (X_DTI.LT.X_NE) THEN
+	  XSTEP = X_NE-X_DTI
+	  GOTO 16
+	END IF
+C
+C redraw window area in refresh
+99	RX = XCUR_MIN
+	RY = YCUR_MIN
+	CALL TRANSF(DTI_TO_TEK,RX,RY,LLTX,LLTY)
+	RX = XCUR_MAX
+	RY = YCUR_MAX
+	CALL TRANSF(DTI_TO_TEK,RX,RY,URTX,URTY)
+C
+	CALL DISMOD(1)		  	! clear refresh buffer
+	CALL MOVTO(LLTX,LLTY)
+	CALL LINTO(LLTX,URTY)
+	CALL LINTO(URTX,URTY)
+	CALL LINTO(URTX,LLTY)
+	CALL LINTO(LLTX,LLTY)
+	CALL REFRSH		  	! redraw T4014 refresh display
+	CALL LDCMPL			! flush drawing buffer
+C
+100	END
+

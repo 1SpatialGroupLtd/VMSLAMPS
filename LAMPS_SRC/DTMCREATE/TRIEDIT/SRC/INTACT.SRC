@@ -1,0 +1,655 @@
+	SUBROUTINE INTACT
+C
+***	MODULE	INTACT
+***	IDENT	17MR93
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD    Force an upper limit on ZGAP & INDEX_ZGAP so	 ST 17-Mar-1993
+C       that it won't overflow when output to screen
+CMOD	DATUM and INVERSE commands added		TJH 19-Jan-1989
+CMOD	FACET command added				TJH 19-Apr-1988
+C	Broken into functions for TRIEDIT		TJH 10-Dec-1987
+C
+C Determines the action and interactions of the various options.
+C
+	IMPLICIT NONE
+C
+C Define command tables:
+	EXTERNAL	TRIEDIT_CMD_TABLE
+	INTEGER*4	TRIEDIT_CMD_TABLE
+C
+C Parameters:
+	INTEGER		INDLUN
+	PARAMETER	(INDLUN=20)
+	INCLUDE 	'LSL$CMNTRIEDIT:DIMS.PAR'
+	INCLUDE 	'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE 	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 	'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 	'($SSDEF)/NOLIST'
+C
+C Common blocks:
+	INCLUDE 	'LSL$CMNTRIEDIT:ANNOT.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:CONTR.CMN'
+	INCLUDE 	'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:COMMAND.CMN'
+	INCLUDE 	'LSL$CMNLSL:EXCEPTION.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:DATQ.CMN'
+	INCLUDE 	'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:ICI.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:FILNMS.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:INPARM.CMN'
+	INCLUDE 	'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 	'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:SELECTIONS.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:TTTYPE.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:TPOLGY.CMN'
+	INCLUDE 	'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 	'LSL$CMNTRIEDIT:RCONVI.CMN'
+C
+C W/s
+	BYTE		ALL_SET	! -1 - all 8 bits set
+	INTEGER         CMD     ! returns no of command in cmd_table
+	INTEGER		I,J	! temp vars
+	INTEGER		III     ! temp var
+	INTEGER		INITUP	! screen update flag
+	INTEGER		KEY	! 'key' pressed
+	INTEGER*2	IELEN  	! return code for IFF closing
+	BYTE		CH	! for use with RDCHS
+	BYTE		CURFC	! current/found point's feature code
+	LOGICAL		OK	! function return
+	LOGICAL		IERR	! error code
+	LOGICAL		EOF	! end of file detected?
+	LOGICAL		HADTOP	! .T. if feature codes were input
+	LOGICAL         IFF     ! .T. if IFF file output required 
+	INTEGER		IZOOM	! zoom flag
+	INTEGER		IX,IY	! cursor position (screen units)
+	INTEGER		KLOSE	! point in triangle geometry flag
+	CHARACTER*100 	WORD
+	CHARACTER*80 	STR
+	INTEGER*4	STRLEN
+C
+C Functions:
+	LOGICAL	ASSIGN_CMD	! assign FCs and layers to feature flags
+	LOGICAL	ADDPNT		! add to or flush INSERT buffer
+	LOGICAL	CHANGE_CMD	! change whatever
+	LOGICAL	CHECK_GIN	! checks that a gin device is available
+	LOGICAL	CLIFFPT		! checks that point is in cliff
+	LOGICAL	DATUM_CMD	! set height datum
+	LOGICAL	DEASSIGN_CMD	! deassign FCs & layers / feature flags
+	LOGICAL	DESELECT_CMD	! deselect FCs & layers 
+	LOGICAL	DISABLE_CMD	! disable options
+	LOGICAL	DRAW_CMD	! draw whatever
+	LOGICAL	ENABLE_CMD	! enable options
+	LOGICAL	GINTOL		! get a point within tolerance of cursor
+	LOGICAL	LABEL_CMD	! label whatever
+	LOGICAL	RDCHS		! read character from line
+	LOGICAL	RDCOMM  	! read command from line
+	LOGICAL FACET_CMD	! outputs triangle facets to IFF
+	LOGICAL FILEIN_CMD	! inputs IFF data
+	INTEGER	FLROPN  	! opens command file
+	INTEGER	FLRSTR  	! reads string from command file
+	INTEGER	GETFILNAM	! reads file-spec
+	INTEGER	TTRSTR  	! reads string from TT:
+	LOGICAL	NEWFIL		! opens files
+	LOGICAL	SELECT_CMD	! select FCs & layers 
+	LOGICAL	SET_CMD		! set up INSERT and IFF defaults
+	INTEGER	SIGCHS		! gives # signif. chars in string
+	LOGICAL	SPAWN_CMD	! rivet rivet
+	LOGICAL	PAUSE_CMD	! wait for <CR>
+	LOGICAL	WAIT_CMD	! wait for specified seconds
+	LOGICAL	WINDOW_CMD	! defines window
+	LOGICAL	UNITS_CMD	! sets WINDOW units
+	INTEGER*2 EXPAND
+C
+C ....................................................................
+C
+C Set up most basic information for the interactive session
+	CALL LIMIT
+C
+C Set initial update option to whole area (INITUP)
+	INITUP=8
+	CALL NEWOBJ(4)
+C
+	CALL SETUP(ITLE,ITLEN,HADTOP)
+C
+C Turn Contour generation IFF file option off
+	CONIFF = .FALSE.
+C
+C Ensure that all IFF feature codes and layers are initially selected
+	FCSMOD=.FALSE.
+	LYSMOD=.FALSE.
+	ALL_SET=-1
+	CALL VIOCLR(USEFC,BMAX*4,ALL_SET)
+	CALL VIOCLR(USEOV,BMAX*4,ALL_SET)
+C
+C Ensure we are known not to be in a zoom, and are interactive
+	IZOOM=0
+	TTIN=.TRUE.
+C
+C Set the default contour interval
+10	CALL ZTRASH
+C
+C Get initial bare bones map on the screen for start of interaction
+C sequence by setting option to 8 and calling UPDATE. If INITUP is
+C 9 rather than 8, it indicates to UPDATE that the present area is 
+C to be retained in bones rather than the original area.
+	IF (VT100) CALL VTCLR(2)	! clear VT100 screen
+	CALL UPDATE(INITUP,IZOOM)
+C Reset the initialisation option to full area
+	INITUP=8
+	GOTO 30
+C
+C .....................................................................
+C
+C close indirect input following disaster
+20	IF (.NOT.TTIN) THEN
+	   TTIN=.TRUE.
+	   CALL FLRCLO(INDLUN)
+	   CALL OUTOPT(' ')
+	   CALL OUTOPT(WARNING//'Indirect file error - returning to '//
+     &			'terminal input')
+	ENDIF
+C
+C Set point insertion counter to zero
+30	CALL NEWOBJ(4)
+C
+C If not a VT100 check the rhs column again to ensure sufficient 
+C space is still available for another command. If enough print '*'
+C to indicate ready for next command. Otherwise clear screen.
+	IF (.NOT.VT100) THEN
+	   CALL TEXPOS('*',0)
+	   IF (IYPOR.LT.2*IHTR) GOTO 200	! dummy up a CLEAR
+	ENDIF
+C
+C============================ READ USER COMMAND ========================
+C
+	TXTPTR=80
+	IF (TTIN) THEN
+	   IF (VT100) THEN
+	      OK=TTRSTR(,,'TRIEDIT> ',IERR)
+	   ELSE
+	      CALL RHSINP(TXTDSC,EOF) ! alaised to TXTBUF
+	      OK=LSL__NORMAL
+	   ENDIF
+	ELSE
+	   CALL FLRSEL(INDLUN)
+	   OK=FLRSTR(,,IERR)
+	ENDIF
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      IF (TTIN) THEN
+	         GOTO 30			! end of file - ignore
+	      ELSE
+	         CALL OUTOPT(WARNING//
+     &		   'Unexpected end of indirect command file detected')
+	         CALL OUTOPT('                RETURN command assumed '//
+     &				'- returning to terminal input')
+	         GOTO 120		! close indirect file etc.
+	      ENDIF
+	   ENDIF
+	   CALL LSL_GETMSG(OK,MESSAGE,MESLEN)
+	   CALL OUTOPT(MESSAGE(1:MESLEN))
+	   CALL LSL_GETMSG(IERR,MESSAGE,MESLEN)
+	   CALL OUTOPT('-'//MESSAGE(2:MESLEN))
+	   GOTO 30
+	ENDIF
+C
+C echo and decode the line
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('TRIEDIT> ')
+	   CALL APPEND(TXTDSC) ! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+	CALL BSLN
+C
+C Look for comment
+	IF (RDCHS(CH)) GOTO 30	! substantially empty line
+	IF (CH.EQ.'!') GOTO 30	! comment!
+C
+C Look for indirect file start
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL OUTOPT(WARNING//'"@" must precede a file-spec')
+	         GOTO 30
+	      ELSE
+	         CALL BSCH
+	      ENDIF
+	      WORD='SYS$DISK:[]'
+	      OK=GETFILNAM(INDFILE,INDLEN,
+     &		WORD(1:SIGCHS(WORD))//'.COM;0',.TRUE.,%REF('!'))
+	      IF (.NOT.OK) THEN
+	         CALL LSL_GETMSG(OK,MESSAGE,MESLEN)
+	         CALL OUTOPT(MESSAGE(1:MESLEN))
+	         CALL LSL_GETMSG(IERR,MESSAGE,MESLEN)
+	         CALL OUTOPT('-'//MESSAGE(2:MESLEN))
+	         GOTO 30
+	      ENDIF
+	      OK=FLROPN(INDLUN, INDFILE(:INDLEN), IERR)
+	      IF (OK) THEN
+	         CALL EXPAND('Command input now being read from %S'
+     &					,INDFILE(:INDLEN))
+	         CALL OUTOPT(EXPDSC)
+	         TTIN=.FALSE.
+	         GOTO 30
+	      ELSE
+	         CALL EXPAND('%S Can''t open indirect command file %S'
+     &			  ,WARNING,INDFILE(:INDLEN))
+	         CALL OUTOPT(EXPDSC)
+	         CALL LSL_GETMSG(OK,MESSAGE,MESLEN)
+	         CALL OUTOPT(MESSAGE(1:MESLEN))
+	         GOTO 30
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+	CALL BSCH			! un-read non-'@'
+C
+	CMD = RDCOMM(TRIEDIT_CMD_TABLE)	! read command
+C
+	IF (ERRNUM.NE.LSL__NORMAL) THEN
+	   IF (ERRNUM.EQ.LSL__UNEXPCMD) THEN
+	      CALL EXPAND('%S unexpected %S',WARNING,CMDNST)
+	      IF (VT100) THEN
+	         CALL TTWLIN
+	      ELSE
+	         CALL TEXPOS(EXPDSC,1)
+	      ENDIF
+	      GOTO 20
+	   ELSEIF (ERRNUM.EQ.LSL__AMBIG) THEN
+	      CALL EXPAND('%S ambiguous command %S',WARNING,CMDNST)
+	      IF (VT100) THEN
+	         CALL TTWLIN
+	      ELSE
+	         CALL TEXPOS(EXPDSC,1)
+	      ENDIF
+	      GOTO 20
+	   ELSE
+	      GOTO 420
+	   ENDIF
+	ENDIF
+C
+C===================== DETERMINE ACTION TO BE TAKEN ====================
+C
+C If the command is one of CHANGE, DELETE, INSERT, HEIGHT, SWAP, WINDOW 
+C or ZOOM it involves graphic input
+C
+	CMD=CMD+1
+	GOTO (30		!			1
+     &		,70		! assign		2
+     &		,40		! change		3
+     &		,200		! clear			4
+     &		,390		! datum			5
+     &		,80		! deassign		6
+     &		,40		! delete		7
+     &		,90		! deselect		8
+     &		,370		! disable		9
+     &		,100		! draw			10
+     &		,330		! dump	         	11
+     &		,360		! enable		12
+     &		,210		! exit    		13
+     &		,220		! facet			14
+     &		,230		! filein		15
+     &		,130		! frt			16
+     &		,40		! height		17
+     &		,250		! help			18
+     &		,350		! iff			19
+     &		,240		! index_interval	20
+     &		,40		! insert		21
+     &		,190		! interval		22
+     &		,280		! label			23
+     &		,150		! pause			24
+     &		,40		! position		25
+     &		,410		! quit			26
+     &		,40		! remove		27
+     &		,110		! return		28
+     &		,300		! select		29
+     &		,380		! set			30
+     &		,310		! show			31
+     &		,140		! spawn			32
+     &		,40		! swap			33
+     &		,400		! units			34
+     &		,160		! wait			35
+     &		,40		! window		36
+     &		,40		! zoom			37
+     &				) ,CMD
+C
+C No match for this command, it is not legal - ring bell
+	CALL TEXPOS(WARNING//'Not yet available',1)
+	ERRNUM=0
+	GOTO 30
+C
+C======================= GRAPHIC INPUT COMMAND =========================
+C
+C Cursor choice involving some form of point investigation. First make
+C sure that we can interact with the cursor after going to the trouble
+C of putting one up. If OK re-dispatch to option
+40	IF (.NOT.CHECK_GIN(CMD)) THEN
+	   IF (TTIN) THEN
+	      GOTO 30				! get another cmd
+	   ELSE
+	      CALL OUTOPT('RETURN command assumed '//
+     &			'- returning to terminal input')
+	      GOTO 120		! close indirect file etc.
+	   ENDIF
+	ENDIF
+	IF (CMD.EQ.3)  GOTO 170			! change
+	IF (CMD.EQ.36) GOTO 180			! window
+	IF (CMD.EQ.33) GOTO 320			! swap
+C
+C The remaining graphics commands need to have a graphic cursor
+C position got for them.
+	CALL XHAIR(IX,IY,KEY)
+	IF (CMD.EQ.25) GOTO 290			! position
+	IF (CMD.EQ.37) GOTO 340			! zoom
+	IF (CMD.EQ.17) GOTO 260			! height
+	IF (CMD.EQ.21) GOTO 270			! insert
+C
+C ......................................................................
+C DELETE OR REMOVE POINT 
+C
+C Find the correct data point to delete
+50	IF (GINTOL(IX,IY,KLOSE)) THEN
+C
+C Point found. Check that it is not an imaginary point. Changes to
+C imaginary point characteristics will be overidden by later DTMCREATE
+C programs and in deletion lies the path to insanity.
+	   IF (KLOSE.LE.LIMPOL) THEN
+	      IF (CMD.EQ.7) THEN
+	         CALL OUTOPT(WARNING//
+     &			' You cannot DELETE an imaginary point')
+	      ELSEIF (CMD.EQ.27) THEN
+	         CALL OUTOPT(WARNING//
+     &			' You cannot REMOVE an imaginary point')
+	      ENDIF
+	      GOTO 30
+	   ENDIF
+C
+C Check that we are no trying to delete a cliffline point
+C If so KLOSE will have a perfect duplicate in the current box.
+	   IF (CLIFFPT(KLOSE)) THEN
+	      IF (CMD.EQ.7) THEN
+	         CALL OUTOPT(WARNING//
+     &			' You cannot DELETE a cliffline point')
+	      ELSEIF (CMD.EQ.27) THEN
+	         CALL OUTOPT(WARNING//
+     &			' You cannot REMOVE a cliffline point')
+	      ENDIF
+	      GOTO 30
+	   ENDIF
+	ELSE
+	   GOTO 50
+	ENDIF
+C
+60	IF (CMD.EQ.27) THEN
+	   CALL DELETE_CMD(KLOSE,.FALSE.)	! remove - delete pt
+	ELSEIF (CMD.EQ.7) THEN
+	   CALL DELETE_CMD(KLOSE,.TRUE.)	! delete - delete string
+	ENDIF
+	GOTO 30
+C
+C ......................................................................
+C ASSIGN
+70	IF (.NOT.ASSIGN_CMD()) GOTO 20
+	GOTO 30
+C
+C ......................................................................
+C DEASSIGN
+80	IF (.NOT.DEASSIGN_CMD()) GOTO 20
+	GOTO 30
+C
+C ......................................................................
+C DESELECT
+90	IF (.NOT.DESELECT_CMD()) GOTO 20
+	GOTO 30
+C
+C ......................................................................
+C DRAW_CMD
+100	IF (.NOT.DRAW_CMD(HADTOP)) GOTO 20
+	GOTO 30
+C
+C .....................................................................
+C RETURN - return to terminal input
+C
+110	IF (TTIN) THEN
+	   CALL OUTOPT(
+     &		'RETURN command ignored - command '//
+     &			'input is already from terminal')
+	ELSE
+	   CALL OUTOPT(
+     &		'RETURN command detected - returning to terminal input')
+	ENDIF
+120	IF (.NOT.TTIN) CALL FLRCLO(INDLUN)
+	TTIN=.TRUE.
+	GOTO 30
+
+C
+C ......................................................................
+C FRT
+130	IF (.NOT.HADFRT) THEN
+	   CALL GETFRT_CMD
+	ENDIF
+	GOTO 30
+C
+C .....................................................................
+C SPAWN 
+C
+140	CALL SPAWN_CMD
+	GOTO 30
+C
+C .....................................................................
+C PAUSE
+C
+150	CALL PAUSE(TTIN)
+	GOTO 30
+C
+C .....................................................................
+C WAIT
+C
+160	IF (.NOT.WAIT_CMD(TTIN)) GOTO 20
+	GOTO 30
+C
+C ......................................................................
+C CHANGE
+170	IF (.NOT.CHANGE_CMD()) GOTO 20		! change pt or string
+	GOTO 30
+C
+C .....................................................................
+C WINDOW 
+180	IF (.NOT.WINDOW_CMD(IZOOM)) GOTO 20
+	GOTO 30
+C
+C...............................................................
+C INTERVAL
+190	IF (CMDRCT.LE.0) THEN
+	   IF (TTIN) THEN 		! input from indirect file
+	      CALL RITVAL(
+     &			'Interval: ', 	! prompt
+     &			REALAR(1),	! real*4 answer
+     &			INTARG(1),	! dummy integer answer
+     &			1)		! get the real argument
+	      CMDRCT=1			! integer arg counter
+	   ELSE
+	      CALL OUTOPT(ERROR//'Missing interval argument')
+	      GOTO 20
+	   ENDIF
+	ENDIF
+	IF (CMDRCT.GT.1) THEN
+	   CALL OUTOPT(' ')
+	   CALL OUTOPT('Only one value please !')
+	   CALL EXPAND('Taking first value only (%F)',REALAR(1))
+	   CALL OUTOPT(EXPDSC)
+	   CALL OUTOPT(' ')
+	ENDIF
+	ZGAP = REALAR(1)
+	IF (ABS(ZGAP).GT.9999999.0) THEN
+	   ZGAP = SIGN(1.0,ZGAP)*9999999.0
+	   STRLEN=EXPAND('%WS Number too large. Defaulting to %F0.1',STR,ZGAP)
+	   CALL OUTOPT(WARNING//STR(1:STRLEN))
+	ENDIF
+	IF (VT100) CALL POINTS(2)	! Update the tell-back area
+	GOTO 30
+C
+C...............................................................
+C CLEAR 
+200	CALL UPDATE(2,IZOOM)
+	GOTO 30
+C
+C...............................................................
+C EXIT 
+210	CALL EXIT_CMD(IZOOM)
+	GOTO 430
+C
+C...............................................................
+C FACET
+220	IF (.NOT.FACET_CMD(IZOOM)) GOTO 20
+	GOTO 30
+C
+C...............................................................
+C FILEIN
+C
+230	IF (.NOT.FILEIN_CMD(IZOOM)) GOTO 20
+	GOTO 30
+C
+C...............................................................
+C INDEX_INTERVAL
+C
+240	IF (CMDRCT.LE.0) THEN
+	   IF (TTIN) THEN 		! input from indirect file
+	      CALL RITVAL(
+     &			'Index interval: ', 	! prompt
+     &			REALAR(1),	! real*4 answer
+     &			INTARG(1),	! dummy integer answer
+     &			1)		! get the real argument
+	      CMDRCT=1			! integer arg counter
+	   ELSE
+	      CALL OUTOPT(ERROR//'Missing index interval argument')
+	      GOTO 20
+	   ENDIF
+	ENDIF
+	IF (CMDRCT.GT.1) THEN
+	   CALL OUTOPT(' ')
+	   CALL OUTOPT('Only one value please !')
+	   CALL EXPAND('Taking first value only (%F)',REALAR(1))
+	   CALL OUTOPT(EXPDSC)
+	   CALL OUTOPT(' ')
+	ENDIF
+	INDEX_ZGAP = REALAR(1)
+	IF (ABS(INDEX_ZGAP).GT.9999999.0) THEN
+	   INDEX_ZGAP = SIGN(1.0,INDEX_ZGAP)*9999999.0
+	   STRLEN=EXPAND('%WS Number too large. Defaulting to %F0.1',
+     &		          STR,INDEX_ZGAP)
+	   CALL OUTOPT(WARNING//STR(1:STRLEN))
+	ENDIF
+	IF (VT100) CALL POINTS(2)	! Update the tell-back area
+	GOTO 30
+C
+C................................................................
+C HELP
+250	CALL HELP_CMD(IZOOM)
+	GOTO 30
+C
+C...............................................................
+C HEIGHT 
+260	CALL HEIGHT_CMD(IX,IY)
+	GOTO 30
+C
+C...............................................................
+C INSERT
+C
+270	CALL INSERT_CMD(IX,IY,KEY)
+	GOTO 30
+C
+C...............................................................
+C LABEL 
+C
+280	IF (.NOT.LABEL_CMD()) GOTO 20
+	GOTO 30
+C
+C...............................................................
+C POSITION 
+C
+290	CALL POSITION_CMD(IX,IY,UNITS)
+	GOTO 30
+C
+C ......................................................................
+C SELECT
+300	CALL SELECT_CMD
+	GOTO 30
+C
+C ......................................................................
+C SHOW
+310	CALL SHOW_CMD
+	GOTO 30
+C
+C...............................................................
+C SWAP
+320	CALL SWAP
+	GOTO 30
+C
+C...............................................................
+C DUMP - save file 
+C
+330	CALL DUMP_CMD(IZOOM)
+	GOTO 30
+C
+C...............................................................
+C ZOOM
+C
+340	CALL ZOOM_CMD(IX,IY,IZOOM)
+	GOTO 30
+C
+C...............................................................
+C IFF 
+350	CALL IFF_CMD(IZOOM)
+	GOTO 30
+C
+C................................................................
+360	IF (.NOT.ENABLE_CMD(IZOOM)) GOTO 20
+	GOTO 30
+C
+C................................................................
+370	IF (.NOT.DISABLE_CMD()) GOTO 20
+	GOTO 30
+C
+C................................................................
+380	IF (.NOT.SET_CMD()) GOTO 20
+	GOTO 30
+C
+C ......................................................................
+C DATUM - height datum:
+C
+390	IF (.NOT.DATUM_CMD()) GOTO 20
+	GOTO 30
+C
+C ......................................................................
+C UNITS
+C
+400	IF (.NOT.UNITS_CMD()) GOTO 20
+	GOTO 30
+C
+C ......................................................................
+C Test that all four letters of Q U I T are present
+410	CALL COPY_STRING(CMDNST,WORD)
+	I=SIGCHS(WORD)
+	IF (I.NE.4) THEN
+	   CALL OUTOPT(WARNING//
+     &		'You must type QUIT in full to quit from TRIEDIT')
+	   GOTO 20
+	ENDIF
+	GOTO 430
+C
+C ============================ E R R O R ==========================
+C
+C Either a bad command was entered, the action required was not
+C possible, or an attempt was made to modify a true or non-existent
+C point
+420	IF (VT100) THEN
+	   CALL OUTOPT(WARNING//'invalid command')
+	ELSE
+	   CALL TEXPOS('<<RASP>>',1)
+	ENDIF	
+	GOTO 20
+C
+430	RETURN
+	END

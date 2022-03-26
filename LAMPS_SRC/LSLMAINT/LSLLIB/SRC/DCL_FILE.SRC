@@ -1,0 +1,196 @@
+	INTEGER*4 FUNCTION DCL_FILE(FILE_LABEL,DEFAULT,ABSENT,
+     &	LIST,WHINGE)
+C
+***	MODULE	DCL_FILE
+***	IDENT	10SE87
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C	
+CMOD	Correct action on finding entity absent from
+C	command line. Now returns SS$_NORMAL and ABSENT
+C	set .T. (rather than CLI$_ABSENT and .F.
+C	respectively).					TJH  10-Nov-1986
+CMOD	Correct action on LIST and with defaulting	WJJ   5-Jun-1986
+CMOD	/LSL_STATUS/ added				TJH  21-Nov-1985
+C	Author						TJH  11-Sep-1985
+C
+C Function gets any file name(s) associated with the DCL parameter
+C FILE_LABEL and puts them into FILARY(). Function returns set to 
+C SS$_NORMAL if all is well. Local error reporting (via condition
+C handler) may be invoked by setting WHINGE .true.. 
+C If the desired file parameter 
+C is absent ABSENT is set .T.. Parameter lists or qualifier argument
+C lists of file-specs will be read if LIST is supplied as .T..
+C
+	IMPLICIT NONE
+C
+	INTEGER*4 	CLI$PRESENT,CLI$_ABSENT, CLI$GET_VALUE
+	EXTERNAL 	CLI$_ABSENT
+C
+C Work space
+	LOGICAL*4	ABSENT		! .T. if file parameter absent
+	CHARACTER*(*)	DEFAULT		! defaults for filename parsing
+	INTEGER*4	ERRCOD		! for error return (not used)
+	CHARACTER*(*)	FILE_LABEL	! the CLD label for parameter
+	INTEGER*4	IERR		! for error return
+	LOGICAL*4	LIST		! .T. read a list of filenames
+	CHARACTER*128	RAW_FIL		! found parameter
+	INTEGER*2	RAW_LEN		! length of found parameter
+	LOGICAL*4	REPORT		! condition handler error report
+	LOGICAL*4	WHINGE		! .T. = report errors locally
+C
+C LSLLIB function:
+	LOGICAL*4	PARFILN		! to parse a filename
+C
+	INCLUDE		'($SSDEF)'
+	INCLUDE 	'($STSDEF)'
+	INCLUDE 	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 	'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 	'LSL$CMNLSL:STATUS.CMN'
+C
+C condition handler
+	EXTERNAL	DCL_ERRET
+C
+C Common block to control error reporting in condition handler
+	COMMON /LSL_REPORT/ REPORT	
+C
+C ......................................................................
+C
+	ABSENT=.FALSE.		! assume the best
+	NUMFIL=0		! initialise number of args. counter
+	REPORT=WHINGE		! is condition handler to scream?
+C
+C Establish condition handler
+	CALL LIB$ESTABLISH( DCL_ERRET )
+C
+C Check that the file parameter was supplied. (It should have been if 
+C the user has made up his CLD module correctly and has called 
+C DCL_STARTUP as any missing parameters will have been prompted for).
+C
+	DCL_FILE = CLI$PRESENT(FILE_LABEL)
+	IF (DCL_FILE) THEN
+C
+C Get filename (or first filename in a FILENAME.EXT,FILENAME.EXT... list
+C of file specs
+	    DCL_FILE=CLI$GET_VALUE (FILE_LABEL,
+     &			            RAW_FIL,
+     &			            RAW_LEN)
+	    IF (.NOT.DCL_FILE) THEN
+		IF (IBITS(DCL_FILE,0,3).NE.STS$K_WARNING)
+     &				CALL LSL_PUTMSG(DCL_FILE)
+	        IF (DCL_FILE.EQ.%LOC(CLI$_ABSENT)) THEN
+		   DCL_FILE=SS$_NORMAL
+		   ABSENT=.TRUE.
+	        ENDIF
+C
+C Revert to normal error processing
+	        CALL LIB$REVERT
+		RETURN			! give up
+	    ENDIF
+C
+C Now parse the file parameter in RAW_FIL against any defaults held in 
+C DEFAULT, then store in FILARY(1)
+	   DCL_FILE=PARFILN(FILARY(1),		! parsed file-spec
+     &			FIL_LEN(1),		! length of " "
+     &			RAW_FIL(:RAW_LEN),	! as grabbed from CLI
+     &			DEFAULT,		! for parsing against
+     &			.TRUE.) 		! allow version numbers
+	    IF (DCL_FILE.NE.LSL__NORMAL) THEN
+		IF (WHINGE) THEN
+		   CALL LSL_PUTMSG(DCL_FILE)	! sets LSL_STATUS
+		ELSE
+		   LSL_STATUS=DCL_FILE.OR.LSL_QUIET
+		ENDIF
+C
+C Revert to normal error processing
+	        CALL LIB$REVERT
+	        RETURN
+	    ENDIF
+C
+	    NUMFIL = 1
+C Do it until the list is depleted if LIST was supplied .TRUE.
+	    IF (LIST) THEN
+	       DO WHILE(DCL_FILE)
+C get next raw file from list
+	           DCL_FILE=CLI$GET_VALUE (FILE_LABEL,
+     &			                   RAW_FIL,
+     &			                   RAW_LEN)
+	           IF (.NOT.DCL_FILE) THEN
+	               IF (DCL_FILE.NE.%LOC(CLI$_ABSENT)) THEN
+     			  IF (IBITS(DCL_FILE,0,3).NE.STS$K_WARNING)
+     &				     CALL LIB$SIGNAL (%VAL (DCL_FILE))
+	               ELSE
+	                  DCL_FILE=SS$_NORMAL
+	               ENDIF
+C
+C Revert to normal error processing
+		       CALL LIB$REVERT
+		       LSL_STATUS=DCL_FILE.OR.LSL_QUIET	
+		       RETURN		! exit from WHILE loop!!!!!
+	           ENDIF
+C
+C got a raw file - will we exceed the maximum?
+		   IF (NUMFIL.EQ.MAX_FIL) THEN
+	              DCL_FILE=LSL__MAXPAREX
+		      IF (WHINGE) THEN
+			CALL LSL_PUTMSG(DCL_FILE)! sets LSL_STATUS
+		      ELSE
+		   	LSL_STATUS=DCL_FILE.OR.LSL_QUIET
+		      ENDIF
+		      CALL LIB$REVERT ! revert to normal err. processing
+	              RETURN
+		   ENDIF
+C Now parse the file parameter in RAW_FIL using previous file for 
+C defaults.
+	           DCL_FILE=PARFILN(FILARY(NUMFIL+1), ! parsed file-spec
+     &			FIL_LEN(NUMFIL+1),		! length of " "
+     &			RAW_FIL(:RAW_LEN),	! as grabbed from CLI
+     &			FILARY(NUMFIL)(:FIL_LEN(NUMFIL)),! for parsing against
+     &			.TRUE.) 		! allow version numbers
+	    	    IF (DCL_FILE.NE.LSL__NORMAL) THEN
+		       IF (WHINGE) THEN
+			CALL LSL_PUTMSG(DCL_FILE)! sets LSL_STATUS
+		       ELSE
+		   	LSL_STATUS=DCL_FILE.OR.LSL_QUIET
+		       ENDIF
+C
+C Revert to normal error processing
+	               CALL LIB$REVERT
+	               RETURN
+	           ENDIF
+C confirm that another file found
+                   NUMFIL=NUMFIL+1
+	       END DO
+C
+C should never reach this bit of code !!!!!!!!!!!
+C
+	       IF (.NOT.DCL_FILE) THEN
+     		   IF (IBITS(DCL_FILE,0,3).NE.STS$K_WARNING)
+     &			   CALL LIB$SIGNAL (%VAL (DCL_FILE))
+C
+C Revert to normal error processing
+	           CALL LIB$REVERT
+		   LSL_STATUS=DCL_FILE.OR.LSL_QUIET
+		   RETURN		! give up
+	       ENDIF
+	   ENDIF
+C
+C As we have got this far, make sure termination status is correct
+	   DCL_FILE=SS$_NORMAL
+	ELSE
+C
+C Set the 'file parameter was absent' flag?
+	   IF (DCL_FILE.EQ.%LOC(CLI$_ABSENT)) THEN
+  	      ABSENT=.TRUE.
+	      DCL_FILE=SS$_NORMAL
+	   ELSE IF (IBITS(DCL_FILE,0,3).NE.STS$K_WARNING) THEN
+     	      CALL LIB$SIGNAL (%VAL (DCL_FILE)) ! report error locally ?
+	   ENDIF	      
+	ENDIF
+C
+C Revert to normal error processing
+	CALL LIB$REVERT
+	LSL_STATUS=DCL_FILE.OR.LSL_QUIET
+	RETURN	
+	END

@@ -1,0 +1,929 @@
+   	PROGRAM PROFILE
+C
+***	MODULE PROFILE
+***	IDENT  31JL92
+C
+	IMPLICIT NONE
+C
+C 	Copyright Laser-Scan Ltd., Cambridge, England
+C 	Author  : 	D R Catlow.
+C 	Created :	April 1988
+C	Modified:
+
+CMOD	3rd argument to function DTI_PRINT_HEADER added.  FJB 28-Nov-1988
+CMOD	DTI_UNITS used to test argument to UNITS command.
+CMOD	Qualifiers ABSOLUTE and TABLE added to ENABLE/DISABLE commands.
+C
+CMOD	Add translation of LSL$DTI_PAGE_FAULT_CLUSTER	   JB 28-Jul-1992
+c
+C	Function:
+C	PROFILE forms part of the Philips Propogation Analysis System.
+C
+C	It takes a DTI containing a Digital Terrain Model, and
+C       optionally 3 clutter grid files containing height data on
+C       buildings, vegetation and water, and calculates a series of
+C       terrain profiles.
+C	Each profile is written to an IFF file as a separate IFF
+C	feature. 
+C	Associated with each feature are an AC storing the bearing 
+C	and length of the profile,
+C	and a coordinate block holding the x,y and z of a
+C       sample point, and an integer clutter value in column 4 of the
+C       CB indicating the type of clutter at the sample point.
+C
+C	By default a profile is constructed between each DTM node and
+C       the base station location; optionally however the user may
+C	specify an angular separation for the profiles.
+C	The user may define a rectangular area of interest, or a 
+C	sector of interest.  If an area of interest is defined, 
+C	only nodes inside the area are considered. 
+C
+C	The user may define a constant sampling interval, or a sampling
+C	rate that varies with distance from the base station using
+C	one or more BAND commands.
+C
+C	The program can take coordinate data from a digitising table if
+C	the SETUP MAP command is given to position a map on the table.
+C
+C-----------------------------------------------------------------------
+C 	Include LSLLIB common blocks
+***	COMMON/LSL$CMNLSL:CMDCOM/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C 	Include DTILIB common block
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C 	PROFILE commons:
+***	COMMON/HERE:PROFILE/		! Profile parameters
+***	COMMON/HERE:PROFILE_IFF/
+***	COMMON/HERE:PROQIO/		! QIO values
+***	COMMON/HERE:TAB/		! Table monitor values
+C
+C	Include any required parameter files
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+C
+	INCLUDE 	'($DVIDEF)'
+	INCLUDE		'($DCDEF)'
+C
+C---------------------------------------------------------------------
+C workspace
+	INTEGER*4	DTI_LUN		! DTI channel number
+	INTEGER*4	CMD		! decoded command number
+	INTEGER*4	I,J		! loop variable
+	INTEGER*4	VAL		! for GETDVI
+C
+	LOGICAL		FROM_TABLE	! command given from the 
+C					! table puck.
+	BYTE		CH		! single character
+C
+	CHARACTER*1	TRANSLATION	! translation of logical name
+	CHARACTER*8	PFC_TRANSLATION	! translation of logical name
+	LOGICAL		HAD_PFC		! had page fault cluster?
+	INTEGER		PFC
+C
+C----------------------------------------------------------------------
+C 	Primary command table
+	EXTERNAL	PROFILE_CMD_TABLE
+C
+C 	Secondary command tables
+	EXTERNAL	UNIT_CMD_TABLE
+	EXTERNAL	ENABLE_CMD_TABLE
+	EXTERNAL	SETUP_CMD_TABLE
+	EXTERNAL	RESET_CMD_TABLE
+C
+C----------------------------------------------------------------------
+C	External functions
+	EXTERNAL 	PUT_OUTPUT
+	EXTERNAL	CTRLCAST
+C
+C-----------------------------------------------------------------------
+C 	DTILIB functions
+	INTEGER*4	DTI_PRINT_HEADER	! to print head details
+	INTEGER*4	DTI_CLOSE		! to close a DTI file
+	INTEGER*4	DTI_UNITS		! test units are valid
+C
+C-----------------------------------------------------------------------
+C 	LSLLIB functions
+	INTEGER*4	RDCOMM		! cf. cmd with command dict
+	LOGICAL		RDCHS		! read a single character
+	LOGICAL		RDCH	   	! read a single ch (incl. space)
+	LOGICAL		RDLONG	   	! read a single integer
+	INTEGER*4	FLRLIN		! read a line from a cmd file
+	INTEGER*4	FLRCLO		! to close indirect command file
+	INTEGER*4	TRNALL		! translate logical name
+C
+C-----------------------------------------------------------------------
+C 	System Library functions
+	INTEGER*4	SYS$ASSIGN	! assign I/O channels
+	INTEGER*4	LIB$GETDVI	! get term characteristics etc.
+C
+C----------------------------------------------------------------------
+C 	PROFILE functions
+	INTEGER*4	TEST_TERM	! input a terminal?
+	LOGICAL		GET_IFFNAME	! parse IFF filename
+	LOGICAL		OPEN_DTI_FILE	! routine to map DTI file
+	LOGICAL		CREATE_IFF_FILE	! create output IFF file
+C
+	LOGICAL		GET_WINDOW_POINTS !to read window values
+	LOGICAL		HAD_PUCK	! had puck input?
+	LOGICAL		READ_PUCK	! read puck input
+	LOGICAL		WAIT_INPUT	! wait for kybd or table input
+	LOGICAL		INIT_TAB	! initialise table monitor
+C
+C---------------------------------------------------------------------
+C	Initialise libraries etc.
+	CALL LSL_INIT(.TRUE.)		! initialise LSLLIB
+	CALL DTI_INIT			! initialise DTILIB
+C
+	CALL SET_TXTLIM(80)		! set max line length
+	CALL LSL_SET_OUTPUT(PUT_OUTPUT)
+C
+C---------------------------------------------------------------------
+C	Initialise PROFILE variables
+	CALL PROFILE_INIT
+C
+C---------------------------------------------------------------------
+C 	Determine whether input is from a command file
+	CMDFIL = .TRUE.			! assume so
+	RETVAL = TEST_TERM('SYS$INPUT',TERM,IERR)
+	IF (.NOT.RETVAL) THEN
+	   IF (RETVAL.EQ.LSL__SYSERR) THEN
+	      CALL LSL_PUTMSG(IERR)
+	   ELSE
+	      CALL LSL_PUTMSG(RETVAL)
+	   ENDIF
+	ELSE
+	   CMDFIL = .NOT.TERM		! input from command file
+	ENDIF
+C                                                                      
+C---------------------------------------------------------------------
+C 	Assign input channel, and set up control/C handler
+	CTRLC = .FALSE.
+	IF (.NOT.CMDFIL) THEN
+	  IERR = SYS$ASSIGN('SYS$INPUT',IN_CHAN,,)
+	  IF (.NOT.IERR) THEN
+	    CALL LSL_PUTMSG(IERR)
+	    GOTO 9000		! exit
+	  ENDIF
+	  CALL SET_OUTBAND_AST(CTRLCAST,8)
+	ENDIF
+	HADQIO = .FALSE.	! no QIO active
+C
+C---------------------------------------------------------------------
+C 	Is output to a terminal?
+	IERR=LIB$GETDVI(DVI$_DEVCLASS,,'SYS$OUTPUT',VAL,,)
+	IF (IERR) THEN				! success
+	   IF (VAL.EQ.DC$_TERM)TERM=.TRUE. 	! it is a terminal
+	ELSE
+	   CALL LIB$SIGNAL(%VAL(IERR))
+	ENDIF
+C
+C	What sort of terminal.
+C	This is used to decide whether we ouput diagnostic messages
+C
+	IF(TERM)THEN
+	  IERR=LIB$GETDVI(DVI$_TT_SCOPE,,'SYS$OUTPUT',VAL,,)
+	  IF (IERR) THEN
+	     CRT=VAL.EQ.1
+	  ELSE
+	     CALL LIB$SIGNAL(%VAL(IERR))
+	  ENDIF	
+C
+C 	Assign output channel
+C
+	  IERR = SYS$ASSIGN('SYS$OUTPUT',OUT_CHAN,,)
+	  IF (.NOT.IERR) THEN
+	    CALL LSL_PUTMSG(IERR)
+	    GOTO 9000		! exit
+	  ENDIF
+	ELSE
+	  CRT=.FALSE.
+	ENDIF
+C
+C	Signal that input is not from an indirect commad file
+C	specified using @ in response to the PROFILE prompt
+C
+	HAD_INDIRECT_FILE=.FALSE.
+C----------------------------------------------------------------------
+C	Announce the program
+	CALL DTMJPI
+C
+C----------------------------------------------------------------------
+C 	Initialise page fault cluster
+C
+	HAD_PFC = .FALSE.
+C
+	RETVAL = TRNALL('LSL$DTI_PAGE_FAULT_CLUSTER',PFC_TRANSLATION)
+	IF (.NOT.RETVAL) THEN
+	   HAD_PFC = .FALSE.
+	ELSE
+	   HAD_PFC = .TRUE.
+	   CALL SETAUX(%REF(PFC_TRANSLATION),8)
+	   IF (RDLONG(PFC)) HAD_PFC = .FALSE.		! get the number
+	ENDIF
+C
+C----------------------------------------------------------------------
+C 	Initialise digitising table
+C
+	RETVAL = TRNALL('LSL$AUTO_ENABLE_TABLE',TRANSLATION)
+	IF(.NOT.RETVAL.OR.TRANSLATION.NE.'1')THEN
+	   TABLE = .FALSE.
+	   GOTO 444
+	ELSE
+	   TABLE = .TRUE.
+	ENDIF
+C
+	IF(TABLE) THEN
+	  IF (INIT_TAB(,IERR)) THEN
+	    CALL WRITEF('%S Unable to initialise the table monitor',
+     &                WARN_BELL)
+	    CALL WRITEF('PROFILE will assume no table is available')
+	    TABLE=.FALSE.			! disallow table input
+	    GOTO 444
+	  ENDIF
+	ENDIF
+C
+C 	Set event flag numbers
+	CALL RETURN_EFN(EF_POINT,EF_STREAM,EF_ERROR,EF_VDU,EF_LAST)
+	GOTO 555
+C
+444	EF_VDU=4
+C
+C 	Set up text pointer for WAIT_INPUT
+C
+555	TXTPTR = 80
+	CALL WRITEF(' ')
+C
+C----------------------------------------------------------------------
+C 	Get a command from the command line, or from a 
+C	table puck button.
+10	CTRLC = .FALSE.			! clear any CTRL/C
+C
+C----------------------------------------------------------------------
+C	If an indirect command file is opened, read a command from
+C	the next line in the file
+C
+	IF(HAD_INDIRECT_FILE)THEN
+	  RETVAL = FLRLIN()
+	  IF(RETVAL.NE.LSL__NORMAL)THEN
+	    IF(RETVAL.NE.LSL__EOF)THEN
+	      CALL WRITEF('%S Reading from command file',ERROR_BELL)
+              CALL WRITEF('Returning to terminal input')
+	    ELSE
+	      CALL WRITEF('%S Reading from command file',ERROR_BELL)
+	      CALL WRITEF('End of command file detected')
+	    ENDIF
+	    GOTO 1350		!to close the file 
+	  ELSE
+C Echo the command on the terminal
+	    CALL BSLN
+	    CALL EXPAND('PROFILE> ')
+	    CALL APPEND(TXTDSC)
+	    CALL TTWSTR
+	  ENDIF
+	  HAD_VDU=.TRUE.	!treat as thought cmd read from terminal
+	  GOTO 20
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C	Get next command from the terminal or puck button
+C
+	IF (.NOT.WAIT_INPUT('PROFILE',.TRUE.,.TRUE.)) GOTO 9000
+C
+20	IF (HAD_VDU) THEN		! keyboard input
+	  IF (RDCHS(CH)) GOTO 10	! empty line
+	  IF (CH.EQ.'!') GOTO 10	! comment!
+	  IF (CH.EQ.'@') GOTO 3000	! open indirect command file
+	  CALL BSLN
+C
+C	Let LSLLIB output ambiguity messages etc. for primary
+C	commands, however subsequently we'll turn off this
+C	mechanism for secondary commands by setting NOMESS to false.
+C
+	  NOMESS=.FALSE.
+C
+	  CMD = RDCOMM(PROFILE_CMD_TABLE)  	! get command number
+	  IF(CMD.LE.0)THEN			! unrecognised command
+	    CALL WRITEF('%S Specifying PROFILE command',ERROR_BELL)
+            GOTO 10
+	  ENDIF
+C
+	  NOMESS=.TRUE.
+C
+C Execute command from keyboard
+C
+	  GOTO (
+     &	   100,  100,  100,  100, 	! BUILDING, VEG, WATER, FILEIN
+     &     250,  300,  400,  500,       ! WINDOW, IFF, GO, HELP
+     &	   600,  700,  800,	        ! SHOW, SETUP, UNITS
+     &	   900, 1000, 9000, 1100,	! WAIT, SPAWN, EXIT, ENABLE
+     &	  1200, 1300, 1450, 1500,	! DISABLE, RETURN, POS, BAND
+     &	  1600, 1700, 1850, 1900,	! PROFILE, SAMPLE, SECTOR, SET
+     &    2050, 2500, 2600)CMD		! POINT, RESET, SUB_SAMPLE
+C
+	ELSEIF (HAD_PUCK(IERR)) THEN
+	  IF(READ_PUCK(BUTTON,X_TAB,Y_TAB,IERR)) THEN
+	    CALL SHOW_ERROR(IERR)
+	  ELSE                                               
+	    GOTO(1400,200,1800,2000),BUTTON+1
+C		  0    1    2    3
+C	         pos wind sect point
+	  ENDIF
+	ENDIF
+C
+	GOTO 10				! get next command
+C---------------------------------------------------------------------
+C	Call Function OPEN_DTI_FILE to read DTI input filename,
+C	and map it into memory.
+C
+C	Building clutter file is opened on DTI_LUN 1
+C	Vegetation clutter file is opened on DTI_LUN 2
+C	Water clutter file is opened on DTI_LUN 3
+C	DTM is opened on DTI_LUN 4
+C
+100	DTI_LUN=CMD
+C
+C	If it's a clutter file, check that the DTM has been opened
+C
+	IF(DTI_LUN.NE.4)THEN
+	  IF(.NOT.DTILUN_INUSE(4))THEN
+	    CALL WRITEF
+     &        ('%S Specifying command %S',ERROR_BELL,CLUTTER_TYPE(CMD))
+	    CALL WRITEF('The input DTM must be specified first')
+	    GOTO 10
+	  ENDIF
+	ENDIF
+C
+C 	Open DTI file, error already output 
+C
+110	IF (.NOT.OPEN_DTI_FILE(DTI_LUN,HAD_PFC,PFC)) THEN
+	  CALL BSLN
+	  IF (.NOT.WAIT_INPUT('Input DTI filename', 
+     &		.FALSE., .TRUE.)) GOTO 10
+	  GOTO 110
+	ENDIF
+C
+C	Confirm the successful opening of the file by printing
+C	out the header details.
+C
+	CALL WRITEF(' ')
+	RETVAL=DTI_PRINT_HEADER(DTI_LUN,UNITS,HAD_ABSOLUTE)
+	IF(.NOT.RETVAL)CALL LSL_PUTMSG(RETVAL)
+	GOTO 10
+C               
+C-----------------------------------------------------------------------
+C	WINDOW defined from puck button
+C
+200	IF(.NOT.MAP_SET)THEN
+	  CALL WRITEF
+     &    ('%S Specifying command WINDOW using puck button',ERROR_BELL)
+	  CALL WRITEF('No map set up has been performed')
+	  GOTO 10
+	ENDIF
+C
+C	Ensure that we prompt for window values in GET_WINDOW_POINTS
+C
+	FROM_TABLE=.TRUE.
+C
+C	Since the command is from the puck, we've no need to check
+C	that the DTM has been defined.
+C
+	GOTO 270
+C
+250	IF(.NOT.DTILUN_INUSE(4))THEN
+	  CALL WRITEF('%S Specifying command WINDOW',ERROR_BELL)
+	  CALL WRITEF('The input DTM must be specified before WINDOW')
+	  GOTO 10
+	ENDIF
+	FROM_TABLE=.FALSE.
+C
+270	IF(.NOT.GET_WINDOW_POINTS(FROM_TABLE))GOTO 10
+C
+C	Confirm window values
+	CALL WRITEF(' ')
+	IERR=DTI_PRINT_HEADER(4,UNITS,HAD_ABSOLUTE)
+	IF(.NOT.IERR)CALL LSL_PUTMSG(IERR)
+C
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	IFF  specifies the name of the output IFF file
+C
+300	IF(.NOT.GET_IFFNAME())THEN
+360	  CALL BSLN
+	  IF(.NOT.WAIT_INPUT('Output IFF filename',.FALSE.,.TRUE.))
+     &    GOTO 10
+	  GOTO 300
+	ENDIF
+C
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	GO - generate profiles
+C
+C	First check that we have all the files 
+C	and all parameter values we need
+C
+400	IF(.NOT.DTILUN_INUSE(4))THEN
+	  CALL WRITEF('%S Specifying command GO',ERROR_BELL)	  
+	  CALL WRITEF('The input DTM must be specified before GO')
+	  GOTO 10
+	ENDIF
+C
+	IF(.NOT.HAD_IFF)THEN
+	  CALL WRITEF('%S Specifying command GO',ERROR_BELL)	  
+	  CALL WRITEF('The output IFF file must be specified before GO')
+	  GOTO 10
+	ENDIF
+C
+	IF(.NOT.HAD_POSITION)THEN
+	  CALL WRITEF('%S Specifying command GO',ERROR_BELL)
+	  CALL WRITEF('Profile origin position has not been defined')
+	  GOTO 10
+	ELSE
+C
+C	Test if the base station position is in the defined area
+C	of interest
+C
+	  IF (X_POSITION.LT.SWX_METRES(4).OR.
+     &        X_POSITION.GT.NEX_METRES(4).OR.
+     &        Y_POSITION.LT.SWY_METRES(4).OR.
+     &        Y_POSITION.GT.NEY_METRES(4))THEN
+	    CALL WRITEF('%S Specifying command GO',ERROR_BELL)
+	    CALL WRITEF
+     &    ('Profile origin is not within the current area of interest')
+	    CALL WRITEF
+     &    ('Redefine the position, or window before issuing GO')
+	    GOTO 10		  
+	  ENDIF
+	ENDIF
+C
+	IF(.NOT.(HAD_SAMPLE.OR.HAD_BAND))THEN
+	  CALL WRITEF('%S Specifying command GO',ERROR_BELL)
+	  CALL WRITEF('Profile sample interval has not been defined')
+	  GOTO 10
+	ENDIF
+C
+C	Close any existing IFF file
+C
+	IF(OPEN_IFF)CALL CLOSE_IFF
+C
+C	Create the output IFF file
+C	Error messages etc. are generated by the function
+C	If it fails its probably due to an invalid file specification,
+C	therefore on error its better to stay in the program,
+C	and allow the user to redefine the file name.
+C
+	IF(.NOT.CREATE_IFF_FILE())GOTO 10
+C
+C	If one or more bands have been defined, test if they extend
+C	to outer limit of sector or area of interest, and extend if
+C	necessary
+C
+	IF(HAD_BAND)CALL EXTEND_BAND
+C
+C	Call the appropriate routine depending on whether we are
+C	creating a profile betweem each DTM node and the base station,
+C	or profiles at a fixed angular interval.
+C
+	IF(PROFILE_INTERVAL.EQ.0)THEN	
+	  CALL GENERATE_PROFILES
+	ELSE
+	  CALL RADIAL_PROFILES
+	ENDIF
+C
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	HELP - access on-line help
+500	CALL HELP
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C 	SHOW - provide information on various parameters and files
+600	CALL SHOW	
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	SETUP
+C	Check the qualifier.  Currently only map is valid
+C
+700	CMD = RDCOMM(SETUP_CMD_TABLE)	
+	IF (CMD.LE.0) THEN	! qualifier unrecognised
+	  CALL WRITEF('%S Specifying command SETUP',ERROR_BELL)
+	  CALL WRITEF('Command qualifier is MAP')
+	  GOTO 10 
+	ENDIF
+C
+        IF(.NOT.TABLE)THEN
+	  CALL WRITEF('%S Specifying command SETUP MAP',ERROR_BELL)
+	  CALL WRITEF
+     &	  ('Command is invalid if the table has not been initialised')
+	  GOTO 10
+	ENDIF
+C
+	IF(.NOT.DTILUN_INUSE(4))THEN
+	  CALL WRITEF('%S Specifying command SETUP MAP',ERROR_BELL)
+	  CALL WRITEF
+     &    ('The input DTM must be specified before SETUP MAP')
+	  GOTO 10
+	ENDIF
+C
+	CALL SET_MAP
+C
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	UNITS
+C	Define the DTM units of measurement
+C
+800	CMD=RDCOMM(UNIT_CMD_TABLE)	
+	IF(CMD.LE.0) THEN! unrecognised command
+	  CALL WRITEF('%S Specifying command UNITS',ERROR_BELL)
+	  CALL WRITEF('Command qualifiers are: 
+     &		MATRIX, METRES, PROJECTION, SECONDS, or LATLONG ')
+	  GOTO 10
+	ENDIF
+C
+C	Test whether units is valid
+C
+	IERR = DTI_UNITS(4,CMD)
+	IF(.NOT.IERR)THEN
+	  IF(IERR.EQ.DTI__INVUNITS)THEN
+	    CALL WRITEF('%S Specifying command UNITS',ERROR_BELL)
+	    CALL WRITEF
+     &      ('Command qualifier is invalid for the input file')
+	  ELSE            
+	    CALL LSL_PUTMSG(IERR)
+	  ENDIF
+	  GOTO 20
+	ENDIF
+C
+	UNITS=CMD
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	WAIT
+C	Suspend processing for the specified number of seconds
+C
+900	IF(CMDRCT.NE.1)THEN
+	  CALL WRITEF('%S Specifying command WAIT',ERROR_BELL)
+	  CALL WRITEF('Command requires a real argument')
+	  GOTO 10
+	ENDIF
+C
+	CALL LIB$WAIT(REALAR(1))
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	SPAWN DCL process - primarily designed for file management
+1000	CALL SPAWN            
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	ENABLE
+C
+C	Get the appropriate qualifier
+1100	CMD = RDCOMM(ENABLE_CMD_TABLE)
+C
+	GOTO(1110,1120,1130),CMD
+C
+	CALL WRITEF('%S Specifying command ENABLE',ERROR_BELL)
+	CALL WRITEF
+     &		('Command qualifiers are '// 
+     &  	'ABSOLUTE, DIAGNOSTICS or TABLE')
+	GOTO 10
+C
+C----------------------------------------------------------------------
+C	ENABLE ABSOLUTE
+C
+1110	HAD_ABSOLUTE = .TRUE.
+	GOTO 10
+C
+C----------------------------------------------------------------------
+C	ENABLE DIAGNOSTICS
+C
+1120	DIAG = .TRUE.
+	GOTO 10
+C
+C----------------------------------------------------------------------
+C	ENABLE TABLE
+C
+1130	IF (.NOT. TABLE) THEN
+	   IF (INIT_TAB(,IERR)) THEN
+	      CALL WRITEF
+     &	      	('%S Error initialising table monitor',ERROR_BELL)
+	       CALL WRITEF
+     &        	('PROFILE will assume no table is available')
+	      TABLE=.FALSE.
+	      GOTO 10
+	   ENDIF
+	   TABLE = .TRUE.
+C
+C 	Set event flag numbers
+C
+	   CALL RETURN_EFN(EF_POINT,EF_STREAM,EF_ERROR,EF_VDU,EF_LAST)
+	ENDIF
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	DISABLE
+C
+C	Get the appropriate qualifier
+1200	CMD = RDCOMM(ENABLE_CMD_TABLE)
+C
+	GOTO(1210,1220,1230),CMD
+	CALL WRITEF('%S Specifying command DISABLE',ERROR_BELL)
+	CALL WRITEF
+     &  	('Command qualifiers are '// 
+     &  	'ABSOLUTE, DIAGNOSTICS or TABLE')
+	GOTO 10
+C
+C----------------------------------------------------------------------
+C	DISABLE ABSOLUTE
+C
+1210	HAD_ABSOLUTE = .FALSE.
+	GOTO 10
+C
+C----------------------------------------------------------------------
+C	DISABLE DIAGNOSTICS
+C
+1220	DIAG = .FALSE.
+	GOTO 10
+C
+C----------------------------------------------------------------------
+C	DISABLE TABLE
+C
+1230	IF(TABLE)CALL CLOSE_TAB (IERR)
+	TABLE = .FALSE.
+C
+C	Reset event flag, and cancel any existing QIOS
+	EF_VDU=4
+	CALL SYS$CANCEL(%VAL(IN_CHAN))
+	HADQIO=.FALSE.
+	GOTO 10
+C	
+C---------------------------------------------------------------------
+C	RETURN
+C
+1300	IF(.NOT.HAD_INDIRECT_FILE)THEN
+	  CALL WRITEF('%S Specifying command RETURN',ERROR_BELL)
+	  CALL WRITEF
+     &    	('The RETURN command is only valid in a command file')
+	  GOTO 10
+	ENDIF
+C
+	CALL WRITEF('Returning to terminal input')
+C
+C	Close the indirect command file
+C
+1350	RETVAL=FLRCLO(1)
+	IF (.NOT.RETVAL)CALL LSL_PUTMSG(RETVAL)
+	HAD_INDIRECT_FILE=.FALSE.
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	POSITION from table puck
+C
+1400	IF(.NOT.MAP_SET)THEN
+	  CALL WRITEF
+     &    ('%S Specifying command POSITION using puck button',
+     &    ERROR_BELL)
+	  CALL WRITEF('No map set up has been performed')
+	  GOTO 10
+	ENDIF
+	FROM_TABLE=.TRUE.
+	GOTO 1460
+C
+C	POSITON on command line
+C
+1450	FROM_TABLE=.FALSE.	
+	IF(.NOT.DTILUN_INUSE(4))THEN
+	  CALL WRITEF('%S Specifying command POSITION',ERROR_BELL)
+	  CALL WRITEF('The input DTM is undefined')
+	  GOTO 10
+	ENDIF
+C
+1460	CALL SET_POSITION(FROM_TABLE)
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	BAND
+C
+1500	CALL SET_BAND
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	PROFILE_INTERVAL
+C
+1600	IF (CMDACT.NE.1)THEN
+	  CALL WRITEF
+     &    ('%S Specifying command PROFILE_INTERVAL',ERROR_BELL)
+	  CALL WRITEF('Command requires 1 real argument')
+	  GOTO 10
+	ENDIF
+C
+C	Note that a profile interval of 0 is allowed,
+C	and tells the program to use every DTM node.  This is the
+C	default action anyway.
+C
+	IF(REALAR(1).LT.0.OR.REALAR(1).GT.180.0)THEN
+	  CALL WRITEF
+     &    ('%S Specifying command PROFILE_INTERVAL',ERROR_BELL)
+	  CALL WRITEF
+     &    ('Command requires a real argument in the range 0 to 180')
+	  GOTO 10
+	ENDIF
+C
+	PROFILE_INTERVAL=REALAR(1)
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	SAMPLE_INTERVAL
+C
+1700	IF(CMDACT.NE.1)THEN
+	  CALL WRITEF
+     &    ('%S Specifying command SAMPLE_INTERVAL',ERROR_BELL)
+	  CALL WRITEF('Command requires 1 real argument')
+	  GOTO 10
+	ENDIF
+C
+	IF(REALAR(1).LE.0)THEN
+	  CALL WRITEF
+     &    ('%S Specifying command SAMPLE_INTERVAL',ERROR_BELL)
+	  CALL WRITEF
+     &    ('Command requires a positive real value') 
+	  GOTO 10
+	ENDIF
+C
+	SAMPLE_INTERVAL=REALAR(1)
+	HAD_SAMPLE=.TRUE.
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	SECTOR from table puck
+C	Define sector of interest
+C
+1800	IF(.NOT.MAP_SET)THEN
+	  CALL WRITEF
+     &    ('%S Specifying command SECTOR using puck button',
+     &    ERROR_BELL)
+	  CALL WRITEF('No map set up has been performed')
+	  GOTO 10
+	ENDIF
+C
+	IF(.NOT.HAD_POSITION)THEN
+	  CALL WRITEF
+     &    ('%S Specifying command SECTOR using puck button',
+     &    ERROR_BELL)
+	  CALL WRITEF('Profile origin must be specified first')
+	  GOTO 10
+	ENDIF
+C
+	FROM_TABLE=.TRUE.
+	GOTO 1860
+C
+C	SECTOR from the command line
+C
+1850	FROM_TABLE=.FALSE.
+C
+1860	CALL SET_SECTOR(FROM_TABLE)
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	SET
+C	Set the values of various IFF entries.
+C
+1900	CALL SET_CMD
+	GOTO 10
+C
+C---------------------------------------------------------------------
+C	POINT
+C	Construct a single profile between the base station and
+C	the specified point.
+C
+2000	IF (.NOT.MAP_SET)THEN
+	  CALL WRITEF
+     &    	('%S Specifying command POINT using puck button',
+     &    	ERROR_BELL)
+	  CALL WRITEF('No map set up has been performed')
+	  GOTO 10
+	ENDIF
+C
+	FROM_TABLE=.TRUE.
+	GOTO 2060
+C
+C	POINT - specified from the terminal
+C
+2050	IF(.NOT.DTILUN_INUSE(4))THEN
+	  CALL WRITEF('%S Specifying command POINT',ERROR_BELL)
+	  CALL WRITEF('The input DTM is undefined')
+	  GOTO 10
+	ENDIF
+	FROM_TABLE=.FALSE.
+C
+C	Check that we've had the necessary parameters
+C
+2060	IF(.NOT.HAD_POSITION)THEN
+	  CALL WRITEF('%S Specifying command POINT',ERROR_BELL)
+	  CALL WRITEF('Profile origin position has not been defined')
+	  GOTO 10
+	ELSE
+C
+C	Test if the base station position is in the defined area
+C	of interest
+C
+	  IF (X_POSITION.LT.SWX_METRES(4).OR.
+     &        X_POSITION.GT.NEX_METRES(4).OR.
+     &        Y_POSITION.LT.SWY_METRES(4).OR.
+     &        Y_POSITION.GT.NEY_METRES(4))THEN
+	    CALL WRITEF('%S Specifying command POINT',ERROR_BELL)
+	    CALL WRITEF
+     &    ('Profile origin is not within the current area of interest')
+	    CALL WRITEF
+     &    ('Redefine the position, or window before issuing POINT')
+	    GOTO 10
+	  ENDIF
+	ENDIF
+C
+	IF(.NOT.(HAD_SAMPLE.OR.HAD_BAND))THEN
+	  CALL WRITEF('%S Specifying command POINT',ERROR_BELL)
+	  CALL WRITEF('The sampling interval has not been defined')
+	  GOTO 10
+	ENDIF
+C
+	IF(.NOT.HAD_IFF)THEN
+	  CALL WRITEF('%S Specifying command POINT',ERROR_BELL)
+	  CALL WRITEF('No output IFF file has been specified')
+	  GOTO 10
+	ENDIF
+C
+	CALL POINT_PROFILE(FROM_TABLE)
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	RESET 
+C
+2500	CMD = RDCOMM(RESET_CMD_TABLE)
+	IF(CMD.LE.0)THEN
+	  CALL WRITEF('%S Specifying command RESET',ERROR_BELL)
+	  CALL WRITEF('Command qualifier is BANDS')
+	  GOTO 10
+	ENDIF
+C
+C	Reset bands by making HAD_BAND = .FALSE., and set band
+C	pointer to intial state
+C
+	HAD_BAND=.FALSE.
+	NEXT_UNDEFINED_BAND=1
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	SUB_SAMPLE
+C
+2600    IF(CMDACT.NE.2)THEN
+	  CALL WRITEF('%S Specifying command SUB_SAMPLE',ERROR_BELL)
+	  CALL WRITEF('Command requires 2 integer values')
+	  GOTO 10
+	ENDIF
+C
+	IF(INTARG(1).LE.0.OR.INTARG(2).LE.0)THEN
+	  CALL WRITEF('%S Specifying command SUB_SAMPLE',ERROR_BELL)
+	  CALL WRITEF
+     &    ('Command requires 2 integer values greater than 0')
+	  GOTO 10
+	ENDIF
+C
+	SUB_SAMPLE(1) = INTARG(1)		!sub sampling in x
+	SUB_SAMPLE(2) = INTARG(2)		!sub sampling in y
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	@ Indirect command file input
+C
+3000	CALL OPEN_COMMAND_FILE
+	GOTO 10
+C
+C-----------------------------------------------------------------------
+C	EXIT	- unmap all open DTIs
+C	Close and unmap any DTI files
+C
+9000	DO 9100 I=1,MAX_DTI
+	   IF(.NOT.DTILUN_INUSE(I))GOTO 9100
+	   RETVAL= DTI_CLOSE(I,.FALSE.,.FALSE.,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+9100	CONTINUE
+C
+C	Close any output IFF file
+	IF(OPEN_IFF)CALL CLOSE_IFF
+C
+C	Close down the table monitor
+	IF(TABLE)CALL CLOSE_TAB (IERR)
+C
+	END
+C

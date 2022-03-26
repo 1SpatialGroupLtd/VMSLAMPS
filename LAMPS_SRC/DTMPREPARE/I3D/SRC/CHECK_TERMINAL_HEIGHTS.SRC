@@ -1,0 +1,238 @@
+	LOGICAL FUNCTION CHECK_TERMINAL_HEIGHTS(
+     &		NOD_I,NOD_R,NOD_L,ARM_I,ARM_L,LNK_I,LNK_R,LNK_L,
+     &		PUP_I,PDN_I,NET_I,STN_I,STN_R,STL_I,STL_L,MNX_I,
+     &		MNX_R,PNT_I,PNT_R,
+     &		MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+C
+***	MODULE	CHECK_TERMINAL_HEIGHTS
+***	IDENT	26AU93
+C
+C	Copyright Laser-Scan, Cambridge, England.
+C
+C	Created						ACM 08-Jan-1989
+C
+CMOD1288 Pass FSN to LITES_MESS				 JB 25-Aug-1993
+C
+C TRUE = All of the rules described below are adhered to.
+C
+C ----------------------------------------------------------------------
+C Description
+C	Checks that the following rules are adhered to:
+C
+C 1. All one-arm nodes must be heighted,
+C
+C	because it is not possible to interpolate a height for such
+C	nodes, and height extrapolation is unsafe.
+C
+C 2. Only one-arm nodes can be sources or sinks, and all sources and
+C    sinks must be one-arm nodes, 
+C
+C	this rule is enforced in order to ensure that I3D can
+C	reliably identify river source and sink nodes. This is important
+C	because the flow directing algorithm depends on this knowledge.
+C
+C 3. Min and max heights in each river network component must be at
+C    terminal nodes and must be defined.
+C
+C 4. The max height must be significatly greater than the min height in
+C    each network component, 
+C
+C	this rule is enforced because horizontal river networks can
+C	safely be assumed to be incorrect.
+C
+C It follows from the above rules that each river network component must
+C have:
+C	1. all terminal nodes heighted
+C	2. unequal min and max heights at terminal nodes
+C	3. at least two terminal nodes
+C
+C Later on the routine SET_INITIAL_FLOW will start by setting the
+C direction of all links connected to terminal nodes so that all links
+C connecting to a sink (min ht) terminal node run downhill into that
+C node, and all links connecting to a source (max ht) terminal node run
+C downhill away from that node. 
+C
+C ----------------------------------------------------------------------
+C Terminology
+C
+C *  A "ONE-ARM" node is an end-point node (not a junction node).
+C
+C *  A "SOURCE" node is a river node from which there is a flow out
+C    and no flow in.
+C
+C *  A "SINK" node is a river node into which there is a flow in and
+C    no flow out.
+C
+C *  A "TERMINAL" node is a source node or a sink node.
+C
+C ----------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE 'LSL$CMNI3D:CONSTANTS.PAR'
+	INCLUDE 'LSL$CMNI3D:I3DMSG.PAR'
+C
+C Common blocks
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+C
+C Dynamically assigned array argument declarations
+	INCLUDE 'LSL$CMNI3D:VM_ARG_DECL.SRC'
+C
+C Workspace
+	INTEGER		INOD,INET,ILNK,IPNT	! array indices
+	INTEGER		IMN,IMX			! min/max ht NOD indices
+	INTEGER		N_ONEARMS		! num unheighted 1-arms
+	INTEGER		N_HORIZNETS		!  " horiz river nets
+	INTEGER		N_NONTERMNETS		!  " nets wi no term nds
+	INTEGER		N_BADHEIGHTS		!  " illegal riv pt hts
+	INTEGER		STA_PNT,FIN_PNT		! link sta/fin PNTs
+	REAL		HGT			! a height
+	INTEGER		FSN			! fsn
+	LOGICAL		FREE_END		! end-point node?
+C
+C ----------------------------------------------------------------------
+C
+	CHECK_TERMINAL_HEIGHTS = .FALSE.
+C
+C Rule 1: All one-arm nodes must be heighted
+C
+	N_ONEARMS = 0
+	DO 12 INET = 1,NUM_NETS
+	   DO 10 INOD = 1,NUM_NODS
+C	      IF (NOD_L(NOD_DEL,INOD)) GOTO 10
+	      IF (NOD_I(NOD_NET,INOD).NE.INET) GOTO 10
+	      FREE_END = ARM_I(ARM_NXT,NOD_I(NOD_ARM,INOD)).EQ.NIL
+C
+	      IF (FREE_END .AND. NOD_I(NOD_ZZZ,INOD).EQ.IFF_ABSENT) THEN
+		 FSN = NOD_I(NOD_FSN,INOD)
+C
+	         IF (HAD_LITES2) CALL LITES_MESS(
+     &	            'Unheighted free end',
+     &		    NOD_R(NOD_XXX,INOD),NOD_R(NOD_YYY,INOD),
+     &	            LITES_HEIGHTPOINT,FSN)
+	         N_ONEARMS = N_ONEARMS+1
+	      ENDIF
+10	   CONTINUE
+12	CONTINUE
+C
+C If had error(s) then report error and fail
+C
+	IF (N_ONEARMS.GT.0) THEN
+	   CALL LSL_PUTMSG(I3D__ONEARM,N_ONEARMS)
+	   GOTO 999
+	ENDIF
+C
+C Rules 2,4:
+C Check that all network components have a min and a max height node
+C defined (if not there is an internal inconsistency), and that these
+C nodes do not have (almost) equal height.
+C
+	N_HORIZNETS   = 0
+	N_NONTERMNETS = 0
+C
+	DO 20 INET = 1,NUM_NETS
+	   IMN = NET_I(NET_IMN,INET)
+	   IMX = NET_I(NET_IMX,INET)
+	   IF (NET_I(NET_GRP,INET).EQ.RIVER) THEN
+	      IF (IMN.EQ.NIL .OR. IMX.EQ.NIL) THEN
+	         N_NONTERMNETS = N_NONTERMNETS+1
+C
+C Find any node which can be used to locate this network component
+	         DO 15 INOD = 1,NUM_NODS
+		    FSN = NOD_I(NOD_FSN,INOD)
+C
+	            IF (NOD_I(NOD_NET,INOD).EQ.INET) THEN
+	               IF (HAD_LITES2) CALL LITES_MESS(
+     &			  'River network component has no terminal nodes',
+     &			  NOD_R(NOD_XXX,INOD),NOD_R(NOD_YYY,INOD),
+     &			  LITES_SHOWPOINT,FSN)
+	               GOTO 16
+	            ENDIF
+15	         CONTINUE
+C
+16	         CONTINUE
+C
+	      ELSEIF (ABS(NOD_R(NOD_ZZZ,IMN)-NOD_R(NOD_ZZZ,IMX)) .LT.
+     &							COORD_TOL) THEN
+	         N_HORIZNETS = N_HORIZNETS+1
+		 FSN = NOD_I(NOD_FSN,IMN)
+C
+	         IF (HAD_LITES2) CALL LITES_MESS(
+     &			'River network component is horizontal',
+     &			NOD_R(NOD_XXX,IMN),NOD_R(NOD_YYY,IMN),
+     &			LITES_SHOWPOINT,FSN)
+	      ENDIF
+	   ENDIF
+20	CONTINUE
+C
+C If had error(s) then report error and fail
+C
+	IF (N_HORIZNETS.GT.0.OR.N_NONTERMNETS.GT.0) THEN
+	   IF (N_HORIZNETS.GT.0)
+     &	      CALL LSL_PUTMSG(I3D__HORIZNET,N_HORIZNETS)
+C
+	   IF (N_NONTERMNETS.GT.0)
+     &	      CALL LSL_PUTMSG(I3D__NOTERMINALS,N_NONTERMNETS)
+C
+	   GOTO 999
+	ENDIF
+C
+C Rule 3: Min and max heights in each river network component must be at
+C terminal nodes.
+C
+	N_BADHEIGHTS = 0
+C
+	DO 35 INET = 1,NUM_NETS
+	   DO 30 ILNK = 1,NUM_LNKS
+	      INOD = LNK_I(LNK_ND1,ILNK)
+	      FSN = NOD_I(NOD_FSN,INOD)
+C
+	      IF (NOD_I(NOD_NET,INOD).NE.INET) GOTO 30
+C	      IF (LNK_I(LNK_DEL,ILNK)) GOTO 30
+	      IF (LNK_I(LNK_GRP,ILNK).NE.RIVER) GOTO 30
+C
+	      STA_PNT = LNK_I(LNK_STA,ILNK)
+	      FIN_PNT = LNK_I(LNK_FIN,ILNK)
+	      IPNT = STA_PNT
+C
+25	      IF (PNT_I(PNT_ZZZ,IPNT).NE.IFF_ABSENT) THEN
+	         HGT = PNT_R(PNT_ZZZ,IPNT)
+	         IMN = NET_I(NET_IMN,INET)
+	         IMX = NET_I(NET_IMX,INET)
+C
+	         IF (HGT.GT.NOD_R(NOD_ZZZ,IMX)) THEN
+	            N_BADHEIGHTS = N_BADHEIGHTS+1
+C
+	            IF (HAD_LITES2) CALL LITES_MESS(
+     &			'River point height > max component source height',
+     &			PNT_R(PNT_XXX,IPNT),PNT_R(PNT_YYY,IPNT),
+     &			LITES_SHOWPOINT,FSN)
+C
+	         ELSEIF (HGT.LT.NOD_R(NOD_ZZZ,IMN)) THEN
+	            N_BADHEIGHTS = N_BADHEIGHTS+1
+	            IF (HAD_LITES2) CALL LITES_MESS(
+     &			'River point height < min component sink height',
+     &			PNT_R(PNT_XXX,IPNT),PNT_R(PNT_YYY,IPNT),
+     &			LITES_SHOWPOINT,FSN)
+	         ENDIF
+	      ENDIF
+C
+	      IPNT = PNT_I(PNT_NXT,IPNT)
+	      IF (IPNT.NE.NIL) GOTO 25
+30	   CONTINUE
+35	CONTINUE
+C
+C If had error(s) then report error and fail
+C
+	IF (N_BADHEIGHTS.GT.0) THEN
+	   CALL LSL_PUTMSG(I3D__BADHEIGHT,N_BADHEIGHTS)
+	   GOTO 999
+	ENDIF
+C
+	CHECK_TERMINAL_HEIGHTS = .TRUE.
+C
+999	RETURN
+	END
+C

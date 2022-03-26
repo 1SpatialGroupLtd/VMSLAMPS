@@ -1,0 +1,533 @@
+C
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL*4 FUNCTION OUTPUT_ASCII()
+C
+***	MODULE	OUTPUT_ASCII
+***	IDENT	12MY92
+C
+	IMPLICIT NONE
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+	LOGICAL*4	ACTUAL_OUTPUT_ASCII
+C
+C	........................................................................
+C
+	OUTPUT_ASCII = ACTUAL_OUTPUT_ASCII(
+     &			POLMAX,TABMAX,POLNEST_MAX, PARTS_MAX,
+     &			%VAL(PTR$_DUFF_POLYGON),
+     &			%VAL(PTR$_NEST_START),
+     &			%VAL(PTR$_POLY_AREA),
+     &			%VAL(PTR$_POLY_DONE),
+     &			%VAL(PTR$_POLY_PARTS),
+     &			%VAL(PTR$_POLY_START),
+     &			%VAL(PTR$_SEED_COORD),
+     &			%VAL(PTR$_SEGTAB),
+     &			%VAL(PTR$_TREE_IN_POLY),
+     &			%VAL(LOC_PTR$_P_PTRS),
+     &			%VAL(LOC_PTR$_T_PTRS)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL*4 FUNCTION ACTUAL_OUTPUT_ASCII(
+     &		POLMAX,TABMAX,POLNEST_MAX,PARTS_MAX,
+     &		DUFF_POLYGON,
+     &		NEST_START,
+     &		POLY_AREA,
+     &		POLY_DONE,
+     &		POLY_PARTS,
+     &		POLY_START,
+     &		SEED_COORD,
+     &		SEGTAB,
+     &		TREE_IN_POLY,
+     &		P_PTRS,
+     &		T_PTRS
+     &	)
+C
+
+***	MODULE	ACTUAL_OUTPUT_ASCII
+***	IDENT	01NO91
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD1056 Output abs coords if requested			JB  01-Nov-1991
+C
+CMOD	Now passes dummy IFF output file LUN to
+C	GET_POLY_LABEL					TJH 29-Mar-1989
+CMOD	No longer attempts to give seed point information
+C	if labelling has failed				AC  20-Sep-1988
+C
+C	Author						AC  24-Jun-1988
+C		(based on routine by TJH)
+C
+C Function to output segment information to the /LIST listing file.
+C If the user specified /OPTIONS=NESTS 1st order nested polygons are
+C included. 
+C
+C Function returns SS$_NORMAL if all is well or one of a variety of
+C IPOLYGON error codes on failure.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNIPOLYGON:IPOLYGONMSG.PAR'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'LSL$CMNIPOLYGON:COMMAND.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:COVERAGES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TREES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:SECTOR.CMN'
+	INCLUDE		'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE		'LSL$CMNLSL:EXPC.CMN'
+C
+C Arguments
+	INTEGER*4	POLMAX
+	INTEGER*4	TABMAX
+	INTEGER*4	POLNEST_MAX
+	INTEGER*4	PARTS_MAX
+C
+	INTEGER		NEST_START(POLMAX+1)
+	INTEGER		DUFF_POLYGON((POLMAX+31)/32)
+	REAL		POLY_AREA(POLMAX)
+	INTEGER		POLY_DONE(POLMAX)
+	INTEGER		POLY_PARTS(2,POLMAX*4)
+	INTEGER		POLY_START(3,POLMAX)
+	REAL		SEED_COORD(2,POLMAX+1)
+	INTEGER*4	SEGTAB(2,TABMAX)
+	INTEGER		TREE_IN_POLY(POLMAX)
+C
+C W/s:
+	LOGICAL	  DOAC		! transfer seed pt ACs?
+	INTEGER	  DUFPOL	! count of duf polygons
+	INTEGER	  FSN		! feature serial number
+	INTEGER	  I		! loop var
+	INTEGER	  IREV		! if -ve then reverse segment
+	LOGICAL	  LASTPTR	! pointer to last nested poly (unused)
+	INTEGER	  NNEST		! number of nested polygons
+	INTEGER	  NTREE		! number of nested trees
+	INTEGER	  POLY_INDX	! current polygon
+	INTEGER	  POLOUT	! number of polygons output
+	INTEGER	  P_PTRS(POLNEST_MAX) ! pointers to nested polys
+	INTEGER	  T_PTRS(POLNEST_MAX) ! pointers to nested trees
+	INTEGER	  SEED_FSN	! seed point feature serial number
+	INTEGER   SEGPTR	! pointer into SEGTAB
+	INTEGER   UNDEFPOL	! count of undefined polygons
+	LOGICAL	  UNDEF		! .T. if undefined polygon
+	INTEGER*2 SEED_FC	!
+C
+	REAL	  	DOUGHNUT_AREA	! poly area less nests
+	CHARACTER*256	TEXT(COVMAX)	! polygon label texts
+	INTEGER*2	LENGTH(COVMAX)	! lengths of TEXT
+	INTEGER*2	DUMLUN
+	PARAMETER	(DUMLUN=0)	! dummy IFF output LUN
+C
+C Functions:
+	LOGICAL		EXT1V		! extract 1-bit field
+	INTEGER		GET_POLY_LABEL	! gets polygon label
+	INTEGER		GET_POLY_IDENT	! gets polygon ident
+	INTEGER		GET_SEED_FSN	! gets FSN of seed point
+	INTEGER		FIRST_NEST	! gets 1st order nested polys
+	INTEGER		NESTED_TREES	! gets nested trees
+	INTEGER*2	EXPAND		! generate text string
+	LOGICAL		PROCESS_AC_TEXT	! modify propagated AC text
+C
+C ......................................................................
+C
+	ACTUAL_OUTPUT_ASCII=%LOC(SS$_NORMAL)
+C
+	CALL FRAMED_MES('Summary Listing of Polygon Components',37)
+	CALL FLWSEL(LISLUN)
+C
+C Reset counters for total polygons output, undefined & duff polygons
+	POLOUT=0
+	UNDEFPOL=0
+	DUFPOL=0
+C
+C We won't transfer any ACs from the seed point
+	DOAC=.FALSE.
+C
+C ......................................................................
+C            D O   B O U N D I N G   P O L Y G O N   F I R S T.
+C
+C Check that the bounding polygon is not duff
+	IF (BOUND_POL.EQ.-9999) THEN
+	   UNDEFPOL=UNDEFPOL+1
+	   CALL FLWRTF('BOUNDING POLYGON: Undefined')
+	   GOTO 30
+	ENDIF
+C
+C This is the first polygon
+	POLOUT=1
+C
+C If a label is required then output it
+	IF (ASCII_LABEL) THEN
+	   ACTUAL_OUTPUT_ASCII=GET_POLY_LABEL(BOUND_POL,TEXT,
+     &					LENGTH,UNDEF,DOAC,DUMLUN)
+	   IF (UNDEF) THEN 
+	      UNDEFPOL=UNDEFPOL+1
+	      CALL FLWRTF('BOUNDING POLYGON: Undefined')
+	      GOTO 5
+	   ENDIF
+C
+	   IF (.NOT.ACTUAL_OUTPUT_ASCII) GOTO 110
+	   IF(HAD_PROP)THEN
+C
+C modify texts: IN_PREFIX text --> OUT_PREFIX text
+	      ACTUAL_OUTPUT_ASCII=PROCESS_AC_TEXT(TEXT,LENGTH)
+	      IF (.NOT.ACTUAL_OUTPUT_ASCII) GOTO 110
+C
+C output ACs for all covers
+	      DO 2 I=1,NUM_COVER
+	      CALL ADD_QUOTES(TEXT(I),LENGTH(I))
+	      IF(I.EQ.1)THEN
+	         CALL FLWRTF
+     &			('BOUNDING POLYGON LABEL: %S',TEXT(I)(:LENGTH(I)))
+	      ELSE
+	         CALL FLWRTF
+     &			('                        %S',TEXT(I)(:LENGTH(I)))
+	      ENDIF
+	      IF(HAD_CONCAT.AND.I.EQ.1)GOTO 3
+2	      CONTINUE
+3	      CONTINUE
+	   ELSE
+	      CALL ADD_QUOTES(TEXT(1),LENGTH(1))
+	      CALL FLWRTF('BOUNDING POLYGON LABEL: %S',TEXT(1)(:LENGTH(1)))
+	   ENDIF
+	ENDIF
+C
+C If an identifier is required then output it...
+5	IF (ASCII_IDENT) THEN
+	   ACTUAL_OUTPUT_ASCII=GET_POLY_IDENT(BOUND_POL,TEXT,LENGTH)
+	   IF (.NOT.ACTUAL_OUTPUT_ASCII) GOTO 110
+	   CALL ADD_QUOTES(TEXT(1),LENGTH(1))
+	   CALL FLWRTF('BOUNDING POLYGON IDENT: %S',TEXT(1)(:LENGTH(1)))
+	ENDIF
+C
+C If no form of identification (either label or identifier) has been used then 
+C give the polygon's internal number
+ 	IF (.NOT.ASCII_LABEL.AND..NOT.ASCII_IDENT) THEN
+	   LENGTH(1)=EXPAND('%WS%N',TEXT(1),POLOUT)
+	   CALL FLWRTF('BOUNDING POLYGON NUMBER: %S',TEXT(1)(:LENGTH(1)))
+	ENDIF
+C
+	CALL IFFSEL(INLUN)
+	CALL EXPAND('SEGMENTS: ')
+C
+C Get the segments relating to this polygon	   
+	SEGPTR=IABS(POLY_START(1,BOUND_POL))
+C
+C Store sign of segment pointer. If negative we will have to
+C reverse this segment for contiguous polygon boundary formation
+10	IREV=ISIGN(1,POLY_PARTS(1,SEGPTR))
+	FSN=SEGTAB(1,IABS(POLY_PARTS(1,SEGPTR)))*IREV
+	IF (EXPLEN+6.GT.80) THEN
+	   CALL FLWLIN
+	   CALL EXPAND('           %N',FSN)
+	ELSE
+	   CALL APPEND(' %N',FSN)
+	ENDIF
+C
+C Have we finished the polygon? If not get next segment forming the
+C polygon 
+	IF (POLY_PARTS(2,SEGPTR).EQ.0)	GOTO 20
+	SEGPTR=POLY_PARTS(2,SEGPTR)
+	GOTO 10
+20	CALL FLWLIN
+C
+C ......................................................................
+C    L O O P    F O R    E  A C H    P O L Y G O N   I N    T U R N
+C
+30	DO 100 POLY_INDX=1,NUM_POLY
+C
+C Ensure that this is not a duff polygon
+	   IF (EXT1V(POLY_INDX,DUFF_POLYGON(1))) THEN
+	      DUFPOL=DUFPOL+1
+	      GOTO 100
+	   ENDIF
+C
+C No nests or trees (yet)
+	   NNEST=0
+	   NTREE=0
+C
+C Is this the bounding polygon - which we have already done?
+	   IF (POLY_INDX.EQ.BOUND_POL) GOTO 100
+C
+C Is this an unwanted isolated polygon? If so ignore it.
+	   IF (POLY_START(1,POLY_INDX).LT.0) GOTO 100
+C
+C We are going to output this polygon
+	   POLOUT=POLOUT+1
+C
+C If we are to output nesting, does the polygon contain any nested
+C polygons?
+	   IF (HAD_NEST) THEN
+	      IF (NEST_START(POLY_INDX).GT.0) THEN
+	         ACTUAL_OUTPUT_ASCII=FIRST_NEST(POLY_INDX,P_PTRS,NNEST,
+     &			.TRUE.,LASTPTR)
+	         IF (.NOT.ACTUAL_OUTPUT_ASCII) GOTO 110
+	      ENDIF
+	   ENDIF
+C
+	   CALL FLWRTF(' ')
+C
+C Output label (if any)
+	   IF (ASCII_LABEL) THEN
+	      ACTUAL_OUTPUT_ASCII=GET_POLY_LABEL(POLY_INDX,TEXT,
+     &					LENGTH,UNDEF,DOAC,DUMLUN)
+	      IF (UNDEF) UNDEFPOL=UNDEFPOL+1
+	      IF (.NOT.ACTUAL_OUTPUT_ASCII) GOTO 110
+	      IF(HAD_PROP)THEN
+C
+C modify texts: IN_PREFIX text --> OUT_PREFIX text
+	         ACTUAL_OUTPUT_ASCII=PROCESS_AC_TEXT(TEXT,LENGTH)
+	         IF (.NOT.ACTUAL_OUTPUT_ASCII) GOTO 110
+C
+C output ACs for all covers
+	         DO 15 I=1,NUM_COVER
+	         CALL ADD_QUOTES(TEXT(I),LENGTH(I))
+	         IF(I.EQ.1)THEN
+	            CALL FLWRTF('POLYGON LABEL: %S',TEXT(I)(:LENGTH(I)))
+	         ELSE
+	            CALL FLWRTF('               %S',TEXT(I)(:LENGTH(I)))
+	         ENDIF
+	         IF(HAD_CONCAT.AND.I.EQ.1)GOTO 16
+15	         CONTINUE
+16	         CONTINUE
+	      ELSE
+	         CALL ADD_QUOTES(TEXT(1),LENGTH(1))
+	         CALL FLWRTF('POLYGON LABEL: %S',TEXT(1)(:LENGTH(1)))
+	      ENDIF
+	   ENDIF
+C
+C Output identifier (if any)
+	   IF (ASCII_IDENT) THEN
+	      ACTUAL_OUTPUT_ASCII=GET_POLY_IDENT(POLY_INDX,TEXT,LENGTH)
+	      IF (.NOT.ACTUAL_OUTPUT_ASCII) GOTO 110
+	      CALL ADD_QUOTES(TEXT(1),LENGTH(1))
+	      CALL FLWRTF('POLYGON IDENT: %S',TEXT(1)(:LENGTH(1)))
+	   ENDIF
+C
+C Output polygon's internal number if neither label or identifier used
+	   IF (.NOT.ASCII_LABEL.AND..NOT.ASCII_IDENT) THEN
+	      LENGTH(1)=EXPAND('%WS%N',TEXT(1),POLOUT)
+	      CALL FLWRTF('POLYGON NUMBER: %S',TEXT(1)(:LENGTH(1)))
+	   ENDIF
+C            
+	   CALL IFFSEL(INLUN)
+	   CALL EXPAND('SEGMENTS: ')
+C
+C Get the segments relating to this polygon	   
+	   SEGPTR=IABS(POLY_START(1,POLY_INDX))
+C
+C Store sign of segment pointer. If negative we will have to
+C reverse this segment for contiguous polygon boundary formation
+40	   IREV=ISIGN(1,POLY_PARTS(1,SEGPTR))
+	   FSN=SEGTAB(1,IABS(POLY_PARTS(1,SEGPTR)))*IREV
+	   IF (EXPLEN+6.GT.80) THEN
+	      CALL FLWLIN
+	      CALL EXPAND('           %N',FSN)
+	   ELSE
+	      CALL APPEND(' %N',FSN)
+	   ENDIF
+C
+C Get pointer to next segment in polygon
+C
+C Have we finished the polygon? If not get next segment forming the
+C polygon 
+	   IF (POLY_PARTS(2,SEGPTR).EQ.0) GOTO 50
+	   SEGPTR=POLY_PARTS(2,SEGPTR)
+	   GOTO 40
+C
+C Are we to do 1st order nesting? If so, append the FSNs of the nested
+C polygon's segments
+50	   IF (HAD_NEST) THEN
+C
+C Write out the FSNs of the 1st order nested polygon(s)
+	      DO 80 I=1,NNEST
+C
+C Enclose the segment list of each nested polygon in round brackets
+	         IF (EXPLEN+8.GT.80) THEN
+	            CALL FLWLIN
+	            CALL EXPAND('         (')
+	         ELSE
+	            CALL APPEND(' (')
+	         ENDIF
+C
+C Get the segments relating to this NESTED polygon	   
+	         SEGPTR=IABS(POLY_START(1,P_PTRS(I)))
+C
+C Store sign of segment pointer. If negative we will have to
+C reverse this segment for contiguous polygon boundary formation
+60	         IREV=ISIGN(1,POLY_PARTS(1,SEGPTR))
+	         FSN=SEGTAB(1,IABS(POLY_PARTS(1,SEGPTR)))*IREV
+	         IF (EXPLEN+6.GT.80) THEN
+	            CALL FLWLIN
+	            CALL EXPAND('         %N',FSN)
+	         ELSE
+	            CALL APPEND(' %N',FSN)
+	         ENDIF
+C
+C Have we finished the polygon? If not get next segment forming the
+C polygon 
+		 IF (POLY_PARTS(2,SEGPTR).EQ.0)	GOTO 70
+		 SEGPTR=POLY_PARTS(2,SEGPTR)
+	         GOTO 60
+70	         CALL APPEND(' )')
+80	      CONTINUE
+	   ENDIF
+C
+C Are we to do 1st order nesting? If so, append the FSNs of the nested
+C polygon's segments
+	   IF (ONE_USE.AND.HAD_NEST) THEN
+	      IF (TREE_IN_POLY(POLY_INDX).GT.0) THEN
+	         ACTUAL_OUTPUT_ASCII=NESTED_TREES(POLY_INDX,T_PTRS,NTREE)
+	         IF (.NOT.ACTUAL_OUTPUT_ASCII) GOTO 110
+	      ENDIF
+C
+C Write out the FSNs of the 1st order nested tree(s)
+	      DO 180 I=1,NTREE
+C
+C Enclose the segment list of each nested tree in round brackets
+	         IF (EXPLEN+8.GT.80) THEN
+	            CALL FLWLIN
+	            CALL EXPAND('         (')
+	         ELSE
+	            CALL APPEND(' (')
+	         ENDIF
+C
+C Get the segments relating to this NESTED tree	   
+	         SEGPTR=IABS(TREE_START(1,T_PTRS(I)))
+C
+C Store sign of segment pointer. If negative we will have to
+C reverse this segment for contiguous tree boundary formation
+160	         IREV=ISIGN(1,POLY_PARTS(1,SEGPTR))
+	         FSN=SEGTAB(1,IABS(POLY_PARTS(1,SEGPTR)))*IREV
+	         IF (EXPLEN+6.GT.80) THEN
+	            CALL FLWLIN
+	            CALL EXPAND('         %N',FSN)
+	         ELSE
+	            CALL APPEND(' %N',FSN)
+	         ENDIF
+C
+C Have we finished the tree? If not get next segment forming the
+C tree 
+		 IF (POLY_PARTS(2,SEGPTR).EQ.0)	GOTO 170
+		 SEGPTR=POLY_PARTS(2,SEGPTR)
+	         GOTO 160
+170	         CALL APPEND(' )')
+180	      CONTINUE
+	   ENDIF
+C
+C Flush out EXPBUF
+	   CALL FLWLIN
+C
+C Output the seed point FSN and coordinates
+	   IF (HAD_SEED) THEN
+	      ACTUAL_OUTPUT_ASCII=GET_SEED_FSN(POLY_INDX,SEED_FSN,SEED_FC)
+	      IF (.NOT.ACTUAL_OUTPUT_ASCII) GOTO 110
+C
+	      IF (SEED_FSN.EQ.65535) THEN
+		 CALL FLWRTF('FAIL TO ASSIGN SEED POINT')
+	      ELSE
+		 CALL FLWRTF('SEED POINT FSN: %N',SEED_FSN)
+C
+		 IF (HAD_ABS) THEN
+		    CALL FLWRTF('SEED POINT POSITION: %F %F',
+     &			SEED_COORD(1,POLY_DONE(POLY_INDX))+MD2LOC(1),
+     &			SEED_COORD(2,POLY_DONE(POLY_INDX))+MD2LOC(2))
+		 ELSE
+		    CALL FLWRTF('SEED POINT POSITION: %F %F',
+     &			SEED_COORD(1,POLY_DONE(POLY_INDX)),
+     &			SEED_COORD(2,POLY_DONE(POLY_INDX)))
+		 ENDIF
+C
+	      ENDIF
+	   ENDIF
+	   CALL IFFSEL(INLUN)
+C	   
+C
+C If desired calculate the area of the polygon allowing for nests
+	   IF (HAD_AREA) THEN
+	      DOUGHNUT_AREA=POLY_AREA(POLY_INDX)
+	      IF (NNEST.GT.0) THEN
+	         DO 90 I=1,NNEST
+	            DOUGHNUT_AREA=DOUGHNUT_AREA-POLY_AREA(P_PTRS(I))
+90	         CONTINUE
+	      ENDIF
+	      CALL FLWRTF('AREA: %F',DOUGHNUT_AREA)
+	   ENDIF
+100	CONTINUE
+C
+110	IF (ACTUAL_OUTPUT_ASCII) THEN
+	   CALL FLWRTF
+	   CALL FLWRTF(	'--------------------------------------'//
+     &		'-------------------------------------')
+0	   CALL FLWRTF
+	   CALL FLWRTF
+	   IF (HAD_LOG) THEN
+	      CALL FLWSEL(LISLUN)
+	      CALL EXPAND(
+     &	      'No. of POLYGONS output to /OPTIONS=LIST file ....... %N',
+     &								POLOUT)
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+	      IF (DUFPOL.GT.0) THEN
+	         CALL EXPAND(
+     &	      'Number of duff polygons omitted from output ........ %N',
+     &							     DUFPOL)
+	         IF (HAD_LIS) THEN
+	            CALL FLWLIN
+	         ELSE
+	            CALL TTWLIN
+	         ENDIF
+	      ENDIF
+	      IF (UNDEFPOL.GT.0) THEN
+	         CALL EXPAND(
+     &	      'Number of undefined polygons output ................ %N',
+     &							     UNDEFPOL)
+	         IF (HAD_LIS) THEN
+	            CALL FLWLIN
+	         ELSE
+	            CALL TTWLIN
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	RETURN
+	END
+C

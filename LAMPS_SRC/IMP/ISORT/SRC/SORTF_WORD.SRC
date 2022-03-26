@@ -1,0 +1,353 @@
+	INTEGER*4 FUNCTION SORTF(CMLSTR,CMLEN)
+C
+***	MODULE	SORTF
+***	IDENT	25NO86
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,England
+C
+CMOD	HI entry not explicitly created. Messages made more explicit
+C	and function made to work !!			ATT  7-Nov-1986
+CMOD	Commented and properly indented, to make it at least
+C	slightly readable.				TJH 24-JUL-1986
+C
+C	Author Immanuel Freedman 09-DEC-85
+C	
+C This module sorts an obtained IFF file by Feature Serial Number (FSN)
+C or Internal Sequence Number (ISN) if /INTERNAL
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNISORT:FILES.CMN'
+	INCLUDE 'LSL$CMNISORT:FLAG.CMN'
+	INCLUDE 'LSL$CMNISORT:IFFOK.CMN'
+	INCLUDE 'LSL$CMNISORT:ISORTMSG.PAR'
+	INCLUDE '($SSDEF)'
+C
+C Logical units referenced
+	INTEGER*4	INLUN		! input file
+	PARAMETER      (INLUN=1)
+	INTEGER*4	OUTLUN		! output file
+	PARAMETER      (OUTLUN=2)
+C
+C Integer:	
+	INTEGER*2	IECODE 		! entry code
+	INTEGER*2	IELEN 		! entry length
+	INTEGER*2	ISQ		! new ISN
+	INTEGER*4	ISTAT		! storage for SORT/MERGE value
+	INTEGER*2	KEY_BUF(5)	! key buffer
+	INTEGER*2	LAYER   	! layer number
+	INTEGER*2	LECODE		! previous entry code
+	INTEGER*2	LRL		! longest record length
+	INTEGER*2	ONE		! value 1
+	INTEGER*2	UIFSN		! unsigned integer FSN
+C
+C Character:
+	CHARACTER*1024	CMLSTR		! command line string
+C
+C Logical:
+        LOGICAL		FIRST		! first feature switch
+C
+C Longword:
+	INTEGER*4	CODE		! code for number of orted feat.
+	INTEGER*4	CMLEN		! length of command line string
+	INTEGER*4	LPOS		! position of an EF entry 
+	INTEGER*4	LPOSNO		! position of an NO entry 
+	INTEGER*4	OPTIONS		! sort options
+	INTEGER*4	POINTER		! position of last previous EF
+	INTEGER*4	PREVIOUS	! previous sorted number
+	INTEGER*4	PROCESS		! record interface
+	INTEGER*4	RESULT		! result of sort
+	INTEGER*4	SORT(3)		! array to receive sort
+        INTEGER*4       SORTNO  	! sorting number
+	INTEGER*4	SORTEDNO	! sorted number
+	INTEGER*4	TEMP1		! temporary storage
+	INTEGER*4	TEMP2		! temporary storage
+	INTEGER*4	UNDESC(2) 	! dummy descriptor for UNSORT
+	INTEGER*4	UNSORT(3) 	! array to be sorted
+C
+C Data:
+	DATA		ONE/1/	
+	DATA		PREVIOUS/0/
+	DATA		LRL/6/		! data on record length (bytes)
+C
+	EQUIVALENCE	(SORTNO,UNSORT(1)),
+     &                  (POINTER,UNSORT(2))
+	EQUIVALENCE	(SORTEDNO,SORT(1)),
+     &			(LPOS,SORT(2))
+C
+C Functions referenced:
+	EXTERNAL	SOR$M_STABLE
+        EXTERNAL        SOR$M_NODUPS	! option retaining first of 
+C					! duplicate keys
+        EXTERNAL	SOR$K_REC_SOR
+        EXTERNAL        DSC$K_DTYPE_L	! signed longword
+        EXTERNAL        SOR$GK_RECORD	
+	EXTERNAL	FLWSTR
+C
+C SORT function names:
+	INTEGER*4	SOR$BEGIN_SORT
+	INTEGER*4	SOR$SORT_MERGE
+	INTEGER*4	SOR$RELEASE_REC
+	INTEGER*4	SOR$RETURN_REC
+	INTEGER*4	SOR$STAT
+	INTEGER*4	SOR$END_SORT
+C
+C ......................................................................
+C
+C Set up descriptor for UNSORT
+	UNDESC(1)=6
+	UNDESC(2)=%LOC(UNSORT)
+C Key buffer 
+	KEY_BUF(1)=1
+	KEY_BUF(2)=%LOC(DSC$K_DTYPE_WU) 	! unsigned word
+	KEY_BUF(3)=0				! ascending order
+	KEY_BUF(4)=0				! no offset
+	KEY_BUF(5)=2				! 1st word=key (2 bytes)
+C
+C /DUPLICATES ?
+        IF (HAD_DUP)THEN
+          OPTIONS=%LOC(SOR$M_STABLE)    	! retain input order
+	ELSE
+          OPTIONS=%LOC(SOR$M_NODUPS)		! retain first
+	ENDIF					! of duplicates	
+C 	
+	CODE=%LOC(SOR$K_REC_SOR)		! code for number of
+C						! sorted features
+C
+	PROCESS=%LOC(SOR$GK_RECORD)		! record interface
+C
+C ......................................................................
+C
+C Start output
+C
+C Write header to list file
+	IF (HAD_OUT.OR.HAD_PRI) CALL SRTINFO(CMLSTR,CMLEN)
+C
+10	CALL IFFSEL(INLUN)	                ! select input file
+        CALL IFFNXT(IECODE,IELEN)               ! get next entry
+        IF (IELEN.EQ.-1) THEN 
+	  SORTF=ISORT__UNEXPEOF
+	  CALL LSL_PUTMSG(SORTF)		! unexpected EOF
+          GOTO 90				! return
+	ENDIF
+C
+C Copy all input (except VO) to output up to first NO entry
+        IF (IECODE.EQ.'VO') GOTO 10
+	IF (IECODE.EQ.'EO') GOTO 10
+	IF (IECODE.EQ.'NO') THEN
+          CALL EIHMK(1)			! set marker on start of layer
+          GOTO 20
+	ENDIF
+C
+        IF (IECODE .NE.'EJ') THEN
+	  CALL EIHCPY(OUTLUN)
+          IF (IERCD.NE.0 .OR. IERNM.NE.1) THEN
+            SORTF=IERNM
+	    GOTO 90			! return
+          ENDIF
+C
+	  LECODE=IECODE			! previous IFF entry
+	  GOTO 10
+ 	ELSE				! end of file, we've finished
+	  CALL IFFSEL(OUTLUN)
+	  CALL IFFEJ
+          SORTF=SS$_NORMAL
+          GOTO 90			! return
+        ENDIF
+C
+C ......................................................................
+C
+C Set up sorting across record interface
+20      ISTAT=SOR$BEGIN_SORT(KEY_BUF,LRL,OPTIONS,,,,PROCESS)
+	IF (.NOT.ISTAT) THEN
+	  SORTF=ISTAT
+  	  GOTO 90			! return
+	ENDIF
+C
+C Start scan for new layer (must be 'NO' entry)
+	POINTER=LPOSH				! first feature pointer
+	CALL EIHRI(LAYER,1,1)			! read layer number
+	IF (HAD_LOG) THEN
+	  SORTF=ISORT__LAYER
+	  CALL LSL_PUTMSG(SORTF,LAYER)		! write layer number
+	ENDIF
+	IF (HAD_OUT.OR.HAD_PRI)THEN
+	  CALL FLWRTF
+	  CALL FLWRTF('Layer %^W%N',LAYER)	!/OUTPUT? write layer no
+	ENDIF
+	FIRST=.TRUE.	                	! first feature switch
+C
+C look for 'NF' within layer
+30      CALL IFFSEL(INLUN)
+	CALL IFFNXT(IECODE,IELEN)		! read entry-in-hand
+	IF (IECODE.EQ.'EO') GOTO 40		! end-layer   
+	IF (IECODE.EQ.'NF')GOTO 35		! feature found
+	IF (IELEN.NE.-1) GOTO 30
+C
+C read sorting  number if found
+35      IF (IELEN.NE.-1) THEN
+          CALL EIHRI(SORTNO,1,1)
+	  IF (HAD_INT) THEN
+            CALL EIHRI(SORTNO,1,2)		! if /INTERNAL, read ISN
+          ENDIF
+	ENDIF
+	IF (IELEN.EQ.-1) THEN			! no features ?
+	  SORTF=ISORT__UNEXPEOF
+	  CALL LSL_PUTMSG(SORTF) 		! no features in layer
+          GOTO 90				! return
+        ENDIF  
+C
+C Pass sorting number and current sort pointer to VAX-SORT routines.
+	ISTAT=SOR$RELEASE_REC(UNDESC)
+	IF (.NOT.ISTAT) THEN
+          SORTF=ISTAT
+          GOTO 90				! return
+        ENDIF
+C
+C Now look for 'EF'
+	CALL IFFNXC('EF',IELEN)
+	IF (IELEN.EQ.-1) THEN 
+	  SORTF=ISORT__UNEXPEOF
+	  CALL LSL_PUTMSG(SORTF)		! unexpected EOF
+	  GOTO 90				! return
+	ENDIF
+	POINTER=LPOSH				! set pointer
+	GOTO 30
+C
+C End of overlay, so SORT pointers. SORT will use workfiles only if 
+C needed
+40	ISTAT=SOR$SORT_MERGE()
+	IF (.NOT.ISTAT) THEN
+	  SORTF=ISTAT
+	  GOTO 90				! return
+	ENDIF
+C
+C Now rewind file to mark (now same entry-in-hand)	
+	CALL IFFSEL(INLUN)
+	CALL IFFRWM				! must be a 'NO' entry
+C
+C Write the 'NO' entry to out-file
+	CALL IFFSEL(OUTLUN)			! select out-file
+	LPOSNO=LPOSE				! remember address of NO
+	CALL IFFNO (LAYER,0,0)
+	CALL IFFSEL(OUTLUN)			! re-select in-file
+C 
+C Set first feature switch
+	FIRST=.TRUE.
+C
+C Recover a SORTed pointer (should point to 'EF' except for first
+C encountered after 'NO' entry)
+70	ISTAT=SOR$RETURN_REC(%DESCR(SORT))
+C
+	IF (ISTAT .EQ. SS$_ENDOFFILE) THEN 	! no more records
+          GOTO 80
+	ENDIF
+C
+        IF (.NOT.ISTAT) THEN
+	  SORTF=ISTAT
+	  GOTO 90				! return
+	ENDIF
+C
+C Position to known entry
+	CALL IFFSEL(INLUN)
+	CALL IFFPKE(IECODE,IELEN,LPOS)
+60	IF (IELEN.EQ.-1) THEN
+	  SORTF=IERNM
+	  GOTO 90				! return
+	ELSE
+          CALL IFFSEL(INLUN)
+	  CALL IFFNXT(IECODE,IELEN)		! get next entry 
+	  IF (IELEN.EQ.-1) THEN
+	    SORTF=IERNM
+	    GOTO 90				! return
+	  ENDIF 
+	ENDIF
+C
+	IF (IECODE.NE.'NF' .AND. IECODE .NE. 'EF') THEN
+	  IF (IECODE.NE.'VO') THEN
+	    CALL IFFSEL(INLUN)
+	    CALL EIHCPY(OUTLUN)
+          ENDIF
+        ENDIF
+C
+	IF (IECODE.EQ.'NF') THEN
+          ISQ=0
+	  CALL IFFSEL(OUTLUN)
+	  IF (SORTEDNO.GT.32767) SORTEDNO=SORTEDNO-65536
+	  UIFSN=SORTEDNO
+          CALL IFFNF(UIFSN,ISQ)		! resequence ISN
+C
+C ......................................................................
+C
+C Do checks for listing and /LOG information. 
+C
+C Check for first and last features.
+	  IF (FIRST) THEN
+            IF (HAD_OUT.OR.HAD_PRI) CALL FLWRTF
+     &	    ('Lowest Feature Serial Number     %N',SORTEDNO)
+            FIRST=.FALSE.
+	  ENDIF
+C
+C Check for missing features
+	  TEMP1=PREVIOUS+ONE
+	  TEMP2=SORTEDNO-ONE
+	  IF (HAD_OUT.OR.HAD_PRI) THEN
+	    IF (SORTEDNO.GT. PREVIOUS+2) THEN
+	      CALL FLWRTF
+     &	    ('Missing Feature Serial Numbers   %^W%N to %N',TEMP1,TEMP2)
+            ENDIF
+	    IF (SORTEDNO.EQ. PREVIOUS+2) THEN
+	      CALL FLWRTF
+     &      ('Missing Feature Serial Number    %^W%N',TEMP2)
+	    ENDIF
+C
+C Check for repeated features
+	    IF (SORTEDNO .EQ. PREVIOUS) THEN
+              CALL FLWRTF
+     &      ('Repeated Feature Serial Number   %^W%N',SORTEDNO)
+	    ENDIF
+	    PREVIOUS=SORTEDNO
+	  ENDIF
+	ENDIF
+C
+        IF (IECODE.EQ.'EF') THEN
+	  CALL IFFSEL(OUTLUN)			! select output IFF file
+          CALL IFFEF				! write 'EF'
+	  GOTO 70				! get next pointer
+        ENDIF
+C
+	GOTO 60					! get next entry
+C
+80      IF ((HAD_OUT.OR.HAD_PRI).AND.(.NOT.FIRST)) CALL FLWRTF
+     &	    ('Highest Feature Serial Number    %^W%N',SORTEDNO) 
+C
+C How many features have been sorted in this layer ?
+	ISTAT=SOR$STAT(CODE,RESULT)
+        IF (.NOT.ISTAT) THEN
+	  SORTF=ISTAT
+	  GOTO 90				! return
+        ELSEIF (HAD_OUT.OR.HAD_PRI) THEN
+          CALL FLWRTF('Layer %^W%N contains %N features',LAYER,RESULT)
+        ENDIF
+C
+C Remove marker
+	CALL EIHMK(0)
+C End sort
+  	ISTAT=SOR$END_SORT()
+        IF (.NOT.ISTAT) THEN
+	  SORTF=ISTAT
+	ELSE
+	  CALL IFFSEL(OUTLUN)			! select output IFF file
+C
+C Patch NO entry with address of EO
+	  CALL IFFUNO(LPOSNO)			
+	  CALL IFFEO				! output 'EO'
+	  CALL IFFSEL(INLUN)			! select input IFF file
+          CALL IFFNXC('EO',IELEN)		! position at known 'EO'
+	  PREVIOUS=0				! reset prev. SORTEDNO
+	  GOTO 10			! get next layer and start sort
+        ENDIF
+C
+90	RETURN
+	END

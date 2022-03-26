@@ -1,0 +1,365 @@
+	.TITLE	$IFFFT
+	.IDENT	'23JL92'
+;
+;
+; Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+;
+; Author: Paul Hardy after PDP11 version by P. Cross.
+;
+;Mod	Make B.VBNx LONG not word to allow big IFF files	PGH  23-Jul-1992
+;	Added IF$AR2, fast version of IF$ARG			CCB  23-May-1984
+;	IFFUPJ, IFFUPP now only allow trailing
+;	args to be omitted. Do implicit IF$UPC		CCB	21-May-1984
+;	IFFWED, IFFZED, IFFRED assume 3 words
+;	of data and 3 compulsory args			CCB	21-May-1984
+;	Do not loop in IFFUPC				CCB	30-Nov-1983
+;	Add .ENTRY for PME splitting of modules		PGH	29-Nov-1983
+;	IF$ARG if error does JMP to IF$ERR, not
+;	MOVAL #IF$ERR, (SP) and RSB			AJW/PGH	31-May-1983
+;	Version numbering			 	DM	24-Nov-1981
+;	IFFACS added 				 	DM	26-Oct-1981
+;	Created						PGH	   Aug-1980
+;
+; IFF Handler private FORTRAN interface
+
+	$SFDEF				; get stack frame definitions
+
+	CODE_PSECT	IFF
+
+; IF$UPC - update the "public" positions in /IFFHAN/ &
+;	   /IFFJUN/ from current IFCB
+
+; R3 and R4 removed from entry mask 29-Nov-1983
+	.ENTRY	IFFUPC,^M<R2,R9,R10,R11>
+	BSBW	IF$INI			; basic init
+	BSBB	IF$UPC			; common up with MACRO
+	RET
+
+IF$UPC::MOVAL	I.POSE(R9),R1		; first of positions in current IFCB
+	MOVAL	LPOSE,R2		; place to copy to
+; NB Moves 24 bytes - does not check LPOSND
+	ASSUMEQ	LPOSND-LPOSE,24
+	MOVQ	(R1)+,(R2)+
+	MOVQ	(R1)+,(R2)+
+	MOVQ	(R1),(R2)
+
+	MOVAW	I.STS(R9),R1
+	MOVAL	IRVLEV,R2
+	BBC	#IFC_V_IRVT,(R1),10$
+	MNEGL	#1,(R2)+			      ; input revision -1
+	BRB	20$
+10$:	EXTZV	#IFC_V_IRV,#IFC_S_IRV,(R1),(R2)+      ; input revision
+20$:	EXTZV	#HIS_V_ORV,#HIS_S_ORV,I.HFLG(R9),(R2) ; output revision
+	
+	MOVAL	I.POSJ(R9),R1		; address of junction stuff
+	MOVAL	IFPOSJ, R2
+; NB Moves 28 bytes - does not check LJUNND
+	ASSUMEQ	LJUNND-IFPOSJ,28
+	MOVQ	(R1)+,(R2)+
+	MOVQ	(R1)+,(R2)+
+	MOVQ	(R1)+,(R2)+
+	MOVL	(R1),(R2)
+	CLC				; success exit
+	RSB
+
+
+; IFFUPJ(IFPOSJ, IFSHSZ, IFSHAD, IFSORI(X),IFSORI(Y),
+;	 IFSSTP(X),IFSSTP(Y), IFSNUM(X), IFSNUM(Y))
+; As with IFFUPP, trailing arguments may be omitted
+
+;
+; Table of argument types
+UPJTAB:	.BYTE	0,0		; two integers, followed by,
+	.BYTE	1,1,1,1,1	; five longs/reals, followed in turn by,
+	.BYTE	0,0		; two more integers
+	.EVEN
+
+	.ENTRY	IFFUPJ,^M<R2,R9,R10,R11>
+	BSBB	IF$UPJ			; common up with macro
+	RET
+
+IF$UPJ::BSBW	IF$INI			; standard entry stuff
+	MOVAL	I.POSJ(R9),R1		; address of first word
+	MOVAL	IFPOSJ, R2		; ditto in /IFFJUN/
+10$:	BSBW	IF$GNA			; get next argument's address
+	BCS	30$
+	TSTB	UPJTAB-1[R11]		; what type
+	BNEQ	20$
+; integer
+	MOVW	(R0), (R1)+		; copy value if given
+	MOVW	(R0), (R2)+		; to /IFFJUN/ also
+	BRB	10$
+; long/real
+20$:	MOVL	(R0), (R1)+
+	MOVL	(R0), (R2)+
+	BRB	10$
+30$:	RSB
+
+
+; IFFUPP(LNFP, LMKP, LEHP, LEFP) - update private positions
+; and positions in IFFHAN. Beware of using LPOSF,LPOSM,LPOSH,LPOSE
+; as actual arguments in call they may be updated BEFORE being used.
+; Only use them in their 'own' position.
+
+	.ENTRY	IFFUPP,^M<R2,R9,R10,R11>
+	BSBW	IF$INI			; basic init
+	MOVAL	I.POSF+4(R9),R1		; address of positions
+	MOVAL	LPOSF+4,R2		; ditto in /IFFHAN/
+10$:	BSBW	IF$GNA			; get next arg
+	BCS	40$			; j if absent
+	MOVL	(R0),-(R1)		; copy it
+	MOVL	(R0),-(R2)		; to /IFFHAN/ also
+	CMPL	R11, #3
+	BLSS	10$			; first 3 args
+	BSBW	IF$GNA
+	BCS	40$			; j if no EOF arg
+	MOVL	(R0),I.POSE(R9)		; copy to IFCB
+	MOVL	(R0),LPOSE		; and to /IFFHAN/
+40$:	RET
+
+
+; IFFUPS(ILUN) - update forepart junction info on file ILUN from current
+; Called from EIHCPY of an SH entry
+
+	.ENTRY	IFFUPS,^M<R2,R3,R9,R10,R11>
+	JSB	IF$INI
+	BCS	99$
+	JSB	IF$GNA			; get next arg
+	BCS	99$			; missing
+	MOVAL	I.POSJ(R9),R3		; address of first word
+	MOVB	I.LUN(R9),-(SP)		; save old LUN
+	MOVZBL	(R0),R1			; unit number (LUN)
+	JSB	IF$SEL			; select it
+	MOVAL	I.POSJ(R9),R1		; destination
+; NB Moves 28 bytes - does not check LJUNND
+	ASSUMEQ	LJUNND-IFPOSJ,28
+	MOVQ	(R3)+,(R1)+
+	MOVQ	(R3)+,(R1)+
+	MOVQ	(R3)+,(R1)+
+	MOVL	(R3),(R1)
+	MOVZBL	(SP)+,R1		; old LUN
+	JSB	IF$SEL			; re-select
+99$:	RET
+
+; IFFWED - write "entry details"
+
+	.ENTRY	IFFWED,^M<R9,R10,R11>
+	BSBW	IF$INI			; R10 <- IFAB,  R9 <- IFCB
+	MOVAL	I.EDAT(R9),R1		; address of entry data
+	TSTL	(AP)+			; increment AP
+	MOVW	@(AP)+,(R1)+
+	MOVW	@(AP)+,(R1)+
+	MOVW	@(AP)+,(R1)
+	RET
+
+; IFFZED - zero entry details
+
+	.ENTRY	IFFZED,^M<R9,R10,R11>
+	BSBW	IF$INI			; basic init
+	MOVAL	I.EDAT(R9),R1		; entry data address
+; make sure the length of entry details is as we expect
+	ASSUMEQ	I.NWED, 3
+	CLRL	(R1)+
+	CLRW	(R1)	
+	RET
+
+; IFFRED - read "entry details"
+
+	.ENTRY	IFFRED,^M<R2,R9,R10,R11>
+	BSBW	IF$INI			; R10 <- IFAB,  R9 <- IFCB
+	MOVAL	I.EDAT(R9),R1		; address of entry data
+	TSTL	(AP)+			; increment AP
+	MOVW	(R1)+,@(AP)+
+	MOVW	(R1)+,@(AP)+
+	MOVW	(R1),@(AP)+
+	RET
+
+; IFFNSQ(ISQ) return next available sequence no and increment
+
+	.ENTRY	IFFNSQ,^M<R9,R10,R11>
+	BSBW	IF$INI			; basic init
+	BSBW	IF$GNA			; get address of arg
+	BCS	10$			; arg missing
+	MOVW	I.FSEQ(R9),(R0)		; result
+	INCW	I.FSEQ(R9)		; for next time
+10$:	RET
+
+; Jiffy routine to find length of zero terminated string
+; uses argument list from enclosing call ! (don't blame me it's PCs idea)
+; see IFFNS for a typical call.  Expects two args by this strange means.
+; first is the string (if any) and the second is an overriding length (if
+; any). The result is the length of the string or zero if none.
+
+	.ENTRY	IFFLCS,^M<R2,R11>	; FORTRAN entry
+	MOVL	SF$L_SAVE_AP(FP),AP	; get previous arg list
+	BSBW	IF$1ST			; basic init
+	CLRL	R0			; assume will fail
+	BSBW	IF$GNA			; first arg
+	BCS	LCS90			; if missing then did fail
+	MOVL	R0,R2			; save string address till later
+	BSBW	IF$GNA			; second arg ?
+	BCS	LCS10			; if missing then scan for null
+	MOVZWL	(R0),R0			; overriding length
+	BRB	LCS90			; done
+
+; search for terminating null
+LCS10:	LOCC	#0,#80,(R2)		; is it there ?
+	SUBL3	R2,R1,R0		; calculate length
+LCS90:	RET				; done
+
+; similar routine to IFFLCS, but allows the string itself to be absent.
+; (necessary for AC entries which have optional text strings)
+
+	.ENTRY	IFFACS,^M<R2,R11>	; FORTRAN entry
+	MOVL	SF$L_SAVE_AP(FP),AP	; get previous arg list
+	BSBW	IF$1ST			; basic init
+	CLRL	R0			; assume will fail
+	BSBW	IF$GNA			; first arg
+	BCS	90$			; if missing then did fail
+	CLRL	R0
+	BSBW	IF$GNA			; second arg
+	BCS	90$
+	BSBW	IF$GNA			; third arg - text (if present)
+	BCS	10$			; not present, so set length -1
+	MOVL	R0,R2			; save string address till later
+	BSBW	IF$GNA			; fourth arg
+	BCS	LCS10			; if missing then scan for null
+	MOVZWL	(R0),R0			; overriding length
+	BRB	90$			; done
+
+10$:	MNEGL	#1,R0			; return -1 for length of str
+90$:	RET
+
+; IFF Handler  FORTRAN  Interface subroutines
+
+; IF$ARG - get standard arguments to registers,
+;	supplying defaults when appropriate
+
+; Inputs:	R4 = 2 if 2nd arg is in longwords
+;		   = 1 if 2nd arg is in words
+;		   = 0 if 2nd arg is in bytes
+;		R3  default word no. longword
+;		AP  FORTRAN arg list
+; Outputs:	R5  arg 1 (address for transfer)
+; 		R2  arg 2 (no. of BYTES for transfer)
+;		R3  arg 3 (word no. in file)
+;		R9  IFCB address for current IFF
+;		R10  IFAB address for current IFF
+;		R11  number of args left
+
+	.ENTRY	IFEARG,^M<>		; entry for PME's sake (never called)
+
+IF$ARG::BSBW	IF$1ST			; basic init
+	BSBW	IF$GNA			; get 1st arg - address
+	BCS	ARGERR			; compulsory
+	MOVL	R0,R5			; address so just return in R5
+	BSBW	IF$GNA			; 2nd arg - nr of bytes/words/dblwords
+	MOVL	#1,R2			; default is one unit
+	BCS	30$
+	MOVZWL	(R0),R2			; actual number supplied
+30$:	ASHL	R4,R2,R2		; convert to bytes
+	BSBW	IF$GNA			; third arg
+	BCS	GETSEL			; missing so use default
+	MOVL	(R0),R3			; explicit arg
+GETSEL:	MOVL	IFFPT,R9		; current selection
+	BEQL	SELERR			; nothing selected
+	MOVAL	I.FAB(R9),R10		; address of FAB
+	CLC
+	RSB				; sucess exit
+
+SELERR:	MOVL	#^A'NSEL',IERCD		; nothing selected error
+ERRJMP:	MOVL	#1,IERNM		; internal error
+	JMP	IF$ERR			; and handle error
+
+ARGERR:	MOVL	#^A'ARGS',IERCD		; bad arguments
+	BRB	ERRJMP
+
+; IF$AR2 - fast version of IF$ARG for 2 compulsory args
+;		R3, R11 are unchanged
+
+IF$AR2::CLRL	IERCD			; no errors
+	MOVL	#1,IERNM		; ditto
+	MOVL	4(AP),R5		; address of first arg
+	MOVZWL	@8(AP),R2		; number of units
+	ASHL	R4,R2,R2		; number of bytes
+	MOVL	IFFPT,R9		; current selection
+	BEQL	SELERR			; nothing selected
+	MOVAL	I.FAB(R9),R10		; address of FAB
+	RSB
+
+; IF$INI - entry for non-standard args
+
+	.ENTRY	IFEINI,^M<>		; entry for PME's sake (never called)
+
+IF$INI::BSBB	IF$1ST			; basic init
+	BRW	GETSEL			; select current IFCB
+
+; IF$1ST - basic init at start of call
+
+IF$1ST::CLRL	IERCD			; no errors yet
+	MOVL	#1,IERNM		; ditto
+IF$ERI::CLRL	R11			; no args taken yet
+	RSB
+
+
+; get next arg - set carry if absent
+; - assumes nr of args so far left in R11
+; result is address in R0 (untouched if arg missing)
+
+	.ENTRY	IFEGNA,^M<>		; entry for PME's sake (never called)
+
+IF$GNA::ACBB	(AP),#1,R11,20$		; j if some left
+10$:	SEC				; no arg found
+	RSB
+
+20$:	TSTL	(AP)[R11]		; is it there ?
+	BEQL	10$			; j if this one absent
+	MOVL	(AP)[R11],R0		; return pointer in R0
+	CLC				; arg present
+	RSB
+
+
+; FORTRAN LOGICAL FUNCTION	iff_havarg(number)
+ 
+; Returns  TRUE if argument is present
+ 
+ .ENTRY	IFF_HAVARG,^M<R2>
+ 
+	MOVL	@4(AP),R0		; argument number
+	MOVL	SF$L_SAVE_AP(FP),R2	; get saved AP from call frame
+	MOVZBL	(R2),R1			; get caller's arg count
+	CMPL	R0,R1			; enough arguments
+	BGTRU	30$			; if GTR, no - answer NO
+	TSTL	(R2)[R0]		; was argument given?
+	BEQL	30$			; if EQL, it wasn't
+	MNEGL	#1,R0			; answer YES (true)
+	RET
+ 
+30$:	CLRL	R0			; answer NO (false)
+	RET
+
+; IF$CWB - convert word no. R3 to block no. (R3) / byte offset (R4)
+;   (no longer assumes <64K blocks in file - PGH 23-Jun-1992)
+
+	.ENTRY	IFECWB,^M<>		; entry for PME's sake (never called)
+
+IF$CWB::MOVZBL	R3,R4			; word offset
+	ASHL	#1,R4,R4		; byte offset
+	ASHL	#-8,R3,R3		; block count
+	INCL	R3			; starting at 1
+	RSB
+
+; IF$CCW - convert block/byte to word no
+;    allowing for forepart and buf origin
+
+IF$CCW::SUBL2	BUFPT,R4
+	CVTWL	IFOREL,-(SP)		; length of header
+	SUBL2	(SP)+,R3
+	DECL	R3			; first block=1
+	ASHL	#-1,R4,R4		; bytes to words
+	ASHL	#8,R3,R3		; blocks to words
+	MOVB	R4,R3			; add the two
+	RSB
+
+	.PSECT
+	.END

@@ -1,0 +1,570 @@
+	PROGRAM OSMHED
+C
+***	MODULE	OSMHED
+***	IDENT	26NO91
+C
+	IMPLICIT NONE
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+C	See .UPD file for further updates	RJH	29-Jul-1987
+C	new fields MHMHWM and MHMLWM		TJI	20-Mar-1984
+C	new field  MHNSUP			TJI	17-Jun-1983
+C	in strings taking %A, change to %A80 where
+C	needed; add pad char to TXTBUF		TJI	20-Aug-1982
+C	Spell Levelling correctly, left justify
+C	EDiTioN again, make EXPBUF longer to hold
+C	long strings				TJI	13-Aug-1982
+C	Add SPECIAL 3, add [expected] to format TJI	13-May-1982
+C	Right justify EDiTioN and SURvey Type
+C	fields in Map Header (last arg to MHINQ)TJI	12-May-1982
+C	Cope with multiple survey dates		PGH	10-May-1982
+C	Digital update date 3 had MHDUPD(4)	AJW	13-Apr-1982
+C	lines 135 and 232 (WRITEFs) too long
+C	split onto two lines			AJW	13-Apr-1982
+C	Map header layout changed		PGH	 8-Mar-1982
+C	FULL listing stuff			PGH	30-Apr-1981
+C	Bit 0 is most significant		AJW	19-Mar-1981
+C	Created					PGH	 5-Mar-1981
+C
+C OS IFF Map Header editor main program
+C
+C
+	INCLUDE '($STSDEF)'
+C
+***	PARAMETER/CMN:OSMHEDMSG/	! message definitions
+C
+***	COMMON/CMN:CONTROL/		! control variables
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/LSL$CMNIFF:MHDMB/
+***	COMMON/LSL$CMNLSL:EXPC/
+***	COMMON/LSL$CMNLSL:STATUS/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C functions
+	INTEGER*4	IFFOPEN		! open IFF file
+	INTEGER*4	IFFMODIFY	! open IFF file for update
+	LOGICAL		OSMH_UPGRADE	! upgrades map header
+	LOGICAL		GET_COMMAND	! get command line
+	INTEGER*2	MHINQ
+C
+C w/s:
+	INTEGER     I
+	INTEGER     IERR	! function error return
+	INTEGER*2   NCHS	! number of chrs read in command line
+	INTEGER*2   IJMP	! index of command into jump table
+	INTEGER*2   IECODE	! entry code for the entry-in-hand
+	INTEGER*2   IELEN	! length of the entry-in-hand
+	INTEGER*4   IFFLUN	! IFF file logical unit number
+	INTEGER*4   HERE	! posn in file
+C
+	PARAMETER   PCSIZ=7+16		! count them
+	CHARACTER*4 PCCOMM(PCSIZ)	! process control file commands
+	PARAMETER   MHSIZ=7+64		! note first 7 are the same
+	CHARACTER*4 MHCOMM(MHSIZ)	! map header commands
+C
+	DATA PCCOMM/'FULL','MH  ','PCF ','HELP',
+     &              '?   ','EXIT','QUIT',
+     &              'JOBN','MRCE','MRCN','STSC',
+     &              'GENR','SECT','INPC','FLAG',
+     &              'EDGC','MDFN','DMPC','SUBF',
+     &              'SUBC','REST','EDGS','EDGJ'/
+C
+	DATA MHCOMM/'FULL','MH  ','PCF ','HELP',
+     &              '?   ','EXIT','QUIT',
+     &                            'SP03','SP04',
+     &              'MRCE','MRCN','MLE ','MLN ',
+     &              'BGI ','STSC','DCSC',
+     &              'SP13','SP14','SP15',
+     &                     'SP18','SP19','EMSN',
+     &              'EMSE','EMSS','EMSW','DIDB',
+     &              'SP25','SP26','SP27','SP28',
+     &              'SP29','SP30','EDTN','SURT',
+     &                     'LFRD',
+     &              
+     &              'BOUD','LEVD','LEV2',
+     &                     'CPYD','DUPC','COND',
+     &              'CVI ',              'MSPC',
+     &              'ABI1','ABI2','ABI3',
+     &		    'HWMD','LWMD','CIND','OSRD',
+     &	            'OSR2','DUPD','QCD ','HUC ',
+     &	            'OSTF','STRD','CVAL','UNSL',
+     &	            'UNSS','UNS2','FLG1','FLG2',
+     &	            'FLG3','FLG4','FLG5','FLG6',
+     &	            'FLG7','FLG8','STRC','BNUM','CID '/
+C
+C
+C Initialise  IFF
+	IFFLUN=1
+	CALL IFFTDY			! not actually necessary now
+C
+C Initialise LSLLIB
+	CALL LSL_INIT(.TRUE.)
+C
+C and set up the buffer lengths
+C	CALL SET_EXPMAX(132)
+C	CALL SET_TXTLIM(81)
+C
+C get command line
+	IF (.NOT. GET_COMMAND()) GOTO 999
+C
+C open IFF file
+	IF (RONLY) THEN
+	   IF (.NOT. IFFOPEN(IFFLUN,IN_FILE(:IN_LEN))) GOTO 999
+	ELSE
+	   IF (.NOT. IFFMODIFY(IFFLUN,IN_FILE(:IN_LEN),'Edit MH')) 
+     &		GOTO 999
+	ENDIF
+C
+C Look for Map Header
+30	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 740
+	IF (IECODE.EQ.'MH') GOTO 40
+	GOTO 30
+C
+C MH - Map Header
+40	HERE = LPOSH
+C
+C Just read first 2 words to fill MHDESC
+C
+	CALL EIHR(MHARR,2,1)
+	IF (.NOT.(MHDESC(2).EQ.2.OR.MHDESC(2).EQ.0)) THEN
+	   CALL LSL_PUTMSG(OSMHED__WRONGMH,MHDESC(2))
+	   GOTO 750
+	ENDIF
+C
+	IF (IELEN .NE. MHLEN) THEN
+	   CALL LSL_PUTMSG(OSMHED__WRONGLEN,IELEN,MHLEN)
+	ENDIF
+	IELEN=MIN0(IELEN,MHLEN)
+	CALL EIHR(MHARR,IELEN,1)
+C
+	IERR = OSMH_UPGRADE()	! upgrade map header to new format
+	IF (.NOT. IERR) THEN	! and check it worked
+	   CALL LSL_PUTMSG(OSMHED__MHUPGRADE)
+	   CALL LSL_ADDMSG(IERR)
+	ENDIF
+C
+	IF (LIST) GOTO 730
+	GOTO 50
+C
+C Set full listing
+45	FULL=.TRUE.
+C
+C print out current state
+50	CALL WRITEF
+	CALL PRTPCF(FULL)
+	CALL WRITEF
+	CALL WRITEF('Type ? or HELP for help')
+	GOTO 90
+C
+C HELP for editing PC
+60	CALL WRITEF
+	CALL WRITEF('The following commands are available :-')
+	CALL WRITEF
+	DO 70 I=1,PCSIZ
+	  CALL APPEND('%S  ',PCCOMM(I))
+	  IF (MOD(I,6).NE.0) GOTO 70
+	    CALL TTWSTR
+	    CALL EXPAND
+70	CONTINUE
+	IF (MOD(PCSIZ,6).NE.0) CALL TTWSTR
+	CALL WRITEF
+	CALL WRITEF(
+     &  'Type a number to replace contents of current field.')
+	CALL WRITEF('Hit RETURN to go on to next field.')
+	CALL WRITEF('Type MH to jump to editing the Map Header.')
+	CALL WRITEF('Type FULL to include currently unused fields.')
+	CALL WRITEF(
+     &  'Type EXIT to exit normally, or QUIT to exit immediately.')
+	CALL WRITEF(
+     &  'Type the four letter mnemonic to edit a particular field.')
+	CALL WRITEF(
+     &	'Type an asterisk (''*'') to unset a date field.')
+	GOTO 90
+C
+C Dispatch on value of IJMP
+C
+C then the PCF entries
+80	GOTO ( 45,280, 50, 60,		! FULL,MH  ,PCF ,HELP
+     &         60,730,750,		! ?   ,EXIT,QUIT
+     &         90,100,110,120,		! JOBN,MRCE,MRCN,STSC
+     &        130,140,150,160,		! GENR,SECT,INPC,FLAG
+     &        170,180,190,200,		! EDGC,MDFN,DMPC,SUBF
+     &        210,220,230,240),IJMP	! SUBC,REST,EDGS,EDGJ
+C
+C *** edit PC here
+C
+90	CALL WRITEF
+	IJMP=MHINQ(' JOB number (%N) [D] ?  ',
+     &             PCJOBN,10,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,100,80
+100	IJMP=MHINQ(' Map Ref Corner (E) (%N) [D] ?  ',
+     &             PCMRCE,10,PCSIZ,PCCOMM,0)
+	MHMRCE=PCMRCE
+	IF (IJMP) 730,110,80
+110	IJMP=MHINQ(' Map Ref Corner (N) (%N) [D] ?  ',
+     &             PCMRCN,10,PCSIZ,PCCOMM,0)
+	MHMRCN=PCMRCN
+	IF (IJMP) 730,120,80
+120	IJMP=MHINQ(' STorage SCale (%N) [D] ?  ',
+     &             PCSTSC,10,PCSIZ,PCCOMM,0)
+	MHSTSC=PCSTSC
+	IF (IJMP) 730,130,80
+130	IJMP=MHINQ(' GENeration and Run (%P0%O8) [O] ?  ',
+     &             PCGENR,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,140,80
+140	IJMP=MHINQ(' SECTion/subsection (%A) [S] ?  ',
+     &             PCSECT,-4,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,150,80
+150	IJMP=MHINQ(' INPut Control (%P0%O8) [O] ?  ',
+     &             PCINPC,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,160,80
+160	IJMP=MHINQ(' FLAG (%P0%O8) [O] ? ',
+     &             PCFLAG,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,170,80
+170	IJMP=MHINQ(' EDGe match Control (%P0%O8) [O] ? ',
+     &             PCEDGC,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,180,80
+180	IJMP=MHINQ(' Map Data File Number (%P0%O8) [O] ? ',
+     &             PCMDFN,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,190,80
+190	IJMP=MHINQ(' DuMP Control (%P0%O8) [O] ? ',
+     &             PCDMPC,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,200,80
+200	IJMP=MHINQ(' SUBFile size (%P0%O8) [O] ? ',
+     &             PCSUBF,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,210,80
+210	IJMP=MHINQ(' SUBfile Creation date (%P0%O8) [O] ? ',
+     &             PCSUBC,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,220,80
+220	IJMP=MHINQ(' RESTart counts (%P0%O8) [O] ? ',
+     &             PCREST,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,230,80
+230	IJMP=MHINQ(' EDGe match Status (%P0%O8) [O] ? ',
+     &             PCEDGS,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,240,80
+240	IJMP=MHINQ(' EDGe Job counts (%P0%O8) [O] ? ',
+     &             PCEDGJ,8,PCSIZ,PCCOMM,0)
+	IF (IJMP) 730,50,80
+C
+C Set full listing
+245	FULL=.TRUE.
+C
+C edit MH here
+C
+250	CALL WRITEF
+	CALL PRTMH(FULL)
+	GOTO 290
+C
+C HELP for MH
+C
+260	CALL WRITEF
+	CALL WRITEF('The following commands are available :-')
+	CALL WRITEF
+	DO 270 I=1,MHSIZ
+	  CALL APPEND('%S  ',MHCOMM(I))
+	  IF (MOD(I,6).NE.0) GOTO 270
+	    CALL TTWSTR
+	    CALL EXPAND
+270	CONTINUE
+	IF (MOD(MHSIZ,6).NE.0) CALL TTWSTR
+	CALL WRITEF
+	CALL WRITEF(
+     &  'Type a number to replace contents of current field.')
+	CALL WRITEF('Hit RETURN to go on to next field.')
+	CALL WRITEF(
+     &  'Type PC to jump back to editing the Process Control File.')
+	CALL WRITEF('Type FULL to include currently unused fields.')
+	CALL WRITEF(
+     &  'Type EXIT to exit normally, or QUIT to exit immediately.')
+	CALL WRITEF(
+     &  'Type the four letter mnemonic to edit a particular field.')
+	CALL WRITEF(
+     &	'Type an asterisk (''*'') to unset a date field.')
+	GOTO 290
+C
+C FULL,MH,PCF,HELP
+C EXIT,QUIT
+C then the MH entries
+C
+280	GOTO (245,250, 50,260,
+     &        260,730,750,
+     &                290,320,		!           SP03,SP04
+     &        300,340,350,360,		! MRCE,MRCN,MLE ,MLN
+     &        370,380,390,    		! BGI ,STSC,DCSC
+     &        410,420,430,    		! SP13,SP14,SP15
+     &            460,470,480,		!      SP18,SP19,EMSN
+     &        490,500,510,520,		! EMSE,EMSS,EMSW,DIDB
+     &        530,540,550,560,		! SP25,SP26,SP27,SP28
+     &        570,580,590,595,		! SP29,SP30,EDTN,SURT
+     &            625,        		!      LFRD
+     &                        		! 
+     &        650,670,671,    		! BOUD,LEVD,LEV2
+     &            721,722,723,		!      CPYD,DUPC,COND
+     &        724,        727,		! CVI ,          MSPC
+     &        728,729,731,    		! ABI1,ABI2,ABI3
+     &	      733,734,760,770,		! HWMD,LWMD,CIND,OSRD
+     &	      780,790,800,810,		! OSR2,DUPD,QCD ,HUC 
+     &	      820,830,840,850,		! OSTF,STRD,CVAL,UNSL
+     &	      860,870,880,890,		! UNSS,UNS2,FLG1,FLG2
+     &	      900,910,920,930,		! FLG3,FLG4,FLG5,FLG6
+     &	      940,950,960,970,		! FLG7,FLG8,STRC,BNUM
+     &	      980), IJMP		! CID 
+C
+C edit MH here
+C
+290	CALL WRITEF
+	GOTO 310
+300	CALL WRITEF
+	GOTO 330
+310	IF (.NOT.FULL) GOTO 320
+	IJMP=MHINQ('  3 spare (%N) [D] ? ',
+     &             MHLONG(3),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,320,280
+320	IF (.NOT.FULL) GOTO 330
+	IJMP=MHINQ('  4 spare (%N) [D] ? ',
+     &             MHLONG(4),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,330,280
+330	IJMP=MHINQ(' Map Ref Corner (E) (%N) [D] ? ',
+     &             MHMRCE,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,340,280
+340	IJMP=MHINQ(' Map Ref Corner (N) (%N) [D] ? ',
+     &             MHMRCN,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,350,280
+350	IJMP=MHINQ(' Map Limit (E) (%N) [D] ? ',
+     &             MHMLE,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,360,280
+360	IJMP=MHINQ(' Map Limit (N) (%N) [D] ? ',
+     &             MHMLN,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,370,280
+370	IJMP=MHINQ(' Basic Grid Interval (%N) [D] ? ',
+     &             MHBGI,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,380,280
+380	IJMP=MHINQ(' STorage SCale (%N) [D] ? ',
+     &             MHSTSC,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,390,280
+390	IJMP=MHINQ(' Data Capture SCale (%N) [D] ? ',
+     &             MHDCSC,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,410,280
+410	IF (.NOT.FULL) GOTO 420
+	IJMP=MHINQ(' 13 spare (%N) [D] ? ',
+     &             MHLONG(13),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,420,280
+420	IF (.NOT.FULL) GOTO 430
+	IJMP=MHINQ(' 14 spare (%N) [D] ? ',
+     &             MHLONG(14),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,430,280
+430	IF (.NOT.FULL) GOTO 460
+	IJMP=MHINQ(' 15 spare (%N) [D] ? ',
+     &             MHLONG(15),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,460,280
+460	IF (.NOT.FULL) GOTO 470
+	IJMP=MHINQ(' 18 spare (%N) [D] ? ',
+     &             MHLONG(18),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,470,280
+470	IF (.NOT.FULL) GOTO 480
+	IJMP=MHINQ(' 19 spare (%N) [D] ? ',
+     &             MHLONG(19),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,480,280
+480	IJMP=MHINQ(' Edge Match Status (N) (%N) [D] ? ',
+     &             MHEMSN,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,490,280
+490	IJMP=MHINQ(' Edge Match Status (E) (%N) [D] ? ',
+     &             MHEMSE,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,500,280
+500	IJMP=MHINQ(' Edge Match Status (S) (%N) [D] ? ',
+     &             MHEMSS,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,510,280
+510	IJMP=MHINQ(' Edge Match Status (W) (%N) [D] ? ',
+     &             MHEMSW,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,520,280
+520	IJMP=MHINQ(' Date of Initial DataBanking (%N/%N/%N) [D/M/Y] ? ',
+     &             MHDIDB,0,MHSIZ,MHCOMM,4)
+	IF (IJMP) 730,530,280
+530	IF (.NOT.FULL) GOTO 540
+	IJMP=MHINQ(' 25 spare (%N) [D] ? ',
+     &             MHLONG(25),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,540,280
+540	IF (.NOT.FULL) GOTO 550
+	IJMP=MHINQ(' 26 spare (%N)  [D] ? ',
+     &             MHLONG(26),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,550,280
+550	IF (.NOT.FULL) GOTO 560
+	IJMP=MHINQ(' 27 spare (%N)  [D] ? ',
+     &             MHLONG(27),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,560,280
+560	IF (.NOT.FULL) GOTO 570
+	IJMP=MHINQ(' 28 spare (%N)  [D] ? ',
+     &             MHLONG(28),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,570,280
+570	IF (.NOT.FULL) GOTO 580
+	IJMP=MHINQ(' 29 spare (%N)  [D] ? ',
+     &             MHLONG(29),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,580,280
+580	IF (.NOT.FULL) GOTO 590
+	IJMP=MHINQ(' 30 spare (%N)  [D] ? ',
+     &             MHLONG(30),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,590,280
+590	IJMP=MHINQ(' EDiTioN (%A)  [S] ? ',
+     &             MHEDTN,-12,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,595,280
+595	IJMP=MHINQ(' SURvey Type (%A) [S] ? ',
+     &             MHSURT,-4,MHSIZ,MHCOMM,2)
+	IF (IJMP) 730,625,280
+625	IJMP=MHINQ(' Latest Full Revision Date (%N/%N) [M/Y] ? ',
+     &             MHLFRD,0,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,650,280
+650	IJMP=MHINQ(' BOUndary Date (%N/%N) [M/Y] ? ',
+     &             MHBOUD,0,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,670,280
+670	IJMP=MHINQ(' LEVelling Date 1 (%N) [Y] ? ',
+     &             MHLEVD(1),10,MHSIZ,MHCOMM,3)
+	IF (IJMP) 730,671,280
+671	IJMP=MHINQ(' LEVelling Date 2 (%N) [Y] ? ',
+     &             MHLEVD(2),10,MHSIZ,MHCOMM,3)
+	IF (IJMP) 730,721,280
+721	IJMP=MHINQ(' CoPYright Date (%N) [Y] ? ',
+     &             MHCPYD,10,MHSIZ,MHCOMM,3)
+	IF (IJMP) 730,722,280
+722	IJMP=MHINQ(' Digital UPdate Count (%N) [D] ? ',
+     &             MHDUPC,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,723,280
+723	IJMP=MHINQ(' CONtour Date (%N) [Y] ? ',
+     &             MHCOND,10,MHSIZ,MHCOMM,3)
+	IF (IJMP) 730,724,280
+724	IJMP=MHINQ(' Contour Vertical Interval (%N) [D] ? ',
+     &             MHCVI,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,727,280
+727	IJMP=MHINQ(' Map SPeCification number (%P0%I8) [D] ? ',
+     &             MHMSPC,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,728,280
+728	IJMP=MHINQ(' Additional Boundary Information (%A80) [S] ? ',
+     &             MHABI1,-80,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,729,280
+729	IJMP=MHINQ(' Additional Boundary Information (%A80) [S] ? ',
+     &             MHABI2,-80,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,731,280
+731	IJMP=MHINQ(' Additional Boundary Information (%A80) [S] ? ',
+     &             MHABI3,-80,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,733,280
+733	IJMP=MHINQ(' High Water Mark Dates (%N/%N) [Y/Y] ? ',
+     &             MHMHWM,0,MHSIZ,MHCOMM,1)
+	IF (IJMP) 730,734,280
+734	IJMP=MHINQ(' Low  Water Mark Dates (%N/%N) [Y/Y] ? ',
+     &		   MHMLWM,0,MHSIZ,MHCOMM,1)
+	IF (IJMP) 730,760,280
+760	IJMP=MHINQ(' Content INDicator (%A) [S] ? ',
+     &             MHCIND,-8,MHSIZ,MHCOMM,2)
+	IF (IJMP) 730,770,280
+770	IJMP=MHINQ(' Original SuRvey Date 1 (%N/%N) [M/Y] ? ',
+     &             MHOSUR(1),0,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,780,280
+780	IJMP=MHINQ(' Original SuRvey Date 2 (%N/%N) [M/Y] ? ',
+     &             MHOSUR(2),0,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,790,280
+790	IJMP=MHINQ(' Digital UPdate Date (%N/%N/%N) [D/M/Y] ? ',
+     &             MHSDUP,0,MHSIZ,MHCOMM,4)
+	IF (IJMP) 730,800,280
+800	IJMP=MHINQ(' Quality Control Date (%N/%N) [M/Y] ? ',
+     &             MHQCD,0,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,810,280
+810	IJMP=MHINQ(' House Unit Count (%N) [D] ? ',
+     &             MHHUC,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,820,280
+820	IJMP=MHINQ(' OSTF+ indicator (%N) [D] ? ',
+     &             MHPLUS,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,830,280
+830	IJMP=MHINQ(' STRucture Date (%N/%N/%N) [D/M/Y] ? ',
+     &             MHSTRD,0,MHSIZ,MHCOMM,4)
+	IF (IJMP) 730,840,280
+840	IJMP=MHINQ(' Check VALues (%A) [S] ? ',
+     &             MHCVAL,-8,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,850,280
+850	IJMP=MHINQ(' UNSpecified Long (%N) [D] ? ',
+     &             MHBYTC,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,860,280
+860	IJMP=MHINQ(' UNSpecified Short 1 (%N) [D] ? ',
+     &             MHUNSS(1),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,870,280
+870	IJMP=MHINQ(' UNSpecified Short 2 (%N) [D] ? ',
+     &             MHUNSS(2),10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,880,280
+880	IJMP=MHINQ(' FLaG1 (%A1) [S] ? ',
+     &             MHFLAG,-8,MHSIZ,MHCOMM,-1)
+	IF (IJMP) 730,890,280
+890	IJMP=MHINQ(' FLaG2 (%A1) [S] ? ',
+     &             MHFLAG,-8,MHSIZ,MHCOMM,-2)
+	IF (IJMP) 730,900,280
+900	IJMP=MHINQ(' FLaG3 (%A1) [S] ? ',
+     &             MHFLAG,-8,MHSIZ,MHCOMM,-3)
+	IF (IJMP) 730,910,280
+910	IJMP=MHINQ(' FLaG4 (%A1) [S] ? ',
+     &             MHFLAG,-8,MHSIZ,MHCOMM,-4)
+	IF (IJMP) 730,920,280
+920	IJMP=MHINQ(' FLaG5 (%A1) [S] ? ',
+     &             MHFLAG,-8,MHSIZ,MHCOMM,-5)
+	IF (IJMP) 730,930,280
+930	IJMP=MHINQ(' FLaG6 (%A1) [S] ? ',
+     &             MHFLAG,-8,MHSIZ,MHCOMM,-6)
+	IF (IJMP) 730,940,280
+940	IJMP=MHINQ(' FLaG7 (%A1) [S] ? ',
+     &             MHFLAG,-8,MHSIZ,MHCOMM,-7)
+	IF (IJMP) 730,950,280
+950	IJMP=MHINQ(' FLaG8 (%A1) [S] ? ',
+     &             MHFLAG,-8,MHSIZ,MHCOMM,-8)
+	IF (IJMP) 730,960,280
+960	IJMP=MHINQ(' STRucture Category (%N) [D] ? ',
+     &             MHSTRC,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,970,280
+970	IJMP=MHINQ(' Batch NUMber (%N) [D] ? ',
+     &             MHBNUM,10,MHSIZ,MHCOMM,0)
+	IF (IJMP) 730,980,280
+980	IJMP=MHINQ(' Contractors IDentity (%A) [S] ? ',
+     &             MHCID,-4,MHSIZ,MHCOMM,2)
+	IF (IJMP) 730,250,280
+C
+C
+C print new state, except where MHINQ produced an error, and also if had
+C /READ_ONLY and /NOLIST
+C
+730	IF (((LSL_STATUS .AND. STS$M_SEVERITY) .EQ. STS$K_ERROR) .OR.
+     &	    ((LSL_STATUS .AND. STS$M_SEVERITY) .EQ. STS$K_SEVERE)) 
+     &	   GOTO 750				! error from MHINQ
+	IF (RONLY.AND..NOT.LIST) GOTO 735	! /READ_ONLY and /NOLIST
+	CALL WRITEF
+	CALL PRTDMB(FULL)
+C
+C write back unless readonly (/LIST implies /READ_ONLY)
+C
+	IF (LIST) GOTO 750
+	CALL EIHW(MHARR,IELEN,1)
+C
+C find the MD and update it if type 2
+C
+	CALL IFFNXT(IECODE,IELEN)		! get next entry
+	IF (IECODE .EQ. 'MD') THEN		! make sure it's an MD
+	   IF (IELEN .EQ. MD2LEN) THEN		! check for type 2
+	      CALL EIHR(MD2ARR,MD2LEN,1)
+	      MD2LOC(1) = MHMRCE
+	      MD2LOC(2) = MHMRCN
+	      MD2SCL = MHSTSC
+	      CALL EIHW(MD2ARR,MD2LEN,1)
+	   ENDIF
+	ELSE
+	   CALL LSL_PUTMSG(OSMHED__NOMD)	! can't find MD
+	ENDIF
+	GOTO 750
+C
+735	CALL LSL_PUTMSG(OSMHED__RDONLY)
+	GOTO 750
+C
+C Errors
+740	CALL LSL_PUTMSG(OSMHED__NOMH)
+C
+C normal exit
+750	CALL IFFCLO(IFFLUN)
+999	CALL LSL_EXIT
+C
+	END

@@ -1,0 +1,239 @@
+        SUBROUTINE VIEW_PALETTE(WORK_SIZE,WORK1,WORK2,WORK3)
+C
+***     IDENT   14FE92
+***     MODULE  VIEW_PALETTE
+C
+C       Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C       Written                                 RWR	Jan-1990
+C
+C	LITES2 cartographic editor VIEW PALETTE command.
+C
+        IMPLICIT NONE
+C
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/CMN:DOUT/
+***	COMMON/CMN:GLOBAL/
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:VIEW/
+C
+C arguments
+	INTEGER		WORK_SIZE
+	REAL		WORK1(WORK_SIZE)
+	REAL		WORK2(WORK_SIZE)
+	REAL		WORK3(WORK_SIZE)
+C
+C Functions
+	EXTERNAL	NASTY,MOAN
+	EXTERNAL	VIEW_PALETTE_CMD_TABLE
+	INTEGER		CALLR
+	INTEGER		ACT_GET_COLOUR_VALUE
+	INTEGER		ACT_SET_COLOUR_VALUE
+	INTEGER		ACT_RECALC
+	INTEGER		LIB$EXTZV
+	LOGICAL		VIEW_GENERATE_PARAMETERS
+C
+C w/s
+	INTEGER		DISPLAY,OVERLAY
+	INTEGER		RETCOD
+	INTEGER		TOP,I
+	INTEGER		PALETTE
+	INTEGER		IERR
+	INTEGER		M_COL
+	REAL		R,G,B
+C
+	INTEGER		VC
+	EQUIVALENCE	(VIEW_CURRENT,VC)
+C
+C define bit map for selection of colours
+	INTEGER		BMAP_SIZE
+	PARAMETER	(BMAP_SIZE = MAXCOL/32 + 1)
+C
+	INTEGER*4	BMAP(BMAP_SIZE)
+C
+C get tertiary command
+	CALL GET_COMMAND(DSTR(:DSTRL),VIEW_PALETTE_CMD_TABLE)
+	IF (MOANED) GOTO 9990
+
+	IF (.NOT.VIEW_CREATED(VC)) THEN
+	   CALL MOAN(MSG_VIEWNOTCREATED)
+	   GOTO 9990
+	ENDIF
+C
+C check for valid display
+	DISPLAY = DINTS(1)
+	IF (DISPLAY.LT.1.OR.DISPLAY.GT.MAXDISP) THEN
+	   CALL MOAN(MSG_DISPRNG,3,MAXDISP)
+	   GOTO 9990
+	ELSEIF (.NOT.DISPLAY_EXISTS(DISPLAY)) THEN
+	   CALL MOAN(MSG_DISPNOTEXISTS,DISPLAY)
+	   CALL LEARN(MSG_USEDISPCRE)
+	   GOTO 9990
+	ENDIF
+C
+C valid overlay?
+	OVERLAY = DINTS(2)
+	IF (OVERLAY.LT.0.OR.OVERLAY.GT.MAXOVER) THEN
+	   CALL MOAN(MSG_OVERRNG,0,MAXOVER)
+	   GOTO 9990
+	ELSEIF (OVERLAY_PLANES(OVERLAY,DISPLAY).EQ.0) THEN
+	   CALL MOAN(MSG_OVNOTEXISTS,OVERLAY,DISPLAY)
+	   CALL LEARN(MSG_USEDISPOVER)
+	   GOTO 9990
+	ENDIF
+C
+C Dispatch according to tertiary command
+	GOTO (100,200,300,400), DPRIN
+C
+C Tertiary command number out of range
+	CALL MSGCMD(NASTY,MSG_ERRTERIND)
+	GOTO 9990
+C
+100	CONTINUE
+	PALETTE = PALETTE_DISPLAY
+	GOTO 1000
+C
+200	CONTINUE
+	PALETTE = PALETTE_IMAGE
+	GOTO 1000
+C
+300	CONTINUE
+	PALETTE = PALETTE_IFF
+	GOTO 1000
+C
+C  VIEW PALETTE AUTO
+400	CONTINUE
+C
+C this command is only valid if one of colour modifiers has been given
+	IF (.NOT.(VIEW_FOG_ON(VC).OR.VIEW_ILLUMINATION_ON(VC).OR.
+     &	          VIEW_DEPTH_ON(VC)))THEN
+	   CALL MOAN(MSG_VIEWNOQUAL)	   
+	   GOTO 9990
+	ENDIF
+C
+C if working with vector information, need IFF palette
+	IF (VIEW_LEVEL_VECTOR(VIEW_LEVEL(VC),VC).AND..NOT.
+     &	         VIEW_HAD_PALETTE(PALETTE_IFF,VIEW_LEVEL(VC),VC)) THEN
+	   CALL MOAN(MSG_NOPALETTE,'IFF','source')
+	   GOTO 9990
+C
+C if working with terrain, need IMAGE palette
+	ELSEIF (VIEW_LEVEL_TERRAIN(VIEW_LEVEL(VC),VC).AND..NOT.
+     &	     VIEW_HAD_PALETTE(PALETTE_IMAGE,VIEW_LEVEL(VC),VC).AND.
+     &	     VIEW_COLOUR_METHOD(VC).NE.METHOD_CONSTANT) THEN
+	   CALL MOAN(MSG_NOPALETTE,'IMAGE','source')
+	   GOTO 9990
+C
+C and for output need DISPLAY palette
+	ELSEIF (.NOT.VIEW_HAD_PALETTE(PALETTE_DISPLAY,
+     &	               VIEW_LEVEL(VC),VC)) THEN
+	   CALL MOAN(MSG_NOPALETTE,'DISPLAY','output')
+	   GOTO 9990
+	ENDIF
+C
+	M_COL = 2**OVERLAY_PLANES(OVERLAY,DISPLAY)-1
+	IF (DSTRIN) THEN
+	   CALL VIOCLR(BMAP,BMAP_SIZE*4)
+	   CALL RDSEL(M_COL,DSTR(1:DSTRL),.FALSE.,BMAP_SIZE,BMAP,IERR)
+	   IF (IERR.LT.0) GOTO 9990
+	ELSE
+	   CALL VIOCLR(BMAP,BMAP_SIZE*4,-1)
+	ENDIF
+C
+C pass this information to viewing module
+	IF (VIEW_GENERATE_PARAMETERS()) GOTO 9990
+C
+	RETCOD = CALLR(VIEW_ID(VC),
+     &	               VIEW_LEVEL(VC),
+     &	               VIEW_COLOUR_METHOD(VC),
+     &	               M_COL+1,			! number of colours
+     &	               BMAP,			! bitmap selection
+     &	               %VAL(VIEW_ADDRESSES(XVISA_GENERATE_PALETTE)))
+	IF (.NOT.RETCOD) THEN
+	   CALL MOAN(MSG_VISLIBERR)
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 9990
+	ENDIF
+C
+C set colours in overlay
+	DO 420,I=0,M_COL
+	   IF (LIB$EXTZV(I,1,BMAP)) THEN
+	      RETCOD = CALLR(VIEW_ID(VC),
+     &	               VIEW_LEVEL(VC),
+     &	               I,			! COLOUR
+     &	               R,			! red
+     &	               G,			! green
+     &	               B,			! blue
+     &	               %VAL(VIEW_ADDRESSES(XVISA_GET_PALETTE_RGB)))
+	      IF (.NOT.RETCOD) THEN
+	         CALL MOAN(MSG_VISLIBERR)
+	         CALL LITES2_SIGNAL(RETCOD)
+	         GOTO 9990
+	      ENDIF
+C
+C set this colour in overlay
+       	      RETCOD = ACT_SET_COLOUR_VALUE(
+     &		   OVERLAY_PTR(OVERLAY,DISPLAY),I,R,G,B)
+	      IF (.NOT.RETCOD) THEN
+	         CALL MOAN(MSG_COLNOTSET)
+	         CALL LITES2_SIGNAL(RETCOD)
+	         GOTO 9990
+	      ENDIF
+	   ENDIF	      
+420	CONTINUE
+C
+C update colour map
+	RETCOD = ACT_RECALC(DISPLAY_PTR(DISPLAY),D_RED,D_GREEN,D_BLUE)
+	IF (.NOT.RETCOD) GOTO 9999
+	CALL LSCRS(DISPLAY_CURRENT,2**DISPLAY_PLANES(DISPLAY),
+     &	               D_RED,D_GREEN,D_BLUE)
+	GOTO 9999
+C
+C process
+1000	CONTINUE
+C
+C pass to viewing module, if view created
+	IF (VIEW_CREATED(VC)) THEN
+	   TOP = 2**OVERLAY_PLANES(OVERLAY,DISPLAY)
+	   TOP = MIN(TOP,WORK_SIZE)	! prevent array overflow
+	   DO 1110, I = 1,TOP
+C
+C get the required colour - use STD variables as temporaries
+C (colour indices start at 0)
+	      RETCOD = ACT_GET_COLOUR_VALUE(OVERLAY_PTR(OVERLAY,DISPLAY),
+     &		            I-1,WORK1(I),WORK2(I),WORK3(I))
+	      IF (.NOT.RETCOD) THEN
+	         CALL LITES2_SIGNAL(RETCOD)
+	         GOTO 9990
+	      ENDIF
+1110	   CONTINUE
+C
+C pass this information to viewing module
+	   RETCOD = CALLR(VIEW_ID(VC),
+     &	               VIEW_LEVEL(VC),
+     &	               PALETTE,
+     &	               TOP,			! number of colours
+     &	               WORK1,			! red
+     &	               WORK2,			! green
+     &	               WORK3,			! blue
+     &	               %VAL(VIEW_ADDRESSES(XVISA_SETUP_PALETTE)))
+	   IF (.NOT.RETCOD) THEN
+	      CALL MOAN(MSG_VISLIBERR)
+	      CALL LITES2_SIGNAL(RETCOD)
+	      GOTO 9990
+	   ENDIF
+	ENDIF
+C
+C this palette now set up
+	VIEW_HAD_PALETTE(PALETTE,VIEW_LEVEL(VC),VC) = .TRUE.
+C
+C store for later use
+	VIEW_PAL(1,PALETTE,VIEW_LEVEL(VC),VC) = DISPLAY
+	VIEW_PAL(2,PALETTE,VIEW_LEVEL(VC),VC) = OVERLAY
+	GOTO 9999
+C
+9990	CALL IGNCMD
+9999	RETURN
+        END

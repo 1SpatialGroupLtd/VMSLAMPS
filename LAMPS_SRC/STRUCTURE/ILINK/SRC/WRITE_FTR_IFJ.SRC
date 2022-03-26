@@ -1,0 +1,232 @@
+	LOGICAL*4 FUNCTION WRITE_FTR_IFJ(
+     &		PR_FTR,FTR_PTS,
+     &		FTR_INFTR,FTR_NDS,FTR_DAT,PNT_FTR,
+     &		IN_FTR_ADDR,NPT,
+     &		MAXINFTRS,MAXOUTFTRS,MAXNODES)
+C
+***	MODULE	WRITE_FTR_IFJ
+***	IDENT	13OC93
+C
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+C
+C	Created  : ACM					       Aug 1986
+C
+CMOD	Made a function, IFF entries which lie between
+C	ST and EF are now copied to the output file.	TJH 04-Jun-1987
+CMOD	Stopped it copying across JP from input file	ACM 18-Aug-1987
+CMOD	Converted to accept CB in place of ST entries	ACM 06-Apr-1988
+CMOD1304Add KEEP=PARENT					 JB 13-Oct-1993
+C
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINKCHAR.CMN'
+
+C Data in
+	INTEGER*4	PR_FTR			! processed-ftr index
+	INTEGER*4	MAXINFTRS,MAXOUTFTRS,MAXNODES
+	INTEGER*4	FTR_INFTR(MAXOUTFTRS)
+	INTEGER*4	FTR_NDS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_DAT(2,MAXOUTFTRS)
+	INTEGER*4	IN_FTR_ADDR(MAXINFTRS)
+	INTEGER*4	IN_FTR
+	REAL*4		NPT(2,MAXNODES)
+	LOGICAL*1	PNT_FTR(MAXOUTFTRS)
+
+C Workspace
+	REAL*4		XX,YY			! pt coords
+
+	INTEGER*4	ADDR			! IFF address
+	INTEGER*4	STANOD,FINNOD
+	INTEGER*4	NROWS,NCOLS
+
+	LOGICAL*4	CLOSED			! ftr closed loop?
+
+	INTEGER*2	FSN,ISN			! for IFFNF
+	INTEGER*2	ACTYPE			! AC type
+	INTEGER*2	IECODE,IELEN		! for IFFPKE,IFFNXC
+
+C Functions
+	INTEGER*4	GET_FTR			! get IFF feature
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Gets ftr PR_FTR from input and writes it to output IFF file
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	WRITE_FTR_IFJ = SS$_NORMAL
+
+C Do nothing if ftr has been deleted
+
+	IF (FTR_PTS(2,PR_FTR).EQ.NIL) GOTO 40
+
+C Get original ftr from IFF input
+
+	WRITE_FTR_IFJ = GET_FTR(		! get ftr pt coords
+     &			PR_FTR,
+     &			%VAL(FTR_INFTR_START),	! data in...
+     &			%VAL(IN_FTR_ADDR_START),
+     &			MAXINFTRS_CMN,MAXOUTFTRS_CMN)
+	IF (.NOT.WRITE_FTR_IFJ) THEN
+	  CALL LSL_PUTMSG(WRITE_FTR_IFJ)
+	  GOTO 40
+	ENDIF
+
+	NROWS = CBH.NROW
+	NCOLS = CBH.NCOL
+
+C Reposition to start of ftr
+
+	IN_FTR = FTR_INFTR(PR_FTR)
+	ADDR = IN_FTR_ADDR(IN_FTR)
+	CALL IFFPKE(IECODE,IELEN,ADDR)
+
+	IF (IECODE.NE.'NF') THEN
+	  WRITE_FTR_IFJ = ILINK__BADADDR
+	  CALL LSL_PUTMSG(WRITE_FTR_IFJ)
+	  GOTO 40
+	ENDIF
+
+C Get original FSN
+
+	CALL EIHRI(FSN,1,1)
+
+C Move ends to corresponding node positions
+
+	STANOD = FTR_NDS(1,PR_FTR)		! start node index
+	FINNOD = FTR_NDS(2,PR_FTR)		! end node index
+
+	XX = BIG_CBD.R(1)			! check join distance
+	YY = BIG_CBD.R(2)
+	CALL COUNT_JOIN(NPT(1,STANOD),NPT(2,STANOD),XX,YY)
+
+	BIG_CBD.R(1) = NPT(1,STANOD)
+	BIG_CBD.R(2) = NPT(2,STANOD)
+
+	XX = BIG_CBD.R((NROWS-1)*NCOLS+1)	! check join distance
+	YY = BIG_CBD.R((NROWS-1)*NCOLS+2)
+	CALL COUNT_JOIN(NPT(1,FINNOD),NPT(2,FINNOD),XX,YY)
+
+	BIG_CBD.R((NROWS-1)*NCOLS+1) = NPT(1,FINNOD)
+	BIG_CBD.R((NROWS-1)*NCOLS+2) = NPT(2,FINNOD)
+
+	IF (HAD_VERIFY) GOTO 40			! return
+
+C If non-point feature now only has one point, then skip it
+
+	IF (NROWS.LT.2.AND..NOT.PNT_FTR(PR_FTR)) GOTO 40
+
+C Feature is OK - Write NF entry
+
+	CALL IFFSEL(OUTLUN)
+	N_OT_FTRS = N_OT_FTRS+1
+	ISN = 0
+	CALL IFFNF(FSN,ISN)
+
+C Write intermediate ftr entries
+
+10	CALL IFFSEL(INLUN)
+	CALL IFFNXT(IECODE,IELEN)
+C
+	IF (IELEN.EQ.-1) THEN
+	  WRITE_FTR_IFJ = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(WRITE_FTR_IFJ,INFILE(:IN_LEN))
+	  GOTO 40
+	END IF
+C
+	IF (IECODE.EQ.'JP') GOTO 10		! ignore NF
+	IF (IECODE.EQ.'NF') GOTO 10		! ignore any JP's
+	IF (IECODE.EQ.'EF') GOTO 40		! return
+C
+	IF (IECODE.EQ.'AC') THEN
+	  CALL EIHRI(ACTYPE,1,1)
+	  IF (ACTYPE.EQ.9) THEN			! ignore AC type 9's
+	    IF (.NOT.HAD_KEEP_PARENT) GOTO 10	! unless forced to transfer
+	  ENDIF
+	ENDIF
+C
+	IF (IECODE.NE.'CB') THEN
+	  CALL EIHCPY(OUTLUN)			! copy all else but CB
+	  GOTO 10
+	ENDIF
+C
+C Write JP entry
+
+	IF (HAD_STRUCTURE) THEN
+	  CALL IFFSEL(OUTLUN)
+	  N_JPS = N_JPS+1
+	  CALL IFFJP(STANOD,ADDR)
+	ENDIF
+
+C Is feature closed?
+
+	CLOSED = BIG_CBD.R(1).EQ.BIG_CBD.R((NROWS-1)*NCOLS+1).AND.
+     &	         BIG_CBD.R(2).EQ.BIG_CBD.R((NROWS-1)*NCOLS+2)
+
+C Check for one-vec ftrs with zero length
+
+	IF (NROWS.EQ.2.AND.CLOSED) THEN
+	  NROWS = 1
+	  CBH.NROW = 1
+	ENDIF
+
+C Prepare to write CB entry
+
+	FTR_DAT(FTR_ST,PR_FTR) = LPOSE		! note CB IFF address
+	FTR_DAT(FTR_NP,PR_FTR) = NROWS		! and No of pts
+
+C Write CB entry
+
+	CALL PUT_CB()
+
+C Count each type of ftr output
+
+	IF (NROWS.EQ.1) THEN
+	  N_PR_PFTRS = N_PR_PFTRS+1		! count point-ftrs
+	ELSE IF (CLOSED) THEN
+	  N_PR_CFTRS = N_PR_CFTRS+1		! count closed-ftrs
+	ELSE
+	  N_PR_OFTRS = N_PR_OFTRS+1		! count open-ftrs
+	ENDIF
+
+C Write JP entry if end node is different from start node
+
+	IF (HAD_STRUCTURE.AND.NROWS.GT.1) THEN
+	  N_JPS = N_JPS+1
+	  CALL IFFJP(FINNOD,ADDR)
+	ENDIF
+
+C Finally copy any other entries which come after the last CB in the
+C feature to the output file. Do NOT copy any CB entries. 
+
+	CALL IFFSEL(INLUN)
+20	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	  WRITE_FTR_IFJ = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(WRITE_FTR_IFJ,INFILE(:IN_LEN))
+	  GOTO 40
+	ENDIF
+
+	IF (IECODE.EQ.'CB') GOTO 20		! ignore CB entry
+	IF (IECODE.EQ.'JP') GOTO 20		! ignore JP entry
+	IF (IECODE.EQ.'EF') GOTO 30		! end of feature
+	CALL EIHCPY(OUTLUN)
+	GOTO 20
+
+C Write EF entry
+
+30	CALL IFFSEL(OUTLUN)
+	CALL IFFEF
+
+40	RETURN
+	END
+

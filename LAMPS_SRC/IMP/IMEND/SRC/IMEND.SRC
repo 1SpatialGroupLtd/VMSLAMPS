@@ -1,0 +1,424 @@
+	PROGRAM IMEND
+C
+***	MODULE	IMEND
+***	IDENT	05JL88
+C
+	IMPLICIT NONE
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+CMOD	Detect 'XX' codes, and set LPOSE correctly	CCB  5-Jul-1988
+CMOD	Patch range using CBs (will therefore do ZS)	CCB  9-Jan-1988
+CMOD	/RANGE qualifier added				TJH 13-Oct-1987
+CMOD	Fix format of CORRUPT message			CCB 15-Jan-1987
+CMOD	LSLLIB IFF open messages used instead of IMEND
+C	specific ones					TJH 19-Nov-1986
+CMOD	Converted to LSLLIB				TJH 21-Apr-1986
+C
+C 	Author: Clarke Brunt
+C
+C Based on old IFT, which was the work of a great many people.
+C Replaces the old MIFF, IFT sequence.
+C
+C Program to attempt to fix a broken IFF file.
+C The IFFLIB 'mend on open' facility is used to set the end-of-file
+C block to the last block allocated, so that the entire file can be
+C read.
+C The IFFLIB end-of-file pointer LPOSE is then set to the end, so that
+C IFFLIB does not complain.
+C The file is then scanned until the end is reached, or an error occurs,
+C and is neatly terminated with EF,EO,EM,EJ as required after the
+C last sanitary entry.
+C
+C The command line is just a filename, default is LSL$IF:IFF.IFF;0
+C
+C Parameters:
+	INTEGER*2	EMPTY,MAP,OVRLAY,FEATUR
+	PARAMETER (EMPTY = 99, MAP = 2, OVRLAY = 1, FEATUR = 0)
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$CMNIMEND:IMENDMSG.PAR'
+C
+C common blocks
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+C functions
+	INTEGER*4	DCL_STARTUP	! get DCL command file
+	INTEGER*4	DCL_FILE	! get filename
+	INTEGER*4	DCL_QUAL	! get qualifier
+	INTEGER*4	IFFOPN		! to open IFF file
+	INTEGER*4	EXPAND		! expand string
+C
+	EXTERNAL	IF$MND		! IFFLIB mending routine
+	EXTERNAL       	IMEND_CLD	! DCL command line definitions
+C
+C workspace:
+	INTEGER*4	ALQ
+	INTEGER*4	LSAVM
+	INTEGER*2	I
+	INTEGER*4	ISEQ
+	INTEGER*2	IECODE,IELEN
+	INTEGER*2	LEVEL
+	LOGICAL*1	HADMH
+	LOGICAL*1	HADEOP
+	INTEGER*4	LSTISQ
+	INTEGER*4	NOPTR
+	INTEGER*4	EOPTR
+	INTEGER*4	MAPNO,LSTMAP
+	INTEGER*2	OVNO,LSTOV
+	INTEGER*4	NFNO,LSTNF
+	LOGICAL*1	INMAP,INOV,INFTR
+	INTEGER*4	POSR,POSH
+	INTEGER*2	LENGTH
+	LOGICAL*4	TRUNCATE	! had /TRUNCATE
+	LOGICAL*4	ABSENT		! for function return
+	LOGICAL*4	EMPTY_FILE	! file empty?
+	LOGICAL*4	FIX_RANGE	! /RANGE specified?
+	LOGICAL*4	PRESENT		! for function return
+	LOGICAL*4	NEGATED		! for function return
+	LOGICAL*4	OK		! for error return
+	LOGICAL*4	HADCB		! had a CB entry
+	REAL*4		RANGE(4)	! calculated coordinate range
+	CHARACTER*80	CORMSG		! for message expansion
+	INTEGER		CORPTR		! length of CORMSG
+	RECORD	/IFF_CBH/	CBH
+	RECORD	/IFF_CBD/	CBD
+	REAL		XY(2,IFF_MAXCBROW)
+	INTEGER*4	COLHXY(2)
+	DATA		COLHXY/IFF_C_X,IFF_C_Y/
+C
+C ......................................................................
+C
+C
+C Initialise things.
+C
+	CALL LSL_INIT(.TRUE.)	! start collecting timing statistics
+C
+	CALL IFFTDY		! allow to continue after IFF error
+	EMPTY_FILE=.FALSE.	! assume file contains something
+C
+C Get command line
+C
+	OK=DCL_STARTUP('IMEND'		! command verb
+     &			   ,.FALSE.	! don't split parameter lists
+     &			   ,IMEND_CLD	! CLD module name
+     &			   ,.TRUE.)	! .T. - local error reporting
+C
+	IF (.NOT.OK) GOTO 140
+C
+C Get the filename, the result will be stored in /CLDCMN/ FILARY(1)
+C
+	OK=DCL_FILE('P1'		! parameter or qualifier label
+     &		   ,'LSL$IF:IFF.IFF;0'	! default filename
+     &		   ,ABSENT		! .T. if no filename found
+     &		   ,.FALSE.		! don't expect list of filenames
+     &		   ,.TRUE.)		! .T. - local error reporting
+C
+	IF (.NOT.OK) GOTO 140
+C
+C Check for /[NO]TRUNCATE
+C
+	OK=DCL_QUAL('TRUNCATE'		! qualifier name
+     &		   ,TRUNCATE		! qualifier present?
+     &		   ,PRESENT		! unused
+     &		   ,NEGATED		! unused
+     &		   ,.TRUE.)		! .T. - local error reporting
+C
+	IF (.NOT.OK) GOTO 140
+C
+C Check for /[NO]RANGE
+C
+	OK=DCL_QUAL('RANGE'		! qualifier name
+     &		   ,FIX_RANGE		! qualifier present?
+     &		   ,PRESENT		! unused
+     &		   ,NEGATED		! unused
+     &		   ,.TRUE.)		! .T. - local error reporting
+C
+	IF (.NOT.OK) GOTO 140
+C
+C open the file, mending its end of file block pointer, routine returns
+C allocation in blocks
+C
+	CALL IFFERM(.FALSE.)		! turn off IFFLIB messages
+	ALQ = IFFOPN(1,FILARY(1)(:FIL_LEN(1)),,,'Mend',IF$MND)
+	CALL IFFERM(.TRUE.)		! messages on again
+C
+	IF (IERCD.EQ.0) THEN
+	   CALL LSL_PUTMSG(LSL__IFFOPENED,FILARY(1)(:FIL_LEN(1)),'mend')
+	ELSE
+	   CALL LSL_PUTMSG(LSL__IFFMODIFY,FILARY(1)(:FIL_LEN(1)))
+	   CALL IFFERR			! add IFFLIB message
+	   GOTO 140
+	ENDIF
+C
+C calculate LPOSE appropriate to number of allocated blocks
+	ALQ = 256*(ALQ-1)
+	CALL IFFUPP(LPOSF,LPOSM,LPOSH,ALQ)
+	LEVEL = EMPTY
+	HADMH = .FALSE.
+	MAPNO = 0
+	ISEQ=0
+	NFNO = 0
+	LSTISQ = 0
+	LSTNF = -1
+	POSR = 0
+	GOTO 20
+C
+C ......................................................................
+C
+C outer loop - looking for overlays, maps or end of job
+C
+C Come here after EM, or EO with no map-header
+10	LEVEL = MAP
+	CALL EIHMK(1)
+C
+C Start here
+20	CALL IFFNXT (IECODE, IELEN)
+	IF (IELEN  .EQ.   -1) GOTO 90
+	IF (IERCD  .NE.    0) GOTO 90
+	IF (IECODE .EQ. 'XX') GOTO 90
+	POSR = LPOSR
+	POSH = LPOSH
+	LENGTH = IELEN
+	IF (IECODE .EQ. 'MH') GOTO 30
+	IF (IECODE .EQ. 'NO') THEN
+	   NOPTR = LPOSH
+	   CALL EIHRI(OVNO,1,1)
+	   IF (IERCD.NE.0) GOTO 90
+	   HADEOP = .FALSE.
+	   IF (IELEN.GE.4) THEN
+	      CALL EIHRL(EOPTR,1,3)
+	      IF (IERCD.NE.0) GOTO 90
+	      HADEOP = .TRUE.
+	   ENDIF
+	   INOV = .TRUE.
+	   GOTO 70
+	ENDIF
+	IF (IECODE .EQ. 'EJ') GOTO 90
+	GOTO 20
+C
+30	MAPNO = MAPNO+1
+	INMAP = .TRUE.
+	HADMH = .TRUE.
+	GOTO 50
+C
+C ......................................................................
+C
+C next loop - in map looking for overlays
+C
+C Come here after EO with map header
+40	LEVEL = OVRLAY
+	CALL EIHMK(1)
+C
+C Come here after MH
+50	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN  .EQ.   -1) GOTO 90
+	IF (IERCD  .NE.    0) GOTO 90
+	IF (IECODE .EQ. 'XX') GOTO 90
+	POSR = LPOSR
+	POSH = LPOSH
+	LENGTH = IELEN
+	IF (IECODE .EQ. 'NO') THEN
+	   NOPTR = LPOSH
+	   CALL EIHRI(OVNO,1,1)
+	   IF (IERCD.NE.0) GOTO 90
+	   HADEOP = .FALSE.
+	   IF (IELEN.GE.4) THEN
+	      CALL EIHRL(EOPTR,1,3)
+	      IF (IERCD.NE.0) GOTO 90
+	      HADEOP = .TRUE.
+	   ENDIF
+	   INOV = .TRUE.
+	   GOTO 70
+	ENDIF
+	IF (IECODE .EQ. 'EM') THEN
+	   CALL LSL_PUTMSG(IMEND__ENDMAP,MAPNO)
+	   INMAP = .FALSE.
+	   GOTO 10
+	ENDIF
+	IF (IECODE .EQ. 'MH') GOTO 90		! wrong!
+	GOTO 50
+C
+C ......................................................................
+C
+C middle loop - in overlay, looking for features
+C
+C Come here after EF
+60	CONTINUE
+	LSTISQ = ISEQ
+	LSTNF = NFNO
+	LSTOV = OVNO
+	LSTMAP = MAPNO
+	LEVEL = FEATUR
+	INFTR = .FALSE.
+	CALL EIHMK(1)
+C
+C Come here after NO
+70	CALL IFFNXT (IECODE, IELEN)
+	IF (IELEN  .EQ.   -1) GOTO 90
+	IF (IERCD  .NE.    0) GOTO 90
+	IF (IECODE .EQ. 'XX') GOTO 90
+	POSR = LPOSR
+	POSH = LPOSH
+	LENGTH = IELEN
+	IF (IECODE .EQ. 'NF') THEN
+	   CALL EIHRI(NFNO,1,1)
+	   CALL EIHRI(ISEQ,1,2)
+	   IF (IERCD.NE.0) GOTO 90
+	   INFTR = .TRUE.
+	   GOTO 80
+	ENDIF
+	IF (IECODE .EQ. 'NO') GOTO 90		! wrong!
+	IF (IECODE .NE. 'EO') GOTO 70
+	IF (HADEOP.AND.EOPTR.NE.LPOSH) THEN
+	   EOPTR = LPOSH
+	   CALL IFFPKE(IECODE,IELEN,NOPTR)
+	   IF (IECODE.EQ.'NO') CALL EIHWL(EOPTR,1,3)
+	   CALL IFFPKE(IECODE,IELEN,EOPTR)
+	   IF (IERCD.NE.0) GOTO 90
+	   CALL LSL_PUTMSG(IMEND__FIXEOP,OVNO)
+	ENDIF
+	CALL LSL_PUTMSG(IMEND__ENDLAY,OVNO)
+	INOV = .FALSE.
+	IF (HADMH) GOTO 40
+	GOTO 10
+C
+C ......................................................................
+C
+C inner loop - in feature, looking for end of feature
+80	CALL IFFNXT (IECODE, IELEN)
+	IF (IELEN  .EQ.   -1) GOTO 90
+	IF (IERCD  .NE.    0) GOTO 90
+	IF (IECODE .EQ. 'XX') GOTO 90
+	POSR = LPOSR
+	POSH = LPOSH
+	LENGTH = IELEN
+	IF (IECODE .EQ. 'FS') GOTO 80
+	IF (IECODE .EQ. 'TH') GOTO 80
+	IF (IECODE .EQ. 'ST') GOTO 80
+	IF (IECODE .EQ. 'ZS') GOTO 80
+	IF (IECODE .EQ. 'AC') GOTO 80
+	IF (IECODE .EQ. 'RO') GOTO 80
+	IF (IECODE .EQ. 'TX') GOTO 80
+	IF (IECODE .EQ. 'TS') GOTO 80
+	IF (IECODE .EQ. 'CS') GOTO 80
+	IF (IECODE .EQ. 'VO') GOTO 80
+	IF (IECODE .EQ. 'JP') GOTO 80
+	IF (IECODE .EQ. 'JB') GOTO 80
+	IF (IECODE .EQ. 'EF') GOTO 60
+	GOTO 90		! unexpected code
+C
+C ......................................................................
+C
+C error or end of file 
+C
+C If there were no valid entries at all, then just clear out
+90	IF (POSR.EQ.0) THEN
+	   CALL LSL_PUTMSG(IMEND__IFFEMPTY)
+	   CALL IFFCLR
+	   EMPTY_FILE=.TRUE.
+	ELSE
+C
+C where did error occur?
+	   IF (INFTR.OR.INOV.OR.INMAP) THEN
+	      CALL EXPAND('File corrupt in ')
+	      CORPTR = 0
+	      IF (INFTR) CORPTR = EXPAND('%WSfeature with FSN %N (%N), ',
+     &					CORMSG,NFNO,ISEQ)
+	      IF (INOV) CORPTR = CORPTR+EXPAND('%WSlayer %^W%N, ',
+     &					CORMSG(CORPTR+1:),OVNO)
+	      IF (INMAP) CORPTR = CORPTR+EXPAND('%WSmap %N',
+     &					CORMSG(CORPTR+1:),MAPNO)
+	      CALL LSL_PUTMSG(IMEND__CORRUPT,CORMSG(:CORPTR))
+	   ENDIF
+C
+	   IF (LSTNF.GE.0) CALL LSL_PUTMSG(IMEND__LSTFTR,
+     &					LSTNF,LSTISQ,LSTOV,LSTMAP)
+C
+C clear out all the garbage
+C
+C If /TRUNCATE (default) and there was at least one complete
+C map/layer/feature, then truncate to complete point and terminate file
+	   IF (TRUNCATE.AND.LEVEL.LT.EMPTY) THEN
+	      LSAVM = LPOSM
+	      CALL IFFUPP(LPOSF,LPOSM,LPOSH,LSAVM)! end of file at mark
+	      CALL EIHMK(0)
+C
+C and finish off the file tidily
+	      IF (LEVEL.EQ.FEATUR)        CALL IFFEF
+	      IF (LEVEL.LE.OVRLAY) THEN
+	         CALL IFFUNO(NOPTR)
+	         CALL IFFEO
+	      ENDIF
+	      IF (LEVEL.LE.MAP.AND.HADMH) CALL IFFEM
+	      CALL IFFEJ
+	   ELSE
+C
+C put end of file after last good entry, which is either at the
+C saved position of LPOSR + the length of the entry, or if this is
+C after end of file, then at the saved LPOSH.
+	      IF (LPOSR+LENGTH.LE.LPOSE) THEN
+	         CALL IFFUPP(LPOSF,LPOSM,LPOSH,POSR+LENGTH)
+	      ELSE
+	         CALL IFFUPP(LPOSF,LPOSM,LPOSH,POSH)
+	      ENDIF
+	      CALL EIHMK(0)
+	      CALL LSL_PUTMSG(IMEND__TERM)
+	   ENDIF
+	   CALL LSL_PUTMSG(IMEND__IFILREP)
+	ENDIF
+C
+C ......................................................................
+C
+C Now rewind the file and recalculate the range by scanning for all CBs?
+	IF (FIX_RANGE.AND.(.NOT.EMPTY_FILE)) THEN
+	   CALL LSL_PUTMSG(IMEND__UPRANGE)
+	   CALL IFFRWD
+	   CALL IFFIRV(1)		! want to see CB entries here
+C
+C Check that the file has a range to patch!
+	   CALL IFFNXC('RA',IELEN)
+	   IF (IELEN.EQ.-1) THEN	! no RA found?
+	      CALL LSL_PUTMSG(IMEND__NORANGE)
+	      GOTO 135
+	   ENDIF
+C
+C Initialise range to silly values
+	   RANGE(1)=1E37
+	   RANGE(2)=-1E37
+	   RANGE(3)=1E37
+	   RANGE(4)=-1E37
+	   HADCB = .FALSE.
+C
+C Loop for each CB in turn
+100	   CALL IFFNXC('CB',IELEN)
+	   IF (IELEN.EQ.-1) THEN	! no more CBs
+	      IF (.NOT.HADCB) THEN	! no CBs at all?
+	         CALL LSL_PUTMSG(IMEND__NOSTS)
+	         GOTO 135		! just close file
+	      ENDIF
+	      GOTO 130			! go to patch the range
+	   ENDIF
+	   HADCB = .TRUE.		! had a CB now
+	   CALL EIHRCB_HEAD(CBH)	! read CB header
+	   CALL EIHRCB_DATA(CBD)	! and the data
+	   CALL IFS_CB_READ(CBH,CBD,XY,2,COLHXY,1,CBH.NROW)
+	   DO 110 I=1,CBH.NROW
+	      RANGE(1)=MIN(XY(1,I),RANGE(1))
+	      RANGE(2)=MAX(XY(1,I),RANGE(2))
+	      RANGE(3)=MIN(XY(2,I),RANGE(3))
+	      RANGE(4)=MAX(XY(2,I),RANGE(4))
+110	   CONTINUE
+	   GOTO 100
+C
+C Find and patch the range entry
+130	   CALL IFFRWD
+	   CALL IFFNXC('RA',IELEN)
+	   CALL EIHWR(RANGE,4,1)
+	   CALL LSL_PUTMSG(IMEND__NEWRANGE,
+     &				 RANGE(1),RANGE(2),RANGE(3),RANGE(4))
+	ENDIF
+135	CALL IFFCLO(1)
+140	CALL LSL_EXIT
+	END

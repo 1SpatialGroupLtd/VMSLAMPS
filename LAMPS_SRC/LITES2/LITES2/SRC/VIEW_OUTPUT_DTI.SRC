@@ -1,0 +1,178 @@
+        SUBROUTINE VIEW_OUTPUT_DTI(WORK_SIZE,WORKB)
+C
+***     IDENT   10MY96
+***     MODULE  VIEW_OUTPUT_DTI
+C
+C       Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C       Written                                 RWR	Apr-1989
+C
+C	LITES2 cartographic editor VIEW DTI command.
+C
+        IMPLICIT NONE
+C
+***     PARAMETER/LSL$CMNDTI:DTILIBMSG/
+***     PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/ ! lsllib message file
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/CMN:DOUT/
+***     COMMON/LSL$CMNDTI:DTIHDR/
+***	COMMON/CMN:VIEW/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C arguments
+	INTEGER		WORK_SIZE		! size of workspace
+	BYTE		WORKB(WORK_SIZE)	! workspace
+C
+C w/s
+	LOGICAL		DTI_OPENED
+	INTEGER		DTLUN
+	INTEGER		LN		! length of file name
+	INTEGER		VC
+	EQUIVALENCE	(VC,VIEW_CURRENT)
+	INTEGER		LEVEL
+	REAL		DUMMYR
+	INTEGER		IERR
+	INTEGER		COL,ROW
+	INTEGER		NUM_COL
+	INTEGER		OFFSET
+	INTEGER		RETCOD
+	INTEGER		MAX_NUM_COLOURS
+	INTEGER		COLOUR_NEW
+	BYTE		COLOUR_NEWB(4)
+	EQUIVALENCE	(COLOUR_NEW,COLOUR_NEWB)
+	INTEGER*2	COLOUR_NEWW(2)
+	EQUIVALENCE	(COLOUR_NEW,COLOUR_NEWW)
+C
+C Functions
+	INTEGER		CALLR
+	LOGICAL		PARFILN		! parses filename
+	INTEGER		DTI_NEXT_LUN
+	INTEGER		DTI_CREATE,DTI_CLOSE
+	INTEGER		DTI_COPY_BYTE_DATA
+C
+	DTI_OPENED = .FALSE.
+C
+C has display been created (with render command?)
+	IF (.NOT.VIEW_CREATED(VC)) THEN
+	   CALL MOAN(MSG_VIEWNOTCREATED)
+	   GOTO 9990
+	ENDIF
+C
+C open DTI file
+C
+C get file name
+	TXTPTR = 80
+	RETCOD = PARFILN(TXTDSC,LN,DSTR(:DSTRL),'LSL$DTI:.DTI',.FALSE.)
+	IF (.NOT.RETCOD) THEN
+	   CALL MOAN(MSG_ERRFILENAME,DSTR(:DSTRL))
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 9990
+	ENDIF
+	TXTPTR = LN
+C
+C get a LUN
+	RETCOD = DTI_NEXT_LUN(DTLUN)
+	IF (.NOT.RETCOD) THEN
+	   CALL MOAN(MSG_TOOMANYIM)
+	   GOTO 9990
+	ENDIF
+C
+C and create it
+	RETCOD = DTI_CREATE(
+     &		DTLUN,TXTDSC,LN,DTI_LSLA,DEFAULT_LSLA_HEADER,DATA_BYTE,
+     &		VIEW_PIXELS(1,VC),VIEW_PIXELS(2,VC),
+     &		IERR)
+	IF (.NOT.RETCOD)THEN
+	   CALL MOAN(MSG_ERROPIMG,'DTI',TXTDSC)
+	   CALL LITES2_SIGNAL(RETCOD)
+	   IF (RETCOD .EQ. DTI__SYSERR) CALL LITES2_SIGNAL(IERR)
+	   GOTO 9990
+	ENDIF	
+C
+	DTI_OPENED = .TRUE.
+C
+C get maximum number of colours in overlay
+	MAX_NUM_COLOURS = 255
+	MIN_WVALUE(DTLUN) = 256
+	MAX_WVALUE(DTLUN) = -1
+C
+C retrieve view (in columns to start with)
+	NUM_COL = 0
+	DO 200, COL = 1,VIEW_PIXELS(1,VC)
+	   OFFSET = NUM_COL*VIEW_PIXELS(2,VC)
+C
+	   DO 100 ROW = 1,VIEW_PIXELS(2,VC)
+	      LEVEL = 0
+C
+	      RETCOD = CALLR(
+     &	                  VIEW_ID(VC),
+     &	                  LEVEL,
+     &	                  COL,
+     &	                  ROW,
+     &	                  DUMMYR,
+     &	                  COLOUR_NEW,
+     &	                  DUMMYR,
+     &	                  %VAL(VIEW_ADDRESSES(XVISA_READ_PIXEL)))
+C
+	      IF (.NOT.RETCOD) THEN
+	         CALL MOAN(MSG_VISLIBERR)
+	         CALL LITES2_SIGNAL(RETCOD)
+	         GOTO 9999
+	      ENDIF
+C
+	      IF (COLOUR_NEW.GT.255) THEN
+	         COLOUR_NEW = MOD((COLOUR_NEW-1),255)+1
+	      ENDIF
+C
+	      MIN_WVALUE(DTLUN) = MIN(MIN_WVALUE(DTLUN),COLOUR_NEWW(1))
+	      MAX_WVALUE(DTLUN) = MAX(MAX_WVALUE(DTLUN),COLOUR_NEWW(1))
+C
+	      WORKB(OFFSET+ROW) = COLOUR_NEWB(1)
+100	   CONTINUE
+C
+C is array full?
+	   NUM_COL = NUM_COL + 1
+	   IF ((NUM_COL+1)*VIEW_PIXELS(2,VC).GT.WORK_SIZE.OR.
+     &	            COL.EQ.VIEW_PIXELS(1,VC)) THEN
+C
+C draw this lot of columns
+	      RETCOD = DTI_COPY_BYTE_DATA(
+     &	           DTLUN,
+     &		   WORKB,
+     &	           .TRUE.,
+     &	           COL-NUM_COL+1,
+     &	           1,
+     &	           NUM_COL,
+     &	           VIEW_PIXELS(2,VC),
+     &	           IERR)
+C
+	      IF (.NOT.RETCOD)THEN
+	         CALL MOAN(MSG_FILEWRTERR,'DTI',TXTDSC)
+	         CALL LITES2_SIGNAL(RETCOD)
+	         IF (RETCOD .EQ. DTI__SYSERR) CALL LITES2_SIGNAL(IERR)
+	         GOTO 9999
+	      ENDIF	
+C
+C and reinitialise count
+	      NUM_COL = 0
+	   ENDIF
+200	CONTINUE
+C
+	GOTO 9999
+C
+9990	CALL IGNCMD
+9999	CONTINUE
+C
+	IF (DTI_OPENED) THEN
+C
+C close the file
+	   RETCOD = DTI_CLOSE(DTLUN,.TRUE.,.FALSE.,IERR)
+	   IF (.NOT.RETCOD)THEN
+	      CALL NASTY(MSG_ERRCLOSIMG,'DTI')
+	      CALL LITES2_SIGNAL(RETCOD)
+	      IF (RETCOD .EQ. DTI__SYSERR) CALL LITES2_SIGNAL(IERR)
+	   ENDIF	
+	ENDIF
+        END

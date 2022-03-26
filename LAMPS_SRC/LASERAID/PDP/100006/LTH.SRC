@@ -1,0 +1,196 @@
+	PROGRAM LTH
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+C Author M.C.Fulford
+C
+C	Created 16.July.80
+C	Last edited 18/August/80
+C
+C	Laseraid subTask - Help facility
+C
+C	This task is started by another one, which should
+C	have already sent it a data packet containing:
+C
+C	1st word/	context (integer)
+C	2nd word/	help file extension as three RAD50 letters
+C
+C	The subsequent words have formats dependent on the
+C	context:
+C
+C		Context 1 - (? xxx in Laseriad):
+C		3rd word/	mode as RAD50 character triple
+C		4th word/	command mnemonic - RAD50 again
+C				($$$ => type out keywords & mode text)
+C
+C	LTH types out whatever is asked for and then resumes
+C	the issuing task.
+C
+	PARAMETER TSKWD = 1,
+     *            CTXWD = 3,
+     *            EXTWD = 4,
+     *            MODWD = 5,
+     *            KEYWD = 6
+C
+C workspace:
+	INTEGER FIFBUF(15)		! to receive data packet
+	LOGICAL*1 FILOPN		! data file opened
+C
+C common blocks:
+***	COMMON/EXPC/
+***	COMMON/TXTC/
+C initialise
+	FILOPN = .FALSE.		! no file open yet
+C receive our data packet (or exit if none)
+	CALL RECOEX(,FIFBUF,,IDS)
+	IF (IDS .LE. 0) GOTO 100	! some error
+C open help file
+	CALL EXPAND('SY:[200,200]HELP.%5',FIFBUF(EXTWD))
+	OPEN (UNIT=1, TYPE='OLD', READONLY,
+     *        NAME=EXPBUF, ERR=120)
+	FILOPN = .TRUE.
+C type out stuff from file
+	CALL TYPHLP(FIFBUF(MODWD), FIFBUF(KEYWD))
+	GOTO 120
+C errors
+100	CALL WRITEF('RECOEX error %N.',IDS)
+	CALL WRITEF('You may have to RESume Laseraid')
+C close down file
+120	IF (FILOPN) CLOSE (UNIT=1)
+	FILOPN = .FALSE.
+C resume the issuing task
+	CALL RESUME(FIFBUF(TSKWD),IDS)
+	IF (IDS .GT. 0) GOTO 140
+	CALL WRITEF('Couldn''t RESUME %5%5 (error %N.)',
+     *              FIFBUF(TSKWD),FIFBUF(TSKWD+1),IDS)
+	CALL WRITEF('You''ll have to RESume Laseraid')
+140	CALL EXIT
+	END
+C
+C
+	SUBROUTINE RDLINE (LTYPE, KEY)
+C
+C Reads a line from help file and analyses it, guided by
+C the first character:
+C
+C	1	<eof>		end of file
+C		! comment	line is skipped
+C	2	*KEY		keyword
+C	3	#MOD		mode
+C	4	text		straight text
+C
+C arguments:
+	INTEGER LTYPE		! type of line (as above)
+	INTEGER KEY		! keyword / mode as RAD50
+***	COMMON/TXTC/
+C
+C w/s
+	BYTE PLINK,STAR,HASH	! character literals
+C
+	DATA PLINK/1H!/,STAR/1H*/,HASH/1H#/
+C
+	LTYPE = 1
+100	READ (1,120,END=140,ERR=140)TXTPTR,TXTBUF
+120	FORMAT(Q,80A1)
+C remove trailing spaces
+125	IF (TXTPTR .LE. 0) GOTO 130
+	IF (TXTBUF(TXTPTR) .NE. "40) GOTO 130
+	TXTPTR = TXTPTR-1
+	GOTO 125
+C
+130	TXTBUF(TXTPTR+1) = 0
+	LTYPE = 4
+	IF (TXTBUF(1) .EQ. PLINK) GOTO 100	! comment
+	IF (TXTBUF(1) .EQ. STAR) LTYPE = 2
+	IF (TXTBUF(1) .EQ. HASH) LTYPE = 3
+C convert key & mode words to RAD50
+	IF (LTYPE.EQ.2 .OR. LTYPE.EQ.3) CALL IRAD50(3,TXTBUF(2),KEY)
+140	RETURN
+	END
+C
+	SUBROUTINE TYPHLP(MODE,KEYWRD)
+C
+C Type out stuff from help file (open on unit 1)
+C
+C arguments:
+	INTEGER MODE	! section indicator
+	INTEGER KEYWRD	! command mnemonic
+C
+C workspace:
+	INTEGER DOLLS			! 3R$$$
+	LOGICAL*1 TYPING		! typing out text
+	LOGICAL*1 TYPKEY		! typing keys
+	INTEGER KEYCNT			! no. of keys typed on line
+	LOGICAL*1 HADTXT		! had text 'tween keywords
+	LOGICAL*1 HADANY		! had some info about subject
+	LOGICAL*1 HADKEY		! have typed out full keyword
+C
+C common block:
+***	COMMON/TXTC/
+***	COMMON/EXPC/
+C
+C data:
+	DATA DOLLS/3R$$$/
+C
+C initialise
+	HADANY = .FALSE.		! nowt typed yet
+	TYPKEY = KEYWRD.EQ.DOLLS	! don't want keys yet
+	HADKEY = .FALSE.
+C process the file
+100	IF (TYPKEY) CALL EXPAND(' ')
+	KEYCNT = 0
+C look for our mode
+120	CALL RDLINE (LINTYP, KEY)
+	GOTO (280, 120, 140, 120),LINTYP
+C is this our mode ?
+140	IF (KEY .NE. MODE .AND.
+     *      KEY .NE. DOLLS) GOTO 120
+C yes - look for keywords and type the text or keywords
+	TYPING = TYPKEY
+	HADTXT = .TRUE.
+C read and analyse lines
+160	CALL RDLINE (LINTYP, KEY)
+	GOTO (260, 180, 260, 240),LINTYP
+C keyword - what state are we in ?
+180	IF (TYPKEY) GOTO 220
+C usual mode - see if keyword matches that specified
+	IF (KEY .NE. KEYWRD) GOTO 200
+C it matches - enable typing & type full keyword
+	TYPING = .TRUE.
+	HADTXT = .FALSE.
+	IF (HADKEY) GOTO 160
+	CALL TTWLIN(' ')
+	CALL WRITEF('    %S60',TXTBUF(2))
+	CALL TTWLIN(' ')
+	HADKEY = .TRUE.
+	GOTO 160
+C no match, but we may be reading trailing aliases
+200	IF (HADTXT) TYPING = .FALSE.
+	GOTO 160
+C we're typing keyword list - add one more
+220	TYPING = .FALSE.	! only header text is typed
+	CALL APPEND('%5 ',KEY)
+	KEYCNT = KEYCNT+1
+	IF (KEYCNT .LT. 10) GOTO 160
+	CALL TTWLIN
+	CALL EXPAND(' ')
+	KEYCNT = 0
+	GOTO 160
+C normal text line - issue it (or not)
+240	HADTXT = .TRUE.
+	IF (.NOT.TYPING) GOTO 160
+	CALL TTWLIN(TXTBUF)
+	HADANY = .TRUE.
+	GOTO 160
+C end of file or end of mode section
+260	IF (KEYCNT .NE. 0) CALL TTWLIN
+	IF (HADANY .OR. TYPKEY) GOTO 300
+	CALL WRITEF('No information on %5',KEYWRD)
+	REWIND 1
+	TYPKEY = .TRUE.
+	GOTO 100
+C
+280	CALL WRITEF('No information on mode %5',MODE)
+C done
+300	RETURN
+	END

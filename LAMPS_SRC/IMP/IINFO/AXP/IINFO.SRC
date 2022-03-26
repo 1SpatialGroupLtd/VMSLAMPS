@@ -1,0 +1,517 @@
+	PROGRAM IINFO
+C
+***	MODULE IINFO
+***	IDENT  17JA91
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author :	L.A.Jones
+C
+CMOD956	/North etc. qualifiers introduced to window the IFF file
+C	Add /SYMBOLS qualifier
+C	Add /OUTPUT=filespec qualifier			JB   15-Jan-1991
+C
+CMOD	/MH_TYPE qualifier added			ST   08-Oct-1990
+CMOD898 /ABSOLUTE qualifier added			CAB  13-Jun-1990
+CMOD	/BRIEF qualifier to switch off output of
+C	entries, but report revision level		JMC  09-Feb-1990
+CMOD	FILEIO output used throughout in place of
+C	FORTRAN i/o					TJH  16-Jan-1989
+CMOD	Changed over to CBs				ACM  08-Dec-1988
+CMOD	/LAYER qualifier added
+CMOD	/HEIGHT qualifier dealt with.			JMB  25-Nov-1987
+CMOD	Open list file with STATUS='NEW' not 'UNKNOWN'	TJH  16-Jun-1987
+CMOD	IFF file opened using IFFOPEN			TJH  03-Nov-1986
+CMOD	Calls to EXIT replaced by a single call to 
+C	LSL_EXIT which sets $STATUS for us.		TJH  23-Oct-1986
+C 	Created						LAJ  11-Jun-1986
+C
+C***********************************************************************
+C***********************************************************************
+C Program to output the following information about the specified IFF 
+C file :-
+C
+C	1. Full file specification
+C	2. Range information
+C	3. History record information
+C 	4. Control point information
+C	5. Information per layer	: no. of features,
+C				  	  no. of points (2 and 3-D),
+C				     	  line length (2 and 3-D)
+C	6. Information per feature code : no. of features,
+C				  	  no. of points (2 and 3-D),
+C				     	  line length (2 and 3-D)
+C	7. Totals information
+C
+C Command syntax      :  IINFO <filespec>
+C
+C Command qualifiers  :  /[NO]MAP_DESCRIPTOR
+C			 /[NO]SCAN
+C			 /[NO]TIMINGS
+C			 /[NO]PRINTER
+C			 /[NO]HEIGHT
+C			 /[NO]LAYER
+C
+C The default is all qualifiers turned off.
+C
+C Qualifier actions :-
+C
+C If /HEIGHT is set, max and min point heights, integer contour
+C heights and real contour heights are displayed.
+C
+C If /MAP_DESCRIPTOR is set, the map descriptor information is output 
+C with the default information mentioned above.
+C
+C If /PRINTER is set, all information is written to file IINFO.LIS and 
+C automatically queued for printing.
+C
+C /SCAN causes a report on all layers to be printed instead of the 
+C default information.
+C
+C /TIMINGS causes the totals of the elapsed and CPU times to be output 
+C as well as the default information.
+C
+C /LAYER causes the feature data to be subdivided into layers.
+C
+C /NORTH = n etc. windows the IFF data
+C
+C /OUTPUT=filespec
+C
+C***********************************************************************
+C***********************************************************************
+C
+	IMPLICIT NONE
+C
+C Common blocks
+C
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNIINFO:IINFOMSG.PAR'
+	INCLUDE 'LSL$CMNIINFO:INFCMN.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE '($RMSDEF)/NOLIST'
+	INCLUDE '($SSDEF)/NOLIST'
+	INCLUDE '($STSDEF)/NOLIST'
+C 
+C Variables
+C
+	CHARACTER*128	INFILE	! For IFF filespec
+C
+	LOGICAL  	PRINTER	! Command qualifiers
+	LOGICAL  	MAP_D
+	LOGICAL  	TIMINGS
+	LOGICAL  	SCAN
+	LOGICAL  	HEIGHT  ! Flag for max/min height wanted
+	LOGICAL		ABSENT	! Qualifiers present?
+	LOGICAL		LOCAL	! Qualifiers local?
+	LOGICAL		LOCNEG	! or negated?
+	LOGICAL  	FILE_ABS
+	LOGICAL  	IS_LAYER
+C
+	LOGICAL*4 	OK	! return status
+	INTEGER	  	IERR	! 2ndary return code
+C
+	INTEGER*2	INLEN	! Length of IFF filespec
+C
+C Command language definitions
+C
+	INTEGER*4	IINFO_CLD
+	EXTERNAL 	IINFO_CLD
+C
+C Functions
+C
+	INTEGER*4	DCL_FILE	
+	INTEGER*4	DCL_QUAL
+	INTEGER*4	DCL_DBL
+	INTEGER*4	DCL_STARTUP
+	INTEGER*4	FLWOPN
+	INTEGER*4	FLWSPL
+	INTEGER*4	FLWCLO
+	INTEGER*4	IFFOPEN
+	INTEGER*4	INFO_OUT
+	INTEGER*4	SCAN_OUT
+C
+C Parameters
+C
+	PARAMETER	INLUN = 1
+	PARAMETER	OLUN  = 6
+C
+C***********************************************************************
+C
+C 	START OF CODE
+C
+C***********************************************************************
+C Initialisation
+C
+	CALL LSL_INIT			! Initialise LSLLIB
+C
+	PRINTER = .FALSE.		! Set qualifiers off
+	SYMBOL	= .FALSE.
+	MAP_D   = .FALSE.
+	TIMINGS = .FALSE.
+	SCAN    = .FALSE.
+	LOCAL   = .FALSE.
+	LOCNEG  = .FALSE.
+	HEIGHT  = .FALSE.
+	HAD_ABS = .FALSE.
+	HAD_OUT = .FALSE.		! had /OUTPUT=filespec?
+	HAD_WIN = .FALSE.		! had any window delimiters?
+	HAD_NORTH = .FALSE.
+	HAD_SOUTH = .FALSE.
+	HAD_WEST  = .FALSE.
+	HAD_EAST  = .FALSE.
+C
+	NBOUND = 0
+	SBOUND = 0
+	EBOUND = 0
+	WBOUND = 0
+C
+	OUTFILE = 'SYS$OUTPUT:'
+	OUTLEN  = 11
+C
+C***********************************************************************
+C Get command line. DCL routines return with SS$_NORMAL if all is well.
+C
+	OK = DCL_STARTUP('IINFO', .FALSE., IINFO_CLD, .TRUE.)
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C***********************************************************************
+C Check for qualifiers - /SYMBOLS
+C
+	OK = DCL_QUAL( 'SYMBOLS'
+     &			,SYMBOL			! True if found
+     &			,LOCAL			! True if found locally
+     &			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C Check for qualifiers - /PRINTER
+C
+	OK = DCL_QUAL( 'PRINTER'
+     &			,PRINTER		! True if found
+     &			,LOCAL			! True if found locally
+     &			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C Now /MAP_DESCRIPTOR
+C
+	OK = DCL_QUAL( 'MAP_DESCRIPTOR'
+     &			,MAP_D			! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C /TIMINGS
+C
+	OK = DCL_QUAL( 'TIMINGS'
+     &			,TIMINGS		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C /SCAN
+C
+	OK = DCL_QUAL( 'SCAN'
+     &			,SCAN			! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C /HEIGHT
+C
+	OK = DCL_QUAL( 'HEIGHT'
+     &			,HEIGHT			! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+
+C
+C /LAYER
+C
+	OK = DCL_QUAL( 'LAYER'
+     &			,IS_LAYER  		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C***********************************************************************
+C /REVISION_LEVEL
+C
+	OK = DCL_QUAL( 'REVISION_LEVEL'
+     &			,HAD_REV  		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C***********************************************************************
+C /MH_TYPE
+C
+	OK = DCL_QUAL( 'MH_TYPE'
+     &			,HAD_MH  		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C***********************************************************************
+C /BRIEF
+C
+	OK = DCL_QUAL( 'BRIEF'
+     &			,HAD_BRIEF		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C***********************************************************************
+C /ABSOLUTE
+C
+	OK = DCL_QUAL( 'ABSOLUTE'
+     &			,HAD_ABS		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C***********************************************************************
+C /NORTH
+C
+	OK = DCL_QUAL( 'NORTH'
+     &			,HAD_NORTH		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C get bound
+C
+	IF (HAD_NORTH) THEN
+	   OK = DCL_DBL('NORTH',.TRUE.)
+	   IF (.NOT.OK) GOTO 20
+	   HAD_WIN = .TRUE.
+	   NBOUND = DBLRAY(1)
+	ENDIF
+C
+C***********************************************************************
+C /SOUTH
+C
+	OK = DCL_QUAL( 'SOUTH'
+     &			,HAD_SOUTH		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C get bound
+C
+	IF (HAD_SOUTH) THEN
+	   OK = DCL_DBL('SOUTH',.TRUE.)
+	   IF (.NOT.OK) GOTO 20
+	   HAD_WIN = .TRUE.
+	   SBOUND = DBLRAY(1)
+	ENDIF
+C
+C***********************************************************************
+C /EAST
+C
+	OK = DCL_QUAL( 'EAST'
+     &			,HAD_EAST		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C get bound
+C
+	IF (HAD_EAST) THEN
+	   OK = DCL_DBL('EAST',.TRUE.)
+	   IF (.NOT.OK) GOTO 20
+	   HAD_WIN = .TRUE.
+	   EBOUND = DBLRAY(1)
+	ENDIF
+C
+C***********************************************************************
+C /WEST
+C
+	OK = DCL_QUAL( 'WEST'
+     &			,HAD_WEST		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+C get bound
+C
+	IF (HAD_WEST) THEN
+	   OK = DCL_DBL('WEST',.TRUE.)
+	   IF (.NOT.OK) GOTO 20
+	   HAD_WIN = .TRUE.
+	   WBOUND = DBLRAY(1)
+	ENDIF
+C
+C***********************************************************************
+C /OUTPUT=filespec (if absent, output remains SYS$OUTPUT:)
+C
+	OK = DCL_QUAL( 'OUTPUT'
+     &			,HAD_OUT		! True if found
+     &			,LOCAL			! True if found locally
+     & 			,LOCNEG			! True if negated
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) GOTO 20			! Exit, reporting error
+C
+	IF (HAD_OUT) THEN
+C
+C get the output file spec
+C
+	   OK = DCL_FILE( 'OUTPUT'
+     & 	 		  ,'IINFO.LIS;0'
+     &			  , ABSENT
+     &			  ,.FALSE.
+     &			  ,.TRUE.)
+C
+	   IF (.NOT. OK) GOTO 20
+C
+	   IF (.NOT.ABSENT) THEN
+	      OUTFILE = FILARY(1)(:FIL_LEN(1))	! Store filename
+	      OUTLEN  = FIL_LEN(1)		! Store name length
+	   ENDIF
+	ENDIF
+C
+C***********************************************************************
+C Finally get the input file spec
+C
+	OK = DCL_FILE( 'IN_FILESPEC'
+     & 			,'LSL$IF:IFF.IFF;0'
+     &			,FILE_ABS
+     &			,.FALSE.
+     &			,.TRUE.)
+C
+	IF (.NOT. OK) THEN
+	   GOTO 20				! Exit, reporting error
+	ELSE
+	   INFILE = FILARY(1)(:FIL_LEN(1))	! Store filename
+	   INLEN  = FIL_LEN(1)			! Store name length
+	ENDIF
+C
+C***********************************************************************
+C Now try to open the given IFF file - no point in going on if we can't 
+C do this! (Open for read only, with IFF input revision level 1)
+C
+	OK=IFFOPEN(INLUN,INFILE(:INLEN),,.FALSE.,1)
+C
+C Did the file open OK?
+C
+	IF (.NOT.OK) GOTO 20			! exit
+C
+C Now see if /PRINTER is set to see where to direct the output. If it 
+C is set open IINFO.LIS for the output.
+C
+	IF (PRINTER) THEN
+	   OK=FLWOPN(OLUN		! Channel
+     &		,'IINFO.LIS'		! Output filename
+     &		,IERR)			! 2ndary error code
+	ELSE
+	   OK=FLWOPN(OLUN		! Channel
+     &		,OUTFILE		! Output file 
+     &		,IERR)			! 2ndary error code
+	ENDIF
+C
+C Error opening output file?
+	IF (.NOT.OK) THEN
+	   IF (PRINTER) THEN
+	      CALL LSL_PUTMSG(IINFO__ERROPOUT,'IINFO.LIS')
+	      CALL LSL_ADDMSG(OK)
+	   ELSE
+	      CALL LSL_PUTMSG(IINFO__ERROPOUT,OUTFILE(1:OUTLEN))
+	      CALL LSL_ADDMSG(OK)
+	   ENDIF
+	   IF (.NOT.IERR) CALL LSL_ADDMSG(IERR)
+	   GOTO 20
+	ENDIF
+C
+C Let the user know which file has been opened and all about it
+C
+	CALL FDAT
+C
+C***********************************************************************
+C Finally, the bit to read the entries and output the data as required.
+C
+C If the /BRIEF qualifier is specified suppress output of entries.
+C Output a blank line instead.
+C
+	IF (HAD_BRIEF) THEN
+	   CALL FLWRTF
+	   GOTO 20
+	ENDIF
+C
+	IF (.NOT. SCAN) THEN			   ! Default data requested
+	   OK = INFO_OUT(MAP_D, TIMINGS, PRINTER,  ! Allow map descriptor and
+     &				HEIGHT,IS_LAYER)   ! timings info if required
+	   IF (.NOT.OK) GOTO 10			   ! close files and exit
+	ELSE
+	   IF (MAP_D) THEN			   ! Can't have map descr.
+	      IF (.NOT. PRINTER) CALL FLWRTF
+	      CALL LSL_PUTMSG(IINFO__ERMAPD)
+	   ENDIF
+C
+	   IF (TIMINGS) THEN			   ! or timings here
+	      IF (.NOT. PRINTER) CALL FLWRTF
+	      CALL LSL_PUTMSG(IINFO__ERTIM)
+	   ENDIF
+	   OK = SCAN_OUT(PRINTER)		   ! Output scan data
+	ENDIF
+C
+C***********************************************************************
+C Finally to tidy up and exit tidily.
+C
+10	CALL IFFCLO(INLUN)			! Close IFF file
+	IF (IERCD .NE. 0) THEN			! Report if not closed 
+	   IF (.NOT. PRINTER) CALL FLWRTF	! properly
+	   CALL LSL_PUTMSG(IINFO__IFFBADCLO
+     &			   ,INFILE(1:INLEN))
+	   GOTO 20				! and exit
+	ENDIF
+C
+	IF (PRINTER) THEN
+	   OK=FLWSPL(OLUN,IERR)
+	ELSE
+	   OK=FLWCLO(OLUN,IERR)
+	ENDIF
+C
+	IF (.NOT.OK) THEN
+	   IF (PRINTER) THEN
+	      CALL LSL_PUTMSG(IINFO__ERRCLOUT,'IINFO.LIS')
+	      CALL LSL_ADDMSG(OK)
+	   ELSE
+	      CALL LSL_PUTMSG(IINFO__ERRCLOUT,OUTFILE(1:OUTLEN))
+	      CALL LSL_ADDMSG(OK)
+	   ENDIF
+	   IF (.NOT.IERR) CALL LSL_ADDMSG(IERR)
+	ENDIF
+C
+20	CALL LSL_EXIT				! and exit
+	END
+C

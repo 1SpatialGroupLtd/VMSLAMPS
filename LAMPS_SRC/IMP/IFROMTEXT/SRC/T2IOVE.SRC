@@ -1,0 +1,397 @@
+	SUBROUTINE T2IOVE
+C
+***	IDENT	17DE86
+***	MODULE	T2IOVE
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+CMOD	TC text strings now truncated at 1st null byte,
+C	NOT at the 255th!				TJH 16-Dec-1986
+CMOD	Layer output message ALWAYS output if default
+C	layer used					TJH 06-Nov-1986
+CMOD	Documentation completed				RJH 15-MAY-1984
+C	Created						RJH 13-APR-1984
+C
+C Description
+C
+C This subroutine is designed for use by the IFROMTEXT program, and its
+C purpose is to deal with IFF text entries at the overlay level.
+C On entry to this subroutine, the next entry code in the text file
+C is expected to have been read in. Junction and void entries are
+C ignored, while entries at feature level are dealt with by calling
+C another subroutine. Overlay level entries are written to the IFF file
+C as they are read from the text file. If none occur, a new overlay
+C entry is written before calling the feature level subroutine. On exit,
+C a new IFF code will normally have been read from the text file, and
+C that entry will be ready for processing at a higher level.
+C Communication with other routines is via the common block T2IPAR.
+C
+	IMPLICIT NONE
+C
+C Common blocks
+C
+***	COMMON/LSL$CMNIFROMTEXT:T2IPAR/	! global variables
+***     COMMON/LSL$CMNIFF:IFFHAN/	! IFF maintenance interface
+***	COMMON/LSL$CMNIFROMTEXT:IFROMMSG.PAR/
+***	COMMON/LSL$CMNIFROMTEXT:T2ICOM/	! global variables
+***	COMMON/LSL$CMNLSL:EXPC/		! global variables
+ 
+C
+C Functions called
+C
+	INTEGER*4	T2ICON		! converts IFF code to seq. no.
+	LOGICAL		T2IINT		! reads an integer
+	LOGICAL		T2ISTR		! reads a string
+	LOGICAL		T2IINF		! reads integer on current line
+C
+C Local variables
+C
+	INTEGER*4	NUM		! local IFF code sequence no.
+	INTEGER*4	EOPTR		! pointer to EO entry
+	INTEGER*4	NOPOSE		! first word of NO entry
+	INTEGER*2	IECODE		! IFF entry code
+	INTEGER*2	IELEN		! IFF entry length
+	INTEGER*2	IOVN		! overlay number
+	INTEGER*2	IOVS		! overlay status
+	INTEGER*2	CH		! character height
+	INTEGER*2	CX		! character spacing
+	INTEGER*2	ISSN		! symbol code
+	INTEGER*2	ISLN		! symbol library code
+	INTEGER*2	I		! counter
+	INTEGER*2	CHLEN		! CH text length
+	INTEGER*2	TCLEN		! TC text length
+	LOGICAL		HADNO		! had new overlay entry ?
+	LOGICAL		HADEO		! end of overlay ?
+	LOGICAL		FAILNO		! new overlay read failed ?
+	LOGICAL		FAILTC		! transmit comment read failed ?
+	LOGICAL		FAILCH		! character string read failed ?
+	LOGICAL		FAILCS		! character size read failed ?
+	LOGICAL		FAILSS		! symbol select read failed ?
+	LOGICAL		FAILSL		! symbol library read failed ?
+	LOGICAL		NOREAD		! integer read error ?
+	LOGICAL		NEGNO		! negative NO
+	BYTE		STR(STRSZ)	! text data
+C
+C Main Structure
+C
+C	repeat
+C	   initialisation
+C	   repeat
+C	      if entry is to be ignored then
+C		 ignore entry
+C		 if not done read next IFF entry code from text file
+C	      else if entry is at feature level then
+C		 if necessary write NO entry to IFF file
+C		 deal with entry at feature level
+C		 if new entry is NO, note end of current overlay
+C	      else if entry is at overlay level
+C		 case entry of
+C		    NO : read in data and write to IFF file
+C		    TC : read in data and write to IFF file
+C		    CH : read in data and write to IFF file
+C		    CS : read in data and write to IFF file
+C		    SS : read in data and write to IFF file
+C		    SL : read in data and write to IFF file
+C		    EO : note end of current overlay
+C		 if not done read next IFF entry code from text file
+C	   until done or end overlay or entry above overlay level
+C	   write EO pointer into NO entry
+C	until done or entry above overlay level
+C
+C Initialisation
+C
+10	IOVN = 0			! assume all zero
+	IOVS = 0
+	EOPTR = 0
+	NOPOSE = 0
+	HADNO = .FALSE.			! assume not had NO
+	HADEO = .FALSE.			! assume not had EO
+	FAILNO = .FALSE.		! assume NO read not failed
+	NEGNO = .FALSE.
+C
+C	Entry to be ignored
+C
+20	IF (ECDNUM .LE. MAXIGN) THEN
+	   CALL T2IIGN
+	   IF (.NOT. DONE) CALL T2INXT(.TRUE.)
+C
+C	Entry at feature level
+C
+	ELSE IF (ECDNUM .LE. MAXFEA) THEN
+C
+C	   If necessary write NO entry to IFF file
+C
+	   IF (.NOT. HADNO) THEN	! check not had NO
+	      IOVN = HIGHNO+1		! default overlay number
+	      HIGHNO = IOVN		! incremented highest ov'lay no.
+	      NOPOSE = LPOSE		! save IFF end fo file pointer
+	      CALL IFFNO(IOVN,IOVS,EOPTR)	! write NO entry
+	      CALL LSL_PUTMSG(IFROM__NODEFAULT)
+	      IF (LOG) THEN
+	         CALL EXPAND('NO %^W%N 0 (EO address not yet defined)'
+     &				,IOVN)
+	         CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	      ENDIF
+	      HADNO = .TRUE.		! now had NO
+	   ENDIF	! (.NOT. HADNO)
+C
+C	   Process entry at feature level
+C
+	   CALL T2IFEA
+C
+C	   If new entry is NO, had end of current overlay
+C
+	   IF (ECDNUM .EQ. T2ICON('NO')) THEN
+	      HADEO = .TRUE.
+	      CALL LSL_PUTMSG(IFROM__EODEFAULT)
+	   ENDIF
+C
+C	Entry at overlay level
+C
+	ELSE IF (ECDNUM .LE. MAXOVE) THEN
+	   NUM = ECDNUM-MAXFEA		! calculate local sequence no.
+	   GO TO (30,40,90,140,150,160,170), NUM
+C
+C	   NO entry
+C
+30	   IF (.NOT. HADNO) THEN
+C
+C	      Read data
+C
+	      FAILNO = T2IINF(IOVN,NOREAD)	! overlay number
+	      IF (FAILNO .OR. (IOVN .LT. 0 ))THEN !don't allow negatives
+		 IF (IOVN .LT. 0) THEN
+		    CALL LSL_PUTMSG(IFROM__ILLEGNEGNO,CURLIN)
+		    NEGNO = .TRUE.
+		 ENDIF
+		 IOVN = HIGHNO+1		! inc. highest o'lay no.
+		 IF (NOREAD .OR. NEGNO) THEN
+	            CALL LSL_ADDMSG(IFROM__NODEFAULT)
+		    NEGNO = .FALSE.
+		 ENDIF
+	      ELSE
+		 FAILNO = T2IINF(IOVS,NOREAD)	! overlay status
+		 IF (FAILNO ) THEN
+		    IF (NOREAD) CALL LSL_PUTMSG(IFROM__NOSTATDEF)
+		 ELSE IF (IOVS .NE. 0) THEN
+		    CALL LSL_PUTMSG(IFROM__ILLEGSTAT,CURLIN)
+		 ENDIF	! (FAILNO)
+	      ENDIF	! (FAILNO)
+C
+C	      Prepare data
+C
+	      IF (IOVN .GT. HIGHNO) HIGHNO = IOVN
+	      IOVS = 0				! status always zero
+C
+C	      Had NO even if failed
+C
+	      HADNO = .TRUE.
+C
+C	      Write entry to IFF file
+C
+	      NOPOSE = LPOSE			! save IFF eof ptr.
+	      CALL IFFNO(IOVN,IOVS,EOPTR)	! write NO entry
+	      IF (LOG) THEN
+	         CALL LSL_PUTMSG(IFROM__LAYWRT,IOVN)
+	      ENDIF
+	   ELSE
+C
+C	      Output message
+C
+	      CALL LSL_PUTMSG(IFROM__REPNOIGN,CURLIN)
+	   ENDIF	! (.NOT. HADNO)
+	   GO TO 180
+C
+C	   TC entry
+C
+40	   DO 60 I=1,STRSZ		! initialise string
+	      STR(I) = 0
+60	   CONTINUE
+	   FAILTC = T2ISTR(STR)		! read string
+	   IF (FAILTC) THEN
+	      DO 50 I=1,6			! initialise string
+	         STR(I) = 'X'
+50	      CONTINUE
+	      TCLEN=6
+	      CALL LSL_PUTMSG(IFROM__TCDEFAULT)
+	      IF (LOG) THEN
+	         CALL LSL_ADDSTR('TC "XXXXXX"')
+	      ENDIF
+	   ELSE
+	      DO 70 I=1,STRSZ
+		IF (STR(I).EQ.0) THEN
+	           TCLEN=I-1
+	           GOTO 80
+	        ENDIF
+70	      CONTINUE
+	      TCLEN=255
+	   ENDIF
+80	   IF (.NOT. HADNO) THEN	! if not had NO, default & write
+	      IOVN = HIGHNO+1
+	      HIGHNO = IOVN
+	      NOPOSE = LPOSE
+	      CALL IFFNO(IOVN,IOVS,EOPTR)
+	      CALL LSL_PUTMSG(IFROM__NODEFAULT)
+	      IF (LOG) THEN
+	         CALL EXPAND('NO %^W%N 0 (EO address not yet defined)'
+     &				,IOVN)
+	         CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	      ENDIF
+	      HADNO = .TRUE.
+	   ENDIF	! (.NOT. HADNO)
+	   CALL IFFTC(STR,TCLEN)		! write TC entry
+	   GO TO 180
+C
+C	   CH entry
+C
+90	   DO 110 I=1,STRSZ
+	      STR(I) = 0
+110	   CONTINUE
+	   FAILCH = T2ISTR(STR)			! read string
+	   IF (FAILCH) THEN
+	      DO 100 I=1,6			! default string
+	         STR(I) = 'X'
+100	      CONTINUE
+	      CHLEN=6
+	      CALL LSL_PUTMSG(IFROM__CHDEFAULT)
+	   ELSE
+	      DO 120 I=1,STRSZ
+		IF (STR(I).EQ.0) THEN
+	           CHLEN=I-1
+	           GOTO 130
+	        ENDIF
+120	      CONTINUE
+	      CHLEN=255
+	   ENDIF
+130	   IF (.NOT. HADNO) THEN	! if not had NO, default & write
+	      IOVN = HIGHNO+1
+	      HIGHNO = IOVN
+	      NOPOSE = LPOSE
+	      CALL IFFNO(IOVN,IOVS,EOPTR)
+	      IF (LOG) THEN
+	         CALL LSL_PUTMSG(IFROM__LAYWRT,IOVN)
+	      ENDIF
+	      HADNO = .TRUE.
+	   ENDIF	! (.NOT. HADNO)
+	   CALL IFFCH(STR,CHLEN)		! write CH entry
+	   GO TO 180
+C
+C	   CS entry
+C
+140	   CH = 0			! initialise data
+	   CX = 0
+	   FAILCS = T2IINT(CH)		! read data
+	   IF (.NOT. FAILCS) FAILCS = T2IINT(CX)
+	   IF (FAILCS) THEN		! if failed, skip to next entry
+	      CALL LSL_PUTMSG(IFROM__CSDEFAULT)
+	      IF (.NOT. (DONE .OR. GOTNXT)) CALL T2ISKP
+	   ENDIF	! (FAILCS)
+	   IF (.NOT. HADNO) THEN	! if not had NO, default & write
+	      IOVN = HIGHNO+1
+	      HIGHNO = IOVN
+	      NOPOSE = LPOSE
+	      CALL IFFNO(IOVN,IOVS,EOPTR)
+	      CALL LSL_PUTMSG(IFROM__NODEFAULT)
+	      IF (LOG) THEN
+	         CALL EXPAND('NO %^W%N 0 (EO address not yet defined)'
+     &				,IOVN)
+	         CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	      ENDIF
+	      HADNO = .TRUE.
+	   ENDIF	! (.NOT. HADNO)
+	   CALL IFFCS(CH,CX)		! write CS entry to IFF file
+	   GO TO 180
+C
+C	   SS entry
+C
+150	   ISSN = 0			! initialise data
+	   FAILSS = T2IINT(ISSN)	! read data
+	   IF (FAILSS) THEN		! if failed, skip to next entry
+	      CALL LSL_PUTMSG(IFROM__SSDEFAULT)
+	      IF (.NOT. (DONE .OR. GOTNXT)) CALL T2ISKP
+	   ENDIF	! (FAILSS)
+	   IF (.NOT. HADNO) THEN	! if not had NO, default & write
+	      IOVN = HIGHNO+1
+	      HIGHNO = IOVN
+	      NOPOSE = LPOSE
+	      CALL IFFNO(IOVN,IOVS,EOPTR)
+	      CALL LSL_PUTMSG(IFROM__NODEFAULT)
+	      IF (LOG) THEN
+	         CALL EXPAND('NO %^W%N 0 (EO address not yet defined)'
+     &				,IOVN)
+	         CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	      ENDIF
+	      HADNO = .TRUE.
+	   ENDIF	! (.NOT. HADNO)
+	   CALL IFFSS(ISSN)		! write SS entry
+	   GO TO 180
+C
+C	   SL entry
+C
+160	   ISLN = 0			! initialise data
+	   FAILSL = T2IINT(ISLN)	! read data
+	   IF (FAILSL) THEN		! if failed, skip to next entry
+	      CALL LSL_PUTMSG(IFROM__SLDEFAULT)
+	      IF (.NOT. (DONE .OR. GOTNXT)) CALL T2ISKP
+	   ENDIF	! (FAILSL)
+	   IF (.NOT. HADNO) THEN	! if not had NO, default & write
+	      IOVN = HIGHNO+1
+	      HIGHNO = IOVN
+	      NOPOSE = LPOSE
+	      CALL IFFNO(IOVN,IOVS,EOPTR)
+	      CALL LSL_PUTMSG(IFROM__NODEFAULT)
+	      IF (LOG) THEN
+	         CALL EXPAND('NO %^W%N 0 (EO address not yet defined)'
+     &				,IOVN)
+	         CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	      ENDIF
+	      HADNO = .TRUE.
+	   ENDIF	! (.NOT. HADNO)
+	   CALL IFFSL(ISLN)		! write SL entry to IFF file
+	   GO TO 180
+C
+C	   EO entry
+C
+170	   IF (.NOT. HADNO) THEN	! if not had NO, default & write
+	      IOVN = HIGHNO+1
+	      HIGHNO = IOVN
+	      NOPOSE = LPOSE
+	      CALL IFFNO(IOVN,IOVS,EOPTR)
+	      CALL LSL_PUTMSG(IFROM__NODEFAULT)
+	      IF (LOG) THEN
+	         CALL EXPAND('NO %^W%N 0 (EO address not yet defined)'
+     &				,IOVN)
+	         CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	      ENDIF
+	      HADNO = .TRUE.
+	   ENDIF			! (.not. hadno)
+	   HADEO = .TRUE.		! had EO entry
+C
+C	   If not done read next IFF entry code from text file
+C
+180	   IF (.NOT. DONE) CALL T2INXT(.TRUE.)
+	ENDIF	! (ECDNUM .LE. MAXIGN)
+C
+C	Repeat if not done and not had end overlay and
+C	entry at overlay level or below
+C
+	IF ((.NOT. DONE) .AND. (.NOT. HADEO)
+     &	   .AND. (ECDNUM .LE. MAXOVE)) GO TO 20
+C
+C	Write EO pointer into NO entry
+C
+	IF (HADNO) THEN
+	   EOPTR = LPOSE			! copy EO pointer
+	   CALL IFFEO				! write EO entry
+	   CALL IFFPKE(IECODE,IELEN,NOPOSE)	! go back to NO entry
+	   CALL EIHW(EOPTR,2,3)			! write EO pointer
+	ENDIF	! (HADNO)
+C
+C	Repeat if not done and entry at overlay level or below
+C
+	IF ((.NOT. DONE) .AND. (ECDNUM .LE. MAXOVE)) GO TO 10
+C
+C Return
+C
+	RETURN
+	END

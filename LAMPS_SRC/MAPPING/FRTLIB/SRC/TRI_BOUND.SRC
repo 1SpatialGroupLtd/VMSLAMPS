@@ -1,0 +1,388 @@
+	LOGICAL FUNCTION TRI_BOUND(CHARST,THS_FONT,NPTS,XY,BORDER,HWTXT)
+C
+***	MODULE	TRI_BOUND
+***	IDENT	20NO97
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author  R J Hulme
+C
+C Created					RJH	22-Jan-1986
+C
+C returns FALSE if it succeeds in returning NPTS points in XY, the local
+C coordinates of the bounding polygon of string CHARST using font FONT.
+C The coordinates are with respect to the defining point of the first 
+C character.
+C 
+C
+	IMPLICIT NONE
+C
+C args
+C
+	CHARACTER*(*)	CHARST		! character string
+	INTEGER*2	THS_FONT	! font (-ve for italic version)
+	INTEGER*4	NPTS		! no. of coordinates
+	REAL		XY(2,*)		! coordinates
+	REAL		BORDER		! border as proportion of height
+	LOGICAL		HWTXT		! use hardware text
+C					! (optional, default false)
+C common
+C
+***	COMMON/HERE:FRTTMP/
+***	COMMON/HERE:FRTTRI_PRIVATE/
+***	COMMON/LSL$CMNFRT:SRIVEC/
+C
+C functions called
+C
+	LOGICAL		TRI_BOUND_SUB
+	LOGICAL		HAVE_I_AN_ARG
+C
+C w/s
+C
+	LOGICAL		HWT
+C
+C get optional argument stuff done before calling subroutine,
+C otherwise tends to access violate, trying to use missing arguments
+C
+C draw text using hardware?
+	HWT = .FALSE.
+	IF (HAVE_I_AN_ARG(6)) HWT = HWTXT
+C
+C
+C translate string if required
+	IF (TRITRN) THEN
+	   CALL LIB$MOVTC(CHARST,' ',TRNTAB,TRNSTR(:LEN(CHARST)))
+	   TRI_BOUND = TRI_BOUND_SUB(TRNSTR(:LEN(CHARST)),
+     &			THS_FONT,NPTS,XY,BORDER,HWT,
+     &			%VAL(TRIWID_LOC),%VAL(TRIFNT_LOC),
+     &			%VAL(SRIVEC(XSRI_STRING_BOUNDS)))
+	ELSE
+	   TRI_BOUND = TRI_BOUND_SUB(CHARST,THS_FONT,NPTS,XY,BORDER,HWT,
+     &			%VAL(TRIWID_LOC),%VAL(TRIFNT_LOC),
+     &			%VAL(SRIVEC(XSRI_STRING_BOUNDS)))
+	ENDIF
+C
+	RETURN
+	END
+C
+	LOGICAL FUNCTION TRI_BOUND_SUB(CHARST,THS_FONT,NPTS,XY,BORDER,
+     &		HWTXT,TRIWID,TRIFNT,SRI_STRING_BOUNDS)
+C
+***	MODULE	TRI_BOUND_SUB
+***	IDENT	04AP95
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+	IMPLICIT NONE
+C
+***	COMMON/HERE:FRTTRI_PRIVATE/	! for text widths
+***	COMMON/LSL$CMNFRT:TRIEXT/	! for character extent
+***	COMMON/HERE:FRTTMP/		! for TMPSTR
+***	COMMON/HERE:FRTWORK/		! CHAR_COUNT, UPPER, LOWER
+C
+C args
+C
+	CHARACTER*(*)	CHARST		! character string
+	INTEGER*2	THS_FONT	! font (-ve for italic version)
+	INTEGER*4	NPTS		! no. of coordinates
+	REAL		XY(2,NPTS)	! coordinates
+	REAL		BORDER		! border as proportion of height
+	LOGICAL		HWTXT		! use hardware text
+	REAL		TRIWID(TRIMXC,*)! widths for spacing
+	INTEGER*2	TRIFNT(*)	! font numbers
+	LOGICAL		SRI_STRING_BOUNDS
+	EXTERNAL	SRI_STRING_BOUNDS ! passed routine
+C
+C functions called
+C
+	LOGICAL		TRIPLT		! plots a character
+	INTEGER		TRITXT_SUB3
+	EXTERNAL	TRI_BOUND_SUB2
+C
+C w/s
+C
+	INTEGER		I,J,N,L		! counter
+	INTEGER		CHARNO		! character number
+	INTEGER		FONTPT		! pointer to font
+	INTEGER		NUMCHS		! no. of characters
+	INTEGER		FONT
+	REAL		THIS_WIDTH	! width of this character
+	REAL		MINY,MAXY
+	LOGICAL		DIAC
+C
+C init things
+C
+	TRI_BOUND_SUB = .TRUE.		! assume failure
+	FONT   = ABS(THS_FONT)		! ignore italic fonts
+	CHAR_COUNT = 0
+C
+C for HWTXT, we pass TRI_BOUND_SUB2 as a callback routine
+C whereas for ordinary text, we call it explicitly
+C
+	IF (HWTXT) THEN
+	   CALL TRITXT_SUB2(CHARST,TMPSTR,L)
+	   IF (L.GT.0) THEN
+	      TRI_BOUND_SUB = SRI_STRING_BOUNDS(TMPSTR(:L),FONT,BORDER,
+     &					TRI_BOUND_SUB2)
+	      IF (.NOT.TRI_BOUND_SUB) GOTO 25
+	   ENDIF
+	ENDIF
+C
+C check valid font
+C
+	DO 10 FONTPT=1,TRIFNC
+	   IF (TRIFNT(FONTPT).EQ.FONT) GOTO 15
+10	CONTINUE
+	CALL FRTWRT('Font %^W%N is not defined',FONT)
+	GOTO 999
+C
+C loop for each character in the string, but don't bother to check for 
+C existence of the character
+C
+C the idea is to calculate a box for each character and end up with 2 
+C strings of points; one for the tops of the characters and one for the 
+C bases 
+C
+15	GET_EXTENT = .TRUE.		! signal getting char extents
+	NUMCHS = LEN(CHARST)		! string length
+	DIAC = .FALSE.			! not a diacritical mark yet
+	I = 0
+20	I = I+1
+	IF (I.GT.NUMCHS) GOTO 25
+C
+C first find the character number and make sure it's valid
+C
+	   CHARNO = ICHAR(CHARST(I:I))
+	   IF ((CHARST(I:I).EQ.'$'.AND.TRIESC) .OR.
+     &	       (CHARST(I:I).EQ.'{'.AND.TRICC)) THEN ! its an escape sequence
+	      N = TRITXT_SUB3(CHARST(I:),CHARNO)
+	      I = I+N-1
+	   ENDIF
+	   IF (CHARNO.EQ.0) GOTO 20	! skip nulls
+C
+C get the character width
+C
+	   THIS_WIDTH = TRIWID(CHARNO,FONTPT)
+C
+C and extent
+C
+	   IF (CHARNO .EQ. ICHAR(' ')) THEN
+	      MIN_X_EXT = 0.0
+	      MAX_X_EXT = THIS_WIDTH
+	      MIN_Y_EXT = 0.0
+	      MAX_Y_EXT = 0.0
+	   ELSE
+	      IF (TRIPLT(CHARNO,FONT,0.0,0.0,1.0,0.0)) GOTO 999
+	      MIN_X_EXT = MIN_X_EXT - BORDER
+	      MAX_X_EXT = MAX_X_EXT + BORDER
+	      MIN_Y_EXT = MIN_Y_EXT - BORDER
+	      MAX_Y_EXT = MAX_Y_EXT + BORDER
+	   ENDIF
+C
+C for zero-width diacritical marks, we accumulate the min and max
+C height, then take the width from the char which follows
+	   IF (.NOT.DIAC) THEN
+	      MINY = MIN_Y_EXT
+	      MAXY = MAX_Y_EXT
+	   ELSE
+	      IF (MIN_Y_EXT.LT.MINY) MINY = MIN_Y_EXT
+	      IF (MAX_Y_EXT.GT.MAXY) MAXY = MAX_Y_EXT
+	   ENDIF
+C
+C if this is a zero-width diacritical mark, then go on to next char
+	   IF (THIS_WIDTH.EQ.0.0.AND.I.LT.NUMCHS) THEN
+	      DIAC = .TRUE.
+	   ELSE
+	      DIAC = .FALSE.
+	      IF (THIS_WIDTH.LT.0.0) THEN
+	        CALL TRI_BOUND_SUB2(THIS_WIDTH,
+     &				MAX_X_EXT,MIN_X_EXT,MINY,MAXY)
+	      ELSE
+	        CALL TRI_BOUND_SUB2(THIS_WIDTH,
+     &				MIN_X_EXT,MAX_X_EXT,MINY,MAXY)
+	      ENDIF
+	   ENDIF
+	   GOTO 20
+C
+25	GET_EXTENT = .FALSE.		! no longer getting extent
+C
+C now we transfer the points, discarding those not needed - first the 
+C points along the bottom
+C
+	J = 1
+	XY(1,1) = LOWER(1,1)
+	XY(2,1) = LOWER(2,1)
+	DO 30 I=2,2*CHAR_COUNT-1
+	   IF ((LOWER(2,I) .NE. LOWER(2,I-1)) .OR. 
+     &				(LOWER(2,I) .NE. LOWER(2,I+1))) THEN
+	      IF (J .LT. NPTS) THEN
+	         J = J + 1
+	         XY(1,J) = LOWER(1,I)
+	         XY(2,J) = LOWER(2,I)
+	      ENDIF
+	   ENDIF
+30	CONTINUE
+	IF (J .LT. NPTS) THEN
+	   J = J + 1
+	   XY(1,J) = LOWER(1,2*CHAR_COUNT)
+	   XY(2,J) = LOWER(2,2*CHAR_COUNT)
+	ENDIF
+C
+C now the ones along the top, reordering at the same time
+C
+	IF (J .LT. NPTS) THEN
+	   J = J + 1
+	   XY(1,J) = UPPER(1,2*CHAR_COUNT)
+	   XY(2,J) = UPPER(2,2*CHAR_COUNT)
+	ENDIF
+	DO 40 I=2*CHAR_COUNT-1,2,-1
+	   IF ((UPPER(2,I) .NE. UPPER(2,I-1)) .OR. 
+     &				(UPPER(2,I) .NE. UPPER(2,I+1))) THEN
+	      IF (J .LT. NPTS) THEN
+	         J = J + 1
+	         XY(1,J) = UPPER(1,I)
+	         XY(2,J) = UPPER(2,I)
+	      ENDIF
+	   ENDIF
+40	CONTINUE
+	IF (J .LT. NPTS) THEN
+	   J = J + 1
+	   XY(1,J) = UPPER(1,1)
+	   XY(2,J) = UPPER(2,1)
+	ELSE
+	   CALL FRTWRT('Too many points defining boundary of %S',CHARST)
+	   GOTO 999
+	ENDIF
+C
+C and return the number of points
+C
+	NPTS = J
+C
+C that's all
+C
+	TRI_BOUND_SUB = .FALSE.		! success
+999	RETURN
+	END
+C
+	SUBROUTINE TRI_BOUND_SUB2(WIDTH,MINX,MAXX,MINY,MAXY)
+C
+***	MODULE	TRI_BOUND_SUB2
+***	IDENT	25AU94
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+	IMPLICIT NONE
+C
+***	COMMON/HERE:FRTWORK/		! CHAR_COUNT, UPPER, LOWER
+C
+C args
+	REAL		WIDTH
+	REAL		MINX,MAXX,MINY,MAXY
+C
+C w/s
+C
+	REAL		LAST_YLO,LAST_YHI	! last extent in Y
+	REAL		STARTX		! X for defining point
+	REAL		LAST_WIDTH	! width of last character
+	SAVE		LAST_YLO,LAST_YHI,STARTX,LAST_WIDTH
+	REAL		TEMP
+C
+C initialise
+C
+	IF (CHAR_COUNT.EQ.0) THEN
+	   STARTX = 0.0			! defining point of 1st char
+	   LAST_YLO = 0.0		! assume zero
+	   LAST_YHI = 0.0		! assume zero
+	ENDIF
+C
+C next visible character
+C
+	CHAR_COUNT = CHAR_COUNT + 1
+C
+C now we calculate a box for each character - for succesive characters
+C there will be some duplication of points, but these are weeded out 
+C later
+C
+C the first character is easy
+C
+	IF (CHAR_COUNT .EQ. 1) THEN
+	   UPPER(1,1) = MINX		! upper left X
+	   LOWER(1,1) = MINX		! lower left X
+C
+C for the following characters, first calculate the new start point
+C
+	ELSE
+	   STARTX = STARTX + LAST_WIDTH
+C
+C the upper left X depends on the height of the previous character -
+C if this character is lower than the last, its x must be the same as 
+C the last character's upper right x
+C
+	   IF (MAXY .LT. LAST_YHI) THEN
+	      UPPER(1,2*CHAR_COUNT-1) = UPPER(1,2*(CHAR_COUNT-1))
+C
+C if this character is higher than the last, its x is calculated from 
+C the start point and the last character's upper right x has to be 
+C adjusted to that
+C
+	   ELSEIF (MAXY .GT. LAST_YHI) THEN
+	      UPPER(1,2*CHAR_COUNT-1) = STARTX + MINX
+	      UPPER(1,2*(CHAR_COUNT-1)) = UPPER(1,2*CHAR_COUNT-1)
+C
+C equal height character:-  x is calculated from the start point
+C
+	   ELSEIF (MAXY .EQ. LAST_YHI) THEN
+	      UPPER(1,2*CHAR_COUNT-1) = STARTX + MINX
+	   ENDIF
+C
+C the lower left X also depends on whether the previous character 
+C dropped lower than the current one -
+C if this character is lower than the last, its x is calculated from 
+C the start point and the last character's lower right x has to be 
+C adjusted to that
+C
+	   IF (MINY .LT. LAST_YLO) THEN
+	      LOWER(1,2*CHAR_COUNT-1) = STARTX + MINX
+	      LOWER(1,2*(CHAR_COUNT-1)) = LOWER(1,2*CHAR_COUNT-1)
+C
+C if this character is higher than the last, its x must be the same as 
+C the last character's lower right x
+C
+	   ELSEIF (MINY .GT. LAST_YLO) THEN
+	      LOWER(1,2*CHAR_COUNT-1) = LOWER(1,2*(CHAR_COUNT-1))
+C
+C otherwise this character's x is calculated from the start point
+C
+	   ELSEIF (MINY .EQ. LAST_YLO) THEN
+	      LOWER(1,2*CHAR_COUNT-1) = STARTX + MINX
+	   ENDIF
+C
+C if the characters don't impinge, then there is a problem. Resolved for
+C the moment by taking the mean of lower and upper x, and moving the last
+C character's right x here as well
+C
+	   IF (MINY.GT.LAST_YHI .OR. MAXY.LT.LAST_YLO) THEN
+	      TEMP=(LOWER(1,2*CHAR_COUNT-1)+UPPER(1,2*CHAR_COUNT-1))*0.5
+	      LOWER(1,2*CHAR_COUNT-1) = TEMP
+	      UPPER(1,2*CHAR_COUNT-1) = TEMP
+	      LOWER(1,2*(CHAR_COUNT-1)) = TEMP
+	      UPPER(1,2*(CHAR_COUNT-1)) = TEMP
+	   ENDIF
+	ENDIF
+C
+C the rest of the coordinates are easy
+C
+	UPPER(2,2*CHAR_COUNT-1) = MAXY		! upper left Y
+	UPPER(1,2*CHAR_COUNT ) = STARTX + MAXX	! upper right X
+	UPPER(2,2*CHAR_COUNT ) = MAXY		! upper right Y
+	LOWER(1,2*CHAR_COUNT ) = STARTX + MAXX	! lower right X
+	LOWER(2,2*CHAR_COUNT ) = MINY		! lower right Y
+	LOWER(2,2*CHAR_COUNT-1) = MINY		! lower left Y
+C
+C save details of this character
+C
+	LAST_YLO = MINY
+	LAST_YHI = MAXY
+	LAST_WIDTH = WIDTH
+C
+	RETURN
+	END

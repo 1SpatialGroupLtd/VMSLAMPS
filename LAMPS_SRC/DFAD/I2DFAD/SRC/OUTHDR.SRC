@@ -1,0 +1,279 @@
+	LOGICAL FUNCTION OUTHDR()
+C
+***	IDENT 	30JL93
+***	MODULE	OUTHDR
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England.
+C Author: M.Dhillon, 2 June 1983
+C Modified: C.C. Brunt, 24 August 1983
+C
+CMOD	Modernised to use LSLLIB and other recent developments
+C						JMB 22-Mar-1988
+CMOD	Test for and convert LEVEL 3 and 4
+C						JMC 29-Jul-1993
+C
+C
+C Function to output a manuscript header record to a DMA DLMS DFAD
+C (Defense Mapping Agency Digital Land Mass Simulation Digital Feature
+C Analysis Data) magtape, returns .FALSE. if succesful.
+C
+C The format of a header block is:
+C
+C Word	 Bits	#bits	Contents		Range
+C
+C 1	 1- 6	6	All zero
+C	 7- 9	3	Manuscript type		1-2
+C	10-12	3	Level Type		0, 7, 2, or 5
+C	13-26	14	WAG (WAC) number	1-9999
+C	27-31	5	WAG (WAC) cell		1-25
+C	32-36	5	WAG cell		1-16
+C
+C 2	 1-36	36	Latitude of origin
+C
+C 3	 1-36	36	Longitude of same
+C
+C 4	 1-18	18	Estimated latitude extent
+C	19-36	18	Estimated longitude ditto
+C
+	IMPLICIT NONE
+C
+C Common blocks
+C
+***	COMMON /HERE:SCRIPT/
+***	COMMON /LSL$CMNDLMS:DFAD/
+***	COMMON /HERE:PARAMS/
+***	COMMON /HERE:DESCR/
+***	COMMON /HERE:STATE/
+***	COMMON /LSL$CMNIFF:MHMCE/
+***	COMMON /LSL$CMNLSL:EXPC/
+C
+C Functions called
+C
+	LOGICAL		COMPLT		! process -ve 36 bit words
+	INTEGER*4	LIB$EXTZV	! extract zero bit extended
+	LOGICAL		RDINT		! to read an integer value
+C
+C Workspace
+C
+	INTEGER*4	LOWBIT		! bits to be put into low word
+	INTEGER*2	OFFSET		! index into DFABUF
+	INTEGER*4	HIHBIT		! bits to be put into high word
+	REAL*4		LOWFLT		! low 1/2 word in real
+	REAL*4		HIHFLT		! high 1/2 word in real
+	REAL*4		CONV		! conversion factor
+	LOGICAL		MINUS		! true if Univac word is -ve
+	LOGICAL		EXTRCT		! true if bits to be extracted
+	INTEGER*2	BITNUM		! bit number in field
+	INTEGER*4	CHKSUM(2)	! the checksum word
+	INTEGER*4	LATEXT		! estimated latitude extent
+	INTEGER*4	LONEXT		! estimated longitude extent
+	INTEGER*4	DFLAMO		! lat of map origin
+	INTEGER*4	DFLOMO		! long of map origin
+C
+C Code starts here
+C Assume failure is imminent
+	OUTHDR = .TRUE.
+C Reset the pointer into DFABUF
+	OFFSET = 1
+	DFAPTR = OFFSET
+C Unset the checksum
+	CHKSUM(1) = 0
+	CHKSUM(2) = 0
+C Begin by writing 6 zeroes to bits 1-6 of the first Univac 36 bit word
+	CALL LIB$INSV(0,12,6,DFABUF(OFFSET+1))
+C Bits 7-9 of that word are reserved for future use ie:also zeroes
+	CALL LIB$INSV(0,9,3,DFABUF(OFFSET+1))
+C ...and the level number of the map
+C First convert 1 and 2 to 0 and 7,
+C and 3 and 4 to 2 and 5
+	IF (MHLEV.EQ.1) THEN
+	   LEVEL=0
+	ELSEIF (MHLEV.EQ.2) THEN
+	   LEVEL=7
+	ELSEIF (MHLEV.EQ.3) THEN
+	   LEVEL=2
+	ELSEIF (MHLEV.EQ.4) THEN
+	   LEVEL=5
+	ELSE
+	   LEVEL=MHLEV
+	   CALL WRITEF( 'Unexpected level number %^W%N', LEVEL )
+	ENDIF
+	CALL LIB$INSV(LEVEL,6,3,DFABUF(OFFSET+1))
+C In order to get the WAG (WAC) information, it is necessary to unpack 
+C the various items out of MHWAC. So set this to be the current text 
+C buffer of length 8 characters.
+	CALL SETAUX(MHWAC,8)
+C Now set the window for the first integer (ie: 4 digits)
+	CALL SETWIN(1,4)
+	IF (RDINT(WAGNUM)) THEN
+	   CALL WRITEF('Error reading WAGNUM from MHWAC')
+	   GOTO 1000
+	END IF
+C ... and the second
+	CALL SETWIN( ,2)
+	IF (RDINT(WAGWAC)) THEN
+	   CALL WRITEF('Error reading WAGWAC from MHWAC')
+	   GOTO 1000
+	END IF
+C ... and the third
+	CALL SETWIN( , )
+	IF (RDINT(WAGCEL)) THEN
+	   CALL WRITEF('Error reading WAGCEL from MHWAC')
+	   GOTO 1000
+	END IF
+C Now put the WAG (WAC) number into DFABUF, in two seperate stages
+	LOWBIT = 0
+	LOWBIT = LIB$EXTZV(8,6,WAGNUM)
+	CALL LIB$INSV(LOWBIT,0,6,DFABUF(OFFSET+1))
+C ...and adjust the high word
+	CALL LIB$INSV(WAGNUM,10,8,DFABUF(OFFSET))
+C ...and next the WAG (WAC) cell
+	CALL LIB$INSV(WAGWAC,5,5,DFABUF(OFFSET))
+C ...and finish offthe first word with the WAG cell
+	CALL LIB$INSV(WAGCEL,0,5,DFABUF(OFFSET))
+C Now evaluate the checksum
+	CALL CHECK(DFABUF(OFFSET),CHKSUM)
+C The next two words are 36 bit Univac quantities to be stored as 
+C integer tenths of a second, instead of the real tenths of a second
+C found in the Map header. Also if the number's are negative then we
+C must convert them from 2's complement to 1's complement. Start with
+C the second word which is the latitude of the manuscript origin.
+C
+	MINUS = .FALSE.
+	OFFSET = OFFSET +2
+	DFAPTR = OFFSET
+	DFLAMO = MHLAMO
+	IF (DFLAMO .LT. 0) THEN
+	   MINUS = .TRUE.
+	   DFLAMO = DFLAMO * -1
+	END IF
+C Now divide by a conversion factor so that the high 1/2 word becomes
+C the dividend and the low 1/2 word the remainder.
+	CONV = FLOAT('40000'X)
+	LOWFLT = AMOD(FLOAT(DFLAMO),CONV)
+	HIHFLT = DFLAMO/CONV
+C Now convert to integers
+	LOWBIT = IFIX(LOWFLT)
+	HIHBIT = IFIX(HIHFLT)
+C .... and now put them into DFABUF
+	CALL LIB$INSV(LOWBIT,0,18,DFABUF(OFFSET))
+	CALL LIB$INSV(HIHBIT,0,18,DFABUF(OFFSET+1))
+C ....and finish of by doing the necesary conversion if the quantity 
+C is negative
+	IF (MINUS) CALL COMPLT
+C Evaluate the checksum
+	CALL CHECK(DFABUF(OFFSET),CHKSUM)
+C Now repeat the whole process for the longitude of the manuscript
+C origin
+C
+	MINUS = .FALSE.
+	OFFSET = OFFSET +2
+	DFAPTR = OFFSET
+	DFLOMO = MHLOMO
+	IF (DFLOMO .LT. 0) THEN
+	   MINUS = .TRUE.
+	   DFLOMO = DFLOMO * -1
+	END IF
+C Now divide by a conversion factor so that the high 1/2 word becomes
+C the dividend and the low 1/2 word the remainder.
+	CONV = FLOAT('40000'X)
+	LOWFLT = AMOD(FLOAT(DFLOMO),CONV)
+	HIHFLT = DFLOMO/CONV
+C Now convert to integers
+	LOWBIT = IFIX(LOWFLT)
+	HIHBIT = IFIX(HIHFLT)
+C .... and now put them into DFABUF
+	CALL LIB$INSV(LOWBIT,0,18,DFABUF(OFFSET))
+	CALL LIB$INSV(HIHBIT,0,18,DFABUF(OFFSET+1))
+C ....and finish of by doing the necesary conversion if the quantity 
+C is negative
+	IF (MINUS) CALL COMPLT
+C Evaluate the checksum
+	CALL CHECK(DFABUF(OFFSET),CHKSUM)
+C ...and the next word contains the extent (approximate) of the 
+C manuscript, again in tenths of a second, but only 1/2 words. Now
+C the quantities in the map header are 32 bit quantities so it is 
+C necessary to pull out the 18 most significant bits. Assume that the 
+C extent is always positive so ignore the most significant bit of the 
+C 32 bit VAX word. Before writing the extent check that the extent is 
+C present in the map-header, otherwise calculate it from the range.
+C Remember that each extent value must be the maximum value to the 
+C highest bounding minute. Since the range is relative to the origin,
+C for the latitude this would mean the extent value is greater than or
+C equal to the maximum latitude of any feature. Therefore check to see
+C if the value is a whole minute value, and if so that is the extent,
+C otherwise round-up to the nearest whole minute. then repeat the
+C the process for the longitude.
+C
+	IF (MHLAEX .EQ. 0 .OR. MHLOEX .EQ. 0) THEN
+	   LATEXT = IFIX(RANGE(4))
+	   IF (MOD(LATEXT,600) .NE. 0) THEN
+	      LATEXT = (LATEXT + 600) - MOD(LATEXT,600)
+	   END IF
+	   LONEXT = IFIX(RANGE(2))
+	   IF (MOD(LONEXT,600) .NE. 0) THEN
+	      LONEXT = (LONEXT + 600) - MOD(LONEXT,600)
+	   END IF
+	ELSE
+	   LATEXT = MHLAEX + 1200	! + 2 mins
+	   LONEXT = MHLOEX + 1200	! + 2 mins
+	END IF
+	LATEX = LATEXT
+	LONGEX = LONEXT
+C Now put the latitude into DFABUF
+	EXTRCT = .FALSE.
+	OFFSET = OFFSET +2
+	DFAPTR = OFFSET
+	DO 200 BITNUM=1,13
+	   IF (LATEXT .AND. ISHFT('40000000'X,-BITNUM)) THEN
+	      EXTRCT = .TRUE.
+	      GOTO 300
+	   END IF
+200	CONTINUE
+300	IF (EXTRCT) THEN
+	   LOWBIT = ISHFT(LATEXT,-(13-BITNUM))
+	ELSE
+	   LOWBIT = LATEXT
+	END IF
+	CALL LIB$INSV(LOWBIT,0,18,DFABUF(OFFSET+1))
+C ...and now repeat the whole process for the latitude of the estimated
+C extent of digital co-ordinates
+	EXTRCT = .FALSE.
+	DO 400 BITNUM=1,13
+	   IF (LONEXT .AND. ISHFT('40000000'X,-BITNUM)) THEN
+	      EXTRCT = .TRUE.
+	      GOTO 500
+	   END IF
+400	CONTINUE
+500	IF (EXTRCT) THEN
+	   LOWBIT = ISHFT(LONEXT,-(13-BITNUM))
+	ELSE
+	   LOWBIT = LONEXT
+	END IF
+	CALL LIB$INSV(LOWBIT,0,18,DFABUF(OFFSET))
+C Now evaluate the checksum
+	CALL CHECK(DFABUF(OFFSET),CHKSUM)
+C The next word is the checksum itself, so write this out to DFABUF
+	OFFSET = OFFSET + 2
+	DFAPTR = OFFSET
+	CALL LIB$INSV(CHKSUM(1),0,18,DFABUF(OFFSET))
+	CALL LIB$INSV(CHKSUM(2),0,18,DFABUF(OFFSET+1))
+C Finally the last word of the manuscript header is all zero bits, so:
+	OFFSET = OFFSET + 2
+	DFAPTR = OFFSET
+	DFABUF(OFFSET) = 0
+	DFABUF(OFFSET+1) = 0
+C Now check that everything has been done
+	OFFSET = OFFSET + 2
+	DFAPTR = OFFSET
+	IF (OFFSET .NE. 13) THEN
+	   CALL WRITEF('Error in outputting header block')
+	   GOTO 1000
+	END IF
+C ...and now write it out to magtape
+	BLKTYP = MANHED
+	CALL WRTMAG
+C ...and finish here
+	OUTHDR = .FALSE.
+1000	RETURN
+	END

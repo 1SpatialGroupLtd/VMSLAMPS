@@ -1,0 +1,191 @@
+	INTEGER*4 FUNCTION FLN_RETRIEVE_TASKS(OPERATOR,
+     &  WORKSTATION,JOB,TASKS,ELMNTS,NUM_TASK)
+C
+***	MODULE	FLN_RETRIEVE_TASKS
+***	IDENT	03MY88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    14-Apr-1988
+C
+C retrieves all tasks that may be carried out by the specified operator
+C on the given workstation. It is assumed that both are authorised for
+C the supplied job.
+C Preferable task is first one in list - task operator last worked on
+C if not finished
+C decreasing order of priority thro' array
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$CMNFLOWLINE:FLOW.PAR'
+	INCLUDE	'LSL$CMNFLOWLINE:FLOWLINEMSG.PAR'
+	INTEGER*4	SS$_NORMAL
+	EXTERNAL	SS$_NORMAL
+C
+C Arguments
+	CHARACTER*(*)	OPERATOR	! IN
+	CHARACTER*(*)   WORKSTATION	! IN
+	INTEGER*4	JOB		! IN
+	INTEGER*4       TASKS(FLN_MAX_TASK) ! OUT - array of tasks
+	INTEGER*4	NUM_TASK	! OUT - number of tasks
+	CHARACTER*(*)   ELMNTS(FLN_MAX_TASK) ! OUT - array of elements
+C
+C Functions
+	INTEGER*4	FLN_CHECK_OPERATOR_AUTH
+	INTEGER*4	FLN_CHECK_WORKSTATION_AUTH
+	INTEGER*4	FLN_RETRIEVE_CURRENT_TASK
+	INTEGER*4	FLN_CHECK_OFFLINE
+C
+C Local Variables
+	INTEGER*4	I
+	INTEGER*4	COUNT_TASK
+	CHARACTER*20	TEMP_ELMNTS(FLN_MAX_TASK) ! element array
+	CHARACTER*20	PROCS(FLN_MAX_TASK)	! procedure array
+	CHARACTER*8	TSTATUS(FLN_MAX_TASK)
+	CHARACTER*8	TSTAT
+	INTEGER*4	TEMP_TASKS(FLN_MAX_TASK)
+	LOGICAL		IS_AUTHORISED
+	INTEGER*4	TASKID
+	CHARACTER*20	PROCID
+	CHARACTER*20    ELMNTID
+	LOGICAL		THIS_TASK
+	INTEGER*4	NUM_ERR
+C
+&RDB&   DATABASE FILENAME 'LSL$FLN_DATABASE:FLOWLINE'
+C
+	FLN_RETRIEVE_TASKS = %LOC(SS$_NORMAL)
+C
+C first have to get the task on which this operator last worked 
+	FLN_RETRIEVE_TASKS= FLN_RETRIEVE_CURRENT_TASK
+     &  (OPERATOR,JOB,TASKID,ELMNTID,PROCID,TSTAT,THIS_TASK)
+	IF (.NOT. FLN_RETRIEVE_TASKS) GOTO 999
+	IF (THIS_TASK) THEN
+	   TEMP_TASKS(1) = TASKID
+	   TEMP_ELMNTS(1) = ELMNTID
+	   PROCS(1) =  PROCID
+           TSTATUS(1) = TSTAT
+	   COUNT_TASK = 1
+	ELSE  
+	   COUNT_TASK = 0
+	   TASKID = 0
+	ENDIF
+C 
+C retrieve all the inactive tasks with the given job
+	NUM_ERR = 0
+20	CONTINUE
+&RDB&   START_TRANSACTION READ_ONLY RESERVING TASK,ELEMENT,JOB,
+&RDB&   PROCEDURE  FOR SHARED
+&RDB&   READ WAIT
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_RETRIEVE_TASKS = RDB$STATUS
+		 GOTO 999
+	      ENDIF
+C
+C try again - probably deadlock
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+C
+C retrieve all the tasks in the appropriate order, except the
+C one we may already have got
+C only retrieve FLN_MAX_TASK - 1 of them
+&RDB&   FOR FIRST 999 T IN TASK
+&RDB&   CROSS J IN JOB OVER JOB_ID
+&RDB&   CROSS E IN ELEMENT OVER ELEMENT_ID 
+&RDB&   CROSS P IN PROCEDURE OVER PROCEDURE_ID
+&RDB&   WITH T.JOB_ID = JOB AND (T.TASK_STATUS = 'Inactive'
+&RDB&   OR T.TASK_STATUS = 'Offline')
+&RDB&   AND T.TASK_ID NE TASKID
+&RDB&   AND E.FLOWLINE_ID  = J.FLOWLINE_ID
+&RDB&   SORTED BY DESCENDING E.PRIORITY, DESCENDING P.PRIORITY,
+&RDB&   ASCENDING  T.TASK_ID
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_RETRIEVE_TASKS = RDB$STATUS
+&RDB&	         ROLLBACK
+		 GOTO 999
+	      ENDIF
+&RDB&	      ROLLBACK
+C
+C try again - probably deadlock
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+	   COUNT_TASK = COUNT_TASK+1
+&RDB&      GET
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_RETRIEVE_TASKS = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C try again - probably deadlock
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+&RDB&         TEMP_TASKS(COUNT_TASK) = T.TASK_ID;
+&RDB&         TEMP_ELMNTS(COUNT_TASK) = T.ELEMENT_ID;
+&RDB&         PROCS(COUNT_TASK) = P.PROCEDURE_ID;
+&RDB&         TSTATUS(COUNT_TASK) = T.TASK_STATUS
+&RDB&      END_GET
+&RDB&   END_FOR   
+&RDB&   COMMIT
+C
+C for each of the tasks check the authorisation
+C
+	NUM_TASK = 0
+	DO 30 I = 1, COUNT_TASK
+C
+C operator authorisatiion for element
+	   FLN_RETRIEVE_TASKS = 
+     &	   FLN_CHECK_OPERATOR_AUTH
+     &	   ('EL',OPERATOR,TEMP_ELMNTS(I),IS_AUTHORISED)
+	   IF (.NOT. FLN_RETRIEVE_TASKS) GOTO 999
+	   IF (.NOT. IS_AUTHORISED) GOTO 30
+C
+C operator authorisatiion for procedure
+	   FLN_RETRIEVE_TASKS = 
+     &	   FLN_CHECK_OPERATOR_AUTH
+     &	   ('PC',OPERATOR,PROCS(I),IS_AUTHORISED)
+	   IF (.NOT. FLN_RETRIEVE_TASKS) GOTO 999
+	   IF (.NOT. IS_AUTHORISED) GOTO 30
+C
+C workstation authorisation for element
+	   FLN_RETRIEVE_TASKS = 
+     &	   FLN_CHECK_WORKSTATION_AUTH
+     &	   ('EL',WORKSTATION,TEMP_ELMNTS(I),IS_AUTHORISED)
+	   IF (.NOT. FLN_RETRIEVE_TASKS) GOTO 999
+	   IF (.NOT. IS_AUTHORISED) GOTO 30
+C
+C workstation authorisation for procedure
+	   FLN_RETRIEVE_TASKS = 
+     &	   FLN_CHECK_WORKSTATION_AUTH
+     &	   ('PC',WORKSTATION,PROCS(I),IS_AUTHORISED)
+	   IF (.NOT. FLN_RETRIEVE_TASKS) GOTO 999
+	   IF (.NOT. IS_AUTHORISED) GOTO 30
+C
+C check for offline task
+C only the operator who owns the associated unfinished session
+C may carry out the task in offline state
+	   IF (TSTATUS(I) .EQ. 'Offline') THEN
+	      FLN_RETRIEVE_TASKS = FLN_CHECK_OFFLINE
+     &	      (OPERATOR,TEMP_TASKS(I),IS_AUTHORISED)
+	   ENDIF
+	   IF ( IS_AUTHORISED) THEN
+	      NUM_TASK = NUM_TASK+1  
+	      TASKS(NUM_TASK) =  TEMP_TASKS(I)
+	      ELMNTS(NUM_TASK) = TEMP_ELMNTS(I)
+	   ENDIF
+30	CONTINUE
+C
+999	RETURN
+	END

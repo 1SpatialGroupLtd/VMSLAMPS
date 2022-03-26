@@ -1,0 +1,1542 @@
+	LOGICAL FUNCTION IMAGE_FILL_REGION(IM,REG,COL,ABORT)
+C
+***	MODULE	IMAGE_FILL_REGION
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To fill a region of image with a colour
+C TRUE if fails
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:REGPAR/
+C
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:REGCMN/
+***	COMMON/CMN:SECMAP/
+***	COMMON/CMN:SETUP/
+***	COMMON/CMN:WORKS/
+C
+C arguments
+	INTEGER	IM		! image number
+	INTEGER	REG		! region number
+	INTEGER	COL		! fill colour
+	LOGICAL	ABORT		! operation aborted
+C
+C functions
+	EXTERNAL	IMAGE_SCANLINE
+	LOGICAL		INIT_SCAN_MEM
+C
+C workspace
+	INTEGER*4	CURPPT		! address of current PPT
+	INTEGER		PTS
+	INTEGER		IERR
+	REAL		ANCHOR(2)
+	INTEGER		P
+C
+	IMAGE_FILL_REGION = .TRUE.	! assume failure
+	ABORT = .FALSE.
+C
+C empty the undo cache
+	CALL CACHE_FREE
+C
+C get scan memory
+	IF (SCAN_PTS_ADDR.EQ.0) THEN
+	   IF (.NOT.INIT_SCAN_MEM(.TRUE.)) GOTO 9999
+	ENDIF
+C
+C unpack the region into scan arrays
+	PTS = 0			! no points added to scan_polygon
+	CURPPT=REGPTR(1,REG)
+10	IF (PTS.GE.SCAN_MAXPTS) GOTO 9950
+	CALL PUTLNG(%VAL(CURPPT+OFFX),%VAL(SCAN_PTS_ADDR+PTS*4))
+	PTS = PTS+1
+	CALL PUTLNG(%VAL(CURPPT+OFFY),%VAL(SCAN_PTS_ADDR+PTS*4))
+	PTS = PTS+1
+	CALL PUTLNG(%VAL(CURPPT),CURPPT)
+	IF (CURPPT.NE.REGPTR(2,REG)) GOTO 10
+C
+C close it
+	IF (PTS.GE.SCAN_MAXPTS) GOTO 9950
+	CALL PUTLNG(%VAL(SCAN_PTS_ADDR),%VAL(SCAN_PTS_ADDR+PTS*4))
+	PTS = PTS+1
+	CALL PUTLNG(%VAL(SCAN_PTS_ADDR+4),%VAL(SCAN_PTS_ADDR+PTS*4))
+	PTS = PTS+1
+C
+	SCAN_NUM_PTS = PTS/2
+	IF (SETUP) THEN
+	   P = 0
+20	   CALL TRNUSE(%VAL(SCAN_PTS_ADDR+P*8),%VAL(SCAN_PTS_ADDR+P*8+4),
+     &			SETCOF,SET_TRANSFORM)
+	   P = P+1
+	   IF (P.LT.SCAN_NUM_PTS) GOTO 20
+	ENDIF
+C
+C scan the polygon, editing the image (store info in common)
+	IMAGE_EDIT_NUMBER = IM
+	IMAGE_EDIT_COLOUR = COL
+	IMAGE_UPDATE_COUNT = 0
+	ANCHOR(1) = IMAGE_ORIGIN(1,IM)-LITES2ORG(1)
+	ANCHOR(2) = IMAGE_ORIGIN(2,IM)-LITES2ORG(2)
+	CALL SCAN_POLYGON(SCAN_NUM_PTS,
+     &			%VAL(SCAN_PTS_ADDR),
+     &			%VAL(SCAN_SIDES_ADDR),
+     &			%VAL(SCAN_SIDPTR_ADDR),
+     &			SCAN_MAXSCT,
+     &			%VAL(SCAN_INTSCT_ADDR),
+     &			%VAL(SCAN_INTPTS_ADDR),
+     &			1,			! horizontal scan
+     &			IMAGE_PIXELSIZE(2,IM),
+     &			ANCHOR,
+     &			IMAGE_SCANLINE,
+     &			IERR)			! ignore for now
+C
+	IF (IERR.NE.0) ABORT = .TRUE.	! most likely to be CTRL/C
+C
+C update the graphics
+	CALL IMAGE_UPDATE(IM)
+C
+	IMAGE_FILL_REGION = .FALSE.		! success
+	GOTO 9999
+C
+9950	CALL MOAN(MSG_STRING,'Too many points in image region')
+	GOTO 9999
+C
+9999	RETURN
+	END
+C
+C
+C
+	LOGICAL FUNCTION IMAGE_SCANLINE(NUM,X,Y)
+C
+***	IDENT   13MY93
+***	MODULE  IMAGE_SCANLINE
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					CCB	 9-Jun-1993
+C
+C	To edit a single scanline of an image
+C	Returns .TRUE. for success - .FALSE. will stop scanning
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:MAPS/
+C
+C arguments
+	INTEGER		NUM		! The number of points passed
+	REAL*4		X(2)
+	REAL*4		Y(2)
+C
+C functions
+	LOGICAL		GET_MEM
+	LOGICAL		IMAGE_SPECKLINE
+	LOGICAL		HADBREAK
+C
+C workspace
+	REAL		X1,X2
+	INTEGER		PX,PY,PX2
+	INTEGER		IM
+	EQUIVALENCE	(IM,IMAGE_EDIT_NUMBER)
+	INTEGER		NPIX,NBYT
+	INTEGER*4	ADDR
+	INTEGER		FILL
+C
+C assume failure
+	IMAGE_SCANLINE = .FALSE.
+C
+C had better have 2 and only two coordinates
+	IF (NUM .NE. 2) GOTO 999
+C
+C translate the coordinates to pixel numbers
+	IF (X(2).GT.X(1)) THEN
+	   X1 = X(1)
+	   X2 = X(2)
+	ELSE
+	   X1 = X(2)
+	   X2 = X(1)
+	ENDIF
+	PX = NINT((X1+LITES2ORG(1)-IMAGE_ORIGIN(1,IM))/
+     &			IMAGE_PIXELSIZE(1,IM)+0.5) + 1
+	IF (PX.GT.IMAGE_COLUMNS(IM)) GOTO 900
+	IF (PX.LE.0) PX = 1
+	PX2 = NINT((X2+LITES2ORG(1)-IMAGE_ORIGIN(1,IM))/
+     &			IMAGE_PIXELSIZE(1,IM)-0.5) + 1
+	IF (PX2.LE.0) GOTO 900
+	IF (PX2.GT.IMAGE_COLUMNS(IM)) PX2 = IMAGE_COLUMNS(IM)
+	PY = NINT((Y(1)+LITES2ORG(2)-IMAGE_ORIGIN(2,IM))/
+     &			IMAGE_PIXELSIZE(2,IM)) + 1
+	IF (PY.LE.0.OR.PY.GT.IMAGE_ROWS(IM)) GOTO 900
+C
+	NPIX = PX2-PX+1
+	IF (NPIX.LE.0) THEN
+	   NPIX = 1
+	   PX = NINT(((X1+X2)/2.0+LITES2ORG(1)-IMAGE_ORIGIN(1,IM))/
+     &			IMAGE_PIXELSIZE(1,IM)) + 1
+	ENDIF
+C
+C if speckle colour is set, then we are to remove speckles from scan
+	IF (IMAGE_SPECKLE_COLOUR.GE.0) THEN
+	   IMAGE_SCANLINE = IMAGE_SPECKLINE(IM,PX,PY,NPIX)
+	   GOTO 999
+	ENDIF
+C
+	IF (HADBREAK()) GOTO 999
+C
+C are we to actually paint the scan line, or just cache it
+	IF (IMAGE_EDIT_COLOUR.EQ.-1) THEN
+C
+C just cache, and don't flag as edited or to be drawn
+	   CALL IMAGE_CACHE_RECT(IM,PX-1,PY-1,NPIX,1,0)
+	   GOTO 900
+	ENDIF
+C
+C allocate data array
+	NBYT = (NPIX-1)/8+1
+	IF (GET_MEM(IM_CACHE_ZONE,ADDR,NBYT)) GOTO 999
+C
+C fill the array either from cache (for COPY/MOVE), or with colour
+C and edit into image (applying offset for COPY/MOVE)
+	IF (IMAGE_EDIT_COLOUR.EQ.-2) THEN
+	   CALL CACHE_READ(IM,PX-1,PY-1,NPIX,1,%VAL(ADDR))
+	   CALL IMAGE_EDIT_RECT(IM,PX-1+IMAGE_MOVE(1),
+     &				   PY-1+IMAGE_MOVE(2),
+     &				   NPIX,1,%VAL(ADDR),.TRUE.)
+	ELSE
+	   FILL = 0
+	   IF (IMAGE_EDIT_COLOUR.NE.0) FILL = -1
+	   CALL VIOCLR(%VAL(ADDR),NBYT,FILL)
+	   CALL IMAGE_EDIT_RECT(IM,PX-1,PY-1,NPIX,1,%VAL(ADDR),.TRUE.)
+	ENDIF
+	CALL FREE_MEM(IM_CACHE_ZONE,ADDR,NBYT)
+C
+C update picture every tile's worth of scan lines
+	IMAGE_UPDATE_COUNT = IMAGE_UPDATE_COUNT+1
+	IF (IMAGE_UPDATE_COUNT.GE.IM_CACHE_PIXELS) THEN
+	   IMAGE_UPDATE_COUNT = 0
+	   CALL IMAGE_UPDATE(IM)
+	ENDIF
+C
+900	IMAGE_SCANLINE = .TRUE.		! success
+C
+999	CONTINUE
+	RETURN
+	END
+C
+C
+C
+	LOGICAL FUNCTION IMAGE_SPECKLINE(IM,PX,PY,PW)
+C
+***	MODULE	IMAGE_SPECKLINE
+***	IDENT	08JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C	To speckle remove a scanline
+C	Returns .TRUE. for success - .FALSE. will stop scanning
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:IMAGE/
+C
+C arguments
+	INTEGER	IM		! image number
+	INTEGER	PX,PY		! pixel number, from bl, start 1
+	INTEGER PW		! width
+C
+C functions
+	LOGICAL		GET_MEM
+	LOGICAL		HADBREAK
+C
+C workspace
+	INTEGER		TYPE,N
+	REAL		R
+	EQUIVALENCE	(N,R)
+	INTEGER		PIX(2)
+	INTEGER		START,NPIX	! speckle start, length
+	INTEGER		NBYT
+	INTEGER*4	ADDR
+	INTEGER		FILL
+	INTEGER		PEND
+	INTEGER		SPIX(2),RPIX(2),MPIX(2)
+	INTEGER		COUNT
+	INTEGER		DX,DY
+	INTEGER		LIM(4)
+C
+	IMAGE_SPECKLINE = .FALSE.	! assume failure
+C
+	PIX(1) = PX
+	PIX(2) = PY
+
+	PEND = PX+PW-1
+C
+C find a pixel with the speckle colour
+10	CALL IMAGEPIXEL(TYPE,N,R,IM,PIX)
+	IF (N.EQ.IMAGE_SPECKLE_COLOUR) GOTO 20
+15	PIX(1) = PIX(1)+1
+	IF (PIX(1).GT.PEND) GOTO 990
+	GOTO 10
+C
+C now got a speckle colour pixel - look for a non-speckle one
+20	START = PIX(1)		! potential start of speckle
+30	PIX(1) = PIX(1)+1
+	IF (PIX(1).GT.IMAGE_COLUMNS(IM)) GOTO 40 ! off end of image
+	CALL IMAGEPIXEL(TYPE,N,R,IM,PIX)
+	IF (N.NE.IMAGE_SPECKLE_COLOUR) GOTO 40	! found non-speckle
+C
+C still in the speckle - check if speckle size is exceeded
+C and we are past the end of the scan, then done
+	IF (PIX(1)-START.GE.IMAGE_SPECKLE(1) .AND.
+     &			PIX(1).GT.PEND) GOTO 990
+	GOTO 30
+C
+C got a chunk of speckle colour
+C If too big, then back to find another
+40	NPIX = PIX(1) - START
+	IF (NPIX.GT.IMAGE_SPECKLE(1)) GOTO 15
+C
+C so we have a speckle sized run on the scanline
+C Use the REGION IMAGE code to trace the boundary of the speckle
+C rejecting it if size exceeds speckle size
+	SPIX(1) = PIX(1)
+	SPIX(2) = PIX(2)
+	LIM(1) = START
+	LIM(2) = PIX(1)
+	LIM(3) = PIX(2)
+	LIM(4) = PIX(2) + 1
+	GOTO 200
+C
+C go right until get a different value
+100	IF (HADBREAK()) GOTO 999
+	SPIX(1) = SPIX(1)+1
+	IF (SPIX(1).GT.IMAGE_COLUMNS(IM)) GOTO 200
+	CALL IMAGEPIXEL(TYPE,N,R,IM,SPIX)
+	IF (N.EQ.IMAGE_SPECKLE_COLOUR) GOTO 100	! still same value
+C
+C hit edge of image, or a non-speckle pixel value
+C set off upwards
+200	DX = 0
+	DY = 1
+	SPIX(1) = SPIX(1)-1	! back up to last speckle pixel
+	RPIX(1) = SPIX(1)	! begin at starting point
+	RPIX(2) = SPIX(2)
+C
+C temporarily down one - function does top right, we want bottom
+	COUNT = 0		! count angles turned
+	MPIX(1) = RPIX(1)	! max rightwards pixel
+	MPIX(2) = RPIX(2)
+C
+C now step
+300	IF (HADBREAK()) GOTO 999
+	CALL REG_IMAGE_STEP(0,IM,IMAGE_SPECKLE_COLOUR,
+     &				RPIX,DX,DY,IMAGE_CONNECT_DIAG,COUNT)
+	IF (RPIX(1).GT.MPIX(1)) THEN
+	   MPIX(1) = RPIX(1)	! new max rightwards
+	   MPIX(2) = RPIX(2)
+	ENDIF
+	LIM(1) = MIN( LIM(1), RPIX(1) )
+	LIM(2) = MAX( LIM(2), RPIX(1)+1 )
+	LIM(3) = MIN( LIM(3), RPIX(2) )
+	LIM(4) = MAX( LIM(4), RPIX(2)+1 )
+C
+	IF (LIM(2)-LIM(1).GT.IMAGE_SPECKLE(1) .OR.
+     &	    LIM(4)-LIM(3).GT.IMAGE_SPECKLE(2)) GOTO 15
+C
+C check if (about to be) back where started
+C (see REG_IMAGE_POINT) - we are testing whether the next point
+C  to be inserted would be the starting point, and using *2 to keep
+C  in as integer)
+	IF (2*RPIX(1)+DX+DY .NE. 2*SPIX(1)+1) GOTO 300
+	IF (2*RPIX(2)+DY-DX .NE. 2*SPIX(2)-1) GOTO 300
+C
+C if allowing diagonal connection, then still may not have finished
+C If we are approaching from left (DX=1) then test pixel below right
+C to see if we are about to turn downwards
+	IF (IMAGE_CONNECT_DIAG.AND.DX.EQ.1) THEN
+	   RPIX(1) = RPIX(1)+1
+	   RPIX(2) = RPIX(2)-1
+	   IF (RPIX(1).GT.IMAGE_COLUMNS(IM)) GOTO 400
+	   IF (RPIX(2).LE.0) GOTO 400
+	   CALL IMAGEPIXEL(TYPE,N,R,IM,RPIX)
+	   IF (N.NE.IMAGE_SPECKLE_COLOUR) GOTO 400
+	   RPIX(1) = RPIX(1)-1
+	   RPIX(2) = RPIX(2)+1
+	   GOTO 300
+	ENDIF
+C
+C if we have made a net number of clockwise turns, then COUNT is
+C negative, and the region must be a 'hole' not containing the
+C initial point, so continue to search rightwards for another region
+400	IF (COUNT.LT.0) THEN	! clockwise
+C
+C begin scanning again at the rightmost pixel of the region
+C The one to the right of this must be our original value
+	   SPIX(1) = MPIX(1)
+	   SPIX(2) = MPIX(2)
+	   GOTO 100
+	ENDIF
+C
+C it's really a speckle - reduce to length of scan line
+C allocate data array
+	NPIX = MIN(NPIX,PEND-START+1)
+	NBYT = (NPIX-1)/8+1
+	IF (GET_MEM(IM_CACHE_ZONE,ADDR,NBYT)) GOTO 999
+C
+C fill the array with colour and edit into image
+	FILL = 0
+	IF (IMAGE_EDIT_COLOUR.NE.0) FILL = -1
+	CALL VIOCLR(%VAL(ADDR),NBYT,FILL)
+	CALL IMAGE_EDIT_RECT(IM,START-1,PIX(2)-1,NPIX,1,
+     &			%VAL(ADDR),.TRUE.)
+	CALL FREE_MEM(IM_CACHE_ZONE,ADDR,NBYT)
+C
+C update picture every tile's worth of scan lines
+	IMAGE_UPDATE_COUNT = IMAGE_UPDATE_COUNT+1
+	IF (IMAGE_UPDATE_COUNT.GE.IM_CACHE_PIXELS) THEN
+	   IMAGE_UPDATE_COUNT = 0
+	   CALL IMAGE_UPDATE(IM)
+	ENDIF
+C
+C back to find another speckle
+	GOTO 15
+C
+990	IMAGE_SPECKLINE = .TRUE.
+999	RETURN
+	END
+C
+C
+C
+	LOGICAL FUNCTION IMAGE_SPECKLE_FILL(IM,REG,SPECK,FILL,SIZE)
+C
+***	MODULE	IMAGE_SPECKLE_FILL
+***	IDENT	29JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To remove speckles of colour SPECK in a region of image,
+C replacing with colour FILL
+C TRUE if fails
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:IMAGE/
+C
+C arguments
+	INTEGER	IM		! image number
+	INTEGER	REG		! region number
+	INTEGER	SPECK		! speckle colour
+	INTEGER	FILL		! fill colour
+	REAL	SIZE		! speckle size
+C
+C workspace
+	LOGICAL	ABORT
+C
+C functions
+	LOGICAL	IMAGE_FILL_REGION
+C
+	IMAGE_SPECKLE_FILL = .TRUE.
+C
+C set up common variables, then use region fill code
+	IMAGE_SPECKLE_COLOUR = SPECK
+	IMAGE_SPECKLE(1) = MAX(1,INT(SIZE/IMAGE_PIXELSIZE(1,IM)))
+	IMAGE_SPECKLE(2) = MAX(1,INT(SIZE/IMAGE_PIXELSIZE(2,IM)))
+C
+	IMAGE_SPECKLE_FILL = IMAGE_FILL_REGION(IM,REG,FILL,ABORT)
+C
+C flag no longer doing speckle remove (so fill works)
+	IMAGE_SPECKLE_COLOUR = -1
+C
+	RETURN
+	END
+C
+C
+C
+	SUBROUTINE IMAGE_CACHE_RECT(IM,PX,PY,PW,PH,FLAG)
+C
+***	MODULE	IMAGE_CACHE_RECT
+***	IDENT	08JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To cache a rectangle of raster
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:LSRLIB/
+C
+C arguments
+	INTEGER	IM		! image number
+	INTEGER	PX,PY		! pixel number, from bl, start 0
+	INTEGER PW,PH		! width, height
+	INTEGER	FLAG		! flag value for cache
+C
+C workspace
+	INTEGER		IX,IY
+C
+C ensure that all pixels to be updated are cached for undo
+C (just test pixels at multiples of cache tile size, plus end one)
+	DO 11 IY=PY,PY+PH-1,IM_CACHE_PIXELS
+	   DO 10 IX=PX,PX+PW-1,IM_CACHE_PIXELS
+	      CALL CACHE_TEST(IM,IX,IY,FLAG)
+10	   CONTINUE
+	   CALL CACHE_TEST(IM,PX+PW-1,IY,FLAG)
+11	CONTINUE
+C
+C PH often is 1, so worth test
+	IF (PH.GT.1) THEN
+	   IY = PY+PH-1
+	   DO 12 IX=PX,PX+PW-1,IM_CACHE_PIXELS
+	      CALL CACHE_TEST(IM,IX,IY,FLAG)
+12	   CONTINUE
+	   CALL CACHE_TEST(IM,PX+PW-1,IY,FLAG)
+	ENDIF
+C
+	RETURN
+	END
+C
+C
+C
+	SUBROUTINE IMAGE_EDIT_RECT(IM,PX,PY,PW,PH,ARRAY,CACHE)
+C
+***	MODULE	IMAGE_EDIT_RECT
+***	IDENT	08JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To edit a rectangle of raster
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:LSRLIB/
+C
+C arguments
+	INTEGER	IM		! image number
+	INTEGER	PX,PY		! pixel number, from bl, start 0
+	INTEGER PW,PH		! width, height
+	INTEGER	ARRAY(*)	! data
+	LOGICAL	CACHE		! cache old data
+C
+	INTEGER	CALLR
+C
+C workspace
+	INTEGER		RET
+	REAL*8		DX(2),DY(2)
+	INTEGER*4	DDX(2,2),DDY(2,2)
+	EQUIVALENCE	(DX,DDX),(DY,DDY)
+C
+C ensure that all pixels to be updated are cached for undo
+C and flagged as edited
+C (just test pixels at multiples of cache tile size, plus end one)
+	IF (CACHE) CALL IMAGE_CACHE_RECT(IM,PX,PY,PW,PH,1)
+C
+C write updated area into data file
+C
+C set up the buffer for the copy region
+	RET = CALLR(
+     &		%VAL(IMAGE_CREG(IM)),
+     &		ARRAY,%VAL((PW*PH-1)/8+1),
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_REG_EXTERN_BUFFER)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 800
+C
+C calculate the corners of the area of interest in the LSR file's
+C own coordinate system (i.e. using the file's original origin
+C and pixelsize)
+	DX(1) = PX*IMAGE_OPIXELSIZE(1,IM)+IMAGE_OORIGIN(1,IM)
+	DX(2) = DX(1) + PW*IMAGE_OPIXELSIZE(1,IM)
+	DY(1) = PY*IMAGE_OPIXELSIZE(2,IM)+IMAGE_OORIGIN(2,IM)
+	DY(2) = DY(1) + PH*IMAGE_OPIXELSIZE(2,IM)
+	IF (.NOT.IMAGE_AREA(IM)) THEN
+	   DX(2) = DX(2)-IMAGE_OPIXELSIZE(1,IM)
+	   DY(2) = DY(2)-IMAGE_OPIXELSIZE(2,IM)
+	ENDIF
+C
+C Can't pass a REAL*8 by value, so pass its two 4-byte halves (equivalenced
+C onto it) as two consecutive arguments
+	RET = CALLR(
+     &		%VAL(IMAGE_CREG(IM)),
+     &		%VAL(DDX(1,1)),%VAL(DDX(2,1)),
+     &		%VAL(DDY(1,1)),%VAL(DDY(2,1)),
+     &		%VAL(DDX(1,2)),%VAL(DDX(2,2)),
+     &		%VAL(DDY(1,2)),%VAL(DDY(2,2)),
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_REG_EXT_IN)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 800
+C
+C write area from buffer
+	RET = CALLR(
+     &		%VAL(IMAGE_CREG(IM)),
+     &		%VAL(LSR_ADDRESSES(XLSR_PUT_REG_COPY)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 800
+	GOTO 999
+C
+800	CALL NASTY(MSG_ERRDIMG,IM,'LSR')
+	RET = CALLR(%VAL(RET),%VAL(LSR_ADDRESSES(XLSR_PRINT_MESSAGE)))
+	CALL WRITEF
+C
+999	RETURN
+	END
+C
+C
+C
+	SUBROUTINE IMAGE_UPDATE(IM)
+C
+***	MODULE	IMAGE_UPDATE
+***	IDENT	08JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	8-June-1993
+C
+C To update the screen with edited parts of raster image
+C
+	IMPLICIT NONE
+C
+C
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:STDBFC/
+C
+C argument
+	INTEGER	IM	! image number
+C
+C do nothing if no displays
+	IF (NODISP) GOTO 999
+C
+C or if no overlays
+	IF (.NOT.OVERLAYS_INUSE) GOTO 999
+C
+C This is a jacket routine, that calls the routine that does the work
+C passing it some working space
+C Use 65536 (8*STDBFM) bytes of the graphics buffer for now 
+C (i.e. overlay on STDBFY and STDBFZ)
+C N.B. Beware the DTIB array crashing into the bottom of this buffer
+C - OK at present
+C
+	CALL IMAGE_UPDATE_SUB(IM,
+     &			      DTI_BMAX,%VAL(DTIB_ADDR),
+     &			      STDBFM*8,%VAL(STDBFY_ADDR))
+C
+999	RETURN
+	END
+C
+C
+	SUBROUTINE	IMAGE_UPDATE_SUB(IM,
+     &					 DTI_BMAX,DTIB,
+     &					 WORK_LENGTH,WORK)
+C
+***	MODULE	IMAGE_UPDATE_SUB
+***	IDENT	14FE92
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:GKSPAR/
+***	PARAMETER/CMN:MOANMESS/
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:LSRLIB/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:RFCTRL/
+***	COMMON/CMN:WORKS/
+C
+C arguments
+	INTEGER		IM
+	INTEGER	        DTI_BMAX
+	BYTE		DTIB(DTI_BMAX)
+	INTEGER		WORK_LENGTH
+	BYTE		WORK(WORK_LENGTH)
+C
+C functions
+	INTEGER	LDTI_COPY_BIT_DATA
+	INTEGER	LDTI_COPY_BIT_DATA_PRIO
+	INTEGER	CALLR
+	INTEGER	GETARR
+C
+C workspace
+	INTEGER	OV
+	INTEGER	MASKL
+	REAL	XPOS,YPOS
+	REAL	PX(2),PY(2)
+	EQUIVALENCE	(PX,XPOS),(PY,YPOS)
+	REAL	XSTEP,YSTEP
+	INTEGER	IX,IY,I
+	INTEGER	RET
+	INTEGER	COLS,ROWS
+	INTEGER	SWP(2)
+	INTEGER	NUMPIX(2)
+	INTEGER*4 BLOC
+	INTEGER	MROW,COL1
+	INTEGER	OW
+	EQUIVALENCE (OW,OVERLAY_WORKSTATION)	! abbreviation
+	INTEGER	WKID
+	REAL*8		DX(2),DY(2)
+	INTEGER*4	DDX(2,2),DDY(2,2)
+	EQUIVALENCE	(DX,DDX),(DY,DDY)
+	REAL*8		EX(2),EY(2)
+	LOGICAL		SHR		! share primary and secondary
+	INTEGER		PTR
+	INTEGER		FLAG
+	INTEGER		TX,TY
+	INTEGER		SWPIX(2),NEPIX(2)
+	LOGICAL		REAC		! reactivate workstation
+C
+C set up for plot/display
+	REAC = .FALSE.
+	WKID = OW
+	IF (WKAC(WKID).AND.WKAC(3-WKID)) THEN
+	   CALL GDAWK(3-WKID)
+	   WKAC(3-WKID) = .FALSE.
+	   REAC = .TRUE.
+	ENDIF
+	SHR = OVERLAY_SHARE.AND.WKAC(3-WKID)
+	CALL STDINI
+C
+	PTR = IM_CACHE_PTR		! head ptr
+	GOTO 20
+C
+C get next tile
+10	PTR = GETARR(%VAL(PTR),IM_TILE_NEXT)
+20	IF (PTR.EQ.0) GOTO 9000
+C
+C get flags, test if already been drawn
+	FLAG = GETARR(%VAL(PTR),IM_TILE_FLAGS)
+	IF (FLAG.NE.1) GOTO 10
+	CALL PUTARR(-1,%VAL(PTR),IM_TILE_FLAGS)
+C
+C get its pixel numbers
+	TX = GETARR(%VAL(PTR),IM_TILE_X)
+	TY = GETARR(%VAL(PTR),IM_TILE_Y)
+C
+C convert this tile into an area to be drawn (allowing for
+C reduced views, current screen area, etc.)
+	SWPIX(1) = TX+1
+	SWPIX(2) = TY+1
+	NEPIX(1) = SWPIX(1) + IM_CACHE_PIXELS - 1
+	NEPIX(2) = SWPIX(2) + IM_CACHE_PIXELS - 1
+C
+C reduced view
+	SWPIX(1) = (SWPIX(1)-1)/IMAGE_VIEW + 1
+	SWPIX(2) = (SWPIX(2)-1)/IMAGE_VIEW + 1
+	NEPIX(1) = (NEPIX(1)-1)/IMAGE_VIEW + 1
+	NEPIX(2) = (NEPIX(2)-1)/IMAGE_VIEW + 1
+C
+C screen
+C
+C For each possible overlay...
+	DO 1000 OV=1,MAXOVER
+	IF (.NOT.OVERLAY_IMAGE(OV)) GOTO 1000
+C
+C For the particular image...
+	IF (.NOT.O_IMSEL(IM,OV)) GOTO 1000	! not selected
+C
+C number of pixels in each direction
+	NUMPIX(1) = NEPIX(1)-SWPIX(1)+1
+	NUMPIX(2) = NEPIX(2)-SWPIX(2)+1
+C
+C position to draw SW corner pixel of desired area
+	XPOS = (SWPIX(1)-1-0.5+0.5/IMAGE_ZOOM)*
+     &		PIXELSIZE(1)+IMAGE_ORIGIN(1,IM)-LITES2ORG(1)
+	YPOS = (SWPIX(2)-1-0.5+0.5/IMAGE_ZOOM)*
+     &		PIXELSIZE(2)+IMAGE_ORIGIN(2,IM)-LITES2ORG(2)
+	XSTEP = 0.0
+	YSTEP = 0.0
+C
+C select bit planes for this overlay
+	MASKL = 0
+	CALL LIB$INSV(-1,
+     &		OVERLAY_OFFSET(OV,OW),OVERLAY_PLANES(OV,OW),MASKL)
+	CALL LSG_PLANE_SELECT(WKID,MASKL)
+	CALL LSG_PLANE_OFFSET(WKID,OVERLAY_OFFSET(OV,OW))
+	IF (SHR) THEN
+	   CALL LSG_PLANE_SELECT(3-WKID,MASKL)
+	   CALL LSG_PLANE_OFFSET(3-WKID,OVERLAY_OFFSET(OV,OW))
+	ENDIF
+C
+C clear the area to be drawn into (not if plotting)
+	PX(2) = PX(1) + (NUMPIX(1)-1.0/IMAGE_ZOOM)*PIXELSIZE(1)
+	PY(2) = PY(1) + (NUMPIX(2)-1.0/IMAGE_ZOOM)*PIXELSIZE(2)
+C
+C now select as many bit planes of the overlay as we are using, and
+C a plane offset to allow for the base plane from IMAGE BITS
+	IF (.NOT.IMAGE_CLASSIFY(IM)) THEN
+	   MASKL = 0
+	   CALL LIB$INSV(-1,
+     &		OVERLAY_OFFSET(OV,OW),
+     &		MIN(OVERLAY_PLANES(OV,OW),IMAGE_NUMBER(IM)),
+     &		MASKL)
+	   CALL LSG_PLANE_SELECT(WKID,MASKL)
+	   CALL LSG_PLANE_OFFSET(WKID,OVERLAY_OFFSET(OV,OW)-IMAGE_BASE(IM))
+	   IF (SHR) THEN
+	      CALL LSG_PLANE_SELECT(3-WKID,MASKL)
+	      CALL LSG_PLANE_OFFSET(3-WKID,
+     &				OVERLAY_OFFSET(OV,OW)-IMAGE_BASE(IM))
+	   ENDIF
+	ENDIF
+C
+C deal with LSR file
+C set packing mode (bit only)
+	CALL LSG_PACKING_MODE(WKID,1)! bit image
+	IF (SHR) CALL LSG_PACKING_MODE(3-WKID,1)
+C
+C LSR never rotated
+	CALL LSG_ROTATION_MODE(WKID,.FALSE.)
+	IF (SHR) CALL LSG_ROTATION_MODE(3-WKID,.FALSE.)
+C
+	IF (IMAGE_VIEW.GT.1) GOTO 800	! reduced view
+C
+C set up required area
+	RET = CALLR(
+     &		%VAL(IMAGE_PREG(IM)),
+     &		%VAL(LSR_ADDRESSES(XLSR_RESET_PTR_REG)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C calculate the corners of the area of interest in the LSR file's
+C own coordinate system (i.e. using the file's original origin
+C and pixelsize)
+	DX(1) = (SWPIX(1)-1)*
+     &		IMAGE_OPIXELSIZE(1,IM)+IMAGE_OORIGIN(1,IM)
+	DX(2) = DX(1) + NUMPIX(1)*IMAGE_OPIXELSIZE(1,IM)
+	DY(1) = (SWPIX(2)-1)*
+     &		IMAGE_OPIXELSIZE(2,IM)+IMAGE_OORIGIN(2,IM)
+	DY(2) = DY(1) + NUMPIX(2)*IMAGE_OPIXELSIZE(2,IM)
+	IF (.NOT.IMAGE_AREA(IM)) THEN
+	   DX(2) = DX(2)-IMAGE_OPIXELSIZE(1,IM)
+	   DY(2) = DY(2)-IMAGE_OPIXELSIZE(2,IM)
+	ENDIF
+C
+C Can't pass a REAL*8 by value, so pass its two 4-byte halves (equivalenced
+C onto it) as two consecutive arguments
+	RET = CALLR(
+     &		%VAL(IMAGE_PREG(IM)),
+     &		%VAL(DDX(1,1)),%VAL(DDX(2,1)),
+     &		%VAL(DDY(1,1)),%VAL(DDY(2,1)),
+     &		%VAL(DDX(1,2)),%VAL(DDX(2,2)),
+     &		%VAL(DDY(1,2)),%VAL(DDY(2,2)),
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_REG_EXT_IN)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C access area until no more
+710	RET = CALLR(
+     &		%VAL(IMAGE_PREG(IM)),
+     &		BLOC,DX(1),DY(1),DX(2),DY(2),
+     &		IX,NUMPIX(1),NUMPIX(2),I,
+     &		%VAL(LSR_ADDRESSES(XLSR_GET_REG_PTR)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+	IF (BLOC.EQ.0) GOTO 1000
+C
+C Output this area
+C Calculate which (bottom left) pixel we have been returned
+	SWP(1) = NINT((DX(1)-IMAGE_OORIGIN(1,IM))/IMAGE_OPIXELSIZE(1,IM))
+	SWP(2) = NINT((DY(1)-IMAGE_OORIGIN(2,IM))/IMAGE_OPIXELSIZE(2,IM))
+C
+C Position to top left of this tile
+	XSTEP = XPOS + (SWP(1)+1-SWPIX(1))*PIXELSIZE(1)
+	YSTEP = YPOS +
+     &		(SWP(2)+1-SWPIX(2)+NUMPIX(2)-1.0/IMAGE_ZOOM)*
+     &						PIXELSIZE(2)
+C
+	CALL LSG_PIXEL_ARRAY(
+     &		XSTEP,YSTEP,
+     &		NUMPIX(1),-NUMPIX(2),1,NUMPIX(1),1,NUMPIX(2),
+     &		IMAGE_ZOOM,
+     &		IMAGE_ZOOM,
+     &		%VAL(BLOC))
+	GOTO 710
+C
+720	CALL NASTY(MSG_ERRDIMG,IM,'LSR')
+	RET = CALLR(%VAL(RET),%VAL(LSR_ADDRESSES(XLSR_PRINT_MESSAGE)))
+	CALL WRITEF
+	GOTO 1000
+C
+C reduced view of LSR
+800	CONTINUE
+C
+	RET = CALLR(
+     &		%VAL(IMAGE_CREG(IM)),
+     &		WORK,%VAL(WORK_LENGTH),
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_REG_EXTERN_BUFFER)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C calculate the number of rows we can fit in the buffers at a time
+C allow 16 extra pixels - possible 1 each end for PIXEL_EXTENDED
+C alignment, and 7 for byte alignment
+C
+C First get number of bytes in a single scan line of un-sampled file
+	MROW = ((NUMPIX(1)*IMAGE_VIEW+16)*IMAGE_LEVELS(IM)-1)/8+1
+C
+C and now the number of these that will fit in the buffer
+	MROW = (WORK_LENGTH) / MROW
+C
+C and now the number of sampled rows that these will make
+C (need complete blocks for subsample priority)
+	IF (IMAGE_LEVELS(IM).EQ.1 .AND. IMAGE_SUBPRI(IM)) THEN
+	   MROW = MROW/IMAGE_VIEW
+	ELSE
+	   MROW = (MROW-1)/IMAGE_VIEW + 1
+	ENDIF
+C
+	IF (IMAGE_LEVELS(IM).EQ.1) THEN
+	   MROW = MIN(MROW,DTI_BMAX*8/NUMPIX(1))
+	ELSE
+	   MROW = MIN(MROW,DTI_BMAX/NUMPIX(1))
+	ENDIF
+C
+	IF (MROW.LE.0) THEN
+	   CALL MOAN(MSG_STRING,
+     &	'Cannot draw LSR at this sub-sampling factor - zoom in')
+	   GOTO 1000
+	ENDIF
+C
+	DO 820 IY = NEPIX(2),SWPIX(2),-MROW
+C
+	  ROWS = MIN(MROW,IY-SWPIX(2)+1)
+C
+C calculate the corners of the area of interest in the LSR file's
+C own coordinate system (i.e. using the file's original origin
+C and pixelsize)
+	DX(1) = ((SWPIX(1)-1)*IMAGE_VIEW)*
+     &		IMAGE_OPIXELSIZE(1,IM)+IMAGE_OORIGIN(1,IM)
+	DX(2) = DX(1) + (NUMPIX(1)*IMAGE_VIEW)*IMAGE_OPIXELSIZE(1,IM)
+	DY(1) = ((IY-ROWS)*IMAGE_VIEW)*
+     &		IMAGE_OPIXELSIZE(2,IM)+IMAGE_OORIGIN(2,IM)
+	IF (IMAGE_LEVELS(IM).EQ.1 .AND. IMAGE_SUBPRI(IM)) THEN
+	   DY(2) = DY(1) + ROWS*IMAGE_VIEW*IMAGE_OPIXELSIZE(2,IM)
+	ELSE
+	   DY(2) = DY(1) + ((ROWS-1)*IMAGE_VIEW+1)*IMAGE_OPIXELSIZE(2,IM)
+	ENDIF
+	IF (.NOT.IMAGE_AREA(IM)) THEN
+	   DX(2) = DX(2)-IMAGE_OPIXELSIZE(1,IM)
+	   DY(2) = DY(2)-IMAGE_OPIXELSIZE(2,IM)
+	ENDIF
+C
+C Can't pass a REAL*8 by value, so pass its two 4-byte halves (equivalenced
+C onto it) as two consecutive arguments
+	RET = CALLR(
+     &		%VAL(IMAGE_CREG(IM)),
+     &		%VAL(DDX(1,1)),%VAL(DDX(2,1)),
+     &		%VAL(DDY(1,1)),%VAL(DDY(2,1)),
+     &		%VAL(DDX(1,2)),%VAL(DDX(2,2)),
+     &		%VAL(DDY(1,2)),%VAL(DDY(2,2)),
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_REG_EXT_IN)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C read area into buffer
+	RET = CALLR(
+     &		%VAL(IMAGE_CREG(IM)),
+     &		BLOC,EX(1),EY(1),EX(2),EY(2),
+     &		IX,COLS,NUMPIX(2),I,
+     &		%VAL(LSR_ADDRESSES(XLSR_GET_REG_COPY)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C sample the buffer
+	COL1 = NINT((DX(1)-EX(1))/IMAGE_OPIXELSIZE(1,IM))
+C	
+	IF (IMAGE_SUBPRI(IM)) THEN
+	   RET=LDTI_COPY_BIT_DATA_PRIO(COLS,COL1,DTIB,
+     &		1,1,ROWS,NUMPIX(1),IMAGE_VIEW,IMAGE_PRIVAL(IM),
+     &		%VAL(BLOC) )
+	ELSE
+	   RET=LDTI_COPY_BIT_DATA(COLS,COL1,DTIB,
+     &		1,1,ROWS,NUMPIX(1),IMAGE_VIEW,
+     &		%VAL(BLOC) )
+	ENDIF
+C
+C Output this area
+C Position to top left
+	YSTEP = YPOS +
+     &		(IY-SWPIX(2)-1.0/IMAGE_ZOOM)*PIXELSIZE(2)
+C
+	CALL LSG_PIXEL_ARRAY(
+     &		XPOS,YSTEP,
+     &		NUMPIX(1),-ROWS,1,NUMPIX(1),1,ROWS,
+     &		IMAGE_ZOOM,
+     &		IMAGE_ZOOM,
+     &		DTIB)
+820	CONTINUE
+C
+1000	CONTINUE	! end of images, overlays
+C
+C try for next tile
+	GOTO 10
+C
+9000	CALL LSG_PLANE_SELECT(WKID,-1)
+	CALL LSG_PLANE_OFFSET(WKID,0)
+	IF (SHR) THEN
+	   CALL LSG_PLANE_SELECT(3-WKID,-1)
+	   CALL LSG_PLANE_OFFSET(3-WKID,0)
+	ENDIF
+	IF (REAC) THEN
+	   CALL GACWK(3-WKID)
+	   WKAC(3-WKID) = .TRUE.
+	ENDIF
+C
+	OCSXY(1) = CSXY(1)+1.0		! force refresh redraw
+C 
+	RETURN
+	END
+C
+C
+C
+	LOGICAL FUNCTION IMAGE_RECOVER(IM)
+C
+***	MODULE	IMAGE_RECOVER
+***	IDENT	10JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To undo image edits by using the cache of saved tiles
+C TRUE if fails
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/CMN:IMAGE/
+C
+C arguments
+	INTEGER	IM		! image number
+C
+C functions
+	INTEGER	GETARR
+C
+C workspace
+	INTEGER*4	PTR
+	INTEGER		FLAG
+C
+	IMAGE_RECOVER = .TRUE.		! assume failure
+C
+	PTR = IM_CACHE_PTR		! head ptr
+	IF (PTR.EQ.0) THEN
+	   CALL MOAN(MSG_IMNORECOVER)
+	   GOTO 9999
+	ENDIF
+C
+10	IF (PTR.EQ.0) GOTO 9000
+C
+	FLAG = GETARR(%VAL(PTR),IM_TILE_FLAGS)
+C
+	IF (FLAG.NE.0) THEN		! has been edited
+	   CALL IMAGE_EDIT_RECT(IM,
+     &			%VAL(PTR+IM_TILE_B_X),%VAL(PTR+IM_TILE_B_Y),
+     &			IM_CACHE_PIXELS,IM_CACHE_PIXELS,
+     &			%VAL(PTR+IM_TILE_B_DATA),.FALSE.)
+C
+C mark tile as not drawn, then draw it
+	   CALL PUTARR(1,%VAL(PTR),IM_TILE_FLAGS)
+	   CALL IMAGE_UPDATE(IM)
+	ENDIF
+C
+C try for next tile
+	PTR = GETARR(%VAL(PTR),IM_TILE_NEXT)
+	GOTO 10
+C
+9000	CONTINUE
+CCC	CALL IMAGE_UPDATE(IM)	! not needed if updates done above
+C
+	CALL CACHE_FREE		! discard undo cache
+	IMAGE_RECOVER = .FALSE.	! success
+C
+9999	RETURN
+	END
+C
+C
+C
+	LOGICAL FUNCTION IMAGE_BEGIN_MOVE(IM,REG,COPY)
+C
+***	MODULE	IMAGE_BEGIN_MOVE
+***	IDENT	10JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To set up ready to move a region of image
+C TRUE if fails
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:END/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:REGPAR/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:REGCMN/
+***	COMMON/CMN:STRIKE/
+***	COMMON/CMN:VARIAT/
+C
+C arguments
+	INTEGER	IM		! image number
+	INTEGER	REG		! region number
+	LOGICAL	COPY		! copy the region (or just move it)
+C
+C functions
+C
+C workspace
+	INTEGER*4	CURPPT		! address of current PPT
+C
+	IMAGE_BEGIN_MOVE = .TRUE.	! assume failure
+C
+C unpack the region into found object arrays
+	FOTOP = 0			! no points yet
+	CURPPT=REGPTR(1,REG)
+10	IF (FOTOP.GE.FOFULL) GOTO 20
+	FOTOP = FOTOP+1
+	CALL PUTLNG(%VAL(CURPPT+OFFX),FOXY(1,FOTOP))
+	CALL PUTLNG(%VAL(CURPPT+OFFY),FOXY(2,FOTOP))
+	FOZI(FOTOP) = IFF_ABSENT
+	CALL PUTLNG(%VAL(CURPPT),CURPPT)
+	IF (CURPPT.NE.REGPTR(2,REG)) GOTO 10
+C
+C close it
+	IF (FOTOP.LT.FOFULL) THEN
+	   FOTOP = FOTOP+1
+	   FOXY(1,FOTOP) = FOXY(1,1)
+	   FOXY(2,FOTOP) = FOXY(2,1)
+	   FOZI(FOTOP) = FOZI(1)
+	ENDIF
+C
+C pretend we have a found object
+20	FO = .TRUE.
+	FOVRT = 1
+	FOLST = FOTOP
+
+	FOVO = 0
+	FOPAK(PAKGT) = LINTYP
+	FOPAK(PAKSEG) = -1
+C
+C refresh it (RFDRAW requires it to be FO before IH)
+	CALL RFDRAW
+C
+	CHCOPY = COPY		! make copy, or just move
+	CHPOS = .TRUE.		! changing position
+	CALL HANDLE		! take feature into hand
+	CHCSXY(1) = CSXY(1)	! save cursor position
+	CHCSXY(2) = CSXY(2)
+	CALL PUTLNG(CSXY(3),CHCSXY(3))
+	CALL SETSTA(STATE_EDIT)	! EDIT state
+	NDMODE = END_IMAGE	! IMAGE operation
+C
+	IMAGE_BEGIN_MOVE = .FALSE.		! success
+	GOTO 9999
+C
+9999	RETURN
+	END
+C
+C
+C
+	LOGICAL FUNCTION IMAGE_END_MOVE(IM,REG,COL)
+C
+***	MODULE	IMAGE_END_MOVE
+***	IDENT	11JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To perform END command after IMAGE COPY/MOVE
+C TRUE if fails
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:SECMAP/
+***	COMMON/CMN:SETUP/
+***	COMMON/CMN:VARIAT/
+***	COMMON/CMN:WORKS/
+C
+C arguments
+	INTEGER	IM		! image number
+	INTEGER	REG		! region number
+	INTEGER	COL		! erase colour (for MOVE)
+C
+C functions
+	LOGICAL		IMAGE_FILL_REGION
+	EXTERNAL	IMAGE_SCANLINE
+C
+C workspace
+	INTEGER	C
+	REAL	ANCHOR(2)
+	INTEGER	IERR
+	REAL	TXY(2)
+	LOGICAL	ABORT
+C
+	IMAGE_END_MOVE = .TRUE.	! assume failure
+C
+C empty the undo cache
+	CALL CACHE_FREE
+C
+C see how much user moved by
+	TXY(1) = CSXY(1)
+	TXY(2) = CSXY(2)
+	IF (SETUP) THEN
+	   CALL TRNUSE(TXY(1),TXY(2),SETCOF,SET_TRANSFORM)
+	   CALL TRNUSE(CHCSXY(1),CHCSXY(2),SETCOF,SET_TRANSFORM)
+	ENDIF
+	CHCSXY(1) = TXY(1)-CHCSXY(1)	! convert to vector
+	CHCSXY(2) = TXY(2)-CHCSXY(2)
+	IMAGE_MOVE(1) = NINT(CHCSXY(1)/IMAGE_PIXELSIZE(1,IM))
+	IMAGE_MOVE(2) = NINT(CHCSXY(2)/IMAGE_PIXELSIZE(2,IM))
+	IF (IMAGE_MOVE(1).EQ.0.AND.IMAGE_MOVE(2).EQ.0) GOTO 9990
+C
+C cache the region, and for MOVE erase it also
+	C = -1			! flag don't erase for COPY
+	IF (.NOT.CHCOPY) C = COL! but use erase colour for MOVE
+	IF (IMAGE_FILL_REGION(IM,REG,C,ABORT)) GOTO 9999
+	IF (ABORT) GOTO 9990	! CTRL/C, but still success
+C
+C re-scan the polygon, performing the move
+	IMAGE_EDIT_COLOUR = -2	! flag value
+	ANCHOR(1) = IMAGE_ORIGIN(1,IM)-LITES2ORG(1)
+	ANCHOR(2) = IMAGE_ORIGIN(2,IM)-LITES2ORG(2)
+	CALL SCAN_POLYGON(SCAN_NUM_PTS,
+     &			%VAL(SCAN_PTS_ADDR),
+     &			%VAL(SCAN_SIDES_ADDR),
+     &			%VAL(SCAN_SIDPTR_ADDR),
+     &			SCAN_MAXSCT,
+     &			%VAL(SCAN_INTSCT_ADDR),
+     &			%VAL(SCAN_INTPTS_ADDR),
+     &			1,			! horizontal scan
+     &			IMAGE_PIXELSIZE(2,IM),
+     &			ANCHOR,
+     &			IMAGE_SCANLINE,
+     &			IERR)			! ignore for now
+C
+C update the graphics
+	CALL IMAGE_UPDATE(IM)
+C
+9990	IMAGE_END_MOVE = .FALSE.		! success
+	GOTO 9999
+C
+9999	RETURN
+	END
+C
+C
+C
+	LOGICAL FUNCTION IMAGE_BEGIN_PAINT(IM,COL)
+C
+***	MODULE	IMAGE_BEGIN_PAINT
+***	IDENT	11JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To fill a region of image with a colour
+C TRUE if fails
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:END/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:RFCTRL/
+C
+C arguments
+	INTEGER	IM		! image number
+	INTEGER	COL		! paint colour
+C
+C workspace
+C
+	IMAGE_BEGIN_PAINT = .TRUE.	! assume failure
+C
+C empty the undo cache
+	CALL CACHE_FREE
+C
+C store info in common for use later
+	IMAGE_EDIT_NUMBER = IM
+	IMAGE_EDIT_COLOUR = COL
+C
+C cause IMAGE_PAINT not to update first time round by setting
+C an identical 'old cursor position'
+	IMAGE_PAINT_CSXY(1) = CSXY(1)
+	IMAGE_PAINT_CSXY(2) = CSXY(2)
+C
+C set cursor to the same shape as brush
+	IF (IMAGE_BRUSH_CURSOR) THEN
+	   IMAGE_SAV_CTYP = RFCTYP
+	   IMAGE_SAV_CARG(1) = RFCARG(1)
+	   IMAGE_SAV_CARG(2) = RFCARG(2)
+	   RFCARG(1) = IMAGE_BRUSH_SIZE(1)
+	   RFCARG(2) = IMAGE_BRUSH_SIZE(2)
+	   IF (IMAGE_BRUSH_CIRCLE) THEN
+	      RFCTYP = 3
+	      RFCARG(2) = RFCARG(1)		! don't want ellipse
+	   ELSE
+	      RFCTYP = 4
+	   ENDIF
+	   RFBIG = .NOT.BIGOPT
+	ENDIF
+C
+	CALL SETSTA(STATE_PAINT)		! set PAINT state
+	NDMODE = END_PAINT
+	PNTING = .TRUE.				! indicate painting
+	IMAGE_BEGIN_PAINT = .FALSE.		! success
+	GOTO 9999
+C
+9999	RETURN
+	END
+C
+C
+C
+	SUBROUTINE IMAGE_PAINT
+C
+***	MODULE	IMAGE_PAINT
+***	IDENT	14JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To paint image with current brush at cursor position
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:SETUP/
+***	COMMON/CMN:WORKS/
+C
+C functions
+	EXTERNAL	IMAGE_SCANLINE
+C
+C workspace
+	INTEGER	IM		! image number
+	EQUIVALENCE	(IM,IMAGE_EDIT_NUMBER)
+	REAL		XX(2),YY(2)
+	REAL		ANCHOR
+	REAL		SPACE
+	REAL		R,D
+	REAL		TXY(2)
+C
+C check if moved since last time
+	IF (CSXY(1).EQ.IMAGE_PAINT_CSXY(1) .AND.
+     &	    CSXY(2).EQ.IMAGE_PAINT_CSXY(2)) GOTO 9999
+C
+	IMAGE_PAINT_CSXY(1) = CSXY(1)
+	IMAGE_PAINT_CSXY(2) = CSXY(2)
+	TXY(1) = CSXY(1)
+	TXY(2) = CSXY(2)
+	IF (SETUP) CALL TRNUSE(TXY(1),TXY(2),SETCOF,SET_TRANSFORM)
+C
+	ANCHOR = IMAGE_ORIGIN(1,IM)-LITES2ORG(1)
+	SPACE = IMAGE_PIXELSIZE(2,IM)
+	IMAGE_UPDATE_COUNT = 0
+C
+	IF (IMAGE_BRUSH_CIRCLE) THEN
+	   R = IMAGE_BRUSH_SIZE(1)/2.0
+C
+C find top scan line within circle
+	   YY(1) = ANCHOR + INT((TXY(2)+R-ANCHOR)/SPACE) * SPACE
+	   IF (YY(1).GE.TXY(2)+R) YY(1) = YY(1) - SPACE
+	   IF (YY(1).LE.TXY(2)-R) YY(1) = TXY(2)
+C
+C find intersection of scan line with circle
+10	   D = R**2 - (YY(1)-TXY(2))**2
+	   IF (D.GT.0.0) THEN
+C
+C draw line
+	      XX(1) = SQRT(D)
+	      XX(2) = TXY(1) + XX(1)
+	      XX(1) = TXY(1) - XX(1)
+	      YY(2) = YY(1)
+	      CALL IMAGE_SCANLINE(2,XX,YY)
+	   ENDIF
+C
+	   YY(1) = YY(1)-SPACE
+	   IF (YY(1).GT.TXY(2)-R) GOTO 10
+C
+	ELSE
+C
+C maybe should user IMAGE_EDIT_RECT for this, rather than
+C scanlines
+	   R = IMAGE_BRUSH_SIZE(2)/2.0
+C
+C find top scan line within rectangle
+	   XX(1) = TXY(1) - IMAGE_BRUSH_SIZE(1)/2.0
+	   XX(2) = TXY(1) + IMAGE_BRUSH_SIZE(1)/2.0
+	   YY(1) = ANCHOR + INT((TXY(2)+R-ANCHOR)/SPACE) * SPACE
+	   IF (YY(1).GT.TXY(2)+R) YY(1) = YY(1) - SPACE
+	   IF (YY(1).LT.TXY(2)-R) YY(1) = TXY(2)
+C
+C set up scanline
+20	   YY(2) = YY(1)
+	   CALL IMAGE_SCANLINE(2,XX,YY)
+	   YY(1) = YY(1)-SPACE
+	   IF (YY(1).GE.TXY(2)-R) GOTO 20
+	ENDIF
+C
+C update the graphics
+	CALL IMAGE_UPDATE(IM)
+	GOTO 9999
+C
+9999	RETURN
+	END
+C
+C
+C
+	LOGICAL FUNCTION IMAGE_BURN_IN(IM)
+C
+***	MODULE	IMAGE_BURN_IN
+***	IDENT	08JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	8-June-1993
+C
+C To edit an image by reading back screen
+C
+	IMPLICIT NONE
+C
+C
+***	PARAMETER/CMN:MOANMESS/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:WORKS/
+C
+C argument
+	INTEGER	IM	! image number
+C
+C functions
+	LOGICAL	GET_MEM
+C
+C workspace
+	INTEGER	I
+	INTEGER	OV
+	INTEGER	MASKL,LONG
+	BYTE	MASKB,BYT
+	EQUIVALENCE (MASKL,MASKB)
+	EQUIVALENCE (LONG,BYT)
+	INTEGER	OW
+	EQUIVALENCE (OW,OVERLAY_WORKSTATION)	! abbreviation
+	LOGICAL	GOT,MEM_GOT
+	INTEGER		NBYT,NBIT
+	INTEGER*4	BYTADDR,BITADDR
+	INTEGER		FILL
+	REAL		X,Y
+	INTEGER		PX,PY,PW,PH
+C
+	IMAGE_BURN_IN = .TRUE.		! assume failure
+	MEM_GOT = .FALSE.
+C
+C do nothing if no displays
+	IF (NODISP) GOTO 980
+C
+C or if no overlays
+	IF (.NOT.OVERLAYS_INUSE) GOTO 980
+C
+C Get pixel value which results from writing background colour
+C into each overlay that the image is drawn into
+	MASKL = 0
+	GOT = .FALSE.
+	DO 10 OV=1,MAXOVER
+	   IF (.NOT.OVERLAY_IMAGE(OV)) GOTO 10
+C
+C For the particular image...
+	   IF (.NOT.O_IMSEL(IM,OV)) GOTO 10	! not selected
+C
+C select bit planes for this overlay
+	   CALL LIB$INSV(IMAGE_BACK(IM),
+     &		OVERLAY_OFFSET(OV,OW),OVERLAY_PLANES(OV,OW),MASKL)
+	   GOT = .TRUE.
+10	CONTINUE
+	IF (.NOT.GOT) GOTO 980
+C
+C must be at 1 to 1 pixel scale
+	IF (IMAGE_ZOOM.NE.1) GOTO 990
+	IF (IMAGE_VIEW.NE.1) GOTO 990
+C
+C empty the undo cache
+	CALL CACHE_FREE
+C
+C allocate memory enough for whole screen of pixels (bytes)
+	PW = DISPLAY_RASX(OW)
+	PH = DISPLAY_RASY(OW)
+	NBYT = PW*PH
+	IF (GET_MEM(IM_CACHE_ZONE,BYTADDR,NBYT)) GOTO 999
+	MEM_GOT = .TRUE.
+C
+C allocate memory for the same, but as bits
+C and fill it with background pixel
+	NBIT = (NBYT+7)/8
+	IF (GET_MEM(IM_CACHE_ZONE,BITADDR,NBIT)) GOTO 999
+	FILL = 0
+	IF (IMAGE_BACK(IM).NE.0) FILL = -1
+	CALL VIOCLR(%VAL(BITADDR),NBIT,FILL)
+C
+C read from the display into the byte array
+C NB need device dependent - not all GKS have this
+	CALL STDINI
+	CALL DISPLAY_SAVE(OW,%VAL(BYTADDR))
+C
+C process the byte array, setting bits to foreground colour wherever
+C the bytes are non-background
+	DO 20 I=1,NBYT
+	   CALL PUTLNG(%VAL(BYTADDR+I-1),LONG)
+	   IF (BYT.NE.MASKB)
+     &	      CALL LIB$INSV(IMAGE_FORE(IM),I-1,1,%VAL(BITADDR))
+20	CONTINUE
+C
+C finished with byte memory now
+	CALL FREE_MEM(IM_CACHE_ZONE,BYTADDR,NBYT)
+	MEM_GOT = .FALSE.
+C
+C work out which area of image we are updating
+C first, get device coord (metre) of bottom left pixel or screen
+	X = 0.5*LWIDTH(OW)/1000.0
+	Y = 0.5*LWIDTH(OW)/1000.0
+C
+C convert it to world coordinate
+C NB need device dependent - not all GKS have this
+	CALL GKSD2W(OW,X,Y,X,Y)
+C
+C convert to pixel number
+	PX = NINT((X+LITES2ORG(1)-IMAGE_ORIGIN(1,IM))/
+     &			IMAGE_PIXELSIZE(1,IM)) + 1
+	PY = NINT((Y+LITES2ORG(2)-IMAGE_ORIGIN(2,IM))/
+     &			IMAGE_PIXELSIZE(2,IM)) + 1
+C
+C update image with bit data
+	CALL IMAGE_EDIT_RECT(IM,PX-1,PY-1,PW,PH,%VAL(BITADDR),.TRUE.)
+C
+C finished with bit data
+	CALL FREE_MEM(IM_CACHE_ZONE,BITADDR,NBIT)
+C
+C update the screen
+	CALL IMAGE_UPDATE(IM)
+C
+	IMAGE_BURN_IN = .FALSE.			! success
+	GOTO 999
+C
+980	CALL MOAN(MSG_NOBURNDISP)
+	GOTO 999
+C
+990	CALL MOAN(MSG_NOTZOOM1)
+	CALL LEARN(MSG_USEZOOM1)
+	GOTO 999
+C
+999	CONTINUE
+C
+C free memory
+	IF (MEM_GOT) CALL FREE_MEM(IM_CACHE_ZONE,BYTADDR,NBYT)
+	RETURN
+	END

@@ -1,0 +1,392 @@
+	LOGICAL FUNCTION GO_CMD()
+C
+***	MODULE	GO_CMD
+***	IDENT	27FE91
+C
+C	Copyright (C), Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Created by 						ALB 11-Apr-1988
+C
+CMOD	Changed the order in which I3D does things in so that the ONEARM
+C	stage is no longer required			ACM 13-Dec-1988
+C
+C This routine executes the GO command, ie. does the I3D processing as
+C selected by the user.
+C
+C The problem of heighting river/ridgelines is quite complex and a given
+C case does not always have a well defined optimum solution.  For this
+C reason I3D was designed as a two stage process in which the first
+C stage intersects river/ridgelines with contours and spot heights, to
+C transfer this height information into the river/ridgeline network, and
+C the second stage, in which every junction and end point in the
+C network must be heighted before heights can be interpolated along
+C each link, is iterative, calling on the user to add height
+C information to the river/ridgeline network when these node heights
+C cannot be found automatically from heights already in the network.
+C
+C The different I3D modes of operation are described below:- 
+C
+C
+C	INTERSECT
+C	This process intersects the terrain with river/ridgeline data,
+C	to transfer this height information into the river/ridgeline
+C	network.
+C
+C	FLOW
+C	This starts by trying to find a legal flow through each river
+C	network component. Links in the river network whose direction of
+C	flow cannot be decided will be indicated to the user. The user
+C	is then required to height certain points within the network in
+C	order to define a satisfactory flow. A checkplot is
+C	automatically produced if the flow found is legal but is not the
+C	only possible legal flow, so that the user can check whether the
+C	flow found is correct. This check plot will be produced in any
+C	case if the CHECKPLOT command is used. Inflection points will be
+C	reported. If a legal flow is found, then I3D will continue and
+C	try to find a height for every river/ridgeline node (junction
+C	or end point). River/ridgeline free ends which overhang terrain
+C	data intersection points by less than the specified clip
+C	tolerance are ignored. If FLOW mode completes successfully then
+C	the program will pass on to mode INTERPOLATE if the ENABLE
+C	INTERPOLATE  command is used. 
+C
+C	INTERPOLATE
+C	This is identical to the FLOW stage, except that it will
+C	automatically pass on to the final I3D stage of interpolating
+C	a height for each original river/ridgeline point and outputting
+C	the resulting 3D river/ridgelines, if the FLOW stage succeeds in
+C	finding a height for each river/ridgeline node.
+C
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$CMNI3D:I3DMSG.PAR'
+C
+C Commons
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+	INCLUDE 'LSL$CMNI3D:MAX.CMN'
+C Workspace
+	INTEGER		I		! counter
+	INTEGER		RET_CODE	! return code
+	INTEGER		IERR		! system error code
+	LOGICAL		LOAD_LINKS_OK
+	LOGICAL		ALLOCATE_MEMORY_OK
+	LOGICAL		INTERSECT_OK
+	LOGICAL		FLOW_OK
+	LOGICAL		INTERPOLATE_OK
+C
+C Functions
+	LOGICAL		FLWCLO
+	LOGICAL		LOAD_LINKS	! Scan IFF to allocate mem
+	LOGICAL		ALLOCATE_MEMORY ! Allocate virtual memory
+	LOGICAL		INTERSECT	! intersect terrain with rivs
+	LOGICAL		FLOW		! Establish network flow, etc
+	LOGICAL		INTERPOLATE	! Interpolate CB strings
+C
+C **********************************************************************
+C Initialise
+C
+	GO_CMD             = .TRUE.	! assume success
+	LOAD_LINKS_OK      = .TRUE.
+	ALLOCATE_MEMORY_OK = .TRUE.
+	INTERSECT_OK       = .TRUE.
+	FLOW_OK            = .TRUE.
+	INTERPOLATE_OK     = .TRUE.
+C
+C **********************************************************************
+C Check that mandatory commands have been executed for all modes.
+C ----------------------------------------------------------------------
+C Mode specified?
+C
+	IF (.NOT.HAD_MODE) THEN
+	   IF (GO_CMD) CALL WRITEF('%S Specifying command GO',ERROR)
+	   CALL WRITEF('Mode not enabled.                         '//
+     &	      '>> Execute command ENABLE MODE ')
+	   GO_CMD = .FALSE.
+	ENDIF
+C ----------------------------------------------------------------------
+C Got input river/ridgeline IFF files?
+C
+	IF (.NOT.HAD_FILEIN) THEN
+	   IF (GO_CMD) CALL WRITEF('%S Specifying command GO',ERROR)
+	   CALL WRITEF('No input river/ridgeline IFF file/s open. '//
+     &	      '>> Execute command FILEIN')
+	   GO_CMD = .FALSE.
+	ENDIF
+C ----------------------------------------------------------------------
+C Got group table?
+C
+	IF (.NOT.HAD_LOOKUP) THEN
+	   IF (GO_CMD) CALL WRITEF('%S Specifying command GO',ERROR)
+	   CALL WRITEF('No group definition table defined.        '//
+     &	      '>> Execute command LOOKUP')
+	   GO_CMD = .FALSE.
+	ENDIF
+C ----------------------------------------------------------------------
+C Check that mode specific commands have been executed.
+C ----------------------------------------------------------------------
+C Got output r/r IFF files?
+C
+	IF ((MODE_INTERSECT.OR.MODE_INTERPOLATE).AND..NOT.HAD_FILEOUT)
+     &	THEN
+	   IF (GO_CMD) CALL WRITEF('%S Specifying command GO',ERROR)
+	   CALL WRITEF('No output river/ridgeline IFF file/s open.'//
+     &	      '>> Execute command FILEOUT')
+	   GO_CMD = .FALSE.
+	ENDIF
+C ----------------------------------------------------------------------
+C Got terrain IFF files?
+C
+	IF (MODE_INTERSECT.AND..NOT.HAD_TERRAIN) THEN
+	   IF (GO_CMD) CALL WRITEF('%S Specifying command GO',ERROR)
+	   CALL WRITEF('No input terrain IFF file/s open.         '//
+     &	      '>> Execute command TERRAIN')
+	   GO_CMD = .FALSE.
+	ENDIF
+C ----------------------------------------------------------------------
+C Num files in = num files out?
+C
+	IF ((NUM_FILEIN.NE.NUM_FILEOUT).AND.
+     &	    (MODE_INTERSECT.OR.MODE_INTERPOLATE)) THEN
+	   IF (GO_CMD) CALL WRITEF('%S Specifying command GO',ERROR)
+	   CALL WRITEF('The number of input r/r files does not equal '//
+     &	      'the number of output r/r files')
+	   GO_CMD = .FALSE.
+	ENDIF
+C ----------------------------------------------------------------------
+C
+	IF (.NOT.GO_CMD) GOTO 999
+C
+C Deselect LITES2 and checkplot file if requested if mode INTERSECT 
+C finally selected
+C
+	IF (MODE_INTERSECT) THEN
+	   IF (HAD_LITES2) THEN
+	      CALL LSL_PUTMSG (I3D__NOLITESOUT)
+	      OPEN_LITES2 = .FALSE.
+	      HAD_LITES2  = .FALSE.
+	   ENDIF
+C
+C Close check plot iff file if open
+C
+	   IF (HAD_CHECKPLOT) THEN
+	      CALL LSL_PUTMSG (I3D__NOCHECKOUT)
+	      OPEN_CHECKPLOT = .FALSE.
+	      HAD_CHECKPLOT  = .FALSE.
+	   ENDIF	      
+	ENDIF
+C
+C **********************************************************************
+C Call LOAD_LINKS to scan only, to estimate the amount of virtual memory
+C required for processing.
+C
+	DO 20 FILEIN_NUM = 1,NUM_FILEIN
+	   IF (HAD_DIAG) CALL WRITEF(
+     &	     'Scanning river/ridgeline IFF for file no. %I0',FILEIN_NUM)
+	   LOAD_LINKS_OK = LOAD_LINKS(.TRUE.,	! scan only
+     &		%VAL(NOD_ADDRESS),%VAL(NOD_ADDRESS),%VAL(NOD_ADDRESS),
+     &		%VAL(ARM_ADDRESS),%VAL(ARM_ADDRESS),
+     &		%VAL(LNK_ADDRESS),%VAL(LNK_ADDRESS),%VAL(LNK_ADDRESS),
+     &		%VAL(PUP_ADDRESS),%VAL(PDN_ADDRESS),
+     &		%VAL(NET_ADDRESS),
+     &		%VAL(STN_ADDRESS),%VAL(STN_ADDRESS),
+     &		%VAL(STL_ADDRESS),%VAL(STL_ADDRESS),
+     &		%VAL(MNX_ADDRESS),%VAL(MNX_ADDRESS),
+     &		%VAL(PNT_ADDRESS),%VAL(PNT_ADDRESS),
+     &		MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+	   IF (.NOT.LOAD_LINKS_OK) GOTO 998
+20	CONTINUE
+C ......................................................................
+C Check NOD_TOL and TOUCH_TOL are not less than COORD_TOL
+C
+	NOD_TOL = MAX(NOD_TOL,COORD_TOL)
+	TOUCH_TOL = MAX(TOUCH_TOL,COORD_TOL)
+C
+C ----------------------------------------------------------------------
+C Check that we have valid entries for MAX_variables 
+C
+	IF (MAX_LNKS.LT.1.OR.MAX_PNTS.LT.2) THEN
+	   CALL WRITEF('%S Specifying command GO',ERROR)
+	   CALL WRITEF
+     &        ('A data inconsistancy has been detected after scanning'//
+     &	      ' r/r input IFF files')
+	   CALL WRITEF('Suspect one of the following reasons:')
+	   CALL WRITEF('   Incorrect group definition table loaded')
+	   CALL WRITEF('   Requires FCs and/or FSNs and/or LAYERs '//
+     &	      'have been DESELECTED')
+	   GO_CMD = .FALSE.
+	   GOTO 998
+	ENDIF
+C
+C ----------------------------------------------------------------------
+C Call function to allocate virtual memory for processing work arrays
+C
+	IF (.NOT.(MODE_FLOW.OR.MODE_INTERPOLATE)) THEN
+	   MAX_NODS = 1			! not used in INTERSECT mode
+	   MAX_ARMS = 1			!  "
+	   MAX_STNS = 1			!  "
+	   MAX_STLS = 1			!  "
+	ENDIF
+C
+	ALLOCATE_MEMORY_OK = ALLOCATE_MEMORY(
+     &		MAX_NODS,		! max num of nodes returned
+     &		MAX_ARMS,		! max num of arms returned
+     &		MAX_LNKS,		! max num of links returned
+     &		MAX_STNS,		! max num of node stack levels
+     &		MAX_STLS,		! max num of link stack levels
+     &		MAX_PNTS)		! number of points 
+	IF (.NOT.ALLOCATE_MEMORY_OK) GOTO 998
+C
+C ----------------------------------------------------------------------
+C Carry out the INTERSECT stage described above
+C
+	IF (MODE_INTERSECT) THEN
+	   INTERSECT_OK = INTERSECT(
+     &		%VAL(NOD_ADDRESS),	! integer form of NODe array
+     &		%VAL(NOD_ADDRESS),	! real    form of NODe array
+     &		%VAL(NOD_ADDRESS),	! logical form of NODe array
+     &		%VAL(ARM_ADDRESS),	! integer form of ARM array
+     &		%VAL(ARM_ADDRESS),	! logical form of ARM array
+     &		%VAL(LNK_ADDRESS),	! integer form of LiNK array
+     &		%VAL(LNK_ADDRESS),	! real    form of LiNK array
+     &		%VAL(LNK_ADDRESS),	! logical form of LiNK array
+     &		%VAL(PUP_ADDRESS),	! integer form of Path UP array
+     &		%VAL(PDN_ADDRESS),	! integer form of Path DowN arry
+     &		%VAL(NET_ADDRESS),	! integer NETwork component arry
+     &		%VAL(STN_ADDRESS),	! integer node STacK array
+     &		%VAL(STN_ADDRESS),	! real    node STacK array
+     &		%VAL(STL_ADDRESS),	! integer link STacK array
+     &		%VAL(STL_ADDRESS),	! logical link STacK array
+     &		%VAL(MNX_ADDRESS),	! integer form of MiNimumX array
+     &		%VAL(MNX_ADDRESS),	! real    form of MiNimumX array
+     &		%VAL(PNT_ADDRESS),	! integer form of PoiNT array
+     &		%VAL(PNT_ADDRESS),	! real    form of PoiNT array
+     &		MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+	   IF (.NOT.INTERSECT_OK) GOTO 998
+	   GOTO 1000
+	ENDIF
+C
+C ----------------------------------------------------------------------
+C Carry out the FLOW stage described above
+C
+	IF (MODE_FLOW .OR. MODE_INTERPOLATE) THEN
+C
+	   FLOW_OK = FLOW(
+     &		%VAL(NOD_ADDRESS),%VAL(NOD_ADDRESS),%VAL(NOD_ADDRESS),
+     &		%VAL(ARM_ADDRESS),%VAL(ARM_ADDRESS),
+     &		%VAL(LNK_ADDRESS),%VAL(LNK_ADDRESS),%VAL(LNK_ADDRESS),
+     &		%VAL(PUP_ADDRESS),%VAL(PDN_ADDRESS),
+     &		%VAL(NET_ADDRESS),
+     &		%VAL(STN_ADDRESS),%VAL(STN_ADDRESS),
+     &		%VAL(STL_ADDRESS),%VAL(STL_ADDRESS),
+     &		%VAL(MNX_ADDRESS),%VAL(MNX_ADDRESS),
+     &		%VAL(PNT_ADDRESS),%VAL(PNT_ADDRESS),
+     &	        MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+C
+	   IF (.NOT.FLOW_OK) THEN
+	      CALL LSL_PUTMSG(I3D__DIRFLOWERR)
+	      GOTO 998	
+	   ENDIF
+C
+C ----------------------------------------------------------------------
+C Carry out the INTERPOLATE stage described above
+C
+	   IF (MODE_INTERPOLATE) THEN
+	      INTERPOLATE_OK = INTERPOLATE(
+     &		%VAL(NOD_ADDRESS),%VAL(NOD_ADDRESS),%VAL(NOD_ADDRESS),
+     &		%VAL(ARM_ADDRESS),%VAL(ARM_ADDRESS),
+     &		%VAL(LNK_ADDRESS),%VAL(LNK_ADDRESS),%VAL(LNK_ADDRESS),
+     &		%VAL(PUP_ADDRESS),%VAL(PDN_ADDRESS),
+     &		%VAL(NET_ADDRESS),
+     &		%VAL(STN_ADDRESS),%VAL(STN_ADDRESS),
+     &		%VAL(STL_ADDRESS),%VAL(STL_ADDRESS),
+     &		%VAL(MNX_ADDRESS),%VAL(MNX_ADDRESS),
+     &		%VAL(PNT_ADDRESS),%VAL(PNT_ADDRESS),
+     &		MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+	   ENDIF
+	ENDIF
+C
+C **********************************************************************
+C Close files after processing
+C
+998	CONTINUE
+C
+C ----------------------------------------------------------------------
+C Close input river/ridgeline IFF file after processing if opened
+C
+	IF (HAD_FILEIN) THEN
+	   IF (OPEN_FILEIN) THEN
+	      CALL IFFSEL(FILEIN_LUN)
+	      CALL IFFCLO(FILEIN_LUN)
+	      OPEN_FILEIN = .FALSE.	! flag that file now closed
+	   ENDIF	      
+	ENDIF
+C
+C ----------------------------------------------------------------------
+C Close output river/ridgeline IFF file if opened
+C
+	IF (HAD_FILEOUT) THEN
+	   IF (OPEN_FILEOUT) THEN
+	      CALL IFFSEL(FILEOUT_LUN)
+	      CALL IFFCLO(FILEOUT_LUN)
+	      OPEN_FILEOUT = .FALSE.	! flag that file now closed
+	   ENDIF	      
+	ENDIF
+C
+C ----------------------------------------------------------------------
+C Close an input terrain IFF file if opened
+C
+	IF (HAD_TERRAIN) THEN
+	   IF (OPEN_TERRAIN) THEN
+	      CALL IFFSEL(TERRAIN_LUN)
+	      CALL IFFCLO(TERRAIN_LUN)
+	      OPEN_TERRAIN = .FALSE.	! flag that file now closed
+	   ENDIF	      
+	ENDIF
+C
+C ----------------------------------------------------------------------
+C Close lites2 file if opened
+C
+	IF (HAD_LITES2) THEN
+	   IF (OPEN_LITES2) THEN
+	      CALL FLWSEL(LITES2_LUN)
+	      CALL FLWRTF('%%MESSAGE *** END OF LITES COMMAND FILE ***')
+	      CALL FLWRTF('%%PING')
+	      CALL FLWRTF('%%PING')
+	      RET_CODE = FLWCLO(LITES2_LUN,IERR)
+	      IF (RET_CODE.NE.LSL__NORMAL) THEN
+	         CALL WRITEF('%S Closing LITES2 file %S',
+     &		    ERROR,LITES2_FNAME(:LITES2_LEN))
+		 CALL LSL_PUTMSG(RET_CODE)
+	         IF (RET_CODE.EQ.LSL__SYSCLOSE) CALL LSL_ADDMSG(IERR)
+	      ELSE
+		 OPEN_LITES2 = .FALSE.
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C ----------------------------------------------------------------------
+C Close check plot iff file if open
+C
+	IF (HAD_CHECKPLOT) THEN
+	   IF (OPEN_CHECKPLOT) THEN
+	      CALL IFFSEL(CHECKPLOT_LUN)
+	      CALL IFFEM
+	      CALL IFFEJ
+	      CALL IFFCLO(CHECKPLOT_LUN)
+	      OPEN_CHECKPLOT = .FALSE.
+	   ENDIF	      
+	ENDIF
+C
+C **********************************************************************
+	IF (.NOT.GO_CMD) GOTO 999
+C
+1000	GO_CMD = LOAD_LINKS_OK .AND. ALLOCATE_MEMORY_OK .AND.
+     &	         INTERSECT_OK .AND. FLOW_OK .AND. INTERPOLATE_OK
+C
+999	RETURN
+	END
+C

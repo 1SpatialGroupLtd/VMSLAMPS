@@ -1,0 +1,580 @@
+	.TITLE	FILE_PARSE
+	.IDENT	/04JL86/
+	.LIBRARY/LSL$LIBRARY:LSLMACLIB/
+
+; Copyright Laser-Scan Laboratories Ltd
+;
+; Author TJ Ibbs, 1 August 1984
+
+;mod Modified for version 4 filenames		- R.W. Russell	 4-Jul-86
+;mod	(all TPA$_STRING to be TPA$_SYMBOL and
+;mod	 version -0 now detected and passed through)
+
+; this is the parser for the RDFILN routine - it finite-state-parses
+; a filename, recognising the appropriate parts of it
+
+; It is called thus:
+;
+; retcod = FILE_PARSE( source_string, had_nod, nod, nod_len,
+;				      had_dev, dev, dev_len,
+;				      had_dir, dir, dir_len,
+;				      had_nam, nam, nam_len,
+;				      had_ext, ext, ext_len,
+;				      had_ver, ver, ver_len )
+;
+; where
+;	source_string	is the filename to be parsed
+;	nod		receives the node part of the name
+;	dev		receives the device part
+;	dir		receives the directory part
+;	nam		receives the filename part
+;	ext		receives the extension
+;	ver		receives the version number
+;
+;	had_xxx		is true if that part was present, false if
+;			not
+;
+;	xxx_len		is the effective length of the string (note that
+;			the returned string is truncated/padded as
+;			required, but xxx_len returns the expected value)
+;
+;	retcod		is a longword return-code (SS$_NORMAL for success)
+;
+; Notes:
+;	* the plain arguments are strings, the had_xxx arguments are logicals,
+;	  the xxx_len arguments are integers (assumed word)
+;	* punctuation between parts is omitted from the resultant strings
+;	  - that is the colon after dev, the brackets around dir, the dot
+;	  between nam and ext, and the semi-colon after	ext
+;	* if punctuation is present, but a string is not, then had_xxx is
+;	  set true as appropriate, but the xxx string remains blank
+;	* this routine does not touch output fields which are not present
+;	  in the source_string - specifically, it will not UNSET any of
+;	  the logical fields, it will only set them. If the user wishes
+;	  fields unset, they must do so themselves (conversely, they need
+;	  not, if they require that effect)
+;
+; Example:
+;		parsing 'vax::DRA1:[fred.bill]file.;12' would set all of
+;	the logical arguments true, and would set the other arguments to
+;
+;	nod = 'vax'		nod_len = 3
+;	dev = 'DRA1'		dev_len = 4
+;	dir = 'fred.bill'	dir_len = 9
+;	nam = 'file'		nam_len = 4
+;	ext = ''		ext_len = 0
+;	ver = '12'		ver_len = 2
+;
+
+; *************************************************************************
+; *************************************************************************
+;
+; NOTE - this must be assembled with LSL$CMNVIO:EXPC.MAR
+;
+; *****************************************************************************
+; *****************************************************************************
+;
+	DATA_PSECT	FILE_PARSE
+;
+; define the relevant offsets for $TPARSE
+
+	$CLIDEF
+	$TPADEF
+
+;
+; macro definitions
+
+;
+; a macro to deine storage for our arguments...
+;
+	.MACRO	STORE_XXX	TYP
+HAD_'TYP':	.BLKL 1
+STR_'TYP':	.BLKL 1
+LEN_'TYP':	.BLKL 1
+	.ENDM	STORE_XXX
+
+;
+; and define a macro for the saving of the arguments
+;
+	.MACRO	SAVE_XXX	TYP
+	MOVAL	@L_'TYP'_ARG(AP),HAD_'TYP'
+	MOVAQ	@S_'TYP'_ARG(AP),STR_'TYP'
+	MOVAL	@Z_'TYP'_ARG(AP),LEN_'TYP'
+	.ENDM	SAVE_XXX
+
+;
+; define a macro for the COPY routines - used to copy strings across
+; during parsing
+;
+
+	.MACRO	COPY_XXX	TYP
+;
+	.ENTRY	COPY_'TYP', ^M<R2,R3,R4,R5,R6>
+;
+; check whether we have already had an error
+;
+	TSTL	IN_ERROR
+	BNEQU	'TYP'_OLDERR
+;
+	MNEGL	#1,@HAD_'TYP'			; note we had a 'TYP'
+	MOVW	TPA$L_TOKENCNT(AP),@LEN_'TYP'	; store the length
+	.IF IDENTICAL 'TYP' NOD
+;
+; don't copy the final 2 characters ('::') of the node name
+;
+	DECW	@LEN_'TYP'			; one less char
+	DECW	@LEN_'TYP'			; two less chars
+	.ENDC
+	.IF IDENTICAL 'TYP' DEV
+;
+; don't copy the final character (':') of the device name
+;
+	DECW	@LEN_'TYP'			; one less char
+	.ENDC
+	.IF IDENTICAL 'TYP' DIR
+;
+; don't copy the final character (']') of the directory specification
+;
+	DECW	@LEN_'TYP'			; one less char
+	.ENDC
+;
+; copy the string to the string argument
+;
+	MOVL	STR_'TYP', R6
+	MOVC5	@LEN_'TYP',-			; source length
+		@TPA$L_TOKENPTR(AP),-		; source buffer
+		#^A/ /,-			; fill with spaces
+		(R6), @4(R6)			; destination string
+	BGTRU	'TYP'_ERR			; string too long
+	MOVL	#SS$_NORMAL, R0			; success
+	RET
+;
+; previous error - just abandon
+;
+'TYP'_OLDERR:
+	MOVL	#LIB$_SYNTAXERR,R0
+	RET
+;
+; error - string too long
+;
+'TYP'_ERR:
+	MOVL	#SS$_RESULTOVF,R0		; resultant string o/flow
+	MOVL	R0,IN_ERROR			; remember it internally
+	RET
+
+	.ENDM	COPY_XXX
+
+;
+; *************************************************************************
+; define our argument offsets
+
+	FROM_ARG	= 4		; source string offset
+;
+	L_NOD_ARG	= 8		; logical for NOD (HAD_NOD)
+	S_NOD_ARG	= 12		; string  for NOD (STR_NOD)
+	Z_NOD_ARG	= 16		; size    for NOD (LEN_NOD)
+;
+	L_DEV_ARG	= 20		; etc
+	S_DEV_ARG	= 24
+	Z_DEV_ARG	= 28
+;
+	L_DIR_ARG	= 32
+	S_DIR_ARG	= 36
+	Z_DIR_ARG	= 40
+;
+	L_NAM_ARG	= 44
+	S_NAM_ARG	= 48
+	Z_NAM_ARG	= 52
+;
+	L_EXT_ARG	= 56
+	S_EXT_ARG	= 60
+	Z_EXT_ARG	= 64
+;
+	L_VER_ARG	= 68
+	S_VER_ARG	= 72
+	Z_VER_ARG	= 76
+;
+
+	NUM_ARGS	= 19		; should have 19 arguments
+
+;
+; define our triangular brackets
+;
+	TRIBRA		= 60
+	TRIKET		= 62
+;
+; and define the storage to hold the argument addresses
+;
+
+	STORE_XXX	NOD
+	STORE_XXX	DEV
+	STORE_XXX	DIR
+	STORE_XXX	NAM
+	STORE_XXX	EXT
+	STORE_XXX	VER
+
+;
+; set aside an internal error store
+;
+IN_ERROR:	.BLKL	1
+
+;
+; define our $TPARSE parameter block
+;
+TPARSE_BLOCK:	.LONG	TPA$K_COUNT0		; count field
+		.LONG	TPA$M_BLANKS		; process blanks explicitly
+		.BLKB	TPA$K_LENGTH0-8		; the rest is set later
+
+;
+; and whether the version number is +ve or -ve
+;
+VER_SIGN:	.BLKB	1			; 1 => -ve, 0 => +ve
+
+; and format strings with which to EXPAND our version number
+;
+; 1) FORMAT - to expand normal version numbers
+;	      although we only want a word-sized number, we shall
+;	      expand it as a longword - this means that the number
+;	      being too big will be caught due to the string not
+;	      fitting into the output string
+;
+; 2) NEGZERO - for the special case of version -0, which means the
+;	       earliest version
+;
+FORMAT:		.ASCID	/%^L%N/
+NEGZERO:	.ASCID	/-0/
+
+;
+; *****************************************************************************
+; *****************************************************************************
+;
+	CODE_PSECT	FILE_PARSE
+;
+	.SBTTL	FILE_PARSE - management part
+;
+	.ENTRY	FILE_PARSE, ^M<>
+;
+; the only check we make on the arguments is how many there are
+;
+	CMPL	(AP), #NUM_ARGS
+	BEQLU	ARGSOK			; correct number of arguments
+;
+	MOVL	#SS$_INSFARG, R0	; insufficient args (even if too namy)
+	RET
+;
+; now get the argument triples where we can remember them
+;
+ARGSOK:	SAVE_XXX	NOD
+	SAVE_XXX	DEV
+	SAVE_XXX	DIR
+	SAVE_XXX	NAM
+	SAVE_XXX	EXT
+	SAVE_XXX	VER
+;
+; unset our internal error store
+;
+	CLRL	IN_ERROR
+;
+; in order to parse FROM, we must set it up as the parser input string
+; in the $TPARSE parameter block
+;
+	MOVAL	@FROM_ARG(AP),R0
+	MOVZWL	(R0),    TPARSE_BLOCK+TPA$L_STRINGCNT	; the length
+	MOVAL	@B^4(R0),TPARSE_BLOCK+TPA$L_STRINGPTR	; buffer
+;
+; and now parse the thing
+; arguments are:
+;	1) parameter block	(pass by reference)
+;	2) state table		(pass by reference)
+;	3) keyword table	(come on, guess)
+;
+	PUSHAL	FILNAM_KEY
+	PUSHAL	FILNAM_STATE
+	PUSHAL	TPARSE_BLOCK
+;
+	CALLS	#3,G^LIB$TPARSE
+;
+; and our success code is thus in R0, ready to be returned
+;
+	RET
+
+;
+; *************************************************************************
+; *************************************************************************
+;
+; and define our parser state table
+;
+	.SBTTL	Filename parser state table
+;
+	.NOSHOW	EXPANSIONS
+;
+	$INIT_STATE	FILNAM_STATE, FILNAM_KEY
+;
+; and we start at the beginning of the filename
+;
+; the first possible thing is a node-name (eg VAX:: or LSL_VAX::)
+; this may legally be absent
+;
+	$STATE
+	$TRAN	!GETNOD,,COPY_NOD
+	$TRAN	TPA$_LAMBDA
+
+;
+; next we may have a device-name (eg LSL$IF: or DRA1:)
+; this may legally be absent
+;
+	$STATE
+	$TRAN	!GETDEV,,COPY_DEV
+	$TRAN	TPA$_LAMBDA
+
+;
+; this falls though into the directory name (eg <FRED> or [TONY.TMP])
+;
+	$STATE
+	$TRAN	'[',SQUDIR		; starts with square bracket
+	$TRAN	TRIBRA,TRIDIR		; starts with a triangular bracket
+	$TRAN	TPA$_LAMBDA		; or not there
+
+;
+; and next the name of the file (eg TEMP or J5002)
+; (NOTE - with version 4 of VMS, this will presumably require
+;         TPA$_SYMBOL, rather than _STRING)
+;
+	$STATE	NAME
+	$TRAN	TPA$_SYMBOL,,COPY_NAM
+	$TRAN	TPA$_LAMBDA
+;
+; this is followed by the extension (eg .TMP or .IFF)
+;
+	$STATE
+	$TRAN	'.',EXTENSION
+	$TRAN	TPA$_LAMBDA
+;
+; and finally the version number (eg ;1 or ;-32767)
+;
+	$STATE	CHK_VER
+	$TRAN	^/';'/,VERSION
+	$TRAN	'.',VERSION		; alternative syntax
+	$TRAN	TPA$_LAMBDA
+;
+; and finally detect any trailing characters
+;
+	$STATE	TRAIL
+	$TRAN	TPA$_BLANK,TRAIL	; ignore any spaces at the end
+	$TRAN	TPA$_EOS,TPA$_EXIT	; succeed if there are no more chars
+	$TRAN	TPA$_ANY,,CHECK_ERR	; fail if there are
+;
+;*****************************************************************************
+;
+; and we now define the subexpressions referred to above
+;
+; so far as we are concerned here, a node name is a symbol followed by '::'
+; - we are not parsing access control lists
+;
+	$STATE	GETNOD
+	$TRAN	TPA$_SYMBOL
+	$STATE
+	$TRAN	':'
+	$STATE
+	$TRAN	':',TPA$_EXIT
+;
+; a device name is a symbol followed by a ':'
+;
+	$STATE	GETDEV
+	$TRAN	TPA$_SYMBOL
+	$STATE
+	$TRAN	':',TPA$_EXIT
+;
+; a SQUare directory name is a square directory spec
+;
+	$STATE	SQUDIR
+	$TRAN	!SDIR,NAME,COPY_DIR
+;
+; which in turn is strings and dots, terminated by a square ket
+; (note that [] is thus a legal directory name)
+; we also allow a directory of the form [.fred]
+;
+	$STATE	SDIR
+	$TRAN	TPA$_SYMBOL		; start with a name
+	$TRAN	'-'			; or a minus
+	$TRAN	TPA$_LAMBDA		; or nothing
+;
+	$STATE	S_DOTDIR
+	$TRAN	'.',SDIR2		; another name
+	$TRAN	']',TPA$_EXIT		; end of the directory
+;
+	$STATE	SDIR2
+	$TRAN	TPA$_SYMBOL,S_DOTDIR	; followed by a dor or a ket
+;
+; a TRIangular directory name is similar
+;
+	$STATE	TRIDIR
+	$TRAN	!TDIR,NAME,COPY_DIR
+;
+; which in turn is strings and dots, terminated by a triangular ket
+; (note that <> is thus a legal directory name)
+; we also allow a directory of the form <.fred>
+;
+	$STATE	TDIR
+	$TRAN	TPA$_SYMBOL		; start with a name
+	$TRAN	'-'			; or a minus
+	$TRAN	TPA$_LAMBDA		; or nothing
+;
+	$STATE	T_DOTDIR
+	$TRAN	'.',TDIR2		; another name
+	$TRAN	TRIKET,TPA$_EXIT	; end of the directory
+;
+	$STATE	TDIR2
+	$TRAN	TPA$_SYMBOL,T_DOTDIR	; a dot or a ket
+;
+; an extension comes after a '.' and is a string (possibly null)
+;
+	$STATE	EXTENSION
+	$TRAN	TPA$_SYMBOL,CHK_VER,COPY_EXT
+	$TRAN	TPA$_LAMBDA,CHK_VER,COPY_EXT
+;
+; and a version comes after a ';' and is a decimal number (possibly absent)
+;
+	$STATE	VERSION
+	$TRAN	!DIGIT,TRAIL,CALC_VER,,,1	; has a number
+	$TRAN	TPA$_LAMBDA,TRAIL,CALC_VER,,,0	; doesn't have a number
+;
+; a version number may or may not be signed
+;
+	$STATE	DIGIT
+	$TRAN	'-',,SET_SIGN,,,1		; sign is -ve
+	$TRAN	'+',,SET_SIGN,,,0		; sign is +ve
+	$TRAN	TPA$_LAMBDA,,SET_SIGN,,,0	; sign is +ve
+	$STATE
+	$TRAN	TPA$_DECIMAL,TPA$_EXIT
+;
+;*****************************************************************************
+; and terminate the parser
+;
+	$END_STATE
+;
+;
+	.SHOW	EXPANSIONS
+;
+; *************************************************************************
+; *************************************************************************
+;
+; and now define the routines called when bits of the parse succeed
+;
+	COPY_XXX	NOD
+	COPY_XXX	DEV
+	COPY_XXX	DIR
+	COPY_XXX	NAM
+	COPY_XXX	EXT
+;
+; for the version number, we must expand it explicitly, so we can return
+; a string
+;
+; *************************************************************************
+;
+	.ENTRY	CALC_VER, ^M<R2,R3,R4,R5,R6>
+;
+; check if we already had an error, and thus should return failure
+;
+	TSTL	IN_ERROR
+	BNEQU	VER_OLDERR
+;
+	MNEGL	#1,@HAD_VER			; note we had a VER
+;
+; but did we actually have a number, as well?
+;
+	TSTL	TPA$L_PARAM(AP)
+	BNEQU	10$				; yes - deal with it
+;
+; here, we had no number, so we must 'fake' having expanded one...
+;
+	CLRL	R0				; clear the length
+	BRB	30$				; goto after EXPAND
+;
+; we had a number - is it -ve?
+;
+10$:	BLBC	VER_SIGN,20$			; no
+;
+; so the number is negative - make it positive
+;
+	MNEGL	TPA$L_NUMBER(AP),TPA$L_NUMBER(AP)
+;
+; was it zero (under VMS, version -0 means the earliest version, so
+; we must catch this as a special case)
+;
+	BNEQU	20$				; wasn't zero, expand it
+;
+; and deal with -0 as a special case...
+; - note that we could just transfer the string explicitly, without using
+;   EXPAND, but I can't be bothered, and anyway this case is very unlikely
+;   to occur
+;
+	PUSHAL	NEGZERO				; our format ( -0 )
+	CALLS	#1,G^EXPAND			; expand it
+	BRB	30$				; and transfer EXPDSC
+;
+; we will now expand the (not -0) version number into EXPDSC
+;
+20$:	PUSHAL	TPA$L_NUMBER(AP)		; address of number to expand
+	PUSHAL	FORMAT				; address of format to use
+	CALLS	#2,G^EXPAND			; and do it
+;
+; and now copy the resultant string into the results...
+; (not having a number joins us here, with a length of zero)
+;
+30$:	MOVW	R0,@LEN_VER			; store the length
+;
+; copy the string to the string argument
+;
+	MOVL	STR_VER, R6
+	MOVC5	@LEN_VER,-			; source length
+		EXPBUF,-			; source buffer
+		#^A/ /,-			; fill with spaces
+		(R6), @4(R6)			; destination string
+	BGTRU	VER_ERR				; string too long
+	MOVL	#SS$_NORMAL, R0			; success
+	RET
+;
+; previous error - just abandon
+;
+VER_OLDERR:
+	MOVL	#LIB$_SYNTAXERR,R0
+	RET
+;
+; error - string too long
+;
+VER_ERR:
+	MOVL	#SS$_RESULTOVF,R0		; resultant string o/flow
+	MOVL	R0,IN_ERROR			; remember it internally
+	RET
+
+;
+; *************************************************************************
+;
+; set the sign for a version number
+;
+	.ENTRY	SET_SIGN,^M<>
+	MOVB	TPA$L_PARAM(AP),VER_SIGN	; just copy the bit
+	RET
+;
+;
+; *************************************************************************
+;
+; check whether we should be returning an internal failure, having found
+; an unexpected character at the end
+;
+	.ENTRY	CHECK_ERR,^M<>
+	MOVL	#LIB$_SYNTAXERR, R0		; normal error
+	TSTL	IN_ERROR
+	BEQLU	10$				; is it unset?
+;
+; one of our action routines returned an internal error
+; this could not be guaranteed to be given back to the user if returned at
+; a different level, 'cos so many states accept TPA$_LAMBDA is all else fails
+; - this means that we must be cunning here, and reinstate the error
+;
+	MOVL	IN_ERROR,R0			; return the error
+10$:	RET
+;
+	.PSECT
+	.END

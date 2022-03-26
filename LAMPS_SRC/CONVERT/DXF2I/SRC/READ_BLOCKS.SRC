@@ -1,0 +1,191 @@
+	LOGICAL*4 FUNCTION READ_BLOCKS()
+C
+***	MODULE READ_BLOCKS
+***	IDENT 16JN93
+C
+C ©Copyright Laser Scan Ltd, Cambridge, England.
+C
+C Author  :  P. Pan					13 March 1990
+C
+C To read BLOCKS(symbol) definitions from DXF file. 
+C User must note that only the name of the BLOCK is translated.
+C
+CMOD1004					J Barber 13 June 1991 
+C	Read BLOCKS section fully
+C	Output BLOCK entities to the IFF file if there was an EXPAND 
+C	 'block_name' entry in the parameter file using the supplied 
+C	 x,y offset and scaling to modify the local entity coords
+C
+	IMPLICIT NONE
+C
+	INCLUDE	 'LSL$CMNDXFPAR:LOOKUP.CMN'
+	INCLUDE  'HERE:DXF2I.CMN'
+	INCLUDE  'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE  'HERE:DXF2IMSG.PAR'
+C
+C Functions
+	INTEGER 	FLRLIN			! read a line from file
+	INTEGER 	READSTR			! get a string
+	LOGICAL		READ_ENTITIES
+C
+C Workspace
+	CHARACTER*255	STRING			! any old string
+	INTEGER 	J
+	INTEGER 	LEN			! string length
+	INTEGER		COUNTER			! local counter
+	INTEGER		BLKNUMLIN		! line position for block
+	LOGICAL		DO_EXPAND		! EXPAND BLOCK entities?
+C
+C---------------------------------------------------------------------
+C
+	IF (HAD_LOG) CALL LSL_PUTMSG(DXF2I__RDBKSC)
+C
+C Get the nextline from the DXF file
+C
+99	READ_BLOCKS = FLRLIN()
+	IF (.NOT.READ_BLOCKS) GOTO 999
+C
+C Search for BLOCK command
+C
+	CALL BSLN
+	NUMLIN = NUMLIN+1
+	LEN = READSTR(STRING,,ON_EOL)
+	IF (LEN.EQ.0) GOTO 99		! Account for null lines
+C
+C---------------------------------------------------------------------
+C Delegate according to line contents
+C
+C end of section
+C
+	IF (STRING(1:LEN).EQ.'ENDSEC') THEN
+	   GOTO 1000 
+C
+	ELSEIF (STRING(1:LEN).EQ.'0') THEN
+	   GOTO 99
+C
+	ELSEIF (STRING(1:LEN).EQ.'8') THEN	! layer, read and
+	   READ_BLOCKS = FLRLIN()		! ignore layer name
+	   IF (.NOT.READ_BLOCKS) GOTO 999
+	   NUMLIN = NUMLIN+1
+C
+	   GOTO 99
+C
+C Got a BLOCK definition
+C
+	ELSEIF (STRING(1:LEN).EQ.'BLOCK') THEN
+C
+	   DO_EXPAND = .FALSE.
+	   FROM_BLOCKS = .FALSE.
+C
+101	   READ_BLOCKS = FLRLIN()
+	   IF (.NOT.READ_BLOCKS) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   LEN = READSTR(STRING,,ON_EOL)
+	   IF (LEN.EQ.0) GOTO 101		! Acocunt for null
+	   BLKNUMLIN = NUMLIN
+C
+	   IF (STRING(1:LEN).EQ.'ENDBLK') THEN
+	      GOTO 99
+C
+	   ELSEIF (STRING(1:LEN).EQ.'8') THEN	! layer, read and
+	      READ_BLOCKS = FLRLIN()		! ignore layer name
+	      IF (.NOT.READ_BLOCKS) GOTO 999
+	      NUMLIN = NUMLIN+1
+C
+	      GOTO 101
+C
+	   ELSEIF (STRING(1:LEN).EQ.'6') THEN	! linetype, read and
+	      READ_BLOCKS = FLRLIN()		! ignore style name
+	      IF (.NOT.READ_BLOCKS) GOTO 999
+	      NUMLIN = NUMLIN+1
+C
+	      GOTO 101
+C
+	   ELSEIF (STRING(1:LEN).EQ.'62') THEN	! colour, read and
+	      READ_BLOCKS = FLRLIN()		! ignore colour value
+	      IF (.NOT.READ_BLOCKS) GOTO 999
+	      NUMLIN = NUMLIN+1
+C
+	      GOTO 101
+C
+C have found field '2' - next line will be the BLOCK name
+C
+	   ELSEIF (STRING(1:LEN).EQ.'2') THEN
+	      READ_BLOCKS = FLRLIN()
+	      IF (.NOT.READ_BLOCKS) GOTO 999
+C
+	      CALL BSLN
+	      NUMLIN = NUMLIN+1
+	      LEN = READSTR(STRING,,ON_EOL)
+C
+C if the BLOCK name is missing, then complain, and leave
+C
+	      IF (LEN.EQ.0) THEN
+	         READ_BLOCKS = DXF2I__UNACONT
+	         CALL LSL_PUTMSG(DXF2I__ERRSYMNAM,NUMLIN)
+	         GOTO 1000
+              ENDIF
+C
+C now check if the DXF BLOCK name is in the PARAMETER lookup table
+C as INSERT entity
+C
+	      DO 3000 COUNTER = 1,CURRSYMIND
+	         IF (LEN.EQ.DXFENTLEN(DXFSYMBOL(COUNTER))) THEN
+	            IF (STRING(1:LEN).EQ.
+     &			DXFENTNAM(DXFSYMBOL(COUNTER))(1:LEN)) GOTO 103
+	         ENDIF
+3000	      CONTINUE
+C
+C if not, report if not had SCAN
+	      CALL LSL_PUTMSG(DXF2I__UNDEFBLK,STRING(1:LEN),BLKNUMLIN)
+C
+103	      CONTINUE
+C
+C now check if the DXF BLOCK name is in the PARAMETER lookup table
+C as EXPAND entity
+C
+	      DO 3001 COUNTER = 1,CURREXPIND
+	         IF (LEN.EQ.EXPANDLEN(COUNTER)) THEN
+	            IF (STRING(1:LEN) .EQ.
+     &				EXPANDNAM(COUNTER)(1:LEN)) THEN
+		       EXPAND_INDEX = COUNTER
+		       DO_EXPAND = .TRUE.
+		       GOTO 104
+		    ENDIF
+	         ENDIF
+3001	      CONTINUE
+C
+C If EXPANDing, read the BLOCK constituents as separate entities
+C NOTE that the coordinates may be completely incorrect for the file
+C as they should be referenced by the INSERT defining point and scaled
+c by some factor, and which should be supplied with the EXPAND entry 
+C in the parameter file
+C
+104	      CONTINUE
+C
+	      IF (DO_EXPAND) THEN
+		 FROM_BLOCKS = .TRUE.
+		 READ_BLOCKS = READ_ENTITIES()
+		 IF (.NOT.READ_BLOCKS) GOTO 1000
+C
+C turn off expansion for subsequent entities
+C
+		 FROM_BLOCKS = .FALSE.
+	      ENDIF
+C
+	      GOTO 99
+	   ENDIF
+C
+	   GOTO 101
+	ENDIF
+C
+	GOTO 99
+C.......................................................................
+C
+999	CALL LSL_PUTMSG(DXF2I__RDLINERR,NUMLIN)
+C
+1000	RETURN
+	END
+C

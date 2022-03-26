@@ -1,0 +1,178 @@
+      	SUBROUTINE TRANSFORM_ZS(ERRCOD)
+
+***	IDENT	27JL93
+***	MODULE	TRANSFORM_ZS
+
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+C	Created   : 22MY86
+C	Author    : A C Morris (from TRANSFORM_ST by DRC)
+
+CMOD	MAXPTS increased to 32767			  JB 17-Jan-1992
+CMOD	Ignore invisible moves for area features	MWSR 18-Jul-1989
+CMOD	To handle invisible lines			 DRC 12-Sep-1988 
+
+C	Routine for GRID to transform IFF ZS strings into DTI format.
+
+	IMPLICIT NONE
+
+	INCLUDE 'LSL$CMNI2GRID:BELLS.PAR'
+
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNI2GRID:CULTRE.CMN'
+
+C Argument
+	INTEGER*2	ERRCOD		! error code
+C
+C Local
+	REAL		ZVALUE		! 
+	REAL		IFF_COORDS(3*MAXPTS)	! 3D point POINTS
+	INTEGER*4	POINTS		! no. of points in ST
+	INTEGER*4	LAST_POINTS	! copy of POINTS
+	INTEGER*4	TOTCOORDS	! total no. of coords in feature
+	INTEGER*4	POINT,I		! counters
+	INTEGER*2	IECODE		! IFF entry code
+	INTEGER*2	IELEN		! IFF entry length
+        INTEGER*2       IENDS           ! additional string variable
+	LOGICAL		HAD_INVIS	! invisible move to next coord
+	LOGICAL		FIRST_ST	! first ST of feature
+
+C***********************************************************************
+C Current entry in hand is ZS.
+
+	ERRCOD    = 0
+	TOTCOORDS = 0
+	FIRST_ST  = .TRUE.
+	HAD_INVIS = .FALSE.
+	NUM_INVIS = 0
+
+100	HAD_INVIS = .FALSE.
+	CALL EIHRS(POINTS,IENDS)	! number of points
+
+C Transfer points to local buffer
+
+	IF(FIRST_ST)THEN
+	  FIRST_ST=.FALSE.
+	  GOTO 105
+	ENDIF
+C
+	IF(IENDS.EQ.0)THEN
+	  HAD_INVIS=.TRUE.
+	  IF (FTYPE .NE. 2) THEN
+C
+C not an area feature
+	     LAST_POINTS=POINTS
+	     GOTO 130
+	  ENDIF
+	ENDIF
+C
+105	IF (TOTCOORDS+3*POINTS.GT.3*MAXPTS) THEN
+	  CALL WRITEF
+     &	  ('%S more than %N points in single feature',ERRBELL,MAXPTS)
+	END IF
+
+	IF (HAD_INVIS.AND. FTYPE.EQ.2) THEN
+C
+C store up record of invisible move if its an area feature
+	   IF(NUM_INVIS .EQ. MAXINVIS)THEN
+	      CALL WRITEF
+     &	      ('%S more than %N invisible moves in single feature',
+     &        ERRBELL,MAXINVIS)
+	      GOTO 999
+	   ENDIF
+	   NUM_INVIS = NUM_INVIS+1
+	   INVIS(NUM_INVIS) = TOTCOORDS/3+1
+	   END_INVIS(NUM_INVIS) = TOTCOORDS/3+POINTS
+	ENDIF
+C	
+	CALL EIHRR(IFF_COORDS(TOTCOORDS+1),POINTS*3,1)
+	TOTCOORDS = TOTCOORDS+POINTS*3	! increment total coord counter
+
+C Another ZS?
+
+110	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 999	! shouldn't happen
+	IF (IECODE.EQ.'ZS') GOTO 100	! yes
+	IF (TOTCOORDS.EQ.0)GOTO 999
+
+130	POINTS = 0
+	DO 150 I = 1,TOTCOORDS,3
+	  POINTS = POINTS+1
+	  XPTS(POINTS) = IFF_COORDS(I)
+	  YPTS(POINTS) = IFF_COORDS(I+1)
+	  ZPTS(POINTS) = IFF_COORDS(I+2)
+150	CONTINUE
+
+C Type 0 - point feature
+
+	IF (FTYPE.EQ.0) THEN
+	  IF (POINTS.GT.1) THEN
+	    CALL WRITEF
+     & 	    ('Point feature %N with more than 1 point',FSN) 
+	    CALL WRITEF('Item will not be converted')
+	    ERRCOD = 1
+	    GOTO 999
+	  ENDIF
+C
+	  IF ( XPTS(I).LT.WIND(1,1).OR.XPTS(I).GT.WIND(2,1) .OR.  ! in win?
+     &         YPTS(I).LT.WIND(1,2).OR.YPTS(I).GT.WIND(2,2)) GOTO 999
+
+	  IF(PARAM_NUMBER.EQ.-3)THEN
+	     ZVALUE = ZPTS(1)
+	  ELSE
+	     ZVALUE = VAL	     
+	  ENDIF
+
+	  IF (WIDEN) THEN
+            CALL WIDEN_POINT(POINTS)	!turn single pt. into an area
+	    CALL PLOT_AREA(POINTS)	!encode boundary and interior
+	    IF (POINTS.EQ.0) THEN
+	      CALL WRITEF('Item will not be converted fully')
+	      ERRCOD = 1
+	      GOTO 999
+	    ENDIF
+C
+	  ELSE
+	    CALL PLOT_POINT(XPTS(1),YPTS(1),ZVALUE)
+	  END IF
+	  GOTO 999
+	END IF
+
+C Type 1 - linear feature
+
+	IF (FTYPE.EQ.1) THEN
+	  IF(WIDEN.AND.WIDTH.GT.0)THEN
+	    CALL WIDEN_LINE(POINTS)
+	    CALL PLOT_AREA(POINTS)
+	    IF (POINTS.EQ.0) THEN
+	      CALL WRITEF('Item will not be converted fully')
+	      ERRCOD = 1
+	      GOTO 999
+	    ENDIF
+	  ENDIF
+C
+	  CALL PLOT_LINE(POINTS)	!to transform and encode
+	  IF (HAD_INVIS)THEN
+	     TOTCOORDS=0
+	     HAD_INVIS=.FALSE.
+	     POINTS=LAST_POINTS
+	     GOTO 105
+	  ELSE
+	     GOTO 999			!return
+	  ENDIF
+	END IF
+
+C Type 2 - areal feature
+
+	IF (FTYPE.EQ.2) THEN
+500	  IF(PARAM_NUMBER.EQ.-3)VAL = ZPTS(1)	!ht of area is ht of first pt
+	  CALL PLOT_AREA(POINTS)		!encode boundry and interior pts
+	  IF (POINTS.EQ.0) THEN
+	    CALL WRITEF('Item will not be converted fully')
+	    ERRCOD = 1
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+999	RETURN
+	END
+C

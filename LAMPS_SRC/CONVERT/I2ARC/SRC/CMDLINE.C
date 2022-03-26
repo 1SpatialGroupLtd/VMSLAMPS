@@ -1,5 +1,5 @@
 
-#module CMDLINE "26JN89"
+#module CMDLINE "04FE91"
 
 /************************************************************************/
 /*									*/
@@ -41,6 +41,8 @@
 /* 	ARC_name - out - the file name of the ARCINFO file to write	*/
 /*									*/
 /*	/FRT = FRT file-spec (required)					*/
+/*	/PARAMETER = Parameter file-spec (required)			*/
+/*	/INFO_TABLES for .AAT and .PAT ARC/INFO tables			*/
 /*	/LOG   for file handling info					*/
 /*	/DEBUG for full program run info entry by entry			*/
 /*									*/
@@ -50,7 +52,9 @@
 
 BOOLEAN read_cmdline( char  IFF_file[C_MAX_SIZ+1],
 		      char  ARC_name[FILE_NAME_LEN-3],
-		      char  FRT_file[C_MAX_SIZ+1] )
+		      char  FRT_file[C_MAX_SIZ+1],
+		      char  PAR_file[C_MAX_SIZ+1] )
+
 {
 	void	    LSL_PUTMSG();
 
@@ -92,8 +96,17 @@ BOOLEAN read_cmdline( char  IFF_file[C_MAX_SIZ+1],
 	}
 
 	length = LSL_CLD.FIL_LEN[0];
-	strncpy (ARC_name, LSL_CLDCHR.FILARY[0], length);
-	ARC_name[length] = 0;
+
+	if (length>12) {
+	  length=12;
+	  strncpy (ARC_name, LSL_CLDCHR.FILARY[0], length);
+	  LSL_PUTMSG (&I2ARC__OUTFIL,ARC_name);
+	  /*printf("%%I2ARC-W-OUTFIL, Reducing filename to %s\n",ARC_name);*/
+	  }
+	else {
+	  strncpy (ARC_name, LSL_CLDCHR.FILARY[0], length);
+	  ARC_name[length] = 0;
+          }
 
 /* ---------------------------------------------------------------------------
  Did we have any qualifiers? - check for /FRT */
@@ -112,11 +125,31 @@ BOOLEAN read_cmdline( char  IFF_file[C_MAX_SIZ+1],
 	}
 
 /* ---------------------------------------------------------------------------
+  - check for /PARAMETER */
+
+	status = c_DCL_QUAL_1 ("PARAMETER", &had_par, TRUE);
+	if ( !(status & STS$M_SUCCESS) ) return FALSE;
+
+	if ( had_par )
+	{
+	   status = c_DCL_FILE ("PARAMETER", "", &absent, FALSE, TRUE );
+	   if ( !(status & STS$M_SUCCESS) ) return FALSE;   /* failed */
+
+	   length = LSL_CLD.FIL_LEN[0];
+	   strncpy (PAR_file, LSL_CLDCHR.FILARY[0], length);
+	   PAR_file[length] = 0;
+	}
+
+/* ---------------------------------------------------------------------------
  And for /LOG */
 
 	status = c_DCL_QUAL_1 ("LOG", &had_log, TRUE);
 	if ( !(status & STS$M_SUCCESS) ) return FALSE;
+/* ---------------------------------------------------------------------------
+ And for /INFO_TABLES */
 
+	status = c_DCL_QUAL_1 ("INFO_TABLES", &had_tab, TRUE);
+	if ( !(status & STS$M_SUCCESS) ) return FALSE;
 /* ---------------------------------------------------------------------------
  And for /DEBUG */
 

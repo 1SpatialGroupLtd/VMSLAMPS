@@ -1,0 +1,126 @@
+	.TITLE	VSCS
+ 
+	.IDENT	/13NO81/
+ 
+	.PSECT	VSCODE
+ 
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+;
+; Author: Susan Manning
+;
+ 
+; VS11 CURSOR CONTROL ROUTINES
+ 
+; VSCURS(N)	turns cursor off or on ( N = 0 or 1 )
+ 
+.ENTRY	VSCURS,^M<R4,R5,R6>
+	MOVZWL	@4(AP),R6		; get on/off status
+	BICL2	#MASK1,R6		; mask to 1 bit
+	MOVZWL	VSJST,R4		; get copy of stored Jstatus word
+	INSV	R6,#JCPOS,#1,R4		; modify enable bit as specified by R6
+	CMPW	R4,VSJST		; cursor enable changed ?
+	BEQL	10$			; no, do nothing
+	MOVW	R4,VSJST		; store new J status word
+	JSB	$VSCBFW			; buffer word, checking space
+	JSB	$VFLUSH			; flush for immediate action
+10$:	RET
+ 
+ 
+ 
+; VSCSWT(X,Y)	specifies a new cursor position
+ 
+.ENTRY	VSCSWT,^M<R4,R5,R6,R7,R8,R9>
+	MOVF	@4(AP),R7
+	MOVF	@8(AP),R9
+	BSBB	VS$CSWT
+	RET
+ 
+VS$CSWT::ADDF2	VSRUOX,R7		; add in user origin offsets
+	ADDF2	VSRUOY,R9
+	MULF3	VSTR,R7,R6		; transform to pixels
+	MULF3	VSTR,R9,R8
+	ADDF2	VSCEN,R6		; relative to bottom left hand corner
+	ADDF2	VSCEN,R8
+	CVTFW	R6,R7			; to integer counts
+	BGEQ	30$
+	CLRW	R7			; force in range at bottom
+30$:	CMPW	R7,#VSEXT
+	BLEQ	40$
+	MOVW	#VSEXT,R7		; force in range at top
+40$:	CVTFW	R8,R9			; now same for Y
+	BGEQ	50$
+	CLRW	R9
+50$:	CMPW	R9,#VSEXT
+	BLEQ	60$
+	MOVW	#VSEXT,R9
+60$:	MOVL	#3,R0			; check room for 3 words in buffer
+	JSB	$VSCHKBF
+	MOVW	#L.CURS,R4		; send control word
+	JSB	$VSBFW
+	ASHL	#1,R7,R4		; move X into position
+	JSB	$VSBFW			; and buffer
+	ASHL	#1,R9,R4		; and same for Y
+	JSB	$VSBFW
+	JSB	$VFLUSH			; and change cursor pos. immediately
+	RSB
+ 
+ 
+ 
+; VSCSRD(X,Y)	returns the current cursor position in X,Y
+ 
+.ENTRY	VSCSRD,^M<R4,R5,R7,R9>
+	MOVZWL	VSJST,R4		; get stored J status word
+	BISL2	#JREAD,R4		; 'or' in read enable bit
+	JSB	$VSCBFW			; buffer it
+	JSB	$VFLUSH			; and flush it
+	$QIOW_G	VI.DPB			; read status
+	BITW	#VST,VSSTATUS+6		; test QIO status
+	BEQL	10$			; branch if okay
+	JMP	ERRVS			; signal error
+10$:	EXTZV	#LCPOS,#LCSIZ,XC,R7	; get X and Y coordinates in pixels
+	EXTZV	#LCPOS,#LCSIZ,YC,R9
+ 
+; transform pixels into user units
+; 	X = (R7-VSCEN)/VSTR - VSRUOX
+;	Y = (R9-VSCEN)/VSTR - VSRUOY
+ 
+	CVTWF	R7,R7
+	CVTWF	R9,R9
+	SUBF2	VSCEN,R7
+	DIVF2	VSTR,R7
+	SUBF3	VSRUOX,R7,@4(AP)	; return to caller
+	SUBF2	VSCEN,R9
+	DIVF2	VSTR,R9
+	SUBF3	VSRUOY,R9,@8(AP)	; return to caller
+	RET
+ 
+ 
+; VSWTJS(TIM)	waits for the joystick switch to be pressed, timing out
+;		after TIM seconds
+ 
+.ENTRY	VSWTJS,^M<R4,R5,R6>
+	MOVZWL	@4(AP),R6		; get timeout interval in seconds
+	MOVZWL	VSJST,R4		; get stored J status word
+	BISL2	#JSENB,R4		; allow joystick switch interrupts
+	BISL2	#VFLG_M_JSENB,VSFLAG	; mark allowing them
+	JSB	$VSCBFW
+	JSB	$VFLUSH			; and allow them immediately
+	BBS	#VFLG_V_JSINT,VSFLAG,10$ ; branch if already had it
+	$QIOW_S	FUNC=#IO$_WAITSWITCH,-	; wait for interrupt or for timeout
+		CHAN=VO.CHAN,-		; period to expire
+		IOSB=VSSTATUS,-
+		P1=(R6)
+	BITW	#VST,VSSTATUS+6		; check status
+	BEQL	10$			; branch if okay
+	JSB	ERRVS
+ 
+10$:	MOVZWL	VSJST,R4
+	JSB	$VSCBFW			; disable joystick switch interrupt
+	JSB	$VFLUSH			; immediately
+	BICL2	#VFLG_M_JSENB!VFLG_M_JSINT,VSFLAG ; mark not allowed
+	RET
+ 
+ 
+	.END
+ 

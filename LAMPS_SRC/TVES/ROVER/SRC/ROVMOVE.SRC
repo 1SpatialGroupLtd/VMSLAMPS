@@ -1,0 +1,203 @@
+	SUBROUTINE ROVMOVE
+C
+***	MODULE	ROVMOVE
+***	IDENT	07OC92
+C
+C Copyright Laser-Scan Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    11-Dec-1987
+C
+CMOD	NINT to remove rounding errors, and cursor wandering when
+C	using UP, DOWN, LEFT and RIGHT commands  CCB/JB  7-Dec-1992
+C
+C Deals with ROVER MOVE command to move editing or registering cursor
+C
+	IMPLICIT NONE
+C
+C Parameters
+C
+C Common Blocks
+	INCLUDE	'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE	'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE	'LSL$CMNDTI:DTIPROJ.CMN'
+	INCLUDE	'LSL$CMNROVER:DTICMN.CMN'
+	INCLUDE	'LSL$CMNROVER:ROVCMN.CMN'
+	INCLUDE	'LSL$CMNROVER:DISCMN.CMN'
+	INCLUDE	'LSL$CMNROVER:TAB.CMN'
+	INCLUDE	'LSL$CMNROVER:RASTED.CMN'
+C
+C Function
+	LOGICAL		READLL			!Reads lat long
+C
+C Local Variables
+	REAL*4		X_DTI,Y_DTI
+	LOGICAL		INIT
+	REAL*4		FACTOR
+	INTEGER*4	LLDEGS(2)		!Latlong values
+	REAL*4		X1,Y1
+	INTEGER*4	MATRIX_FUDGE
+C
+	INIT = .FALSE.
+	MATRIX_FUDGE = 0
+	IF (HAD_TRKB .OR. HAD_TIMER) THEN
+	   CALL READ_DTI_POSITION(X_DTI,Y_DTI)
+	   IF (REGISTERING) THEN
+	     X1 = X_DTI
+	     Y1 = Y_DTI
+	   ELSE
+	     X1 = REAL(NINT(X_DTI))
+	     Y1 = REAL(NINT(Y_DTI))
+	   ENDIF
+C
+	   IF (HAD_TIMER) THEN
+	      CALL SYS$CLREF(%VAL(EF_TIMER))	! clear event flag
+	   ENDIF
+C
+C  if we've moved the trackerball recently then ignore this one
+	   IF (MOVED_RECENTLY) GOTO 999	   
+C
+	   IF (HAD_TRKB) CALL SETUP_BALL_TIMER
+C
+	ELSEIF (HAD_TABLE) THEN
+	   CALL TRANSF(DTICHAN+4,X_TAB,Y_TAB,X_DTI,Y_DTI)
+	   X1 = X_DTI
+	   Y1 = Y_DTI
+	ELSE
+C
+C must be from the terminal 
+	   IF (CMDRCT .NE. 2) THEN
+	      CALL WRITEF('%S Error specifying command MOVE',EBELL)
+	      CALL WRITEF('Command requires 2 integer arguments')
+	      GOTO 999
+	   ENDIF
+C
+C arguments depend on units 
+	   GOTO (10,20,30,40,20)UNTYPE(DTICHAN)
+C	
+C matrix units
+10	   X1=REALAR(1)
+           Y1=REALAR(2)
+	   GOTO 45
+C
+C metres  or projection
+20	   CALL DTI_UNITS_TO_MATRIX(DTICHAN, 
+     &		DBLE(REALAR(1)), 
+     &		DBLE(REALAR(2)),
+     &		UNTYPE(DTICHAN), CUR_ROTATE(DTICHAN), 
+     &		HAD_ABSOLUTE, X1, Y1)
+	   GOTO 45
+C
+C SECONDS
+30	   CALL DTI_UNITS_TO_MATRIX(DTICHAN,
+     &		DBLE(REALAR(2)*10), 
+     &		DBLE(REALAR(1)*10),
+     &		UNTYPE(DTICHAN), CUR_ROTATE(DTICHAN), 
+     &		HAD_ABSOLUTE, X1, Y1)
+	   GOTO 45
+C
+C LATLONG
+40         IF (READLL(LLDEGS,2)) THEN
+	      CALL WRITEF('%S Specifying command MOVE',EBELL)
+	      CALL WRITEF('Unable to use supplied LAT LONG values')
+	      GOTO 45
+	   ELSE
+   	      CALL DTI_UNITS_TO_MATRIX(DTICHAN,
+     &		DBLE(LLDEGS(2)*10), 
+     &		DBLE(LLDEGS(1)*10),
+     &		UNTYPE(DTICHAN), CUR_ROTATE(DTICHAN), 
+     &		HAD_ABSOLUTE, X1, Y1)
+	      GOTO 45
+	   ENDIF
+C
+45	   IF (REGISTERING) THEN
+	      MATRIX_FUDGE = 1
+	      IF (UNTYPE(DTICHAN).EQ.1) THEN
+	         X1  = X1 + 1.0
+	         Y1  = Y1 + 1.0
+	      ENDIF
+	   ELSE
+	      MATRIX_FUDGE = 0
+	   ENDIF
+	ENDIF
+C
+C check arguments against the current window settings
+60	IF (NINT(X1) .LT. DTI_WINDOW_SWX(DTICHAN) .OR. 
+     &	    NINT(X1) .GT. (DTI_WINDOW_NEX(DTICHAN)+MATRIX_FUDGE) .OR.
+     &	    NINT(Y1) .LT. DTI_WINDOW_SWY(DTICHAN) .OR.
+     &	    NINT(Y1) .GT. (DTI_WINDOW_NEY(DTICHAN)+MATRIX_FUDGE)) THEN
+C
+	    IF (NINT(X1).GT.(X_EXTENT(DTICHAN)+MATRIX_FUDGE) .OR.
+     &      	NINT(X1).LT.1 .OR.
+     &		     Y1 .GT.(Y_EXTENT(DTICHAN)+MATRIX_FUDGE) .OR.
+     &		NINT(Y1).LT.1) THEN
+	      IF (.NOT.(HAD_TRKB .OR. HAD_TABLE .OR. HAD_TIMER)) THEN
+	          CALL WRITEF('%S Error specifying command MOVE',EBELL)
+	          CALL WRITEF
+     &            ('%S Supplied coordinates exceed file extents',EBELL)
+	      ENDIF
+	      GOTO 999
+	   ELSE
+	      IF (.NOT. (HAD_TRKB .OR. HAD_TABLE .OR. HAD_TIMER)) THEN
+C
+C a move command to coordinates outside the current window causes
+C a zoom around the given coordinates
+C first blank out previous cursor
+		 CALL MOVE_CURSOR(X_CURDTI,Y_CURDTI,.FALSE.,.TRUE.)
+		 FACTOR = 1.0
+C
+	         IF (REGISTERING) THEN
+	            IF (UNTYPE(DTICHAN).EQ.1) THEN
+	               X_CURDTI = X1-0.5
+	               Y_CURDTI = Y1-0.5
+	            ELSE
+	               CALL MATRIX_POINT_FIVE(X1,Y1,CUR_ROTATE(DTICHAN),
+     &				.FALSE.,X_CURDTI,Y_CURDTI)
+	            ENDIF
+C
+C		    X_CURDTI = X1+0.5
+C	            Y_CURDTI = Y1+0.5
+	         ELSE
+	            X_CURDTI = X1
+	            Y_CURDTI = Y1
+	         ENDIF
+		 CALL ZOOM(FACTOR)		! zoom factor 1
+		 INIT = .TRUE.
+	      ELSE
+                 GOTO 999
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C do the moving
+	IF (REGISTERING) THEN
+          IF (.NOT.(HAD_TRKB .OR. HAD_TABLE .OR. HAD_TIMER))THEN
+	     IF (UNTYPE(DTICHAN).EQ.1) THEN
+	        X_DTI = X1-0.5
+	        Y_DTI = Y1-0.5
+	     ELSE
+	        CALL MATRIX_POINT_FIVE(X1,Y1,CUR_ROTATE(DTICHAN),
+     &			.FALSE.,X_DTI,Y_DTI)
+	     ENDIF
+	  ENDIF
+	ELSE
+	  X_DTI = REAL(NINT(X1))
+	  Y_DTI = REAL(NINT(Y1))
+	ENDIF
+C
+	CALL MOVE_CURSOR(X_DTI,Y_DTI,INIT,.FALSE.)
+C
+C if command not from trackerball must reset mouse
+	IF (.NOT.(HAD_TRKB .OR. HAD_TIMER)) THEN
+C	   CALL SET_DTI_POSITION(X_DTI,Y_DTI)
+	   CALL SET_TRKB(FLOAT(XCROSS),FLOAT(YCROSS))
+	ENDIF
+C
+	IF (HAD_TRKB) THEN
+	   CALL SYS$CLREF(%VAL(EF_TRKB))	! clear event flag
+	ENDIF
+C
+999	RETURN
+	END
+C

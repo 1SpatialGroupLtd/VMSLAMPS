@@ -1,0 +1,459 @@
+	SUBROUTINE WRITE_DTI
+C
+***	MODULE WRITE_DTI
+***	IDENT  11AU88
+C
+C	Copyright  Laser-Scan Laboratories Ltd., Cambridge, England
+C	Author   : D R Catlow 
+C	Created  : November 1987
+C
+C	Routine to interprete the bit pattern of a cover map data
+C	value, and write the decoded information to an output DTI
+C	file.
+C	Values written to the output file, depend on how many
+C	observers can see a particular node:
+C	-1 node is outside the field of view of all observers
+C	0  node is inside field of view but not visible to any observer
+C       1  node is visible to 1 observer
+C	2  node is visible to 2 observers etc...
+C	Only the information related to the observers currently
+C	selected are considered.
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+C
+***	COMMON/HERE:DRWCMN/		!drawing values
+***	COMMON/HERE:OBSERVER/		!contains SELOBS
+***	COMMON/HERE:DISPLY/		!observer details for
+C					!display image
+***	COMMON/HERE:COVER/		!display offsets
+C
+C	Locals:
+	INTEGER*4	YPOS		!Y drawing position
+	INTEGER*4	XPOS		!X drawing position
+	INTEGER*4	COL_COUNT	!output DTI COLs
+	REAL		CONE_LEFT
+	REAL		CONE_RIGHT
+	INTEGER*4	RETVAL		!function return
+	INTEGER*4	ERROR		!system error code
+	INTEGER*4	COL		!COL counter
+	INTEGER*4	ROW		!row counter
+	INTEGER*4	NUMBER		!number of obs selected
+	INTEGER*4	DIS_SIZE(2)	!matrix display area size
+	INTEGER*4	DTILUN		!which matrix
+	INTEGER*4	HEADER_OFFSET	!obs details offset in
+C					!matrix header
+	INTEGER*4	SHEET_OFFSET	!offset of sheet details
+	INTEGER*4	SAVED_UNITS	!copy of units value
+	INTEGER*4	I,N		!counters
+	INTEGER*4	SF		!pixel enlargement factor
+	INTEGER*4	NUMBER_PIXELS	!number of pixels to write
+	INTEGER*2	COL_INDEX	!colour index
+	INTEGER*2	COUNT
+	INTEGER*2	CELL		
+	INTEGER*4	LLDEGS(4)	!temp. holds lat.long in .1 secs
+	INTEGER*4	DEGR,MINU,SECO
+	LOGICAL		NEGA
+	BYTE		CH
+C
+C
+C	Functions called:
+	INTEGER*4	DTI_CLOSE	!close a DTI file
+	INTEGER*4	DTI_READ_WORD_DATA	!read a data value
+	INTEGER*4	DTI_READ_WORD_HEADER	!read word from header
+	INTEGER*4	DTI_READ_REAL_HEADER	!read REAL*4 from header
+	INTEGER*4	DTI_MINMAX_DATA	!determines min/max data value
+C
+	LOGICAL		WAIT_INPUT	! wait for kybd or table input
+	LOGICAL		RDCHS
+	LOGICAL		DISPLAY_INSIDE	!test if node is inside cone
+	LOGICAL		OPEN_FILE	!open a matrix
+	LOGICAL		CREATE_FILE	!create a matrix
+C
+C************************************************************************
+C
+C	Input DTI cover map is opened on DTILUN 2
+	DTILUN=2
+C
+C	Close any existing cover map
+	IF(DTILUN_INUSE(DTILUN))THEN
+	  RETVAL=DTI_CLOSE(DTILUN,.FALSE.,.FALSE.,ERROR)
+	  IF(RETVAL.NE.DTI__NORMAL)THEN
+            CALL LSL_PUTMSG(RETVAL)
+	    IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C	Open the input cover map
+	IF(RDCHS(CH))GOTO 15
+	CALL BSCH
+10	IF(.NOT.OPEN_FILE(DTILUN))THEN		! Error already output 
+15	  CALL BSLN
+	  IF(.NOT.WAIT_INPUT('Input cover map filename',.FALSE.,.TRUE.))
+     &    GOTO 999
+	  GOTO 10
+	ENDIF
+C
+	IF(RDCHS(CH))GOTO 25
+	CALL BSCH
+C	and create the output matrix on channel 6
+20	IF(.NOT.CREATE_FILE(6,X_EXTENT(2),Y_EXTENT(2),.FALSE.))THEN
+25	  CALL BSLN
+	  IF(.NOT.WAIT_INPUT('Output DTI filename',.FALSE.,.TRUE.))
+     &    GOTO 999
+	  GOTO 20
+	ENDIF
+C
+C	Transfer grid interval values
+	X_GRID(6)=X_GRID(2)
+	Y_GRID(6)=Y_GRID(2)
+C
+C	These are stored in the header at byte offset 220 onwards
+C	in an old style visibility map, and at byte offset 280 
+C	in a new style cover map.
+	IF(HEADER_TYPE(DTILUN).EQ.DTI_MIKE)THEN
+	  SHEET_OFFSET=220
+	ELSE
+	  SHEET_OFFSET=280
+	ENDIF
+C
+C	Matrix offset values
+        RETVAL=DTI_READ_WORD_HEADER(DTILUN,
+     &         DISPLAY_XOFFSET,SHEET_OFFSET+16,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	  GOTO 999
+	ENDIF
+C
+        RETVAL=DTI_READ_WORD_HEADER(DTILUN,
+     &         DISPLAY_YOFFSET,SHEET_OFFSET+18,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	  GOTO 999
+	ENDIF
+C
+C	Read in observer details from header of input cover map
+C	Initialise HAD_D_OBSERVERS array
+30	DO 40 I=1,8
+	   HAD_D_OBSERVERS(I)=.FALSE.
+40	CONTINUE
+C
+	CALL WRITEF
+	CALL EXPAND('Observer values ')
+C
+C	Test if current units setting is sensible for this file.
+C	If not then output details in matrix units.
+	SAVED_UNITS=UNITS
+	IF(SAVED_UNITS.EQ.3.OR.SAVED_UNITS.EQ.4)THEN
+	  IF(LATINT(2).EQ.0.AND.LONINT(2).EQ.0)SAVED_UNITS=1
+	ENDIF
+C
+	IF(SAVED_UNITS.EQ.1)CALL APPEND('(Units are DTI Matrix Values)')
+	IF(SAVED_UNITS.EQ.2)CALL APPEND('(Units are Metres)')
+	IF(SAVED_UNITS.EQ.3)CALL APPEND('(Units are Seconds)')
+        IF(SAVED_UNITS.EQ.4)CALL APPEND
+     &  ('(Units are Degrees, Minutes, Seconds)')
+	CALL TTWSTR
+C
+	CALL WRITEF
+     &	('Observer       Position          Height    Di
+     &rection     Cone     Distance')
+C
+C	If input file is a MIKE type header, then its an old
+C	style visibility grid with different offset values.
+C	A file with the new style is always created.
+	IF(HEADER_TYPE(DTILUN).EQ.DTI_MIKE)THEN
+	  HEADER_OFFSET=0
+	ELSE
+	  HEADER_OFFSET=16
+	ENDIF
+C
+	DO 70 I=1,8
+C
+	   HEADER_OFFSET=HEADER_OFFSET+24
+C
+	   IF(.NOT.SELOBS(I))GOTO 70
+C
+	   RETVAL=DTI_READ_REAL_HEADER(DTILUN,
+     &            CON_D_OBSERVERS(I),HEADER_OFFSET+8,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	     GOTO 999
+	   ENDIF
+	   IF(CON_D_OBSERVERS(I).EQ.0)GOTO 70	!though selected,
+C
+C	   this observer was not used in the cover map generation
+	   RETVAL=DTI_READ_WORD_HEADER(DTILUN,
+     &            DTI_D_OBSERVERS(I,1),HEADER_OFFSET,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	     GOTO 999
+	   ENDIF
+C
+	   RETVAL=DTI_READ_WORD_HEADER(DTILUN,
+     &            DTI_D_OBSERVERS(I,2),HEADER_OFFSET+2,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	     GOTO 999
+	   ENDIF
+C
+	   POS_D_OBSERVERS(I,1)=DTI_D_OBSERVERS(I,1)*X_GRID(DTILUN)
+	   POS_D_OBSERVERS(I,2)=DTI_D_OBSERVERS(I,2)*Y_GRID(DTILUN)
+C
+	   RETVAL=DTI_READ_REAL_HEADER(DTILUN,
+     &            POS_D_OBSERVERS(I,3),HEADER_OFFSET+4,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	     GOTO 999
+	   ENDIF
+C
+	   RETVAL=DTI_READ_REAL_HEADER(DTILUN,
+     &            DIR_D_OBSERVERS(I),HEADER_OFFSET+12,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	     GOTO 999
+	   ENDIF
+C
+	   RETVAL=DTI_READ_REAL_HEADER(DTILUN,
+     &            DIS_D_OBSERVERS(I,1),HEADER_OFFSET+16,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	     GOTO 999
+	   ENDIF
+C
+	   RETVAL=DTI_READ_REAL_HEADER(DTILUN,
+     &            DIS_D_OBSERVERS(I,2),HEADER_OFFSET+20,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	     GOTO 999
+	   ENDIF
+C
+	   HAD_D_OBSERVERS(I)=.TRUE.
+C		   
+C	and output details to terminal...
+C
+C	Branch according to UNITS
+C
+	   GOTO (310,320,330,340)UNITS
+C
+310	   CALL WRITEF
+     &	   ('%I3   %I8   %I8      %F7.1    %F7.1
+     &     %F7.1     %F7.1',
+     &	   I,
+     &     DTI_D_OBSERVERS(I,1)+DISPLAY_XOFFSET,
+     &     DTI_D_OBSERVERS(I,2)+DISPLAY_YOFFSET,
+     &     POS_D_OBSERVERS(I,3),
+     &	   DIR_D_OBSERVERS(I),
+     &     CON_D_OBSERVERS(I),
+     &     DIS_D_OBSERVERS(I,1))
+	   GOTO 70
+C
+320	   CALL WRITEF
+     &	   ('%I3   %F10.1 %F10.1    %F7.1    %F7.1
+     &     %F7.1     %F7.1',
+     &	   I,
+     &     POS_D_OBSERVERS(I,1)+(DISPLAY_XOFFSET*X_GRID(2)),
+     &     POS_D_OBSERVERS(I,2)+(DISPLAY_YOFFSET*Y_GRID(2)),
+     &     POS_D_OBSERVERS(I,3),
+     &	   DIR_D_OBSERVERS(I),
+     &     CON_D_OBSERVERS(I),
+     &     DIS_D_OBSERVERS(I,2))
+	   GOTO 70
+C
+330	   LLDEGS(1)=(LONREC(1,2)+((DTI_D_OBSERVERS(I,1)-1)*LONINT(2)))/10
+	   LLDEGS(2)=(LATREC(1,2)+((DTI_D_OBSERVERS(I,2)-1)*LATINT(2)))/10
+	   IF(DTI_D_OBSERVERS(I,1).EQ.0)LLDEGS(1)=0
+	   IF(DTI_D_OBSERVERS(I,2).EQ.0)LLDEGS(2)=0
+C
+	   CALL WRITEF
+     &	   ('%I3    %^L%I9 %I9     %F7.1    %F7.1
+     &     %F7.1     %F7.1',
+     &	   I,				!observer number
+     &	   LLDEGS(2),			!x observer position (secs)
+     &	   LLDEGS(1),			!y observer position (secs)
+     &	   POS_D_OBSERVERS(I,3),	!height (metres)
+     &	   DIR_D_OBSERVERS(I),		!direction (degrees from N)
+     &     CON_D_OBSERVERS(I),		!cone of vision (degrees)
+     &	   DIS_D_OBSERVERS(I,2))	!distance (metres)
+	   GOTO 70
+C
+340	   LLDEGS(1)=LONREC(1,2)+((DTI_D_OBSERVERS(I,1)-1)*LONINT(2))
+	   LLDEGS(2)=LATREC(1,2)+((DTI_D_OBSERVERS(I,2)-1)*LATINT(2))
+C
+	   CALL EXPAND('%I3    ',I)	!observer
+	   IF(DTI_D_OBSERVERS(I,1).EQ.0)THEN
+	     CALL APPEND('  0 00 00    0 00 00    ')
+	   ELSE
+	     CALL DTI_CVTANG(LLDEGS(2),NEGA,DEGR,MINU,SECO)
+	     CALL APPEND('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	     IF(NEGA)THEN
+	       CALL APPEND('S ')
+	     ELSE
+	       CALL APPEND('N ')
+	     ENDIF
+C
+	     CALL DTI_CVTANG(LLDEGS(1),NEGA,DEGR,MINU,SECO)
+	     CALL APPEND('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	     IF(NEGA)THEN
+	       CALL APPEND('W   ')
+	     ELSE
+	       CALL APPEND('E   ')
+	     ENDIF
+	   ENDIF
+C
+	   CALL APPEND('%P %F7.1  ',POS_D_OBSERVERS(I,3))
+	   CALL APPEND('  %P %F7.1 ',DIR_D_OBSERVERS(I))
+	   CALL APPEND('    %P %F7.1 ',CON_D_OBSERVERS(I))
+	   CALL APPEND('    %P %F7.1',DIS_D_OBSERVERS(I,2))
+	   CALL TTWSTR
+C
+70	CONTINUE
+C
+	CALL WRITEF
+C--------------------------------------------------------------------------
+C
+C	Lat origin value in tenths of seconds
+        RETVAL=DTI_READ_REAL_HEADER(DTILUN,
+     &         LATREC(1,DTILUN),SHEET_OFFSET,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	  GOTO 999
+	ENDIF
+C	
+C	Lon origin value in tenths of seconds
+        RETVAL=DTI_READ_REAL_HEADER(DTILUN,
+     &         LONREC(1,DTILUN),SHEET_OFFSET+4,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	  GOTO 999
+	ENDIF
+C
+C	Lat interval in tenths of seconds
+        RETVAL=DTI_READ_REAL_HEADER(DTILUN,
+     &         LATINT(DTILUN),SHEET_OFFSET+8,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	  GOTO 999
+	ENDIF
+C
+C	Lon interval in tenths of seconds
+        RETVAL=DTI_READ_REAL_HEADER(DTILUN,
+     &         LONINT(DTILUN),SHEET_OFFSET+12,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	  GOTO 999
+	ENDIF
+C
+C
+C--------------------------------------------------------------------------
+C
+	COL_COUNT=1	     
+C
+C	Main loop...
+90	DO 300 COL=1,X_EXTENT(DTILUN)	 
+C
+	   DO 200 ROW=1,Y_EXTENT(DTILUN)
+C
+	      RETVAL=DTI_READ_WORD_DATA(DTILUN,CELL,COL,ROW)
+	      IF(.NOT.RETVAL)THEN
+                CALL LSL_PUTMSG(RETVAL)
+	        GOTO 999
+	      ENDIF
+C
+	      IF(CELL.EQ.-1)THEN	!outside cones of vision
+		COLOUR(ROW)=-1	
+	        GOTO 200
+	      ENDIF
+C
+	      COUNT=0		!count of how many observers the cell
+C				!is visible to
+	      IF(CELL.EQ.0)GOTO 120
+C
+	      DO 100 I=1,8
+	        IF(.NOT.SELOBS(I))GOTO 100	!observer not selected
+		IF(.NOT.HAD_D_OBSERVERS(I))GOTO 100
+C	Test if appropriate bit is set
+	        IF(BTEST(CELL,I-1))THEN		!yes	
+		  COUNT=COUNT+1		
+	        ENDIF
+100	      CONTINUE
+C
+	      IF(COUNT.EQ.0)THEN    !not visible to any of the selected
+C	!observers. Is this because the cell is outside all their cones
+C	!of vision?
+120	        DO 150 I=1,8
+	          IF(.NOT.SELOBS(I))GOTO 150
+		  CONE_LEFT=DIR_D_OBSERVERS(I)-(CON_D_OBSERVERS(I)*0.5)
+	          IF(CONE_LEFT.LE.0.0)THEN
+	             CONE_LEFT=CONE_LEFT+360.0
+	          ENDIF
+C
+		  CONE_RIGHT=DIR_D_OBSERVERS(I)+(CON_D_OBSERVERS(I)*0.5)
+	          IF(CONE_RIGHT.GT.360.0)THEN
+	             CONE_RIGHT=CONE_RIGHT-360.0
+	          ENDIF
+C    Test if cell is inside area of vision of current observer		
+		  IF(DISPLAY_INSIDE(COL,ROW,I,
+     &                      CONE_LEFT,CONE_RIGHT,DTILUN))THEN
+C	!inside at least 1 cone of vision, so really not visible
+	            COLOUR(ROW)=0
+	            GOTO 200
+	          ENDIF
+150	        CONTINUE
+C	!outside all cones of vision
+	        COLOUR(ROW)=-1
+	        GOTO 200
+	      ENDIF
+C	
+C	set colour according to how many observers can see the cell
+	      COLOUR(ROW)=COUNT
+C
+200	   CONTINUE
+C
+	   CALL WRITE_COLUMN(COL_COUNT,COLOUR)
+	   COL_COUNT=COL_COUNT+1
+C
+300	CONTINUE
+C
+C------------------------------------------------------------------------
+C 	Close the DTI files on 2 and  6 
+	RETVAL=DTI_MINMAX_DATA(6,.FALSE.,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+	RETVAL=DTI_CLOSE(6,.TRUE.,.TRUE.,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+	RETVAL=DTI_CLOSE(2,.FALSE.,.TRUE.,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C	
+999	RETURN
+C
+	END

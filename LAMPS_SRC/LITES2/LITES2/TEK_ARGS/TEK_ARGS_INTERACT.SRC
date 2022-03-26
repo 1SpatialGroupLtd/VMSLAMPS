@@ -1,0 +1,704 @@
+	SUBROUTINE INTERACT(CTRLZ)
+C
+***	IDENT   10MY96
+***	MODULE  INTERACT
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					CCB	 7-DEC-1984
+C
+C Description
+C
+C	LITES2 cartographic editor interactive input routine
+C
+C      ---      THIS SUBROUTINE IS INSTALLATION DEPENDENT      ---
+C	---   This is WOSPLIB/Table Monitor/direct table Version ---
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:END/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:DOUT/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/CMN:GLOBAL/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:PROMPT/
+***	COMMON/CMN:RFCTRL/
+***	COMMON/CMN:STATE/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:VAREFN/
+***	COMMON/CMN:VARIAT/
+***	COMMON/CMN:WORKS/
+C
+	INCLUDE '($DVIDEF)'
+C
+C argument
+	LOGICAL*1	CTRLZ		! true when command from
+					! keyboard terminated with ^Z
+C
+C functions called
+	INTEGER*4	SYS$DASSGN
+	INTEGER*4	EXPAND
+	INTEGER		LIB$GETDVI
+	LOGICAL		HAD_ERROR,READ_ERROR
+	LOGICAL		HAD_PUCK,READ_PUCK
+	LOGICAL		HAD_STREAM,READ_STREAM
+	LOGICAL		RUBISH
+	LOGICAL		STRDTB
+	LOGICAL		DIGTRN
+	LOGICAL		GTYPAC
+	LOGICAL		AUXACT		! are auxiliary inputs active
+	LOGICAL		SERVAUX		! service the auxiliary inputs
+	LOGICAL		AUXOFF		! has an auxiliary input gone off
+	LOGICAL		SERV_FOLLOW	! service event from following
+C
+C local variables
+	INTEGER*4	IERR
+	INTEGER*4	MASK
+	INTEGER		TTLEN
+	INTEGER*2	TAIOSB(4)
+	INTEGER		TABLEN
+	PARAMETER	(TABLEN=12)
+	BYTE		TABUF(TABLEN)
+	INTEGER		TALEN
+	CHARACTER*20	TTDEV
+	CHARACTER*20	TKDEV
+	INTEGER		I,J
+	INTEGER*2	TALIN,TABUT
+	REAL		TABXY(2)
+	INTEGER*4	DEV,BUTTON
+	REAL		TEKXY(2)	! TEK cursor position
+	INTEGER*2	CS1,CS2
+	INTEGER		PTR
+	LOGICAL*1	RMON		! .TRUE. if using table monitor
+	BYTE		BU		! button number returned by
+					! table monitor
+	INTEGER*4	IX,IY		! coordinates returned by
+					! table monitor
+	LOGICAL*1	POS		! positioning command
+	LOGICAL*1	POSDON		! implicit POS done?
+	CHARACTER*30	STRING		! command string from TRNTIP
+	INTEGER*4	STRLEN		! length of string
+	INTEGER*4	COUNT		! number of chars in typeahead
+	BYTE		BYTE1		! first character
+	LOGICAL*1	WAIT_STREAM	! awaiting stream input?
+	INTEGER		MASK4014
+	LOGICAL		FROM_MENU
+	INTEGER		TERMLEN
+	LOGICAL		HADKB		! input from TT or AUX
+C
+	EQUIVALENCE	(TALIN,TABUF(1)),(TABUT,TABUF(3)),
+     &			(TABXY(1),TABUF(5))
+C
+C initialise
+	RMON = TABINI.AND.MONOPT.AND..NOT.DTRON	! use table monitor?
+	TXTPTR = 0			! nothing in TXTBUF
+C
+10	CTRLZ = .FALSE.			! assume not CTRL/Z
+	HADKB = .FALSE.			! no keyboard input
+	CALL PROMPT			! prompt if required
+C
+C service any inputs from auxiliary lines, that are outstanding
+C
+	IF (AUXACT()) THEN		! are any aux inputs active?
+	   IF (.NOT.AUX_READ) THEN	! no read up
+	      IF (AUXOFF(AUXIOSB)) GOTO 600
+	   ENDIF
+	ENDIF
+C
+C If workstation 1 (TEK) is not open, then do ordinary terminal read
+	IF (.NOT.WKOP(1)) GOTO 100
+C
+C Otherwise maybe use WOSPLIB input
+C If this is first call since workstation opened, then decide what to do
+	IF (TTINIT) THEN
+C
+C Use WOSPLIB terminal input provided that the WOSP workstation is
+C active, and SYS$INPUT and LSL$TK are the same device.
+C (WOSPIN is set to .FALSE. in BLKDAT)
+	   IERR = LIB$GETDVI(DVI$_DEVNAM,,'SYS$INPUT',,TTDEV,)
+	   IF (.NOT.IERR) THEN
+	      CALL MOAN(MSG_FLDTOTRANS,'SYS$INPUT')
+	      CALL LITES2_SIGNAL(IERR)
+	      GOTO 999
+	   ENDIF
+	   IERR = LIB$GETDVI(DVI$_DEVNAM,,'LSL$TK',,TKDEV,)
+	   IF (.NOT.IERR) THEN
+	      CALL MOAN(MSG_FLDTOTRANS,'LSL$TK')
+	      CALL LITES2_SIGNAL(IERR)
+	      GOTO 999
+	   ENDIF
+	   IF (TTDEV.EQ.TKDEV) WOSPIN = .TRUE.
+C
+	   IF (WOSPIN.AND.TTASN) THEN
+C
+C deassign terminal channel
+	      IERR = SYS$DASSGN(%VAL(TTICHN))
+	      IF (.NOT.IERR) THEN
+	         CALL MOAN(MSG_FLDDEASSCHN)
+	         CALL LITES2_SIGNAL(IERR)
+	      ENDIF
+	      TTASN = .FALSE.
+	   ENDIF
+	   TTINIT = .FALSE.
+	ENDIF
+C
+C ready to actually get input
+C get a table read going
+	IF ((BITINI.OR.(TABINI.AND..NOT.MONOPT)).AND..NOT.TAREAD) THEN
+	   CALL TKREAD(2,TABUF,TABLEN,TALEN,TABFLG,TAIOSB)
+	   TAREAD = .TRUE.			! table read going
+	ENDIF
+C
+C get reads going
+100	CONTINUE
+	IF (DTRON.AND..NOT.DTBREAD) THEN
+	   IF (GTYPAC(DTBCHN,COUNT,BYTE1)) THEN	! check type ahead buff
+	      IF (COUNT.GT.MXTYPC) THEN
+	         CALL MOAN(MSG_NOMOREBUTS,COUNT/15)
+	      ENDIF
+	   ENDIF
+	   DTBREAD=STRDTB(DTBFLG,DTBCHN,DTBOSB,,DTBLEN,DTBBUF)
+	ENDIF
+C
+C put up reads for auxiliary inputs
+C Then go and see if any have gone off
+	CALL STRTAUX(AUXIOSB,,TTBLEN,AUXBUF)
+	IF (AUXOFF(AUXIOSB)) GOTO 600
+C
+	IF (WOSPIN) THEN		! use WOSPLIB input
+C
+C set WOSPLIB terminal read going
+	   CALL TKREAD(1,TTBUF,TTBLEN,TTLEN,TTIFLG,TTIOSB)
+	   TTREAD = .TRUE.			! terminal read going
+	ELSE					! go wait for something
+C
+C set ordinary terminal read going
+	   IF (.NOT.TTREAD.AND..NOT.TTABORT) THEN
+	      CALL QIOUP(TTASN,'SYS$INPUT',TTICHN,TTIFLG,TTIOSB,,
+     &	              TTBLEN,TTBUF,TTREAD,TTABORT)
+	      IF (TTABORT) GOTO 999
+	   ENDIF
+	ENDIF
+C
+C now wait for a response from somewhere
+150	CONTINUE
+C
+C build event flag wait mask
+	MASK = 0				! clear to start with
+	CALL EFWM(MASK,TTIFLG,CLCFLG)		! terminal and CTRL/C
+	IF (AUX_READ) CALL EFWM(MASK,AUXFLG)
+	IF (TAREAD) CALL EFWM(MASK,TABFLG)	! add WOSP table
+	IF (DTBREAD) CALL EFWM(MASK,DTBFLG)	! add direct table read
+	IF (RMON) THEN
+	   CALL EFWM(MASK,TABPUK,TABERR)	! monitor puck and error
+	   WAIT_STREAM = STREAM			! are we awaiting stream?
+	   IF (STREAM) THEN
+	      CALL EFWM(MASK,TABSTR)		! monitor stream
+	      STREAM = .FALSE.			! assume not stream next
+	   ENDIF
+	ENDIF
+	IF (BALINI) CALL EFWM(MASK,TBFLG,FBFLG)	! tracker ball, buttons
+C
+C stream digitising?
+	IF (FOLLOWING) CALL EFWM(MASK,FOLFLG)
+	IF (FOLLOWING.AND..NOT.FOLLOW_TIMING) THEN
+	   CALL FOLTMR()
+	   FOLLOW_TIMING = .TRUE.
+	ENDIF
+C
+	IF (WTYPES(1).NE.4014) THEN
+	   IF (WKOP(1).AND..NOT.TIMOUT) THEN
+	      CALL EFWM(MASK,TMOFLG)		! TEK display timeout
+	      CALL TMOTMR				! set timer going
+	   ENDIF
+	ENDIF
+	IF (TIMOUT.OR..NOT.BITINI) GOTO 160	! no cursor timer
+C
+C if any cursor constraint, set cursor timer
+	IF (ROLING) GOTO 153
+C
+C or if anything requiring refresh modification on cursor movement
+C These are MODIFYing and ROTATE, ALIGN, STRETCH, MOVE (text OK)
+C plus WINDOWing and MOVEing linear features.
+C NB ARGS cursor will not be updated to follow bitpad for text moving
+C or ordinary cursor tracking. Could do if really wanted, but tends
+C to spoil smooth bitpad tracking.
+	IF ((SINDEX.EQ.STATE_MODIFY).AND.
+     &	(NDMODE.EQ.END_ROTATE.OR.NDMODE.EQ.END_ALIGN
+     &	.OR.NDMODE.EQ.END_STRETCH.OR.
+     &	(NDMODE.EQ.END_MOVE.AND.COIPAK(PAKGT).NE.TEXTYP) ) .OR.
+     &	(SINDEX.EQ.STATE_WINDOW) .OR.
+     &  (SINDEX.EQ.STATE_EDIT.AND.CHPOS) ) GOTO 153
+	GOTO 160
+C
+153	CALL EFWM(MASK,CSRFLG)			! cursor timer flag
+155	CALL CSRTMR				! start timer
+C
+C and wait for it
+160	IF (CTRLC.NE.CTRLC_OFF) THEN
+	   CALL SYS$CLREF(%VAL(CLCFLG))
+	   GOTO 990
+	ENDIF
+	CALL SYS$WFLOR( %VAL(TTIFLG), %VAL(MASK) )
+C
+	IF (WTYPES(1).NE.4014) THEN
+C
+C has TEK timed out
+	   IF (TMOTED) THEN
+	      CALL PING
+	      CALL RFSTOP			! stop refresh cycling
+	      TIMOUT = .TRUE.			! remember timed out
+	      TMOTED = .FALSE.
+	      GOTO 150				! wait again
+	   ENDIF
+C
+C if had timed out, then start refresh up again
+	   IF (TIMOUT) THEN
+	      CALL REFRSH
+	      TIMOUT = .FALSE.
+	   ENDIF
+	ENDIF
+C
+C check if local bitpad tracking has occurred
+	IF (BITINI.AND.WTYPES(1).NE.4014) THEN	! muart bitpad enabled?
+	   CALL GETPCC(CS1)		! count cursor moves
+	   CALL CSRD(TEKXY(1),TEKXY(2))	! read cursor
+	   CALL GETPCC(CS2)		! new cursor moves
+	   IF (CS2.GT.CS1) THEN		! locally tracked?
+C
+C Convert to world coordinates
+	      CALL GKSD2W(1,TEKXY(1),TEKXY(2),TEKXY(1),TEKXY(2))
+	      IF (RUBISH(TEKXY)) THEN	! out of range
+	         POSXY(1) = CSXY(1)	! re-position
+	         POSXY(2) = CSXY(2)
+	         OCSXY(1) = CSXY(1)+1.0	! force re-write
+	      ELSE
+	         POSXY(1) = TEKXY(1)
+	         POSXY(2) = TEKXY(2)
+	      ENDIF
+	      POSPND = .TRUE.		! POS command pending
+	      POSDON = .FALSE.		! POS not done yet
+	   ENDIF
+	ENDIF
+C
+	IF (BALINI) THEN
+C
+C check the TB...
+	   CALL VSTBRD(TEKXY(1),TEKXY(2))	! get displacement
+C
+C any movement?
+	   IF (TEKXY(1).NE.0.0.OR.TEKXY(2).NE.0.0) THEN
+	      CALL GD2W(2,TEKXY(1),TEKXY(2),TEKXY(1),TEKXY(2))
+	      TEKXY(1) = TEKXY(1)+CSXY(1)
+	      TEKXY(2) = TEKXY(2)+CSXY(2)
+	      IF (.NOT.RUBISH(TEKXY)) THEN	! in range
+	         POSXY(1) = TEKXY(1)
+	         POSXY(2) = TEKXY(2)
+	         POSPND = .TRUE.		! POS command pending
+	         POSDON = .FALSE.		! POS not done yet
+	      ENDIF
+	      GOTO 990			! perform immediately
+	   ENDIF
+C
+C read the function buttons, to see which has been hit most recently
+	   CALL VSFBRD(I)		! see which FB has been hit
+	   IF (I.NE.0) THEN
+	      BUTTON = I-1		! into range 0-3
+	      DEV = 4			! on device 4
+	      GOTO 900
+	   ENDIF
+	ENDIF
+C
+C now look for what we have got
+	IF (TTIOSB(1).NE.0) GOTO 200		! terminal input
+	IF (TAREAD.AND.TAIOSB(1).NE.0) GOTO 300	! wosplib table
+	IF (DTBREAD.AND.DTBOSB(1).NE.0) GOTO 400! direct table
+	IF (RMON) THEN
+	   IF (HAD_ERROR(IERR)) THEN
+	      IF (.NOT.READ_ERROR(TXTBUF,TXTPTR,I,IERR)) THEN
+	         CALL INFORM(MSG_TABMONERR,I)
+	         CALL INFORM(MSG_STRING,TXTDSC)
+	         TXTPTR = 0		! buffer empty again
+	      ENDIF
+	      GOTO 160
+	   ELSEIF (HAD_PUCK(IERR)) THEN		! tab_mon puck
+	      IF (.NOT.READ_PUCK(BU,IX,IY,IERR)) GOTO 500
+	   ELSEIF (WAIT_STREAM) THEN		! waiting for stream
+	      IF (HAD_STREAM(IERR)) THEN	! tab_mon stream
+	         BU = -1			! mark as stream
+	         IF (.NOT.READ_STREAM(IX,IY,IERR)) GOTO 500
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C check for auxiliary input
+	IF (AUX_READ) THEN
+	   IF (AUXOFF(AUXIOSB)) GOTO 600
+	ENDIF	      
+C
+C was it cursor timeout?
+	IF (CSRTMO) THEN
+	   CSRTMO = .FALSE.
+	   IF (POSPND.AND..NOT.POSDON) GOTO 990	! perform implicit POS
+	   GOTO 155				! re-time and wait
+	ENDIF
+C
+C check for stream digitising timer
+	IF (FOLLOWING.AND.FOLLOWED) THEN
+	   CALL FOLTMR()		! start timer again
+	   IF (SERV_FOLLOW()) GOTO 990	! got valid coordinate
+	   GOTO 10			! round again
+	ENDIF
+C
+C check for CTRL/C
+	IF (CTRLC.NE.CTRLC_OFF) THEN
+	   CALL SYS$CLREF(%VAL(CLCFLG))
+	   GOTO 990
+	ENDIF
+C
+C nothing happening?
+	CALL INFORM(MSG_NOINPUT)
+	GOTO 10
+C
+C got terminal input
+200	TTREAD = .FALSE.	! no terminal read outstanding
+	TTIDON = .TRUE.		! terminal input done (want prompt)
+	IF (.NOT.TTIOSB(1)) THEN
+	   CALL MOAN(MSG_ERRINTERRD)
+	   CALL LITES2_SIGNAL(TTIOSB(1))
+	   GOTO 10
+	ENDIF
+	HADKB = .TRUE.
+C
+C put string from terminal into TXTBUF
+	CTRLZ = TTIOSB(4).EQ.1.AND.TTIOSB(3).EQ.26
+	J = TTIOSB(2)		! number of chars input
+	TERMLEN = TTIOSB(4)	! terminator length
+	IF (J.GT.0.OR.TERMLEN.GT.1) THEN	! line not empty
+C
+C Check for a valid keyboard escape sequence
+	   STRLEN = 0
+	   IF (TERMLEN.GT.1) CALL INTTERM(TTBUF(J+1),TERMLEN,STRING,STRLEN)
+C
+C Set appropriate carriage controls for next line -
+C If the line was not terminated by c/r, then pretend not had terminal
+C input, so next output will be preceded by newline, but force a prompt
+C if some chars were typed (since TTIDON false would not prompt)
+	   IF (TTIOSB(3).NE.13) THEN
+	      TTIDON = .FALSE.	! want newline before output
+	      IF (J.NE.0) TTPROM = .TRUE.
+	   ENDIF
+C
+	   PTR = 0
+C
+C add a POS command if required
+	   IF (POSPND.AND..NOT.PROINQ) THEN
+	      PTR = EXPAND('%W%%POS %G0.8 %G0.8#',TXTBUF,
+     &					POSXY(1),POSXY(2))
+	      POSPND = .FALSE.
+	   ENDIF
+C
+C now the ordinary characters
+	   DO 210 I=1,J
+	      TXTBUF(I+PTR) = TTBUF(I)
+210	   CONTINUE
+	   PTR = PTR+J
+C
+C and now the command resulting from an escape sequence
+C Ignore escape command in an inquire if any ordinary chars
+	   IF (STRLEN.GT.0.AND.(J.EQ.0.OR..NOT.PROINQ)) THEN
+	      IF (J.NE.0) THEN
+	         PTR = PTR + 1
+	         TXTBUF(PTR) = '#'
+	      ENDIF
+	      PTR = PTR + EXPAND('%W%S',TXTBUF(PTR+1),STRING(1:STRLEN))
+	   ENDIF
+	   TXTPTR = PTR
+C
+C c/r, with 4014, means put up GIN, and wait for response
+	ELSEIF (J.EQ.0.AND.BITINI.AND.WTYPES(1).EQ.4014) THEN
+C
+C put gin up, and put up a wosp keyboard read
+220	   CALL TKGIN(.TRUE.)
+	   CALL TKREAD(1,TTBUF,TTBLEN,TTLEN,TTIFLG,TTIOSB)
+C
+	   MASK4014 = 0				! clear to start with
+	   CALL EFWM(MASK4014,TTIFLG,TABFLG)	! terminal
+	   CALL SYS$WFLOR( %VAL(TTIFLG), %VAL(MASK4014) )
+C
+C if keyboard input, ignore it 
+	   IF (TTIOSB(1)) GOTO 220
+	   CALL TKKILL(1)	! take down keyboard read
+	   TAREAD = .FALSE.	! no table read outstanding
+	   IF (.NOT.TAIOSB(1)) THEN
+	      CALL MOAN(MSG_ERRINTABRD)
+	      CALL LITES2_SIGNAL(TAIOSB(1))
+	      GOTO 10
+	   ENDIF
+C
+C Convert to world coordinates
+	   CALL GKSD2W(1,TABXY(1),TABXY(2),TEKXY(1),TEKXY(2))
+	   IF (RUBISH(TEKXY)) THEN	! out of range
+	      POSXY(1) = CSXY(1)	! re-position
+	      POSXY(2) = CSXY(2)
+	      OCSXY(1) = CSXY(1)+1.0	! force re-write
+	      CALL INFORM(MSG_BADPOS)
+	   ELSE
+	      POSXY(1) = TEKXY(1)
+	      POSXY(2) = TEKXY(2)
+	   ENDIF
+	   POSPND = .TRUE.		! POS command pending
+	   POSDON = .FALSE.		! POS not done yet
+C
+C put up another table read
+	   CALL TKREAD(2,TABUF,TABLEN,TALEN,TABFLG,TAIOSB)
+	   TAREAD = .TRUE.		! table read 
+	ENDIF
+C
+C put WOSPLIB TKREAD back up straight away
+	IF (WOSPIN) THEN
+	   CALL TKREAD(1,TTBUF,TTBLEN,TTLEN,TTIFLG,TTIOSB)
+	   TTREAD = .TRUE.			! terminal read going
+	ENDIF
+	GOTO 990		! return with TXTBUF filled
+				! ready for decoder
+C
+C got wosp table input
+300	TAREAD = .FALSE.	! no table read outstanding
+	IF (.NOT.TAIOSB(1)) THEN
+	   CALL MOAN(MSG_ERRINTABRD)
+	   CALL LITES2_SIGNAL(TAIOSB(1))
+	   GOTO 10
+	ENDIF
+C
+	DEV = TALIN		! convert to long
+	BUTTON=TABUT		!    "    "    "
+C
+C adjust bitpad button number
+	IF (DEV.EQ.BITLIN.AND.WTYPES(1).NE.4014) THEN
+	   CALL LIB$FFS(0,4,TABUT,BUTTON)
+	ENDIF
+C
+	CALL TKREAD(2,TABUF,TABLEN,TALEN,TABFLG,TAIOSB)
+	TAREAD = .TRUE.		! table read going
+
+	GOTO 900		! to get this table read interpreted
+C
+C got direct table input
+C
+400	CONTINUE
+	DTBREAD=.FALSE.
+C
+C was there an error?
+C
+	IF (.NOT.DTBOSB(1)) THEN
+	   CALL MOAN(MSG_ERRINTABRD)
+	   CALL LITES2_SIGNAL(DTBOSB(1))
+	   GOTO 100
+	ENDIF
+C
+C translate string
+C
+	J=DTBOSB(2)				! I*2 -> I*4
+	IF (J.EQ.0) GOTO 100
+	IF (DIGTRN(DTBBUF,J,BUTTON,IX,IY,USEFUN,%VAL(FUNADR))) THEN
+	   CALL INFORM(MSG_TABERRREAD,DTBBUF)   ! error in string
+	   GOTO 100
+	ELSE
+	   DEV=DIGLIN
+	   TABXY(1)=IX
+	   TABXY(2)=IY
+	ENDIF
+	GOTO 900
+C
+C got table monitor input
+C
+500	DEV=DIGLIN		! only from table, never from bitpad
+	BUTTON=BU		! byte to long conversion
+	TABXY(1)=IX		! long to real conversion
+	TABXY(2)=IY		!  "	   "       "
+C
+	IF (BUTTON.EQ.0) THEN		! stream button
+	   STREAM = .TRUE.		! want stream next time
+	   CALL READ_STREAM(IX,IY,IERR)	! clear event flag
+	ELSEIF (BUTTON.LT.0) THEN	! was streamed
+	   STREAM = .TRUE.		! want stream next time
+	   BUTTON = 0			! stream button
+	ENDIF
+	GOTO 900
+C
+C got input from auxiliary line
+C
+600	IF (SERVAUX(AUXIOSB,TTBLEN,AUXBUF)) THEN
+	   HADKB = .TRUE.
+	   GOTO 990
+	ELSE
+	   GOTO 10
+	ENDIF
+C
+C interpret input from table/bitpad
+C
+900	CALL TRNTIP(DEV,BUTTON,TABXY,POS,STRING,STRLEN,FROM_MENU)
+C
+C Button 0 is tracking button on bitpad or table, but not on ARGS
+	IF (DEV.EQ.4) THEN				! ARGS
+	   IF (STRLEN.EQ.0) GOTO 990			! no command
+	   CALL VSFBW4(ISHFT(1,BUTTON))			! light up
+	ELSE
+C
+C is there a POS command to set pending
+	   IF (POS) THEN		! this probe defined a position
+	      IF ((BUTTON.EQ.0).OR..NOT.POSCMD) THEN	! so use it
+	         POSXY(1) = TABXY(1)
+	         POSXY(2) = TABXY(2)
+	         POSPND = .TRUE.		! POS command pending
+	         POSDON = .FALSE.		! POS not done yet
+	      ENDIF
+	   ENDIF
+	   IF (BUTTON.EQ.0.OR.STRLEN.EQ.0) GOTO 990	! no command
+	ENDIF
+C
+	IF (.NOT.QUIOPT) CALL PING		! acknowledge button
+	PTR = 0
+	IF (POSPND.AND..NOT.PROINQ) THEN
+	   PTR = EXPAND('%W%%POS %G0.8 %G0.8#',TXTBUF,POSXY(1),POSXY(2))
+	   POSPND = .FALSE.
+	ENDIF
+	TXTPTR = PTR + EXPAND('%W%S',TXTBUF(PTR+1),STRING(1:STRLEN))
+C
+C have we got anything?
+990	IF (TXTPTR.EQ.0.OR.PROINQ) THEN		! no
+	   IF (POSPND.AND..NOT.POSDON) THEN	! perform implicit POS
+C
+C If there is a cursor constraint, then we have to journal explicit
+C POS command, otherwise journal may not reproduce correct results
+	      IF (ROLING.AND..NOT.PROINQ) THEN
+	         TXTPTR = EXPAND(
+     &			'%W%%POS %G0.8 %G0.8#',TXTBUF,POSXY(1),POSXY(2))
+	         POSPND = .FALSE.
+	         GOTO 999
+	      ENDIF
+	      DREALS(1) = POSXY(1)		! load arguments
+	      DREALS(2) = POSXY(2)
+	      DNREA = 2
+	      CALL DOPOSI			! execute POS
+	      CALL UPDATE			! update picture etc.
+	      POSDON = .TRUE.			! done POS
+	   ENDIF
+C
+C If CTRL/C not pressed, then try again, else return blank line and
+C let command decoder deal with it.
+C NB we should return to INTERACT before any more commands are obeyed
+	   IF (TXTPTR.EQ.0.AND.(.NOT.PROINQ.OR..NOT.HADKB)) THEN
+	      IF (CTRLC.EQ.CTRLC_OFF) GOTO 10
+	      IF (FOLLOWING) CALL ENDFOLL	! stop following on CTRLc
+	   ENDIF
+	ENDIF
+C
+999	CONTINUE
+C
+C take gin cursor down
+	IF (BITINI.AND.WTYPES(1).EQ.4014) CALL TKGIN(.FALSE.)
+	MOANED = .FALSE.	! don't let command decoder ignore line
+	RETURN
+	END
+C
+C************************************************************************
+C
+C TEK timer routines
+C
+	SUBROUTINE TMOTMR
+C
+***	IDENT   12JN85
+***	MODULE  TMOTMR
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C	Written					CCB	20-JUN-1985
+C	To set TEK timeout timer going
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:VAREFN/
+***	COMMON/CMN:WORKS/
+C
+	EXTERNAL	TMOAST			! timer AST routine
+	INTEGER*4	DAYTIM(2)
+	DATA		DAYTIM/-600 000 000,-1/	! 60 seconds
+C
+C cancel old request (if any)
+	CALL SYS$CANTIM(%VAL(TMOFLG),)
+C
+C and set new one
+	TMOTED = .FALSE.
+	CALL SYS$SETIMR(%VAL(TMOFLG),DAYTIM,TMOAST,%VAL(TMOFLG))
+	RETURN
+	END
+C
+	SUBROUTINE TMOAST
+C
+***	IDENT   12JN85
+***	MODULE  TMOAST
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C	Written					CCB	20-JUN-1985
+C	TEK timer timeout AST routine
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:WORKS/
+C
+	TMOTED = .TRUE.				! timed out
+	RETURN
+	END
+C
+	SUBROUTINE CSRTMR
+C
+***	IDENT   12JN85
+***	MODULE  CSRTMR
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C	Written					CCB	20-JUN-1985
+C	To set TEK cursor timer going
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:VAREFN/
+	EXTERNAL	CSRAST			! cursor AST routine
+	INTEGER*4	DAYTIM(2)
+	DATA		DAYTIM/-2 500 000,-1/	! quarter second
+C
+C cancel old request (if any)
+	CALL SYS$CANTIM(%VAL(CSRFLG),)
+C
+C and set new one
+	CALL SYS$SETIMR(%VAL(CSRFLG),DAYTIM,CSRAST,%VAL(CSRFLG))
+	RETURN
+	END
+C
+	SUBROUTINE CSRAST
+C
+***	IDENT   12JN85
+***	MODULE  CSRAST
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C	Written					CCB	20-JUN-1985
+C	TEK cursor timer timeout AST routine
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:WORKS/
+C
+	CSRTMO = .TRUE.				! timed out
+	RETURN
+	END
+

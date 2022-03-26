@@ -1,0 +1,300 @@
+ 	INTEGER*4 FUNCTION IFF_HEADER()
+C
+***	MODULE	IFF_HEADER
+***	IDENT	31MY91
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,England
+C
+CMOD	For type 3 or 4 headers, the fields given are
+C	inserted in the new array MH2ARR at the
+C	positions obtained from LSL$OS_MH_TABLE		ST  03-Oct-1990
+CMOD	Now sets MD units, spheroid and proj. if OS	TJH 03-Dec-1987
+CMOD	Set MHDESC(1), (3) and (4)			RJH 18-Aug-1987
+C	Created						TJH 29-Sep-1986
+C
+C Routine to calc. and then write out template IFF header entries.
+C
+C Parameters:
+	INCLUDE 'LSL$CMNISTART:PARAMS.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNISTART:COMMAND.CMN'
+	INCLUDE 'LSL$CMNISTART:IFF_ENT.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+C
+	INCLUDE 'LSL$CMNIFF:MHDMB.CMN'
+C
+C include files to cope with new OS map header
+C
+	INCLUDE 'LSL$CMNIFF:MHOSGB.CMN'		! New OS map header
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW_MH.CMN'	! New map header variables
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW.PAR'	! Header field definitions
+C
+C functions
+C
+	LOGICAL		OSMH_NEW_INI	! Open and read translation table
+	LOGICAL		OSMH_NEW_GETFLD	! Extract field from new header
+	LOGICAL		OSMH_NEW_PUT_CITF_LINE	! Insert line into header
+	LOGICAL		OSMH_NEW_PUTINT	! Insert int field into new header
+	LOGICAL		OSMH_NEW_PUTFLG	! Insert flag field into new header
+C
+C Set the map scale position for an MCE MH
+C
+	INTEGER		DIGSCL			! src digitising scale
+	BYTE		MHBYTE( 698 )
+	EQUIVALENCE	( MHARR(3), MHBYTE(1) )
+	EQUIVALENCE	( DIGSCL,MHBYTE(333) )
+C
+	REAL		CFT(10,2)		! for CC entry
+	REAL		RANGE(4)		! for RA entry
+C
+C init things
+	DATA CFT/0,1,0,7*0,0,0,1,7*0/
+	DATA RANGE/4*0.0/
+C
+	INTEGER*4	HEADERVAL		! int to pass values to header
+	INTEGER*4 	SS$_NORMAL
+	EXTERNAL  	SS$_NORMAL		! normal successful completion
+	INTEGER*4	RETVAL			! local success/failure
+	INTEGER*4	HEADERSIZE		! Template header file size
+	CHARACTER*80	CITFLINE
+	INTEGER*4	LINELEN
+C
+C...................................................................
+C
+C Ensure that we return with SS$_NORMAL if all was well
+C
+	IFF_HEADER=%LOC(SS$_NORMAL)
+C
+C Assume a non-customer dependent MH entry
+C
+	MHDESC(1)=174
+	MHDESC(2)=0
+	MHDESC(3)=0
+	MHDESC(4)=0
+C
+C Transfer scale into map header common, (OS and LSL MH only)
+C
+	IF (.NOT.HAD_MCE) THEN
+	  PCSCSC = SCALE	! process header scale
+	  MHDGSC = SCALE	! digitising scale
+	  MHSCSC = SCALE	! source scale
+	ENDIF
+C
+	IF (HAD_OS) THEN
+C
+C Set the map header type
+	   MHDESC(2) = MH_TYPE
+C
+C Initialise MH to blanks for type 2 MH
+C
+	   IF (MH_TYPE.EQ.2) CALL ISTART_BLANK
+C
+C and position of SW corner (our origin offset)
+	   PCMRCE=SNGL(OFFSET(1))	! process header X offset
+	   PCMRCN=SNGL(OFFSET(2))	! process header Y offset
+	   MHMRCE=SNGL(OFFSET(1))	! map header X offset
+	   MHMRCN=SNGL(OFFSET(2))	! map header Y offset
+C
+C and range
+	   RANGE(2)=MAPEXT(1)
+	   RANGE(4)=MAPEXT(2)
+C
+C and CPs
+	   CPARRY(1,3)=MAPEXT(1)
+	   CPARRY(2,1)=MAPEXT(2)
+	   CPARRY(1,4)=MAPEXT(1)
+	   CPARRY(2,4)=MAPEXT(2)
+C
+	   CPARRY(4,1)=MAPEXT(2)
+	   CPARRY(3,3)=MAPEXT(1)
+	   CPARRY(3,4)=MAPEXT(1)
+	   CPARRY(4,4)=MAPEXT(2)
+C
+C For type 3 or 4 headers,
+	   IF (MH_TYPE.EQ.3 .OR. MH_TYPE.EQ.4) THEN
+C
+C For type 3 or 4 headers the fields must be inserted into the new map header
+C MH2ARR using OSMH_NEW_PUTINT at the positions in the table LSL$OS_MH_TABLE
+C
+C Set the map header type
+	      MH2DESC(2) = MH_TYPE
+C
+C Fill whole of MH2BYTE with spaces (ASCII 32) rather than nulls
+	      DO 100 I = 1,MH2BYSZ
+	         MH2BYTE(I) = 32	
+100	      CONTINUE
+C
+C Read in postions and sizes of fields in header 
+	      RETVAL = OSMH_NEW_INI()
+	      IF ( .NOT.RETVAL ) GOTO 900
+C
+C OSTF Blank template header size should be the sum of the -1 and -20 header
+C sizes in the translation table LSL$OS_MH_TABLE. For CITF it is just CITF_MH
+C entry in table.
+C It is then converted into a word length and 2 words added for MH2DESC
+C
+	      IF (MH_TYPE.EQ.3) THEN
+	         RETVAL = OSMH_NEW_GETFLD(MH_ONE)
+	         IF ( .NOT.RETVAL ) GOTO 900
+	         HEADERSIZE = MH_SIZE
+C
+	         RETVAL = OSMH_NEW_GETFLD(MH_TWENTY)
+	         IF ( .NOT.RETVAL ) GOTO 900
+	         HEADERSIZE = HEADERSIZE + MH_SIZE
+C
+	      ELSEIF (MH_TYPE.EQ.4) THEN
+	         RETVAL = OSMH_NEW_GETFLD(MH_LENGTH)
+	         IF ( .NOT.RETVAL ) GOTO 900
+	         HEADERSIZE = MH_SIZE
+C
+C Write a blank CITF header
+C
+		 CITFLINE(1:40)  = '07                                      '
+		 CITFLINE(41:80) = '                                  1%    '
+		 RETVAL = OSMH_NEW_PUT_CITF_LINE(1,CITFLINE,80)
+	         IF ( .NOT.RETVAL ) GOTO 900
+		 CITFLINE(1:40)  = '00                                      '
+		 CITFLINE(41:80) = '                                    1%  '
+		 RETVAL = OSMH_NEW_PUT_CITF_LINE(2,CITFLINE,80)
+	         IF ( .NOT.RETVAL ) GOTO 900
+		 CITFLINE(1:40)  = '00                                      '
+		 CITFLINE(41:80) = '                                        '
+		 RETVAL = OSMH_NEW_PUT_CITF_LINE(3,CITFLINE,80)
+	         IF ( .NOT.RETVAL ) GOTO 900
+	      ENDIF
+C
+C Convert HEADERSIZE into word length - adjusting for an odd number
+C Mod 1000 - S Townrow 31/5/91
+C
+	      HEADERSIZE = (HEADERSIZE+1) / 2 + 2
+C
+C Put -1 record
+	      IF (MH_TYPE.EQ.3) THEN
+	         RETVAL = OSMH_NEW_PUTFLG(MH_ONE)
+	         IF ( .NOT.RETVAL ) GOTO 900
+	      ENDIF
+C
+C Put Easting
+	      HEADERVAL = SNGL(OFFSET(1))
+	      RETVAL = OSMH_NEW_PUTINT(MD_X_ORIG, HEADERVAL, 8)
+	      IF ( .NOT.RETVAL ) GOTO 900
+C
+C Put Northing
+	      HEADERVAL = SNGL(OFFSET(2))
+	      RETVAL = OSMH_NEW_PUTINT(MD_Y_ORIG, HEADERVAL)
+	      IF ( .NOT.RETVAL ) GOTO 900
+C
+C Put Scale
+	      HEADERVAL = SCALE
+	      RETVAL = OSMH_NEW_PUTINT(MD_SCALE, HEADERVAL) 
+	      IF ( .NOT.RETVAL ) GOTO 900
+C
+C Put BGI
+	      IF (MH_TYPE.EQ.3) THEN
+	         HEADERVAL = MHBGI
+	         RETVAL = OSMH_NEW_PUTINT(MH_BGI, HEADERVAL) 
+	         IF ( .NOT.RETVAL ) GOTO 900
+	      ENDIF
+C
+C Put Capture Scale
+	      IF (MH_TYPE.EQ.3) THEN
+		 HEADERVAL = SCALE
+		 RETVAL = OSMH_NEW_PUTINT(MH_CAP_SCALE, HEADERVAL)
+		 IF ( .NOT.RETVAL ) GOTO 900
+	      ENDIF
+C
+C Put -20 record
+	      IF (MH_TYPE.EQ.3) THEN
+	         RETVAL = OSMH_NEW_PUTFLG(MH_TWENTY)
+	         IF ( .NOT.RETVAL ) GOTO 900
+	      ENDIF
+	   ENDIF
+	ELSE
+	   RANGE(1)=AMIN1(CPARRY(3,1),CPARRY(3,2))	! xmin
+	   RANGE(2)=AMAX1(CPARRY(3,3),CPARRY(3,4))	! xmax
+	   RANGE(3)=AMIN1(CPARRY(4,2),CPARRY(4,3))	! ymin
+	   RANGE(4)=AMAX1(CPARRY(4,1),CPARRY(4,4))	! ymax
+	ENDIF
+C
+C If this is an MCE file then set the MH type flag accordingly, then
+C set the source map scale field of MHARR to be the scale specified
+C by the user (See equivalence statement above).
+C
+	IF (HAD_MCE) THEN
+	  MHDESC(2)=1
+	  DIGSCL=SCALE
+	ENDIF
+C
+C Set the MD flag to say that we have a set type 2 Map Descriptor
+C
+	MATV2=2
+C
+C Put the origin offset into the OO field of the MD
+C
+	MD2LOC(1)=OFFSET(1)
+	MD2LOC(2)=OFFSET(2)
+C
+C Put the map scale into the MD scale field
+C
+	MD2SCL=DFLOAT(SCALE)
+C
+C Also set the projection, units and spheroid in the map descriptor
+C
+	IF (HAD_OS) THEN
+	   MD2PRJ = 101		! projection - UK national grid
+	   MD2UNT = 2		! IFF units  - projection units (metres)
+	   MD2SPH = 9		! spheroid   - Airy
+	ENDIF
+C
+C Add IFF header stuff
+	CALL IFFSEL(OUTLUN)
+	CALL IFFRA(RANGE)
+	CALL IFFHI
+C
+C If dealing with a file for Laseraid we must output a sector header at
+C this point. 
+C
+	IF (LASER) THEN
+	  CALL IFFSH(-5.0E37,-5.0E37,1.0E38,1.0E38,1,1)
+	ENDIF
+C
+C Output the map header (of whatever type)
+C
+	IF (MH_TYPE.LE.2) THEN
+	   CALL IFFMH(MHARR,MHLEN)
+	ELSEIF (MH_TYPE.EQ.3 .OR. MH_TYPE.EQ.4) THEN
+	   CALL IFFMH(MH2ARR,HEADERSIZE)
+	ENDIF
+C
+C and the type 2 map descriptor
+C
+	CALL IFFMD(MD2ARR,MD2LEN)
+	IF (HAD_OS) THEN
+	  CALL IFFNS(
+     &		'Template created by ISTART in OS mode')
+	ELSEIF (HAD_TABMON.OR.HAD_MUART) THEN
+	  CALL IFFNS(
+     &		'Template created by ISTART in digitising table mode')
+	ELSE
+	  CALL IFFNS(
+     &		'Template created by ISTART in default template mode')
+	ENDIF
+	CALL IFFCC(CFT)
+	CALL IFFCP(CPARRY)
+C
+C Write out a layer 0 to hold the registration marks (and later, the
+C grid if /OS selected).
+C
+	IF (.NOT.LASER.OR.HAD_OS) THEN
+	  LPOSNO=LPOSE			! remember position of no
+	  CALL IFFNO(0,0,0)
+	ENDIF
+C
+	GOTO 999
+C
+900	IFF_HEADER = RETVAL
+C
+999	RETURN
+	END

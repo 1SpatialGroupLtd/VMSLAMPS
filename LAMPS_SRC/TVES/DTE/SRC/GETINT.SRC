@@ -1,0 +1,250 @@
+	INTEGER FUNCTION GET_INT(INT,PROMPT)
+C
+***	IDENT	29JL86
+***	MODULE	GET_INT
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C
+C	Author	  : Andrew Morris
+C	Created   : Nov 1984
+C
+CMOD	Modified to allow DTE to be used without TABLE_MONITOR
+C	and X_TAB,Y_TAB in DTECMN		ATT 	29-Jul-1986
+C
+	IMPLICIT NONE
+C
+C parameters in
+	CHARACTER*(*)	PROMPT		! prompt string
+C
+C parameters out
+	INTEGER		INT		! integer being read
+C
+C parameters
+***	PARAMETER/HERE:DTEPAR/
+C
+C system parameters
+	INCLUDE '($SSDEF)'
+	INCLUDE '($IODEF)'
+C
+***	COMMON/LSL$CMNVIO:TXTC/		! has TXTBUF for comm line
+***	COMMON/LSL$CMNVIO:EXPC/		! message output
+***	COMMON/LSL$CMNVIO:CMDCOM/	! command decoding
+***	COMMON/HERE:TAB/		! has ERR,IERR etc
+***	COMMON/HERE:DTEQIO/		! HAD EVENT FLAGS
+***	COMMON/HERE:DTECMN/		! has CMDFIL
+C
+C functions
+	INTEGER		RDCOMM		! read next command
+	INTEGER		SYS$QIO		! "que" an I/O request
+	INTEGER		EXPAND		! length of string argument
+	INTEGER		SYS$READEF	! read event flag
+C
+	LOGICAL		READ_PUCK	! read puck data
+	LOGICAL		HAD_PUCK	! had puck input?
+	LOGICAL		HAD_ERROR	! had table error?
+	LOGICAL		RDLONG		! read integer?
+	LOGICAL		IN_MENU		! point in menu area?
+	LOGICAL		RDCHS		! read next non blank character
+	LOGICAL		WAIT_INPUT	! wait for input
+C
+C workspace
+	INTEGER		CMD		! command number
+	INTEGER		POS		! position for next digit on VDU
+	INTEGER		P_LEN		! length of prompt string
+	INTEGER		NDIGITS		! number of digits in INT
+	INTEGER		DIGIT(6)	! digits in INT
+	INTEGER		I		! loop counter
+C
+	LOGICAL		EOLN		! end of line?
+	LOGICAL		HADQIO		! had a QIO?
+C
+	CHARACTER*1	CHR		! a true character
+C
+	BYTE		CH		! a character
+C
+C externals
+	EXTERNAL	DTE_CMD_TABLE	! table of keyboard commands
+C
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C Gets integer from wherever integers are allowed to come from
+C and checks it will fit into an integer*2
+C
+C Integers can only come from the keyboard
+C
+C Function result returns	-1 for error,
+C				 0 for success,
+C				 1 for ABANDON command,
+C				 2 for END command
+C
+C If result is not success, INT is returned = 0
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C
+	P_LEN = LEN(PROMPT)+3		! pos to echo 1st digit
+	NDIGITS = 0			! zero digit count
+	HADQIO = .FALSE.		! not yet had a QIO
+	INT = 0				! default value
+C
+	ERR = .NOT.WAIT_INPUT(PROMPT)
+	IF (ERR) THEN
+	  GET_INT = 1
+	  GOTO 40			! return
+	END IF
+C
+	GOTO 20				! see what was input
+C
+C QIO for keyboard input with no prompt
+10	IF (HADQIO) CALL SYS$CANCEL(%VAL(IN_CHAN)) !
+	IERR = SYS$QIO
+     +  	(
+     +  	%VAL(EF_VDU),		! event flag to be set
+     +  	%VAL(IN_CHAN),		! I/O channel number
+     +  	,			! I/O functions
+     +  	ISB,			! I/O status block
+     +  	,			! AST address
+     +  	,			! AST parameters
+     +  	TXTBUF,			! buffer
+     +  	%VAL(TXTLIM-1),		! max buffer length
+     +    	,			! default timeout period
+     +  	,			! default terminator
+     +  	,			! prompt string
+     +  	,			! prompt length
+     +  	)
+	HADQIO = .TRUE.
+C
+C QIO successful?
+	IF (.NOT.IERR) THEN
+	  CALL GEN_SYSMSG(IERR)
+	  GET_INT = 1			! abandon
+	  GOTO 40			! return
+	END IF
+C
+C wait for table or keyboard input
+	IF (HAD_TABLE) THEN
+	  CALL WFLOR(EF_POINT,EF_ERROR,EF_VDU)
+	ELSE
+	  CALL WFLOR(EF_VDU)
+	ENDIF
+C
+	HAD_VDU = ISB_STATUS.NE.0
+	GOTO 20
+C
+C wait for input from puck only
+16	CALL WAIT_PUCK(IERR)
+	HAD_VDU = .FALSE.
+C
+C if had VDU input, then check for QIO error
+20	IF (HAD_VDU) THEN
+	  IF (CMDFIL) GOTO 23
+C
+C I/O successful?
+	  IF (.NOT.ISB_STATUS) THEN
+	    CALL LIB$SIGNAL(%VAL(ISB_STATUS))
+	    GET_INT = 1
+	    GOTO 40			! return
+	  END IF
+C
+	  IF (TXTBUF(1).EQ.26) THEN	! ^Z?
+	    GET_INT = 1
+	    GOTO 40			! return
+	  END IF
+C
+C set TXTPTR and loop if blank line
+	  TXTPTR = ISB_TOFF
+23	  IF (TXTPTR.EQ.0) GOTO 10	! try again
+C
+	  CALL BSLN
+	  EOLN = RDCHS(CH)
+	  IF (EOLN) THEN		! ignore blank lines
+	    GET_INT = 1			! abandoned
+	    GOTO 40			! return
+	  END IF
+	  IF ((CH.GE.'0'.AND.CH.LE.'9').OR.CH.EQ.'-'.OR.CH.EQ.'+')
+     +	    THEN
+	    CALL BSCH
+	    ERR = RDLONG(INT)
+	    IF (.NOT.ERR) THEN
+	      GET_INT = 0		! success
+	    ELSE
+	      CALL EXPAND('%SBad integer',BELL)
+	      CALL DTEMSG(EXPDSC)
+	      IF (CMDFIL) THEN		! no 2nd chance for cmd file
+	        GET_INT = 1		! abandoned
+	        GOTO 40			! return
+	      END IF
+	      GOTO 10			! try again
+	    END IF
+	  ELSE			 	! interpret as command
+	    CALL BSLN
+	    CMD = RDCOMM(DTE_CMD_TABLE)
+	    IF (CMD.EQ.CMD_ABANDON) THEN
+	      GET_INT = 1		! abandon
+	      GOTO 40			! return
+	    ELSE IF (CMD.EQ.CMD_END) THEN
+	      GET_INT = 2		! return for default
+	      GOTO 40
+	    ELSE
+	      CALL EXPAND('%SUnexpected ''%A''',BELL,TXTBUF(1))
+	      CALL DTEMSG(EXPDSC)
+	      GOTO 10			! try again
+	    END IF
+	  END IF
+C
+	ELSE IF (HAD_PUCK(IERR)) THEN
+	  ERR = READ_PUCK(BUTTON,X_TAB,Y_TAB,IERR)
+	  IF (ERR) THEN
+	    CALL SHOW_ERROR(IERR)
+	    GET_INT = -1
+	    GOTO 40				! return
+	  END IF
+C
+	  CMD = BUTTON+1
+	  IF (CMD.EQ.CMD_ABANDON) THEN
+	    IF (NDIGITS.LE.0) THEN
+	      GET_INT = 1			! abandon
+	      GOTO 40				! return
+	    ELSE
+	      CALL LIB$PUT_SCREEN(' ',BOT_LIN,P_LEN+NDIGITS,0)
+	      CALL LIB$SET_CURSOR(BOT_LIN,P_LEN+NDIGITS)
+	      NDIGITS = NDIGITS-1
+	      GOTO 16				! get next digit
+	    END IF
+	  ELSE IF (CMD.EQ.CMD_END) THEN
+	    IF (NDIGITS.EQ.0) THEN
+	      GET_INT = 2			! end (default)
+	      GOTO 40				! return
+	    ELSE
+	      GET_INT = 0			! success
+	      INT = 0
+	      DO 50 I = 1,NDIGITS
+50	      INT = INT+DIGIT(I)*10**(NDIGITS-I)
+	    END IF
+	  ELSE
+	    IF (BUTTON.GE.0.AND.BUTTON.LE.9) THEN
+	      IF (NDIGITS.GT.5) GOTO 16		! ignore 6th digit
+	      NDIGITS = NDIGITS+1
+	      POS = P_LEN+NDIGITS
+	      DIGIT(NDIGITS) = BUTTON
+	      CHR = CHAR(ICHAR('0')+BUTTON)
+	      CALL LIB$PUT_SCREEN(CHR,BOT_LIN,POS,0)
+	    END IF
+	    GOTO 16				! get next digit
+	  END IF
+	END IF
+C
+	IF (IABS(INT).GT.32767) THEN
+	  CALL EXPAND('%SAbs value must be <= 32767',BELL)
+	  CALL DTEMSG(EXPDSC)
+	  IF (CMDFIL) THEN		! no 2nd chance for cmd file
+	    GET_INT = 1			! abandoned
+	    GOTO 40			! return
+	  END IF
+	  GOTO 10			! try again
+	END IF
+C
+40	IF (GET_INT.EQ.0) THEN		! acknowledge successful input
+	  CALL LIB$SET_CURSOR(BOT_LIN,1)
+	  WRITE(*,FMT='(1X,A)')CHAR(7)
+	END IF
+	HAD_VDU = .FALSE.
+	IF (HADQIO) CALL SYS$CANCEL(%VAL(IN_CHAN)) ! cancel any QIO
+	END

@@ -1,0 +1,968 @@
+	SUBROUTINE ANALYZ
+C
+***	MODULE	ANALYZ
+***	IDENT	10OC86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+CMOD	Never call NEGET(,0)			 DM	10-Oct-1986
+CMOD	Converged				 DM	28-May-1986
+CMOD	Don't perform zero-length extended scan	 DM	07-May-1986
+C	Created 				 DM	10-May-1983
+C
+C Analyses the raw encounters returned by NEGET and tries to make sense
+C of the whole mess.
+C Values returned in ANLYZD in /ANACOM/ are:  1  - junction scan needed
+C					      0  - we did it !
+C					     -1  - scan is duff
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/PARAMS/
+C
+	PARAMETER ALLBLK='37777'O	! all-black scan (nothing seen)
+	PARAMETER ALLWHT='37776'O	! all-white scan (all line)
+	PARAMETER MAXWID='37767'O	! max width of a line encounter
+	PARAMETER NEGEDG='37770'O	! negative edge encounter
+	PARAMETER POSEDG='37774'O	! positive edge encounter
+	PARAMETER SUBSEQ='40000'O	! subsequent encounter bit
+	PARAMETER TOP13='177770'O	! the top 13 bits
+	PARAMETER WIDFLD='37777'O	! width field of encounter
+C
+***	COMMON/ANACOM/
+***	COMMON/LINKS/
+***	COMMON/LKFOLL/
+***	COMMON/LKPARM/
+***	COMMON/RSE/
+***	COMMON/SCCORR/
+***	COMMON/SCPARM/
+C
+	INTEGER*2 ENCBIT		! enc returned by m/c (all bits)
+	INTEGER*2 ENCFLP		! 0/4 => don't/do flip +/- encs
+	INTEGER*2 ENCSNS		! enc type allowing for scan dir
+	INTEGER*2 ENCTYP		! encounter type (-ve edge etc)
+	INTEGER*2 IDINC(2)		! ID increment for extended scan
+	INTEGER*2 INVERT(0:7)		! for reverse polarity linework
+	INTEGER*2 PRVSNS		! ENCSNS of previous encounter
+	INTEGER*2 PRVTYP		! ENCTYP of previous encounter
+	INTEGER*2 SAVMOD		! saved value of IMOD
+	INTEGER*4 ACTV			! active edge number
+	INTEGER*4 CURSCN		! current value of FSTSCN (q.v.)
+	INTEGER*4 EDGE			! current edge number
+	INTEGER*4 EDGLST(MAXEDG)	! a whole scan-line (backwards)
+	INTEGER*4 ENCNUM		! encounter number
+	INTEGER*4 FSTSCN		! -2/-1 => is/not 1st scan line
+	INTEGER*4 IGNORE		! ignore encs at start of scan
+	INTEGER*4 I,J,K,L,M,N		! loop variables, etc.
+	INTEGER*4 PRVEDG		! previous edge number
+	INTEGER*4 TWOAGO		! the edge before PRVEDG
+	INTEGER*4 TWOTYP		! ENCTYP of TWOAGO
+	LOGICAL*4 GOTJUN		! found a junction ?
+	LOGICAL*4 HADEXT		! extended the scan already ?
+	LOGICAL*4 NEWBCH		! new batch of encounters ?
+	LOGICAL*4 WNTEDG		! want edge chains returned ?
+	REAL*4	  CHNLIM		! edge chain appending criterion
+	REAL*4	  GRADNT		! scan vector gradient
+	REAL*4	  VDIFF			! V difference for two edges
+C
+C functions:
+	INTEGER*2 NEGET			! gets next batch of encounters
+	LOGICAL*4 ADDJOI		! adds an edge join to the map
+	LOGICAL*4 ADDNBR		! adds a neighbour for an edge
+	LOGICAL*4 EXPLOR		! explores the join structure
+	LOGICAL*4 GRWCHN		! grows final chains
+C
+	DATA INVERT/4,1,2,3,0,5,7,6/	! invert polarity of encounters
+C
+C ......................................................................
+C
+	IGNORE=LIMIT(11)*IPIT			! how much to ignore
+	ENCFLP=(2 - IU)*4
+	ENCNUM=1
+	PRVEDG=0
+	PRVSNS=0
+	PRVTYP=0
+	TWOAGO=0
+	TWOTYP=0
+	CURSCN=-2
+	FSTSCN=-2
+	GOTJUN=.FALSE.
+	HADEXT=.FALSE.
+	WNTEDG=(IMOD.AND.1).EQ.0		! return edge chains ?
+	CALL VIOCLR(EVGRAD,ANACMB)		! zero ALL of /ANACOM/
+	CALL VIOCLR(ACTCHN,MAXCHN+1)		! zero chain structure
+	CALL VIOCLR(CHNSNS,MAXCHN+1)
+	CALL VIOCLR(CLOCHN,MAXCHN+1)
+	CALL VIOCLR(CHAIN,2*(MAXCHN+2))
+	CALL VIOCLR(LENGTH,2*(MAXCHN+2))
+	JNCSPT=.NOT.WNTEDG.AND.JNCING		! spotting junctions ?
+	NEGOT=0
+	NEOLD=0
+	NETOP=NESIZE - NEXPND			! max enc num returned
+C
+C ... set up our special scan data requirements.
+	IUTB=1					! enable direction bit
+	SAVMOD=IMOD				! preserve existing IMOD
+	IMOD=6					! edge mode, empty scans
+C
+C ... find out how many encounters we've got.
+C ... come back here to get each new batch.
+10	IF (((NESIZE-NEXPND+1)-ENCNUM).LE.0) GO TO 1010
+	INE=NEGET(ENCBUF(W,ENCNUM),((NESIZE-NEXPND+1)-ENCNUM))
+	IF (INE) 1190,1010,20			! was the scan OK ?
+20	ENCNUM=ENCNUM - 1
+	INE=INE + ENCNUM			! (in case not 1st time)
+	NEGOT=INE
+	EDGE=PRVEDG
+	ENCSNS=PRVSNS				! assumes phase retained
+	ENCTYP=PRVTYP
+	PRVEDG=TWOAGO
+	PRVTYP=TWOTYP
+	NEWBCH=.TRUE.
+C
+C ... let's start analysing !
+30	ENCNUM=ENCNUM + 1			! loop through the encs
+	   TWOAGO=PRVEDG			! remembering last two
+	   TWOTYP=PRVTYP
+	   PRVEDG=EDGE
+	   PRVSNS=ENCSNS			! see ENCSNS (below)
+	   PRVTYP=ENCTYP			! prev encounter type
+	   IF (ENCNUM.GT.INE) GO TO 280		! found end of buffer ?
+	   ENCBUF(X,ENCNUM)=ENCBUF(X,ENCNUM) - RSEOFF(X)
+	   ENCBUF(Y,ENCNUM)=ENCBUF(Y,ENCNUM) - RSEOFF(Y)
+	   IF (FSTSCN.GT.-2) GO TO 40		! past first scan line ?
+	   IF (ABS(ENCBUF(IU,ENCNUM)).LT.IGNORE) GO TO 30 ! enc wanted ?
+	   FSTSCN=CURSCN			! update 1st scan flag
+	   IF (ABS(ENCBUF(IU,ENCNUM)).GT.IGNORE) CURSCN=-1
+C
+C ... invert the polarity of the encounters ?
+40	   IF (INVPOL) ENCBUF(W,ENCNUM)=(ENCBUF(W,ENCNUM).AND.TOP13).OR.
+     &					(INVERT(ENCBUF(W,ENCNUM).AND.7))
+	   ENCBIT=ENCBUF(W,ENCNUM)		! encounter status bits
+	   ENCTYP=ENCBIT.AND.WIDFLD		! current encounter type
+C
+C ... handle 'all-black' and 'all-white' encounters separately.
+	   IF (ENCTYP.EQ.ALLBLK) GO TO 970
+	   IF (ENCTYP.EQ.ALLWHT) GO TO 940
+	   IF (ENCTYP.LT.NEGEDG) GO TO 1200	! what is this ??
+C
+C ......................................................................
+C
+C ... it's an edge encounter of some kind.
+C ... first set up the 'sense' of the encounter based on the scan-line
+C ... direction (left-right or right-left). The TYPE of the encounter
+C ... is invariant, but the SENSE depends on the way we approach it.
+C ... hence on alternate scans encounters will keep the same ENCTYP,
+C ... but their ENCSNS will alternate between POSEDG and NEGEDG.
+	   ENCSNS=ENCTYP
+	   IF ((ENCBIT.AND.TOPBIT).EQ.0) ENCSNS=(ENCTYP.XOR.4)
+C
+C ... then, because of the way positive and negative encounters are
+C ... defined, we must flip their TYPE if IU=1.
+	   ENCTYP=ENCTYP.XOR.ENCFLP
+C
+C ... try to append this encounter to an existing edge.
+	   DO 70 I=1,MAXEDG		! loop through active edges
+	      EDGE=ACTEDG(I)
+	      IF (EDGE.EQ.0) GO TO 80
+	      IF (ENCTYP.NE.EDGTYP(EDGE)) GO TO 70
+	      IF (ABS(ENCBUF(IU,ENCNUM) - EDGPOS(IU,EDGE)).NE.IPIT)
+     &		 GO TO 70		! polarity OK, check position
+	      IF (EDGLEN(EDGE).GT.2) GO TO 50
+	      CHNLIM=CHLIM(4)
+	      GO TO 60
+50	      CHNLIM=CHLIM(2)		! use CLV except on short edge
+60	      VDIFF=FLOAT(ENCBUF(IV,ENCNUM) - EDGPOS(IV,EDGE))
+     &		    /FLOAT(IPIT)
+	      IF (ABS(VDIFF - EVGRAD(EDGE)).GT.CHNLIM) GO TO 70
+C
+C ... we have a match - 'append' the encounter to the edge.
+C ... as we grow the edge, maintain a 'trailing mean gradient' biased
+C ... towards the earlier data (i.e. don't allow sudden changes).
+	      EVGRAD(EDGE)=EVGRAD(EDGE) +
+     &			   MAX(0.25,1.0/FLOAT(EDGLEN(EDGE)))*
+     &			   (VDIFF - EVGRAD(EDGE))
+	      UPDATD(EDGE)=.TRUE.		! mark the edge updated
+	      EDGLEN(EDGE)=EDGLEN(EDGE) + 1	! increment edge length
+	      EDGPOS(X,EDGE)=ENCBUF(X,ENCNUM)	! remember end position
+	      EDGPOS(Y,EDGE)=ENCBUF(Y,ENCNUM)
+	      EDGBIT(EDGE)=ENCBIT		! save characteristics
+	      EDGSNS(EDGE)=ENCSNS
+	      IF ((ENCBIT.AND.SUBSEQ).NE.0) GO TO 660
+	      GO TO 280				! join common code
+70	   CONTINUE
+C
+C ......................................................................
+C
+C ... we failed to append the encounter, so we must start a new edge.
+80	   IF (TOPEDG.GE.MAXEDG) GO TO 1210
+	   TOPEDG=TOPEDG + 1
+	   EDGE=TOPEDG
+	   ACTEDG(I)=EDGE			! make the edge active
+	   IF (I.LT.MAXEDG) ACTEDG(I+1)=0	! terminate active list
+	   EVGRAD(EDGE)=0.0			! no idea of gradient
+	   UPDATD(EDGE)=.TRUE.			! mark the edge updated
+	   EDGLEN(EDGE)=1
+	   EDGPOS(X,EDGE)=ENCBUF(X,ENCNUM)	! remember end position
+	   EDGPOS(Y,EDGE)=ENCBUF(Y,ENCNUM)
+	   EDGBIT(EDGE)=ENCBIT			! save characteristics
+	   EDGTYP(EDGE)=ENCTYP			! lose the top 2 bits
+	   EDGSNS(EDGE)=ENCSNS
+	   IF ((ENCBIT.AND.SUBSEQ).EQ.0) GO TO 280
+	   IF (ENCSNS.NE.POSEDG) GO TO 90
+	   IF (PRVSNS.NE.NEGEDG) GO TO 1180	! N.B. SUB bit removed
+	   GO TO 670				! set up 'neighbours'
+C
+90	   IF (ENCSNS.NE.NEGEDG) GO TO 1200	! what is this ??
+	   IF (PRVSNS.NE.POSEDG) GO TO 1180
+C
+C ... got a new subsequent edge with negative sense - try to form joins
+C ... if easy, otherwise wait until we get the next encounter.
+	   IF (EDGLEN(PRVEDG).NE.1) GO TO 780	! prev edge also new ?
+	   IF (FSTSCN.EQ.-2) GO TO 780		! yes - 1st scan line ?
+	   IF (JOILST(1,PRVEDG).NE.0) GO TO 780	! no - already joined ?
+C
+C ... both PRVEDG and EDGE are new chains - be careful setting up join.
+C ... order PRVEDG and EDGE according to their V coordinates.
+	   IF (EDGPOS(IV,EDGE).GT.EDGPOS(IV,PRVEDG)) GO TO 100
+	   L=EDGPOS(IV,EDGE)
+	   M=EDGPOS(IV,PRVEDG)
+	   GO TO 110
+100	   L=EDGPOS(IV,PRVEDG)
+	   M=EDGPOS(IV,EDGE)
+C
+C ... look for newly inactivated edges (i.e. ones which terminate on the
+C ... previous scan line).
+110	   J=0
+	   DO 250 I=1,MAXEDG
+	      ACTV=ACTEDG(I)
+	      IF (ACTV.EQ.PRVEDG) GO TO 260
+	      IF (ACTV.EQ.J) GO TO 250		! (already dealt with)
+	      K=EDGPOS(IV,ACTV)			! V coord on curr. scan
+	      IF (.NOT.UPDATD(ACTV))
+     &		 K=K + INT(EVGRAD(ACTV)*FLOAT(IPIT))
+	      J=NEIGBR(ACTV)			! get the neighbour
+	      IF (J.LE.0) GO TO 120		! if any ...
+	      IF (UPDATD(J)) GO TO 130		! and not updated ...
+	      N=EDGPOS(IV,J) + INT(EVGRAD(J)*FLOAT(IPIT))
+	      IF (JOILST(2,J).NE.0) GO TO 140	! and not joined
+	      GO TO 150
+C
+C ... ACTV is a *real* edge - dummy up a 'neighbour position' for it.
+120	      N=((EDGBIT(ACTV).AND.4)-2)*16383	! +/- 32766
+	      GO TO 150
+C
+C ... J has been updated - use its latest V coordinate.
+130	      N=EDGPOS(IV,J)
+140	      J=0				! prevent join
+C
+C ... got two active neighbouring edges - project the line K---N joining
+C ... them onto L---M on the current scan line.
+150	      IF (MIN(K,N).GT.M) GO TO 250	! do the lines overlap ?
+	      IF (MAX(K,N).LT.L) GO TO 250
+C
+C ... try to form joins.
+C ... first check if there is any danger of missing a better join.
+	      IF (UPDATD(ACTV)) GO TO 270
+	      IF (EDGTYP(ACTV).EQ.ENCTYP) GO TO 200
+C
+	      IF (J.LE.0) GO TO 170		   ! prevent join
+	      IF (N.LT.L.OR.N.GT.M) GO TO 170
+	      IF (EDGBLK(J).LE.0) GO TO 160	   ! any ambiguity ?
+	      IF (ABS(EDGPOS(IV,EDGE) - K)
+     &		  .GT.
+     &		  ABS(EDGPOS(IV,EDGBLK(J)) +
+     &		      INT(EVGRAD(EDGBLK(J))*FLOAT(IPIT)) - K))
+     &		 GO TO 170
+160	      IF (ADDJOI(J,2,EDGE,1)) GO TO 1220
+170	      IF (JOILST(2,ACTV).NE.0) GO TO 270
+	      IF (K.LT.L.OR.K.GT.M) GO TO 180
+	      IF (EDGBLK(ACTV).LE.0) GO TO 190	   ! any ambiguity ?
+	      IF (UPDATD(EDGBLK(ACTV))) GO TO 190
+	      IF (ABS(EDGPOS(IV,PRVEDG) - N)
+     &		  .GT.
+     &		  ABS(EDGPOS(IV,EDGBLK(ACTV)) +
+     &		      INT(EVGRAD(EDGBLK(ACTV))*FLOAT(IPIT)) - N))
+     &		 GO TO 270
+	      GO TO 190
+180	      IF (TWOAGO.LE.0) GO TO 190	   ! any ambiguity ?
+	      IF (ABS(N - EDGPOS(IV,TWOAGO)).LE.ABS(K - N)) GO TO 270
+190	      IF (ADDJOI(ACTV,2,PRVEDG,1)) GO TO 1220
+	      GO TO 270
+C
+200	      IF (J.LE.0) GO TO 230		   ! prevent join
+	      IF (N.LT.L.OR.N.GT.M) GO TO 210
+	      IF (EDGBLK(J).LE.0) GO TO 220	   ! any ambiguity ?
+	      IF (UPDATD(EDGBLK(J))) GO TO 220
+	      IF (ABS(EDGPOS(IV,PRVEDG) - N)
+     &		  .GT.
+     &		  ABS(EDGPOS(IV,EDGBLK(J)) +
+     &		      INT(EVGRAD(EDGBLK(J))*FLOAT(IPIT)) - N))
+     &		 GO TO 230
+	      GO TO 220
+210	      IF (TWOAGO.LE.0) GO TO 220	   ! any ambiguity ?
+	      IF (ABS(K - EDGPOS(IV,TWOAGO)).LE.ABS(K - N)) GO TO 230
+220	      IF (ADDJOI(J,2,PRVEDG,1)) GO TO 1220
+230	      IF (K.LT.L.OR.K.GT.M) GO TO 270	   ! prevent join
+	      IF (JOILST(2,ACTV).NE.0) GO TO 270
+	      IF (EDGBLK(ACTV).LE.0) GO TO 240	   ! any ambiguity ?
+	      IF (ABS(EDGPOS(IV,EDGE) - K)
+     &		  .GT.
+     &		  ABS(EDGPOS(IV,EDGBLK(ACTV)) +
+     &		      INT(EVGRAD(EDGBLK(ACTV))*FLOAT(IPIT)) - K))
+     &		 GO TO 270
+240	      IF (ADDJOI(ACTV,2,EDGE,1)) GO TO 1220
+	      GO TO 270
+250	   CONTINUE
+C
+C ... nothing relevant on previous scan line - join PRVEDG and EDGE.
+260	   IF (ADDJOI(PRVEDG,1,EDGE,1)) GO TO 1220
+270	   IF (TWOAGO.GT.0) GO TO 740		! try to join TWOAGO
+	   GO TO 780				! set up neighbours
+C
+C ......................................................................
+C
+C ... we've just started a new scan line.
+C ... (we also come here when we reach the end of the scan buffer).
+280	   IF (NEWBCH) GO TO 590		! new batch of encs ?
+	   IF (PRVEDG.EQ.0) GO TO 450		! any previous edge ?
+	   IF (PRVSNS.NE.POSEDG) GO TO 370
+C
+C ... first we tidy up any trailing edges with positive sense ...
+	   CALL ADDNBR(PRVEDG,FSTSCN)		! create dummy neighbour
+	   IF (GRWCHN(PRVEDG,ENCNUM-1,PRVTYP,FSTSCN,CURCHN(PRVEDG)))
+     &	      GO TO 1230			! grow a chain
+	   IF (EDGLEN(PRVEDG).GT.2) GO TO 450	! too late for joining
+	   IF (TWOAGO.NE.EDGBLK(PRVEDG)) GO TO 380
+C
+C ... (PRVEDG and TWOAGO are on the same scan line) ...
+	   IF (EDGLEN(TWOAGO).NE.1) GO TO 300
+	   IF (JOILST(1,TWOAGO).NE.0) GO TO 300
+	   IF (NEIGBR(TWOAGO).LE.0) GO TO 290	! try to join TWOAGO ...
+	   I=CHNMAP(CURCHN(TWOAGO),NEIGBR(TWOAGO))
+	   IF (I.LE.0.AND.JOIEND(1,NEIGBR(TWOAGO)).EQ.2)
+     &	      I=JOILST(1,NEIGBR(TWOAGO))
+	   IF (I.LE.0) GO TO 290		! to previous scan-line
+	   J=1					! which side of I ...
+	   IF ((TWOTYP.AND.4).EQ.0) J=2		! do we join ?
+	   IF (CHNEDG(J,I).LE.0) GO TO 290	! (if either)
+	   IF (JOILST(2,CHNEDG(J,I)).NE.0) GO TO 290
+	   IF (ABS(ENCBUF(IV,ENCNUM-1) - ENCBUF(IV,ENCNUM-3)).LE.
+     &	       (ENCBUF(W,CHAIN(I)).AND.WIDFLD)) GO TO 290
+	   IF (ADDJOI(TWOAGO,1,CHNEDG(J,I),2)) GO TO 1220
+	   GO TO 450
+C
+C ... (try to join PRVEDG to TWOAGO) ...
+290	   IF (JOILST(1,PRVEDG).NE.0) GO TO 450	! already joined ?
+	   IF (FSTSCN.EQ.-2) GO TO 450		! first scan line ?
+	   IF (ADDJOI(TWOAGO,1,PRVEDG,1)) GO TO 1220
+	   GO TO 450
+C
+C ... (try to join PRVEDG to previous scan line) ...
+300	   IF (JOILST(1,PRVEDG).NE.0) GO TO 450	! already joined ?
+	   M=((EDGBIT(PRVEDG).AND.4)-2)*16383	! +/- 32767
+310	   L=0
+	   IF (EDGLEN(PRVEDG).EQ.1) GO TO 320	! PRVEDG must not be ...
+	   IF (EDGE.NE.PRVEDG) GO TO 450	! on that scan line
+	   L=L - INT(EVGRAD(PRVEDG)*FLOAT(IPIT))
+320	   L=L + EDGPOS(IV,PRVEDG)		! V position of PRVEDG
+	   DO 360 I=1,MAXEDG
+	      ACTV=ACTEDG(I)
+	      IF (ACTV.EQ.0) GO TO 450		! look for active ...
+	      IF (UPDATD(ACTV)) GO TO 360	! non-updated edge
+	      IF (EDGTYP(ACTV).NE.PRVTYP) GO TO 360
+	      IF (JOILST(2,ACTV).NE.0) GO TO 360
+	      K=EDGPOS(IV,ACTV) + INT(EVGRAD(ACTV)*FLOAT(IPIT))
+	      IF (NEIGBR(ACTV).GT.0) GO TO 330
+	      N=((EDGBIT(ACTV).AND.4)-2)*16383	! +/- 32767
+	      GO TO 340
+330	      N=EDGPOS(IV,NEIGBR(ACTV)) +
+     &		INT(EVGRAD(NEIGBR(ACTV))*FLOAT(IPIT))
+C
+C ... see whether K---N overlaps L---M.
+340	      IF (MIN(K,N).GT.MAX(L,M)) GO TO 360
+	      IF (MAX(K,N).LT.MIN(L,M)) GO TO 360
+	      IF (EDGBLK(ACTV).LE.0) GO TO 350	! best candidate ?
+	      IF (EDGBLK(ACTV).EQ.TWOAGO) GO TO 350
+	      J=EDGPOS(IV,EDGBLK(ACTV)) +
+     &		INT(EVGRAD(EDGBLK(ACTV))*FLOAT(IPIT))
+	      IF (ABS(J - M).LE.ABS(L - M)) GO TO 360
+350	      IF (ADDJOI(ACTV,2,PRVEDG,1)) GO TO 1220
+	      GO TO 450
+360	   CONTINUE
+	   GO TO 450
+C
+370	   IF (PRVSNS.NE.NEGEDG) GO TO 450
+C
+C ... or negative sense (forming joins if necessary).
+	   EDGBLK(PRVEDG)=FSTSCN
+	   IF (EDGLEN(PRVEDG).GT.2) GO TO 450	! too late for joining
+	   IF (TWOAGO.EQ.NEIGBR(PRVEDG)) GO TO 440
+C
+C ... PRVEDG and TWOAGO are on different scan lines.
+380	   IF (TWOAGO.EQ.PRVEDG) GO TO 450	! part of same edge ?
+	   IF (TWOAGO.EQ.0) GO TO 450
+	   IF (JOILST(1,PRVEDG).NE.0) GO TO 450	! already joined ?
+	   I=1					! build up scan-line ...
+	   EDGLST(1)=TWOAGO			! containing TWOAGO
+	   IF (TWOTYP.EQ.NEGEDG) GO TO 400
+390	   IF (EDGBLK(EDGLST(I)).LE.0) GO TO 410
+	      I=I + 1
+	      EDGLST(I)=EDGBLK(EDGLST(I-1))
+400	      IF (NEIGBR(EDGLST(I)).LE.0) GO TO 410
+	      I=I + 1
+	      EDGLST(I)=NEIGBR(EDGLST(I-1))
+	   GO TO 390
+C
+C ... having reconstructed the scan line containing TWOAGO, look along
+C ... it for a likely candidate to be joined to PRVEDG.
+410	   IF (PRVTYP.EQ.EDGTYP(EDGLST(I))) GO TO 420
+	   I=I - 1				! start at opposite ...
+	   IF (I.EQ.0) GO TO 450		! end to TWOAGO
+420	   IF (EDGLST(I).EQ.PRVEDG) GO TO 450
+	      IF (JOILST(2,EDGLST(I)).NE.0) GO TO 430
+	      IF (ADDJOI(EDGLST(I),2,PRVEDG,1)) GO TO 1220
+	      GO TO 450
+430	      I=I - 2
+	   IF (I.GT.0) GO TO 420
+	   GO TO 450
+C
+C ... PRVEDG and TWOAGO are on the same scan line.
+440	   IF (JOILST(1,PRVEDG).NE.0) GO TO 450	! already joined ?
+	   M=EDGPOS(IV,TWOAGO)
+	   GO TO 310				! join common code
+C
+C ... now we tidy up any chains which have just become inactive,
+C ... creating joins as necessary.
+450	   J=1
+	   DO 570 I=1,MAXEDG		! loop through 'active' edges
+	      ACTV=ACTEDG(I)
+	      IF (ACTV.EQ.0) GO TO 580
+	      IF (UPDATD(ACTV)) GO TO 560
+	      IF ((EDGBIT(ACTV).AND.SUBSEQ).EQ.0) GO TO 470
+	      IF (JOILST(2,ACTV).NE.0) GO TO 470
+C
+C ... newly inactivated SUBSEQuent edge.
+	      IF (EDGSNS(ACTV).EQ.NEGEDG) GO TO 460
+C
+C ... positive sense.
+C ... see if we can join across a region of black (i.e. non-line).
+	      IF (UPDATD(EDGBLK(ACTV))) GO TO 470	! can't join
+	      IF (JOILST(2,EDGBLK(ACTV)).NE.0) GO TO 470
+	      IF (ADDJOI(ACTV,2,EDGBLK(ACTV),2)) GO TO 1220
+	      GO TO 470					! chain inactive
+C
+C ... negative sense.
+C ... see if we can join across a region of line.
+460	      IF (UPDATD(NEIGBR(ACTV))) GO TO 470	! can't join
+	      IF (JOILST(2,NEIGBR(ACTV)).NE.0) GO TO 470
+	      IF (ADDJOI(ACTV,2,NEIGBR(ACTV),2)) GO TO 1220
+C
+C ... if junction spotting is enabled, examine this newly-inactivated
+C ... edge to determine (1) whether it is part of a closed feature which
+C ...			    includes the SIDE of the scan.
+C ...			(2) whether it is next to a valid pair of
+C ...			    neighbouring encounters (i.e. a line).
+C ... if both of these are true, this could be a junction with an arm
+C ... severed (e.g. by a scratch on the negative).
+470	      IF (.NOT.JNCSPT) GO TO 570
+	      IF (EDGCLO(ACTV)) GO TO 570	! is the edge closed ?
+	      M=0
+	      IF (EXPLOR(ACTV,1,M)) GO TO 570	! explore join structure
+	      IF (EXPLOR(JOILST(2,ACTV),3-JOIEND(2,ACTV),M)) GO TO 570
+	      IF (M.EQ.0) GO TO 570		! edge abuts scan side ?
+	      IF (EDGLEN(M).GT.2) GO TO 480	! edge very short ?
+	      IF (JOIEND(1,M).EQ.0.AND.JOIEND(2,M).EQ.0) GO TO 570
+C
+C ... the edge itself looks OK.
+480	      IF (EDGBLK(M).NE.-1) GO TO 540
+C
+C ... edge is on a line by itself - can't be a severed arm.
+C ... HOWEVER, having got this far we dare not ignore the edge, as it
+C ... could correspond to a marginal junction with no *real* transition.
+490	      DO 500 K=1,TOPEDG			! must be at least ...
+		 IF (K.EQ.M) GO TO 500		! one other edge ...
+		 IF (JOINED(M,K)) GO TO 500	! NOT joined to M
+		 IF (NEIGBR(K).LE.0) GO TO 500	! & must be edge of line
+		 IF (JOINED(K,NEIGBR(K))) GO TO 500
+		 IF (.NOT.JOINED(M,NEIGBR(K))) GO TO 510
+500	      CONTINUE
+	      GO TO 570
+C
+C ... found a junction (?) - calculate a sensible origin for the scan.
+510	      K=CURCHN(M)			! find the start of ...
+	      IF (K.EQ.0) GO TO 570		! the *real* chain ...
+	      K=CHAIN(K)			! to which M belongs
+520	      L=NXT(K)
+		 IF (L.EQ.0) GO TO 530
+		 K=L
+	      GO TO 520
+530	      JUNSCN(X)=ENCBUF(X,K)		! do junction scan there
+	      JUNSCN(Y)=ENCBUF(Y,K)
+	      GO TO 550
+C
+C ... severed arm is a possibility - is the edge next to a line ?
+540	      IF (EDGBLK(M).LE.0) GO TO 570
+	      IF (JOINED(EDGBLK(M),M)) GO TO 490
+	      IF (.NOT.UPDATD(EDGBLK(M))) GO TO 570
+	      IF (NEIGBR(EDGBLK(M)).LE.0) GO TO 570
+C
+C ... found a junction - calculate a sensible origin for the scan.
+C ... the junction code will take care of any unwanted chains which
+C ... we've already grown.
+	      K=CHAIN(CURCHN(EDGBLK(M)))	! K and L same if MOD 1
+	      L=CHAIN(CURCHN(NEIGBR(EDGBLK(M))))
+	      JUNSCN(IU)=ENCBUF(IU,K)
+	      JUNSCN(IV)=(ENCBUF(IV,K)+ENCBUF(IV,L))/2
+550	      GOTJUN=.TRUE.
+	      GO TO 570				! chain inactive now
+C
+560	      ACTEDG(J)=ACTV			! chain still active
+	      J=J + 1
+570	   CONTINUE
+C
+580	   ACTEDG(J)=0				! terminate new list
+	   CALL VIOCLR(UPDATD,MAXEDG)		! unset 'updated' flags
+	   IF (EDGE.GT.0) UPDATD(EDGE)=.TRUE.	! excluding current edge
+590	   NEWBCH=.FALSE.
+	   IF (GOTJUN) GO TO 1270		! no need to do any more
+C
+C ... finally we look at the encounter itself.
+	   IF (ENCNUM.GT.INE) GO TO 10		! at end of buffer ?
+	   IF (ENCTYP.LT.ALLWHT) GO TO 640
+	   IF (ENCTYP.EQ.ALLBLK) GO TO 30	! all-black case ?
+C
+C ... finish dealing with all-white encounter.
+C ... if junction spotting is enabled and we have a line 'in hand', then
+C ... we've found a junction.
+	   IF (PRVTYP.EQ.ALLWHT) GO TO 30
+	   IF (.NOT.JNCSPT.OR.FSTSCN.EQ.-2) GO TO 30 ! any encs yet ?
+	   DO 630 I=1,MAXEDG
+	      ACTV=ACTEDG(I)			     ! look for an ...
+	      IF (ACTV.EQ.0) GO TO 30		     ! active ...
+600	      J=CURCHN(ACTV)			     ! edge which ...
+		 IF (J.EQ.0) GO TO 630		     ! is part of ...
+610		 IF (EDGCHN(J)) GO TO 620	     ! a line chain
+C
+C ... found a junction - calculate a sensible origin for the scan.
+		    JUNSCN(IU)=ENCBUF(IU,ENCNUM)
+		    JUNSCN(IV)=INT(FLOAT(JUNSCN(IU))*
+     &				   FLOAT(ID(IV))/FLOAT(ID(IU)))
+		    GO TO 1270
+620		    J=CHNMAP(J,ACTV)
+		 IF (J.NE.0) GO TO 610
+		 IF (JOIEND(1,ACTV).NE.2) GO TO 630
+		 ACTV=JOILST(1,ACTV)
+	      GO TO 600
+630	   CONTINUE
+	GO TO 30
+640	   IF (ENCSNS.NE.POSEDG) GO TO 650
+C
+C ... edge with positive sense (and first encounter on a new scan line).
+C ... create a dummy 'neighbour' across a region of black (non-line).
+	   EDGBLK(EDGE)=CURSCN			! not a *real* neighbour
+	GO TO 30				! get next encounter
+C
+650	   IF (ENCSNS.NE.NEGEDG) GO TO 1200	! what is this ??
+C
+C ... edge with negative sense (and first encounter on a new scan line).
+C ... this is automatically part of a *real* edge chain.
+	   CALL ADDNBR(EDGE,CURSCN)		! create dummy neighbour
+	   IF (GRWCHN(EDGE,ENCNUM,ENCTYP,CURSCN,CURCHN(EDGE)))
+     &	      GO TO 1230
+	GO TO 30				! get next encounter
+C
+C ......................................................................
+C
+C ... SUBSEQuent edge (i.e. not the first encounter on this scan line).
+660	   IF (ENCSNS.NE.POSEDG) GO TO 680
+	   IF (PRVSNS.NE.NEGEDG) GO TO 1180	! N.B. SUB bit removed
+C
+C ... encounter has positive sense.
+C ... if previous edge is new, try to join it to something.
+C ... we know that EDGE is not new (else we would not be here !).
+	   IF (EDGLEN(PRVEDG).NE.1) GO TO 670
+	   IF (JOILST(1,PRVEDG).NE.0) GO TO 670	! already joined ?
+	   I=EDGBLK(EDGE)			! previous 'neighbour'
+	   IF (I.LE.0) GO TO 670		! (if any)
+	   IF (JOILST(2,I).NE.0) GO TO 670	! already joined ?
+	   IF (ADDJOI(I,2,PRVEDG,1)) GO TO 1220
+C
+C ... set up our edge's 'neighbour' across the area of black (N.B. this
+C ... is not a *true* neighbour - it can't cause a junction scan to be
+C ... performed). We also come here if EDGE is new.
+670	   EDGBLK(EDGE)=PRVEDG			! nearest across black
+	   EDGBLK(PRVEDG)=EDGE			! (both ways)
+	GO TO 30				! get next encounter
+C
+680	   IF (ENCSNS.NE.NEGEDG) GO TO 1200	! what is this ??
+C
+C ... encounter has negative sense.
+C ... now we start looking for neighbouring pairs of encounters.
+	   IF (PRVSNS.NE.POSEDG) GO TO 1180	! N.B. SUB bit removed
+	   IF (EDGLEN(PRVEDG).NE.1) GO TO 780
+C
+C ... PRVEDG is new - try to join it to the previous scan line.
+	   IF (JOILST(1,PRVEDG).NE.0) GO TO 740	! already joined ?
+	   L=EDGPOS(IV,PRVEDG)
+	   M=EDGPOS(IV,EDGE)
+	   DO 730 I=1,MAXEDG
+	      ACTV=ACTEDG(I)
+	      IF (ACTV.EQ.0) GO TO 740		! look for active ...
+	      IF (UPDATD(ACTV)) GO TO 730	! non-updated edge
+	      IF (EDGTYP(ACTV).NE.PRVTYP) GO TO 730
+	      IF (JOILST(2,ACTV).NE.0) GO TO 730
+	      K=EDGPOS(IV,ACTV) + INT(EVGRAD(ACTV)*FLOAT(IPIT))
+	      IF (TWOAGO.NE.EDGBLK(PRVEDG)) GO TO 690
+	      IF (ABS(L - EDGPOS(IV,TWOAGO)).LE.ABS(L - K)) GO TO 730
+690	      IF (NEIGBR(ACTV).GT.0) GO TO 700
+	      N=((EDGBIT(ACTV).AND.4)-2)*16383	! +/- 32767
+	      GO TO 710
+700	      N=EDGPOS(IV,NEIGBR(ACTV)) +
+     &		INT(EVGRAD(NEIGBR(ACTV))*FLOAT(IPIT))
+C
+C ... see whether K---N overlaps L---M.
+710	      IF (MIN(K,N).GT.MAX(L,M)) GO TO 730
+	      IF (MAX(K,N).LT.MIN(L,M)) GO TO 730
+	      IF (EDGBLK(ACTV).LE.0) GO TO 720	! best candidate ?
+	      J=EDGPOS(IV,EDGBLK(ACTV)) +
+     &		INT(EVGRAD(EDGBLK(ACTV))*FLOAT(IPIT))
+	      IF (ABS(J - M).LE.ABS(L - M)) GO TO 730
+720	      IF (ADDJOI(ACTV,2,PRVEDG,1)) GO TO 1220
+	      GO TO 740
+730	   CONTINUE
+C
+C ... (also come here if EDGE and PRVEDG are both new).
+740	   IF (TWOAGO.NE.EDGBLK(PRVEDG)) GO TO 780
+	   IF (EDGLEN(TWOAGO).NE.1) GO TO 780	! is TWOAGO also new ?
+	   IF (JOILST(1,TWOAGO).NE.0) GO TO 780	! yes - already joined ?
+C
+C ... TWOAGO is also a candidate for joining.
+C ... first try to join it to previous scan line.
+	   IF (.NOT.EDGCHN(CURCHN(TWOAGO))) GO TO 750
+	   IF (JOIEND(1,PRVEDG).NE.2) GO TO 770
+	   IF (EDGBLK(JOILST(1,PRVEDG)).LE.0) GO TO 780
+	   J=CURCHN(EDGBLK(JOILST(1,PRVEDG)))
+	   GO TO 760
+750	   J=CHNMAP(CURCHN(NEIGBR(TWOAGO)),NEIGBR(TWOAGO))
+	   IF (J.LE.0.AND.JOIEND(1,NEIGBR(TWOAGO)).EQ.2)
+     &	      J=CURCHN(JOILST(1,NEIGBR(TWOAGO))) ! chain for 'threeago'
+760	   IF (J.LE.0) GO TO 780		 ! try to join to J
+	   K=1					 ! but which side ?
+	   IF ((TWOTYP.AND.4).EQ.0) K=2
+	   IF (CHNEDG(K,J).LE.0) GO TO 780	 ! anything to join to ?
+	   IF (UPDATD(CHNEDG(K,J))) GO TO 770	 ! J updated ?
+	   IF (JOILST(2,CHNEDG(K,J)).NE.0) GO TO 770
+	   IF ((((EDGBIT(CHNEDG(K,J)).AND.4)-2)/2)*
+     &	       (EDGPOS(IV,PRVEDG) -
+     &		(EDGPOS(IV,CHNEDG(K,J)) +
+     &		 INT(EVGRAD(CHNEDG(K,J))*FLOAT(IPIT))))
+     &	       .GE.0) GO TO 770			 ! +/-1*projected V diff
+	   IF (ADDJOI(CHNEDG(K,J),2,TWOAGO,1)) GO TO 1220
+	   GO TO 780
+C
+C ... try to join TWOAGO to PRVEDG.
+770	   IF (JOILST(1,PRVEDG).NE.0) GO TO 780	! already joined ?
+	   IF (ADDJOI(TWOAGO,1,PRVEDG,1)) GO TO 1220
+C
+C ... next set up the neighbours (also come here if EDGE is new).
+780	   I=1
+	   IF (ADDNBR(PRVEDG,EDGE)) I=2		! (both ways)
+	   IF (ADDNBR(EDGE,PRVEDG)) I=I + 2
+	   IF (.NOT.JNCSPT) GO TO 920
+	   GO TO (920,790,800,910),I		! what was seen ?
+790	   J=PRVEDG				! common edge before ...
+	   GO TO 810				! and after transition
+800	   J=EDGE
+810	   N=J
+	   IF (TRNEDG(N).LT.0) GO TO 850	! edge before transition
+C
+C ... found a junction - calculate a sensible origin for the scan.
+C ... before the transition, J belonged to a line chain - use its end.
+820	   K=CURCHN(J)				! look for the chain
+830	      IF (CHNEDG(1,K).EQ.TRNEDG(N).OR.CHNEDG(2,K).EQ.TRNEDG(N))
+     &		 GO TO 840
+		 K=CHNMAP(K,J)
+	      IF (K.NE.0) GO TO 830
+	      IF (JOIEND(1,J).NE.2) GO TO 1250
+	      J=JOILST(1,J)
+	   GO TO 820
+840	   JUNSCN(X)=ENCBUF(X,CHAIN(K))
+	   JUNSCN(Y)=ENCBUF(Y,CHAIN(K))
+	   GO TO 1270
+C
+C ... before the transition, J belonged to an edge chain.
+C ... project the middle of PRVEDG---EDGE back to the START of it.
+850	   K=CURCHN(J)
+860	      IF (EDGCHN(K)) GO TO 870		! look for an edge
+		 K=CHNMAP(K,J)
+	      IF (K.NE.0) GO TO 860
+	      IF (JOIEND(1,J).NE.2) GO TO 1250
+	      J=JOILST(1,J)
+	   GO TO 850
+870	   M=CHAIN(K)				! found an edge ...
+880	   L=NXT(M)				! hunt for the beginning
+	      IF (L.EQ.0) GO TO 890		! (leave result in M)
+	      M=L
+	   GO TO 880
+890	   JUNSCN(IU)=ENCBUF(IU,M)
+	   JUNSCN(IV)=ENCBUF(IV,CHAIN(CURCHN(N))) -
+     &		      INT(EVGRAD(N)*
+     &			  FLOAT(IABS(ENCBUF(IU,CHAIN(CURCHN(N)))-
+     &				     JUNSCN(IU))))
+C
+C ... don't let the projected position lie outside the scan boundary.
+900	   I=INT(0.5*WAR*CR(IV)*FLOAT(IPIT))	! half scan width
+	   J=INT(FLOAT(JUNSCN(IU))*FLOAT(ID(IV))/FLOAT(ID(IU)))
+	   IF (ABS(JUNSCN(IV)-J).GT.I)
+     &	      JUNSCN(IV)=J + (((EDGBIT(K).AND.4)-2)/2)*I
+	   GO TO 1270
+C
+C ... the topology is rather odd, so we just do the best we can.
+910	   JUNSCN(X)=(ENCBUF(X,CHAIN(CURCHN(TRNEDG(PRVEDG)))) +
+     &		      ENCBUF(X,CHAIN(CURCHN(TRNEDG(EDGE)))))/2
+	   JUNSCN(Y)=(ENCBUF(Y,CHAIN(CURCHN(TRNEDG(PRVEDG)))) +
+     &		      ENCBUF(Y,CHAIN(CURCHN(TRNEDG(EDGE)))))/2
+	   GO TO 1270
+C
+C ... finally generate chains as required.
+920	   IF (WNTEDG) GO TO 930		! do we want edge chns ?
+C
+C ... centre lines required.
+C ... generate a new encounter corresponding to the centre of the line.
+C ... prevent width overflow & set SUBSEQuent encounter bit if required.
+	   NETOP=NETOP + 1
+	   IF (NETOP.GT.NESIZE) GO TO 1240
+	   ENCBUF(W,NETOP)=MIN(ABS(ENCBUF(IV,ENCNUM) -
+     &				   ENCBUF(IV,ENCNUM-1)).AND.WIDFLD,
+     &			       MAXWID)
+     &			   .XOR.(ENCBUF(W,ENCNUM-1).AND.SUBSEQ)
+	   ENCBUF(IU,NETOP)=ENCBUF(IU,ENCNUM)
+	   ENCBUF(IV,NETOP)=(ENCBUF(IV,ENCNUM) + ENCBUF(IV,ENCNUM-1))/2
+C
+C ... this new encounter becomes part of a centre-line chain.
+C ... both edges will normally already belong to the same chain, but we
+C ... must watch out for new edges (due to wide lines, etc).
+	   IF (GRWCHN(EDGE,NETOP,ENCTYP,PRVEDG,
+     &		      MIN(CURCHN(EDGE),CURCHN(PRVEDG)))) GO TO 1230
+	GO TO 30				! get next encounter
+C
+C ... centre lines not required - return edge chains.
+930	   IF (GRWCHN(EDGE,ENCNUM,ENCTYP,0,CURCHN(EDGE))) GO TO 1230
+	   IF (GRWCHN(PRVEDG,ENCNUM-1,PRVTYP,0,CURCHN(PRVEDG)))
+     &	      GO TO 1230
+	GO TO 30				! get next encounter
+C
+C ......................................................................
+C
+C ... all-white scan (i.e. scan is always within line).
+C ... ignore it if the previous two scan lines were also all white.
+940	   IF (PRVTYP.NE.ALLWHT) GO TO 950
+	   IF (TWOTYP.NE.ALLWHT) GO TO 280	! finish tidying up
+	GO TO 30				! get next encounter
+C
+C ... terminate all updated edges, forming joins as necessary.
+950	   DO 960 I=1,MAXEDG
+	      ACTV=ACTEDG(I)
+	      IF (ACTV.EQ.0) GO TO 1000
+	      IF (.NOT.UPDATD(ACTV)) GO TO 960
+	      IF ((EDGBIT(ACTV).AND.SUBSEQ).EQ.0) GO TO 960
+	      IF (EDGSNS(ACTV).NE.POSEDG) GO TO 960
+	      IF (ADDJOI(ACTV,2,EDGBLK(ACTV),2)) GO TO 1220
+960	   CONTINUE
+	   GO TO 1000				! tidy up
+C
+C ......................................................................
+C
+C ... all-black scan (i.e. no encounters seen at all).
+C ... ignore it if the previous two scan lines were also all black.
+970	   IF (PRVTYP.NE.ALLBLK) GO TO 980
+	   IF (TWOTYP.NE.ALLBLK) GO TO 280	! finish tidying up
+	GO TO 30				! get next encounter
+C
+C ... terminate all updated edges, forming joins as necessary.
+980	   DO 990 I=1,MAXEDG
+	      ACTV=ACTEDG(I)
+	      IF (ACTV.EQ.0) GO TO 1000
+	      IF (.NOT.UPDATD(ACTV)) GO TO 990
+	      IF ((EDGBIT(ACTV).AND.SUBSEQ).EQ.0) GO TO 990
+	      IF (EDGSNS(ACTV).NE.NEGEDG) GO TO 990
+	      IF (ADDJOI(ACTV,2,NEIGBR(ACTV),2)) GO TO 1220
+990	   CONTINUE
+C
+C ... (also come here from the all-white case).
+1000	   EDGE=0				! enc not part of edge
+	   ENCSNS=ENCTYP			! overwrite old sense
+	   GO TO 280				! tidy previous scans
+C
+C ......................................................................
+C
+C ... end of scan data.
+1010	IF (.NOT.JNCSPT) GO TO 1280
+C
+C ... check that we haven't failed to sort out a neighbour transition
+C ... (e.g. because it is too close to the end of the scan).
+C ... if possible, we extend the scan a bit to try to resolve the
+C ... problem. If we can't do that (or already have !), we probably
+C ... won't be able to see it in the next scan so we MUST flag it now
+C ... (even if it results in a wasted junction scan).
+	GRADNT=FLOAT(ID(IV))/FLOAT(ID(IU))	! scan vector gradient
+	DO 1120 I=1,TOPEDG
+	   IF (TRNEDG(I).EQ.0) GO TO 1120	! transition seen ?
+	   J=NEIGBR(I)
+	   IF (J.NE.-1) GO TO 1030		! side of scan ?
+	   IF (TRNEDG(I).LT.0) GO TO 1120	! real edge involved ?
+	   DO 1020 K=1,MAXEDG			! yes, we have an ...
+	      ACTV=ACTEDG(K)			! unresolved problem ...
+	      IF (ACTV.EQ.0) GO TO 1120		! if I is still active
+	      IF (ACTV.NE.I) GO TO 1020
+	      IF (HADEXT) GO TO 1060		! already extended ?
+	      IF (NEGOT.EQ.0) GO TO 1060	! weird scan ?
+	      L=EDGPOS(IV,I) - ENCBUF(IU,NEGOT)*GRADNT
+	      M=(((EDGBIT(I).AND.4)-2)/2)*
+     &		INT(0.5*WAR*CR(IV)*FLOAT(IPIT))	! (+/-1)*halfwidth
+	      IDINC(IU)=MAX(2*IPIT,ABS(M-L)-IPIT)  ! amount to extend by
+	      GO TO 1050
+1020	   CONTINUE
+	   GO TO 1120
+1030	   IF (J.LE.0) GO TO 1120
+	   IF (JOINED(I,J)) GO TO 1120		! edges now joined ?
+	   IF (TRNEDG(I).LT.0) GO TO 1040
+	   IF (JOINED(TRNEDG(I),J)) GO TO 1120
+C
+C ......................................................................
+C
+C ... try to extend the scan by TRNLEN(I) (or equivalent).
+1040	   IF (HADEXT) GO TO 1060		! already extended ?
+	   IDINC(IU)=MAX(2,TRNLEN(I)-1)*IPIT	! amount to extend by
+1050	   IF (ID(IU).LT.0) IDINC(IU)=-IDINC(IU)
+	   IDINC(IV)=INT(FLOAT(IDINC(IU))*GRADNT)
+	   ID(IU)=ENCBUF(IU,NEGOT) + SIGN(IPIT,ID(IU))
+	   ID(IV)=INT(FLOAT(ID(IU))*GRADNT)	! advance by one pitch
+	   IF (TMPCHK) CALL WRITEF('ANALYZ: Extending scan')
+	   CALL DISMOD(0)			! stop refreshing
+	   CALL MOVTO(START(X)+FLOAT(ID(X)),START(Y)+FLOAT(ID(Y)))
+	   CALL SCANBY(IDINC(X),IDINC(Y),1)	! perform the new scan
+	   CALL SCSET(0)			! disable scanner again
+	   RSEOFF(X)=-ID(X)			! coordinate offsets ...
+	   RSEOFF(Y)=-ID(Y)			! for new batch of encs
+	   ID(X)=ID(X) + IDINC(X)		! update ID
+	   ID(Y)=ID(Y) + IDINC(Y)
+	   HADEXT=.TRUE.			! only do it once !!
+	   GO TO 10				! analyse the new batch
+C
+C ......................................................................
+C
+C ... found a junction - calculate a sensible origin for the scan.
+1060	   J=CURCHN(I)				! current chain for edge
+	   K=J
+	   L=CHNMAP(K,I)			! previous chn for edge
+	   IF (L.EQ.0) GO TO 1070		! (if any)
+	   K=L
+	   IF (.NOT.EDGCHN(K)) GO TO 1100
+C
+C ... use start of chain K.
+1070	   M=CHAIN(K)
+1080	   L=NXT(M)				! hunt for the beginning
+	      IF (L.EQ.0) GO TO 1090		! (leave result in M)
+	      M=L
+	   GO TO 1080
+1090	   IF (.NOT.EDGCHN(K)) GO TO 1110
+C
+C ... K is an edge chain - interpolate backwards from CHAIN(J) onto the
+C ... scan line corresponding to M.
+	   JUNSCN(IU)=ENCBUF(IU,M)
+	   JUNSCN(IV)=ENCBUF(IV,CHAIN(J)) -
+     &		      INT(EVGRAD(I)*
+     &			  FLOAT(IABS(ENCBUF(IU,CHAIN(J))-JUNSCN(IU))))
+C
+C ... don't let the projected position lie outside the scan boundary.
+	   GO TO 900
+C
+C ... K is a line chain, so we've finished.
+1100	   M=CHAIN(K)
+1110	   JUNSCN(IU)=ENCBUF(IU,M)
+	   JUNSCN(IV)=ENCBUF(IV,M)
+	   GO TO 1270
+1120	CONTINUE
+C
+C ... finally, check that we haven't got a joined pair of active edges
+C ... which are neighbours across black (non-line).
+C ... this could be a Y-junction which has slipped the net.
+	DO 1170 I=1,MAXEDG
+	   ACTV=ACTEDG(I)
+	   IF (ACTV.EQ.0) GO TO 1280
+	   J=EDGBLK(ACTV)
+	   IF (J.LE.0) GO TO 1170
+	   IF (.NOT.JOINED(ACTV,J)) GO TO 1170
+C
+C ... find the beginning of the chains containing ACTV and J.
+	   L=CHAIN(CURCHN(ACTV))
+1130	   K=NXT(L)				! leave result in L ...
+	      IF (K.EQ.0) GO TO 1140
+	      L=K
+	   GO TO 1130
+1140	   M=CHAIN(CURCHN(J))
+1150	   K=NXT(M)				! and M
+	      IF (K.EQ.0) GO TO 1160
+	      M=K
+	   GO TO 1150
+C
+C ... calculate a sensible origin for the scan.
+1160	   JUNSCN(X)=(ENCBUF(X,L) + ENCBUF(X,M))/2
+	   JUNSCN(Y)=(ENCBUF(Y,L) + ENCBUF(Y,M))/2
+	   GO TO 1270
+1170	CONTINUE
+	GO TO 1280
+C
+C ......................................................................
+C
+C ... error messages.
+1180	IF (TMPCHK)
+     &	   CALL WRITEF('ANALYZ: Encounter %N is inconsistent',ENCNUM)
+	GO TO 1260
+C
+1190	CALL WRITEF('ANALYZ: Some scan data lost')
+	GO TO 1280				! not fatal
+C
+C ... encounter not recognised (!!)
+1200	IF (TMPCHK)
+     &	   CALL WRITEF('ANALYZ: Invalid encounter (%O)',ENCBIT)
+	GO TO 1260
+C
+1210	IF (TMPCHK) CALL WRITEF('ANALYZ:%C Too many edges%C',7,7)
+	GO TO 1260
+C
+1220	IF (TMPCHK)
+     &	   CALL WRITEF('ANALYZ:%C Error JOINing two edges%C',7,7)
+	GO TO 1260
+C
+1230	IF (TMPCHK) CALL WRITEF('ANALYZ:%C Too many chains%C',7,7)
+	GO TO 1260
+C
+1240	IF (TMPCHK)
+     &	   CALL WRITEF('ANALYZ:%C Too many new encounters generated%C',
+     &		       7,7)
+	GO TO 1260
+C
+1250	IF (TMPCHK) CALL WRITEF(
+     &	   'ANALYZ:%C Error locating transition on edge %^L%N%C',7,J,7)
+C
+1260	CALL WRITEF('Unable to analyse scan')
+	ANLYZD=-1				! failure
+	GO TO 1280
+C
+C ... junction scan wanted.
+1270	ANLYZD=1
+C
+C ... tidy up before we leave.
+1280	IUTB=0					! disable direction bit
+	IMOD=SAVMOD				! restore user's IMOD
+	IF (.NOT.HADEXT) GO TO 1290
+	NEGOT=ENCNUM - 1			! number of m/c encs
+	RSEOFF(X)=0
+	RSEOFF(Y)=0
+1290	RETURN
+	END

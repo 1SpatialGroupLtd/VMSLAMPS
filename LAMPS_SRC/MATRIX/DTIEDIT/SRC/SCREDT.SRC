@@ -1,0 +1,603 @@
+   	SUBROUTINE SCREDT
+C
+***	MODULE SCREDT
+***	IDENT  06MR89
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C	D R Catlow
+C	
+CMOD	To correct bug when XORI rather than YORI was mistakenly
+C	transferred to YCURL			DRC 10JA89
+C
+C	New version that utilises LSLLIB and DTILIB calls.
+C	The concept of a VIEW and EDIT mode has been introduced, to
+C	prevent accidental editing of the matrix values.
+C
+C	VIEW MODE:
+C 	The position of the cursor is controlled by keypad keys
+C	"12346789".
+C	Keypad "." selects a rectangle; <enter> clears it.
+C	Keypad "-" switches to EDIT mode.
+C
+C	EDIT MODE:
+C       Numeric "+","-","0123456789" keys are used to create a
+C 	number, terminated by <return>, and sets the height of the select
+C 	area, or the cursor position to that height. 
+C	Alphabetic keys change the height as well.
+C	<return> returns the user to VIEW MODE.
+C
+C	PUTBL is called to display status information.
+C
+C--------------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters:
+	INCLUDE '($IODEF)'
+	INCLUDE '($SSDEF)'
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/	!DTILIB error messages
+C
+C common blocks:
+**	COMMON/HERE:DTICOM/
+**	COMMON/HERE:DTIQIO/
+**	COMMON/LSL$CMNLSL:EXPC/
+***	COMMON/LSL$CMNDTI:DTIHDR/	! DTI file details
+C
+C local workspace:
+	CHARACTER*1  CHRGOT		! bottom line character
+C
+	INTEGER*4	RET		! function return code
+	INTEGER   IERR			! system service error return
+	INTEGER   III,JJJ,KKK
+	INTEGER   LLL,MMM,NNN,OOO	! do loops, temps
+C
+	INTEGER    MAXLIN
+	PARAMETER (MAXLIN=132)
+	CHARACTER*(MAXLIN) LINE		! general char string
+	LOGICAL		HEIGHT_MODE	! if true, we're looking for
+C					! a height value
+	LOGICAL		HAD_HEIGHT	
+	LOGICAL		READ_VALUE	
+C
+	CHARACTER*1	KEYPAD_CHAR	! Keypad character
+C functions:
+C
+	LOGICAL		RDREAL		! to read a real value
+	INTEGER*4	SYS$QIOW	! read from terminal
+	INTEGER*4	RDLONG		! read integer
+	INTEGER*4	DTI_INIT_DATA	! put the data value into
+C					! a rectangular area in the matrix
+	INTEGER*4	DTI_WRITE_DATA	! write a data value
+C
+C--------------------------------------------------------------------------
+C write out the screen
+	DO 10 III=YORI,YORI+(LINES-1)
+	  CALL MY$PUT_SQUARE(XORI,III,COLUMN,0)
+10	CONTINUE
+C
+C put screen cursor at origin
+	XCUR=XORI
+	YCUR=YORI
+	XCURL=XCUR
+	YCURL=YCUR
+	XMARK=XCUR
+	YMARK=YCUR  
+	XORIL=XCUR
+	YORIL=YCUR
+	GOTMRK=.FALSE.
+	HEIGHT_MODE=.FALSE.
+C initialise stuff
+	CHRGOT=CHAR(0)
+	CALL PUTBL(CHRGOT,4)
+	CALL PUTBL(CHRGOT,1)	! write out bottom line
+C
+	GOTO 70
+C
+C this is the main loop
+20	CONTINUE
+C
+C	Check that the cursor is not trying to move outside the screen
+	IF     (XCUR.GT.XCOUNTS_W.OR.XCUR.GT.XORI+COLUMN-1) THEN
+	  XCUR=XCURL
+	  YCUR=YCURL
+	  CALL PUTERR('Off right hand edge ***')
+	  CALL PUTBL(CHRGOT,1)
+	  GOTO 70
+	ELSEIF (XCUR.LT.XORI) THEN
+	  XCUR=XCURL
+	  YCUR=YCURL
+	  CALL PUTERR('Off left hand edge ***')
+	  CALL PUTBL(CHRGOT,1)
+	  GOTO 70
+	ELSEIF (YCUR.GT.YCOUNTS_W) THEN
+	  YCUR=YCURL
+	  XCUR=XCURL
+	  CALL PUTERR('Off upper edge ***')
+	  CALL PUTBL(CHRGOT,1)
+	  GOTO 70
+	ELSEIF (YCUR.LT.1) THEN
+	  YCUR=YCURL
+	  XCUR=XCURL
+	  CALL PUTERR('Off bottom edge ***')
+	  CALL PUTBL(CHRGOT,1)
+	  GOTO 70
+	ENDIF
+C
+	IF (YCUR.GT.YCURL.AND.YCUR.GT.MIN(YORI+LINES-1,YCOUNTS_W))THEN
+C	!scroll down
+	  YORI=YORI+(YCUR-YCURL)
+	  CALL LIB$SET_CURSOR(1,1)
+	  CALL LIB$DOWN_SCROLL
+	  CALL MY$PUT_SQUARE(XORI,YORI+LINES-1,COLUMN,0)
+	ELSEIF ((YCUR.LT.YCURL).AND.(YCUR.LT.YORI))THEN	!scroll up
+	  YORI=YORI+YCUR-YCURL
+	  CALL LIB$SET_CURSOR(LINES,1)
+	  CALL LIB$UP_SCROLL
+	  IF (GOTMRK.AND.(YMARK.LE.YORI).AND.(XMARK.LE.XCUR)) THEN
+	    CALL MY$PUT_SQUARE(XORI  ,YORI,XMARK-XORI +1,0)
+	    CALL MY$PUT_SQUARE(XMARK ,YORI,XCUR -XMARK+1,2)
+	    IF (XCUR.LT.XORI+COLUMN-1) THEN
+	    CALL MY$PUT_SQUARE(XCUR+1,YORI,XORI+COLUMN-XCUR,0)
+	    ENDIF
+	  ELSE
+	    CALL MY$PUT_SQUARE(XORI,YORI,COLUMN,0)
+	  ENDIF
+	ENDIF
+C
+C	if the position has changed,
+	IF ((XCURL.NE.XCUR).OR.(YCURL.NE.YCUR)) THEN
+C	  then if there is a mark set
+C	  we need to change the reverse video range
+	  IF (GOTMRK) THEN 
+C	    if the x position has changed
+	    IF     (XCURL.NE.XCUR) THEN
+	      III=MAX(YMARK,YORI)
+C	      then if the cursor is above the mark
+	      IF (III.LE.YCURL) THEN
+C	        first put out the chars down the right hand side
+	        IF (XCURL.LT.XCUR) THEN
+	          JJJ=XCURL+1		! start of line
+	          KKK=XCUR		! end of line
+	          LLL=2			! reverse video
+	        ELSE
+	          JJJ=XCUR+1
+	          KKK=XCURL
+	          LLL=0
+	        ENDIF
+C	        put out the character
+	        CALL MY$GET_CHAR(JJJ,YCURL,KKK-JJJ+1,LINE(1:))
+	        MMM=KKK-JJJ+1		! end of LINE
+C	        and for the rest of the changed area
+	        DO 40 NNN=YCURL-1,III,-1
+C	          add a line feed, some back spaces, and the chars
+	          MMM=MMM+1
+	          LINE(MMM:MMM)=CHAR(10)
+	          IF (KKK.LT.XORI+COLUMN-1) THEN
+	            MMM=MMM+1
+	            LINE(MMM:MMM)=CHAR(8)
+	          ENDIF
+	          DO 30 OOO=XCURL+1+1,XCUR
+	            MMM=MMM+1
+	            LINE(MMM:MMM)=CHAR(8)
+30	          CONTINUE
+	          CALL MY$GET_CHAR(JJJ,NNN,KKK-JJJ+1,
+     &                             LINE(MMM+1:))
+	          MMM=MMM+KKK-JJJ+1
+40	        CONTINUE
+	        CALL MY$PUT_SCREEN(JJJ,YCURL,LINE(1:MMM),LLL)
+	      ENDIF
+	    ENDIF
+C
+C	    then the line along the top
+	    IF    ((YCURL.LT.YCUR).AND.(XCUR.GE.XMARK)) THEN
+	      DO 50 III=YCURL+1,YCUR
+	        CALL MY$PUT_SQUARE(XMARK,III,XCUR-XMARK+1,2)
+50	      CONTINUE
+	    ELSEIF (YCURL.GT.YCUR) THEN
+	      DO 60 III=YCUR+1,YCURL
+	       CALL MY$PUT_SQUARE(
+     &           MIN(XMARK,XCUR),III,ABS(XMARK-XCUR)+1,0)
+60	      CONTINUE
+	    ENDIF
+C
+C	    if the cursor is to the bottom or to the left of the mark,
+C	    pull the mark to the current cursor position
+	    IF ((XCUR.LT.XMARK).OR.(YCUR.LT.YMARK)) THEN
+	      XMARK=XCUR
+	      YMARK=YCUR
+	      CALL MY$PUT_SQUARE(XCUR,YCUR,1,2)
+	    ENDIF
+	  ENDIF
+	ENDIF
+C
+	XCURL=XCUR
+	YCURL=YCUR
+	CALL MY$SET_CURSOR(XCUR,YCUR)
+	CALL PUTBL(CHRGOT,1)
+C
+	XORIL=XORI
+	YORIL=YORI
+C
+C**********************************************************************
+C
+C read from terminal
+70	CONTINUE
+	IERR=SYS$QIOW(,				! efn
+     &                %VAL(ICHAN),		! channel
+     &                %VAL(IO$_READVBLK.OR.
+     &                     IO$M_ESCAPE.OR.
+     &                     IO$M_NOFILTR.OR.
+     &                     IO$M_NOECHO),	! functions
+     &                IOSB,			! iosb
+     &                ,				! astadr
+     &                ,				! astprm
+     &                %REF(LINE),		! p1 =buffer
+     &                %VAL(MAXLIN),		! p2 = size
+     &                ,				! p3 = timeout
+     &                TERMAD,			! p4 = terminator mask
+     &                ,				! p5 = prompt buffer
+     &                )				! p6 = prompt size
+	IF     (IERR.NE.       SS$_NORMAL) THEN
+C	  CALL LIB$SIGNAL(%VAL(IERR))
+	  GOTO 70
+	ELSEIF (IOSB_STATUS.EQ.SS$_CONTROLY) THEN
+	  GOTO 70
+	ELSEIF (IOSB_STATUS.EQ.SS$_BADESCAPE) THEN
+	  CALL PUTERR('Bad escape sequence')
+	  CALL PUTBL(CHRGOT,1)
+	  GOTO 70
+	ELSEIF (IOSB_STATUS.EQ.SS$_PARTESCAPE) THEN
+	  CALL PUTERR('Partial escape sequence')
+	  CALL PUTBL(CHRGOT,1)
+	  GOTO 70
+	ELSEIF (IOSB_STATUS.NE.SS$_NORMAL) THEN
+C	  CALL LIB$SIGNAL(%VAL(IOSB_STATUS))
+	  GOTO 70
+	ENDIF
+C
+C write out the current values
+	IF (NEWBL.AND.(.NOT.HEIGHT_MODE)) THEN
+	  CALL PUTBL(CHRGOT,1)
+	ENDIF
+C
+C**********************************************************************
+C
+C check for control/Z
+C
+	IF (LINE(1:1).EQ.CHAR(26)) THEN
+	  RETURN
+	ENDIF
+C
+C**********************************************************************
+C
+C see if it was A-Z, a-z, or
+C sort out which escape sequence it was
+C arrows are	up	= "<esc>OA"	-	= "<esc>Om"	
+C		down	= "<esc>OB"	,	= "<esc>Ol"
+C		left	= "<esc>OC"	.	= "<esc>On"
+C		right	= "<esc>OD"	enter	= "<esc>OM"
+C keypad is	0	= "<esc>Op"	PF1	= "<esc>OP"
+C		.			PF2	= "<esc>OQ"
+C		.			PF3	= "<esc>OR"
+C		9	= "<esc>Oy"	PF4	= "<esc>OS"
+C
+C
+	IF ((LINE(1:1).GE.'a').AND.(LINE(1:1).LE.'z')) THEN 	 
+	   LINE(1:1)=CHAR(ICHAR(LINE(1:1))-ICHAR('a')+ICHAR('A'))
+ 	ENDIF 
+C
+C--------------------------------------------------------------------
+C
+C	If we are in height mode, then check for alpha character (A-Z)
+	IF(HEIGHT_MODE)THEN
+	  IF ((LINE(1:1).GE.'A').AND.(LINE(1:1).LE.'Z').OR.
+     &        (LINE(1:1).EQ.' ')) THEN
+C
+C	If we get a character in range <space>, A-Z, then set all 
+C	of selected range, or char at cursor posn
+	     READ_VALUE=.FALSE.
+	     IF (LINE(1:1).EQ.' ') THEN
+	         INT4=0
+		 RNUMBER=0
+	     ELSE
+	         INT4=(ICHAR(LINE(1:1))-ICHAR('A')+1)*INCHGT-1+BASHGT
+		 RNUMBER=INT4
+	     ENDIF
+C
+	     READ_VALUE=.TRUE.
+	     HAD_HEIGHT=.TRUE.
+	     DTI_NUMLEN=0	     
+C
+	     IF (CHRGOT.NE.LINE(1:1)) THEN
+	         CHRGOT=LINE(1:1)
+	         CALL PUTBL(CHRGOT,2)
+	     ENDIF
+C
+	     GOTO 70
+C-----------------------------------------------------------------------
+C
+C ^R, ^W refresh screen and clear select range
+	    ELSE IF ((LINE(1:1).EQ.CHAR(23)).OR.
+     &               (LINE(1:1).EQ.CHAR(18))) THEN
+	      DO 110 III=YORI,YORI+(LINES-1)
+	         CALL MY$PUT_SQUARE(XORI,III,COLUMN,0)
+110	      CONTINUE
+	      CALL MY$SET_CURSOR(XCUR,YCUR)
+	      GOTMRK=.FALSE.
+C
+C-----------------------------------------------------------------------
+C
+C	  ^X, ^U clear numeric buffer
+	    ELSE IF ((LINE(1:1).EQ.CHAR(24)).OR.
+     &               (LINE(1:1).EQ.CHAR(21))) THEN
+	      DTI_NUMLEN=0
+	      CALL PUTBL(CHRGOT,3)
+	      HAD_HEIGHT=.FALSE.
+	      READ_VALUE=.FALSE.
+C-----------------------------------------------------------------------
+C
+C	  DEL deletes last character
+	    ELSE IF (LINE(1:1).EQ.CHAR(127)) THEN
+	      IF(READ_VALUE)THEN
+	        CALL PUTBL(CHRGOT,3)
+	        READ_VALUE=.FALSE.
+		HAD_HEIGHT=.FALSE.
+	      ELSE
+	        DTI_NUMLEN=MAX(0,DTI_NUMLEN-1)
+		IF(DTI_NUMLEN.LE.0)THEN
+	          CALL PUTBL(CHRGOT,3)
+		  HAD_HEIGHT=.FALSE.
+		ELSE
+		  CALL PUTBL(CHRGOT,2)
+		ENDIF
+	      ENDIF
+C-----------------------------------------------------------------------
+C
+C	  Numeric Values
+	    ELSE IF ((LINE(1:1).EQ.'+').OR.(LINE(1:1).EQ.'-').OR.
+     &		     (LINE(1:1).EQ.'.').OR.
+     &               (LINE(1:1).GE.'0').AND.(LINE(1:1).LE.'9')) THEN
+	      DTI_NUMLEN=MIN(DTI_NUMMAX,DTI_NUMLEN+1)
+	      DTI_NUMLIN(DTI_NUMLEN:DTI_NUMLEN)=LINE(1:1)
+	      CALL PUTBL(CHRGOT,2)
+	      HAD_HEIGHT=.TRUE.
+	      READ_VALUE=.FALSE.
+C-----------------------------------------------------------------------
+C	  
+C	  <CR> or enter terminates line
+            ELSE IF (LINE(1:1).EQ.CHAR(13))THEN
+C
+700	      IF(READ_VALUE)GOTO 112
+	      IF(HAD_HEIGHT)THEN
+	        CALL SETAUX(%REF(DTI_NUMLIN),DTI_NUMLEN)
+C
+C	Read real number
+	        IF(DATA_TYPE(1).EQ.4)THEN
+	          IF(RDREAL(RNUMBER))THEN
+	            DTI_NUMLEN=0
+	            CALL PUTERR('Bad number')
+	            HAD_HEIGHT=.FALSE.
+	            READ_VALUE=.FALSE.
+	            CALL PUTBL(CHRGOT,3)
+	            GOTO 70
+	          ENDIF
+	        ELSE
+	          IF(RDLONG(INT4))THEN		!failed to read number
+	             DTI_NUMLEN=0
+	             CALL PUTERR('Bad number')
+	             HAD_HEIGHT=.FALSE.
+		     READ_VALUE=.FALSE.
+	             CALL PUTBL(CHRGOT,3)
+	             GOTO 70
+		   ENDIF
+	        ENDIF
+C
+C	Check if the number is in the correct range for the data type
+112		IF     (DATA_TYPE(1).EQ.1)THEN
+	          IF(INT4.LT.0.OR.INT4.GT.255)THEN
+	            DTI_NUMLEN=0
+	            CALL PUTERR
+     &  ('*** Bad number - value in range 0 to 255 required')
+	            HAD_HEIGHT=.FALSE.
+		    READ_VALUE=.FALSE.
+	            CALL PUTBL(CHRGOT,3)
+	            GOTO 70
+	          ENDIF
+		ELSE IF (DATA_TYPE(1).EQ.5)THEN
+	          IF(INT4.LT.0.OR.INT4.GT.1)THEN
+	            DTI_NUMLEN=0
+	            CALL PUTERR
+     &  ('*** Bad number - value in range 0 to 1 required')
+	            HAD_HEIGHT=.FALSE.
+		    READ_VALUE=.FALSE.
+	            CALL PUTBL(CHRGOT,3)
+	            GOTO 70
+	          ENDIF
+	        ELSE IF(DATA_TYPE(1).EQ.2)THEN
+	          IF(INT4.LT.-32767.OR.INT4.GT.32767)THEN
+	            DTI_NUMLEN=0
+	            CALL PUTERR
+     &  ('*** Bad number - value in range -32767 to 32767 required')
+	            HAD_HEIGHT=.FALSE.
+		    READ_VALUE=.FALSE.
+	            CALL PUTBL(CHRGOT,3)
+	            GOTO 70
+	          ENDIF
+	        ELSE IF(DATA_TYPE(1).EQ.3)THEN
+	          IF(INT4.LT.-2147483648.OR.
+     &               INT4.GT.2147483647)THEN
+	            DTI_NUMLEN=0
+	            CALL PUTERR
+     &  ('*** Bad number - value in range -2147483648 to 
+     &2147483647 required')
+	            HAD_HEIGHT=.FALSE.
+		    READ_VALUE=.FALSE.
+	            CALL PUTBL(CHRGOT,3)
+	            GOTO 70
+	          ENDIF
+	        ENDIF
+C
+115	        IF (GOTMRK) THEN
+		   IF(DATA_TYPE(1).EQ.4)THEN	!write real data
+		     RET=DTI_INIT_DATA(1,RNUMBER,XMARK,YMARK,
+     &		                      (XCUR-XMARK)+1,(YCUR-YMARK)+1)
+		   ELSE		
+		     RET=DTI_INIT_DATA(1,INT4,XMARK,YMARK,
+     &		                      (XCUR-XMARK)+1,(YCUR-YMARK)+1)
+		   ENDIF
+C
+		   IF(RET.NE.DTI__NORMAL)THEN
+	              CALL LSL_PUTMSG(RET)
+		      GOTO 70
+		   ENDIF
+C
+	          DO 140 III=YMARK,YCUR
+	            IF ((III.GE.YORI).AND.(III.LE.YORI+(LINES-1))) THEN
+	              CALL MY$PUT_SQUARE(XMARK,III,XCUR-XMARK+1,0)
+	            ENDIF
+140	          CONTINUE
+C
+	          GOTMRK=.FALSE.
+	        ELSE
+		  IF(DATA_TYPE(1).EQ.4)THEN
+		    RET=DTI_WRITE_DATA(1,RNUMBER,XCUR,YCUR)
+		  ELSE
+		    RET=DTI_WRITE_DATA(1,INT4,XCUR,YCUR)
+		  ENDIF
+C
+		  IF(RET.NE.DTI__NORMAL)THEN
+	            CALL LSL_PUTMSG(RET)
+		    GOTO 70
+		  ENDIF
+	          CALL MY$PUT_SQUARE(XCUR,YCUR,1,0)
+	        ENDIF
+C
+	        IF (INT4.GT.MAXHGT.OR.INT4.LT.MINHGT) THEN
+	           NEWRAN=.TRUE.
+	        ENDIF
+C
+	        DTI_NUMLEN=0
+	        CALL MY$SET_CURSOR(XCUR,YCUR)
+	        CHRGOT=CHAR(0)
+	      ENDIF
+C
+	      CALL PUTBL(CHRGOT,1)
+	      HEIGHT_MODE=.FALSE.
+	      HAD_HEIGHT=.FALSE.
+	      READ_VALUE=.FALSE.
+	      CALL BSLN				! to undo SETAUX
+	      GOTO 70
+C
+	   ENDIF
+	   GOTO 70
+C
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C
+	HAD_HEIGHT=.FALSE.
+C
+	IF ((LINE(1:1).EQ.ESC).AND.(LINE(2:2).EQ.'O')) THEN
+	  KEYPAD_CHAR=LINE(IOSB_TOFF+3:IOSB_TOFF+3)
+C
+	  IF      (KEYPAD_CHAR.EQ.'A') THEN	! up
+	    YCUR=YCUR+1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'B') THEN	! down
+	    YCUR=YCUR-1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'C') THEN	! right
+	    XCUR=XCUR+1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'D') THEN	! left
+	    XCUR=XCUR-1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'p') THEN
+	    CALL PUTERR('Unexpected keypad 0')
+	    CALL PUTBL(CHRGOT,1)
+	    GOTO 70
+	  ELSEIF  (KEYPAD_CHAR.EQ.'q') THEN	! 1
+	    XCUR=XCUR-1
+	    YCUR=YCUR-1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'r') THEN	! 2
+	    YCUR=YCUR-1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'s') THEN	! 3
+	    XCUR=XCUR+1				
+	    YCUR=YCUR-1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'t') THEN	! 4
+	    XCUR=XCUR-1				
+	  ELSEIF  (KEYPAD_CHAR.EQ.'u') THEN	! 5
+	    CALL PUTERR('Unexpected keypad 5')
+	    CALL PUTBL(CHRGOT,1)
+	    GOTO 70
+	  ELSEIF  (KEYPAD_CHAR.EQ.'v') THEN	! 6
+	    XCUR=XCUR+1				
+	  ELSEIF  (KEYPAD_CHAR.EQ.'w') THEN	! 7
+	    XCUR=XCUR-1				
+	    YCUR=YCUR+1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'x') THEN	! 8
+	    YCUR=YCUR+1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'y') THEN	! 9
+	    XCUR=XCUR+1				
+	    YCUR=YCUR+1
+	  ELSEIF  (KEYPAD_CHAR.EQ.'m') THEN
+	    IF(.NOT.ALLOW_EDIT)THEN
+	      CALL PUTERR('EDIT operations are currently disabled')
+	      CALL PUTBL(CHRGOT,1)
+	      GOTO 70
+	    ELSE
+	      HEIGHT_MODE=.TRUE.
+	      CALL PUTBL(CHRGOT,3)
+	      GOTO 70
+	    ENDIF
+	  ELSEIF  (KEYPAD_CHAR.EQ.'l') THEN
+	    GOTO 999				! exit
+	  ELSEIF  (KEYPAD_CHAR.EQ.'n') THEN	! "."
+	    IF (.NOT.GOTMRK) THEN 
+	      GOTMRK=.TRUE.
+	      XMARK=XCUR
+	      YMARK=YCUR
+	      CALL MY$PUT_SQUARE(XCUR,YCUR,1,2)
+	      CALL MY$SET_CURSOR(XCUR,YCUR)
+	    ELSE
+	      CALL PUTERR('Select is already active')
+	      CALL PUTBL(CHRGOT,1)
+	      GOTO 70
+	    ENDIF
+	  ELSEIF  (KEYPAD_CHAR.EQ.'M') THEN	! enter
+	    GOTO 700
+C	    Clear selected range
+C	    IF (GOTMRK) THEN
+C	      DO 150 III=MAX(YORI,YMARK),MIN(YCUR,YORI+22)
+C	        CALL MY$PUT_SQUARE(XMARK,III,XCUR-XMARK+1,0)
+C150	      CONTINUE
+C	      CALL MY$SET_CURSOR(XCUR,YCUR)
+C	      GOTMRK=.FALSE.
+C	    ENDIF
+	  ELSEIF  (KEYPAD_CHAR.EQ.'P') THEN
+	    CALL PUTERR('Unexpected PF1')
+	    CALL PUTBL(CHRGOT,1)
+	    GOTO 70
+	  ELSEIF  (KEYPAD_CHAR.EQ.'Q') THEN
+	    CALL PUTERR('Unexpected PF2')
+	    CALL PUTBL(CHRGOT,1)
+	    GOTO 70
+	  ELSEIF  (KEYPAD_CHAR.EQ.'R') THEN
+	    CALL PUTERR('Unexpected PF3')
+	    CALL PUTBL(CHRGOT,1)
+	    GOTO 70
+	  ELSEIF  (KEYPAD_CHAR.EQ.'S') THEN
+	    CALL PUTERR('Unexpected PF4')
+	    CALL PUTBL(CHRGOT,1)
+	    GOTO 70
+	  ELSE
+	    CALL PUTERR('Unexpected escape sequence')
+	    CALL PUTBL(CHRGOT,1)
+	    GOTO 70
+	  ENDIF
+	ELSE
+	  CALL PUTERR('Unexpected character')
+	  CALL PUTBL(CHRGOT,1)
+	  GOTO 70
+	ENDIF
+	GOTO 20
+C
+999	RETURN
+C
+	END

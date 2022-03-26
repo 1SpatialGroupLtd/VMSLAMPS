@@ -1,0 +1,713 @@
+ 	LOGICAL*4 FUNCTION FIXIT(XYZ,TOTPTS)
+C
+***	MODULE FIXIT
+***	IDENT	25JA96
+C
+C	Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+CMOD    Fix a bug where the /DFAD qualifier causes the	 ST 25-Jan-1996
+C       last point to be deleted and then put back.
+C       Mod 1527
+CMOD    Now caters for array sizes of points based on	 ST 15-Nov-1993
+C       logical LSL$FILL_POINTSMAX. Mod 1317
+CMOD	/CLOSE now takes an optional real value, the
+C	CLOSE-tolerance, default infinity, which, if
+C	specified, will cause only open features
+C	whose ends are within this CLOSE tolerance to
+C	be closed. The /NEAR qualifier will no longer
+C	restrict which features are closed in any way	ACM 03-Nov-1988
+CMOD	corrected default /NEAR behaviour, and upper 
+C	limit on loop when outputting features requiring
+C	multiple STs					 AC 02-Jun-1988
+CMOD    test for IFF__MISSING instead of IFF__FIXATT   MWSR 28-Mar-1988
+CMOD    cope with CB entry			       MWSR 11-Nov-1987
+CMOD 2/478 Bug fix. /NEAR=tol now deletes the almost
+C	repeated vertices, not the good ones! Number of
+C	points deleted count now correct.		TJH 10-Jun-1987
+CMOD	Point deletion messages rationalised layer
+C	messages corrected and summary tidied		ATT 09-Dec-1986
+CMOD	Layer messages rationalised			TJH 04-Dec-1986
+CMOD	/FEATURE_CODE renamed /FC			TJH 29-Oct-1986
+C
+C	Author  : A.T. Timms
+C	Created : 20 August 1986
+C
+C Function to actually do the checking/fixing for IFIXAREA
+C Code ripped off from original IFIXAREA but structure modified.
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INTEGER  SS$_NORMAL
+	EXTERNAL SS$_NORMAL
+	INCLUDE 'LSL$CMNIFIXAREA:IFIXMSG.PAR'
+	INCLUDE 'LSL$CMNIFF:IFFMSG.PAR'
+C
+C Common blocks
+	INCLUDE 'LSL$CMNIFIXAREA:IFIXAREA.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'	! IFF read & write
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'	! to decode text
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'	! CMDLIB to look up DFAD data
+	INCLUDE 'LSL$CMNIFF:CB.STR'     ! CB structure
+	INCLUDE 'LSL$CMNIFF:IFFSTR.CMN' ! CB structure
+C
+C Functions called
+	INTEGER*2	TXTCML	! reads a new command line
+	INTEGER*4	RDINT	! read integer from TXTBUF
+	LOGICAL		RDCHS	! read (non space) char from TXTBUF
+	INTEGER*4	RDCOMM	! for CMDLIB lookup
+	INTEGER*4	IFS_CB_READ
+	EXTERNAL	FLWSTR	! file write string
+	EXTERNAL	FLWLIN	! file write line
+	EXTERNAL	TTWLIN	! terminal write line
+C
+C Arguments
+	INTEGER*4	TOTPTS	! number of points
+	REAL*4		XYZ(3,TOTPTS)	! co-ordinates for feature
+C
+C Workspace 
+	INTEGER*4	KEYWD	! found in AC type 7 entries
+	INTEGER*4	NFTOT	! feature count in file
+	INTEGER*4	NFTOTC	! features closed
+	INTEGER*4	NSKTOT	! total vertices deleted
+	INTEGER*4	NFTOTR	! features reversed
+	LOGICAL*1 	OVCOPY	! copy entry by virtue of overlay 
+	LOGICAL*1 	FCCOPY	! copy entry by virtue of feature code
+	LOGICAL*1 	DFCOPY	! copy entries not dfad type 2
+	LOGICAL*1	MOVE_END! move end pt onto start pt?
+	INTEGER*2	NPTS	! ST value (no of points)
+	INTEGER*2	IENDS	! ST value
+	REAL*4		XYZBUFF(600)	! co-ordinates from one ST
+	REAL*4		XX,YY 	! one point in XYBUFF
+	REAL*4		DX,DY 	! vector between end points
+	REAL*4		SQDIST	! square dist between end pts
+	REAL*4		TEMPBUF(600)
+	INTEGER         COUNT
+	INTEGER*4	I1	! DO limit
+	INTEGER*4	NJUMPS	! no of jumps in feature
+	INTEGER*4	NEDGES	! no of edge points in feature
+	INTEGER*4	EDGE	! current edge point during output
+	INTEGER*4	NE	! current edge index during output
+ 	INTEGER*4	JUMPS(100)	! jump positions
+ 	INTEGER*4	EDGES(100)	! jump positions
+	LOGICAL*1	JUMPST	! jump in this ST
+	LOGICAL*1	JSUPP	! supress dummy jump to 1st ST
+	LOGICAL*1	EDGE1	! 1st point an edge
+	LOGICAL*1	EDGE2	! 2nd point an edge
+	LOGICAL		HADCB   ! its a CB rather than an ST
+	INTEGER*4	K	! last element of X-Y arrays used
+	INTEGER*4	KSTART	! value of K at start of feature
+	LOGICAL*1	STEP	! marker for pen up to next ST
+	INTEGER*4	NJ	! current component of feature
+	INTEGER*4	PTR1	! start of ST in X-Y arrays
+	INTEGER*4	PTR2	! end of ST in X-Y arrays
+	INTEGER*4	NSKIP
+	! no of points skipped in feature
+	INTEGER*4	NOPOS	! position of start of layer
+	INTEGER*4	EOPOS	! position of end of layer
+	INTEGER*2	IFFLAY	! overlay number	
+	INTEGER*4	FSN	! feature number
+	INTEGER*4	ISQ	! internal feature seq number	
+	INTEGER*2	IFC	! feature code
+	INTEGER*2	ACTYPE	! AC type ( 7 holds DFAD type)
+	LOGICAL*1	DOREV	! feature orientation to be reversed
+	INTEGER         XYZ_COL(3) ! to denote X and Y coords in CB
+	INTEGER		NUMCOL  ! number of cols - 2 or 3
+	INTEGER		LVAL
+	INTEGER*4	RET
+C
+C IFF handling stuff
+	INTEGER*2	IELEN	! length of entry in hand
+	INTEGER*2	IECODE	! entry code of entry in hand
+	INTEGER*2	IEL1	! alt length of entry in hand
+	INTEGER*2	IEC1	! alt entry code of entry in hand
+	INTEGER		I,J	! loop variable
+C
+C DFAD stuff (whatever it may mean !) very MCE specific !!
+	INTEGER		DFDCMD_CMD_TABLE
+	EXTERNAL	DFDCMD_CMD_TABLE
+C
+	INTEGER		FC_PNT		! feature code if point
+	INTEGER		FC_LIN		! feature code if linear
+	INTEGER		FC_AR		! feature code if areal
+	PARAMETER	(FC_PNT=100)
+	PARAMETER	(FC_LIN=101)
+	PARAMETER	(FC_AR =102)
+C
+	EQUIVALENCE (LVAL,XYZBUFF(3))
+C
+C CB entry records
+	RECORD /IFF_CBH/ CBH
+	RECORD /IFF_CBD/ CBD
+C
+C.......................................................................
+C Initialise variables
+	NFTOT=0				! feature count
+	NFTOTC=0			! total closed
+	NSKTOT=0			! total vertices removed
+	NFTOTR=0			! total reversed
+	FIXIT = %LOC(SS$_NORMAL)   	! assume normal completion 
+	HADCB = .FALSE.
+C
+C.......................................................................
+C And start looking for features
+	CALL IFFSEL(INLUN)		! select input file
+C
+10	CALL IFFNXT(IECODE,IELEN)	! get next entry
+	IF (IELEN.EQ.-1) GOTO 990	! Unexpected end of file
+C
+C the following require some action
+	IF (IECODE.EQ. 'HI') GOTO 20	! History record	
+	IF (IECODE.EQ. 'NO') GOTO 50	! New overlay	
+	IF (IECODE.EQ. 'EO') GOTO 70	! End overlay	
+	IF (IECODE.EQ. 'NF') GOTO 80	! New feature
+	IF (IECODE.EQ. 'FS') GOTO 90	! feature status (code)
+	IF (IECODE.EQ. 'AC') GOTO 110	! Ancillary code
+	IF (IECODE.EQ. 'ZS') GOTO 135	! String of 3d coords
+	IF (IECODE.EQ. 'ST'.OR. IECODE .EQ. 'CB') GOTO 140
+	IF (IECODE.EQ. 'EF') GOTO 160	! End feature
+	IF (IECODE.EQ. 'EJ') GOTO 500	! End Job (end of file)
+C
+C otherwise just copy entry to the fixed file
+	CALL EIHCPY(FIXLUN)
+	GOTO 10				! and go back for more
+C
+C...................................................................
+C HI History record 
+20	CALL EIHCPY(FIXLUN)
+	GOTO 10				! go back 
+C 
+C...................................................................
+C NO entry overlay
+50	OVCOPY = .FALSE.		! not just copying yet 
+	CALL EIHRI(IFFLAY,1,1)		! read overlay no
+C
+C /LAYER specified ? if so are we interested in it ?
+	IF (HAD_LAY) THEN		! yes /LAYER
+	  DO 55 I=1,LAY_NUM	
+	    IF (IFFLAY.EQ.LAYNO(I)) GOTO 60 ! yes specified
+55	  CONTINUE
+C
+C it would not appear so... just copy this overlay
+	  OVCOPY = .TRUE.		! set OVCOPY true
+60	  IF (OVCOPY) THEN		! we are copying
+	    IF (HAD_LOG) THEN		! tell the world ?
+	      FIXIT = IFIX__LAYCOP
+	      CALL LSL_PUTMSG(FIXIT,IFFLAY)
+	    ELSE
+	      IF (HAD_OUT.AND..NOT.HAD_OUTFIL)
+     &        CALL FLWRTF('Copying layer %^W%N',IFFLAY)
+	    ENDIF
+C
+	    IF (HAD_OUTFIL.OR.HAD_PRINT)	! write to the world
+     &        CALL FLWRTF('Copying layer %^W%N',IFFLAY)
+	  ELSE				! we are processing
+	    IF (HAD_LOG) THEN		! tell the world
+	      FIXIT = IFIX__LAYPROC
+	      CALL LSL_PUTMSG(FIXIT,IFFLAY)
+	    ELSE
+	      IF (HAD_OUT.AND..NOT.HAD_OUTFIL)
+     &        CALL FLWRTF('Processing layer %^W%N',IFFLAY)
+	    ENDIF
+C
+	    IF (HAD_OUTFIL.OR.HAD_PRINT)	! write the word
+     &        CALL FLWRTF('Processing layer %^W%N',IFFLAY)
+	  END IF
+	ELSE				! No /Layer but info requested ?
+	  IF (HAD_LOG) THEN
+	    FIXIT = IFIX__LAYPROC
+	    CALL LSL_PUTMSG(FIXIT,IFFLAY)
+	  ELSE
+	    IF (HAD_OUT.AND..NOT.HAD_OUTFIL)
+     &      CALL FLWRTF('Processing layer %^W%N',IFFLAY)
+	  END IF
+C
+	  IF (HAD_OUTFIL.OR.HAD_PRINT)
+     &      CALL FLWRTF('Processing layer %^W%N',IFFLAY)
+	END IF
+C
+C and copy overlay to fixed file
+	CALL IFFSEL(FIXLUN)
+	NOPOS=LPOSE			! remember NO position
+	CALL IFFNO(IFFLAY,0,0)		! output NO
+	CALL IFFSEL(INLUN)
+	GOTO 10
+C
+C...................................................................
+C EO end overlay
+70	CALL IFFSEL(FIXLUN)		! select fixed file
+	CALL IFFUNO(NOPOS) 		! update NO entry
+	CALL IFFEO			! output EO
+	CALL IFFSEL(INLUN)
+	GOTO 10
+C
+C...................................................................
+C NF entry (new feature)
+80	NFTOT=NFTOT+1			! bump up no. of features
+	DFCOPY=HAD_DFAD	! copy entry unless DFAD type 2 (set below)
+	FCCOPY=HAD_FC	! copy entry unless specified FC(set below)
+	K=0				! points so far
+	NSKIP=0				! deleted points so far
+	NJUMPS=0			! jumps in feature
+	NEDGES=0			! edges in feature
+C
+	CALL EIHRI(FSN,1,1)		! read feature no
+	CALL EIHRI(ISQ,1,2)		! read internal sequence no
+C
+	CALL IFFSEL(FIXLUN)		! select fixed file
+	CALL IFFNF(FSN,ISQ)		! output NF
+	FSN = IAND(FSN,65535)		! cnvrt to unsgnd lngwrd
+	ISQ = IAND(ISQ,65535)		! cnvrt to unsgned lngwrd
+	HADCB = .FALSE.
+	CALL IFFSEL(INLUN)		! back to input file
+C
+	GOTO 10
+C
+C...................................................................
+C FS feature code
+C What we do will depend upon whether we have had /DFAD (and /AC)
+C or /FC or neither !!
+C Skip FC check if we are copying this overlay or checking AC's
+90	IF (OVCOPY.OR.HAD_AC) GOTO 100	! Skip FC check
+	CALL EIHR(IFC,1,1)		! read FC
+C
+C If we have had /FC let's see if we are supposed to check this one.
+	IF (HAD_FC) THEN		! yes /FC
+	  DO 95 I=1,FC_NUM
+	    IF (IFC.EQ.FCODE(I)) FCCOPY = .FALSE. ! don't copy, check
+95	  CONTINUE
+	ELSE IF (HAD_DFAD) THEN		! /DFAD
+	  IF (IFC.EQ.FC_AR) DFCOPY= .FALSE. 	! don't just copy check
+	ENDIF
+C
+100	CALL EIHCPY(FIXLUN)		! and copy it to fixed file
+C
+	GOTO 10				! go back
+C
+C...................................................................
+C AC ancillary code
+C skip AC test if copying whole overlay, or /AC not given
+110	IF(OVCOPY.OR.(.NOT.HAD_AC))GOTO 130
+C
+	CALL EIHR(ACTYPE,1,1)		! read AC type
+	IF (ACTYPE.NE.7) GOTO 130	! if isn't type 7 don't bother
+	CALL EIHR(TXTBUF,IELEN-3,4)	! read TXTBUF
+	CALL BSLN			! go back to beginning of line
+	TXTPTR = (IELEN-3)*2		! say where the end of line is
+C
+C Find what DFAD types we are dealing with_ eg. "RELEASABILITY" !!
+120	KEYWD=RDCOMM(DFDCMD_CMD_TABLE)	! read DFAD command table
+	IF (KEYWD.EQ.1) THEN		
+C
+C we have a DFAD type 
+	  IF (CMDICT.GT.0) THEN			! If DFAD type 2
+	    IF (INTARG(1).EQ.2) DFCOPY=.FALSE.	! then process
+	  ELSE
+	    FIXIT = IFIX__ACTYFNOVAL		! missing value
+	    CALL LSL_PUTMSG(FIXIT,FSN,ISQ)	! on AC
+	  END IF
+	  GOTO 130
+	ELSE IF (KEYWD.GT.0) THEN		! go back for the next
+	  GOTO 120
+	ELSE
+C
+C end of text no type field !!
+	  FIXIT = IFIX__ACNOTYF
+	  CALL LSL_PUTMSG(FIXIT,FSN,ISQ)
+	END IF
+130	CALL EIHCPY(FIXLUN)			! copy entry
+C
+	GOTO 10					! and go back
+C
+C ......................................................................
+C ZS entry - just copy on through
+135	CALL EIHCPY(FIXLUN)
+	GOTO 10
+C
+C...................................................................
+C ST entry - the really bad one. Just read all the points into XY
+C Do most of the dirty work when we have reached an EF.
+C
+C Note: if DFAD is true and AC 7 type 2 comes after STs, feature will 
+C be copied anyway. I hope this doesn't matter. (so do I. ATT !!)
+140	IF (OVCOPY.OR.DFCOPY.OR.FCCOPY) THEN
+	  CALL EIHCPY(FIXLUN)			! just copy entry 
+	ELSE					! Oh bloody hell ...!!!
+	  IF(IECODE .EQ. 'CB') THEN
+	    HADCB = .TRUE.
+	    CALL EIHRCB_HEAD(CBH)		! read CB header
+	    CALL EIHRCB_DATA(CBD)		! read CB data
+	    IF (.NOT. SIMPLE_XY.AND. (.NOT.SIMPLE_XYZ)) THEN 	 
+	       CALL LSL_PUTMSG(IFIX__EXTCOLIGN,FSN,ISQ)
+	    ENDIF
+	    NPTS = CBH.NROW
+	    IENDS = CBH.FLAGS
+C
+C extract X and Y Z from CB data
+	    XYZ_COL(1) = IFF_C_X
+	    XYZ_COL(2) = IFF_C_Y
+	    XYZ_COL(3) = IFF_C_Z
+	    RET = IFS_CB_READ(CBH,CBD,XYZBUFF,3,XYZ_COL,1,CBH.NROW)
+	    IF (RET .EQ. IFF__MISSING) THEN
+	       NUMCOL =2
+	    ELSE
+	       NUMCOL =3
+	    ENDIF
+	  ELSE
+C
+C we shouldn't get here because we don't get STs now that we're 
+C using input revision level 1
+	     CALL EIHRS(NPTS,IENDS)		! read string details
+	     CALL EIHRR(XYZBUFF,NPTS*2,1)		! read co-ords
+	  ENDIF
+	  JUMPST=.NOT.BTEST(IENDS,0)		! pen up to 1st pt
+	  EDGE1=BTEST(IENDS,1)			! first point an edge
+	  EDGE2=BTEST(IENDS,2)			! second point an edge
+	  KSTART=K+1				! start in X-Y arrays
+	  IF(K.EQ.0)THEN
+	     XYZ(1,1)=XYZBUFF(1)
+	     XYZ(2,1)=XYZBUFF(2)
+	     IF (NUMCOL .GT. 2) THEN
+	        XYZ(3,1)=XYZBUFF(3)
+	     ENDIF
+	     I1 = 4
+	     K=1
+	     JSUPP=.NOT.JUMPST		! introduce dummy jump	
+	     JUMPST=.TRUE.
+	  ELSE
+	     I1=1
+	     JSUPP=.FALSE.
+	  END IF
+C
+C Loop to check for very adjacent points /NEAR ? or superimposed points
+C /DELETE ?
+	  DO 150 I=I1,NPTS*3-1,3
+	    XX=XYZBUFF(I)			! X co-ord
+	    YY=XYZBUFF(I+1)			! Y co-ord
+	    IF (HAD_NEAR) THEN			! Check if too near
+	      IF (HAD_NEAR_TOL) THEN		! within tolerance ?
+	        DX = XYZ(1,K)-XX
+	        DY = XYZ(2,K)-YY
+	        SQDIST = DX*DX+DY*DY
+C Skip adding pnt to XY if dist < NEAR_TOL
+	        IF (SQDIST.LT.NEAR_TOL*NEAR_TOL) GOTO 150
+	      ELSE				! or NINT (no tol)
+	        IF (NINT(XYZ(1,K)).EQ.NINT(XX).AND.NINT(XYZ(2,K)).EQ.
+     &	        NINT(YY)) GOTO 150	! skip adding point to XY
+	      ENDIF
+	    ELSE IF (HAD_DEL) THEN	! are points superimposed ?
+	      IF(XYZ(1,K).EQ.XX.AND.XYZ(2,K).EQ.YY) GOTO 150	! skip
+	    END IF
+	    IF (K+1.EQ.TOTPTS) GOTO 800		! too many points
+	    K=K+1
+	    XYZ(1,K)=XX
+	    XYZ(2,K)=YY
+	    IF (NUMCOL .GT. 2) XYZ(3,K)=XYZBUFF(I+2)
+150 	  CONTINUE
+C
+C Calculate the number of points ignored NSKIP and the number of edges
+	  NSKIP=NSKIP+NPTS+KSTART-K-1
+	  IF (JUMPST) THEN
+	    NJUMPS=NJUMPS+1
+	    JUMPS(NJUMPS)=KSTART
+	  END IF
+C
+	  IF (EDGE1) THEN
+	    NEDGES=NEDGES+1
+	    EDGES(NEDGES)=KSTART
+	  END IF
+C
+	  IF (EDGE2) THEN
+	    IF (KSTART.LT.K) THEN		! more than 1 pt
+	      NEDGES=NEDGES+1
+	      EDGES(NEDGES)=K
+	    END IF
+	  END IF
+	END IF
+C
+	GOTO 10					! go back for more
+C
+C...................................................................
+C EF end of feature. 
+C First deal with the ST's if we have to. If we are just copying this 
+C feature for whatever reason then skip the ST stuff.
+C 
+160	IF (OVCOPY.OR.DFCOPY.OR.FCCOPY) GOTO 200! just EF
+C
+C process point array XY
+C close feature (if required) unless it contains invisible lines
+	IF (NSKIP.GT.0) THEN			! we have deleted points
+	  NSKTOT=NSKTOT+NSKIP			! increment total
+	  IF (HAD_LOG) THEN			! and tell the world
+	    FIXIT = IFIX__FSNPTSDEL
+	    CALL LSL_PUTMSG(FIXIT,NSKIP,FSN,ISQ)		
+	    IF (HAD_OUTFIL.OR.HAD_PRINT) 
+     &      CALL FLWRTF
+     &	    ('%^W%N points deleted from feature with FSN %N (%N)'
+     &	    ,NSKIP,FSN,ISQ)
+	  END IF
+	END IF
+C
+C If we are closing the feature and there are more than 2 points, and
+C no invisible lines then ......
+C
+	IF (HAD_CLOSE.AND.(K.GT.2).AND.(NJUMPS.EQ.1)) THEN
+C
+	  DX = XYZ(1,K)-XYZ(1,1)
+	  DY = XYZ(2,K)-XYZ(2,1)
+	  SQDIST = DX*DX+DY*DY
+C
+C If ends are identical then skip
+C
+	  IF (SQDIST.EQ.0) GOTO 170
+C
+C If a CLOSE tolerance was given, skip if end separation > tol
+C
+	  IF (HAD_CLOSE_TOL) THEN
+	    IF (SQDIST.GT.CLOSE_TOL*CLOSE_TOL) GOTO 170
+	  END IF
+C
+C If ends are very nearly identical or a /NEAR tolerance has been
+C specified and separation is < NEAR tolerance, then move end point
+C to start point position, instead of adding an extra point
+C
+	  IF (HAD_NEAR.AND.HAD_NEAR_TOL) THEN
+	    MOVE_END = SQDIST.LE.NEAR_TOL*NEAR_TOL
+	  ELSE 
+	    MOVE_END = SQDIST.LT.1E-8
+	  END IF
+C
+C If we used /DFAD (/DFAD = /CLOSE and /NEAR) on a feature with a penultimate
+C point very close to the last and first (ie it is a loop), then /NEAR will
+C throw away the last only for /CLOSE to put it back. This results in the
+C feature being unaltered and when using DFADVAL/TOL=0.0, it identifies this
+C feature as having points too close together. (SPR 3093). 
+C
+C To fix this we should move the end of the last point rather than add a 
+C new one. Mod 1527
+C
+	  IF (HAD_DFAD.AND.
+     &	     (NINT(XYZ(1,K)).EQ.NINT(XYZ(1,1))).AND.
+     &	     (NINT(XYZ(2,K)).EQ.NINT(XYZ(2,1)))) MOVE_END = .TRUE.
+C
+	  IF (.NOT.MOVE_END) THEN
+	    IF (K+1.EQ.TOTPTS) GOTO 800		! too many points
+	    K=K+1
+	 ENDIF
+C
+C First and last points are near enough so superimpose them
+	  XYZ(1,K)=XYZ(1,1)
+	  XYZ(2,K)=XYZ(2,1)
+	  IF (NUMCOL .GT. 2) XYZ(3,K)=XYZ(3,1)
+C
+C and tell the world 
+	  IF (HAD_LOG) THEN
+	    FIXIT = IFIX__FSNCLO
+	    CALL LSL_PUTMSG(FIXIT,FSN,ISQ)
+C
+	    IF (HAD_OUTFIL.OR.HAD_PRINT) 
+     &      CALL FLWRTF('Feature with FSN %N (%N) closed',FSN,ISQ)
+	  ENDIF
+C
+ 	  NFTOTC=NFTOTC+1			! increment the total
+170	  CONTINUE
+C
+C feature isn't being closed. Say why if we have had /CLOSE and /LOG
+	ELSE IF (HAD_CLOSE.AND.HAD_LOG) THEN
+	  IF(K.LE.2)THEN			! too few points
+	    FIXIT = IFIX__NOCLPTS
+	    CALL LSL_PUTMSG(FIXIT,FSN,ISQ,K)
+	    IF (HAD_OUTFIL.OR.HAD_PRINT) 
+     &      CALL FLWRTF
+     &        ('Feature with FSN %N (%N) not closed, only %^W%N point%m'
+     &				,FSN,ISQ		   ,K)
+	  ELSE
+	    FIXIT = IFIX__NOCLINVIS		! invisible lines
+	    CALL LSL_PUTMSG(FIXIT,FSN,ISQ,NJUMPS-1)
+	    IF (HAD_OUTFIL.OR.HAD_PRINT) 
+     &        CALL FLWRTF
+     &    ('Feature with FSN %N (%N) not closed, %^W%N invisible line%m'
+     &			     ,FSN,ISQ,		NJUMPS-1)
+	  END IF
+	END IF
+C
+C Reverse orientation of feature if more than 2 points and /REVERSE 
+	IF (HAD_REV.AND.K.GT.2) THEN
+	  DO 175 I=1,K-1
+	    CALL CLMIN(XYZ(1,I),XYZ(2,I),I)
+175	  CONTINUE
+C
+	  IF(XYZ(1,1).NE.XYZ(1,K).OR.XYZ(2,1).NE.XYZ(2,K))
+     &	  CALL CLMIN(XYZ(1,K),XYZ(2,K),K)
+C
+C
+	  CALL CLOCK(DOREV)	! Returns DOREV true if clockwise
+C
+	  IF (DOREV.AND.HAD_ACLOCK) THEN	! need to reverse
+	    NFTOTR=NFTOTR+1			! increment total
+	    CALL REV(XYZ,K,JUMPS,NJUMPS,EDGES,NEDGES,NPTS) ! reverse
+C
+C and tell the world
+	    IF (HAD_LOG) THEN 
+	      FIXIT = IFIX__FSNREVD
+	      CALL LSL_PUTMSG(FIXIT,FSN,ISQ,K)
+C
+	      IF (HAD_OUTFIL.OR.HAD_PRINT) 
+     &        CALL FLWRTF
+     &		('Feature with FSN %N (%N) reversed, %^W%N point%m'
+     &			     ,FSN,ISQ             ,K)
+	    ENDIF
+C
+	  ELSE IF (.NOT.DOREV.AND.HAD_CLOCK) THEN	! need to revse
+	    NFTOTR=NFTOTR+1				! incrmnt total
+	    CALL REV(XYZ,K,JUMPS,NJUMPS,EDGES,NEDGES,NPTS)! reverse
+C
+C tell world
+	    IF (HAD_LOG) THEN 
+	      FIXIT = IFIX__FSNREVD
+	      CALL LSL_PUTMSG(FIXIT,FSN,ISQ,K)
+C
+	      IF (HAD_OUTFIL.OR.HAD_PRINT) 
+     &        CALL FLWRTF
+     &		 ('Feature with FSN %N (%N) reversed, %^W%N point%m'
+     &				   ,FSN,ISQ		,K)
+	    ENDIF
+C
+	  END IF
+	END IF
+C
+C ...........................................................................
+C output ST's 
+C
+	NJ=0				! current component
+	NE=1				! current edge index
+	IF (NEDGES.GT.0) EDGE=EDGES(NE)	! current edge
+	PTR2=0				! end pointer in arrays
+	STEP = .TRUE.			! new component next
+180	IF (STEP) THEN
+	  NJ=NJ+1
+	  IF (NJ.GT.NJUMPS) GOTO 200	! all ST's output
+	END IF
+	PTR1=PTR2+1
+	PTR2=PTR1+189			! allow max 190 pts per ST
+	STEP= .FALSE.
+	IF (NJ.EQ.NJUMPS) THEN
+	  IF (PTR2.GE.K) THEN
+	    PTR2=K
+	    STEP= .TRUE.		! end of co-ords
+	  END IF
+	ELSE
+	  IF (PTR2.GE.JUMPS(NJ+1)) THEN
+	    PTR2=JUMPS(NJ+1)-1
+	    STEP= .TRUE.		! end of component
+	  END IF
+	END IF
+C
+C set up IENDS, NPTS & output ST 
+	IENDS=1
+	IF (PTR1.EQ.1) THEN
+	  IF (.NOT.JSUPP) IENDS=0	! real jump to 1st pt
+	ELSE IF (PTR1.EQ.JUMPS(NJ)) THEN
+	  IENDS=0
+	END IF
+	IF (NE.GT.NEDGES) GOTO 190
+	IF (PTR1.GT.EDGE) THEN
+	  NE=NE+1
+	  IF (NE.GT.NEDGES) GOTO 190
+	  EDGE=EDGES(NE)
+	END IF
+	IF (PTR1.EQ.EDGE) IENDS=IENDS+2
+	IF (PTR2.EQ.EDGE) IENDS=IENDS+4
+190	NPTS=PTR2-PTR1+1
+	CALL IFFSEL(FIXLUN)
+	IF (HADCB) THEN
+C
+C loop between PTR1 and PTR2, NUMCOL times. Put COUNT on the inside to 
+C sort out all this.
+	   COUNT = 1
+	   DO 195 I  =PTR1,PTR2
+	      DO 192 J = 1,NUMCOL
+	        TEMPBUF(COUNT) = XYZ(J,I)
+	        COUNT = COUNT +1
+192           CONTINUE
+195	   CONTINUE
+C
+C
+	   IF (NUMCOL .EQ. 2) THEN
+	      CALL IFFST(TEMPBUF(1),NPTS,IENDS)
+	   ELSE
+	      CALL IFFZS(TEMPBUF(1),NPTS,IENDS)
+	   ENDIF
+	ELSE
+	   CALL IFFST(XYZ(1,PTR1),NPTS,IENDS)
+	ENDIF
+	CALL IFFSEL(INLUN)
+	GOTO 180
+C
+C Now the easy bit the EF itself.
+200	CALL IFFSEL(FIXLUN)
+	CALL IFFEF			! output end feature
+	CALL IFFSEL(INLUN)	
+C
+	GOTO 10				! go back
+C
+C...................................................................
+C
+C EJ we have reached the end of file ... say what we have done
+C
+500	CALL IFFSEL(FIXLUN)
+	CALL IFFEJ			! write EJ
+C
+	FIXIT = %LOC(SS$_NORMAL)	! success !!
+C
+C tell the world what we have done 
+	CALL EXPAND			! Blank line first
+	CALL TTWLIN			! To screen
+	IF (HAD_OUTFIL.OR.HAD_PRINT) CALL FLWLIN	! To file
+C
+	CALL EXPAND ('SUMMARY:')
+	CALL TTWLIN
+	IF (HAD_OUTFIL.OR.HAD_PRINT) CALL FLWLIN
+C
+	CALL EXPAND ('%^L%N feature%m processed',NFTOT)
+	CALL TTWLIN
+	IF (HAD_OUTFIL.OR.HAD_PRINT) CALL FLWLIN
+C
+     	IF (HAD_CLOSE) THEN
+	  CALL EXPAND ('%^L%N feature%m closed',NFTOTC)
+	  CALL TTWLIN
+	  IF (HAD_OUTFIL.OR.HAD_PRINT) CALL FLWLIN
+	ENDIF
+C
+	IF (HAD_REV) THEN
+	  CALL EXPAND ('%^L%N feature%m reversed',NFTOTR)
+	  CALL TTWLIN
+	  IF (HAD_OUTFIL.OR.HAD_PRINT) CALL FLWLIN
+	ENDIF
+C
+	IF (HAD_NEAR.OR.HAD_DEL) THEN
+	  CALL EXPAND ('%^L%N point%m deleted',NSKTOT)
+	  CALL TTWLIN
+	  IF (HAD_OUTFIL.OR.HAD_PRINT) CALL FLWLIN
+	ENDIF
+C
+	GOTO 999		! all done
+C
+C...................................................................
+C Error messages
+C...................................................................
+C Too many points in a string
+800	FIXIT = IFIX__TOOMNYPTS
+	CALL LSL_PUTMSG(FIXIT,TOTPTS,FSN,ISQ)
+	GOTO 999		! all done
+C
+C...................................................................
+C Unexpected end of file
+990	FIXIT = IFIX__UNEXPEOF
+	CALL LSL_PUTMSG(FIXIT)
+C...................................................................
+C Exit successfully ?
+999	IF (FIXIT) FIXIT = %LOC(SS$_NORMAL)   	! normal completion ?
+C
+	RETURN
+   	END

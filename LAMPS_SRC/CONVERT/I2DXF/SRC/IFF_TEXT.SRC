@@ -1,0 +1,348 @@
+	LOGICAL FUNCTION IFF_TEXT()
+C
+***	IDENT	05DE94
+***	MODULE	IFF_TEXT
+C
+C Copyright (C) Laser-Scan Ltd, Cambridge, England
+C
+C Author  :  Paul Pan, 5 September 1989
+C Modified:  Paul Pan, 13 March 1990
+C	     to introduce PARAMETER file handling
+C	     PP, 6 June 1990 to take away FRCOUSED msg
+C	     PP, 2 August 1990 to correct TH value 
+C
+CMOD960	     JB, 24 Jan 1991
+c	     to recorrect text size using TH entry value as point
+c	     size values if /POINTSIZE given, otherwise as mm./100
+C	     Use FRT value if no TH, or if value = 0
+C	     Output AC heights to group 38, ZS contents only
+c	     to 3x groups
+C
+CMOD1125     Jon Barber				 	13-Jul-1992
+C	     Use abs coords for /ABSOLUTE qualifier
+C
+CMOD1413     Jon Barber				 	27-Sep-1994
+C	     Use point size entries in parameter file to
+C	     convert IFF point sizes to mm's
+C
+CMOD1437     Jon Barber				 	24-Nov-1994
+C	     Do not allow text height entries to be missed,
+C	     and use default of 5 mm's with a message DEFTXTHGT
+C
+CMOD1439     Jon Barber				 	05-Dec-1994
+C	     Do not use IFF_ABSENT as a 'real' number,
+C	     preventing an AXP crash.
+C
+C Purpose:  manipulate IFF Text data and convert it into DXF format
+C
+        IMPLICIT NONE
+C
+C Messages:
+	INCLUDE	 'HERE:I2DXFMSG.PAR'
+C
+C Common blocks:
+	INCLUDE  'LSL$CMNIFF:CB.STR'		! for IFF_ABSENT
+	INCLUDE  'LSL$CMNDXFPAR:LOOKUP.CMN'
+	INCLUDE  'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE  'HERE:I2DXF.CMN'		! added on 28/02/90
+        INCLUDE  'HERE:FEATURE.CMN'
+        INCLUDE  'HERE:POINT.CMN'
+        INCLUDE  'HERE:OSPTSZ.CMN'
+C
+C Functions:
+	LOGICAL		FRTFND			! get FC entries from FRTCOM
+C
+C Workspace:
+	LOGICAL		OK	        	! functions return code
+	INTEGER*2	IELEN			! end of file/entry length
+        INTEGER*2	IECODE			! return code
+	INTEGER*4	FC			! required fc
+	INTEGER*2	FONT			! required font
+C
+C Specific to this routine
+        INTEGER		HEIGHT              	! IFF height of text (mm.s/100)
+        REAL		RHEIGHT	        	! real height of text (mm.s)
+        BYTE		DXF_TEXT(255)		! storing the text value
+        INTEGER		CHAR_COUNT          	! no of chars in text string
+        REAL		RADIAN_ANGLE        	! text rotation angle in radians
+        REAL		DEGREE_ANGLE        	! text rotation angle in degrees
+	LOGICAL		HAD_RO			! text rotation
+	LOGICAL		HAD_TH			! text height
+	INTEGER		JUSTIFY			! justification flag
+	REAL		NEWPT(2)		! don't mess up PT_BUFFER 
+C
+	INTEGER		INT_EQUIV		! for IFF_ABSENT comparison
+	REAL		REAL_EQUIV
+	EQUIVALENCE 	(INT_EQUIV,REAL_EQUIV)
+C
+	REAL		ZERO			! a real containing zero
+	PARAMETER	(ZERO=0.0)
+C
+C----------------------------------------------------------------
+C Output DXF file has already been selected
+C set default stage to TRUE
+C
+        IFF_TEXT = I2DXF__NORMAL
+C
+	HAD_RO = .FALSE.
+	HAD_TH = .FALSE.
+	DEGREE_ANGLE = 0.0
+	RADIAN_ANGLE = 0.0
+C
+C----------------------------------------------------------------
+C get the justification flag, the last 4 bits of the 3rd word
+C from FSTAT
+C
+	JUSTIFY = (FSTAT(3).AND.'F'X)	
+C
+C----------------------------------------------------------------
+C Test whether input DXF ENTITY type is legal for this routine
+C    valid DXF entry is:
+C    	   TEXT
+C
+	IF (DXFENTTYP(SELENTIND).EQ.DXFTEXT) GOTO 107
+C
+C Report illegal cross-referencing and leave the routine
+C	
+	IFF_TEXT = I2DXF__BADCROSREF
+	CALL LSL_PUTMSG(I2DXF__BADCROSREF)
+	CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
+C
+	GOTO 1000
+C
+C----------------------------------------------------------------
+C Only the following entities in IFF file is considered
+C    they are: TH,ST,RO or TX
+C    which define the Height, Location, Rotation Angle and
+C    the Buffer value of the TEXT
+C
+107	CALL IFFNXT( IECODE,IELEN )
+C
+        IF( IECODE.EQ.'TH' ) GOTO 102
+        IF( IECODE.EQ.'ST' ) GOTO 103
+        IF( IECODE.EQ.'ZS' ) GOTO 103
+        IF( IECODE.EQ.'RO' ) GOTO 104
+        IF( IECODE.EQ.'TX' ) GOTO 105
+        IF( IECODE.EQ.'EF' ) GOTO 106
+C
+        GOTO 107
+C
+C --------------------------------------------------------------
+C TH entry: extracting height data
+C
+102     CONTINUE
+        CALL EIHRI(HEIGHT,1,1)
+C
+C If TH entry = 0, use FRT entry
+C
+	IF (HEIGHT.LE.0) THEN
+	   HAD_TH = .FALSE.
+	   GOTO 107
+	ENDIF
+C
+	HAD_TH = .TRUE.
+        GOTO 107
+C
+C -------------------------------------------------------------
+C ST entry: extracting location point data
+C
+103     CONTINUE
+        CALL EIHRS(NO_OF_PTS,PEN)
+C
+C If there is more than one point in the feature
+C    only the first point will be used
+C
+C Then extract the coordinate point                
+C
+	IF (IECODE.EQ.'ZS') THEN
+           CALL EIHRR( PT_BUFFER,3,1 )
+	   HAD_ZS = .TRUE.
+C
+	ELSE
+           CALL EIHRR( PT_BUFFER,2,1 )
+	ENDIF
+C
+        GOTO 107
+C
+C --------------------------------------------------------------
+C RO entry: extracting rotation data
+C
+104     CONTINUE                 
+        CALL EIHRR( RADIAN_ANGLE,1,1 )
+C
+C As angle in IFF is represented in Radians whilst
+C    in DXF is in Degrees, we have to transform
+C
+        DEGREE_ANGLE = RADIAN_ANGLE * 180/PI
+	HAD_RO = .TRUE.
+C
+        GOTO 107
+C
+C --------------------------------------------------------------
+C TX entry: extracting text data
+C
+105     CONTINUE
+	CALL EIHR( DXF_TEXT,IELEN,1 )
+	CHAR_COUNT = IELEN * 2
+C 
+C Adjustment of text's length
+C
+	IF ( DXF_TEXT( CHAR_COUNT ).EQ.0 ) THEN
+           CHAR_COUNT = CHAR_COUNT - 1
+        ELSEIF ( CHAR_COUNT.LT.255 ) THEN
+	   DXF_TEXT( CHAR_COUNT + 1 ) = 0
+	ENDIF
+C
+        GOTO 107
+C
+C --------------------------------------------------------------
+C EF entry: after all, we are now ready to output the data to the 
+C    selected DXF file
+C
+106     CONTINUE
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'TEXT' )
+        CALL FLWSTR( '  8' )
+        CALL FLWRTF( '%S',DXFLAYNAM(SELLAYIND)
+     &				(1:DXFLAYLEN(SELLAYIND)) ) 
+        CALL FLWSTR( '  6' )
+        CALL FLWSTR( 'CONTINUOUS' )
+C
+	IF (DXFENTLEN(SELENTIND).GT.0) THEN
+           CALL FLWSTR( '  7' )
+           CALL FLWRTF( '%S',DXFENTNAM(SELENTIND)
+     &				(1:DXFENTLEN(SELENTIND)) ) 
+        ENDIF
+C
+        CALL FLWSTR( ' 62' )
+        CALL FLWRTF( '%^W%I6',ENTCOLOUR(SELENTIND) ) 
+C
+C Now convert TH height from points to mm if HAD_PNT true, 
+C otherwise TH entry represents mm./100
+C
+	IF (HAD_TH) THEN
+C
+C Had /POINTSIZE; convert from point sizes
+C
+	  IF (HAD_PNT) THEN				! had_pnt /pointsize
+C
+C Get font number specified in parameter file for matching FC/COL/STYLE
+C combination
+C
+	    FONT = FONTNUMBER(SELENTIND)
+	    RHEIGHT = 0.0
+C
+C Use user defined from parameter TEXT SIZE entries
+C
+	    IF (HAD_POINT_SIZES(FONT)) THEN		! had this particular
+C							! font/FC combination
+C Use point_sizes array to get mm's from points
+C
+		RHEIGHT = POINT_SIZES(HEIGHT,FONT)
+C
+C Output message if point size not set
+C
+		IF (RHEIGHT.EQ.0) CALL LSL_PUTMSG
+     &				(I2DXF__UNDEFPOINTSIZE, HEIGHT)
+C
+	    ELSE					! had_point_sizes = F
+		RHEIGHT = OSPTSZ(HEIGHT)		! calc. point size
+C
+C Some point sizes not allowed, interpolate
+		IF (RHEIGHT.EQ.0) RHEIGHT = (HEIGHT/128.0) * 25.4
+C
+	    ENDIF					! had_point_sizes
+C
+	  ELSE						! had_pnt = F
+	     RHEIGHT = HEIGHT/100.0			! convert mm./100 to mm.
+	  ENDIF						! had_pnt /pointsize
+C
+	ENDIF	! had_th
+C
+	IF (JUSTIFY.EQ.0) THEN
+	   CALL OUTPUT_COORD(PT_BUFFER(1,1), PT_BUFFER(2,1), 1)
+C
+C This height is not optional and as IFF does not contain a height
+C for the insertion point of the text it will be output as zero.
+C
+	   REAL_EQUIV = PT_BUFFER(3,1)
+	   IF (HAD_ZS .AND. INT_EQUIV.NE.IFF_ABSENT) THEN
+              CALL FLWSTR( ' 30' )
+              CALL FLWRTF( '%F',PT_BUFFER(3,1) )
+	   ENDIF
+C
+	   IF (HAD_HT) THEN
+	      CALL FLWSTR( ' 38' )
+              CALL FLWRTF( '%F',AC_HT )
+	   ENDIF
+C
+        ELSE
+	   CALL NEWSTART( PT_BUFFER(1,1),
+     &			  PT_BUFFER(2,1),
+     &			  NEWPT(1),
+     &			  NEWPT(2),
+     &			  JUSTIFY,
+     &			  RADIAN_ANGLE,
+     &			  RHEIGHT,		! height in mm.
+     &                    CHAR_COUNT,
+     &			  DXF_TEXT )
+C
+	   CALL OUTPUT_COORD(NEWPT(1), NEWPT(2), 1)
+C
+	   REAL_EQUIV = PT_BUFFER(3,1)
+	   IF (HAD_ZS .AND. INT_EQUIV.NE.IFF_ABSENT) THEN
+              CALL FLWSTR( ' 30' )
+              CALL FLWRTF( '%F',PT_BUFFER(3,1) )
+	   ENDIF
+C
+	   IF (HAD_HT) THEN
+	      CALL FLWSTR( ' 38' )
+              CALL FLWRTF( '%F',AC_HT )
+	   ENDIF
+	ENDIF
+C
+	IF (HAD_TH) THEN
+           CALL FLWSTR( ' 40' )
+           CALL FLWRTF( '%F', RHEIGHT )
+C
+C Otherwise TH contains 0, use FRT value as a last resort
+	ELSE
+C
+C Get FRT size entry
+C
+	   FC   = IFFFCCODE(SELENTIND)
+	   OK   = FRTFND(FC)
+C
+	   IF (OK .OR. FRTSIZ.EQ.0) THEN	! didn't find FC, or size=0
+	      RHEIGHT = 5			! use a default of 5mm.
+	      IF (.NOT.HAD_QUIET) THEN
+		CALL LSL_PUTMSG(I2DXF__DEFTEXHGT, RHEIGHT)
+		CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
+	      ENDIF
+C
+	   ELSE
+	      RHEIGHT = FRTSIZ
+	   ENDIF
+C
+	   CALL FLWSTR( ' 40' )
+	   CALL FLWRTF( '%F', RHEIGHT )
+	ENDIF
+C
+100	CONTINUE
+C
+        CALL FLWSTR( '  1' )
+        CALL FLWRTF( '%A',DXF_TEXT )
+C
+	IF (HAD_RO) THEN 
+           CALL FLWSTR( ' 50' )
+           CALL FLWRTF( '%F',DEGREE_ANGLE)
+	ELSE
+           CALL FLWSTR( ' 50' )
+           CALL FLWRTF( '%F', 0.0)
+	ENDIF
+C
+C Exit
+1000	RETURN
+        END
+C

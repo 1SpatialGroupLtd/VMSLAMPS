@@ -1,0 +1,214 @@
+	LOGICAL FUNCTION READ_NAMPOSTN(FONT,HEIGHT,DIGPOS,COORDS,ROTATE,
+	1				NUMPOINTS,ACTUAL_HT)
+C
+***     MODULE READ_NAMPOSTN
+***     IDENT	14JN96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author	IM	02-09-87
+C Modified	TJI	 5-Oct-1987
+CMod	Handle NTF 1.1					VLG	31-Oct-1989
+CMod							VLG	01-Feb-1990
+CMod	Handle NTF level 3				VLG	12-Mar-1990
+CMOD	Enable point heights to remain in sheet mm	ST	03-Oct-1991
+CMOD	Bug fixed to assign a real correctly from	ST	03-Oct-1991
+C	an int.
+CMOD    Implement CITF96 changes (WI/CC 1545)           TJM     12-Jun-1996
+C
+C Reads the name position record
+C
+	IMPLICIT NONE
+C
+C Messages:
+C
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Commons:
+C
+	INCLUDE 'CITF.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+C
+C Arguments:
+C
+	INTEGER*4	NCOORDS	! Max no. coords read by GEOMETRY
+	PARAMETER	(NCOORDS=2)
+	INTEGER		FONT		! The text font
+	INTEGER*2	HEIGHT		! The text height
+	INTEGER		DIGPOS		! Digitised location (0-8)
+	REAL		COORDS(2,NCOORDS) ! Coords read by GEOMETRY
+	REAL		ROTATE		! The angle of the text
+	INTEGER		NUMPOINTS	! Number of points read by GEOMETRY
+	REAL		ACTUAL_HT	! Text height in mm
+C
+C Functions:
+C
+	LOGICAL		READ_CITF_GEOMETRY
+	LOGICAL		READ_GEOMETRY
+	LOGICAL		READ_RECORD
+	INTEGER		RDINT		! read an integer
+	INTEGER		RDLONG		! read a longword
+	REAL		XCONVERT
+	REAL		YCONVERT
+C
+C Workspace:
+C
+	LOGICAL		OK		! Success flag
+	INTEGER		I		! DO loop counter
+	INTEGER		XPOS,YPOS	! Coordinates as read from NTF
+	INTEGER*2	NUM		! Integer thing to read
+	INTEGER		CPOS		! Current position
+	INTEGER		GEOM_ID		! ID of geometry record
+	INTEGER		NAME_ID
+C
+	REAL		PI
+	REAL		OS_POINT_SIZE(24)
+	REAL		MIN_HEIGHT
+	PARAMETER	(PI=3.1415926)
+C
+C OS_POINT_SIZE data - stolen from I2OSTF (NB heights now in tenths mm)
+C
+	DATA OS_POINT_SIZE /     0.0, 0.0, 8.5, 0.0,
+     &				11.0, 12.5, 14.0, 16.0, 
+     &				17.5, 20.5, 22.0, 24.5,
+     &				0.0, 29.0, 0.0, 32.5,
+     &				0.0, 36.0, 0.0, 39.5, 
+     &				0.0, 44.5, 0.0, 50.0 /
+C
+C ........................................................................
+C Assume success
+C 
+	OK=.TRUE.
+	IF (.NOT.(HAD_CITF93.OR.HAD_CITF96)) GOTO 50
+C
+	IF (.NOT.REC_IN_HAND) THEN 		! havent record in hand
+	   OK = READ_RECORD()			! get record
+	   IF (.NOT.OK) GOTO 999 		! check for errors
+	   REC_IN_HAND = .TRUE.			! now have record
+	ENDIF
+C       
+	IF ( STRING(1:2).EQ.REC$_CURVTEXT) THEN
+	   OK = .FALSE.
+	   CALL LSL_PUTMSG(NTF2I__CURVTEXT,SEC_REC) ! ignore record
+	   GOTO 999
+	ENDIF
+C
+	IF ( STRING(1:2).NE.REC$_NAMPOSTN) THEN
+	   OK = .FALSE.
+	   CALL LSL_PUTMSG(NTF2I__NONAMPOS,SEC_REC) ! ignore record
+	   GOTO 999
+	ENDIF
+C
+C Read the font
+C
+50	CALL SETAUX(%REF(STRING(3:6)),4)
+	IF (RDINT(FONT)) THEN
+	   CALL LSL_PUTMSG(NTF2I__NAMPOSTN,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'FONT')
+	   CALL LSL_ADDSTR(STRING(3:6))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C And the text height
+C
+	CALL SETAUX(%REF(STRING(7:9)),3)	! Get the value 
+	IF (RDINT(HEIGHT)) THEN
+	   CALL LSL_PUTMSG(NTF2I__NAMPOSTN,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'TEXT_HT')
+	   CALL LSL_ADDSTR(STRING(7:9))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C Text heights are stored as mm/10 in NTF - we want them in mm/100
+C if not OS data. If OS data we need point sizes (unless /NOIFF_POINTSIZE
+C was given)
+C
+	IF ((.NOT.(HAD_CITF93.OR.HAD_CITF96) .AND.
+     &       .NOT.OS_DATA) .OR. .NOT.HAD_IFF_POINTSIZE) THEN
+	   ACTUAL_HT = FLOAT(HEIGHT)/10.0
+	   HEIGHT = HEIGHT*10
+	ELSE			! Convert to point size
+	   MIN_HEIGHT = 0.0
+	   DO 100 I= 1,24
+	      IF (OS_POINT_SIZE(I).NE.0.0) THEN
+	         IF (MIN_HEIGHT.EQ.0.0) THEN
+		    MIN_HEIGHT = OS_POINT_SIZE(I)-0.5
+	         ENDIF
+		 IF (FLOAT(HEIGHT).GE.OS_POINT_SIZE(I)-0.5 .AND.
+     & 		     FLOAT(HEIGHT).LE.OS_POINT_SIZE(I)+0.5) THEN	
+		    HEIGHT = I		! Correct height
+	            GOTO 200
+		 ELSEIF ( FLOAT(HEIGHT).GE.MIN_HEIGHT .AND.
+     &		 	  FLOAT(HEIGHT).LT.OS_POINT_SIZE(I)-0.5 ) THEN
+		    HEIGHT = I		! next highest in table
+		    GOTO 200
+		 ENDIF
+	      ENDIF
+100	   CONTINUE
+	   HEIGHT = 24		!Bad height altogether
+200	   CONTINUE
+	   ACTUAL_HT = OS_POINT_SIZE(HEIGHT)/10
+	ENDIF
+C
+C And get the digitised position (a value from 0 to 9)
+C
+	CALL SETAUX(%REF(STRING(10:10)),1)
+	IF ((RDINT(DIGPOS)).OR.(DIGPOS.GT.9)) THEN
+	   CALL LSL_PUTMSG(NTF2I__NAMPOSTN,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'DIG_POSTN')
+	   CALL LSL_ADDSTR(STRING(10:10))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+	IF (DIGPOS.EQ.9) DIGPOS = 0	! no data - assume position 0
+C
+C Get the text rotation
+C
+	CALL SETAUX(%REF(STRING(11:14)),4)
+	IF (RDINT(NUM)) THEN
+	   CALL LSL_PUTMSG(NTF2I__NAMPOSTN,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'ORIENT')
+	   CALL LSL_ADDSTR(STRING(11:14))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C That's stored in NTF as degrees/10 - needs to be converted to radians
+C
+	ROTATE = (FLOAT(NUM)/10.0) * (PI/180)
+C
+C Get the geometry id if we have NTF level 3
+C
+	IF (LEVEL.EQ.3) THEN
+	   CALL SETAUX(%REF(STRING(15:20)),6)
+	   IF (RDLONG(GEOM_ID)) THEN
+	      CALL LSL_PUTMSG(NTF2I__NAMPOSTN,FSN,SEC_REC)
+	      CALL LSL_ADDMSG(NTF2I__ERRORRD,'GEOM_ID')
+	      CALL LSL_ADDSTR(STRING(15:20))
+	      OK=.FALSE.
+	      GOTO 999
+	   ENDIF
+	ELSE
+	   GEOM_ID = 0		! Not used for levels 1 and 2
+	ENDIF
+C
+C Look for the required geometry record
+C
+	REC_IN_HAND = .FALSE.	! Current record has been processed
+	IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	   OK = READ_CITF_GEOMETRY(NUMPOINTS,.TRUE.)
+	ELSE
+	   OK = READ_GEOMETRY(COORDS,NUMPOINTS,NCOORDS,GEOM_ID)
+	ENDIF
+C
+C ........................................................................
+C and that's it
+C
+999	READ_NAMPOSTN=OK
+	RETURN
+	END

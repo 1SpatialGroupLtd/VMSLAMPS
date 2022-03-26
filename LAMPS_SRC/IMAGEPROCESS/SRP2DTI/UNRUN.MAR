@@ -1,0 +1,239 @@
+	.TITLE UNRUN	
+	.IDENT /02FE88/
+;	
+; Copyright| Laser-Scan Laboratories Ltd. Cambridge CB4 4BH , England
+;	   | Author: A. Stevens
+;
+; History
+;
+;	Created  				 AS	06-Oct-1987
+;
+; Module description
+;
+; Macro program to decode Hell data of the form
+;
+;	odd bytes = colour 1/2 background/linework
+;	even bytes = run length
+;	
+; Called from Fortran by LENGTH = HELLDECODE(FROM,TO,FORM,NPIX,REVERSE)
+; FROM is an array containing Hell run length data
+; TO   is a (larger) array to contain the unpacked data
+; FORM is the type of data required back - 1=byte, 2=word,4=longword
+; NPIX is the number of pixels requested
+; REVERSE : if true, reverse order of o/p pixels
+;
+; LENGTH returns the number of pixels actually handed back. 
+; The run is usually terminated by a colour of 255. LENGTH returns zero
+; if 255 was found in the first colour.
+; LENGTH returning a negative value indicates an error condition 
+; as follows:
+;	-1	illegal FORM (ie not 1,2 or 4) 
+;
+; workspace
+;
+	.LIBRARY /LSL$LIBRARY:LSLMACLIB/
+;
+;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;
+	.PSECT	_ADCS$DATA QUAD,PIC,USR,CON,REL,LCL,NOSHR,NOEXE,RD,WRT,NOVEC
+;
+;
+;.......................................................................
+;
+	.PSECT _ADCS$CODE PIC,USR,CON,REL,LCL,SHR,EXE,RD,NOWRT,NOVEC
+;
+	.ENTRY UNRUN,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+;
+;Register usuage:
+;
+;	R2:	temporary storage
+;	R3:	output data pointer
+;	R6:	input data pointer
+;	R8:	no. of pixels
+;	R9:	partial run counter
+;	R10:	total run counter
+;	R11:	saves requested no. of pixels	
+;
+;...get the arguments from outside
+;
+	MOVAB	@4(AP),R6	; input HELL data address
+	MOVAB	@8(AP),R3	; address for results
+	MOVL	@12(AP),R0	; form of results (1,2,4)
+	MOVL	@16(AP),R11	; no. of pixels to provide
+	MOVL	@20(AP),R1	; 0 means foreward, -1 reverse
+;
+START:
+	CLRL	R9		; partial run counter
+	CLRL	R10		; use as length of line counter 
+	MOVL	R11,R8		; working count of pixels left to find
+;
+; decide in which form the data is required back and leap straight
+; to that bit of code. 
+	CMPL	R1,#0		; foreward form
+	BNEQ	REV		; if not, presume reversed
+;
+	CMPL	R0,#1		; byte form requested
+	BNEQ	W		; try word instead
+	BRW	BYTE		; process byte form
+W:	CMPL	R0,#2		; integer form
+	BNEQ	L		; try longword instead
+	BRW	WORD		; process word form
+L:	CMPL	R0,#4		; longword
+	BNEQ	ERR		; branch to error
+	BRW	LONG		; process longword form
+;
+; for data to be reversed on output. the output pointer must point to
+; one beyond the end of the o/p buffer.(this pointer will be 
+; pre-decremented before data is p to its buffer). 
+REV:	
+	MULL3	R0,R11,R2	; calc no. of bytes in o/p buffer	
+	ADDL2	R2,R3		; ensure o/p pointer points to 1 beyond
+;
+	CMPL	R0,#1		; byte form requested
+	BNEQ	RW		; try word instead
+	BRW	BYTER		; process reverse byte form
+RW:	CMPL	R0,#2		; integer form
+	BNEQ	RL		; try longword instead
+	BRW	WORDR		; process reverse word form
+RL:	CMPL	R0,#4		; longword
+	BNEQ	ERR		; branch to error
+	BRW	LONGR		; process reverse longword form
+				; end of o/p buffer. 
+;
+ERR:	MOVL	#-1,R0		; illegal form requested
+	JMP	ENDERR		; error condition
+;
+;-------------------------------------------------------------
+BYTE:				; do this for all byte pairs
+	CMPB	(R6),#255	; is colour 255?
+	BNEQ	5$		; if not, continue 
+	BRW	ENDOK		; if so, end of this logical block
+;	
+5$:	EXTZV	#1,#1,(R6),R0	; get colour from (R6) bit 1 to R0
+	INCL	R6		; point to run length
+	MOVB	(R6),R9		; extract run length 
+	ADDL2	R9,R10		; accumulate total run 
+;	MOVC5	#0,(R1),R0,R9,(R3)	; fill run		
+				; src_len,src_add,fill,dst_len,dst_add
+				; R3 now contains next free byte in dest
+10$:	MOVB	R0,(R3)+	; put colour in output and inc by byte
+	SOBGTR  R8,11$		; for all requested pixels, or 
+	JMP	ENDOK
+11$:	SOBGTR	R9,10$		; for all in this run
+
+	INCL	R6		; point to next colour
+	JMP 	BYTE		; keep looping until end colour found
+;
+;-------------------------------------------------------------
+WORD:				; do this for all byte pairs
+	CMPB	(R6),#255	; is colour 255?
+	BNEQ	5$		; if not, continue 
+	BRW	ENDOK		; if so, end of this logical block
+;	
+5$:	EXTZV	#1,#1,(R6),R0	; get colour from (R6) bit 1 to R0
+	INCL	R6		; point to run length
+	MOVB	(R6),R9		; extract run length 
+	ADDL2	R9,R10		; accumulate total run (assuming all 
+				; required, but we will adjust at end)
+;
+10$:	MOVW	R0,(R3)+	; put colour in output and inc by word
+	SOBGTR  R8,11$		; for all requested pixels, or 
+	JMP	ENDOK
+11$:	SOBGTR	R9,10$		; for all in this run
+;
+	INCL	R6		; point to next colour
+	JMP	WORD
+;
+;-------------------------------------------------------------
+LONG:				; do this for all byte pairs
+	CMPB	(R6),#255	; is colour 255?
+	BNEQ	5$		; if not, continue 
+	BRW	ENDOK		; if so, end of this logical block
+;	
+5$:	EXTZV	#1,#1,(R6),R0	; get colour from (R6) bit 1 to R0
+	INCL	R6		; point to run length
+	MOVB	(R6),R9		; extract run length 
+	ADDL2	R9,R10		; accumulate total run 
+;
+20$:	MOVL	R0,(R3)+	; put colour in output and inc by long
+	SOBGTR  R8,21$		; for all requested pixels, or 
+	JMP	ENDOK
+21$:	SOBGTR	R9,20$		; for all in this run
+;
+	INCL	R6		; point to next colour
+	JMP	LONG
+;
+;-------------------------------------------------------------
+BYTER:				; do this for all byte pairs
+	CMPB	(R6),#255	; is colour 255?
+	BEQL	ENDOK		; if so, end of this logical block
+;	
+	EXTZV	#1,#1,(R6),R0	; get colour from (R6) bit 1 to R0
+	INCL	R6		; point to run length
+	MOVB	(R6),R9		; extract run length 
+	ADDL2	R9,R10		; accumulate total run 
+;	MOVC5	#0,(R1),R0,R9,(R3)	; fill run		
+				; src_len,src_add,fill,dst_len,dst_add
+				; R3 now contains next free byte in dest
+10$:	MOVB	R0,-(R3)	; dec by byte and put colour in output 
+	SOBGTR  R8,11$		; for all requested pixels, or 
+	JMP	ENDOK
+11$:	SOBGTR	R9,10$		; for all in this run
+
+	INCL	R6		; point to next colour
+	JMP 	BYTER		; keep looping until end colour found
+;
+;-------------------------------------------------------------
+WORDR:				; do this for all byte pairs
+	CMPB	(R6),#255	; is colour 255?
+	BEQL	ENDOK		; if so, end of the logical block
+;	
+	EXTZV	#1,#1,(R6),R0	; get colour from (R6) bit 1 to R0
+	INCL	R6		; point to run length
+	MOVB	(R6),R9		; extract run length 
+	ADDL2	R9,R10		; accumulate total run (assuming all 
+				; required, but we will adjust at end)
+;
+10$:	MOVW	R0,-(R3)	; dec by word and put colour in output 
+	SOBGTR  R8,11$		; for all requested pixels, or 
+	JMP	ENDOK
+11$:	SOBGTR	R9,10$		; for all in this run
+;
+	INCL	R6		; point to next colour
+	JMP	WORDR
+;
+;-------------------------------------------------------------
+LONGR:				; do this for all byte pairs
+	CMPB	(R6),#255	; is colour 255?
+	BEQL	ENDOK		; if so, end of the logical block
+;	
+	EXTZV	#1,#1,(R6),R0	; get colour from (R6) bit 1 to R0
+	INCL	R6		; point to run length
+	MOVB	(R6),R9		; extract run length 
+	ADDL2	R9,R10		; accumulate total run 
+;
+20$:	MOVL	R0,-(R3)	; dec by longword, put colour in output 
+	SOBGTR  R8,21$		; for all requested pixels, or 
+	JMP	ENDOK
+21$:	SOBGTR	R9,20$		; for all in this run
+;
+	INCL	R6		; point to next colour
+	JMP	LONGR
+;
+;----------------------------------------------------------
+; calculate actual line length returned. This will be the lesser of R10 
+; (calculated assuing all the run was used) and R11 (which was the
+; number of pixels requested)
+ENDOK:				; normal success return
+	CMPL	R11,R10		; see if used less than whole run
+	BLSS	1$
+	MOVL	R10,R0		; return total length of line
+	JMP 	LAST		; return statement
+1$:	MOVL	R11,R0		;
+	JMP 	LAST		; return statement
+ENDERR:				; illegal condition return
+	MOVL	#-1,R0		; error condition	
+LAST:	
+	RET
+	.END
+;-------------------------------------------------------------

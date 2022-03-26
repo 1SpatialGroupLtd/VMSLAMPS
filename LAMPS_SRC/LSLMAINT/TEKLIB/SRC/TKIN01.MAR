@@ -1,0 +1,120 @@
+	.TITLE	TKIN
+	.IDENT	/28MR82/
+
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+; Author Susan Manning from originals by R. Fairbairns
+; Date as .IDENT
+
+	CODE_PSECT	TKW
+
+; set up GIN mode
+
+ .ENTRY		TKCUR,^M<R2,R5,R10,R11>
+	TSTB TKINPU		; already doing it?
+	BEQL	1$		
+	BRW	NOCUR	; yes - no need
+1$:	JSB	$TKW2C		; send 'GIN request'
+	.BYTE	AS.ESC,AS.SUB
+	JSB	$FLSHW		; transmit it and wait until it's out
+	DECB	TKINPU		; remember now in GIN mode
+	RET
+
+
+; read Tel cursor position ( after previous TKCUR)
+
+; operates as a FORTRAN LOGICAL FUNCTION
+; result TRUE <=> tek cursor transfer was outstanding, and it was 
+; successfully read
+
+;
+; previous state of TKINPU (logical: whether in GIN mode)  
+; returned in function arg
+
+ .ENTRY		TKCSRD,^M<R2,R3,R4,R5,R7,R9,R10,R11>
+	MOVB	TKINPU,@4(AP)		; return GIN state
+$TKSCR:: CLRW	R10		; in case no transfer
+	TSTB	TKINPU		; in GIN mode?
+	BNEQ	60$		
+	BRW NOCUR		; no - reject call
+60$:	JSB	$TKW2C		; enquire cursor position
+	.BYTE	AS.ESC,AS.ENQ
+	JSB	$FLUSH		; ensure that's out
+	$QIO_G	QI.DPB		; set request up for input
+	BLBC	R0,40$		; branch if error
+20$:	MOVL	QI.EFN,R1	; efn for that transfer
+	$WAITFR_S EFN=R1	; wait for input
+	BLBC	R0,40$			; branch if error
+30$:	CMPW	QI.ISB,#SS$_NORMAL	; input O.K.?
+	BEQL	10$
+	MOVZWL	QI.ISB,R0
+; general error return
+40$:	PUSHL	R0
+	CALLS	#1,LIB$SIGNAL
+	RET
+
+; check input
+10$:	MOVL	#4,R0
+	MOVAB	TKIBUF,R1
+1$:	MOVZBL	(R1)+,R2		; check
+	XORL3	#^O40,R2,R3		;   d5, 6
+	BITL	#^O140,R3		;    only have d5 set
+	BEQL	50$		
+	BRW CURFL		; cursor read fail
+50$:	SOBGTR	R0,1$
+
+; code 4 bytes into 2 x 10-bits
+	MOVAB	TKIBUF,R1
+	MOVL	#2,R4
+2$:	MOVL	R3,R2		; copy x , second time around
+	MOVZBL	(R1)+,R0	; ms 5
+	ASHL	#5,R0,R0	; to position
+	BICL2	#^O176000,R0	; clear rubbish
+	MOVZBL	(R1)+,R3	; ls 5
+	BICL2	#^O177740,R3	; clear rubbish
+	BISL2	R0,R3		; 10 bits in one register
+	.IF NE C4014
+	ASHL	#2,R3,R3	; to d2 to allow for enhanced addressing
+	.ENDC
+	SOBGTR	R4,2$		; back for second
+
+; now get back to ideal screen coordinates
+	CVTWF	R2,R7		; x, counts
+	CVTWF	R3,R9		; y, counts
+	SUBF2	TKCENX,R7	; centre
+	SUBF2	TKCENY,R9
+	DIVF2	BASETR,R7	; to centimetres
+	DIVF2	BASETR,R9
+	CLRW	R0		; 'changed' marker
+	MOVAB	TKCURX,R1
+	SUBF2	(R1)+,R7	; offset x with current position
+	BEQL	3$
+	INCW	R0		; x changed
+3$:	SUBF2	(R1)+,R9	; offset y
+	BEQL	4$
+	BISW2	#2,R0		; y changed
+4$:	TSTW	R0
+	BEQL	CLRIN		; nothing changed (reject call)
+	BISB2	R0,TKRCMV	; mark cursor moved
+	ADDF3	(R1),R7,(R1)+	; x cursor movement accumulated
+	ADDF3	(R1),R9,(R1)	; y
+	MOVW	#-1,R0		; success
+	BRB	CLRIN
+
+; read failed (bum character)
+CURFL:	PUSHAB	CSMOAN
+	CALLS	#1,WRITEF	; ok if we're in the right environment
+	CLRW	R0		; reject
+CLRIN:	CLRB	TKINPU		; no input outstanding regardless
+NOCUR:	RET
+
+; cursor read fail moan
+
+CSMOAN:	.BYTE	1,0
+	.LONG	MOANTX
+MOANTX:	.BYTE	7
+	.ASCIZ	/Cursor data corrupt/
+
+	.EVEN
+
+	.PSECT
+	.END

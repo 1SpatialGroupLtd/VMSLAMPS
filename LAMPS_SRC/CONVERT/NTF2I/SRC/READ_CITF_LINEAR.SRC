@@ -1,0 +1,518 @@
+	LOGICAL FUNCTION READ_CITF_LINEAR()
+C
+***     MODULE READ_CITF_LINEAR
+***     IDENT	07NO96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C       Author					S Townrow 5-Nov-1992
+C
+C Description
+C
+C A parallel routine to READ_LINEAR which just handle CITF files.
+C It is intended to deal with feature level CITF attributes.
+C
+CMOD1245 always output UPDATE_DATE and UPDATE_TYPE ACs, so that ...
+C	... LITES2 OPERATIONS can update them.			PGH 24-Jun-1993
+C
+CMOD    Implement CITF96 changes (WI/CC 1545)                   TJM 18-Jun-1996
+C
+	IMPLICIT NONE
+C
+C Messages:
+C
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Commons:
+C
+	INCLUDE 'LOOKUP.CMN'
+	INCLUDE 'CITF.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'
+C
+	REAL		 PI
+	PARAMETER	(PI=3.1415926)
+C
+C Functions:
+C
+	LOGICAL		RDREAL, RDINT,RDLONG
+	LOGICAL		READ_CITF_GEOMETRY
+	LOGICAL		READ_CITF_COORDATTS
+	LOGICAL		READ_CITF_ATTRIBS
+	LOGICAL		READ_CHAIN
+	LOGICAL		READ_CONTINUE
+	LOGICAL		ASSOCIATE_FSN
+	LOGICAL		GET_FC
+	LOGICAL		CALC_SYMB_POINT
+	LOGICAL		IS_CONTINUATION
+	REAL		ZCONVERT
+	LOGICAL		FRTFND
+	INTEGER*4	CVT_DMY_DAY
+C
+C Workspace:
+C
+	LOGICAL		OK		! Success flag
+	INTEGER*4	I,LOOP		! DO loop counter
+	INTEGER*2	NUM		! For reading numbers into
+	INTEGER*4	T,RET		! various temporaries
+	INTEGER*4	DATE
+	INTEGER*4	YEAR
+	INTEGER*4	MONTH
+	INTEGER*4	DAY
+	INTEGER*4	GTYPE
+	CHARACTER*2	FC_ATTR_CODE
+
+	BYTE		AC_STR(255)
+	CHARACTER*20	OUT_ATTR
+	INTEGER		ATTR_LEN
+	REAL 		HEIGHT		! Contour height
+	REAL		ROTATE		! Orientation angle
+	INTEGER*2	ISTAT(4)	! Feature status (FS) flags 
+	CHARACTER*8	VALUE		! The VALUE field
+C
+	INTEGER		NCOORDS		! Number of coordinates
+	INTEGER		GEOM_ID		! ID of associated geometry record
+	INTEGER		CHAIN_ID
+	EQUIVALENCE	(GEOM_ID, CHAIN_ID)
+	INTEGER		ATT_ID
+	INTEGER		INPUT_FSN
+	INTEGER		P1,P2,PREVLEN
+C
+	LOGICAL*4	HAD_UPDATE_DATE		! UPDATE_DATE contained data
+	LOGICAL*4	HAD_UPDATE_STAT		! UPDATE_STATUS contained data
+	LOGICAL*4	HAD_SPEC		! SPEC contained data
+	LOGICAL*4	HAD_PROC		! PROCESS contained data
+	LOGICAL*4	HAD_DOP			! DATE_OF_PROCESS had data
+	LOGICAL*4	HAD_PHYS		! PHYS_STAT contained data
+C
+	LOGICAL		IS_LINE	
+	LOGICAL		IS_POINT
+	LOGICAL		HAD_FSN
+	LOGICAL		IS_LABEL
+C
+	INTEGER*4       FC                      ! CITF FC value
+	INTEGER*4	IFF_FC			! IFF FC value
+C	
+	CHARACTER*5	RECORD_TYPE
+	CHARACTER*2	NTF$_REC_DESCR
+	CHARACTER*6	NTF$_SERIAL_NO
+	CHARACTER*8	NTF$_FEAT_CODE          ! CITF96 mod
+	CHARACTER*8	NTF$_UPDATE_DATE
+	CHARACTER*1	NTF$_UPDATE_STAT
+	CHARACTER*255	NTF$_SPEC
+	INTEGER*4	NTF$_SPEC_LEN
+	CHARACTER*9	NTF$_P_AND_D
+	INTEGER*4	NTF$_P_AND_D_LEN
+	CHARACTER*1	NTF$_PROC
+	CHARACTER*8	NTF$_DOP
+	CHARACTER*1	NTF$_PHYS
+C
+C------------------------------------------------------------------------------
+C
+	OK=.TRUE.	! Assume success
+	ATT_ID = 0
+	REC_IN_HAND = .FALSE.	!Current record is processed
+	IS_LINE = .FALSE.
+	IS_POINT = .FALSE.
+	IS_LABEL = .FALSE.
+C
+C------------------------------------------------------------------------------
+C
+	NTF$_REC_DESCR		= STRING( 1:2 )
+	NTF$_SERIAL_NO		= STRING( 3:8 )
+	IF (HAD_CITF93) THEN
+	   NTF$_FEAT_CODE	= STRING( 9:12)
+	   NTF$_UPDATE_DATE	= STRING(13:20)
+	   NTF$_UPDATE_STAT	= STRING(21:21)
+	ELSEIF (HAD_CITF96) THEN
+	   NTF$_FEAT_CODE	= STRING( 9:16)
+	   NTF$_UPDATE_DATE	= STRING(17:24)
+	   NTF$_UPDATE_STAT	= STRING(25:25)
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Check for 'no data' in UPDATE fields
+C
+	HAD_UPDATE_DATE = NTF$_UPDATE_DATE(1:8).NE.'00000000'
+	HAD_UPDATE_STAT = NTF$_UPDATE_STAT(1:1).NE.' '
+C
+C------------------------------------------------------------------------------
+C Get field width for SPEC
+C
+	HAD_SPEC = .FALSE.
+	IF (HAD_CITF93) THEN
+	   P1 = 22
+	ELSEIF (HAD_CITF96) THEN
+	   P1 = 26
+	ENDIF
+	NTF$_SPEC_LEN = 0
+	PREVLEN = 0
+20	P2 = INDEX(STRING(1:LENGTH),DIVIDER)
+	IF (P2.EQ.P1) THEN		! no field present, just divider
+	   P1 = MAX(P1+1,P2 + 1)
+	ELSEIF (P2.GT.P1) THEN		! spec was present
+	   NTF$_SPEC_LEN = MIN(255,NTF$_SPEC_LEN + P2 - P1)
+	   IF (PREVLEN.LT.255) THEN
+	      NTF$_SPEC(PREVLEN+1:NTF$_SPEC_LEN) = STRING(P1:P2-1)
+	   ENDIF
+	   PREVLEN = NTF$_SPEC_LEN
+	   P1 = P2 + 1
+	   HAD_SPEC = .TRUE.
+	ELSEIF (P2.EQ.0) THEN		! either missing \ or it continues
+	   IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) THEN
+	      CALL LSL_PUTMSG(NTF2I__NODIVIDER,NTF$_REC_DESCR)
+	   ELSE
+	      HAD_SPEC = .TRUE.
+	      NTF$_SPEC_LEN = MIN(255,NTF$_SPEC_LEN + LENGTH - 2 - P1 + 1)
+	      IF (PREVLEN.LT.255) THEN
+		 NTF$_SPEC(PREVLEN+1:NTF$_SPEC_LEN) = STRING(P1:LENGTH-2)
+	      ENDIF
+	      PREVLEN = NTF$_SPEC_LEN
+	      IF (IS_CONTINUATION(STRING,LENGTH)) THEN
+		 OK = READ_CONTINUE('POINTREC/LINEREC')
+		 IF (.NOT.OK) GOTO 999
+		 P1 = 3
+		 GOTO 20
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Get field width for PROCESS and DATE_OF_PROCESS
+C
+	HAD_PROC = .FALSE.
+	HAD_DOP = .FALSE.
+	IF (P1.GE.LENGTH-2 .AND. IS_CONTINUATION(STRING,LENGTH)) THEN
+	   OK = READ_CONTINUE('LINEREC or POINTREC')
+	   IF (.NOT.OK) GOTO 999
+	   P1 = 3
+	ENDIF
+	P2 = INDEX(STRING(P1:LENGTH),DIVIDER)
+	IF (P2.GT.0) P2 = P2 + P1 - 1
+	IF (P2.LE.P1) THEN		! no field present, just divider
+	   NTF$_P_AND_D_LEN = 0
+	   P1 = MAX(P1+1,P2 + 1)
+	ELSEIF (P2.GT.P1) THEN		! spec was present
+	   NTF$_P_AND_D_LEN = MIN(9,P2 - P1)
+	   NTF$_P_AND_D(1:NTF$_P_AND_D_LEN) = STRING(P1:P2-1)
+	   P1 = P2 + 1
+	ELSEIF (P2.EQ.0) THEN
+	   IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) THEN
+	      CALL LSL_PUTMSG(NTF2I__NODIVIDER,NTF$_REC_DESCR)
+	   ENDIF
+	ENDIF
+C
+C Interpret the field we've built
+C
+	IF (NTF$_P_AND_D_LEN.EQ.0) THEN
+	   NTF$_PROC = ' '
+	   NTF$_DOP = '        '
+	ELSEIF (NTF$_P_AND_D_LEN.EQ.1) THEN
+	   NTF$_PROC = NTF$_P_AND_D(1:1)
+	   HAD_PROC = .TRUE.
+	ELSEIF (NTF$_P_AND_D_LEN.EQ.9) THEN
+	   NTF$_PROC = NTF$_P_AND_D(1:1)
+	   NTF$_DOP = NTF$_P_AND_D(2:9)
+	   HAD_PROC = .TRUE.
+	   HAD_DOP = .TRUE.
+	ELSEIF (NTF$_P_AND_D_LEN.EQ.8) THEN
+	   NTF$_PROC = ' '
+	   NTF$_DOP = NTF$_P_AND_D(1:8)
+	   HAD_DOP = .TRUE.
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Get field PHYS_STAT
+C
+	HAD_PHYS = .FALSE.
+	IF (P1.GT.LENGTH-2) THEN
+	   IF (IS_CONTINUATION(STRING,LENGTH)) THEN
+	      OK = READ_CONTINUE('LINEREC or POINTREC')
+	      IF (.NOT.OK) GOTO 999
+	      P1 = 3
+	      NTF$_PHYS = STRING(P1:P1)
+	      HAD_PHYS = .TRUE.
+	   ELSE
+	      NTF$_PHYS = ' '
+	   ENDIF
+	ELSE
+	   NTF$_PHYS = STRING(P1:P1)
+	   HAD_PHYS = .TRUE.
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C set up various flags and the record_description for later use
+C
+	IF(NTF$_REC_DESCR.EQ.REC$_LINEREC) THEN		! a line
+	  IS_LINE = .TRUE.
+	  RECORD_TYPE = 'LINE '
+	ELSEIF(NTF$_REC_DESCR.EQ.REC$_POINTREC) THEN	! a point
+	  IS_POINT = .TRUE.
+	  RECORD_TYPE = 'POINT'
+	ENDIF
+	HAD_DT = .FALSE.
+	HAD_OR = .FALSE.
+	DT = 0.0
+	OR = 0.0
+C
+C------------------------------------------------------------------------------
+C get the feature serial number
+C
+	HAD_FSN = .FALSE.				! initialise flag
+C
+	IF (NTF$_SERIAL_NO.NE.' ') THEN			! something in ID field
+	  CALL SETAUX(%REF(NTF$_SERIAL_NO),6)		! set as input buffer
+	  OK = .NOT.RDLONG(INPUT_FSN)			! attempt to read FSN
+	  HAD_FSN = OK.AND.(INPUT_FSN.GT.0)
+	ENDIF
+C
+	IF (HAD_FSN) THEN				! if we read the FSN
+	  FSN = INPUT_FSN				! use it
+	ELSE						! didnt read FSN
+	  FSN = FSN+1					! increment FSN
+	ENDIF
+C
+	CALL IFFNF( FSN, FSN )				!start feature
+C
+C------------------------------------------------------------------------------
+C Now work out the FS entry ...check for CITF93 or CITF96 format
+C
+	IF (HAD_CITF93) THEN
+	   CALL SETAUX(%REF(NTF$_FEAT_CODE),4)          ! set input buffer
+	   OK = .NOT.RDINT(FC)				! try to read FC
+	   IF ((.NOT.OK).OR.(FC.LE.0)) THEN		! error bad FC
+	      ISTAT(1) = 0                              ! default to FC 0
+	      FC = 0					! flag FC not numeric
+	         DO 100 I=1,4				! copy it to AC
+		    AC_STR(I) = ICHAR(NTF$_FEAT_CODE(I:I))
+ 100		 CONTINUE
+	      ATTR_LEN = 4	                        ! 4 character FC
+	   ELSE						! FC okay
+	      ISTAT(1) = FC				! copy to output array
+	      IF (HAD_FC_LOOKUP)			! translate?
+     &	         CALL FC_TRANS(%VAL(LUT_BASE_ADDR), FC, ISTAT(1))
+	   ENDIF
+C
+C IFF_FC used as dummy, since ISTAT(1) is INTEGER*2, so will not hold CITF FC
+C greater than 32767.
+C
+	ELSEIF (HAD_CITF96) THEN
+	   CALL SETAUX(%REF(NTF$_FEAT_CODE),8)          ! set input buffer
+	   OK = .NOT.RDLONG(FC)                         ! try to read FC
+	   IFF_FC = FC					! copy to IFF version
+	   IF (OK .AND. HAD_FC_LOOKUP)			! translate?
+     &	         CALL FC_TRANS(%VAL(LUT_BASE_ADDR), FC, IFF_FC)
+	   IF ((.NOT.OK).OR.(FC.LE.0)
+     &		.OR.(IFF_FC.GT.32767)) THEN		! error bad FC
+	      IF (IFF_FC .GT. 32767)
+     &		CALL LSL_PUTMSG(NTF2I__FCTOOLARGE,FC)	! FC too large
+	      ISTAT(1) = 0                              ! default to FC 0
+	      FC = 0					! flag FC not numeric
+	         DO 105 I=1,8				! copy it to AC
+		    AC_STR(I) = ICHAR(NTF$_FEAT_CODE(I:I))
+ 105		 CONTINUE
+	      ATTR_LEN = 8	                        ! 8 character FC
+	   ELSE
+	      ISTAT(1) = IFF_FC				! copy to output array
+	   ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C work out rest of ISTAT
+C
+	ISTAT(2)=0				! only used by LASERAID
+	ISTAT(4)=0				! User dependent data
+	ISTAT(3)=0				! default to linear data
+	IF (IS_POINT)  ISTAT(3)='4000'X		! set to point feature
+	CALL IFFFS( ISTAT )			! write out FS entry
+C
+C------------------------------------------------------------------------------
+C If FC is 0, then were unable to read the original feature code as a number.
+C If so always output the feature code as the optional text in AC 1
+C
+C
+	IF (FC.EQ.0) CALL IFFAC(1, 0, AC_STR, ATTR_LEN)		! write the ac
+C
+C------------------------------------------------------------------------------
+C Write the feature level attributes - if defined in the ACD
+C
+C UPDATE_DATE
+CMOD always output this, so LITES2 OPERATIONS can update it.	PGH 24-Jun-1993
+C
+	T = FEAT_UPDATE_DATE
+!!!!	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_UPDATE_DATE) THEN
+	IF (CITF_FEAT_ACD_DEF(T)) THEN
+	   IF (HAD_UPDATE_DATE) THEN
+	      RET = .FALSE.
+	      IF (CITF_FEAT_ACD_TYPE(T).EQ.ACD_DATATYPE_D) THEN   ! is it a DATE
+	         CALL SETAUX(%REF(NTF$_UPDATE_DATE(1:4)),4)
+	         OK = RDINT(YEAR)		! check later if it fails
+	         CALL SETAUX(%REF(NTF$_UPDATE_DATE(5:6)),2)
+	         OK = RDINT(MONTH)		! check later if it fails
+	         CALL SETAUX(%REF(NTF$_UPDATE_DATE(7:8)),2)
+	         OK = RDINT(DAY)		! check later if it fails
+	         RET = CVT_DMY_DAY(DATE,DAY,MONTH,YEAR)
+	      ENDIF
+	   ELSE
+	      DATE=0		! 17th November 1858 is unset value
+	      RET=.TRUE.	! put into VALUE field
+	   ENDIF
+	   IF (RET) THEN
+	      CALL IFFAC(CITF_FEAT_ACD_CODE(T),DATE)
+	   ELSE
+	      DO 120 I=1,8			! copy it to AC string
+120		 AC_STR(I) = ICHAR(NTF$_UPDATE_DATE(I:I))
+	      CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,8)
+	   ENDIF
+	ENDIF
+C
+C UPDATE_STAT
+CMOD always output this, so LITES2 OPERATIONS can update it.	PGH 24-Jun-1993
+C
+	T = FEAT_UPDATE_STAT
+!!!	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_UPDATE_STAT) THEN
+	IF (CITF_FEAT_ACD_DEF(T)) THEN
+	   IF (HAD_UPDATE_STAT) THEN
+	      AC_STR(1) = ICHAR(NTF$_UPDATE_STAT(1:1))
+	   ELSE
+	      AC_STR(1) = ICHAR(' ')	! missing value is space
+	   ENDIF
+	   DO 880 I = 2,4
+880	      AC_STR(I) = ICHAR(' ')
+C	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,1)
+	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),AC_STR)
+	ENDIF
+C
+C SPEC
+C
+	T = FEAT_SPEC
+	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_SPEC) THEN
+	   DO 110 I=1,NTF$_SPEC_LEN			! copy it to AC
+110	      AC_STR(I) = ICHAR(NTF$_SPEC(I:I))
+	   IF (NTF$_SPEC_LEN.GT.0) THEN
+	      CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,NTF$_SPEC_LEN)
+	   ENDIF
+	ENDIF
+C
+C PROCESS
+C
+	T = FEAT_PROCESS
+	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_PROC) THEN
+	   AC_STR(1) = ICHAR(NTF$_PROC(1:1))
+	   DO 881 I = 2,4
+881	      AC_STR(I) = ICHAR(' ')
+C	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,1)
+	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),AC_STR)
+	ENDIF
+C
+C DATE OF PROCESS
+C
+	T = FEAT_DATE_OF_PROCESS
+	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_DOP) THEN
+	   RET = .FALSE.
+	   IF (CITF_FEAT_ACD_TYPE(T).EQ.ACD_DATATYPE_D) THEN   ! is it a DATE
+	      CALL SETAUX(%REF(NTF$_DOP(1:4)),4)
+	      OK = RDINT(YEAR)			! check later if it fails
+	      CALL SETAUX(%REF(NTF$_DOP(5:6)),2)
+	      OK = RDINT(MONTH)			! check later if it fails
+	      CALL SETAUX(%REF(NTF$_DOP(7:8)),2)
+	      OK = RDINT(DAY)			! check later if it fails
+	      RET = CVT_DMY_DAY(DATE,DAY,MONTH,YEAR)
+	   ENDIF
+	   IF (RET) THEN
+	      CALL IFFAC(CITF_FEAT_ACD_CODE(T),DATE)
+	   ELSE
+	      DO 130 I=1,8			! copy it to AC string
+130		 AC_STR(I) = ICHAR(NTF$_DOP(I:I))
+	      CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,8)
+	   ENDIF
+	ENDIF
+C
+C PHYS_STAT
+C
+	T = FEAT_PHYS_STAT
+	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_PHYS) THEN
+	   AC_STR(1) = ICHAR(NTF$_PHYS(1:1))
+	   DO 882 I = 2,4
+882	      AC_STR(I) = ICHAR(' ')
+C	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,1)
+	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),AC_STR)
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C read geometry records, first get ID (if at level 3)
+C
+	OK = READ_CITF_GEOMETRY(NCOORDS,.FALSE.)
+	IF (.NOT.OK) GOTO 999
+C
+C------------------------------------------------------------------------------
+C read any attribute coordinate records and add the value to the CB array
+C
+	OK=READ_CITF_COORDATTS(NCOORDS)
+	IF (.NOT.OK) GOTO 999
+C
+C------------------------------------------------------------------------------
+C read any attribute records
+C
+	OK=READ_CITF_ATTRIBS(IS_POINT)
+	IF (.NOT.OK) GOTO 999
+C
+C------------------------------------------------------------------------------
+C Decide on the basis of GTYPE whether we need to output an RO entry
+C
+	GTYPE = 1
+	IF (IS_POINT) THEN
+	   IF (FRTFND(ISTAT(1))) THEN
+	      CALL WRITEF('%%NTF2I-W-MISC, FC %^W%I0 not in FRT',ISTAT(1))
+	      CALL WRITEF('-NTF2I-I-MISC, Graphical Type needed to determine if RO entry required')
+	      GTYPE = 7
+	      GOTO 800
+	   ELSE
+	      IF (FRTGT.LT.7 .OR. FRTGT.GT.9) THEN
+		 GTYPE = 7
+	      ELSE
+		 GTYPE = FRTGT
+		 IF (FRTGT.EQ.9) THEN
+		    IF (HAD_DT) THEN
+		       IF (XY_UNIT.EQ.1) THEN
+			  GTYPE = 8
+			  CALL LSL_PUTMSG(NTF2I__INCOMPUNITS)
+		       ELSE
+			  GTYPE = 9
+			  OK = CALC_SYMB_POINT(NCOORDS)
+			  IF (.NOT.OK) GOTO 999
+		       ENDIF
+		    ELSE
+		       IF (HAD_OR) THEN
+			  GTYPE = 8
+		       ELSE
+			  GTYPE = 7
+		       ENDIF
+		    ENDIF
+		 ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C We can now output the coordinates that we read earlier
+C
+800	CALL WRITE_CITF_COORDS(NCOORDS,GTYPE) 		!write coordinates
+C
+C------------------------------------------------------------------------------
+C Write an RO if required
+C
+	IF (IS_POINT .AND. GTYPE.EQ.8) CALL IFFRO(OR)
+C
+C------------------------------------------------------------------------------
+C rejoin errors and always close the feature
+C
+999	CALL IFFEF					!end feature
+	READ_CITF_LINEAR=OK
+	RETURN
+	END

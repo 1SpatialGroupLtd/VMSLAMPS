@@ -1,0 +1,414 @@
+	SUBROUTINE GRAFON
+C
+***	MODULE	GRAFON
+***	IDENT	27MR92
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	COLOUR.DAT now DTMCREATE_COLOUR		TJH	02-Feb-1989
+CMOD	S6000 option now tests logical name WKSPLL
+C	and if defined opens graphics using
+C	WOPWKP (parallel interface)		TJH     06-Jul-1988
+CMOD	Converted for TRIEDIT			TJH	07-Dec-1987
+CMOD	GPX option added			TJH	03-Dec-1987
+CMOD	EOF tested for in TEXTIN		TJH	12-Aug-1986
+CMOD	SIGMEX 6100 option added		TJH	29-Jul-1986
+CMOD	File version numbers explicitly forced  TJH	18-Jun-1985
+CMOD	New device types supported		 DM	03-Apr-1985
+CMOD	EXTHAN call moved outside S7000 loop	 DM	05-Dec-1984
+CMOD    VT100 option accommodated  		TJH     03-Jul-1984
+CMOD    Initial command line decoding added, 
+CMOD    TEK 4010 & 4014 allowed		        TJH     28-Jun-1984
+CMOD	CALL VSINIT(7), not (15)		 DM	06-Jun-1984
+C	Standardised 				 DM	25-May-1984
+C
+C W/s
+	LOGICAL		AMBIG	! had an ambiguous file name ?
+	LOGICAL		EOF	! end of file detected?
+	LOGICAL		OK	! function return
+	INTEGER		LASF(13)! aspect source flags
+	DATA    	LASF/13*1/! 			>> "individual"
+	INTEGER		IWKID	! S6100 workstation ident (not used)
+	DATA		IWKID/1/
+C
+C Now in GKS.CMN
+C
+C	INTEGER		WKID		! 
+C	INTEGER		CONID		! connection identifiers
+C	INTEGER		WTYPE		! workstation type
+C	BYTE		PLANE_MASK	! selected planes
+C	REAL		SCRNSZ(2)	! screen size (metres)
+C	INTEGER		RASTSZ(2)	! screen size (pixels)
+C	REAL		NDCX,NDCY	! extent in NDC
+	INTEGER		ERRCOD	! for error reporting
+	INTEGER		III     ! for TTRSTR
+	INTEGER		IDUMMY	! dummy for GOPKS
+	INTEGER*4	DCUNIT	! Units from GQMDS	
+	INTEGER*2	ICHAN	! channel no.
+	REAL		DUMMY	! dummy arg.
+	BYTE		CH	! for use with RDCHS
+	CHARACTER*128	FILTXT	! indirect file name/general file name
+	CHARACTER*100	DEFNAM	! default device/directory for filename
+C
+	INTEGER*4	LNMLST(4)
+	INTEGER*2	LNMLSTW(8)
+	EQUIVALENCE	(LNMLST,LNMLSTW)
+C
+C Functions:
+	LOGICAL		ASNCHN	! assign a channel for TT emulator
+	INTEGER		SYS$CRELNM
+	LOGICAL		SYS$ASSIGN
+	LOGICAL		GETSPEC ! gets a file specification
+	LOGICAL         HADFIL  ! filename on cmd. line?
+	LOGICAL		INITEK	! assign LSL$TK
+	LOGICAL		RDCHS	! read character from line, skip spaces
+	LOGICAL		RDCH	! read character from line
+	INTEGER		RDFILN	! reads and parses a filename
+	INTEGER		TTRSTR  ! read a string from TT:
+	LOGICAL		TRNALL	! translate logical name
+	LOGICAL		SIGCHS
+C
+C Parameters:
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+	INCLUDE	'($LNMDEF)/NOLIST'
+C
+C Common:
+C
+	INCLUDE 'LSL$CMNTRIEDIT:GKS.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:CLPENS.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:FILNMS.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TABLE.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TTTYPE.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C ......................................................................
+C
+C If available get a translation for logical name LSL$DTMCREATE_WORK
+	IF (.NOT.TRNALL('LSL$DTMCREATE_WORK',DEFNAM)) THEN
+	   DEFNAM='SYS$DISK:[]'
+	ENDIF
+C See whether a filename was supplied on the command line
+	TXTPTR=TXTLIM
+	TXTADD=%LOC(TXTBUF)
+	CALL LIB$GET_FOREIGN(TXTDSC,,I)
+	TXTBUF(MIN(I+1,TXTLIM))=0
+	TXTPTR=I
+	CALL BSLN
+C
+	IF (RDCHS(CH)) THEN	! empty line. No indication of hardware,
+	   HADFIL=.FALSE.       ! or filename
+	ELSE			! read the filename
+	   CALL BSCH
+	   JJJ=0
+	   DO 10 III=DCPTR,TXTPTR
+	      IF (RDCH(CH)) THEN
+	         CALL WRITEF
+     &		    ('%S while decoding command line.',ERROR)
+	         CALL LSL_EXIT(SS$_ABORT)
+	      ENDIF		 
+	      IF (CH.EQ.' '
+     &			.OR.CH.EQ.11
+     &			.OR.CH.EQ.15) GOTO 20
+	      JJJ=JJJ+1
+	      ITLE(JJJ:JJJ)=CHAR(TXTBUF(JJJ))
+10	   CONTINUE
+C
+C Try to find the input file.
+20	   CALL STR$UPCASE(ITLE,ITLE)
+	   OK=GETSPEC(ITLE,JJJ,FILTXT,ITLEN,
+     &			DEFNAM(1:SIGCHS(DEFNAM))//'.DTA',' ',AMBIG)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_GETMSG(OK,MESSAGE,MESLEN)! what went wrong ?
+	      I=INDEX(MESSAGE,'!') - 1		! (ignore any FAO stuff)
+	      IF (I.LE.0) I=MESLEN
+	      MESSAGE(1:1)='-'
+	      IF (JJJ.GT.0) THEN
+	         CALL WRITEF('%S searching for %S',ERROR,ITLE(1:JJJ))
+	         CALL WRITEF('%S',MESSAGE(1:I))
+	      ENDIF
+	   ELSE
+	      HADFIL=.TRUE.
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C
+C Were any hardware options supplied on the command line ?
+C As we don't know which options are going to be set let's temporarily
+C set the VT100 option so that error messages may be seen via sys$output
+C
+	USECMD=.FALSE.  ! commands are via cmd. line, not USE command
+	TABACT=.FALSE.	! digitising table is not active
+	VTTEMP=.TRUE.	! note that this is a temporary phenonemon;
+	VT100=.TRUE.    ! turn off again before we leave CONFIG if 
+C                       ! VT100 is not explicitly set 
+C
+	IF (.NOT.RDCHS(CH)) THEN	! also args. on line
+	   CALL BSCH			! backspace the read char. again
+C
+C Decode args. and check for availibility of desired option
+
+	   CALL CONFIG(.FALSE.,.FALSE.,' ')
+	ELSE
+	   CALL CONFIG(.TRUE.,.FALSE.,' ')	! use defaults
+	ENDIF
+C
+C ......................................................................
+C
+	IF (.NOT.VT100) THEN
+	   OK=ASNCHN()			! assign channel for TT emulator
+	   IF (.NOT.OK) THEN
+	      CALL OUTOPT(ERROR//
+     &			'assigning channel for terminal emulator')
+	      CALL LSL_GETMSG(OK,MESSAGE,MESLEN)! what went wrong ?
+	      I=INDEX(MESSAGE,'!')-1		! (ignore any FAO stuff)
+	      IF (I.LE.0) I=MESLEN
+	      MESSAGE(1:1)='-'
+	      CALL OUTOPT(MESSAGE(1:I))
+	      CALL LSL_EXIT(SS$_ABORT)
+	   ENDIF
+	ENDIF
+C
+C Assign LSL$TK
+	IF (S6100.OR.T4014.OR.T4010.OR.MT4014.OR.
+     &	    T4105.OR.T4106.OR.T4107.OR.T4109.OR.T4115) THEN 
+	   OK=INITEK()
+	   IF (.NOT.OK) THEN
+	      CALL OUTOPT(ERROR//'assigning LSL$TK')
+	      CALL LSL_GETMSG(OK,MESSAGE,MESLEN)! what went wrong ?
+	      I=INDEX(MESSAGE,'!')-1		! (ignore any FAO stuff)
+	      IF (I.LE.0) I=MESLEN
+	      MESSAGE(1:1)='-'
+	      CALL OUTOPT(MESSAGE(1:I))
+	      CALL LSL_EXIT(SS$_ABORT)
+	   ENDIF
+	   IF (.NOT.S6100) THEN
+	      IF (MT4014) THEN
+	         CALL TKINIT(7,,5)	
+	         CALL LDWAIT
+	         CALL LDFPPM(4,DUMMY,XEXTEN,YEXTEN)	   
+	         SCALE=MIN(XEXTEN/1024.0,YEXTEN/780.0)
+	         CALL ORIGIN(-1023.0*SCALE/2.0,-779.0*SCALE/2.0)
+	         CALL UNITS(SCALE)
+	      ELSEIF (T4014) THEN
+	         CALL CSIZE(4)
+	      ELSEIF (.NOT.T4010) THEN
+	         CALL TGINIT		! T41XX
+	         CALL CSIZE(4)
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C
+	IF (S6100) THEN			! Sigmex 6100 init stuff.
+C
+C
+C Check whether logical name WKSPLL assigns to anything sensible -
+C if so then use parallel interface
+	   IF (SYS$ASSIGN('WKSPLL',ICHAN,,)) THEN	! OK
+	      CALL SYS$DASSGN(%VAL(ICHAN))	! deassign again
+	      CALL WOPWKP(IWKID,-1,1)	! open for parallel
+	   ELSE
+	      CALL WOPWK(IWKID,-1,1)	! open for serial
+	   ENDIF
+C
+C Set deferral state for picture
+	   CALL WSDS(IWKID,2,1)
+C
+C Set aspect source flags (1=individual ie not "bundled")
+	   CALL WSASF(LASF)
+C
+C Switch alpha screen off
+	   CALL WSVISA(.FALSE.)
+C
+C Switch graphics screen on
+	   CALL WSVISG(.TRUE.)
+C
+C Set workstation window
+	   CALL WSWKWN(IWKID,0,1024,0,780)
+C
+C Set initial colour & size for text
+	   CALL WSTXCI(15)
+	   CALL WSCHH(8)
+	ENDIF
+C
+C ......................................................................
+C
+	IF (GPX) THEN
+C
+	   LNMLSTW(1) = 1
+	   LNMLSTW(2) = LNM$_STRING
+	   LNMLST(2) = %LOC('1')
+	   LNMLST(3) = 0
+	   LNMLST(4) = 0
+	   OK = SYS$CRELNM(,'LNM$PROCESS','LSL$DECW_MODE',,LNMLST)
+	   IF (.NOT.OK) THEN
+              CALL OUTOPT(ERROR//'creating logical name LSL$DECW_MODE')
+	   ENDIF
+C
+C Workstation ident (not used)
+	   IWKID=1
+C
+C Connection identifier
+	   CONID=1001
+C
+C Workstation type
+	   WTYPE=1
+C
+C Startup GKS
+	   CALL GOPKS(IDUMMY)
+C
+C Open workstation
+	   CALL GOPWK(WKID,CONID,WTYPE)	! OPen gKS workstation
+	   CALL GACWK(IWKID)		! and activate it
+C 
+C Set aspect source flags (1=individual ie not "bundled")
+	   CALL GSASF(LASF)
+C
+C Set deferral state to output ASTI (used to be ASAP)
+C and implicit regeneration SUPPRESSED
+	   CALL GSDS(WTYPE,GASTI,GSUPPD)
+C
+C Obtain screen range
+	   CALL GQMDS(WTYPE,ERRCOD,DCUNIT,
+     &	         SCRNSZ(1),SCRNSZ(2),RASTSZ(1),RASTSZ(2))
+C
+C Calculate a screen shaped portion of NDC
+	   NDCX = 1.0
+	   NDCY = SCRNSZ(2)/SCRNSZ(1)
+	   IF (NDCY.GT.1.0) THEN
+	      NDCX = 1.0/NDCY
+	      NDCY = 1.0
+	   ENDIF
+C
+C Set window 
+	   CALL GSWN(1,1.0,1023.0,1.0,780.0)
+C
+C Map this onto a screen shaped portion of NDC
+	   CALL GSVP(1,0.0,NDCX,0.0,NDCY)
+C
+C Set workstation window same as world viewport
+	   CALL GSWKWN(WKID,0.0,NDCX,0.0,NDCY)
+C
+C Set workstation viewport to entire screen
+	   CALL GSWKVP(WKID,0.0,SCRNSZ(1),0.0,SCRNSZ(2))
+C
+C Select normalisation transformation
+	   CALL GSELNT(1)
+C
+C Select colour table to be used
+	   CALL LSG_SET_LUT(WKID,'LSL$LOOKUP:DTMCREATE_COLOUR.DAT')
+C
+C Set initial polyline colour index
+	   CALL GSPLCI(2)
+C
+C Set spacing, colour & size for text
+CC	   CALL GSCHSP(1)
+	   CALL GSTXCI(15)
+	   CALL GSCHH(8.0)
+C
+	ENDIF
+C
+C ......................................................................
+C
+	IF (S7000) THEN			! Sigma init stuff.
+	   CALL VSINIT(7)
+	   CALL VSALOF			! turn off alpha screen
+	   CALL VSSIZE(XSIZE,YSIZE)
+	   SCALE=MIN(XSIZE/1024.0,YSIZE/780.0)
+	   CALL VSORGN(-1023.0*SCALE/2.0,-779.0*SCALE/2.0)
+	   CALL VSUNIT(SCALE)
+	   CALL VSRDSC('LSL$LOOKUP:DTMCREATE_COLOUR.DAT')
+	ENDIF
+C
+	CALL EXTHAN			! establish an exit handler
+	NOMESS=.TRUE.			! no CMDLIB messages
+C
+C ......................................................................
+C
+C MAXPEN is the number of pens available in the system. Every time
+C routine NEWOBJ is called it will pick up the default colour
+C and line type settings for the pen it wants and try to implement
+C them. Hopefully the workstation will give in gracefully!
+	MAXPEN=7
+C set hardware character height in screen units
+	CALL KSCHHT(15.0)
+C
+C ......................................................................
+C
+30	IF (.NOT.HADFIL) THEN	
+C As no filename supplied on command line, prompt for one
+	   HADFIL=.TRUE.
+	   IF (VT100) THEN
+40	      TXTPTR=80
+	      OK=TTRSTR(,,'.DTA file? ')
+	      IF (.NOT.OK) THEN
+	         IF (OK.EQ.LSL__EOF) THEN
+	            CALL LSL_EXIT(SS$_ABORT)
+	         ELSE
+	            CALL OUTOPT(' ')
+	            CALL OUTOPT(ERROR//'reading file-spec')
+	            CALL LSL_GETMSG(OK,MESSAGE,MESLEN)
+	            CALL OUTOPT(MESSAGE(1:MESLEN))
+	            HADFIL=.FALSE.
+	            GOTO 30
+	         ENDIF
+	      ENDIF
+	      IF (TXTPTR.EQ.0) GOTO 40		! User just typed <CR> ?
+	   ELSE
+50	      CALL SCNCLR
+	      TXTPTR=80
+	      CALL TEXTOT('.DTA file? ',0)
+	      CALL TEXTIN(TXTDSC,EOF)
+	      IF (EOF) THEN
+	         CALL GRAFOF
+	         CALL LSL_EXIT(SS$_ABORT)
+	      ENDIF	      
+	      CALL LENGTH(TXTDSC,TXTPTR)
+	      IF (TXTPTR.EQ.0) GOTO 50		! User just typed <CR> ?
+	   ENDIF
+C
+C Decode the potential filename and make sure that specific version 
+C numbers are used
+	   CALL BSLN
+	   JJJ=0
+	   DO 60 III=DCPTR,TXTPTR
+	      JJJ=JJJ+1
+	      ITLE(JJJ:JJJ)=CHAR(TXTBUF(III))
+60	   CONTINUE
+	   CALL STR$UPCASE(ITLE,ITLE)
+C
+C Try to find the input file.
+	   OK=GETSPEC(ITLE,JJJ,FILTXT,ITLEN,
+     &			DEFNAM(1:SIGCHS(DEFNAM))//'.DTA',' ',AMBIG)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_GETMSG(OK,MESSAGE,MESLEN)! what went wrong ?
+	      I=INDEX(MESSAGE,'!') - 1		! (ignore any FAO stuff)
+	      IF (I.LE.0) I=MESLEN
+	      MESSAGE(1:1)='-'
+	      IF (ITLEN.GT.0) THEN
+	         CALL EXPAND(ERROR//'searching for %S',ITLE(1:JJJ))
+	         CALL OUTOPT(EXPDSC)
+	         CALL OUTOPT(MESSAGE(1:I))
+	         CALL LSL_WAIT(2,2)
+	      ENDIF
+	      HADFIL=.FALSE.
+	      GOTO 30
+	   ENDIF
+	ENDIF
+C
+C Use PUTFLN to separate our file specification into its component
+C parts of NODE::DEV:[DIR]FILE.EXT;VER etc the EXPFLN to regenerate it
+	CALL PUTFLN(FILTXT(1:ITLEN))
+	LEN_EXT=3
+	STR_EXT='DTA'
+	CALL EXPFLN(ITLE,ITLEN)
+	RETURN
+	END

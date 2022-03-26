@@ -1,0 +1,157 @@
+	.TITLE	$IFFMND
+	.IDENT	'15DE89'
+;
+; Copyright Laser-Scan Laboratories Ltd, Cambridge, England.
+;
+; Author: Clarke Brunt
+;
+; IFF mend routines
+	.LIBRARY	/SYS$LIBRARY:LIB/
+	.LIBRARY	/LSL$LIBRARY:LSLMACLIB/
+
+	$ATRDEF
+	$FABDEF
+	$FIBDEF
+	$FATDEF
+	$IODEF
+	$NAMDEF
+
+	DATA_PSECT	IFF
+
+STATUS:	.BLKL	1
+
+FIB_BLOCK:
+	.BLKB	FIB$W_DID
+
+FIB_DESCR:
+	.LONG	FIB$W_DID
+	.ADDRESS FIB_BLOCK
+
+ATR_ADDRESS:
+	.ADDRESS ATR_BLOCK
+
+ATR_BLOCK:
+	.WORD	ATR$S_RECATTR
+	.WORD	ATR$C_RECATTR
+	.ADDRESS RECATTR
+	.LONG	0
+
+RECATTR:
+	.BLKB	ATR$S_RECATTR
+
+IO_STATUS:
+	.BLKL	2
+
+DEVICE_DESCR:
+	.BLKL	2
+
+DEVICE_CHANNEL:
+	.BLKW	1
+	
+
+	CODE_PSECT	IFF
+
+; User routine which can be passed as 5th arg to IFFOPN to fix up
+; end of file pointer. FAB address as argument.
+
+.ENTRY	IF$MND,^M<R2>
+
+; LIB$FILE_SCAN needs an expanded string in the NAM block, so
+; if there isn't one already, then create one
+
+	MOVAB	@4(AP),R0		; FAB address
+	MOVL	FAB$L_NAM(R0),R2	; NAM address
+	TSTB	NAM$B_ESS(R2)		; expanded string size
+	BEQL	5$
+	CLRL	R2			; flag already got ES
+	BRB	6$
+5$:	MOVL	#NAM$C_MAXRSS,STATUS	; size required
+	PUSHAL	-(SP)
+	PUSHAL	STATUS
+	CALLS	#2,G^LIB$GET_VM
+	BLBC	R0,10$
+	$NAM_STORE -
+		NAM=(R2),-		; NAM itself
+		ESA=@(SP)+,-		; address of expanded string buffer
+		ESS=#NAM$C_MAXRSS	; size of said buffer
+
+6$:	CLRL	STATUS
+	PUSHAL	G^IF$SCAN_ERR			; error routine
+	PUSHAL	G^IF$SCAN_SUC			; success routine
+	PUSHAL	@4(AP)				; FAB address
+	CALLS	#3,G^LIB$FILE_SCAN		; scan for file
+	BLBC	R0,10$				; error from FILE_SCAN
+	MOVL	STATUS,R0			; error from routine	
+10$:	TSTL	R2
+	BEQL	20$
+	PUSHL	R0				; preserve error code
+	MOVL	#NAM$C_MAXRSS,STATUS
+	PUSHAL	NAM$L_ESA(R2)
+	PUSHAL	STATUS
+	CALLS	#2,G^LIB$FREE_VM
+	$NAM_STORE -
+		NAM=(R2),-		; NAM itself
+		ESA=#0,-		; address of expanded string buffer
+		ESS=#0			; size of said buffer
+	POPL	R0				; recover error code
+20$:	RET
+
+; LIB$FILE_SCAN error routine, called with FAB address as argument
+.ENTRY	IF$SCAN_ERR,^M<>
+	RET
+
+; LIB$FILE_SCAN success routine, called with FAB address as argument
+.ENTRY	IF$SCAN_SUC,^M<R2>
+
+	MOVAL	@4(AP),R2			; FAB address
+	MOVAL	@FAB$L_NAM(R2),R2		; NAM address
+	MOVB	NAM$B_DEV(R2),DEVICE_DESCR	; device length
+	MOVAL	@NAM$L_DEV(R2),DEVICE_DESCR+4	; device name address
+
+; assign a channel to the device
+	$ASSIGN_S	DEVNAM=DEVICE_DESCR,CHAN=DEVICE_CHANNEL
+	BLBCW	R0,90$
+
+; set FIB for write access, denying read and write to others
+	MOVL	#FIB$M_WRITE!FIB$M_NOREAD!FIB$M_NOWRITE,-
+			FIB_BLOCK+FIB$L_ACCTL
+
+; move file id. to FIB
+	MOVW	NAM$W_FID(R2),FIB_BLOCK+FIB$W_FID
+	MOVW	NAM$W_FID+2(R2),FIB_BLOCK+FIB$W_FID+2
+	MOVW	NAM$W_FID+4(R2),FIB_BLOCK+FIB$W_FID+4
+
+; access the file
+	$QIOW_S	CHAN=DEVICE_CHANNEL,-
+		FUNC=#IO$_ACCESS!IO$M_ACCESS,-
+		IOSB=IO_STATUS,-
+		P1=FIB_DESCR,-
+		P5=ATR_ADDRESS
+	BLBC	R0,90$
+	MOVZWL	IO_STATUS,R0
+	BLBC	R0,90$
+
+; modify end of file pointers
+	MOVL	RECATTR+FAT$L_HIBLK,RECATTR+FAT$L_EFBLK
+	INCW	RECATTR+FAT$W_EFBLKL
+	BCC	10$
+	INCW	RECATTR+FAT$W_EFBLKH
+10$:	CLRW	RECATTR+FAT$W_FFBYTE
+
+; deaccess file, modifying attributes
+	$QIOW_S	CHAN=DEVICE_CHANNEL,-
+		FUNC=#IO$_DEACCESS,-
+		IOSB=IO_STATUS,-
+		P1=FIB_DESCR,-
+		P5=ATR_ADDRESS
+	BLBC	R0,90$
+	MOVZWL	IO_STATUS,R0
+
+; and deassign channel
+90$:	MOVL	R0,STATUS		; set error code
+	$DASSGN_S	CHAN=DEVICE_CHANNEL
+	MOVL	STATUS,R0		; and return it
+	RET
+
+	.PSECT
+	.END

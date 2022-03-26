@@ -1,0 +1,154 @@
+; Copyright Laser-Scan Labs Ltd, Cambridge, England.
+; Author Paul Hardy
+; Last edited 10/June/80
+ 
+; Unsolicited terminal input
+ 
+	.TITLE	UTIN
+	.IDENT	/05AP84/
+	.LIBRARY/LSL$LIBRARY:LSLMACLIB/
+ 
+; local storage
+
+	DATA_PSECT	VIO
+ 
+TTDESC:	.ASCID	/TT/			; string descriptor for device name
+ 
+MBNAME:	.LONG	MBSIZE			; string descriptor for mailbox name
+	.LONG	MBBUFF
+MBBUFF:	.ASCII	/UTRMBX/		; first part qualified by ...
+MBTN:	.ASCII	/TTA0/			; ... the terminal name
+MBSIZE=.-MBBUFF
+MBCHAN:	.LONG	0
+MBDEV:
+MBDLEN:	.LONG	MBDSIZ			; string desc for MB device name
+MBDPTR:	.LONG	MBDBUF
+MBDBUF:	.BLKB	40			; MB device name
+MBDSIZ=.-MBDBUF
+MBIOSB:	.BLKL	2			; MB iostatus block
+ 
+EQVDSC:					; string descriptor for translation
+EQVLEN:	.LONG	40			; length of translated string
+EQVPTR:	.LONG	EQVBUF			; pointer to name
+EQVBUF:	.BLKB	40			; space for logical name translation
+ 
+UTRISB:	.LONG	0			; IO status block
+UTRSTS:	.LONG	0
+UTRCHR:	.LONG	0			; buffer for char
+UTREFS:	.LONG	0			; status of EFNs
+UTRNUL:	.LONG	0			; null string
+ 
+UTREFN:	.LONG	0			; event flag no
+UTRCHN:	.LONG	0			; channel no
+ 
+	CODE_PSECT	VIO
+ 
+; initialisation routine
+ 
+; initialisation routine CALL UTRINI(['dev'][,efn])
+ 
+	.ENTRY	UTRINI,^M<>
+	MOVAL	TTDESC,R1		; default device
+	CMPB	(AP),#1			; first arg ?
+	BLSS	10$			; missing
+	MOVL	4(AP),R1		; string descriptor pointer for device
+10$:	$TRNLOG_S	LOGNAM=(R1),-	; translate logical name for device
+			RSLLEN=EQVLEN,-	; length
+			RSLBUF=EQVDSC	; destination
+	BLBC	R0,14$
+	MOVL	EQVBUF+1,MBTN		; update mailbox name
+	$TRNLOG_S	LOGNAM=MBNAME,-	; try translating mailbox name
+			RSLLEN=MBDLEN,-
+			RSLBUF=MBDEV	; destination for device name
+	BLBS	R0,15$
+14$:	BRW	EXIT
+15$:	CMPL	R0,#SS$_NORMAL		; found a translation ?
+	BNEQ	NEWMBX			; if not then can create new MBX
+; here with existing mailbox
+	$ASSIGN_S	DEVNAM=MBDEV,-	; assign channel to it
+			CHAN=MBCHAN
+	BLBC	R0,JJEXIT
+ 
+; now clear any existing crud from it
+20$:	$QIOW_S	FUNC=#IO$_READVBLK!IO$M_NOW,-
+		CHAN=MBCHAN,-
+		IOSB=MBIOSB,-
+		P1=MBBUFF,-
+		P2=#MBSIZE
+	BLBC	R0,JJEXIT
+	TSTW	MBIOSB+2		; anything read?
+	BNEQ	20$		; if NEQ, yes - try ignoring something else
+	BRB	GOTMBX			; rejoin new mbx route
+JJEXIT:	BRW	EXIT			; stepping stone
+; if no translation then can safely create a new mailbox
+NEWMBX:	$CREMBX_S	CHAN=MBCHAN,-
+			LOGNAM=MBNAME
+	BLBC	R0,EXIT
+GOTMBX:	$ASSIGN_S	DEVNAM=EQVDSC,-	
+			CHAN=UTRCHN,-
+			MBXNAM=MBNAME
+	BLBC	R0,EXIT
+	CMPB	(AP),#2			; second arg is efn
+	BLSS	20$			; missing
+	MOVZBL	@8(AP),UTREFN		; use given efn
+	BRB	30$
+20$:	PUSHAL	UTREFN			; place to put it
+	CALLS	#1, G^LIB$GET_EF	; get event flag no
+	BLBC	R0,EXIT
+30$:	JSB	MBENBL			; enable mailbox for unsolicited data
+	RET
+ 
+ 
+; Read character from TT if any has been typed since last call
+ 
+	.ENTRY	UTRCH,^M<>
+	$READEF_S	EFN=UTREFN,STATE=UTREFS ; anything happened yet ?
+	BLBC	R0,EXIT
+	CMPL	R0,#SS$_WASSET		; was it set ?
+	BEQL	10$			; yes
+; here with still clear so no char yet
+	CLRB	@4(AP)			; no char
+99$:	RET
+ 
+10$:	MOVB	UTRCHR,@4(AP)		; char
+	BSBB	MBENBL			; enable mailbox again
+	BRB	99$
+ 
+EXIT:	$EXIT_S	R0			; error exit
+ 
+; set up mailbox and terminal for unsolicited input
+ 
+MBENBL:	$CLREF_S	EFN=UTREFN	; nothing happened yet
+	$QIOW_S	FUNC=#IO$_SETMODE!IO$M_WRTATTN,-  ; alert the mailbox
+		CHAN=MBCHAN,-
+		P1=MBAST
+	BLBC	R0,EXIT
+	$QIOW_S	FUNC=#IO$_WRITEVBLK!IO$M_ENABLMBX!IO$M_NOFORMAT!IO$M_PURGE,-
+		CHAN=UTRCHN,-		; enable the terminal
+		P1=UTRNUL,-
+		P2=#1
+	BLBC	R0,EXIT
+	RSB
+ 
+; AST routine
+ 
+	.ENTRY	MBAST,^M<>
+	$QIOW_S	FUNC=#IO$_READVBLK!IO$M_NOW,-
+		CHAN=MBCHAN,-
+		P1=MBBUFF,-
+		P2=#MBSIZE
+	BLBC	R0,JEXIT
+	$QIOW_S	FUNC=#IO$_READVBLK!IO$M_NOECHO!IO$M_NOFILTR,-  ; get char
+		CHAN=UTRCHN,-
+		IOSB=UTRISB,-
+		P1=UTRCHR,-
+		P2=#1
+	BLBC	R0,JEXIT
+	$SETEF_S	EFN=UTREFN	; mark as char available
+	BLBC	R0,JEXIT
+	RET
+ 
+JEXIT:	BRW	EXIT			; stepping stone
+ 
+	.PSECT
+	.END

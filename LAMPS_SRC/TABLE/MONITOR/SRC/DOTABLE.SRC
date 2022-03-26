@@ -1,0 +1,182 @@
+	SUBROUTINE DO_TABLE
+C
+***	IDENT	11FE88
+***	MODULE	DO_TABLE
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 26 July 1984
+C
+C This subroutine handles the main loop of the TABLE_MONITOR
+C It only returns if the process should relinquish the table
+C and enter hibernation again
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'($SSDEF)'
+C
+C common blocks, etc
+C
+***	PARAMETER/HERE:ERROR/		! error numbers
+***	COMMON/HERE:GEN/		! for GOT_TABLE, ERR_SAV, etc
+C
+***	PARAMETER/CMN:TABMON/		! for TIME_OUT
+***	COMMON/CMN:SECTION/		! for SEC_BASE
+***	COMMON/HERE:STREAM/		! for OLDX,OLDY,OLDBUTN
+C
+C functions called
+C
+	LOGICAL		DIGTIS		! check the table string
+	INTEGER*4	SYS$CLREF	! clear an event flag
+	INTEGER*4	SYS$READEF	! read  an event flag
+	LOGICAL		WRITE_LOCK	! establish an exclusive
+C					! lock on the section
+	LOGICAL		UNLOCK		! release the lock again
+C
+C worskpace
+C
+	INTEGER*4	X,Y		! where the button was pressed
+	BYTE		BUTN		! which button was pressed
+	INTEGER*4	IERR		! error number
+	INTEGER*4	TMO		! timeout workspace
+	INTEGER*4	DUMMY
+	INTEGER*4	TEMP
+	INTEGER*4	FLAG
+	PARAMETER	(FLAG = -999)
+C
+C *********************************************************************
+C
+C and work out the time-out period - this is defined in hundredths of
+C a second in the global section
+C
+5	CONTINUE
+C
+	CALL COPY_LONG( %VAL( SEC_BASE+TIME_OUT ), TMO )
+C
+	IF ( TMO.LE.0 ) TMO = DEFAULT_TIMEOUT
+C
+	DELTA = TMO * 100*1000		! in 100 nanosecond units
+C
+C are we using new TABLIB? - read the global section, and then
+C clear the field, in case somebody control ys out of there program
+C (ie does not close TABMON down properly)
+C
+	CALL COPY_LONG(%VAL(SEC_BASE+EXTRA_FLGS),EXTRA_FLG)
+C
+C first we must ensure that we have the lock
+C
+	IF ( WRITE_LOCK() ) GOTO 9999	! give up if can't
+	CALL COPY_LONG(0,%VAL(SEC_BASE+EXTRA_FLGS))
+C
+C write FLAG back again, so we can check if INITAB has been called
+C
+	CALL COPY_LONG( FLAG, %VAL(SEC_BASE+TIME_OUT))
+C
+C and now unlock
+C
+	IF ( UNLOCK() ) GOTO 9999
+C
+10	CALL INIT_BUFFER		! initialise our typeahead
+C
+C and unset the current streamed position and button
+C
+	OLDX    = -32767
+	OLDY    = -32767
+C
+C and note that the last (!) button press wasn't streamed
+C
+	WAS_STREAM = .FALSE.
+C
+C and that we haven't yet been asked for a button
+C
+	BUTN_REQ = .FALSE.
+C
+C and unset the last button pressed
+C
+	OLD_BUTN = -1
+C
+C and we must try for a first button press (but note we purge any
+C typeahead that might be lying around) Also, don't forget to note
+C our current time, for 'debouncing'
+C
+	CALL SYS$GETTIM( BEFORE )	! note the time
+	CALL PURTAB			! start the table read off
+C
+C *********************************************************************
+C
+C and each time we get a table response, process it
+C
+200	CALL WAITAB			! wait for a response
+C
+C this may have been a button press at the table, or a "probe table"
+C command from TABLIB, or possibly the
+C library has set the HIBERNATE event flag - check that first
+C
+	IERR = SYS$CLREF( %VAL(HIBERNATE) )
+C
+C now, have we been ordered to hibernate again?
+C
+	IF ( IERR.EQ.SS$_WASSET ) THEN
+	   CALL STOPTAB			! clear our input
+	   RETURN			! and return
+	ENDIF
+C
+C +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+C now check if INITAB has been called (ie new program without closing
+C down properly)
+C
+	CALL COPY_LONG( %VAL( SEC_BASE+TIME_OUT ), TEMP )
+	IF (TEMP.NE.FLAG) GOTO 5
+C
+C +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+C now check for a "probe table" command from TABLIB
+	IF (EXTRA_FLG) THEN
+	   IERR = SYS$CLREF(%VAL(ASK_TABLE))
+C
+C if there was a command, then we deal with it completely synchronously
+C everything else is thrown away
+	   IF (IERR.EQ.SS$_WASSET) THEN
+	      CALL ASKTAB	! this may fail and set ERROR flag
+	      GOTO 10
+	   ENDIF
+	ENDIF
+C
+C +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+C
+C otherwise, did we have a button press?
+C
+	IERR = SYS$READEF( %VAL(TABLE_EFN), DUMMY )
+C
+	IF ( IERR.EQ.SS$_WASSET ) THEN
+C
+C    yes - find out what it was
+C
+	   IF ( DIGTIS( BUTN, X, Y ) ) THEN
+C
+C	 we have a valid button press - place it away
+C
+	      IF ( WAS_STREAM ) THEN
+	         CALL WRITE_STREAM( X, Y )
+	      ELSE
+	         CALL OUT_PUCK( BUTN, X, Y )
+	      ENDIF
+C
+	   ENDIF
+C
+	ELSE
+C
+C    there was nothing read - we must attempt to pop something
+C    off the typeahead stack, as NO_BUTTON must have been set
+C
+	   CALL POP_PUCK	! pop button into section
+C
+	ENDIF
+C
+C and repeat the whole thing
+C
+	GOTO 200
+C
+C *********************************************************************
+C
+9999	RETURN
+	END

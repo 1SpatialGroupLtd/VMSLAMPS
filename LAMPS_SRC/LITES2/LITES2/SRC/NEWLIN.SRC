@@ -1,0 +1,201 @@
+	SUBROUTINE NEWLIN(FILINP,NOLIN)
+C
+***	IDENT	25MY94
+***	MODULE	NEWLIN
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RJH	04-DEC-1984
+C
+C Description
+C
+C    This subroutine is part of the LITES2 Command Interface, and its
+C purpose is to read a line into the text input buffer.
+C    If necessary, a command file is opened or selected and the next
+C line read from it. Alternatively, if input is interactive, the
+C appropriate command is entered into the text input buffer. The
+C initialisation command file is handled by translating its logical
+C name, and if successful, a command file directive is entered into the 
+C text input buffer. If initialisation has been completed, the DCL
+C command line is used if it has not yet been read.
+C    The argument returned is a flag indicating whether or not a line
+C has been successfully read.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:EFNLUN/		! line input constants
+***     PARAMETER/CMN:MOANMESS/		! moan constants
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+C
+***	COMMON/CMN:DFILRD/		! command filename details
+***     COMMON/CMN:DIN/			! command decoding input
+***     COMMON/CMN:GLOBAL/		! global variables
+***	COMMON/CMN:LICENC/
+***     COMMON/CMN:LVAR/		! line input variables
+***     COMMON/LSL$CMNLSL:TXTC/
+C
+C Arguments
+C
+	INTEGER		FILINP		! flags, input from a file ?
+	LOGICAL		NOLIN		! no line read ?
+C
+C Functions called
+C
+	INTEGER*4	COMLIN		! reads DCL command line if any
+	INTEGER*4	FLRLIN		! reads a record from file
+	INTEGER*4	FLRSEL		! selects a file for reading
+	LOGICAL		FRMFIL		! input from command file ?
+	LOGICAL		RSPINP		! respond level command input ?
+	LOGICAL		RDLONG
+	INTEGER		SIGCHS
+C
+C Local Variables
+C
+	INTEGER*4	CLILEN		! DCL command line length
+	INTEGER*4	ERRCOD		! file I/O error code
+	INTEGER*4	RETCOD		! system error code
+	LOGICAL		WASNEW		! was new file
+	INTEGER		ENC_CODE
+C
+C Initialisation
+C
+	CLILEN = 0
+	ERRCOD = 0
+	FILINP = 1		! assume from file (bottom bit)
+	NOLIN = .FALSE.
+C
+C Open a new command file if necessary
+C
+	WASNEW = NEWFIL		! needed below
+	IF (NEWFIL) THEN
+	   CALL OPNFIL
+	   IF (.NOT. MOANED)
+     &	      CALL INFORM(MSG_RDNGFILE,'command',
+     &	                  DFLST(DTOP)(1:DFLEN(DTOP)))
+	   NEWFIL = .FALSE.			! reset flag
+C
+C If there is no new command file but one is already open, select it for
+C reading
+C
+	ELSE IF (FRMFIL()) THEN
+	   ERRCOD = FLRSEL(DTOP)
+	   IF (.NOT.ERRCOD) THEN
+              CALL NASTY(MSG_FLRSELERR,DFLST(DTOP)(1:DFLEN(DTOP)),DTOP)
+	      CALL LITES2_SIGNAL(RETCOD)
+	      CALL CLOFIL
+	   ENDIF
+	ENDIF
+C
+C If no errors and reading from a command file, read a line in
+C
+	IF (.NOT. MOANED) THEN
+	   IF (FRMFIL()) THEN
+10	      ERRCOD = FLRLIN(,,,RETCOD)
+C
+C If the end of file has been reached, the command file is closed, and
+C if this is successful, a message is output
+C
+	      IF (.NOT.ERRCOD) THEN
+	         IF (ERRCOD .EQ. LSL__EOF) THEN
+		    CALL CLOFIL
+		    IF (.NOT. MOANED) THEN
+		       CALL INFORM(MSG_CMDFILCOMPL)
+		       NOLIN = .TRUE.
+		    ENDIF
+C
+C Output message if error occurred while reading in line
+C
+	         ELSE 
+		    CALL NASTY(MSG_FLRLINERR,DFLST(DTOP)(1:DFLEN(DTOP)),
+     &		    DTOP)
+		    CALL LITES2_SIGNAL(ERRCOD)
+		    IF (ERRCOD .EQ. LSL__SYSREAD) CALL LITES2_SIGNAL(RETCOD)
+	            CALL CLOFIL
+	         ENDIF
+	      ELSE
+C
+C if this was first line from a new file, check whether encrypted
+	         IF (WASNEW) THEN
+	            WASNEW = .FALSE.
+	            DFKL(DTOP) = 0
+	            IF (TXTPTR.LT.4) GOTO 20	! not long enough
+	            IF (TXTBUF(1).NE.'#' .OR.
+     &			TXTBUF(2).NE.'%' .OR.
+     &			TXTBUF(3).NE.'#') GOTO 20 ! no '#%#'
+	            CALL SETWIN(4,)
+	            IF (RDLONG(ENC_CODE)) GOTO 20 ! no enc code
+C
+C check key in licence and get DFKEY(DTOP)
+	            IF (USELIC) CALL TSTENC(%VAL(LFUNAD),ENC_CODE,DFKEY(DTOP))
+	            DFKL(DTOP) = SIGCHS(DFKEY(DTOP))
+	            IF (DFKL(DTOP).EQ.0) THEN
+	               CALL MOAN(MSG_ENCNOTLIC,ENC_CODE,
+     &				DFLST(DTOP)(:DFLEN(DTOP)))
+	               CALL CLOFIL
+	               GOTO 999
+	            ENDIF
+	            JOUFCE = .TRUE.
+	            CALL JOUCMD		! journal @file line
+	            JOUFCE = .FALSE.
+	            GOTO 10		! back for next 'real' line
+	         ENDIF
+C
+C check if need to decrypt the line
+20	         IF (DFKL(DTOP).NE.0) THEN
+	            CALL ENCRYPT(DFKEY(DTOP)(:DFKL(DTOP)))
+	            FILINP = -1	! encrypted (-ve), and from file
+	         ENDIF
+	      ENDIF
+C
+C Not already reading from a command file
+C
+	   ELSE
+	      FILINP = 0
+C
+C If recovery file has not been tried, attempt to set a command 
+C directive for it, and set the initialisation flags
+C
+	      IF (.NOT. RECODN) THEN
+		 CALL SETFIL('LSL$LITES2REC',RECODN)
+		 INITDN = ((.NOT. RECODN) .OR. MOANED)
+		 WSIDN = INITDN
+	      ENDIF
+C
+C If the initialisation command file has not been read, check if the 
+C RESPOND command has been given. If not, attempt to set a command 
+C directive for the initialisation file. If this file has been read, or 
+C if it does not exist, attempt to set a command file directive for the 
+C work station initialisation file.
+C
+	      IF (.NOT. WSIDN) THEN
+		 IF (RSPINP()) THEN	! respond level input ?
+		    CALL INTACT		! interactive input
+		 ELSE
+		    IF (.NOT. INITDN) THEN
+		       CALL SETFIL('LSL$LITES2INI',INITDN)
+		       WSIDN = MOANED
+		    ENDIF
+		    IF (INITDN .AND. (.NOT. WSIDN)) CALL SETWRK(WSIDN)
+		 ENDIF
+	      ENDIF
+C
+C If initialisation is complete and the DCL command line has not been
+C read, it is used (if it exists).
+C
+	      IF (RECODN .AND. WSIDN .AND. (.NOT. MOANED)) THEN
+		 IF (.NOT. CLIDN) THEN
+		    CLILEN = COMLIN()
+		    CLIDN = .TRUE.
+		 ENDIF
+C
+C If both the initialisation file and DCL command line have been read,
+C input is assumed to be interactive. The appropriate menu command is
+C placed in the text input buffer
+C 
+		 IF (CLILEN .EQ. 0) CALL INTACT
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+999	RETURN
+	END

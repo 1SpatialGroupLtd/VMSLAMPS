@@ -1,0 +1,654 @@
+	LOGICAL FUNCTION CMDLINE
+C
+***	IDENT	11DE90
+***	MODULE	CMDLINE
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C
+C Author TJ Ibbs, 30 April 1986
+C
+CMOD	Added /INDEX qualifier				ACM 27-Apr-1989
+C
+C To read the command line and pack its data away safely
+C
+C - returns FALSE if we succeed, and TRUE if we should EXIT
+C
+	IMPLICIT NONE
+C
+C common files
+C
+	INCLUDE	'LSL$CMNLSL:CLD.CMN'		! for command line reading
+	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'	! for HAD_VER
+	INCLUDE	'CMN:FILES.CMN'			! local files & switches
+	INCLUDE	'CMN:OSTF2IMSG.PAR'		! error messages
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+C
+C externals
+C
+	INTEGER		OSTF2I_CLD
+	EXTERNAL	OSTF2I_CLD
+C
+C functions
+C
+	LOGICAL		DCL_STARTUP		! start command line off
+	LOGICAL		DCL_FILE		! read a file name
+	LOGICAL		DCL_QUAL		! and a qualifier
+	LOGICAL		DCL_INT			! and an integer
+	LOGICAL		TEST_FOREIGN		! check device type
+	LOGICAL		TEST_TERM		! and again
+C
+C workspace
+C
+	LOGICAL		OK			! return from DCL_xxx
+	LOGICAL		ABSENT			! filename absent?
+	LOGICAL		HAD_QUAL		! had global qualifier?
+	LOGICAL		PRESENT			! had local  qualifier?
+	LOGICAL		NEGATED			! qualifier negated?
+C
+	LOGICAL		IS_FOREIGN		! is it MOUNT/FOREIGN
+	INTEGER		IERR
+C
+	LOGICAL	   	HAD_FC    		! FC keyword present
+	LOGICAL   	HAD_CAT   		! CATEGORY keyword present
+	LOGICAL		HAD_SIZE  		! SIZE keyword present
+	LOGICAL		HAD_STYLE 		! STYLE keyword present
+C
+	INTEGER*2	I			! Loop counter
+	INTEGER*2	MAXWORD
+	PARAMETER      (MAXWORD = 32767)	! Max value for word
+C
+C **********************************************************************
+C set up various defaults
+C
+	DATA 	COMB_FC 	/ 900, 555, 28 /
+	DATA	COMB_CAT	/ 11 /
+	DATA	COMB_SIZE	/ 12 /
+	DATA	COMB_STYLE	/ 3 /
+C
+	CMDLINE = .TRUE.			! assume failure
+C
+	HAD_SELECT  = .FALSE.			! no /SELECT
+	HAD_OUTFILE = .FALSE.			! no output file chosen
+	HAD_COMB    = .FALSE.			! no OS text conversion
+	ASCII       = .TRUE.			! assume data in ASCII
+	POINT_SIZE  = .FALSE.			! assume OS text hts in mm/10
+	BLOCKSIZE   = 1800			! default blocksize
+	BL_POINTER  = 0				! Prompt to read first
+C						! block - serial MT only
+C
+	SERIAL_MT = .FALSE.	! default case - may be altered later
+C
+C **********************************************************************
+C and read in the command line
+C
+	OK = DCL_STARTUP( 'OSTF2I',		! command verb
+     &			  .FALSE.,		! don't burst parameter lists
+     &			  OSTF2I_CLD,		! our CLD file
+     &			  .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+C **********************************************************************
+C INFILE - determine our input file (or magtape)
+C
+	OK = DCL_FILE( 'INFILE',		! qualifier name
+     &		       '.OSTF;0',		! default filename
+     &		       ABSENT,			! out - was name absent?
+     &		       .FALSE.,			! only one file to process
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+C the filename is now in FILARY(1) - put it into our own space
+C
+	INFILE_LEN = FIL_LEN(1)
+	INFILE     = FILARY(1)(1:INFILE_LEN)
+C
+C Now we need to check, if we had a device name, whether it relates to a
+C magtape mounted /FOREIGN - if we do then it overrides any /SERIAL_MAGTAPE
+C switch
+C
+ 	IF (HAD_DEV) THEN
+C
+	   OK = TEST_FOREIGN(STR_DEV(:LEN_DEV),IS_FOREIGN,IERR)
+	   IF (.NOT. OK) THEN
+	      CALL LSL_PUTMSG(OSTF2I__INPTYPE,STR_DEV(:LEN_DEV))
+	      CALL LSL_ADDMSG(OK)
+	      IF (OK .EQ. LSL__SYSERR) CALL LSL_ADDMSG(IERR)
+	      GOTO 9000				! and exit
+	   ENDIF
+C
+C now, if it is not mounted /FOREIGN, should we believe it to be
+C a serial magtape? check what the user specified...
+C
+C if they asked for a SERIAL_MAGTAPE, and we have a terminal device
+C for output, then it is...
+C
+	   IF ( .NOT.IS_FOREIGN ) THEN
+	      OK = DCL_QUAL( 'SERIAL_MAGTAPE',	! qualifier name
+     &		             HAD_QUAL,		! out - globally there
+     &		             PRESENT,		! out - locally there
+     &		             NEGATED,		! out - true if negated
+     &		             .TRUE. )		! deal with errors itself
+C
+	      IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	      IF ( HAD_QUAL ) THEN
+		 OK = TEST_TERM(STR_DEV(:LEN_DEV),SERIAL_MT,IERR)
+		 IF (.NOT. OK) THEN
+		    CALL LSL_PUTMSG(OSTF2I__INPTYPE,STR_DEV(:LEN_DEV))
+		    CALL LSL_ADDMSG(OK)
+		    IF (OK .EQ. LSL__SYSERR) CALL LSL_ADDMSG(IERR)
+		    GOTO 9000				! and exit
+		 ENDIF
+	      ENDIF
+C
+	   ENDIF
+C
+	   IF (IS_FOREIGN.OR.SERIAL_MT) THEN	! If it is a magtape
+	      INFILE = STR_DEV(:LEN_DEV)//':'	! we just want the device
+	      INFILE_LEN = LEN_DEV + 1		! name.
+	   ENDIF
+	ELSE					! No device name given
+	   SERIAL_MT = .FALSE.			! Say not serial tape.
+	ENDIF
+C
+C **********************************************************************
+C /ASCII or /EBCDIC - is our data in ASCII or EBCDIC?
+C
+	OK = DCL_QUAL( 'ASCII',			! qualifier name
+     &		       HAD_QUAL,		! out - globally the[Are
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   ASCII = .TRUE.
+	ENDIF
+C
+	OK = DCL_QUAL( 'EBCDIC',		! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   ASCII = .FALSE.
+	ENDIF
+C
+C **********************************************************************
+C /[NO]POINT_SIZE - is OS text height to be in point sizes?
+C
+	OK = DCL_QUAL( 'POINT_SIZE',		! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   POINT_SIZE = .NOT.NEGATED		! true if /POINT_SIZE
+	ENDIF
+C
+C **********************************************************************
+C /[NO]IFF_POINTSIZE - is IFF text height to be in point sizes?
+C
+	OK = DCL_QUAL( 'IFF_POINTSIZE',		! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IFF_POINTSIZE = HAD_QUAL		! true if qualifier present
+C						! or default
+C
+C **********************************************************************
+C /[NO]HISTORY - should the IFF file contain a HIstory (and type 2 MD) entry ?
+C
+	OK = DCL_QUAL( 'HISTORY',		! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   NEW_TYPE = .NOT.NEGATED		! true if /HISTORY
+	ENDIF
+C
+C **********************************************************************
+C /[NO]INDEX - do we want index only?
+C
+	OK = DCL_QUAL( 'INDEX',			! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   INDEX_ONLY = .NOT.NEGATED		! true if /INDEX
+	ENDIF
+C
+C **********************************************************************
+C /[NO]LOWER_LEFT - do we want lower left corners of text only?
+C
+	OK = DCL_QUAL( 'LOWER_LEFT',			! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   HAD_LOWER_LEFT = .NOT.NEGATED		! true if /LOWER_LEFT
+	ENDIF
+C
+C **********************************************************************
+C /[NO]AUTO_PLUS - do we have search for OSTF+ data ?
+C
+	OK = DCL_QUAL( 'AUTO_PLUS',		! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   HAD_AUTO_PLUS = .NOT.NEGATED			! true if /AUTO_PLUS
+	ENDIF
+C
+C **********************************************************************
+C /[NO]PLUS - do we have OSTF+ data ?
+C
+	OK = DCL_QUAL( 'PLUS',			! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   PLUS = .NOT.NEGATED			! true if /PLUS
+	ENDIF
+C
+C **********************************************************************
+C /[NO]TRUNCATE - do we want to truncate texts with trailing spaces ?
+C
+	OK = DCL_QUAL( 'TRUNCATE',		! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   TRUNCATE = .NOT.NEGATED		! true if /TRUNCATE
+	ENDIF
+C
+C **********************************************************************
+C /BLOCKSIZE=n - select the blocksize on the tape
+C
+	OK = DCL_QUAL( 'BLOCKSIZE',		! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+C if the switch was present, then record as much, and read its value(s)
+C into the CLD common block, from whence we will retrieve them.
+C
+ 	IF ( HAD_QUAL ) THEN
+	   OK = DCL_INT( 'BLOCKSIZE',		! qualifier name
+     &			 .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	   BLOCKSIZE = IARRAY(1)		! remember the value
+	ENDIF
+C
+C **********************************************************************
+C /[NO]GRID[=n] - output a grid ?
+C
+	OK = DCL_QUAL( 'GRID',			! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+C if the switch was present, then record as much, and if a value was 
+C given then read it into the CLD common block, from whence we will 
+C retrieve it.
+C
+ 	IF ( HAD_QUAL ) THEN
+	   ADD_GRID = .NOT.NEGATED		! true if /GRID
+	   OK = DCL_INT( 'GRID',		! qualifier name
+     &			 .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	   IF (NUMINT .GT. 0) THEN
+	      GRID_INT = IARRAY(1)		! remember the value
+	   ELSE
+	      GRID_INT = 0
+	   ENDIF
+	ENDIF
+C
+C **********************************************************************
+C /[NO]FRT[=file] - use FRT file to find oriented symbols and read ACD's
+C
+	OK = DCL_QUAL( 'FRT',			! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+C set the flag and set the default filename
+C
+	IF ( HAD_QUAL ) THEN
+C
+	   HAD_FRT = .NOT.NEGATED		! true if /FRT
+	   FRTFILE = 'LSL$FRT:OS.FRT'
+	   FRTFILE_LEN = 14
+C
+C and get the filename
+C
+	   OK = DCL_FILE( 'FRT',		! qualifier name
+     &		       FRTFILE(1:FRTFILE_LEN),	! default filename
+     &		       ABSENT,			! out - was name absent?
+     &		       .FALSE.,			! only one file to process
+     &		       .TRUE. )			! deal with errors itself
+C
+	   IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+C was it there?
+C If it was, then copy the filename somewhere more useful
+C
+	   IF ( .NOT.ABSENT ) THEN
+	      FRTFILE_LEN = FIL_LEN(1)
+	      FRTFILE = FILARY(1)(1:FIL_LEN(1))
+	   ENDIF
+C
+	ENDIF
+C
+C **********************************************************************
+C /SELECT=(list) - select the sheets from the input file to be read used
+C
+	OK = DCL_QUAL( 'SELECT',		! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+C if the switch was present, then record as much, and read its value(s)
+C into the CLD common block, where we will leave them.
+C
+ 	IF ( HAD_QUAL ) THEN
+	   OK = DCL_INT( 'SELECT',		! qualifier name
+     &			 .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	   NUM_SEL = NUMINT
+	   DO 90 I = 1, NUM_SEL
+	      SEL_LIST(I) = IARRAY(I)
+90	   CONTINUE
+	   HAD_SELECT = .TRUE.			! remember we've had it
+	ENDIF
+C
+C **********************************************************************
+C OUTFILE - optional output file
+C
+	OK = DCL_FILE( 'OUTFILE',		! qualifier name
+     &		       'LSL$IF:.IFF',		! default filename
+     &		       ABSENT,			! out - was name absent?
+     &		       .FALSE.,			! only one file to process
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+C was it there?
+C If it was, then copy the filename somewhere more useful, and check that
+C we have not been given a version number
+C If we have not had an explicit selection, then generate a default selection
+C of sheet 1. Otherwise, check that only one sheet has been selected
+C
+	IF ( .NOT.ABSENT ) THEN
+C
+ 	   HAD_OUTFILE = .TRUE.
+	   OUTFILE_LEN = FIL_LEN(1)
+	   OUTFILE     = FILARY(1)(1:OUTFILE_LEN)
+C
+	   IF ( HAD_VER ) THEN
+	      CALL LSL_PUTMSG( OSTF2I__VERSION )
+	      GOTO 9000
+	   ENDIF
+C
+	   IF ( HAD_SELECT ) THEN
+	      IF ( NUM_SEL.GT.1 ) THEN
+		 CALL LSL_PUTMSG( OSTF2I__MULTSEL )
+		 GOTO 9000
+	      ENDIF
+	   ELSE
+	      HAD_SELECT = .TRUE.
+	      SEL_LIST(1) = 1		! fake /SELECT=1
+	      NUM_SEL = 1
+	   ENDIF
+C
+	ENDIF
+C
+C **********************************************************************
+C If a grid with a specific interval is to be added and we have not had 
+C an explicit selection, then generate a default selection
+C of sheet 1. Otherwise, check that only one sheet has been selected
+C
+	IF ( ADD_GRID .AND. (GRID_INT .GT. 0)) THEN
+C
+	   IF ( HAD_SELECT ) THEN
+	      IF ( NUM_SEL.GT.1 ) THEN
+		 CALL LSL_PUTMSG( OSTF2I__GRIDSEL )
+		 GOTO 9000
+	      ENDIF
+	   ELSE
+	      HAD_SELECT = .TRUE.
+	      SEL_LIST(1) = 1		! fake /SELECT=1
+	      NUM_SEL = 1
+	   ENDIF
+C
+	ENDIF
+C
+C **********************************************************************
+C
+C Check if OSTEXT_COMBINE was specifed and if so get the parameters 
+C from the lists
+C
+	OK = DCL_QUAL( 'OSTEXT_COMBINE',	! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+	   HAD_COMB  = .TRUE.
+C
+C Assume no keywords were present (therefore use defaults)
+C
+	   HAD_FC    = .FALSE.
+	   HAD_CAT   = .FALSE.
+	   HAD_SIZE  = .FALSE.
+	   HAD_STYLE = .FALSE.
+C
+	   OK = DCL_QUAL( 'OSTEXT_COMBINE.FC',	! keyword name
+     &	   	          HAD_FC,		! out - globally there
+     &		          PRESENT,		! out - locally there
+     &		          NEGATED,		! out - true if negated
+     &		          .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	   IF ( HAD_FC ) THEN
+C
+C The FC keyword is present so decode the list of parameters
+C There should be three FC's :
+C    1 - Coordinate (default 900)
+C    2 - Text (default 555)
+C    3 - Destination (default 28)
+C
+	      OK = DCL_INT( 'OSTEXT_COMBINE.FC',.TRUE. )
+	      IF ( .NOT.OK ) GOTO 9000
+	      IF ( NUMINT .NE. NUM_FC ) THEN
+	         CALL LSL_PUTMSG( OSTF2I__INCNUMFC )
+	         GOTO 9000
+	      ELSE
+	         DO 100 I = 1, NUM_FC
+	            IF ( IARRAY(I) .LT. 0 .OR. IARRAY(I) .GT. MAXWORD ) THEN
+	               CALL LSL_PUTMSG( OSTF2I__ILEGFC,IARRAY(I) )
+	               GOTO 9000
+	            ELSE
+	               COMB_FC(I) = IARRAY(I)
+	            ENDIF
+100	         CONTINUE
+	      ENDIF
+	   ENDIF
+C
+	   OK = DCL_QUAL( 'OSTEXT_COMBINE.CATEGORY',	! keyword name
+     &	   	          HAD_CAT,		! out - globally there
+     &		          PRESENT,		! out - locally there
+     &		          NEGATED,		! out - true if negated
+     &		          .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	   IF ( HAD_CAT ) THEN
+C
+C CATEGORY keyword is present so decode the value (default 11)
+C
+	      OK = DCL_INT( 'OSTEXT_COMBINE.CATEGORY',.TRUE. )
+	      IF ( .NOT.OK ) GOTO 9000
+	      IF ( NUMINT .NE. 1 ) THEN
+	         CALL LSL_PUTMSG( OSTF2I__INCNUMCAT )
+	         GOTO 9000
+	      ELSE
+	         IF ( IARRAY(1) .LT. 0 .OR. IARRAY(1) .GT. MAXWORD ) THEN
+	            CALL LSL_PUTMSG( OSTF2I__ILEGCAT,IARRAY(1) )
+	            GOTO 9000
+	         ELSE
+	            COMB_CAT = IARRAY(1)	   
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C
+	   OK = DCL_QUAL( 'OSTEXT_COMBINE.SIZE',	! keyword name
+     &	   	          HAD_SIZE,		! out - globally there
+     &		          PRESENT,		! out - locally there
+     &		          NEGATED,		! out - true if negated
+     &		          .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	   IF ( HAD_SIZE ) THEN
+C
+C SIZE keyword is present so decode the value (default 12)
+C
+	      OK = DCL_INT( 'OSTEXT_COMBINE.SIZE',.TRUE. )
+	      IF ( .NOT.OK ) GOTO 9000
+	      IF ( NUMINT .NE. 1 ) THEN
+	         CALL LSL_PUTMSG( OSTF2I__INCNUMSIZ )
+	         GOTO 9000
+	      ELSE
+	         IF ( IARRAY(1) .LT. 0 .OR. IARRAY(1) .GT. MAXWORD ) THEN
+	            CALL LSL_PUTMSG( OSTF2I__ILEGSIZ,IARRAY(1) )
+	            GOTO 9000
+	         ELSE
+	            COMB_SIZE = IARRAY(1)	   
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C
+	   OK = DCL_QUAL( 'OSTEXT_COMBINE.STYLE',	! keyword name
+     &	   	          HAD_STYLE,		! out - globally there
+     &		          PRESENT,		! out - locally there
+     &		          NEGATED,		! out - true if negated
+     &		          .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	   IF ( HAD_STYLE ) THEN
+C
+C STYLE keyword is present so decode the value (default 3)
+C
+	      OK = DCL_INT( 'OSTEXT_COMBINE.STYLE',.TRUE. )
+	      IF ( .NOT.OK ) GOTO 9000
+	      IF ( NUMINT .NE. 1 ) THEN
+	         CALL LSL_PUTMSG( OSTF2I__INCNUMSTY )
+	         GOTO 9000
+	      ELSE
+	         IF ( IARRAY(1) .LT. 0 .OR. IARRAY(1) .GT. MAXWORD ) THEN
+	            CALL LSL_PUTMSG( OSTF2I__ILEGSTY,IARRAY(1) )
+	            GOTO 9000
+	         ELSE
+	            COMB_STYLE = IARRAY(1)	   
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C
+	ENDIF
+C
+C **********************************************************************
+C /MH_TYPE=<integer> - specify which type of header is required in IFF file.
+C
+	OK = DCL_QUAL( 'MH_TYPE',		! qualifier name
+     &		       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+C if the switch was present, then record as much, and read its value(s)
+C into the CLD common block, where we will leave them.
+C
+ 	IF ( HAD_QUAL ) THEN
+	   OK = DCL_INT( 'MH_TYPE',		! qualifier name
+     &			 .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9000		! failed - give up with status
+C
+	   IF ( IARRAY(1).NE.2 .AND. IARRAY(1).NE.3 ) THEN
+	      CALL LSL_PUTMSG( OSTF2I__ILEGMH,IARRAY(1) )
+	      GOTO 9000		
+	   ENDIF
+C
+C integer argument was valid (ie 2 or 3)
+C
+	   MHTYPE = IARRAY(1)
+	   HAD_MH = .TRUE.
+	ELSE
+	   MHTYPE = 2				! Default is type 2 header
+	   HAD_MH = .FALSE.
+	ENDIF
+C
+C **********************************************************************
+C and that is our input line processing finished
+C - if we reach here then it succeeded - report as much
+C
+	CMDLINE = .FALSE.
+C
+C and return
+C
+9000	RETURN
+      	END

@@ -1,0 +1,184 @@
+	INTEGER*4  FUNCTION FLN_RETRIEVE_OPER_ELEM_TIMINGS
+     &             (OPERATOR_ID,FLOWLINE_ID,ELEMENT,CPU_TIME,
+     &              CONNECT_TIME,
+     &              NUM_SESSION,
+     &              QUOTIENT,
+     &		    NUM_ELEMENT)
+C
+***	MODULE	FLN_RETRIEVE_OPER_ELEM_TIMINGS
+***	IDENT	24JL91
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    16-Sep-1988
+C
+C Retrieves for specified flowline database timing statistics for an
+C operator for all elements 
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$CMNFLOWLINE:FLOW.PAR'
+	INCLUDE	'LSL$CMNFLOWLINE:FLOWLINEMSG.PAR'
+	INTEGER*4	SS$_NORMAL
+	EXTERNAL	SS$_NORMAL
+	INTEGER*4	NUM_HUNSEC_INDAY ! number of1/100 secs in a day
+	PARAMETER	(NUM_HUNSEC_INDAY = 8640000)
+	
+C
+C Arguments
+	CHARACTER*(*)	FLOWLINE_ID		   ! IN - flowline
+	CHARACTER*(*)	OPERATOR_ID		   ! IN - ELEMENT
+	CHARACTER*(*)	ELEMENT(FLN_MAX_ELEMENT)     ! OUT 
+	INTEGER*4	CPU_TIME(FLN_MAX_ELEMENT)     ! OUT - total CPU
+	INTEGER*4	CONNECT_TIME(FLN_MAX_ELEMENT) ! OUT - elapsed
+	INTEGER*4	NUM_SESSION(FLN_MAX_ELEMENT)  ! OUT - num sess
+	INTEGER*4	QUOTIENT(FLN_MAX_ELEMENT)     ! OUT - efficiency
+	INTEGER*4	NUM_ELEMENT		      ! OUT 
+C
+C Local Variables
+	INTEGER*4	NUM_ERR
+	INTEGER*4	CPU,STADAY,FINDAY,STATIM,FINTIM
+C
+&RDB&   DATABASE FILENAME 'LSL$FLN_DATABASE:FLOWLINE'
+C
+	FLN_RETRIEVE_OPER_ELEM_TIMINGS = %LOC(SS$_NORMAL)
+C
+C retrieve all the active PROJECTs with the given project
+	NUM_ERR = 0
+20	CONTINUE
+	NUM_ELEMENT= 0
+C
+&RDB&   START_TRANSACTION READ_ONLY RESERVING ELEMENT,
+&RDB&   TASK_HISTORY,SESSION_HISTORY,OPERATOR
+&RDB&   FOR SHARED
+&RDB&   READ WAIT
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_RETRIEVE_OPER_ELEM_TIMINGS = RDB$STATUS
+		 GOTO 999
+	      ENDIF
+C
+C try again - probably deadlock
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+C
+C retrieve all the elements
+&RDB&   FOR  FIRST FLN_MAX_ELEMENT E IN ELEMENT 
+&RDB&   WITH E.FLOWLINE_ID = FLOWLINE_ID  
+&RDB&   SORTED BY E.ELEMENT_ID
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_RETRIEVE_OPER_ELEM_TIMINGS = RDB$STATUS
+&RDB&	         ROLLBACK
+		 GOTO 999
+	      ENDIF
+&RDB&	      ROLLBACK
+C
+C try again - probably deadlock
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+C
+	   NUM_ELEMENT = NUM_ELEMENT+1
+	   NUM_SESSION(NUM_ELEMENT) = 0
+	   CPU_TIME(NUM_ELEMENT) = 0
+	   CONNECT_TIME(NUM_ELEMENT) = 0
+C
+&RDB&      FOR T IN TASK_HISTORY CROSS
+&RDB&         S IN SESSION_HISTORY OVER TASK_ID 
+&RDB&         WITH 
+&RDB&         T.ELEMENT_ID = E.ELEMENT_ID
+&RDB&         AND S.OPERATOR_ID = OPERATOR_ID AND
+&RDB&         S.CPU_TIME NOT MISSING AND
+&RDB&         S.START_TIME NOT MISSING AND
+&RDB&         S.START_DATE NOT MISSING AND
+&RDB&         S.FINISH_TIME NOT MISSING AND 
+&RDB&         S.FINISH_DATE NOT MISSING
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_RETRIEVE_OPER_ELEM_TIMINGS = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C try again - probably deadlock
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+C
+	      NUM_SESSION(NUM_ELEMENT) = NUM_SESSION(NUM_ELEMENT)+1
+C
+&RDB&         GET
+&RDB&	         ON ERROR
+	            NUM_ERR = NUM_ERR+1
+	            IF (NUM_ERR .GT. 5) THEN
+		       FLN_RETRIEVE_OPER_ELEM_TIMINGS = RDB$STATUS
+&RDB&	               ROLLBACK
+		       GOTO 999
+	            ENDIF
+&RDB&	            ROLLBACK
+C
+C try again - probably deadlock
+	            CALL LIB$WAIT(FLN_PSE)
+	            GOTO 20
+&RDB&	         END_ERROR
+C
+&RDB&            CPU = S.CPU_TIME;
+&RDB&            STADAY = S.START_DATE;
+&RDB&            STATIM = S.START_TIME;
+&RDB&            FINDAY = S.FINISH_DATE;
+&RDB&            FINTIM = S.FINISH_TIME;
+C
+&RDB&         END_GET
+C
+	      CPU_TIME(NUM_ELEMENT) = CPU_TIME(NUM_ELEMENT)+CPU
+	      IF (STADAY.LT.FINDAY .OR.
+     &		  (STADAY.EQ.FINDAY .AND. STATIM.LT.FINTIM) ) THEN
+	         CONNECT_TIME(NUM_ELEMENT) =
+     &		    CONNECT_TIME(NUM_ELEMENT) +
+     &		    (FINDAY-STADAY)*NUM_HUNSEC_INDAY +
+     &		    (FINTIM-STATIM)
+	      ENDIF
+C
+&RDB&      END_FOR
+C
+C discard elements with no sessions
+	   IF (NUM_SESSION(NUM_ELEMENT).EQ.0) THEN
+	      NUM_ELEMENT = NUM_ELEMENT-1
+	   ELSE
+C
+C otherwise get the name of the element
+&RDB&         GET
+&RDB&	         ON ERROR
+	            NUM_ERR = NUM_ERR+1
+	            IF (NUM_ERR .GT. 5) THEN
+		       FLN_RETRIEVE_OPER_ELEM_TIMINGS = RDB$STATUS
+&RDB&	               ROLLBACK
+		       GOTO 999
+	            ENDIF
+&RDB&	            ROLLBACK
+C
+C try again - probably deadlock
+	            CALL LIB$WAIT(FLN_PSE)
+	            GOTO 20
+&RDB&	         END_ERROR
+C
+&RDB&            ELEMENT(NUM_ELEMENT) = E.ELEMENT_ID;
+&RDB&         END_GET
+C
+	   ENDIF
+C
+&RDB&   END_FOR
+C
+&RDB&   COMMIT
+C
+999	RETURN
+	END

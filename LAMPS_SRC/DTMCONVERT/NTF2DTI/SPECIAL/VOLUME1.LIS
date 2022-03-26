@@ -1,0 +1,1259 @@
+
+                                                                 6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page   1
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00001   	LOGICAL FUNCTION READ_NTF
+00002   C
+00003   C
+00004   C	Copyright (C) Laser-Scan Ltd, Cambridge, England
+00005   C
+00006   C	Author TJ Ibbs, 6 October 1987
+00007   C	The main routine that controls the reading of the NTF data
+00008   C
+00009   C	Stolen & Modified I McLeman 7 April 1988
+00010   C
+00011   CMOD	Added comment blocks to make code understandable. 
+00012   C	IM has a lot to answer for 				SG 16-Aug-1991
+00013   CMOD    Fix selection of specified section from the NTF file. 
+00014   C	[So has SG !!!!]					JB 21-Oct-1991
+00015   C
+00016   CMOD1119 Cope with variable length records for Version 1.1 NTF	JB 18-May-1992
+00017   C						level 4
+00018   CMOD	 Cope with multiple tape volumes		       JMC 17-Dec-1992
+00019   C
+00020   CMOD1242 Cope with variable length records for Version 2.0 NTF	JB 21-Jun-1993
+00021   C						level 5
+00022   C
+00023   	IMPLICIT NONE
+00024   C
+00025   C Message files:
+00026   	INCLUDE	'HERE:NTF2DTIMSG.PAR'
+00131   	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+00404   	INCLUDE	'LSL$CMNDTI:DTILIBMSG.PAR'
+00477   C
+00478   C Common files:
+00479   	INCLUDE	'HERE:COMMANDS.CMN'
+00498   	INCLUDE	'HERE:NTF2DTI.CMN'
+00528   	INCLUDE	'HERE:NTFDATA.CMN'
+00589   	INCLUDE	'HERE:RECORD.CMN'
+00612   C
+00613   C Functions
+00614   	LOGICAL		READ_NTF_RECORD		! read next record from NTF
+00615   	LOGICAL		READ_VOLHDREC
+00616   	LOGICAL		READ_DBQUAL
+00617   	LOGICAL		READ_DBHREC
+00618   	LOGICAL		READ_CONTINUE
+00619   	LOGICAL		READ_FEATCLASS
+00620   	LOGICAL		READ_SECTION
+00621   	LOGICAL		READ_VOLTERM
+00622   	LOGICAL		READ_DATADESC
+00623   	LOGICAL		RDINT		! read an integer from input buffer
+00624   C
+00625   C Workspace
+00626   	LOGICAL		OK,FOUND			! Function return
+00627   	INTEGER		IERR,RETVAL			! Ditto
+00628   	INTEGER		I				! DO loop counter
+00629   C
+00630   C ......................................................................
+00631   C
+00632   	OK     = .TRUE.				! assume success
+00633   	RECNUM = 0				! no records read yet
+00634   C
+
+READ_NTF                                                         6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page   2
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00635   C---------------------------------------------------------------------
+00636   C read each record in order, hope that they are in sensible order
+00637   C The Volume header record will be dealt with in READ_VOLHDREC (called
+00638   C in READ_NTF_RECORD) to extract the version, level and fixed/variable 
+00639   C record flags
+00640   C
+00641   2000	OK=READ_NTF_RECORD()
+00642   	IF (.NOT.OK) GOTO 9999
+00643   	NTF$_REC_DESCR = STRING(1:2)
+00644   C
+00645   C	..............................................................
+00646   C
+00647   	IF ( NTF$_REC_DESCR.EQ.'01' ) THEN		! VOLHDREC
+00648   C							! already done in
+00649   C							! READ_NTF_RECORD
+00650   C
+00651   	ELSEIF ( NTF$_REC_DESCR.EQ.'06' ) THEN		! database quality
+00652   	   CALL READ_DBQUAL				! report on it
+00653   C
+00654   C	..............................................................
+00655   C
+00656   	ELSE IF ( NTF$_REC_DESCR.EQ.'02' ) THEN		! database header
+00657   	   OK = READ_DBHREC()
+00658   	   IF (.NOT.OK) CALL WRITEF('%%NTF2DTI-W-MISC, error reading DBHREC')
+00659   C
+00660   C	..............................................................
+00661   C
+00662   	ELSE IF ( NTF$_REC_DESCR.EQ.'05' ) THEN		! feature classification
+00663   	   OK = READ_FEATCLASS()			! report on it
+00664   	   IF (.NOT.OK) CALL WRITEF('%%NTF2DTI-W-MISC, error reading FEATCLASS')
+00665   C
+00666   C	..............................................................
+00667   C	If SECTION has a value other than 0 then it was specified as a qualifier
+00668   C	on the command line. In this case read only the section specified,
+00669   C	otherwise read all the sections.
+00670   C
+00671   	ELSE IF ( NTF$_REC_DESCR.EQ.'07' ) THEN		! section header SECHREC
+00672   	   COUNT_SECTION=COUNT_SECTION+1
+00673   C
+00674   	   IF (SECTION.NE.0) THEN			! want particular section
+00675   C
+00676   	     DO WHILE (COUNT_SECTION.NE.SECTION)
+00677   	       NTF$_REC_DESCR = '90'			! disregard current rec
+00678   C
+00679   	       DO WHILE (NTF$_REC_DESCR.NE.'07')	! look for next SECHREC
+00680   	         OK=READ_NTF_RECORD()
+00681   		 NTF$_REC_DESCR = STRING(1:2)
+00682   	         IF (.NOT.OK) GOTO 9999
+00683   C
+00684   		 IF (NTF$_REC_DESCR.EQ.'99') THEN	! end of volume
+00685   		   CALL WRITEF()
+00686   		   CALL WRITEF('%%NTF2DTI-W-MISC, section %N not found',
+00687        &								SECTION)
+00688   		   CALL READ_VOLTERM()			! report on it
+00689   		   IF (.NOT.MULTIVOLUME) GOTO 9999	! and that's the end
+00690   		 ENDIF
+00691   	       END DO
+
+READ_NTF                                                         6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page   3
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00692   C
+00693   	       COUNT_SECTION=COUNT_SECTION+1
+00694   	     END DO
+00695   	   ENDIF
+00696   C
+00697   106	   OK = READ_SECTION()		! read & start new DTI file
+00698   	   IF (.NOT.OK) CALL LSL_PUTMSG(NTF2DTI__SECTION, COUNT_SECTION)
+00699   C
+00700   C If end of file, give up, otherwise get next section
+00701   	   IF (OK.EQ.LSL__EOF .OR. OK.EQ.DTI__SYSERR) GOTO 9999		
+00702   C
+00703   	   IF (SECTION.NE.0) GOTO 9999		! Found required section
+00704   C
+00705   C	..............................................................
+00706   C
+00707   	ELSE IF ( NTF$_REC_DESCR.EQ.'99' ) THEN		! volume termination
+00708   	   CALL READ_VOLTERM()				! report on it
+00709   	   IF (.NOT.MULTIVOLUME) GOTO 9999		! and that's the end
+00710   C
+00711   C	..............................................................
+00712   C
+00713   	ELSE IF ( NTF$_REC_DESCR.EQ.'90' ) THEN		! comment
+00714   	   CALL READ_COMMENT				! report on it
+00715   C
+00716   C	..............................................................
+00717   C
+00718   C	ELSE IF ( NTF$_REC_DESCR.EQ.'00' ) THEN		! comment
+00719   C	   CALL READ_CONTINUE				! report on it
+00720   C
+00721   C	..............................................................
+00722   C
+00723   	ELSE IF ( NTF$_REC_DESCR.EQ.'03' ) THEN		! data description
+00724   C
+00725   C Get GRIDVAL field width - same format for name and width in level 4 and 5)
+00726   C
+00727   	  IF (LEVEL.EQ.4 .OR. LEVEL.EQ.5) THEN		! must be level 4 or 5
+00728   	    FOUND = READ_DATADESC(STRING,LENGTH,'GRIDVAL',7,RETVAL)
+00729   	    IF (FOUND) THEN
+00730   	      FIELD_WIDTH = RETVAL
+00731   	      CALL WRITEF('%%NTF2DTI-I-MISC, field_width set to %I',
+00732        &							FIELD_WIDTH)
+00733   	    ENDIF
+00734   	  ENDIF
+00735   C
+00736   C	..............................................................
+00737   C
+00738        	ELSE IF	( NTF$_REC_DESCR.EQ.'04' ) THEN		! data format DATAFMT
+00739   C
+00740   	  IF (LEVEL.EQ.4 .OR. LEVEL.EQ.5) THEN		! must be level 4 or 5
+00741               IF (STRING(3:4).EQ.'50') THEN
+00742   		CALL SETAUX( %REF(STRING(15:16)), 2 )
+00743   		OK = .NOT.RDINT(NUM_FIELD)
+00744   		IF (.NOT.OK) THEN
+00745   		   CALL LSL_PUTMSG(NTF2DTI__DATAFMT,'NUM_FIELD')
+00746   		   CALL LSL_ADDSTR(STRING(15:16))
+00747   		   GOTO 9999
+00748   		ENDIF
+
+READ_NTF                                                         6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page   4
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00749   	    ENDIF
+00750   	  ENDIF
+00751   C
+00752   	  IF (.NOT.FIXED) LENGTH = LENGTH - 1		! miss EOR marker
+00753   C
+00754   	  DO WHILE (OK .AND. STRING(LENGTH:LENGTH).EQ.'1')
+00755   	    OK = READ_CONTINUE('DATAFMT')		! ignore these for now
+00756   C
+00757   	    IF (.NOT.FIXED) LENGTH = LENGTH - 1		! miss EOR marker
+00758   	  END DO
+00759   C
+00760   	  IF (.NOT.OK) GOTO 9999			! and any continuations
+00761   C
+00762   C	..............................................................
+00763   C	the only way that we get here is if the functions above didn't
+00764   C	process all their records. Bad records are trapped by READ_NTF_RECORD 
+00765   C
+00766   	ELSE
+00767   	   CALL LSL_PUTMSG(NTF2DTI__UNEXPREC,NTF$_REC_DESCR,RECNUM)
+00768   	ENDIF
+00769   C
+00770   	GOTO 2000				! read the next record
+00771   C
+00772   C .....................................................................
+00773   C Sort out our return status
+00774   C
+00775   9999	IF (.NOT.OK) CALL WRITEF('%%NTF2DTI-E-MISC, error in READ_NTF')
+00776   	READ_NTF = OK
+00777   C
+00778   	RETURN
+00779   	END
+
+READ_NTF                                                         6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page   5
+01                                                               6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+PROGRAM SECTIONS
+
+    Name				 Bytes   Attributes
+
+  0 $CODE                                  749   PIC CON REL LCL   SHR   EXE   RD NOWRT QUAD
+  1 $PDATA                                 262   PIC CON REL LCL   SHR NOEXE   RD NOWRT QUAD
+  2 $LOCAL                                 368   PIC CON REL LCL NOSHR NOEXE   RD   WRT QUAD
+  3 COMMANDS                                40   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  4 NTF2DTI                                 16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  5 NTFDATA                                 16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  6 DTIDATA                                128   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  7 RECORD1                                 86   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  8 RECORD2                                  9   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+
+    Total Space Allocated                 1674
+
+
+ENTRY POINTS
+
+    Address  Type  Name          
+
+  0-00000000  L*4  READ_NTF      
+
+
+VARIABLES
+
+    Address  Type  Name                                               Address  Type  Name                            
+
+  6-0000005C  I*4  COL_END                                          6-00000068  I*4  COL_INV                         
+  6-00000058  I*4  COL_START                                        4-00000004  I*4  COUNT_SECTION                   
+  3-00000018  L*4  DEDUCE_FILE                                      3-00000024  L*4  DTIOPEN                         
+  8-00000008  CHAR EOR_MARKER                                       6-00000078  I*4  FIELD_WIDTH                     
+  5-0000000C  L*4  FIXED                                            2-00000034  L*4  FOUND                           
+  2-00000040  I*4  I                                                2-00000038  I*4  IERR                            
+  6-00000074  I*4  INTERPRET                                        5-00000004  I*4  INTVER                          
+  3-0000001C  L*4  IS_MAGTAPE                                       3-00000010  L*4  IS_OS                           
+  3-00000020  L*4  IS_TERM                                          8-00000004  I*4  LENGTH                          
+  5-00000000  I*4  LEVEL                                            3-00000000  L*4  LOG                             
+  4-00000008  L*4  MULTIVOLUME                                      7-00000054  CHAR NTF$_REC_DESCR                  
+  6-0000007C  I*4  NUM_FIELD                                        6-0000002C  I*4  N_COLUMNS                       
+  6-00000028  I*4  N_ROWS                                           2-00000030  L*4  OK                              
+  6-00000070  I*4  ORDER                                            3-00000004  L*4  OUTPUT                          
+  3-00000008  L*4  PROJECT                                          2-0000002C  L*4  READ_VOLHDREC                   
+  8-00000000  I*4  RECNUM                                           2-0000003C  I*4  RETVAL                          
+  3-00000014  L*4  REWIND                                           6-00000064  I*4  ROW_END                         
+  6-0000006C  I*4  ROW_INV                                          6-00000060  I*4  ROW_START                       
+  3-0000000C  L*4  SECT                                             4-00000000  I*4  SECTION                         
+  7-00000000  CHAR STRING                                           7-00000050  I*4  STR_LEN                         
+  5-00000008  R*4  VERSION                                          4-0000000C  I*4  VOLCOUNT                        
+  6-00000014  I*4  XMAX                                             6-00000010  I*4  XMIN                            
+  6-00000000  I*4  XYLEN                                            6-00000008  R*4  XY_MULT                         
+  6-00000004  I*4  XY_UNIT                                          6-00000030  R*4  X_ORIG                          
+  6-00000020  I*4  X_SAMP                                           6-0000001C  I*4  YMAX                            
+  6-00000018  I*4  YMIN                                             6-00000034  R*4  Y_ORIG                          
+  6-00000024  I*4  Y_SAMP                                           6-0000000C  R*4  Z_MULT                          
+
+READ_NTF                                                         6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page   6
+01                                                               6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+ARRAYS
+
+    Address  Type  Name                                  Bytes  Dimensions
+
+  2-0000000C  CHAR NTF_RECORDS                              22  (11)
+  2-00000022  CHAR STD_ATTR_CODES                            6  (3)
+  2-00000000  I*4  STD_ATTR_LEN                             12  (3)
+  6-00000038  R*4  X_COORD                                  16  (4)
+  6-00000048  R*4  Y_COORD                                  16  (4)
+
+
+
+
+LABELS
+
+    Address   Label       Address   Label       Address   Label   
+
+  0-0000014B  106       0-00000013  2000      0-000002D6  9999    
+
+
+FUNCTIONS AND SUBROUTINES REFERENCED
+
+  Type  Name                              Type  Name                              Type  Name                            
+
+        LSL_ADDSTR                              LSL_PUTMSG                         L*4  RDINT                           
+        READ_COMMENT                       L*4  READ_CONTINUE                      L*4  READ_DATADESC                   
+   L*4  READ_DBHREC                             READ_DBQUAL                        L*4  READ_FEATCLASS                  
+   L*4  READ_NTF_RECORD                    L*4  READ_SECTION                            READ_VOLTERM                    
+        SETAUX                                  WRITEF                          
+
+                                                                 6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page   7
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00001   C
+00002    
+00003   	LOGICAL FUNCTION READ_VOLHDREC
+00004   C
+00005   C
+00006   C Copyright Laser-Scan Ltd, Cambridge, England
+00007   C
+00008   C Author					IM	18-Aug-1987
+00009   C
+00010   C Modified					TJI	 5-Oct-1987
+00011   C Modified					IM      07-Apr-1988
+00012   C
+00013   C MOD1119	For Variable length records	JB      19-May-1992
+00014   C		at version 1.1 level 4, EOR = <CR>
+00015   C MOS1242	For Variable length records	JB      21-Jun-1993
+00016   C		at version 2.0 level 5, EOR = '%'
+00017   C
+00018   C Reads the volume header record
+00019   C
+00020   	IMPLICIT NONE
+00021   C
+00022   C Messages:
+00023   	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+00296   	INCLUDE 'HERE:NTF2DTIMSG.PAR'
+00401   C
+00402   C Common files:
+00403   	INCLUDE 'HERE:COMMANDS.CMN'
+00422   	INCLUDE	'HERE:NTFDATA.CMN'	! for LEVEL,VERSION,FIXED
+00483   	INCLUDE	'HERE:RECORD.CMN'	! for STRING
+00506   C
+00507   C Functions:
+00508   	LOGICAL		RDCH		! read a char
+00509   	LOGICAL		RDINT		! read an integer
+00510   	LOGICAL		READ_CONTINUE	! read a continuation record
+00511   C
+00512   C Workspace:
+00513   	INTEGER		OK		! Success flag
+00514   	INTEGER		IERR		! Failure return
+00515   	BYTE		CH
+00516   C
+00517   C ...................................................................
+00518   C Assume variable length version 1.1 level 4 NTF data (OS set)
+00519   C
+00520   	OK	   = .TRUE. 		! assume OK
+00521   	EOR_MARKER = CHAR(13)		! assume <CR>, V1.1
+00522   	FIXED 	   = .FALSE.		! assume variable records
+00523   C
+00524   C ...................................................................
+00525   C - firstly read the level of the data
+00526   C
+00527   	CALL SETAUX(%REF(STRING(57:57)),1)
+00528   	IF (RDINT(LEVEL)) THEN
+00529   	   CALL LSL_PUTMSG(NTF2DTI__VOLHDREC,'LEVEL')
+00530   	   CALL LSL_ADDSTR(STRING(57:57))
+00531   	   OK=.FALSE.
+00532   	   GOTO 999
+00533   	ENDIF
+
+READ_VOLHDREC                                                    6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page   8
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00534   C
+00535   C .....................................................................
+00536   C Is it a level we can cope with (ie. 0 or 4 for V1.0, level 4 for V1.1
+00537   C or level 5 for V2.0) ?
+00538   C
+00539   	IF (LEVEL.NE.0 .AND. LEVEL.NE.4 .AND. LEVEL.NE.5) THEN	
+00540   	   CALL LSL_PUTMSG(NTF2DTI__WRONGLEVEL,LEVEL)
+00541   	   CALL WRITEF('-NTF2DTI-I-MISC, attempting to continue regardless')
+00542   	ENDIF
+00543   C
+00544   C Level 4 must be OS specific
+00545   C
+00546   	IF (LEVEL.EQ.4) THEN			! ver 1.0, 1.1
+00547   	  IF (.NOT.IS_OS) THEN
+00548   	    CALL LSL_PUTMSG(NTF2DTI__NOTOS)
+00549   	    OK = .FALSE.
+00550   	    GOTO 999
+00551   	  ENDIF
+00552   C
+00553   	ELSEIF (LEVEL.EQ.5) THEN		! ver 2.0
+00554   	   IS_OS = .FALSE.			! turn off OS specific
+00555   	ENDIF
+00556   C
+00557   C ........................................................................
+00558   C	Default the field width to 10. At level 0 this is the only value we
+00559   C	can use. At level 4 or 5 this value may be redefined in a DATADESC 
+00560   C
+00561   	FIELD_WIDTH = 10				! default to 10
+00562   C
+00563   C ....................................................................
+00564   C - next the version number of this NTF (as a real number)
+00565   C
+00566   	CALL SETAUX(%REF(STRING(58:61)),4)
+00567   	IF (RDINT(INTVER)) THEN
+00568   	   CALL LSL_PUTMSG(NTF2DTI__VOLHDREC,'NTFVER')
+00569   	   CALL LSL_ADDSTR(STRING(58:61))
+00570   	   OK=.FALSE.
+00571   	   GOTO 999
+00572   	ENDIF
+00573   C
+00574   	IF (INTVER.EQ.200) THEN
+00575   	   EOR_MARKER 	= '%'
+00576   	   FIXED 	= .FALSE.
+00577   C
+00578   	ELSEIF (INTVER.EQ.110) THEN
+00579   	   EOR_MARKER 	= CHAR(13)
+00580   	   FIXED 	= .FALSE.
+00581   C
+00582   	ELSEIF (INTVER.EQ.100) THEN
+00583   	   EOR_MARKER 	= CHAR(13)
+00584   	   FIXED 	= .TRUE.
+00585   	ENDIF
+00586   C
+00587   C Translate that into the real number we expect - ie NN.nn
+00588   C
+00589   	VERSION = FLOAT(INTVER) / 100.0
+00590   C
+
+READ_VOLHDREC                                                    6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page   9
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00591   C can we understand it? - try to decode it anyway
+00592   C
+00593   	IF (VERSION.GT.2.0) THEN
+00594   	   CALL LSL_PUTMSG(NTF2DTI__WRONGVERSION,VERSION)
+00595   	   CALL WRITEF('-NTF2DTI-W-MISC, '//
+00596        &		'support for RASTER only exists at version 1.0, 1.1 or 2.0')
+00597   	   OK = .FALSE.
+00598   	   GOTO 999
+00599   	ENDIF
+00600   C
+00601   C - read the format of the data: variable or fixed
+00602   C
+00603   	CALL SETAUX(%REF(STRING(62:62)),1)
+00604   	IF (RDCH(CH)) THEN
+00605   	   CALL LSL_PUTMSG(NTF2DTI__VOLHDREC,'FORMAT')
+00606   	   CALL LSL_ADDSTR(STRING(62:62))
+00607   	   OK=.FALSE.
+00608   	   GOTO 999
+00609   	ENDIF
+00610   C
+00611   	IF (CH.EQ.'V') THEN
+00612   	   FIXED = .FALSE.
+00613   C
+00614   	ELSEIF (CH.EQ.'F') THEN
+00615   	   FIXED = .TRUE.
+00616   C
+00617   	ELSEIF (CH.EQ.' ') THEN
+00618   	   IF (INTVER.EQ.100) FIXED = .TRUE.
+00619   	   IF (INTVER.EQ.110) FIXED = .FALSE.
+00620   	   IF (INTVER.EQ.200) FIXED = .FALSE.
+00621   	ENDIF
+00622   C
+00623   C ..................................................................
+00624   C Announce the level, version and format we are reading
+00625   C
+00626   	IF (LOG) THEN
+00627   	   CALL LSL_PUTMSG(NTF2DTI__NTFDATA,LEVEL,VERSION)
+00628   	   IF (FIXED) THEN
+00629   	      CALL LSL_PUTMSG(NTF2DTI__NTFFORMAT, 'FIXED')
+00630   	   ELSE
+00631   	      CALL LSL_PUTMSG(NTF2DTI__NTFFORMAT, 'VARIABLE')
+00632   	   ENDIF
+00633   	ENDIF
+00634   C
+00635   C ..................................................................
+00636   C If we're producing a log file, write pertinent information to it
+00637   C
+00638   	IF (OUTPUT) THEN
+00639   	   CALL FLWSTR('Volume header record:')
+00640   	   CALL FLWRTF('	Data sent by     "%S"',STRING(3:22))
+00641   	   CALL FLWRTF('	Data sent to     "%S"',STRING(23:42))
+00642   	   CALL FLWRTF('	Date of transfer "%S" (ie %S/%S/%S)',
+00643        &			STRING(43:50),
+00644        &			STRING(49:50),STRING(47:48),STRING(43:46))
+00645   	   CALL FLWRTF('	NTF level         %I2',LEVEL)
+00646   	   CALL FLWRTF('	NTF version       %F5.2',VERSION)
+00647   	ENDIF
+
+READ_VOLHDREC                                                    6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  10
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00648   C
+00649   C ...................................................................
+00650   C The OS output an index after a VOLHDREC. We must thus check
+00651   C for a continuation mark at the end of this record, and ignore any
+00652   C continuation records. If we find a continuation, and haven't been told
+00653   C to expect it by the user, complain
+00654   C
+00655   	IF (.NOT.FIXED) LENGTH = LENGTH - 1
+00656   C
+00657   	IF (STRING(LENGTH:LENGTH).EQ.'1') THEN
+00658   	   IF (.NOT.IS_OS) CALL LSL_PUTMSG(NTF2DTI__VOLHDCONT)
+00659   C
+00660   200	   OK = READ_CONTINUE('VOLHDREC (index)')
+00661   	   IF (.NOT.OK) GOTO 999
+00662   C
+00663   	   IF (.NOT.FIXED) LENGTH = LENGTH - 1		! miss EOR marker
+00664   	   IF (STRING(LENGTH:LENGTH).EQ.'1') GOTO 200
+00665   	ENDIF
+00666   C
+00667   C ...................................................................
+00668   C Join errors
+00669   C
+00670   999	READ_VOLHDREC=OK
+00671   C
+00672   	RETURN
+00673   	END
+
+
+
+
+PROGRAM SECTIONS
+
+    Name				 Bytes   Attributes
+
+  0 $CODE                                  786   PIC CON REL LCL   SHR   EXE   RD NOWRT QUAD
+  1 $PDATA                                 367   PIC CON REL LCL   SHR NOEXE   RD NOWRT QUAD
+  2 $LOCAL                                 520   PIC CON REL LCL NOSHR NOEXE   RD   WRT QUAD
+  3 COMMANDS                                40   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  4 NTFDATA                                 16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  5 DTIDATA                                128   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  6 RECORD1                                 86   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  7 RECORD2                                  9   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+
+    Total Space Allocated                 1952
+
+
+ENTRY POINTS
+
+    Address  Type  Name          
+
+  0-00000000  L*4  READ_VOLHDREC 
+
+READ_VOLHDREC                                                    6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  11
+01                                                               6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+VARIABLES
+
+    Address  Type  Name                                               Address  Type  Name                            
+
+  2-00000012  L*1  CH                                               5-0000005C  I*4  COL_END                         
+  5-00000068  I*4  COL_INV                                          5-00000058  I*4  COL_START                       
+  3-00000018  L*4  DEDUCE_FILE                                      3-00000024  L*4  DTIOPEN                         
+  7-00000008  CHAR EOR_MARKER                                       5-00000078  I*4  FIELD_WIDTH                     
+  4-0000000C  L*4  FIXED                                            2-0000001C  I*4  IERR                            
+  5-00000074  I*4  INTERPRET                                        4-00000004  I*4  INTVER                          
+  3-0000001C  L*4  IS_MAGTAPE                                       3-00000010  L*4  IS_OS                           
+  3-00000020  L*4  IS_TERM                                          7-00000004  I*4  LENGTH                          
+  4-00000000  I*4  LEVEL                                            3-00000000  L*4  LOG                             
+  6-00000054  CHAR NTF$_REC_DESCR                                   5-0000007C  I*4  NUM_FIELD                       
+  5-0000002C  I*4  N_COLUMNS                                        5-00000028  I*4  N_ROWS                          
+  2-00000018  I*4  OK                                               5-00000070  I*4  ORDER                           
+  3-00000004  L*4  OUTPUT                                           3-00000008  L*4  PROJECT                         
+  7-00000000  I*4  RECNUM                                           3-00000014  L*4  REWIND                          
+  5-00000064  I*4  ROW_END                                          5-0000006C  I*4  ROW_INV                         
+  5-00000060  I*4  ROW_START                                        3-0000000C  L*4  SECT                            
+  6-00000000  CHAR STRING                                           6-00000050  I*4  STR_LEN                         
+  4-00000008  R*4  VERSION                                          5-00000014  I*4  XMAX                            
+  5-00000010  I*4  XMIN                                             5-00000000  I*4  XYLEN                           
+  5-00000008  R*4  XY_MULT                                          5-00000004  I*4  XY_UNIT                         
+  5-00000030  R*4  X_ORIG                                           5-00000020  I*4  X_SAMP                          
+  5-0000001C  I*4  YMAX                                             5-00000018  I*4  YMIN                            
+  5-00000034  R*4  Y_ORIG                                           5-00000024  I*4  Y_SAMP                          
+  5-0000000C  R*4  Z_MULT                                         
+
+
+ARRAYS
+
+    Address  Type  Name                                  Bytes  Dimensions
+
+  2-0000000C  CHAR STD_ATTR_CODES                            6  (3)
+  2-00000000  I*4  STD_ATTR_LEN                             12  (3)
+  5-00000038  R*4  X_COORD                                  16  (4)
+  5-00000048  R*4  Y_COORD                                  16  (4)
+
+
+
+
+LABELS
+
+    Address   Label       Address   Label   
+
+  0-000002DB  200       0-00000309  999     
+
+
+FUNCTIONS AND SUBROUTINES REFERENCED
+
+  Type  Name            Type  Name            Type  Name            Type  Name            Type  Name            Type  Name          
+
+   CHAR CHAR             R*4  FLOAT                 FLWRTF                FLWSTR                LSL_ADDSTR            LSL_PUTMSG    
+   L*4  RDCH             L*4  RDINT            L*4  READ_CONTINUE         SETAUX                WRITEF        
+
+                                                                 6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  12
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00001   C
+00002    
+00003   	SUBROUTINE READ_VOLTERM
+00004   C
+00005   C
+00006   C Copyright (C) Laser-Scan Ltd, Cambridge, England
+00007   C
+00008   C Author TJ Ibbs, 5 October 1987
+00009   C
+00010   CMOD	Cope with multiple tape volumes			       JMC 17-Dec-1992
+00011   C
+00012   	IMPLICIT NONE
+00013   C
+00014   C Messages
+00015   	INCLUDE	'($DMTDEF)'
+00052   	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+00325   	INCLUDE	'HERE:NTF2DTIMSG.PAR'
+00430   C
+00431   C Common files
+00432   	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'
+00493   	INCLUDE	'LSL$CMNLSL:MTIVCM.CMN'
+00504   	INCLUDE	'HERE:FILENAME.CMN'
+00524   	INCLUDE	'HERE:COMMANDS.CMN'
+00543   	INCLUDE	'HERE:NTF2DTI.CMN'
+00573   	INCLUDE	'HERE:NTFDATA.CMN'
+00634   	INCLUDE	'HERE:RECORD.CMN'
+00657   C
+00658   C Workspace
+00659   	LOGICAL		OK			! Function return
+00660   C
+00661   C Functions
+00662   	LOGICAL 	MTIRWD
+00663   	LOGICAL 	TTRSTR
+00664   C
+00665   C If the free text in the record is not blank, output it to our
+00666   C log file, less record descriptor and continuation flag and EOR marker
+00667   C
+00668   c Cope with OS cock up of not putting a closing EOR on volume terminator
+00669   c
+00670   c	IF (.NOT.FIXED) LENGTH = LENGTH - 1		! miss EOR marker
+00671   C
+00672   	IF (OUTPUT .AND. LENGTH.GT.3) THEN		! something there
+00673   	  IF (STRING(3:LENGTH-1).NE.' ') THEN
+00674   	    CALL FLWSTR('Volume termination record:')
+00675   	    CALL FLWRTF('	%S',STRING(3:LENGTH-1))
+00676   	  ENDIF
+00677   	ENDIF
+00678   C
+00679   C   If the continuation mark is set then it's a multi-volume set so
+00680   C   dismount tapedrive, prompt user to reload, then remount.
+00681   C
+00682   	IF (STRING(LENGTH:LENGTH).EQ.'1')  THEN
+00683   	   CALL SYS$DISMOU(DEVICE(1:DEVLEN),%VAL(DMT$M_UNLOAD))
+00684   	   VOLCOUNT = VOLCOUNT + 1
+00685   	   CALL WRITEF('Please mount volume %N on %S',
+00686        &			VOLCOUNT,DEVICE(:DEVLEN))
+00687   	   OK = TTRSTR(,,'press RETURN when ready:')
+
+READ_VOLTERM                                                     6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  13
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00688   	   OK = TTRSTR(,,'Are you sure? If so press RETURN again:')
+00689   	   MULTIVOLUME = .TRUE.
+00690   	   CALL MOUNT_TAPE(DEVICE(:DEVLEN),.TRUE.)
+00691   	ELSE
+00692   	   MULTIVOLUME = .FALSE.
+00693   	   VOLCOUNT = 1
+00694   	ENDIF
+00695   C
+00696   	RETURN
+00697   	END
+
+
+
+
+PROGRAM SECTIONS
+
+    Name				 Bytes   Attributes
+
+  0 $CODE                                  226   PIC CON REL LCL   SHR   EXE   RD NOWRT QUAD
+  1 $PDATA                                 129   PIC CON REL LCL   SHR NOEXE   RD NOWRT QUAD
+  2 $LOCAL                                 212   PIC CON REL LCL NOSHR NOEXE   RD   WRT QUAD
+  3 LSL_FNAM_STR                           210   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  4 LSL_FNAM_LOG                            24   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  5 LSL_FNAM_LEN                            24   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  6 LSL_MTIVCM                               8   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  7 FILE_INT                                16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  8 FILE_CHR                               868   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  9 COMMANDS                                40   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 10 NTF2DTI                                 16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 11 NTFDATA                                 16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 12 DTIDATA                                128   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 13 RECORD1                                 86   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+ 14 RECORD2                                  9   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+
+    Total Space Allocated                 2012
+
+
+ENTRY POINTS
+
+    Address  Type  Name          
+
+  0-00000000       READ_VOLTERM  
+
+
+VARIABLES
+
+    Address  Type  Name                                               Address  Type  Name                            
+
+ 12-0000005C  I*4  COL_END                                         12-00000068  I*4  COL_INV                         
+ 12-00000058  I*4  COL_START                                       10-00000004  I*4  COUNT_SECTION                   
+  9-00000018  L*4  DEDUCE_FILE                                      8-000000D9  CHAR DEVICE                          
+  7-00000004  I*4  DEVLEN                                           8-000001B2  CHAR DTIFILE                         
+  7-00000008  I*4  DTILEN                                           9-00000024  L*4  DTIOPEN                         
+ 14-00000008  CHAR EOR_MARKER                                      12-00000078  I*4  FIELD_WIDTH                     
+ 11-0000000C  L*4  FIXED                                            4-00000004  L*4  HAD_DEV                         
+  4-00000008  L*4  HAD_DIR                                          4-00000010  L*4  HAD_EXT                         
+  4-0000000C  L*4  HAD_NAM                                          4-00000000  L*4  HAD_NOD                         
+
+READ_VOLTERM                                                     6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  14
+01                                                               6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+  4-00000014  L*4  HAD_VER                                         12-00000074  I*4  INTERPRET                       
+ 11-00000004  I*4  INTVER                                           9-0000001C  L*4  IS_MAGTAPE                      
+  9-00000010  L*4  IS_OS                                            9-00000020  L*4  IS_TERM                         
+ 14-00000004  I*4  LENGTH                                           5-00000004  I*4  LEN_DEV                         
+  5-00000008  I*4  LEN_DIR                                          5-00000010  I*4  LEN_EXT                         
+  5-0000000C  I*4  LEN_NAM                                          5-00000000  I*4  LEN_NOD                         
+  5-00000014  I*4  LEN_VER                                         11-00000000  I*4  LEVEL                           
+  9-00000000  L*4  LOG                                              8-00000000  CHAR LOGFILE                         
+  7-00000000  I*4  LOGLEN                                           6-00000000  I*4  MTIERR                          
+  6-00000004  I*4  MTINBL                                           2-0000002C  L*4  MTIRWD                          
+ 10-00000008  L*4  MULTIVOLUME                                     13-00000054  CHAR NTF$_REC_DESCR                  
+  8-0000028B  CHAR NTFFILE                                          7-0000000C  I*4  NTFLEN                          
+ 12-0000007C  I*4  NUM_FIELD                                       12-0000002C  I*4  N_COLUMNS                       
+ 12-00000028  I*4  N_ROWS                                           2-00000028  L*4  OK                              
+ 12-00000070  I*4  ORDER                                            9-00000004  L*4  OUTPUT                          
+  9-00000008  L*4  PROJECT                                         14-00000000  I*4  RECNUM                          
+  9-00000014  L*4  REWIND                                          12-00000064  I*4  ROW_END                         
+ 12-0000006C  I*4  ROW_INV                                         12-00000060  I*4  ROW_START                       
+  9-0000000C  L*4  SECT                                            10-00000000  I*4  SECTION                         
+ 13-00000000  CHAR STRING                                           3-00000006  CHAR STR_DEV                         
+  3-0000001A  CHAR STR_DIR                                          3-000000A5  CHAR STR_EXT                         
+ 13-00000050  I*4  STR_LEN                                          3-0000007E  CHAR STR_NAM                         
+  3-00000000  CHAR STR_NOD                                          3-000000CC  CHAR STR_VER                         
+ 11-00000008  R*4  VERSION                                         10-0000000C  I*4  VOLCOUNT                        
+ 12-00000014  I*4  XMAX                                            12-00000010  I*4  XMIN                            
+ 12-00000000  I*4  XYLEN                                           12-00000008  R*4  XY_MULT                         
+ 12-00000004  I*4  XY_UNIT                                         12-00000030  R*4  X_ORIG                          
+ 12-00000020  I*4  X_SAMP                                          12-0000001C  I*4  YMAX                            
+ 12-00000018  I*4  YMIN                                            12-00000034  R*4  Y_ORIG                          
+ 12-00000024  I*4  Y_SAMP                                          12-0000000C  R*4  Z_MULT                          
+
+
+ARRAYS
+
+    Address  Type  Name                                  Bytes  Dimensions
+
+  2-0000000C  CHAR NTF_RECORDS                              22  (11)
+  2-00000022  CHAR STD_ATTR_CODES                            6  (3)
+  2-00000000  I*4  STD_ATTR_LEN                             12  (3)
+ 12-00000038  R*4  X_COORD                                  16  (4)
+ 12-00000048  R*4  Y_COORD                                  16  (4)
+
+
+
+
+FUNCTIONS AND SUBROUTINES REFERENCED
+
+  Type  Name            Type  Name            Type  Name            Type  Name            Type  Name            Type  Name          
+
+        FLWRTF                FLWSTR                MOUNT_TAPE            SYS$DISMOU       L*4  TTRSTR                WRITEF        
+
+                                                                 6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  15
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00001   C
+00002    
+00003   	INTEGER FUNCTION MOUNT_TAPE(TAPE_NAME, FOREIGN)
+00004   C
+00005   C
+00006   C Copyright Laser-Scan Labs., Ltd., Cambridge, England.
+00007   C
+00008   C Author J.H.Rees
+00009   C
+00010   C	Originally part of the IFF-to-Raster conversion program
+00011   C
+00012   C	Copied and modified for use with NTF2DTI  	J M Cadogan 15-Dec-1992
+00013   C
+00014   C	 - mounts a mag-tape (the tape is mounted FOREIGN).
+00015   C
+00016   C
+00017   C Returns:-	error return (if any!)
+00018   C
+00019   C
+00020   	IMPLICIT NONE
+00021   C
+00022   C Common blocks:
+00023   C
+00024           INTEGER    LSL__CREATED                   
+00025           PARAMETER (LSL__CREATED                   =   201424905)
+00026           INTEGER    LSL__NORMAL                    
+00027           PARAMETER (LSL__NORMAL                    =   201424913)
+00028           INTEGER    LSL__SIGSUCC                   
+00029           PARAMETER (LSL__SIGSUCC                   =   201424921)
+00030           INTEGER    LSL__STREOL                    
+00031           PARAMETER (LSL__STREOL                    =   201424929)
+00032           INTEGER    LSL__STRCHAR                   
+00033           PARAMETER (LSL__STRCHAR                   =   201424937)
+00034           INTEGER    LSL__STRCMD                    
+00035           PARAMETER (LSL__STRCMD                    =   201424945)
+00036           INTEGER    LSL__STRSPACE                  
+00037           PARAMETER (LSL__STRSPACE                  =   201424953)
+00038           INTEGER    LSL__DUMMY1                    
+00039           PARAMETER (LSL__DUMMY1                    =   201424961)
+00040           INTEGER    LSL__DUMMY2                    
+00041           PARAMETER (LSL__DUMMY2                    =   201424969)
+00042           INTEGER    LSL__DUMMY3                    
+00043           PARAMETER (LSL__DUMMY3                    =   201424977)
+00044           INTEGER    LSL__DUMMY4                    
+00045           PARAMETER (LSL__DUMMY4                    =   201424985)
+00046           INTEGER    LSL__DUMMY5                    
+00047           PARAMETER (LSL__DUMMY5                    =   201424993)
+00048           INTEGER    LSL__DUMMY6                    
+00049           PARAMETER (LSL__DUMMY6                    =   201425001)
+00050           INTEGER    LSL__DUMMY7                    
+00051           PARAMETER (LSL__DUMMY7                    =   201425009)
+00052           INTEGER    LSL__DUMMY8                    
+00053           PARAMETER (LSL__DUMMY8                    =   201425017)
+00054           INTEGER    LSL__DUMMY9                    
+00055           PARAMETER (LSL__DUMMY9                    =   201425025)
+00056           INTEGER    LSL__DUMMY10                   
+00057           PARAMETER (LSL__DUMMY10                   =   201425033)
+
+MOUNT_TAPE                                                       6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  16
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00058           INTEGER    LSL__DEFTOOBIG                 
+00059           PARAMETER (LSL__DEFTOOBIG                 =   201425040)
+00060           INTEGER    LSL__EOF                       
+00061           PARAMETER (LSL__EOF                       =   201425048)
+00062           INTEGER    LSL__FILTOOLONG                
+00063           PARAMETER (LSL__FILTOOLONG                =   201425056)
+00064           INTEGER    LSL__NEGPOSNMK                 
+00065           PARAMETER (LSL__NEGPOSNMK                 =   201425064)
+00066           INTEGER    LSL__POSNMKOVF                 
+00067           PARAMETER (LSL__POSNMKOVF                 =   201425072)
+00068           INTEGER    LSL__RANREV                    
+00069           PARAMETER (LSL__RANREV                    =   201425080)
+00070           INTEGER    LSL__RECTOOBIG                 
+00071           PARAMETER (LSL__RECTOOBIG                 =   201425088)
+00072           INTEGER    LSL__SIGWARN                   
+00073           PARAMETER (LSL__SIGWARN                   =   201425096)
+00074           INTEGER    LSL__SRCTOOBIG                 
+00075           PARAMETER (LSL__SRCTOOBIG                 =   201425104)
+00076           INTEGER    LSL__NOFIELD                   
+00077           PARAMETER (LSL__NOFIELD                   =   201425112)
+00078           INTEGER    LSL__DUMMYW2                   
+00079           PARAMETER (LSL__DUMMYW2                   =   201425120)
+00080           INTEGER    LSL__DUMMYW3                   
+00081           PARAMETER (LSL__DUMMYW3                   =   201425128)
+00082           INTEGER    LSL__DUMMYW4                   
+00083           PARAMETER (LSL__DUMMYW4                   =   201425136)
+00084           INTEGER    LSL__DUMMYW5                   
+00085           PARAMETER (LSL__DUMMYW5                   =   201425144)
+00086           INTEGER    LSL__DUMMYW6                   
+00087           PARAMETER (LSL__DUMMYW6                   =   201425152)
+00088           INTEGER    LSL__DUMMYW7                   
+00089           PARAMETER (LSL__DUMMYW7                   =   201425160)
+00090           INTEGER    LSL__DUMMYW8                   
+00091           PARAMETER (LSL__DUMMYW8                   =   201425168)
+00092           INTEGER    LSL__DUMMYW9                   
+00093           PARAMETER (LSL__DUMMYW9                   =   201425176)
+00094           INTEGER    LSL__DUMMYW10                  
+00095           PARAMETER (LSL__DUMMYW10                  =   201425184)
+00096           INTEGER    LSL__AMBIG                     
+00097           PARAMETER (LSL__AMBIG                     =   201425194)
+00098           INTEGER    LSL__AMBINEQ                   
+00099           PARAMETER (LSL__AMBINEQ                   =   201425202)
+00100           INTEGER    LSL__AMBIG2                    
+00101           PARAMETER (LSL__AMBIG2                    =   201425210)
+00102           INTEGER    LSL__BADEXCEP                  
+00103           PARAMETER (LSL__BADEXCEP                  =   201425218)
+00104           INTEGER    LSL__BADINEQ                   
+00105           PARAMETER (LSL__BADINEQ                   =   201425226)
+00106           INTEGER    LSL__BADPARSE                  
+00107           PARAMETER (LSL__BADPARSE                  =   201425234)
+00108           INTEGER    LSL__BADTCOND                  
+00109           PARAMETER (LSL__BADTCOND                  =   201425242)
+00110           INTEGER    LSL__BASECH                    
+00111           PARAMETER (LSL__BASECH                    =   201425250)
+00112           INTEGER    LSL__BUFOVFLW                  
+00113           PARAMETER (LSL__BUFOVFLW                  =   201425258)
+00114           INTEGER    LSL__BUFFEROVF                 
+
+MOUNT_TAPE                                                       6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  17
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00115           PARAMETER (LSL__BUFFEROVF                 =   201425266)
+00116           INTEGER    LSL__COMMA                     
+00117           PARAMETER (LSL__COMMA                     =   201425274)
+00118           INTEGER    LSL__DEFFILNAM                 
+00119           PARAMETER (LSL__DEFFILNAM                 =   201425282)
+00120           INTEGER    LSL__DEFVERNUM                 
+00121           PARAMETER (LSL__DEFVERNUM                 =   201425290)
+00122           INTEGER    LSL__DEVALLOC                  
+00123           PARAMETER (LSL__DEVALLOC                  =   201425298)
+00124           INTEGER    LSL__ENDOFTAPE                 
+00125           PARAMETER (LSL__ENDOFTAPE                 =   201425306)
+00126           INTEGER    LSL__ENDOFVOL                  
+00127           PARAMETER (LSL__ENDOFVOL                  =   201425314)
+00128           INTEGER    LSL__FAC                       
+00129           PARAMETER (LSL__FAC                       =   201425322)
+00130           INTEGER    LSL__FILINUSE                  
+00131           PARAMETER (LSL__FILINUSE                  =   201425330)
+00132           INTEGER    LSL__FLTDIV                    
+00133           PARAMETER (LSL__FLTDIV                    =   201425338)
+00134           INTEGER    LSL__FLTOVF                    
+00135           PARAMETER (LSL__FLTOVF                    =   201425346)
+00136           INTEGER    LSL__FLTUND                    
+00137           PARAMETER (LSL__FLTUND                    =   201425354)
+00138           INTEGER    LSL__HADEXCP                   
+00139           PARAMETER (LSL__HADEXCP                   =   201425362)
+00140           INTEGER    LSL__ILLEGLUN                  
+00141           PARAMETER (LSL__ILLEGLUN                  =   201425370)
+00142           INTEGER    LSL__INTPARSERR                
+00143           PARAMETER (LSL__INTPARSERR                =   201425378)
+00144           INTEGER    LSL__INTDIV                    
+00145           PARAMETER (LSL__INTDIV                    =   201425386)
+00146           INTEGER    LSL__INTOVF                    
+00147           PARAMETER (LSL__INTOVF                    =   201425394)
+00148           INTEGER    LSL__INVALSPEC                 
+00149           PARAMETER (LSL__INVALSPEC                 =   201425402)
+00150           INTEGER    LSL__LUNINUSE                  
+00151           PARAMETER (LSL__LUNINUSE                  =   201425410)
+00152           INTEGER    LSL__MAXPAREX                  
+00153           PARAMETER (LSL__MAXPAREX                  =   201425418)
+00154           INTEGER    LSL__MISSARGS                  
+00155           PARAMETER (LSL__MISSARGS                  =   201425426)
+00156           INTEGER    LSL__MSGNOTFND                 
+00157           PARAMETER (LSL__MSGNOTFND                 =   201425434)
+00158           INTEGER    LSL__NOLUNS                    
+00159           PARAMETER (LSL__NOLUNS                    =   201425442)
+00160           INTEGER    LSL__NONUM                     
+00161           PARAMETER (LSL__NONUM                     =   201425450)
+00162           INTEGER    LSL__NOSUCHDEV                 
+00163           PARAMETER (LSL__NOSUCHDEV                 =   201425458)
+00164           INTEGER    LSL__NOSUCHLUN                 
+00165           PARAMETER (LSL__NOSUCHLUN                 =   201425466)
+00166           INTEGER    LSL__NOSUCHFILE                
+00167           PARAMETER (LSL__NOSUCHFILE                =   201425474)
+00168           INTEGER    LSL__RESPARSOVF                
+00169           PARAMETER (LSL__RESPARSOVF                =   201425482)
+00170           INTEGER    LSL__SIGERR                    
+00171           PARAMETER (LSL__SIGERR                    =   201425490)
+
+MOUNT_TAPE                                                       6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  18
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00172           INTEGER    LSL__SRCFILNAM                 
+00173           PARAMETER (LSL__SRCFILNAM                 =   201425498)
+00174           INTEGER    LSL__SRCVERNUM                 
+00175           PARAMETER (LSL__SRCVERNUM                 =   201425506)
+00176           INTEGER    LSL__STRTOOLONG                
+00177           PARAMETER (LSL__STRTOOLONG                =   201425514)
+00178           INTEGER    LSL__SYNTAXERR                 
+00179           PARAMETER (LSL__SYNTAXERR                 =   201425522)
+00180           INTEGER    LSL__SYSCLOSE                  
+00181           PARAMETER (LSL__SYSCLOSE                  =   201425530)
+00182           INTEGER    LSL__SYSERR                    
+00183           PARAMETER (LSL__SYSERR                    =   201425538)
+00184           INTEGER    LSL__SYSFIND                   
+00185           PARAMETER (LSL__SYSFIND                   =   201425546)
+00186           INTEGER    LSL__SYSREAD                   
+00187           PARAMETER (LSL__SYSREAD                   =   201425554)
+00188           INTEGER    LSL__SYSREW                    
+00189           PARAMETER (LSL__SYSREW                    =   201425562)
+00190           INTEGER    LSL__SYSUPD                    
+00191           PARAMETER (LSL__SYSUPD                    =   201425570)
+00192           INTEGER    LSL__SYSWRITE                  
+00193           PARAMETER (LSL__SYSWRITE                  =   201425578)
+00194           INTEGER    LSL__SYSOPEN                   
+00195           PARAMETER (LSL__SYSOPEN                   =   201425586)
+00196           INTEGER    LSL__UNEXPCH                   
+00197           PARAMETER (LSL__UNEXPCH                   =   201425594)
+00198           INTEGER    LSL__UNEXPCMD                  
+00199           PARAMETER (LSL__UNEXPCMD                  =   201425602)
+00200           INTEGER    LSL__UNEXPCMD2                 
+00201           PARAMETER (LSL__UNEXPCMD2                 =   201425610)
+00202           INTEGER    LSL__UNEXPEOF                  
+00203           PARAMETER (LSL__UNEXPEOF                  =   201425618)
+00204           INTEGER    LSL__UNEXPEOL                  
+00205           PARAMETER (LSL__UNEXPEOL                  =   201425626)
+00206           INTEGER    LSL__FILNOLEN                  
+00207           PARAMETER (LSL__FILNOLEN                  =   201425634)
+00208           INTEGER    LSL__SYSFLUSH                  
+00209           PARAMETER (LSL__SYSFLUSH                  =   201425642)
+00210           INTEGER    LSL__DUMMYE3                   
+00211           PARAMETER (LSL__DUMMYE3                   =   201425650)
+00212           INTEGER    LSL__DUMMYE4                   
+00213           PARAMETER (LSL__DUMMYE4                   =   201425658)
+00214           INTEGER    LSL__DUMMYE5                   
+00215           PARAMETER (LSL__DUMMYE5                   =   201425666)
+00216           INTEGER    LSL__DUMMYE6                   
+00217           PARAMETER (LSL__DUMMYE6                   =   201425674)
+00218           INTEGER    LSL__DUMMYE7                   
+00219           PARAMETER (LSL__DUMMYE7                   =   201425682)
+00220           INTEGER    LSL__DUMMYE8                   
+00221           PARAMETER (LSL__DUMMYE8                   =   201425690)
+00222           INTEGER    LSL__DUMMYE9                   
+00223           PARAMETER (LSL__DUMMYE9                   =   201425698)
+00224           INTEGER    LSL__DUMMYE10                  
+00225           PARAMETER (LSL__DUMMYE10                  =   201425706)
+00226           INTEGER    LSL__SIGSEVER                  
+00227           PARAMETER (LSL__SIGSEVER                  =   201425716)
+00228           INTEGER    LSL__DUMMYS1                   
+
+MOUNT_TAPE                                                       6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  19
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00229           PARAMETER (LSL__DUMMYS1                   =   201425724)
+00230           INTEGER    LSL__DUMMYS2                   
+00231           PARAMETER (LSL__DUMMYS2                   =   201425732)
+00232           INTEGER    LSL__DUMMYS3                   
+00233           PARAMETER (LSL__DUMMYS3                   =   201425740)
+00234           INTEGER    LSL__DUMMYS4                   
+00235           PARAMETER (LSL__DUMMYS4                   =   201425748)
+00236           INTEGER    LSL__DUMMYS5                   
+00237           PARAMETER (LSL__DUMMYS5                   =   201425756)
+00238           INTEGER    LSL__DUMMYS6                   
+00239           PARAMETER (LSL__DUMMYS6                   =   201425764)
+00240           INTEGER    LSL__DUMMYS7                   
+00241           PARAMETER (LSL__DUMMYS7                   =   201425772)
+00242           INTEGER    LSL__DUMMYS8                   
+00243           PARAMETER (LSL__DUMMYS8                   =   201425780)
+00244           INTEGER    LSL__DUMMYS9                   
+00245           PARAMETER (LSL__DUMMYS9                   =   201425788)
+00246           INTEGER    LSL__DUMMYS10                  
+00247           PARAMETER (LSL__DUMMYS10                  =   201425796)
+00248           INTEGER    LSL__SIGINFO                   
+00249           PARAMETER (LSL__SIGINFO                   =   201425803)
+00250           INTEGER    LSL__DUMMYI1                   
+00251           PARAMETER (LSL__DUMMYI1                   =   201425811)
+00252           INTEGER    LSL__DUMMYI2                   
+00253           PARAMETER (LSL__DUMMYI2                   =   201425819)
+00254           INTEGER    LSL__DUMMYI3                   
+00255           PARAMETER (LSL__DUMMYI3                   =   201425827)
+00256           INTEGER    LSL__DUMMYI4                   
+00257           PARAMETER (LSL__DUMMYI4                   =   201425835)
+00258           INTEGER    LSL__DUMMYI5                   
+00259           PARAMETER (LSL__DUMMYI5                   =   201425843)
+00260           INTEGER    LSL__DUMMYI6                   
+00261           PARAMETER (LSL__DUMMYI6                   =   201425851)
+00262           INTEGER    LSL__DUMMYI7                   
+00263           PARAMETER (LSL__DUMMYI7                   =   201425859)
+00264           INTEGER    LSL__DUMMYI8                   
+00265           PARAMETER (LSL__DUMMYI8                   =   201425867)
+00266           INTEGER    LSL__DUMMYI9                   
+00267           PARAMETER (LSL__DUMMYI9                   =   201425875)
+00268           INTEGER    LSL__DUMMYI10                  
+00269           PARAMETER (LSL__DUMMYI10                  =   201425883)
+00270           INTEGER    LSL__IFFOPENED                 
+00271           PARAMETER (LSL__IFFOPENED                 =   201425891)
+00272           INTEGER    LSL__IFFPARSE                  
+00273           PARAMETER (LSL__IFFPARSE                  =   201425898)
+00274           INTEGER    LSL__IFFVERNUM                 
+00275           PARAMETER (LSL__IFFVERNUM                 =   201425906)
+00276           INTEGER    LSL__IFFSIZE                   
+00277           PARAMETER (LSL__IFFSIZE                   =   201425914)
+00278           INTEGER    LSL__IFFOPEN                   
+00279           PARAMETER (LSL__IFFOPEN                   =   201425922)
+00280           INTEGER    LSL__IFFCREATE                 
+00281           PARAMETER (LSL__IFFCREATE                 =   201425930)
+00282           INTEGER    LSL__IFFMODIFY                 
+00283           PARAMETER (LSL__IFFMODIFY                 =   201425938)
+00284           INTEGER    LSL__LCMOPNOUT                 
+00285           PARAMETER (LSL__LCMOPNOUT                 =   201425947)
+
+MOUNT_TAPE                                                       6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  20
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00286           INTEGER    LSL__LOGOPNOUT                 
+00287           PARAMETER (LSL__LOGOPNOUT                 =   201425955)
+00288           INTEGER    LSL__OPLCM                     
+00289           PARAMETER (LSL__OPLCM                     =   201425962)
+00290           INTEGER    LSL__OPLOG                     
+00291           PARAMETER (LSL__OPLOG                     =   201425970)
+00292           INTEGER    LSL__IFFINREV                  
+00293           PARAMETER (LSL__IFFINREV                  =   201425978)
+00294           INTEGER    LSL__IFFOUTREV                 
+00295           PARAMETER (LSL__IFFOUTREV                 =   201425986)
+00296   C
+00297   	INCLUDE		'($MNTDEF)'
+00470   C
+00471   C Functions:
+00472   C
+00473   	INTEGER*4	SYS$MOUNT
+00474   C
+00475   C Arguments:
+00476   C
+00477   	CHARACTER*(*)	TAPE_NAME		! the mag-tape we are to mount.
+00478   	LOGICAL		FOREIGN			! if TRUE then mount tape
+00479   						!  "/FOREIGN";
+00480   						! if FALSE then don't (ie ANSI)
+00481   C
+00482   C w/s:
+00483   C
+00484   	LOGICAL		STATUS			! function returns.
+00485   C
+00486   C Define the item-list structure.
+00487   C
+00488   	STRUCTURE	/ITEM_STRUCT/
+00489   	  UNION
+00490   	    MAP
+00491   	      INTEGER*2		BUFF_LEN	! No of bytes in BUFF_ADDR
+00492   	      INTEGER*2		ITEM_CODE	! our intent
+00493   	      INTEGER*4		BUFF_ADDR	! what we want it to do
+00494   	      INTEGER*4		RET_LEN_ADDR	! not used.
+00495   	    END MAP
+00496   	    MAP
+00497   	      INTEGER*4		END_LIST	! eol marker
+00498   	    END MAP
+00499   	  END UNION
+00500   	END STRUCTURE
+00501   C
+00502   C declare the item_structure.
+00503   C
+00504   	RECORD	/ITEM_STRUCT/	ITEM_LIST(3)
+00505   C
+00506   C Code:
+00507   C
+00508   C Initialise:
+00509   C
+00510   	MOUNT_TAPE = LSL__NORMAL		! assume success.
+00511   C
+00512   C Set-up the item list for use with SYS$MOUNT.
+00513   C
+00514   C...the device-name...
+
+MOUNT_TAPE                                                       6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  21
+                                                                 6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+00515   	ITEM_LIST(1).BUFF_LEN	   = LEN(TAPE_NAME)
+00516   	ITEM_LIST(1).ITEM_CODE	   = MNT$_DEVNAM
+00517   	ITEM_LIST(1).BUFF_ADDR	   = %LOC(TAPE_NAME)
+00518   	ITEM_LIST(1).RET_LEN_ADDR  = 0
+00519   C...it's flags
+00520   	ITEM_LIST(2).BUFF_LEN	= 4
+00521   	ITEM_LIST(2).ITEM_CODE = MNT$_FLAGS
+00522   	IF ( FOREIGN )  THEN
+00523   	  ITEM_LIST(2).BUFF_ADDR = %LOC(MNT$M_FOREIGN)
+00524   	ELSE
+00525   	  ITEM_LIST(2).BUFF_ADDR =
+00526        &		%LOC(MNT$M_NOHDR3.OR.MNT$M_FOREIGN)
+00527   	ENDIF
+00528   	ITEM_LIST(2).RET_LEN_ADDR = 0
+00529   	ITEM_LIST(3).END_LIST	= 0
+00530   C
+00531   C Now we try to mount the tape.
+00532   C
+00533   	STATUS = SYS$MOUNT(ITEM_LIST)
+00534   	IF (.NOT.STATUS)  THEN
+00535   	  MOUNT_TAPE = STATUS
+00536   	  GOTO 999
+00537   	ENDIF
+00538   C
+00539   C End:
+00540   C
+00541   999	RETURN
+00542   	END
+
+MOUNT_TAPE                                                       6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  22
+01                                                               6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+PROGRAM SECTIONS
+
+    Name				 Bytes   Attributes
+
+  0 $CODE                                  145   PIC CON REL LCL   SHR   EXE   RD NOWRT QUAD
+  1 $PDATA                                   8   PIC CON REL LCL   SHR NOEXE   RD NOWRT QUAD
+  2 $LOCAL                                  60   PIC CON REL LCL NOSHR NOEXE   RD   WRT QUAD
+
+    Total Space Allocated                  213
+
+
+ENTRY POINTS
+
+    Address  Type  Name          
+
+  0-00000000  I*4  MOUNT_TAPE    
+
+
+VARIABLES
+
+    Address  Type  Name              Address  Type  Name              Address  Type  Name          
+
+ AP-00000008@ L*4  FOREIGN         2-00000028  L*4  STATUS         AP-00000004@ CHAR TAPE_NAME     
+
+
+RECORD ARRAYS
+
+    Address   Name          Structure           Bytes  Dimensions
+
+  2-00000000  ITEM_LIST     ITEM_STRUCT            36  (3)
+
+
+
+
+LABELS
+
+    Address   Label   
+
+  0-0000008C  999     
+
+
+FUNCTIONS AND SUBROUTINES REFERENCED
+
+  Type  Name            Type  Name          
+
+   I*4  LEN              I*4  SYS$MOUNT     
+
+MOUNT_TAPE                                                       6-Aug-1997 09:37:38	VAX FORTRAN V5.9-173                Page  23
+01                                                               6-Aug-1997 09:37:36	[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.FOR;10  
+
+COMMAND QUALIFIERS
+
+  FORTRAN/EXTEND/DEBUG/NOOPT/LIST VOLUME1
+
+  /CHECK=(NOBOUNDS,OVERFLOW,NOUNDERFLOW)
+  /DEBUG=(SYMBOLS,TRACEBACK)
+  /DESIGN=(NOCOMMENTS,NOPLACEHOLDERS)
+  /SHOW=(NODICTIONARY,NOINCLUDE,MAP,NOPREPROCESSOR,SINGLE)
+  /STANDARD=(NOSEMANTIC,NOSOURCE_FORM,NOSYNTAX)
+  /WARNINGS=(NODECLARATIONS,GENERAL,NOULTRIX,NOVAXELN)
+  /CONTINUATIONS=19  /NOCROSS_REFERENCE  /NOD_LINES  /EXTEND_SOURCE
+  /F77  /NOG_FLOATING  /I4  /NOMACHINE_CODE  /NOOPTIMIZE  /NOPARALLEL
+  /NOANALYSIS_DATA
+  /NODIAGNOSTICS
+  /LIST=LSL$SOURCE_ROOT:[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.LIS;10                                          
+  /OBJECT=LSL$SOURCE_ROOT:[DTMCONVERT.NTF2DTI.SPECIAL]VOLUME1.OBJ;10                                          
+
+
+COMPILATION STATISTICS
+
+  Run Time:           2.70 seconds
+  Elapsed Time:       4.02 seconds
+  Page Faults:        1063
+  Dynamic Memory:     965 pages

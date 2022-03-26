@@ -38,19 +38,21 @@ C Functions called
 C
 	LOGICAL		RDLONG			! read a long
 	INTEGER*4	RDCH			! read char
+	INTEGER*4	MOD			! modulus
 	LOGICAL*4	OSMH_NEW_GET_CITF_LINE	! read a line from the header
+	LOGICAL*4	OSMH_NEW_GET_DIV_POSN	! find posn of nth divider
 C
 C Local Variables
 C
 	INTEGER*4	STATUS			! Error status code
 	INTEGER*4	I,J			! counters
 C
-	LOGICAL		FOUNDALLDIVS
-	LOGICAL		REMEMBER
-	INTEGER*4	NUMDIV,DIVFOUND
 	INTEGER*4	LEN,OFFSET,NUMLEFT,COUNT
 	INTEGER*4	HEADERSIZE
+	INTEGER*4	START,STARTPOS
+	INTEGER*4	NUMDIV,LINE
 	CHARACTER*80	STR
+	CHARACTER*2	REC_DESCR
 	CHARACTER*1	CH
 C
 C------------------------------------------------------------------------------
@@ -58,10 +60,8 @@ C
 C Assume everything will work
 C
 	STATUS = .TRUE.
-	DIVFOUND = 0
 	POS = 0
 	COUNT = 0
-	FOUNDALLDIVS = .FALSE.
 C
 C This routine should only be called for type 3 or 4 headers.
 C
@@ -75,24 +75,18 @@ C Set buffer to read from
 C
 	CALL SETAUX(MH2BYTE,MH2BYSZ)
 C
-C Find size field
-C
-!	   IF (MH2DESC(2).EQ.3) THEN
-!	      SIZE = OSMH_TABLE(FIELD,3,MH2DESC(2))
-!	   ELSE
-!	      IF (FIELD.EQ.MH_LENGTH) THEN
-!		 SIZE = OSMH_TABLE(FIELD,1,MH2DESC(2))
-!	      ELSE
-!		 SIZE = OSMH_TABLE(FIELD,3,MH2DESC(2))
-!	      ENDIF
-!	   ENDIF
-C
 C Find offset for field
 C
 	IF (MH2DESC(2).EQ.3) THEN
+C
+C Type 3 MH fields are easy
+C
 	   POS = OSMH_TABLE(FIELD,2,MH2DESC(2))
 	   SIZ = OSMH_TABLE(FIELD,3,MH2DESC(2))
-	ELSEIF (FIELD.LT.MH_CH_IND_A .OR. FIELD.GT.MH_CH_IND_H) THEN
+	ELSEIF (FIELD.LT.MH_DIFF_HT_LEN .OR. FIELD.GT.MH_CH_IND_H) THEN
+C
+C Type 4 fixed fields
+C
 	   IF (FIELD.EQ.MH_LENGTH) THEN
 	      POS = 1
 	      SIZ = OSMH_TABLE(FIELD,1,MH2DESC(2))
@@ -102,69 +96,78 @@ C
 		 POS = MH_UNDEFINED
 		 GOTO 999
 	      ENDIF
-	      POS = (OSMH_TABLE(FIELD,1,MH2DESC(2))-1) * 80
+C
+C Find start of 07 record
+C
+	      DO 50 I = 0,MH2BYSZ/80 - 1
+		 REC_DESCR = CHAR(MH2BYTE((I)*80+1))//
+     &		             CHAR(MH2BYTE((I)*80+2))
+		 IF (REC_DESCR.EQ.'07') GOTO 60
+50	      CONTINUE
+C
+C Failed to find 07.
+C
+	      STATUS = OSMHLIB__NOSECHREC
+	      IF ( .NOT.MH_NOMESS ) CALL LSL_PUTMSG(STATUS)
+	      GOTO 999
+60	      POS = (I + OSMH_TABLE(FIELD,1,MH2DESC(2))-1) * 80
 	      POS = POS + OSMH_TABLE(FIELD,2,MH2DESC(2))
 	      SIZ = OSMH_TABLE(FIELD,3,MH2DESC(2))
 	   ENDIF
 	ELSE
+C
+C Variable fields: all change indicators and the DIFF_HT_LEN
+C
 	   SIZ = OSMH_TABLE(FIELD,3,MH2DESC(2))
 	   HEADERSIZE = OSMH_TABLE(MH_LENGTH,1,MH2DESC(2))
 	   NUMDIV = OSMH_TABLE(FIELD,1,MH2DESC(2))
 	   OFFSET = OSMH_TABLE(FIELD,2,MH2DESC(2))
-!	   IF (NUMDIV.EQ.0 .AND. OFFSET.EQ.0) GOTO 999	! field undefined
-	   FOUNDALLDIVS = NUMDIV.EQ.0
-	   DO 100 I = 1,(HEADERSIZE-1)/80+1
-	      STATUS = OSMH_NEW_GET_CITF_LINE(I,STR,LEN)
-	      IF (STATUS.EQ.OSMHLIB__BLANKLINE) GOTO 700
-!	      IF (STATUS.EQ.OSMHLIB__BLANKLINE) THEN
-!		 STATUS = OSMHLIB__TOOFEWDIVS
-!		 IF ( .NOT.MH_NOMESS ) CALL LSL_PUTMSG(STATUS)
-!		 GOTO 999
-!	      ENDIF
-	      IF (.NOT.STATUS) THEN
-		 GOTO 999
+	   IF (NUMDIV.EQ.MH_UNDEFINED .OR. OFFSET.EQ.MH_UNDEFINED) THEN
+	      POS = MH_UNDEFINED
+	      SIZ = MH_UNDEFINED
+	      GOTO 999
+	   ENDIF
+C
+	   STATUS = OSMH_NEW_GET_DIV_POSN(NUMDIV,STARTPOS,LINE)
+	   IF (.NOT.STATUS) GOTO 999
+C
+C Found nth divider. Read that line again and start counting characters until
+C we find the correct offset.
+C
+	   IF (OFFSET.EQ.0) THEN
+	      IF (NUMDIV.EQ.0) THEN
+		 POS = 3
+	      ELSE
+		 POS = STARTPOS
 	      ENDIF
-	      LEN = LEN-2
-	      DO 200 J = 3,LEN
-		 IF (FOUNDALLDIVS) THEN
-		    COUNT = COUNT + 1
-		    IF (COUNT.GE.OFFSET) THEN
-		       POS = POS + J
-		       GOTO 800
-		    ENDIF
-		 ELSE
-		    CH = STR(J:J)
-		    IF (CH.EQ.MH_CITF_DIVIDER) DIVFOUND = DIVFOUND + 1
-		    IF (NUMDIV.EQ.DIVFOUND) THEN
-		       NUMLEFT = LEN-J
-		       IF (OFFSET.LE.NUMLEFT) THEN
-			  POS = POS + J + OFFSET
-			  GOTO 800
-		       ELSE
-			  COUNT = NUMLEFT
-			  FOUNDALLDIVS = .TRUE.
-			  GOTO 150
-		       ENDIF
-		    ENDIF
+	      GOTO 800
+	   ENDIF
+	   STARTPOS = STARTPOS + 1
+	   START = MOD(STARTPOS,80)
+	   POS = 80*INT(STARTPOS/80)
+	   DO 100 I = LINE,(HEADERSIZE-1)/80+1
+	      STATUS = OSMH_NEW_GET_CITF_LINE(I,STR,LEN)
+	      IF (.NOT.STATUS) GOTO 999
+	      LEN = LEN-2		! take 2 off for '0%' at end of line
+	      DO 200 J = START,LEN
+		 COUNT = COUNT + 1
+		 IF (COUNT.GE.OFFSET) THEN
+		    POS = POS + J
+		    GOTO 800
 		 ENDIF
 200	      CONTINUE
 150	      POS = POS + 80
+	      START = 3
 100	   CONTINUE
 C
-C Check the reason for the failure
+C Run out of header and not found correct offset
 C
-700	   IF (.NOT.FOUNDALLDIVS) THEN
-	      STATUS = OSMHLIB__TOOFEWDIVS
+	   IF (COUNT.LT.OFFSET) THEN
+	      STATUS = OSMHLIB__BADOFFSET
 	      IF ( .NOT.MH_NOMESS ) CALL LSL_PUTMSG(STATUS)
 	      GOTO 999
-	   ELSE
-	      IF (COUNT.LT.OFFSET) THEN
-		 STATUS = OSMHLIB__BADOFFSET
-		 IF ( .NOT.MH_NOMESS ) CALL LSL_PUTMSG(STATUS)
-		 GOTO 999
 	      ENDIF
 	   ENDIF
-	ENDIF
 C
 800	CONTINUE
 C

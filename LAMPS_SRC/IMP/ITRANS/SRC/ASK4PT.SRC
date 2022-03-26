@@ -1,0 +1,580 @@
+        LOGICAL FUNCTION ASK4PT
+C
+***	MODULE ASK4PT
+***	IDENT 20FE92
+C
+C Copyright Laser-Scan Laboratories Ltd.,Cambridge,England
+C 
+C
+CMOD	Need R8CPTS to have number of lines that can	RWR	 5-Dec-91
+C	be read from file.(SPR 1517)
+CMOD	Stop overwriting of common blocks (writing to
+C	GOT_LINES rather than 4 across CPs)		RWR	26-Oct-90
+CMOD	Assume ABSOLUTE input coords with /CONTROL	RWR	15-Oct-90
+CMOD	Allow quadratic transformation - /SIX		RWR	 4-Sep-90
+CMOD	Allows a control file to be read, and least	CAB	23-Aug-90
+C	squares fits to /FOUR and /PROJECTIVE
+C	transformations
+CMOD	when scaling up CP entries, add origin		RWR	14-Jun-89
+C	(mod M744)
+CMOD	allow /PROJECTIVE				RWR	 5-May-88
+CMOD	Always reset CPTS from originals from file	RWR	15-Dec-87
+C	(mod M2/420)
+C	(not done in last mod when residuals not
+C	accepted)
+CMOD	Always reset CPTS from originals from file	RWR	11-Feb-87
+C	(mod M2/420)
+CMOD	Allow scaling up of corner points in sheet mms 
+C	to projection units				RWR	20-Jan-87
+C
+C Author    Ron Russell				 9-Dec-1985
+C
+C       This subroutine works out transformation from mms to projection
+C	units
+C
+	IMPLICIT NONE
+C
+	INCLUDE '($SSDEF)'
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***	PARAMETER/LSL$CMNLSL:RDYES/
+***	PARAMETER/HERE:ITRANSMSG/
+C
+***	COMMON/LSL$CMNLSL:EXCEPTION/
+***	COMMON/LSL$CMNLSL:EXPC/
+***	COMMON/HERE:GENERAL/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***     COMMON/HERE:DESCRIPT/
+C
+C w/s
+C
+	INTEGER*4	I,J		! counters
+	REAL		SCLFCTR		! converstion factor from table
+					! units
+	REAL		RESID(2,MAX_LINES)! residuals (target space)
+	REAL		XMAX,YMAX	! maximum residuals (target
+					! units)
+	REAL		XRMS,YRMS	! RMS residuals (target units)
+	LOGICAL		YESNO
+	INTEGER*4	IERR
+	INTEGER*4	LEN
+	REAL*8		X,Y
+	REAL*8		R8CPTS(2,MAX_LINES)
+	REAL*8		MINX,MINY
+	REAL		LOWX,LOWY,UPPX,UPPY
+	BYTE		ICH
+	REAL		XERR,YERR	! allowable X and Y error
+	INTEGER*4	PRJIND
+	CHARACTER*16	UNITS
+	INTEGER		UNLEN
+	REAL*8		GCPCOEF(3,2)	! coefficients for GENTRN
+	REAL*8		COEF4PT(4,2)	! coefficients for EXTENDED_4PT_LS
+					! and PROJ_4PT_LS
+	REAL*8		COEF2P(4)	! coefficients for RWR2PT
+C
+	CHARACTER*2	CPTN(4)		! corner point names (all 4)
+	LOGICAL		SCALE_UP
+C
+C functions
+C
+	INTEGER		TTRSTR
+	INTEGER		RDDBLE
+	INTEGER		RDCHS
+	LOGICAL		GENTRN
+	LOGICAL		EXTENDED_4PT_LS
+	LOGICAL		RWR2PT
+	INTEGER		SIGCHS
+	LOGICAL		RDYES
+	LOGICAL		PROJ_4PT_LS
+	LOGICAL		SECOND_ORDER_LS
+C
+C initialise
+C
+	DATA	CPTN/'NW','SW','SE','NE'/
+C
+	ASK4PT=SS$_NORMAL
+C
+C reset CPTS's from values in CP entry, as this may not be the first
+C time through this routine (may come here again after a ^z)
+C
+  10	CONTINUE
+	DO 20, I=1,4
+	   DO 20, J=1,GOT_LINES
+	      IF (HAD_CONT) THEN
+C
+C if reading control from a control point file, we assume that all the
+C coordinates are ABSOLUTE; if using the CP entry, the LHS is RELATIVE while
+C the RHS may be ABSOLUTE or RELATIVE
+C reduce LHS of CTRLPTS by the current local origin - the RHS is done later
+	         IF (I.LE.2) THEN
+	            CPTS(I,J) = CTRLPTS(I,J) - CURRLOC(I)
+	         ELSE
+	            CPTS(I,J) = CTRLPTS(I,J)
+	         ENDIF
+	      ELSE
+	         CPTS(I,J) = ORGCPTS(I,J)
+	      ENDIF
+	   CONTINUE
+   20	CONTINUE
+C
+C what units are we speaking about?
+C
+	IF (CURRPRJ.EQ.2) THEN
+	   UNITS='feet'
+	   UNLEN=4
+	ELSEIF (CURRSPH.EQ.101) THEN
+	   UNITS='projection units'
+	   UNLEN=16
+	ELSE
+	   UNITS='metres'
+	   UNLEN=6
+	ENDIF
+C
+C get the projection index
+C
+	PRJIND = -1			! get an error if not found
+	DO 30, I=1,MD2_NOPRJ
+ 	   IF (CURRPRJ.EQ.MD2_PRJCD(I)) THEN
+	      PRJIND=I
+	      GOTO 40
+	   ENDIF
+   30	CONTINUE
+C
+C get corner points in projection system 
+C
+   40	CONTINUE
+	DO 50,I=1,GOT_LINES
+	   IF (HAD_FTT) THEN
+	      IF (HAD_CONT) THEN
+	         R8CPTS(1,I)=CTRLPTS(3,I)
+	         R8CPTS(2,I)=CTRLPTS(4,I)
+	      ELSE
+	         R8CPTS(1,I)=CPTS(3,I)
+	         R8CPTS(2,I)=CPTS(4,I)
+	      ENDIF
+	   ELSE
+	      R8CPTS(1,I)=CPTS(3,I) + CURRLOC(1)
+	      R8CPTS(2,I)=CPTS(4,I) + CURRLOC(2)
+	   ENDIF	      
+   50	CONTINUE
+	IF ((HAD_FTT) .AND. (HAD_CONT)) GOTO 110
+C
+	SCALE_UP = .NOT.HAD_FTT .AND. (CURRUNT.EQ.102.OR.CURRUNT.EQ.104)
+	CALL WRITEF(' ')
+	IF (HAD_FTT.OR..NOT.SCALE_UP) THEN
+	   CALL WRITEF('Plane transformation')
+	   CALL WRITEF('Existing control points are:')
+	ELSE
+C
+C calculate scale factor between sheet units and projection units
+
+	   SCLFCTR = CURRSCL
+	   IF (SCLFCTR.EQ.0.0) SCLFCTR = 1.0
+	   IF (CURRUNT.EQ.102) THEN
+	      SCLFCTR = SCLFCTR /1000.0
+	   ELSE
+	      SCLFCTR = SCLFCTR /39370.08
+	   ENDIF
+	   CALL WRITEF('Data are not in projection units')
+	   CALL WRITEF(
+     &	      ' Existing control points        + local origin   '//
+     &	            '     would scale to proj units')
+	ENDIF
+	DO 52, I=1,GOT_LINES
+	   IF (HAD_FTT.OR..NOT.SCALE_UP) THEN
+	      CALL WRITEF('      %^D%F12.3   %F12.3',R8CPTS(1,I),
+     &	                                          R8CPTS(2,I))
+	   ELSE
+	      CALL WRITEF(
+     &	         '%F12.3 %F12.3 :%^D%F12.3 %F12.3 :%F12.3 %F12.3',
+     &	         CPTS(3,I),CPTS(4,I),R8CPTS(1,I),R8CPTS(2,I),
+     &	         R8CPTS(1,I)*SCLFCTR,R8CPTS(2,I)*SCLFCTR)
+	   ENDIF
+   52	CONTINUE
+C
+C if dealing with sheet mms or thous, ask if corner points are to simply
+C be scaled up
+C
+	IF (SCALE_UP) THEN
+	   ASK4PT=RDYES('Do you wish to use these scaled '//
+     &	                     'control points [Y]',YESNO,ASSUME_YES,IERR)
+C
+	   IF (.NOT.ASK4PT) THEN
+	     IF (ASK4PT.NE.LSL__EOF) THEN	! must be LSL__SYSERR
+	         ASK4PT=IERR
+	         CALL LSL_PUTMSG(IERR)
+	      ELSE			! ^Z
+	         ASK4PT=ITRANS__EOF
+	      ENDIF
+	      GOTO 999			! exit
+	   ENDIF
+C
+C if yes, multiply by map scale and divide by factor to get coodinates
+C in projection units
+C
+	   IF (YESNO) THEN
+	      DO 56, I=1,GOT_LINES
+	         DO 56 J = 1,2
+	            R8CPTS(J,I)=R8CPTS(J,I)*SCLFCTR
+	         CONTINUE
+   56	      CONTINUE
+C
+C and continue with transformation
+C
+	      GOTO 110
+C
+C reset control points, and write them out again without origin offset
+	   ELSE
+	      DO 57,I=1,GOT_LINES
+	         R8CPTS(1,I)=CPTS(3,I)
+	         R8CPTS(2,I)=CPTS(4,I)
+   57	      CONTINUE
+	      CALL WRITEF('Existing control points are:')
+	      DO 58, I=1,GOT_LINES
+	         CALL WRITEF('      %^D%F12.3   %F12.3',R8CPTS(1,I),
+     &	                                                R8CPTS(2,I))
+   58	      CONTINUE
+	   ENDIF
+	ENDIF
+C
+C accept existing RHS cp entry
+C
+	ASK4PT=RDYES('Do you wish to use these '//
+     &	                     'control points [N]',YESNO,ASSUME_NO,IERR)
+C
+	IF (.NOT.ASK4PT) THEN
+	  IF (ASK4PT.NE.LSL__EOF) THEN	! must be LSL__SYSERR
+	      ASK4PT=IERR
+	      CALL LSL_PUTMSG(IERR)
+	   ELSE			! ^Z
+	      ASK4PT=ITRANS__EOF
+	   ENDIF
+	   GOTO 999			! exit
+	ENDIF
+C
+	IF (YESNO) GOTO 110		! accept control points
+C
+	IF (HAD_FTT) THEN
+	   CALL WRITEF('Enter control point values in output units')
+	ELSE
+	   CALL WRITEF('Enter control point values in '//
+     &	            '%S on %S projection',UNITS(1:UNLEN),
+     &	            MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))))
+	ENDIF
+C
+C get corner points of target system
+C
+   60	CONTINUE
+	DO 100, I=1,GOT_LINES
+   70	   CALL EXPAND('Enter coordinates of %S corner:  ',CPTN(I))
+	   ASK4PT=TTRSTR(,LEN,EXPDSC,IERR)
+	   IF (.NOT.ASK4PT) THEN
+	      IF (ASK4PT.NE.LSL__EOF) THEN	! must be LSL__SYSERR
+	         ASK4PT=IERR
+	         CALL LSL_PUTMSG(IERR)
+	         GOTO 999
+	      ELSE			! ^Z
+	         IF (I.EQ.1) THEN
+	            ASK4PT=ITRANS__EOF
+	            GOTO 999
+	         ELSE
+	            CALL LSL_PUTMSG(ITRANS__REENTER)
+	            GOTO 10			! start again
+	         ENDIF
+	      ENDIF
+	   ELSEIF (LEN.EQ.0) THEN		! need an answer
+	      GOTO 70
+	   ENDIF
+C
+	   CALL BSLN
+C
+C check for ?
+C
+	   IF (RDCHS(ICH)) THEN
+	      CALL LSL_PUTMSG(ITRANS__UNEXPEOL)
+	      GOTO 70
+	   ELSE
+	      IF (ICH.EQ.'?') THEN
+	         IF (HAD_FTT) THEN
+	            CALL WRITEF('Enter coordinates of %S corner in '//
+     &                    'output units')
+	         ELSE
+	            CALL WRITEF('Enter coordinates of %S corner in '//
+     &	                  'projection units',CPTN(I))
+	         ENDIF
+	         GOTO 70
+	      ELSE
+	         CALL BSCH
+	      ENDIF
+	   ENDIF	
+C
+C read a value
+C
+	   IF (RDDBLE(X)) THEN
+	      IF (ERRNUM.EQ.LSL__HADEXCP) THEN
+	         CALL LSL_PUTMSG(LSL_EXCP)
+	      ELSE
+	         CALL LSL_PUTMSG(ERRNUM)
+	      ENDIF
+	      GOTO 70
+	   ENDIF	
+	   IF (.NOT.RDDBLE(Y)) GOTO 90 ! check for both on one line
+C
+C check for end of line
+C
+	   IF (.NOT.RDCHS(ICH)) THEN
+	      CALL LSL_PUTMSG(ITRANS__UNEXPCH,ICH)
+	      GOTO 70
+	   ENDIF
+C
+   80	   CONTINUE
+	   CALL EXPAND('Northings of %S corner: ',CPTN(I))
+	   ASK4PT=TTRSTR(,LEN,EXPDSC,IERR)
+	   IF (.NOT.ASK4PT) THEN		! error
+	      IF (ASK4PT.NE.LSL__EOF) THEN	! must be LSL__SYSERR
+	         ASK4PT=IERR
+	         CALL LSL_PUTMSG(IERR)
+	         GOTO 999
+	      ELSE
+	         CALL LSL_PUTMSG(ITRANS__REENTER)
+	         GOTO 10
+	      ENDIF
+	   ELSEIF (LEN.EQ.0) THEN		! no default
+	      GOTO 80
+	   ENDIF
+C
+	   CALL BSLN
+	   IF (RDDBLE(Y)) THEN
+	      IF (ERRNUM.EQ.LSL__HADEXCP) THEN
+	         CALL LSL_PUTMSG(LSL_EXCP)
+	      ELSE
+	         CALL LSL_PUTMSG(ERRNUM)
+	      ENDIF
+	      GOTO 80
+	   ENDIF
+C
+   90	   CONTINUE
+C
+C check for end of line
+C
+	   IF (.NOT.RDCHS(ICH)) THEN
+	      CALL LSL_PUTMSG(ITRANS__UNEXPCH,ICH)
+	      GOTO 70
+	   ENDIF
+C
+	   R8CPTS(1,I)=X
+	   R8CPTS(2,I)=Y
+  100	CONTINUE
+C
+C reduce to SW corner if not using absolute values, and convert to R*4
+C
+110	CONTINUE
+	IF (.NOT.HAD_ABS) THEN
+	   MINX=R8CPTS(1,1)
+	   MINY=R8CPTS(2,1)
+	   DO 120, I=2,GOT_LINES
+	      MINX=MIN(R8CPTS(1,I),MINX)
+	      MINY=MIN(R8CPTS(2,I),MINY)
+120	   CONTINUE
+	ELSE
+	   MINX=0.0
+	   MINY=0.0
+	ENDIF
+C
+	DO 170, I=1,GOT_LINES
+	   CPTS(3,I)=R8CPTS(1,I)-MINX
+	   CPTS(4,I)=R8CPTS(2,I)-MINY
+	   DO 170, J=1,4
+	      IF (HAD_CONT) THEN
+	         SAVCPTS(J,I) = CTRLPTS(J,I)
+	      ELSE
+	         SAVCPTS(J,I)=CPTS(J,I)
+	      ENDIF
+	   CONTINUE
+170	CONTINUE
+C
+C compute allowable errors
+C
+	LOWX = CPTS(1,1)
+	UPPX = CPTS(1,1)
+	LOWY = CPTS(2,1)
+	UPPY = CPTS(2,1)
+	DO 180, I=2,GOT_LINES
+	   LOWX = MIN(LOWX,CPTS(1,I))
+	   UPPX = MAX(UPPX,CPTS(1,I))
+	   LOWY = MIN(LOWY,CPTS(2,I))
+	   UPPY = MAX(UPPY,CPTS(2,I))
+180 	CONTINUE
+	XERR = (UPPX-LOWX)/1000.0
+	YERR = (UPPY-LOWY)/1000.0
+C
+C compute transformation parameters and check that they are OK 
+C
+	ITREX=.FALSE.		! clear exception
+	IF (HAD_THREE) THEN
+	   IF (GENTRN(GOT_LINES,CPTS,GCPCOEF,RESID,
+     &					XMAX,YMAX,XRMS,YRMS)) THEN
+	      CALL LSL_PUTMSG(ITRANS__BADCPTS)
+	      IF (.NOT.HAD_CONT) THEN
+	         GOTO 10				! start again
+	      ELSE
+	         ASK4PT = ITRANS__BADCPTS
+	         GOTO 999
+	      ENDIF
+	   ELSE
+	      DO 190, I=1,3
+	         DO 190, J=1,2
+	            COEF(I,J)=GCPCOEF(I,J)
+	         CONTINUE
+  190	      CONTINUE
+	      COEF(4,1)=0.0			! no x*y term
+	      COEF(4,2)=0.0
+	      COEF(5,1)=0.0			! no x*x term
+	      COEF(5,2)=0.0
+	      COEF(6,1)=0.0			! no y*y term
+	      COEF(6,2)=0.0
+	   ENDIF
+	ELSEIF (HAD_FOUR) THEN
+	   IF (EXTENDED_4PT_LS(GOT_LINES,CPTS,COEF4PT,RESID,
+     &					XMAX,YMAX,XRMS,YRMS)) THEN
+	      CALL LSL_PUTMSG(ITRANS__BADCPTS)
+	      IF (.NOT.HAD_CONT) THEN
+	         GOTO 10				! start again
+	      ELSE
+	         ASK4PT = ITRANS__BADCPTS
+	         GOTO 999
+	      ENDIF
+	   ELSE
+	      DO 191, I=1,4
+	         DO 191, J=1,2
+	            COEF(I,J)=COEF4PT(I,J)
+	         CONTINUE
+191	      CONTINUE
+	      COEF(5,1)=0.0			! no x*x term
+	      COEF(5,2)=0.0
+	      COEF(6,1)=0.0			! no y*y term
+	      COEF(6,2)=0.0
+	   ENDIF
+	ELSEIF (HAD_PROJECTIVE) THEN		! for projective use
+	   IF (PROJ_4PT_LS(GOT_LINES,CPTS,COEF4PT,RESID,
+     &					XMAX,YMAX,XRMS,YRMS)) THEN	
+	      CALL LSL_PUTMSG(ITRANS__BADCPTS)
+	      IF (.NOT.HAD_CONT) THEN
+	         GOTO 10				! start again
+	      ELSE
+	         ASK4PT = ITRANS__BADCPTS
+	         GOTO 999
+	      ENDIF
+	   ELSE
+	      DO 192, I=1,4
+	         DO 192, J=1,2
+	            COEF(I,J)=COEF4PT(I,J)
+	         CONTINUE
+192	      CONTINUE
+	      COEF(5,1)=0.0			! no x*x term
+	      COEF(5,2)=0.0
+	      COEF(6,1)=0.0			! no y*y term
+	      COEF(6,2)=0.0
+	   ENDIF
+	ELSEIF (HAD_SIX) THEN		! for second order transformation 
+	   IF (SECOND_ORDER_LS(GOT_LINES,CPTS,COEF,RESID,
+     &					XMAX,YMAX,XRMS,YRMS)) THEN	
+	      CALL LSL_PUTMSG(ITRANS__BADCPTS)
+	      IF (.NOT.HAD_CONT) THEN
+	         GOTO 10				! start again
+	      ELSE
+	         ASK4PT = ITRANS__BADCPTS
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+	ELSE				! HAD_TWO.OR.TABUNTS
+	   IF (RWR2PT(GOT_LINES,CPTS,COEF2P,RESID,
+     &					XMAX,YMAX,XRMS,YRMS)) THEN
+	      CALL LSL_PUTMSG(ITRANS__BADCPTS)
+	      IF (.NOT.HAD_CONT) THEN
+	         GOTO 10				! start again
+	      ELSE
+	         ASK4PT = ITRANS__BADCPTS
+	         GOTO 999
+	      ENDIF
+	   ELSE
+	      COEF(1,1)=COEF2P(1)	! a0+a1x-a2y
+	      COEF(2,1)=COEF2P(2)	! b1+a2x+a1y
+	      COEF(3,1)=-COEF2P(3)
+	      COEF(4,1)=0.0
+	      COEF(1,2)=COEF2P(4)
+	      COEF(2,2)=COEF2P(3)
+	      COEF(3,2)=COEF2P(2)
+	      COEF(4,2)=0.0
+	      COEF(5,1)=0.0			! no x*x term
+	      COEF(5,2)=0.0
+	      COEF(6,1)=0.0			! no y*y term
+	      COEF(6,2)=0.0
+	   ENDIF
+	ENDIF
+C
+C check for arithmetic error in solving transformation
+C
+	IF (ITREX) THEN
+	   CALL LSL_PUTMSG(ITRANS__BADCPTS)
+	   IF (.NOT.HAD_CONT) THEN
+	      GOTO 10				! start again
+	   ELSE
+	      ASK4PT = ITRANS__BADCPTS
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C check for residuals (if any)
+C
+	IF (XMAX.GT.XERR.OR.YMAX.GT.YERR) THEN
+	   CALL LSL_PUTMSG(ITRANS__ERRCPTS,XMAX,YMAX,UNITS(1:UNLEN))
+C
+	   ASK4PT=RDYES('Do you wish to continue with these '//
+     &	                     'residuals [N]',YESNO,ASSUME_NO,IERR)
+C
+	   IF (.NOT.ASK4PT) THEN
+	      IF (ASK4PT.NE.LSL__EOF) THEN	! must be LSL__SYSERR
+	         ASK4PT=IERR
+	         CALL LSL_PUTMSG(IERR)
+	         GOTO 999			! exit
+	      ELSE			! ^Z
+	         ASK4PT=ITRANS__EOF
+	         IF (HAD_CONT) THEN
+	            ASK4PT=.FALSE.
+	            GOTO 999
+	         ELSE
+	            GOTO 10
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C
+	   IF (.NOT.YESNO) THEN
+	      IF (HAD_CONT) THEN
+	         ASK4PT=.FALSE.
+	         GOTO 999
+	      ELSE
+	         GOTO 10
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C transform corner points (making current and target values the same)
+C
+	DO 210, I=1,GOT_LINES
+	   CALL TRNUSER(CPTS(1,I),CPTS(2,I),COEF)
+	   CPTS(3,I)=CPTS(1,I)
+	   CPTS(4,I)=CPTS(2,I)
+  210	CONTINUE
+C
+C reset current local origin
+C
+	CURRLOC(1)=MINX
+	CURRLOC(2)=MINY
+C
+C now 4pt transformation is set up
+C
+	DO4PT=.TRUE.
+C
+  999	CONTINUE
+	RETURN
+   	END

@@ -1,0 +1,1517 @@
+	.TITLE FILEIO
+	.IDENT /21AP94/
+	.LIBRARY/LSL$LIBRARY:LSLMACLIB/
+
+;			     L S L L I B
+;
+;		F I L E    R E A D    A N D    W R I T E
+;
+;			 F A C I L I T I E S
+;
+;
+; Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+;
+; Author: TJ Ibbs, 9 September 1981
+;
+; file read facilities to go with LSLLIB, etc
+; (initially written for use in IGES for the OS, and then modified for VIOLIB,
+;  before being modified yet again for LSLLIB)
+
+;******************************************************************************
+;*********						     	       ********
+;******    MUST be assembled with TXTC.MAR, EXPC.MAR and LSLLIBMSG.MAR    *****
+;*********							       ********
+;******************************************************************************
+
+;******************************************************************************
+;*			M O D I F I C A T I O N S			      *
+;******************************************************************************
+;
+;MOD	Tony J Ibbs	 7-Jul-1988
+;MOD	When unsetting the FAB and RAB (in FLXOPN_SEL), set the FAB's
+;MOD	ORG=SEQ - ie default to sequential organisation for the file
+;
+;MOD	Tony J Ibbs	 6-Jul-1988
+;MOD	In FLWOVW and FLWUPD, also add DEL to the FAB's FAC, so that if the
+;MOD	file is an indexed sequential file, records can be deleted
+;
+;MOD	Tony J Ibbs	24-Jun-1988
+;MOD	Setting the RAC field to KEY (below, 18-Mar-1988) on opening an
+;MOD	indexed file for write was a mistake - undo it. The FLxFND routines
+;MOD	handle setting RAC=KEY before the find, and then setting it back to
+;MOD	SEQ after they have finished. This means that it is again possible
+;MOD	to open an indexed file for write, select it for read, rewind it,
+;MOD	and ask for the 'first'	record using FLRLIN.
+;MOD	Instead, what we do is to set the RAC field to KEY before we write
+;MOD	each individual record to an indexed file - this means a modification
+;MOD	to FLWLIN and FLWSTR
+;
+;MOD	Tony J Ibbs	20-Jun-1988
+;MOD	New routine FLWRDL to delete a record in an indexed sequential file
+;
+;MOD	Tony J Ibbs	18-Mar-1988
+;MOD	When writing to an indexed sequential file, we don't want sequential
+;MOD	access to the records (we'll either use a $FIND to find the record to
+;MOD	overwrite, or be inserting a new record, so we don't want to have to
+;MOD	sort those records first!). Modify the RAC (record access mode) field
+;MOD	in the RAB in FLXOPN_OPEN to be KEY for writing indexed files.
+;MOD			---------------------------
+;MOD	FLXOPN_SEL resets various FAB and RAB characteristics, so that when
+;MOD	a new file is opened (using a FAB/RAB that has been used before) it
+;MOD	does not inherit characteristics from the previous file.
+;MOD	Add resetting of the RAT to CR (FAB record attributes set back to
+;MOD	carriage return carriage control, the default), and of the RAC to
+;MOD	SEQ (RAB record access mode set back to sequential - see the previous
+;MOD	modification above).
+;
+;MOD	Tony J Ibbs	16-Mar-1988
+;MOD	Add new routines FLRFNB and FLWFNB (find using a buffer for the key)
+;
+;MOD	Clarke Brunt	10-Sep-1987
+;MOD	#512 (not 512) in $RAB_STORE in FLWOPB.
+;MOD	Put default filename in CODE_PSECT and reference it from all
+;MOD	the FABs. Avoids duplicating it in PSECT $RMSNAM.
+;
+;MOD	Tony J Ibbs	26-Mar-1987	mod 2/450
+;MOD	Add new routine FLWUSH to do $FLUSH on a file - copied from routine
+;MOD	FLRREW. NB - remove R9 from FLRREW, as don't need the FAB to rewind.
+;
+;MOD	Tony J Ibbs	16-Mar-1987	mod 2/429
+;MOD	Rewrite the file open routines to be clearer
+;MOD	Recomment the prelude to the file, ditto
+;
+;MOD	Bill James	 8-Dec-1986
+;MOD	Add FLRSVL/FLWSVL to save current LUN
+;
+;MOD	Dave Meader	30-Oct-1986
+;MOD	preserve R4 in FLWBLK.
+;
+;MOD	Tony J Ibbs	13-Aug-1986
+;MOD	in FLxOPN, only set the lun in the current row after the file
+;MOD	has been opened - this means that an open error doesn't exit
+;MOD	leaving the lun set spuriously
+;
+;MOD	Tony J Ibbs	29-May-1986
+;MOD	in FLRLIN/FLRSTR - save mask should include R5
+;
+;MOD	Tony J Ibbs	15-May-1986
+;MOD	in FLRLIN/FLRSTR \GOTDSC correct setting of R1 - should be MOVZWL
+;
+;MOD	Tony J Ibbs	 8-May-1986
+;MOD	add NCHS argument to FLRSTR, and use R4 to preserve the location
+;MOD	of the 'buffer' length (for both strings and buffers)
+;
+;******************************************************************************
+;*			F U N C T I O N S				      *
+;******************************************************************************
+
+;	O P E N   F I L E S
+
+; ok = FLROPN( lun, 'filename' [,IERR] [,ALQ] )	open file to read
+; ok = FLROPB( lun, 'filename' [,IERR] [,ALQ] )	open file for block read
+; ok = FLWOPN( lun, 'filename' [,IERR] [,ALQ] )	open new file to write
+; ok = FLWOPB( lun, 'filename' [,IERR] [,ALQ] ) open new file for block write
+; ok = FLWEXT( lun, 'filename' [,IERR] [,ALQ] ) open file to extend
+; ok = FLWOVW( lun, 'filename' [,IERR] [,ALQ] ) open file to overwrite
+; ok = FLWUPD( lun, 'filename' [,IERR] [,ALQ] ) open file to update
+
+;	C L O S E   F I L E S
+
+; ok = FLRCLO( [lun] [,IERR] )		close file opened for read
+; ok = FLWCLO( [lun] [,IERR] )		close file opened for write
+; ok = FLWSPL( [lun] [,IERR] )		close and spool file
+; ok = FLWPRT( [lun] [,IERR] )		close and print file
+; ok = FLWDEL( [lun] [,IERR] )		close and delete file
+; ok = FLWSUB( [lun] [,IERR] )		close and submit file
+
+;	R E W I N D   F I L E
+
+; ok = FLRREW( [lun] [,IERR] )		rewind file open for read
+
+;	F I N D   A   R E C O R D   I N   A N   I N D E X E D   F I L E
+
+; ok = FLRFND( string [,key_of_ref] [,equal/greater] [,IERR] )
+; ok = FLWFND( string [,key_of_ref] [,equal/greater] [,IERR] )
+
+; ok = FLRFNB( buffer, buflen, [,key_of_ref] [,equal/greater] [,IERR] )
+; ok = FLWFNB( buffer, buflen, [,key_of_ref] [,equal/greater] [,IERR] )
+
+;	R E A D   F R O M   A   F I L E
+
+; ok = FLRBLK( vbn, buffer [, read] [, IERR] )		read a block
+; ok = FLRLIN( [buffer] [, nchs] [, buflen] [, IERR] )	read a line to a buffer
+; ok = FLRSTR( [string] [, nchs] [, IERR] )		read a line to a string
+
+;	W R I T E   T O   A   F I L E
+
+; ok = FLWBLK( vbn, buffer [, read] [, IERR] )		write a block
+; ok = FLWLIN( [buffer] [, nchs] [, buflen] [, IERR] )	write a line from buffer
+; ok = FLWSTR( [string] [,IERR] )			write a line from string
+
+;	U P D A T E   A   R E C O R D
+
+; ok = FLULIN( [buffer] [, nchs] [, IERR] )
+; ok = FLUSTR( [string] [,IERR] )
+
+;	D E L E T E  A   R E C O R D	(in an indexed file)
+
+; ok = FLWRDL( [IERR] )
+
+;	F L U S H   I N T E R N A L   B U F F E R S
+
+; ok = FLWUSH( [lun] [, IERR] )
+
+;	S E L E C T   A   F I L E
+
+; ok = FLRSEL( lun )			select file opened for read
+; ok = FLWSEL( lun )			select file opened for write
+; ok = FLRSVL( lun )			return current read lun
+; ok = FLWSVL( lun )			return current write lun
+
+;	W R I T E F,  e t c
+
+; call FLWRTF( format, arg1, arg2, ...)		as WRITEF, but FLW
+; call FLWAPP( format, arg1, arg2, ...)		as APPEND, but FLW
+
+;******************************************************************************
+;*		 E R R O R S  and  R E T U R N   C O D E S		      *
+;******************************************************************************
+; In all cases, the function return 'ok' is returned with the appropriate LSL
+; status code. If 'ok' is a failure code, IERR will return an appropriate
+; system error number. Otherwise, IERR will be undefined.
+;
+; Note that both 'ok' and IERR are longwords
+
+;******************************************************************************
+;*		K E E P I N G   T R A C K   O F   F I L E S		      *
+;******************************************************************************
+; each file is accessed via its own FAB and RAB, and these are associated with
+; a particular lun.
+;
+; row     lun	 FAB	RAB	file
+;	==============================
+;   0   |  2   |  1  |   1  |   FRED.DAT
+;   1   |  4   |  2  |   2  |   MICK.LEG
+;   2   |  0   |  -  |   -  |   no file, lun unassigned
+;   3   |  0   |  -  |   -  |    "  "     "      "
+;
+; FLx_CURRNT		holds the current row number
+;			(where x=R for read or x=W for write)
+;
+; FLIO_ROW(row)		contains the lun for that file
+; FLIO_RABS(row)	is the RAB
+; FLIO_FABS(row)	is the FAB
+;
+; a file may be accessed for read only (use FLROPN on it) or for read/write
+; (use FLWOPN on it). Before a 'lun' may be reused, the file associated
+; with it must be closed (use FLxCLO)
+;
+
+;******************************************************************************
+;*			D A T A S T R U C T U R E S			      *
+;******************************************************************************
+; define our data PSECT...
+
+	DATA_PSECT	LSL
+
+; set up error mnemonics for later...
+
+	$SSDEF		; system errors
+	$RMSDEF		; RMS errors
+
+; file and record handling descriptors - define relevant macros
+
+	.MACRO	FLIO_BLK	NUM		; macro to make blocks
+FLIO_FAB'NUM':	$FAB	DNA = DEFNAM,-			; default file name
+			DNS = DEFLEN,-			; default name length
+			NAM = FLIO_NAM'NUM',-		; NAM block address
+			RAT = CR			; record attributes
+FLIO_RAB'NUM':	$RAB	FAB = FLIO_FAB'NUM		; link RAB to it's FAB
+FLIO_NAM'NUM':	$NAM					; the NAM block
+	.ENDM	FLIO_BLK
+
+	.MACRO	FLIO_RABLIST	NUM		; macro to set up RAB ptrs
+	.ADDRESS	FLIO_RAB'NUM
+	.ENDM	FLIO_RABLIST
+
+	.MACRO	FLIO_FABLIST	NUM		; macro to set up FAB ptrs
+	.ADDRESS	FLIO_FAB'NUM
+	.ENDM	FLIO_FABLIST
+
+; we have a maximum number of files which may be open at any one time
+; - this is NBLK and
+
+NBLK = 15
+
+; set up the FAB, RAB definitions
+
+WHERE = 0
+	.REPT	NBLK				; make NBLK of them
+WHERE = WHERE+1					; next number
+	FLIO_BLK	\WHERE			; call the block macro
+	.ENDR					; end repeat
+
+; create the FAB column of the table
+
+WHERE = 0
+FLIO_FABS:
+	.REPT	NBLK				; make NBLK of them
+WHERE = WHERE+1					; next number
+	FLIO_FABLIST	\WHERE			; call the list macro
+	.ENDR					; end repeat
+
+; create the RAB column of the table
+
+WHERE = 0
+FLIO_RABS:
+	.REPT	NBLK				; make NBLK of them
+WHERE = WHERE+1					; next number
+	FLIO_RABLIST	\WHERE			; call the list macro
+	.ENDR					; end repeat
+
+; create the  LUN column of the table (basic row index)
+
+FLIO_ROW:.REPT	NBLK
+	.WORD	0				; declare row variables
+	.ENDR
+
+; access to the table
+
+FLIO_MAX:	.WORD	NBLK-1			; maximum row index is NBLK-1
+FLR_CURRNT:	.WORD	0			; which row is current for read
+FLW_CURRNT:	.WORD	0			; which row is current for write
+FLIO_ERR:	.LONG	0			; IERR substitute for FLxOPN
+
+
+	CONST_PSECT	LSL
+
+; default filename string
+DEFNAM:	.ASCII	/FILE.DAT/
+DEFLEN=.-DEFNAM
+
+; and now a PSECT for the actual code...
+
+	CODE_PSECT	LSL
+
+;******************************************************************************
+;*			File opening routines				      *
+;******************************************************************************
+
+; Register usage:
+;	R2  - FLXOPN_OPEN sets it to
+;		0 if the file is sequential
+;		1 if the file is indexed
+;	R3  - lun to use (copy of first argument)
+;	R4  - set to
+;		0 if we are opening for read
+;		1 if we are opening for write
+;	R5  - set to
+;		0 if no error, or LSLLIB error
+;		1 if system error
+;	R6  - contents of FAB$L_ALQ to be returned as file size in ALQ
+;	R9  - address of current FAB
+;	R10 - address of current RAB
+;	R11 - used by VIO$GNA to count args
+
+;**********************************************************************	FLROPN
+; FLROPN - open a file for reading
+
+	.ENTRY	FLROPN, ^M<R2,R3,R4,R5,R6,R9,R10,R11>
+
+	CLRL	R4			; reading
+
+	BSBW	FLXOPN_SEL		; select the lun, unset the FAB/RAB
+	BLBC	R0,90$			; exit if that failed
+
+	$FAB_STORE	FAB=R9,-
+			FAC=GET		; only need read access
+
+	BSBW	FLXOPN_OPEN		; open the file
+	BLBC	R0,90$			; exit if that failed
+	BSBW	FLXOPN_CONNECT		; connect to the file
+
+90$:	BRW	FLXOPN_END		; and finish off neatly
+
+;**********************************************************************	FLROPB
+; FLROPB - open a file for block reading
+
+	.ENTRY	FLROPB, ^M<R2,R3,R4,R5,R6,R9,R10,R11>
+
+	CLRL	R4	      		; reading
+
+	BSBW	FLXOPN_SEL		; select the lun, unset the FAB/RAB
+	BLBC	R0,90$			; exit if that failed
+
+	$FAB_STORE	FAB=R9,-
+			FAC=<GET,BIO>	; read access, block oriented i/o
+
+	BSBW	FLXOPN_OPEN		; open the file
+	BLBC	R0,90$			; exit if that failed
+
+	$RAB_STORE	RAB=R10,-
+			ROP=BIO,-	; doing block i/o
+			RSZ=#512,-	; records are 512 bytes
+			USZ=#512	; buffer size 512 bytes
+
+	BSBW	FLXOPN_CONNECT		; connect to the file
+
+90$:	BRW	FLXOPN_END		; and finish off neatly
+
+;**********************************************************************	FLWOPN
+; FLWOPN - open a new file for writing
+
+	.ENTRY	FLWOPN, ^M<R2,R3,R4,R5,R6,R9,R10,R11>
+
+	MOVB	#1,R4			; writing
+
+	BSBW	FLXOPN_SEL		; select the lun, unset the FAB/RAB
+	BLBC	R0,90$			; exit if that failed
+
+	BSBW	FLXOPN_CREATE		; open or create the file
+	BLBC	R0,90$			; exit if that failed
+	BSBW	FLXOPN_CONNECT		; connect to the file
+
+90$:	BRW	FLXOPN_END		; and finish off neatly
+
+;**********************************************************************	FLWOPB
+; FLWOPB - open a new file for block writing
+
+	.ENTRY	FLWOPB, ^M<R2,R3,R4,R5,R6,R9,R10,R11>
+
+	MOVB	#1,R4			; writing
+
+	BSBW	FLXOPN_SEL		; select the lun, unset the FAB/RAB
+	BLBC	R0,90$			; exit if that failed
+
+	$FAB_STORE	FAB=R9,-
+			FAC=<PUT,BIO>,-	; writing, block oriented i/o
+			RFM=FIX,-	; fixed length records
+			MRS=#512	; 512 byte records (ie blocks)
+	$RAB_STORE	RAB=R10,-
+			ROP=BIO,-	; block oriented i/o
+			RSZ=#512,-	; record size is 512
+			USZ=#512	; buffer size is 512
+
+	BSBW	FLXOPN_CREATE		; open or create the file
+	BLBC	R0,90$			; exit if that failed
+	BSBW	FLXOPN_CONNECT		; connect to the file
+
+90$:	BRW	FLXOPN_END		; and finish off neatly
+
+;**********************************************************************	FLWEXT
+; FLWEXT - open a file for extending
+
+	.ENTRY	FLWEXT, ^M<R2,R3,R4,R5,R6,R9,R10,R11>
+
+	MOVB	#1,R4			; writing
+
+	BSBW	FLXOPN_SEL		; select the lun, unset the FAB/RAB
+	BLBC	R0,90$			; exit if that failed
+
+	$RAB_STORE	RAB=R10,-
+			ROP=EOF		; first record to be after EOF
+
+	BSBW	FLXOPN_OPEN		; open the file
+	BLBC	R0,90$			; exit if that failed
+	BSBW	FLXOPN_CONNECT		; connect to the file
+
+90$:	BRW	FLXOPN_END		; and finish off neatly
+
+;**********************************************************************	FLWOVW
+; FLWOVW - open a file for overwriting
+
+	.ENTRY	FLWOVW, ^M<R2,R3,R4,R5,R6,R9,R10,R11>
+
+	MOVB	#1,R4				; writing
+
+	BSBW	FLXOPN_SEL			; select lun, unset the FAB/RAB
+	BLBC	R0,90$				; exit if that failed
+
+; FAC - PUT and GET as usual, but also UPDate and TRuNcate. Also allow DELete
+;	(which is only relevant for records in indexed files)
+; RAB - first record written is to be after the End Of File
+
+	$FAB_STORE	FAB=R9,-
+			FAC=<PUT,GET,UPD,TRN,DEL>
+	$RAB_STORE	RAB=R10,-
+			ROP=EOF
+
+	BSBW	FLXOPN_OPEN			; open the file
+	BLBC	R0,90$				; exit if that failed
+
+; if the file is indexed, then we want to overwrite a record if we
+; specify a new record with the same key.
+
+	BLBC	R2,10$				; branch if it's not indexed
+	$RAB_STORE	RAB=R10,-
+			ROP=UIF			; overwrite records
+
+10$:	BSBW	FLXOPN_CONNECT			; connect to the file
+	BLBC	R0,90$				; exit if that failed
+
+; if this is a sequential file, then we want to overwrite the file,
+; and must thus remove its contents. If it is indexed, then we leave
+; it alone
+
+	BLBS	R2,90$				; branch if it is indexed
+	$REWIND		RAB=R10			; rewind to the first record
+	BLBC	R0,90$				; exit if that failed
+	$FIND		RAB=R10			; make it the current record
+	BLBC	R0,90$				; exit if that failed
+	$TRUNCATE	RAB=R10			; and truncate the file
+
+90$:	BRW	FLXOPN_END			; and finish off neatly
+
+;**********************************************************************	FLWUPD
+; FLWUPD - open a file for updating
+
+	.ENTRY	FLWUPD, ^M<R2,R3,R4,R5,R6,R9,R10,R11>
+
+	MOVB	#1,R4				; writing
+
+	BSBW	FLXOPN_SEL			; select lun, unset the FAB/RAB
+	BLBC	R0,90$				; exit if that failed
+
+; FAC - GET and PUT as usual, but also UPDate file, and allow DELetion of
+;	records (only relevant in an indexed sequential file)
+; RAB - first record written is to be after the End Of File
+
+	$FAB_STORE	FAB=R9,-        
+			FAC=<PUT,GET,UPD,DEL>
+	$RAB_STORE	RAB=R10,-
+			ROP=EOF
+
+	BSBW	FLXOPN_OPEN			; open the file
+	BLBC	R0,90$				; exit if that failed
+	BSBW	FLXOPN_CONNECT			; connect to the file
+
+90$:	BRW	FLXOPN_END			; and finish off neatly
+
+;******************************************************************************
+; select the requested lun, and clear the FAB and RAB associated with it
+
+FLXOPN_SEL:
+
+	CLRL	R5			; no system errors detected
+	CLRL	R6			; we do not yet know the file size
+	JSB	VIO$1ST			; initialise argument reading
+	JSB	VIO$GNA	   		; get the address of the lun argument
+	BCC	10$			; branch if found the argument
+	MOVL	#LSL__MISSARGS,R0	; define the error
+	RSB				; and return
+
+; so we have the unit number (lun) - or at least, we assume that's what it is
+; - we must check that we are not already accessing a file on that lun
+
+10$:	MOVL	(R0),R3			; put the actual number in R3
+	MOVL	#LSL__LUNINUSE,R0	; prepare the "lun in use" error
+	CLRL	R1			; start at row 0 of the table
+
+20$:	CMPW	R3,FLIO_ROW[R1]		; is lun for that row the same as ours?
+	BNEQ	25$			; if not, continue
+	RSB				; if so, return with the error
+25$:	ACBW	FLIO_MAX,#1,R1,20$	; try next row
+
+; now look for a row with a zero (unused) lun - we can then use that row
+; NOTE that we must distinguish between read and write
+
+       	BLBS	R4,30$			; jump if we are writing
+
+	CLRW	FLR_CURRNT		; no row current for read yet
+	MOVAL	FLR_CURRNT,R2		; remember the address of row number
+	PUSHL	R2			; we are calling FLRSEL(0)
+	CALLS	#1, G^FLRSEL
+	BRB	35$			; and to common source again
+
+30$:	CLRW	FLW_CURRNT		; no row current for write yet
+	MOVAL	FLW_CURRNT,R2		; remember the address of row number
+	PUSHL	R2			; we are calling FLWSEL(0)
+	CALLS	#1, G^FLWSEL
+
+; if R0 has the bottom bit set, then that failed
+; if the error was "no such lun", then we did not find lun 0 in the table,
+; and therfore the table had no empty rows. It is helpful to change the
+; error to the more meaningful version
+
+35$:	BLBS	R0,50$			; branch if no error
+	CMPL	R0,#LSL__NOSUCHLUN	; was it "no such lun"?
+	BNEQ	40$			; if not, exit
+	MOVL	#LSL__NOLUNS,R0		; make it "no room in unit table"
+40$:	RSB				; return with the error
+
+; no error - FLxSEL has set FLx_CURRNT to the current row, and the address of
+; FLx_CURRNT is still in R2. We must now get the name of the file that we are
+; to open
+
+50$:	MOVZWL	(R2),R0			; put the current row number into R0
+	MOVL	FLIO_FABS[R0],R9	; get the address of the current FAB
+	MOVL	FLIO_RABS[R0],R10	; and that of the current RAB
+	JSB	VIO$GNA			; look for filespec
+	BCC	60$			; and branch if we found it
+	MOVL	#LSL__MISSARGS,R0	; missing argument again
+	RSB				; so return with the error
+
+; we have the filespec, and R0 contains the address of its quadword descriptor
+
+60$:	MOVAQ	(R0),R1			; $xxx_STORE uses R0
+	MOVL	#LSL__NORMAL,R2		; assume normal return
+
+; set the FAB and RAB fields to something sensible, to clear any fields
+; that might have been set by earlier uses. Note that the macros corrupt
+; R0, so that we must set it to 'success' before we can return.
+
+	$FAB_STORE	FAB= R9,-	; set up FAB
+			FNA=@4(R1),-	; filespec
+			FNS=(R1),-	; and its length
+			FAC=<PUT,GET>,-	; and we default to writing
+			FOP=#0,-	; zero the FOP
+			ALQ=#0,-	; and no file size yet
+			RAT=CR,-	; default carriage control (<CR>)
+			RFM=VAR,-	; variable length records
+			ORG=SEQ,-	; default to sequential organisation
+			MRS=#0		; no explicit maximum record size
+	$RAB_STORE	RAB=R10,-
+			ROP=#0,-	; clear ROP field
+			RAC=SEQ		; default record access - sequential
+
+	MOVL	#1,R0			; fake a success return
+	RSB				; and that is all we have to do
+
+;******************************************************************************
+; open an existing file
+
+FLXOPN_OPEN:
+
+	$OPEN	FAB=R9			; open the file
+	BLBC	R0,FLXOPN_ERR		; branch if error
+
+; we use a "compare zero extended field" instruction to determine whether
+; the file we have just opened is actually an indexed file.
+; The field at position $V_ORG, of size $S_ORG, within the ORG field in our
+; FAB (pointed to by R9) is compared with the constant value $C_IDX shifted
+; right by $V_ORG (so that we only compare the relevant field at posn $V_ORG)
+; If it is equal, then we have an indexed file
+
+	CLRL	R2			; assume that it's not indexed
+	CMPZV	#FAB$V_ORG,-		; position of field to look at
+		#FAB$S_ORG,-		; size of the field
+		 FAB$B_ORG(R9),-	; address of base (ie our FAB)
+		#FAB$C_IDX @ -FAB$V_ORG	; value to compare it with
+	BNEQ	10$			; branch if it's not indexed
+	INCL	R2			; it is indexed - now non-zero
+10$:	RSB
+
+;******************************************************************************
+; create a new file
+
+FLXOPN_CREATE:
+
+	$CREATE	FAB=R9			; create the file
+	BLBC	R0,FLXOPN_ERR		; branch if error
+	RSB
+
+;..............................................................................
+;Deal with errors from the $OPEN or $CREATE
+
+FLXOPN_ERR:
+
+	CMPL	R0,#RMS$_FLK	  	; was the file locked?
+	BNEQ	30$			;  no - check the next error
+	MOVL	#LSL__FILINUSE,R0	; yes - file in use by another user
+	RSB
+
+30$:	CMPL	R0,#RMS$_FNF		; was the file not found?
+	BNEQ	40$			;  no - check the next error
+	MOVL	#LSL__NOSUCHFILE,R0	; yes - no such file
+	RSB
+
+40$:	MOVB	#1,R5			; it was a system error
+	RSB
+
+;******************************************************************************
+; set up the lun in the table, and connect to the file
+
+FLXOPN_CONNECT:
+
+	BLBS	R4,10$			; branch if we are writing
+
+	MOVZWL	FLR_CURRNT,R0		; get the current row of the table
+	BRB	20$			; go and insert the lun
+
+10$:	MOVZWL	FLW_CURRNT,R0		; get the current row of the table
+20$:	MOVW	R3,FLIO_ROW[R0]		; and place the lun there
+
+	$CONNECT	RAB=R10		; connect the RAB to our FAB
+	BLBC	R0,30$			; branch on error
+	MOVL	FAB$L_ALQ(R9),R6	; store the file size (ALQ)
+	RSB
+
+30$:	MOVB	#1,R5			; it was a system error
+	RSB
+
+;******************************************************************************
+; exit neatly, dealing with any errors
+
+FLXOPN_END:
+
+	BLBC	R0,10$			; branch if some error did occur
+	MOVL	#LSL__NORMAL,R2		; otherwise we succeeded
+	BRB	30$
+
+10$:	BLBC	R5,20$			; branch if it was an LSLLIB error
+	MOVL	R0,R1			; remember the system error in R1
+ 	MOVL	#LSL__SYSOPEN,R2	; and we will return an LSLLIB value
+	BRB	30$
+
+20$:	MOVL	R0,R2			; return the LSLLIB error
+
+; if IERR was specified in the argument list, place any system error there
+30$:	JSB	VIO$GNA			; get IERR argument
+	BLBS	R1,40$			; if there was no system error, or if
+	BCS	40$			; there was no argument, ignore IERR
+	MOVL	R1,(R0)			; report the system error in IERR
+
+; if ALQ was specified in the argument list, place the file size there
+40$:	JSB	VIO$GNA			; get ALQ argument
+	BCS	50$			; branch if it's not there
+	MOVL	R6,(R0)			; report the file size
+
+50$:	MOVL	R2,R0			; return success/failure
+	RET
+
+;******************************************************************************
+;*			File selection routines				      *
+;******************************************************************************
+
+;**********************************************************************	FLWSEL
+; FLWSEL - select a file for writing
+
+	.ENTRY	FLWSEL, ^M<R2,R4,R11>
+	MOVB	#1,R4			; note we have FLWSEL
+	BRB	FLXSEL			; and common source
+
+;**********************************************************************	FLRSEL
+; FLRSEL - select a file for reading
+
+	.ENTRY	FLRSEL, ^M<R2,R4,R11>
+	CLRB	R4			; note we have FLRSEL
+
+;------------------------------------------------------------------------------
+FLXSEL:	JSB	VIO$1ST			; set up arg reading
+	JSB	VIO$GNA			; get address of lun - 1st argument
+	BCC	10$			; yes - branch if argument given
+	MOVL	#LSL__MISSARGS,R0	;  no - no lun specified
+	BRB	60$
+
+10$:	MOVL	(R0),R1			; store lun number in R1
+	CLRL	R2			; start search at row 0
+20$:	CMPW	R1,FLIO_ROW[R2]		; lun found yet?
+	BEQLU	30$			; branch if got it
+	ACBW	FLIO_MAX,#1,R2,20$	; try next
+
+	MOVL	#LSL__NOSUCHLUN,R0	; complain no such file
+	BRB	60$
+
+30$:	BLBS	R4,40$			; branch if FLWSEL
+	MOVW	R2,FLR_CURRNT		; remember current row (read)
+	BRB	50$
+
+40$:	MOVW	R2,FLW_CURRNT		; remember current row (write)
+
+50$:	MOVL	#LSL__NORMAL,R0		; no error
+60$:	RET				; and go away
+
+;**********************************************************************	FLWSVL
+; FLWSVL - save current writing lun
+
+	.ENTRY	FLWSVL, ^M<R2,R11>
+	MOVZWL	FLW_CURRNT,R2		; note we have FLWSVL
+	BRB	FLXSVL			; and common source
+
+;**********************************************************************	FLRSVL
+; FLRSVL - save current reading lun
+
+	.ENTRY	FLRSVL, ^M<R2,R11>
+	MOVZWL	FLR_CURRNT,R2		; note we have FLRSVL
+
+;------------------------------------------------------------------------------
+FLXSVL:	JSB	VIO$1ST			; set up arg reading
+	JSB	VIO$GNA			; get address of user's buffer
+	BCC	10$			; yes - branch to use argument
+	MOVL	#LSL__MISSARGS,R0	;  no - no argument
+	BRB	60$
+
+10$:	MOVZWL	FLIO_ROW[R2], (R0)	; put LUN into user's buffer
+	BNEQ	20$			; branch if valid LUN (ie selected)
+	MOVL	#LSL__NOSUCHLUN,R0	; complain nothing currently selected
+	BRB	60$
+;
+20$:	MOVL	#LSL__NORMAL,R0		; no error
+60$:	RET
+
+;******************************************************************************
+;*			File closing routines				      *
+;******************************************************************************
+
+; Register usage:
+;	R2  - address of lun argument
+;	R3  - flags to force action on closing file
+;	R4  - 0 if closing a file open for read, 1 if open for write
+;	R9  - address of current FAB
+;	R11 - used in VIO$GNA
+;
+; The flags used in R3 include:
+;		DLT	delete the file
+;		SPL	spool (print) the file
+;		SCF	submit as a command file
+;		TEF	truncate to the end of file
+;		NAM	use the NAM block to get its name
+
+;**********************************************************************	FLWSPL
+; FLWSPL - close, print and delete the file (Spool it)
+
+	.ENTRY	FLWSPL,	^M<R2,R3,R4,R5,R9,R11>
+	MOVB	#1,R4
+	MOVL	#FAB$M_SPL!FAB$M_DLT!FAB$M_NAM!FAB$M_TEF,R3
+	BRB	FLXCLO
+
+;**********************************************************************	FLWPRT
+; FLWPRT - close and print the file
+
+	.ENTRY	FLWPRT,	^M<R2,R3,R4,R5,R9,R11>
+	MOVB	#1,R4
+	MOVL	#FAB$M_SPL!FAB$M_NAM!FAB$M_TEF,R3
+	BRB	FLXCLO
+
+;**********************************************************************	FLWDEL
+; FLWDEL - close and delete the file
+
+	.ENTRY	FLWDEL,	^M<R2,R3,R4,R5,R9,R11>
+	MOVB	#1,R4
+	MOVL	#FAB$M_DLT!FAB$M_NAM,R3
+	BRB	FLXCLO
+
+;**********************************************************************	FLWSUB
+; FLWSUB - close and submit the file to the batch queue
+
+	.ENTRY	FLWSUB, ^M<R2,R3,R4,R5,R9,R11>
+	MOVB	#1,R4
+	MOVL	#FAB$M_SCF!FAB$M_NAM!FAB$M_TEF,R3
+	BRB	FLXCLO
+
+;**********************************************************************	FLWCLO
+; FLWCLO - just close the file
+
+	.ENTRY	FLWCLO, ^M<R2,R3,R4,R5,R9,R11>
+	MOVB	#1,R4
+	MOVL	#FAB$M_TEF,R3		; truncate file, just in case
+	BRB	FLXCLO
+
+;**********************************************************************	FLRCLO
+; FLRCLO - close the file (the only option for a file opened for read)
+
+	.ENTRY	FLRCLO, ^M<R2,R3,R4,R5,R9,R11>
+	CLRL	R4			; remember it's FLRCLO
+	CLRL	R3			; no flags for the close
+
+;------------------------------------------------------------------------------
+FLXCLO:	JSB	VIO$1ST			; set up argument reading
+	JSB	VIO$GNA			; look for yet another lun
+	BCS	10$			; no arg, so go and use current lun
+
+; the user specified a lun - we must select that file
+
+	MOVL	R0,R2			; remember where the lun is
+	PUSHL	R2			; its an argument to FLxSEL
+	BLBS	R4,5$			; branch if select for write
+	CALLS	#1, G^FLRSEL		; FLRSEL(lun)
+	BRB	6$
+5$:	CALLS	#1, G^FLWSEL		; FLWSEL(lun)
+6$:	BLBS	R0,10$			; no error, so continue
+	BRW	80$			; had error, complain
+
+; by here, we should have the correct lun selected,so
+
+10$:	BLBS	R4,11$			; branch if FLWCLO
+	MOVZWL	FLR_CURRNT,R0		; get pointer to current row (read)
+	BRB	12$
+11$:	MOVZWL	FLW_CURRNT,R0		; get pointer to current row (write)
+
+12$:	TSTW	FLIO_ROW[R0]		; check that the lun is positive
+	BGTR	15$			; branch if OK
+
+; if we are here, then our lun was zero (or less!), so complain...
+
+	MOVL	#LSL__ILLEGLUN,R0	; error message illegal lun number
+	BRW	80$			; RETURN carrying the complaint
+
+; but here, the lun is OK, so close the relevant file
+
+15$:	MOVL	FLIO_FABS[R0],R9	; get address of current FAB
+
+; we must now perform a consistency check - FLRCLO must only close 'read'
+; files (without PUT), and FLWCLO, etc, may only close 'write' files (with PUT)
+
+ 	MOVL	#LSL__FAC,R0			; "file access conflict" error
+	BBC	#FAB$V_PUT,FAB$B_FAC(R9),17$	; branch if not 'write'
+
+; here we have a 'write' file - are we closing it with FLWCLO?
+
+	BLBC	R4,80$			; no, give the error
+	TSTL	R3			; yes, check contents of R3
+	BEQLU	19$			; jump round if R3 empty
+	$FAB_STORE	FAB=R9,-
+			FOP=R3		; set what to do on close
+	BRB	19$			; and do it
+
+; whereas here we have a 'read' (ie not'write') file - are we in FLRCLO?
+
+17$:	BLBS	R4,80$			; no, give the error
+
+; all is well - we can finally do the close
+
+19$:	$CLOSE	FAB=R9			; close the file
+	MOVL	R0,R1			; remember error return
+	MOVL	#LSL__NORMAL,R2		; assume successful return 
+	BLBS	R1,50$			; branch if no error
+	MOVL	#LSL__SYSCLOSE,R2	; it is a close error
+	BRB	60$			; and skip next bit
+
+; if closed succesfully, then zero the lun in the row, to show row now unused
+
+50$:	BLBS	R4,51$			; branch if FLWCLO
+	MOVZWL	FLR_CURRNT,R9		; get row number (read)
+	BRB	52$
+51$:	MOVZWL	FLW_CURRNT,R9		; get row number (write)
+52$:	CLRW	FLIO_ROW[R9]		; zero lun in row
+	BRB 	70$			; don't want to set IERR
+
+60$:	JSB	VIO$GNA			; try to get IERR
+	BCS	70$			; branch if no IERR given
+	MOVL	R1,(R0)			; put error code in IERR
+
+70$:	MOVL	R2,R0			; return true/false
+80$:	RET				; and go away
+
+;******************************************************************************
+;*			Rewind the file					      *
+;******************************************************************************
+
+;**********************************************************************	FLRREW
+; FLRREW - rewind to the beginning of a file selected for read
+
+    	.ENTRY	FLRREW, ^M<R2,R3,R10,R11>
+	JSB	VIO$1ST			; set up arg reading
+	JSB	VIO$GNA			; look for yet another lun
+	BCS	10$			; no arg, so go and use current lun
+
+; user specified a lun, so select it
+
+	MOVL	R0,R2			; remember the lun's address
+	PUSHL	R2			; it's an argument to FLRSEL
+	CALLS	#2, G^FLRSEL
+	BLBC	R0,80$			; had error, return
+
+10$:	MOVZWL	FLR_CURRNT,R0		; get pointer to current row
+	TSTW	FLIO_ROW[R0]		; check lun number
+	BGTR	15$			; branch if OK
+
+; if we are here, then our lun was zero (or less!), so complain...      
+
+	MOVL	#LSL__ILLEGLUN,R0	; illegal lun number given
+	BRB	80$			; return 
+
+; but here, the lun is OK, so rewind the relevant file
+
+15$:	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	$REWIND		RAB=R10		; rewind the file
+	MOVL	R0,R1			; remember error return
+	MOVL	#LSL__NORMAL,R2		; assume success
+	BLBS	R1,70$			; branch if no error
+
+	MOVL	#LSL__SYSREW,R2		; system error
+	JSB	VIO$GNA			; try to get IERR
+	BCS	70$			; branch if no IERR given
+	MOVL	R1,(R0)			; put error code in IERR
+
+70$:	MOVL   	R2,R0			; return the result
+80$:	RET				; and go away
+
+;******************************************************************************
+;*		    Flush the internal buffers to disk			      *
+;******************************************************************************
+
+;**********************************************************************	FLWUSH
+; FLWUSH - flush the internal buffers to disk
+
+	.ENTRY	FLWUSH, ^M<R2,R3,R10,R11>
+	JSB	VIO$1ST			; set up arg reading
+	JSB	VIO$GNA			; look for yet another lun
+	BCS	10$			; no arg, so go and use current lun
+
+; user specified a lun, so select it
+
+	MOVL	R0,R2			; remember the lun's address
+	PUSHL	R2			; it's an argument to FLWSEL
+	CALLS	#2, G^FLWSEL
+	BLBC	R0,80$			; had error, return
+
+10$:	MOVZWL	FLW_CURRNT,R0		; get pointer to current row
+	TSTW	FLIO_ROW[R0]		; check lun number
+	BGTR	15$			; branch if OK
+
+; if we are here, then our lun was zero (or less!), so complain...
+
+	MOVL	#LSL__ILLEGLUN,R0	; illegal lun number given
+	BRB	80$			; return 
+
+; but here, the lun is OK, so flush the relevant file
+
+15$:	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	$FLUSH		RAB=R10		; flush the file
+	MOVL	R0,R1			; remember error return
+	MOVL	#LSL__NORMAL,R2		; assume success
+	BLBS	R1,70$			; branch if no error
+
+	MOVL	#LSL__SYSFLUSH,R2	; system error
+	JSB	VIO$GNA			; try to get IERR
+	BCS	70$			; branch if no IERR given
+	MOVL	R1,(R0)			; put error code in IERR
+
+70$:	MOVL   	R2,R0			; return the result
+80$:	RET				; and go away
+
+;******************************************************************************
+;*			Indexed record finds				      *
+;******************************************************************************
+
+; Register usage:
+;	R2  - buffer address of the string to search for
+;	R3  - length of key string (from above)
+;	R4  - 0 if Read file, 1 if Write file to be searched
+;	R10 - address of current RAB
+;	R11 - used by VIO$GNA
+
+;**********************************************************************	FLRFND
+; FLRFND - find the record with the given key (string key)
+
+	.ENTRY	FLRFND, ^M<R2,R3,R4,R5,R6,R10,R11>
+	CLRL	R4			; note we're looking in the Read file
+	BRB	FLFIND_STR
+
+;**********************************************************************	FLWFND
+; FLWFND - find the record with the given key (string key)
+
+	.ENTRY	FLWFND, ^M<R2,R3,R4,R5,R6,R10,R11>
+	MOVL	#1,R4			; note that we're using the Write file
+	BRB	FLFIND_STR
+
+;**********************************************************************	FLRFNB
+; FLRFNB - find the record with the given key (buffer/length key)
+
+	.ENTRY	FLRFNB, ^M<R2,R3,R4,R5,R6,R10,R11>
+	CLRL	R4			; note we're looking in the Read file
+	BRB	FLFIND_BUF
+
+;**********************************************************************	FLWFNB
+; FLWFNB - find the record with the given key (buffer/length key)
+
+	.ENTRY	FLWFNB, ^M<R2,R3,R4,R5,R6,R10,R11>
+	MOVL	#1,R4			; note that we're using the Write file
+	BRB	FLFIND_BUF
+
+;------------------------------------------------------------------------------
+FLFIND_STR:
+	JSB	VIO$1ST			; set up arg reading
+	JSB	VIO$GNA			; look for the string to use as key
+	BCC	10$			; got arg, so go on
+
+; argument missing - fatal error 
+
+	MOVL	#LSL__MISSARGS,R0	; give an error
+	BRW	FLFIND_END		; and tell the world
+
+; but by here we have our string to search for -
+; we must abstract the buffer address and string length
+
+10$:	MOVL	(R0)+,R3		; get the string length
+	MOVL	(R0),R2			; and the address of the buffer
+	BRB	FLFIND			; go to common code
+
+;------------------------------------------------------------------------------
+FLFIND_BUF:
+	JSB	VIO$1ST			; set up arg reading
+	JSB	VIO$GNA			; look for the buffer to use as key
+	BCC	10$			; got arg, so go on
+
+; argument missing - fatal error 
+
+5$:	MOVL	#LSL__MISSARGS,R0	; give an error
+	BRW	FLFIND_END		; and tell the world
+
+10$:	MOVL	R0,R2			; the address of the buffer
+	JSB	VIO$GNA			; look for the buffer to use as key
+	BCS	5$			; if arg missing, complain
+	MOVL	(R0),R3			; the length of the buffer
+
+;------------------------------------------------------------------------------
+; and now we look for the rest of the args - get the key of reference
+
+FLFIND:	CLRL	R5			; default is zero
+	JSB	VIO$GNA			; get any arg
+	BCS	11$			; ignore if none
+	MOVL	(R0),R5			; remember the key of reference
+
+; and now for the search type - 0=> key equal,
+;				1=> key equal or greater
+;				2=> key greater
+
+11$:	CLRL	R0			; default is zero (key equal)
+	CLRL	R6			; default is key zero - clear R6
+	JSB	VIO$GNA			; get any arg
+	BCS	20$			; if no arg, use the default
+	BBS	#1,(R0),15$		; want key greater
+	BBS	#0,(R0),16$		; want key greater or equal
+	CLRL	R6			; any other value - key equal
+	BRB	20$
+
+15$:	MOVL	#RAB$M_KGT,R6		; move KGT mask - key greater
+	BRB	20$
+16$:	MOVL	#RAB$M_KGE,R6		; move KGE mask - key greater or equal
+
+; and sort out whether we want the current Write RAB or the Read RAB
+
+20$:	BLBS	R4,41$			; branch if 'writing'
+	MOVZWL	FLR_CURRNT,R0		; get pointer to current row (read)
+	BRB	42$
+41$:	MOVZWL	FLW_CURRNT,R0		; get pointer to current row (write)
+
+42$:	TSTW	FLIO_ROW[R0]		; check lun number
+	BGTR	45$			; branch if OK
+
+; if we are here, then our lun was zero (or less!), so complain...
+
+	MOVL	#LSL__ILLEGLUN,R0	; illegal lun
+	BRB	FLFIND_END		; RETURN carrying the complaint
+
+; otherwise, we have a sensible lun - let's do the find
+
+45$:	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	$RAB_STORE	RAB=R10,-
+			RAC=KEY,-	; search on a key
+			KRF=R5,-	; key of reference (0=>primary, etc)
+			ROP=R6,-	; find key greater than/equal?
+			KBF=(R2),-	; key buffer address
+			KSZ=R3		; key size
+	$FIND		RAB=R10		; find the appropriate record
+	MOVL	R0,R1			; remember error return
+
+; and undo our random access to the file
+
+	$RAB_STORE	RAB=R10,-
+			RAC=SEQ		; sequential access to the file again
+50$:	MOVL	#LSL__NORMAL,R2		; assume return false (no error)
+	BLBS	R1,70$			; branch if no error
+
+	MOVL	#LSL__SYSFIND,R2	; system error
+	JSB	VIO$GNA			; try to get IERR
+	BCS	70$			; branch if no IERR given
+	MOVL	R1,(R0)			; put error code in IERR
+
+70$:	MOVL	R2,R0			; return true/false
+
+FLFIND_END:
+	RET				; and go away
+
+;******************************************************************************
+;*			Block oriented i/o				      *
+;******************************************************************************
+
+; Register usage:
+;	R2 - vbn (virtual block number) to read/write
+;	R3 - buffer address
+;	R4 - 0 if reading, 1 if writing
+;	R10- current RAB
+;	R11- used by VIO$GNA
+
+
+;**********************************************************************	FLRBLK
+; FLRBLK - read block 'vbn' into buffer
+
+	.ENTRY	FLRBLK, ^M<R2,R3,R4,R10,R11>
+	CLRL	R4			; we're reading
+	MOVZWL	FLR_CURRNT,R0		; get current row
+	BRB	BLKRW
+
+;**********************************************************************	FLWBLK
+; FLWBLK - write block 'vbn' from buffer
+
+	.ENTRY	FLWBLK, ^M<R2,R3,R4,R10,R11>
+	MOVB	#1,R4			; we're writing
+	MOVZWL	FLW_CURRNT,R0		; get current row
+
+;------------------------------------------------------------------------------
+BLKRW:	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	JSB	VIO$1ST			; init arg list reading
+	JSB	VIO$GNA			; read in arg (vbn)
+	BCC	5$			; continue if got the argument
+	BRW	60$			; go and deal with error if arg. missing
+
+5$:	MOVL	(R0),R2			; save the address of the vbn
+	JSB	VIO$GNA			; read in arg (buffer address)
+	BCS	70$			; branch if it is missing
+	MOVL	R0,R3			; save the address of the buffer
+	BLBC	R4,10$			; are we reading or writing ?
+
+	$RAB_STORE	RAB=R10,-	; set up rab with ...
+			RBF=(R3),-	; ... record address
+			BKT=R2		; ... and vbn
+	$WRITE	RAB=R10			; and write the block
+	BRB	20$
+
+10$:	$RAB_STORE	RAB=R10,-	; set up rab with ...
+			UBF=(R3),-	; ... user buffer address
+			BKT=R2		; ... and vbn
+	$READ	RAB=R10			; and read the block
+
+20$:	MOVL	R0,R1			; save return code
+
+; block number is 3 words, but return longword only
+
+	JSB	VIO$GNA			; look for return argument
+	BLBC	R1,35$			; branch if we had an error
+	BCS	30$			; branch if not there
+	MOVL	RAB$W_RFA(R10),(R0)	; return the block number for success
+30$:	MOVL	#LSL__NORMAL,R2		; success code
+	BRB	50$
+
+; here we have had an error...
+
+35$:	BLBS	R4,40$			; branch if writing
+	MOVL	#LSL__SYSREAD,R2	; system error reading
+	CMPL	R1,#RMS$_EOF		; EOF error?
+	BNEQ	45$			; no
+	MOVL	#LSL__EOF,R2		; yes, return the error
+	BRB	50$
+
+40$:	MOVL	#LSL__SYSWRITE,R2	; system error writing
+
+45$:	JSB	VIO$GNA			; try to get IERR
+	BCS	50$			; branch if no IERR given
+	MOVL	R1,(R0)			; put error code in IERR
+
+50$:	MOVL	R2,R0			; return true/false
+	RET				; and go away
+
+; here with arg(s) missing
+
+60$:	JSB	VIO$GNA			; skip second arg if first missing
+70$:	MOVL	#LSL__MISSARGS,R2	; give the error
+	BRB	50$			; join exit code
+
+;******************************************************************************
+;*			Reading records					      *
+;******************************************************************************
+
+; Register usage:
+;	R2 - where to put 'nchs' read
+;	R3 - where to return IERR (or 0 if no such passed)
+;	R4 - where the buffer length came from
+;	R10- current RAB
+;	R11- used by VIO$GNA, & then low word of error return code
+
+;**********************************************************************	FLRSTR
+; FLRSTR - read in a string
+
+	.ENTRY	FLRSTR, ^M<R2,R3,R4,R5,R10,R11>
+	JSB	VIO$1ST			; init arg list reading
+	MOVZWL	FLR_CURRNT,R0		; get current row
+	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	JSB	VIO$GNA			; get 1st arg - string to read into
+	BCC	10$			; branch if arg is there
+
+	MOVAL	TXTDSC,R0		; using default - TXTDSC
+	MOVAW	TXTPTR,R2		; thus size of string is in TXTPTR
+	MOVW	TXTLIM,TXTPTR		; set it to be current length of TXTBUF
+
+10$:	MOVAL	(R0)+,R4		; R4 becomes address of length of string
+	MOVL	(R0),R3			; R3 becomes address of buffer of string
+	$RAB_STORE	RAB=R10,-
+			UBF=(R3),-	; set up this buffer
+			USZ=(R4)	; of this size
+	MOVAW	TXTPTR,R0		; default place to put length read
+	JSB	VIO$GNA			; 2nd arg - no of chars read
+	MOVL	R0,R2			; remember where that goes
+	BRB	GOTDSC
+
+;**********************************************************************	FLRLIN
+; FLRLIN - read in a line, maximum length buflen
+
+	.ENTRY	FLRLIN, ^M<R2,R3,R4,R5,R10,R11>
+	JSB	VIO$1ST			; init arg list reading
+	MOVZWL	FLR_CURRNT,R0		; get current row
+	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	MOVAW	TXTBUF,R0		; default 1st arg - buffer to read into
+	JSB	VIO$GNA			; read in arg
+	MOVL	R0,R1			; since R0 used by $xxx_STORE
+	$RAB_STORE	RAB=R10,-
+			UBF=(R1)	; buffer to read to is the one specified
+	MOVAW	TXTPTR,R0		; default place to put length read
+	JSB	VIO$GNA			; 2nd arg - number of characters read
+	MOVL	R0,R2			; remember where that goes
+	MOVAL	TXTLIM,R0		; address of default buffer length
+	JSB	VIO$GNA			; 3rd arg - size of buffer
+	MOVL	R0,R4			; remember where that goes, too
+	$RAB_STORE	RAB=R10,-
+			USZ=(R4)	; buffer size
+
+;------------------------------------------------------------------------------
+GOTDSC:	CLRL	R0			; default is no IERR argument
+	JSB	VIO$GNA			; if stays 0, IERR not wanted
+	MOVL	R0,R3			; remember it
+
+	$GET	RAB=R10			; read the next record
+	MOVL	R0,R11			; remember return code
+	MOVL	#LSL__NORMAL,R0		; assume no error
+	BLBS	R11,10$			; branch if no error found
+
+; being naturally pessimistic about such things, here we have the error bits
+;		.......ERROR on $GET........	
+
+	CMPL	R11,#RMS$_RTB		; was it record too big
+	BNEQ	30$			; no, go and RETURN
+	MOVL	#LSL__RECTOOBIG,R0	; yes, give a warning
+
+; the record was too big, but we still want to remember the size read, etc.
+; Thus we join up the overflow-error and normal (OK) paths again at this point
+; and we update 'nchs' (note that if we are reading into TXTDSC, with TXTPTR
+; receiving our length, this will automatically 'shrink' TXTDSC to size)
+
+10$:	MOVZWL	RAB$W_RSZ(R10),R1	; move no of chars read into R1
+	MOVL	R1,(R2)			; copy length read into 'nchs'
+	MOVZWL	(R4),R2			; now get the total length of buffer
+	CMPW	R2,R1
+	BLEQU	60$			; branch if enough chars to fill buffer
+
+; we have not filled the buffer, so pad it out with spaces
+
+	DECW	R2			; so get right bytes
+	MOVL	RAB$L_UBF(R10),R5	; buffer address
+25$:	MOVB	#^A/ /,(R5)[R1]		; insert space
+	ACBW	R2,#1,R1,25$		; loop until we've filled it
+	BRB	60$			; return
+
+; now deal with error returns, etc
+
+30$:	MOVL	#LSL__SYSREAD,R0	; system error
+	CMPL	R11,#RMS$_EOF		; EOF error?
+	BNEQ	50$			; no - something else
+	MOVL	#LSL__EOF,R0		; yes, set an LSLLIB version
+	BRB	60$			; and return
+
+50$:	TSTL	R3			; check IERR address
+	BEQL	60$			; if 0, no error return, exit now
+	MOVL	R11,(R3)		; move error code into IERR
+
+60$:	RET				; and return
+
+;******************************************************************************
+;*			Writing records					      *
+;******************************************************************************
+
+; Register usage:
+;	R2 - non-zero if this is a write to an indexed file
+;	R3 - where to return IERR (or 0 if no such passed)
+;	R9 - current FAB
+;	R10- current RAB
+;	R11- used by VIO$GNA, & then low word of error return code
+
+;**********************************************************************	FLWSTR
+; FLWSTR - write out a string
+
+	.ENTRY	FLWSTR, ^M<R2,R3,R9,R10,R11>
+	JSB	VIO$1ST			; init arg list reading
+	MOVZWL	FLW_CURRNT,R0		; get current row
+	MOVL	FLIO_FABS[R0],R9	; get address of current FAB
+	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	MOVAL	EXPDSC,R0		; default string from EXPC
+	JSB	VIO$GNA			; get any 1st arg (string)
+	MOVL	(R0)+,R1		; store length of string
+	MOVL	(R0),R3			; and address of buffer
+	$RAB_STORE	RAB=R10,-
+			RBF=(R3),-	; this buffer
+			RSZ=R1		; of this size
+	BRB	PUTDSC
+
+;**********************************************************************	FLWLIN
+; FLWLIN - write out a buffer, length nchs
+
+	.ENTRY	FLWLIN, ^M<R2,R3,R9,R10,R11>
+	JSB	VIO$1ST			; init arg list reading
+	MOVZWL	FLW_CURRNT,R0		; get current row
+	MOVL	FLIO_FABS[R0],R9	; get address of current FAB
+	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	MOVAW	EXPBUF,R0		; default 1st arg (buffer)
+	JSB	VIO$GNA			; read in arg
+	MOVL	R0,R1			; since R0 used by $xxx_STORE
+	$RAB_STORE	RAB=R10,-
+			RBF=(R1)	; set buffer up to use it
+	MOVAW	EXPLEN,R0		; default 2nd arg (nchs)
+	JSB	VIO$GNA			; get argument (if any)
+	MOVL	R0,R1			; move length to safety
+	$RAB_STORE	RAB=R10,-
+			RSZ=(R1)	; buffer size
+
+;------------------------------------------------------------------------------
+PUTDSC:	CLRL	R0			; default is not to have IERR
+	JSB	VIO$GNA			; if stays 0, IERR not wanted
+	MOVL	R0,R3			; remember it
+
+; we use a "compare zero extended field" instruction to determine whether
+; the file is an indexed file. If it is indexed, then we want to set the
+; RAB's RAC field to KEY - that is, write by keyed access, rather than
+; by the default sequential...
+; The field at position $V_ORG, of size $S_ORG, within the ORG field in our
+; FAB (pointed to by R9) is compared with the constant value $C_IDX shifted
+; right by $V_ORG (so that we only compare the relevant field at posn $V_ORG)
+; If it is equal, then we have an indexed file
+
+	CLRL	R2			; assume that it's not indexed
+	CMPZV	#FAB$V_ORG,-		; position of field to look at
+		#FAB$S_ORG,-		; size of the field
+		 FAB$B_ORG(R9),-	; address of base (ie our FAB)
+		#FAB$C_IDX @ -FAB$V_ORG	; value to compare it with
+	BNEQ	20$			; branch if it's not indexed
+	INCL	R2			; it is indexed - now non-zero
+	$RAB_STORE	RAB=R10,-
+			RAC=KEY		; access the record by key
+
+20$:	$PUT	RAB=R10			; write a line
+	MOVL	R0,R11			; remember return code
+	MOVL	#LSL__NORMAL,R0		; assume no error
+	BLBS	R11,60$			; if had, indeed, no error, skip
+
+	MOVL	#LSL__SYSWRITE,R0	; return system error
+	TSTL	R3			; check IERR address
+	BEQL	60$			; if 0, no error return, exit now
+	MOVL	R11,(R3)		; move error code into IERR
+
+60$:	BLBC	R2,70$			; if not indexed, just return
+	$RAB_STORE	RAB=R10,-	; otherwise, set the access mode
+			RAC=SEQ		; back to sequential
+70$:	RET				; and return
+
+;******************************************************************************
+;*			Updating records				      *
+;******************************************************************************
+
+;**********************************************************************	FLUSTR
+; FLUSTR - update a record that we have previously $GOT or $FOUND
+
+	.ENTRY	FLUSTR, ^M<R3,R10,R11>
+	JSB	VIO$1ST			; init arg list reading
+	MOVZWL	FLW_CURRNT,R0		; get current (writing) row
+	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	MOVAL	EXPDSC,R0		; default string from EXPC
+	JSB	VIO$GNA			; get any 1st arg (string)
+	MOVL	(R0)+,R1		; store length of string
+	MOVL	(R0),R3			; store address of buffer
+	$RAB_STORE	RAB=R10,-
+			RBF=(R3),-	; this buffer
+			RSZ=R1		; of this size
+	BRB	UPDDSC
+
+;**********************************************************************	FLULIN
+; FLULIN - update a record that we have previously $GOT or $FOUND
+
+	.ENTRY	FLULIN, ^M<R3,R10,R11>
+	JSB	VIO$1ST			; init arg list reading
+	MOVZWL	FLW_CURRNT,R0		; get current row
+	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+	MOVAW	EXPBUF,R0		; default 1st arg (buffer)
+	JSB	VIO$GNA			; read in arg
+	MOVL	R0,R1			; since R0 used by $xxx_STORE
+	$RAB_STORE	RAB=R10,-
+			RBF=(R1)	; set buffer up to use it
+	MOVAW	EXPLEN,R0		; default 2nd arg (nchs)
+	JSB	VIO$GNA			; get argument (if any)
+	MOVL	R0,R1			; move length to safety
+	$RAB_STORE	RAB=R10,-
+			RSZ=(R1)	; buffer size
+
+;------------------------------------------------------------------------------
+UPDDSC:	CLRL	R0			; default is no IERR argument
+	JSB	VIO$GNA			; if stays 0, IERR not wanted
+	MOVL	R0,R3			; remember it
+
+	$UPDATE	RAB=R10			; update the record
+	MOVL	R0,R11			; remember return code
+	MOVL	#LSL__NORMAL,R0		; assume no error
+	BLBS	R11,60$			; if had, indeed, no error, skip
+
+	MOVL	#LSL__SYSUPD,R0		; return system error
+50$:	TSTL	R3			; check IERR address
+	BEQL	60$			; if 0, no error return, exit now
+	MOVL	R11,(R3)		; move error code into IERR
+
+60$:	RET				; and return...
+
+;******************************************************************************
+;*			Deleting records				      *
+;******************************************************************************
+
+;**********************************************************************	FLWRDL
+; FLWRDL - delete a record that we have previously $GOT or $FOUND.
+;	   NB only works for an indexed sequential file
+
+	.ENTRY	FLWRDL, ^M<R3,R10,R11>
+	JSB	VIO$1ST			; init arg list reading
+	MOVZWL	FLW_CURRNT,R0		; get current row
+	MOVL	FLIO_RABS[R0],R10	; get address of current RAB
+
+	CLRL	R0			; default is no IERR argument
+	JSB	VIO$GNA			; if stays 0, IERR not wanted
+	MOVL	R0,R3			; remember it
+
+	$RAB_STORE	RAB=R10,-
+			RAC=KEY		; access the record by key
+	$DELETE	RAB=R10			; delete the record
+	MOVL	R0,R11			; remember return code
+	$RAB_STORE	RAB=R10,-
+			RAC=SEQ		; go back to sequential access
+	MOVL	#LSL__NORMAL,R0		; assume no error
+	BLBS	R11,60$			; if had, indeed, no error, skip
+
+	MOVL	#LSL__SYSUPD,R0		; return system error
+50$:	TSTL	R3			; check IERR address
+	BEQL	60$			; if 0, no error return, exit now
+	MOVL	R11,(R3)		; move error code into IERR
+
+60$:	RET				; and return...
+
+;******************************************************************************
+;*			WRITEF routines					      *
+;******************************************************************************
+
+;**********************************************************************	FLWRTF
+; FLWRTF - as WRITEF, but uses FLWSTR to write, instead of TTWSTR
+
+	.ENTRY	FLWRTF, ^M<>
+	CALLG	(AP),G^EXPAND		; expand our args
+	CALLS	#0,G^FLWSTR		; and write out the result
+	RET
+
+;**********************************************************************	FLWAPP
+; FLWAPP - as WRITAP (WRTAPP), but see FLWRTF above
+
+	.ENTRY	FLWAPP, ^M<>
+	CALLG	(AP),G^APPEND		; append our args
+	CALLS	#0,G^FLWSTR		; and write out the result
+	RET
+
+;******************************************************************************
+;*			    T H E   E N D				      *
+;******************************************************************************
+
+	.PSECT
+	.END

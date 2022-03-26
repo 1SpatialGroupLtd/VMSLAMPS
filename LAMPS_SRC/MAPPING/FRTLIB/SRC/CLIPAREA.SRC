@@ -1,0 +1,633 @@
+	SUBROUTINE CLIPAREA(N,X,Y,Z,NPOL,POLXY,SAME,WSPACE,WXY,WPROP,WPTRS,
+     &		WINTSCTL,WINTSCT,NOPOL,OPOLX,OPOLY,OPOLZ,SRIGFA)
+C
+***	MODULE	CLIPAREA
+***	IDENT	26OC94
+C
+C	Copyright (C) 1987, Laser-Scan Laboratories Ltd.,
+C	Cambridge, England
+C
+C	Created					RWR	 24-Oct-1988
+C
+C Subroutine to clip a fill area to a polygon. The results are output
+C by calls to SRIGFA (or SRI_LINE if buffers overflow)
+C
+C the polygon (POLXY) must be closed - ie first point = last point
+C
+C The algorithm is as follows:
+C ===========================
+C
+C 1) a doublely linked list is created from the original polygon
+C 2) the points where the fill area cuts the polygon are added to
+C    this list
+C
+C The nodes of this list include
+C	a) the X and Y coordinates of the points
+C	b) forward and backward pointer to the next node - FPTR and BPTR
+C	c) for the inserted nodes, the proportion of the original line
+C	   that they make (to allow insertion in the correct place in
+C	   the list)
+C	d) an A pointer. For the original nodes in the list, this points
+C	   to the next original node (thus defining the vectors in the
+C	   original polygon); for the inserted nodes, it points to the
+C	   vector of the fill area that caused the intersection. (The
+C	   negitive of the vector number is used, to make it simpler
+C	   to recognise while debugging)
+C	e) an I pointer. This is an index of the inserted nodes. IN
+C	   transitions are odd, OUT are even. The node where the area
+C	   leaves the polygon has an index one higher than that of the
+C	   node where the area entered the polygon.
+C	   When a node has been output, this pointer is set to -1, to
+C	   flag it
+C
+C 3) if no transition nodes have been inserted, then:
+C		if the fill area started inside the polygon the whole
+C		fill area is output.
+C		The problem is finished
+C
+C 4) the linked list is traversed until an (unused) IN transition is
+C    found. Then:-
+C	a) The coordinates of the node are put in the output buffer
+C	   and the node flagged as used.
+C	b) the linked list is traversed to find the corresponding out
+C	   transition (and thus the vectors of the fill area to output)
+C	c) the required vectors of the fill area are output for this
+C	   section of the fill area.
+C	d) the coordinates of the node are put in the output buffer
+C	e) the next nodes in the linked list are output, until the
+C	   next IN node is found. Note that the direction that this
+C	   scan takes depends on whether the area and polygon are
+C	   digitised in the same or the opposite direction.
+C	f) if this node is where we started, then the buffers are flushed
+C	   and we look for another sub-polygon (step 4), otherwise we
+C	   output this part of the area (setp a)
+C
+C By this point all the sub-polygons have been output.
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER		N		! number of points
+	REAL		X(N)		! x coords
+	REAL		Y(N)		! y coords
+	REAL		Z(N)		! z coords
+	INTEGER		NPOL		! number of points in polygon
+	REAL		POLXY(2,NPOL)	! points is polygon;
+C					! point 1 = point NPOL
+	LOGICAL		SAME		! true if both polygons in same
+					! direction
+C
+C the rest of arguments are used as workspace
+	INTEGER		WSPACE		! length of workspace arrays
+	REAL		WXY(2,WSPACE)	! coordinates in linked list
+	REAL		WPROP(WSPACE)	! proportion of vector that
+					! inserted points are
+	INTEGER		WPTRS(4,WSPACE)
+	INTEGER		WINTSCTL	! length of intersection arrays
+	INTEGER		WINTSCT(WINTSCTL)
+	INTEGER		NOPOL		! length of arrays for output
+					! buffers
+	REAL		OPOLX(NOPOL)	! x buffer
+	REAL		OPOLY(NOPOL)	! y buffer
+	REAL		OPOLZ(NOPOL)	! z buffer
+	EXTERNAL	SRIGFA	! passed routine
+C
+C Local workspace:
+	INTEGER	VECTOR
+	REAL	LINE(2,2)
+	LOGICAL	INSIDE
+	INTEGER	I,J,K
+	REAL	MINVAL		! for sorting
+	INTEGER	MINDEX		! for sorting
+	REAL	LINELEN
+	INTEGER	INDEX
+	INTEGER	EXTRA
+	REAL	TMPX(2),TMPY(2),TMPZ(2)	! for outputting last vector
+	INTEGER	THISPT,LASTPT,NEXTPT,STARTPT
+	INTEGER	TPT,NPT
+	INTEGER COUNT,NINTER
+	INTEGER	DUPL,FLAG
+	LOGICAL	DUPLICATED
+	INTEGER	LAST_NODE
+	REAL	DX1,DX2,DY1,DY2
+	INTEGER	TOP
+	LOGICAL	DEBUGW,DEBUGF
+	DATA	DEBUGW,DEBUGF/2*.FALSE./
+C
+C for intersecting
+	REAL	XK,YK		! first point of line
+	REAL	XL,YL		! second point of line
+	REAL	XLK,YLK		! differences
+	REAL	MAXLINE(2)	! limits of line
+	REAL	MINLINE(2)	!   "    "   "
+C
+	REAL	XM,YM		! first point of current vector
+	REAL	XN,YN		! second point of current vector
+	REAL	XNM,YNM
+	REAL	XMK,YMK
+	REAL	DET,DETINV	! determinant and its inverse
+	REAL	S,T		! fractions of line intersections
+C
+C access to PTRS array
+	INTEGER		FPTR	! forward pointer
+	INTEGER		BPTR	! backward pointer
+	INTEGER		APTR	! pointer to area being clipped
+	INTEGER		IPTR	! index
+	PARAMETER	(FPTR=1,BPTR=2,APTR=3,IPTR=4)
+C
+C temporary
+	REAL*8	LIMIT
+C
+C functions
+	INTEGER	PNTPOL
+	LOGICAL POLINTSCT
+C
+	EXTERNAL CF_CLIPGPL
+	EXTERNAL SWAP_CLIPGPL
+C
+***	COMMON/LSL$CMNFRT:FFABUF/
+***	COMMON/LSL$CMNFRT:SRISCL/
+***	COMMON/LSL$CMNFRT:SRIVEC/
+C
+	IF (N.LE.2) GOTO 900		! can't do anything
+C
+C not enough workspace - output as a line
+	IF ((NPOL-1).GT.WSPACE) GOTO 800	! 
+C
+C get an idea of what 0 is from the extent of the polygon
+	LIMIT = MAX(FILLCLIP_YMAX-FILLCLIP_YMIN,FILLCLIP_XMAX-FILLCLIP_XMIN)
+	LIMIT = LIMIT*1E-6
+C
+C does poly-line start inside or outside polygon?
+	LINE(1,1) = X(1)		! use LINE and I as temps
+	LINE(2,1) = Y(1)
+	I = PNTPOL(LINE,POLXY,NPOL)
+C
+C if point lies on polygon, then we have a problem - so don't output
+C anything. This is only a valid approach because of the way this routine
+C is being used in FRTLIB; here it is most unlikely that a point will
+C lie on the polygon
+	IF (I.EQ.0) GOTO 900
+	INSIDE = I.EQ.1
+C
+C build up a (doubly) linked circular list of the polygon to clip to
+C (the polygon is closed, so ignore the last point)
+	DO 50, I = 1,NPOL-1
+	   WXY(1,I) = POLXY(1,I)
+	   WXY(2,I) = POLXY(2,I)
+	   WPTRS(FPTR,I) = I+1
+	   WPTRS(BPTR,I) = I-1
+	   WPTRS(APTR,I) = I+1		! APTR used to define vector
+	   WPTRS(IPTR,I) = 0		! flag as original polygon
+50	CONTINUE
+C
+C first and last pointers
+	WPTRS(FPTR,NPOL-1) = 1
+	WPTRS(APTR,NPOL-1) = 1
+	WPTRS(BPTR,1)      = NPOL-1	
+C
+C initialise
+	INDEX = NPOL			! note - leaving a gap in case
+					! WXY is same array as POLXY
+	EXTRA = 0
+C
+C number intersections	- ODD numbers are in transitions, EVEN are out
+	IF (INSIDE) THEN
+	   COUNT = 1
+	ELSE
+	   COUNT = 0
+	ENDIF
+C
+C duplicated points are flagged as negative numbers
+	DUPL = 0
+C 
+C look at each vector in the fill area in turn
+	DO 200, VECTOR = 1,N
+	   XK = X(VECTOR)
+	   YK = Y(VECTOR)
+	   IF (VECTOR.LT.N) THEN
+	      XL = X(VECTOR+1)
+	      YL = Y(VECTOR+1)
+	   ELSEIF (X(1).EQ.X(N).AND.Y(1).EQ.Y(N)) THEN	! area closed
+	      GOTO 200
+	   ELSE				! must close area
+	      XL = X(1)
+	      YL = Y(1)
+	   ENDIF
+	   XLK = XL - XK
+	   YLK = YL - YK
+	   MAXLINE(1) = MAX(XK,XL)
+	   MAXLINE(2) = MAX(YK,YL)
+	   MINLINE(1) = MIN(XK,XL)
+	   MINLINE(2) = MIN(YK,YL)
+C
+C does this line cut the polygon; if so where?
+C
+C it cannot clip the polygon if it lies outside its limits
+
+	   IF ((MAXLINE(1).LT.FILLCLIP_XMIN).OR.
+     &	       (MINLINE(1).GT.FILLCLIP_XMAX).OR.
+     &	       (MAXLINE(2).LT.FILLCLIP_YMIN).OR.
+     &	       (MINLINE(2).GT.FILLCLIP_YMAX)) GOTO 200
+C
+C check with complete polygon	   
+	   NINTER = 0
+	   STARTPT = 1
+	   THISPT = STARTPT
+100	   CONTINUE
+	   NEXTPT = WPTRS(APTR,THISPT)
+C
+	   XN = WXY(1,THISPT)
+	   YN = WXY(2,THISPT)
+	   XM = WXY(1,NEXTPT)
+	   YM = WXY(2,NEXTPT)
+C
+C is there the possibility of an intersection?
+	   IF ((MAX(XM,XN).LT.MINLINE(1)).OR.
+     &	       (MAX(YM,YN).LT.MINLINE(2)).OR.
+     &	       (MIN(XM,XN).GT.MAXLINE(1)).OR.
+     &	       (MIN(YM,YN).GT.MAXLINE(2))) GOTO 150
+C
+C compute intersection
+	   XNM = XN - XM
+	   YNM = YN - YM
+	   XMK = XM - XK
+	   YMK = YM - YK
+C
+	   DET = XNM*YLK - YNM*XLK
+C
+C lines parallel, no intersection  -- SHOULD CHECK AGAINST A LIMIT
+	   IF (ABS(DET).LE.0.0) GOTO 150
+	   DETINV = 1.0/DET
+	   S = (XNM*YMK - YNM*XMK) * DETINV
+	   T = (XLK*YMK - YLK*XMK) * DETINV
+C
+C are intersections within line segments?
+	   IF (S.LT.0.0.OR.S.GT.1.0.OR.
+     &	       T.LT.0.0.OR.T.GT.1.0) GOTO  150
+	   T = 1.0 - T			! because I compute the wrong way
+C
+C got an intersection, so increment count and add it to list
+	   NINTER = NINTER + 1
+	   IF (NINTER.GT.WINTSCTL) GOTO 800	! array full
+C
+C get another node
+	   EXTRA = EXTRA + 1
+	   INDEX = INDEX + 1
+	   IF (INDEX.GT.WSPACE) GOTO 800	! array full
+C
+	   WPTRS(APTR,INDEX) = THISPT		! (temporarily)
+	   WPROP(INDEX) = T
+	   WXY(1,INDEX) = S			! (temporarily)
+	   WINTSCT(NINTER) = INDEX
+C
+C move onto next vector of polygon
+150	   CONTINUE
+	   IF (NEXTPT.NE.STARTPT) THEN
+	      THISPT = NEXTPT
+	      GOTO 100
+	   ELSE
+C
+C finished, so sort all the intersections on this vector of the area,
+C set COUNT in them, so we know if they are in or out transitions, and
+C then add them to our linked list (in appropriate place)
+C
+C so sort (using simple, but slow, selections sort)
+C sorting on stored value of S, so sort according to distance along
+C vector
+	      DO 170, I= 1,NINTER
+	         MINVAL = WXY(1,WINTSCT(I))	! S
+	         MINDEX = -1
+C
+C get next lowest proportion, from those left
+	         DO 160, J = I+1,NINTER
+	            IF (WXY(1,WINTSCT(J)).LT.MINVAL) THEN
+	               MINDEX = J
+	               MINVAL = WXY(1,WINTSCT(J))
+	            ENDIF
+160	         CONTINUE
+C
+C swap I with lowest, if necessary
+	         IF (MINDEX.GT.0) THEN
+	            J = WINTSCT(I)
+	            WINTSCT(I) = WINTSCT(MINDEX)
+	            WINTSCT(MINDEX) = J
+	         ENDIF
+170	      CONTINUE
+C
+C now go through this list and set count for each intersection, and
+C also the coordinates. Also add it to list
+C NOTE: flag points that are coincident with negative numbers
+	      I = 0
+	      DUPLICATED = .FALSE.
+	      IF (NINTER.GT.1) LINELEN = SQRT(XLK**2+YLK**2)
+180	      CONTINUE
+	      I = I+1
+	      IF (I.GT.NINTER) GOTO 200
+	      J = WINTSCT(I)
+C
+C are we dealing with second of duplicated pair?
+	      IF (DUPLICATED) THEN
+	         DUPLICATED = .FALSE.
+	      ELSE
+C
+C check that this point is not coincident with next one
+	         IF (I.LT.NINTER) THEN
+	            K = WINTSCT(I+1)
+	            IF (ABS((WXY(1,J)-WXY(1,K))*LINELEN).LT.LIMIT) THEN
+	               DUPLICATED = .TRUE.
+	               DUPL = DUPL - 1
+	               EXTRA = EXTRA - 2
+	               FLAG = DUPL
+	               GOTO 185
+	            ENDIF
+	         ENDIF
+	         COUNT = COUNT + 1
+	         LAST_NODE = COUNT	! last transition so far
+	         FLAG = COUNT
+	      ENDIF
+C
+C insert point in list
+185	      WPTRS(IPTR,J) = FLAG
+	      THISPT = WPTRS(APTR,J) ! side of polygon
+	      WPTRS(APTR,J) = - VECTOR
+C
+C work out coordinates
+	      S = WXY(1,J)
+	      T = WPROP(J)
+	      WXY(1,J) = XK + XLK*S
+	      WXY(2,J) = YK + YLK*S
+C
+C add it to linked list in correct place. We know the side of the
+C polygon it is in, put it in correct place in this side. (Other
+C inserted nodes on this side have their WPROP set)
+	      TPT = THISPT
+190	      CONTINUE
+	      NPT = WPTRS(FPTR,TPT)
+	      IF ((NPT.EQ.WPTRS(APTR,THISPT)).OR.
+     &	             (T.LE.WPROP(NPT))) THEN
+C
+C insert this element in the linked list here
+	         WPTRS(BPTR,J) = TPT
+	         WPTRS(FPTR,J) = NPT
+	         WPTRS(FPTR,TPT) = J
+	         WPTRS(BPTR,NPT) = J
+	         GOTO 180
+	      ENDIF
+	      TPT = NPT
+	      GOTO 190
+	   ENDIF
+200	CONTINUE
+C
+C ********************* DEBUG OUTPUT ***********************************
+C
+C now see if we have got it right
+	IF (DEBUGF.OR.DEBUGW) THEN
+	   STARTPT = 3
+	   IF (DEBUGF) THEN
+	      CALL FLWOPN(2020,'LSL$USER:[RON]AREA.DEBUG')
+	      CALL FLWRTF
+	      CALL FLWRTF('Going forwards')
+	      CALL FLWRTF
+	   ENDIF
+	   IF (DEBUGW) THEN
+	      CALL WRITEF
+	      CALL WRITEF('Going forwards')
+	      CALL WRITEF
+	   ENDIF
+	   THISPT = STARTPT
+210	   CONTINUE
+	   IF (DEBUGW) CALL WRITEF(
+     &	'%I3 X= %F7.3, Y= %F7.3, PROP= %F5.3'
+     &//' Ptrs b- %^W%I3 f- %I3 i- %I3 a- %I5',
+     &	        THISPT,WXY(1,THISPT),WXY(2,THISPT),WPROP(THISPT),
+
+     &	               WPTRS(BPTR,THISPT),WPTRS(FPTR,THISPT),
+     &	               WPTRS(IPTR,THISPT),WPTRS(APTR,THISPT))
+	   IF (DEBUGF) CALL FLWRTF(
+     &	'%I3 X= %F7.3, Y= %F7.3, PROP= %F5.3'
+     &//' Ptrs b- %^W%I3 f- %I3 i- %I3 a- %I5',
+     &	        THISPT,WXY(1,THISPT),WXY(2,THISPT),WPROP(THISPT),
+     &	               WPTRS(BPTR,THISPT),WPTRS(FPTR,THISPT),
+     &	               WPTRS(IPTR,THISPT),WPTRS(APTR,THISPT))
+	   NEXTPT = WPTRS(FPTR,THISPT)
+	   IF (NEXTPT.EQ.STARTPT) GOTO 220		! finished
+	   THISPT = NEXTPT
+	   GOTO 210
+C
+C
+220	   CONTINUE
+	   IF (DEBUGF) THEN
+	      CALL FLWCLO
+	      DEBUGF = .FALSE.
+	   ENDIF
+	ENDIF
+C
+C ********************* END OF DEBUG OUTPUT ************************
+C
+C if there has not been an intersection, output the whole polygon if
+C it is inside
+	IF (EXTRA.EQ.0) THEN
+	   IF (INSIDE) THEN
+	      CALL SRIGFA(N,X,Y,Z)
+	   ENDIF
+	   GOTO 900
+	ENDIF
+C
+C find an "IN" transition that has not yet been used
+C (ie a list element that has a "count" that is greater than 1, and is
+C odd)
+300	CONTINUE
+	THISPT = 1
+350	CONTINUE
+	I = WPTRS(IPTR,THISPT)
+	IF ((I.GT.0).AND.((I.AND.1).EQ.1)) THEN
+	   STARTPT = THISPT
+	   COUNT = 0
+	   GOTO 400
+	ENDIF
+	THISPT = WPTRS(FPTR,THISPT)
+	IF (THISPT.EQ.1) GOTO 900		! finished
+	GOTO 350
+C
+C output coordinates of this transition
+400	CONTINUE
+	COUNT = COUNT + 1
+	IF (COUNT.LE.NOPOL) THEN
+	   OPOLX(COUNT) = WXY(1,THISPT)
+	   OPOLY(COUNT) = WXY(2,THISPT)
+	   OPOLZ(COUNT) = SRI_Z
+	ENDIF
+C
+C find the vectors of the area that start and end this section
+	TPT = - WPTRS(APTR,THISPT)
+C
+C the node at the end of this string has a count of 1 greater than
+C this node (unless it is end/start of area)
+cccc	IF (I.EQ.(INDEX-NPOL+1)) THEN	! last node to be inserted
+	IF (I.EQ.LAST_NODE) THEN
+	   IF (INSIDE) THEN
+	      J = 2
+	   ELSE
+	      J = 1
+	   ENDIF
+	ELSE
+	   J = I+1
+	ENDIF
+C
+	NEXTPT = THISPT
+405	CONTINUE
+	IF (WPTRS(IPTR,NEXTPT).NE.J) THEN
+	   NEXTPT = WPTRS(FPTR,NEXTPT)
+C
+C if we are back where we started, something has gone wrong
+	   IF (NEXTPT.EQ.THISPT) GOTO 850
+	   GOTO 405
+	ENDIF
+C	
+	NPT = - WPTRS(APTR,NEXTPT)
+C
+C cancel the "count", to say this transition has been dealt with
+	WPTRS(IPTR,THISPT) = 0
+C
+C output the points of the area between ends of sections
+C if the ends of the sections both lie on the same vector of the
+C area, then we have to decide if we must output all the points
+C in the area, or none of them
+	IF (TPT.EQ.NPT) THEN
+	   DX1 = WXY(1,THISPT)-X(TPT)
+	   DY1 = WXY(2,THISPT)-Y(TPT)
+	   DX2 = WXY(1,NEXTPT)-X(NPT)
+	   DY2 = WXY(2,NEXTPT)-Y(NPT)
+	   IF ((DX1**2+DY1**2).LT.(DX2**2+DY2**2)) GOTO 440
+	ENDIF
+C
+	IF (NPT.GT.TPT) THEN
+	   DO 410,I=TPT+1,NPT
+	      COUNT = COUNT+1
+	      IF (COUNT.LE.NOPOL) THEN
+	         OPOLX(COUNT) = X(I)
+	         OPOLY(COUNT) = Y(I)
+	         OPOLZ(COUNT) = SRI_Z
+	      ENDIF
+410	   CONTINUE
+	ELSE
+C
+C have to output in two sections
+	   DO 420, I = TPT+1,N
+	      COUNT = COUNT+1
+	      IF (COUNT.LE.NOPOL) THEN
+	         OPOLX(COUNT) = X(I)
+	         OPOLY(COUNT) = Y(I)
+	         OPOLZ(COUNT) = SRI_Z
+	      ENDIF
+420	   CONTINUE
+C
+	   DO 430, I=1,NPT
+	      COUNT = COUNT+1
+	      IF (COUNT.LE.NOPOL) THEN
+	         OPOLX(COUNT) = X(I)
+	         OPOLY(COUNT) = Y(I)
+	         OPOLZ(COUNT) = SRI_Z
+	      ENDIF
+430	   CONTINUE
+	ENDIF
+440	CONTINUE
+C
+C now output points at out transition
+	THISPT = NEXTPT
+500	CONTINUE
+	COUNT = COUNT + 1
+	IF (COUNT.LE.NOPOL) THEN
+	   OPOLX(COUNT) = WXY(1,THISPT)
+	   OPOLY(COUNT) = WXY(2,THISPT)
+	   OPOLZ(COUNT) = SRI_Z
+	ENDIF
+C
+C cancel pointer
+	WPTRS(IPTR,THISPT) = 0
+C
+C move on to next element in list - forwards or backwards
+	IF (SAME) THEN
+	   THISPT = WPTRS(FPTR,THISPT)
+	ELSE
+	   THISPT = WPTRS(BPTR,THISPT)
+	ENDIF
+C
+C if finished, then output area, and go and look to see if there are any
+C more
+	IF (THISPT.EQ.STARTPT) THEN
+	   COUNT = COUNT + 1
+	   IF (COUNT.LE.NOPOL) THEN
+	      OPOLX(COUNT) = WXY(1,THISPT)
+	      OPOLY(COUNT) = WXY(2,THISPT)
+	      OPOLZ(COUNT) = SRI_Z
+	   ENDIF
+	   IF (COUNT.LE.NOPOL) THEN
+	      CALL SRIGFA(COUNT,OPOLX,OPOLY,OPOLZ)
+	   ENDIF
+	   GOTO 300
+	ENDIF
+C
+C is it an "IN" transition
+	I = WPTRS(IPTR,THISPT)
+	IF ((I.GT.0).AND.((I.AND.1).EQ.1)) GOTO 400
+C
+C if it is a duplicated point, move onto corresponding duplicated point,
+C ignoring those in between
+	IF (I.LT.0) THEN
+	   J = THISPT
+550	   CONTINUE
+	   IF (SAME) THEN
+	      THISPT = WPTRS(FPTR,THISPT)
+	   ELSE
+	      THISPT = WPTRS(BPTR,THISPT)
+	   ENDIF
+C
+	   IF (THISPT.EQ.J) GOTO 850		! check for infinite loop
+C
+	   IF (WPTRS(IPTR,THISPT).NE.I) GOTO 550
+	ENDIF
+	GOTO 500			
+C
+C if space runs out, plot as a polyline
+800	CONTINUE
+C
+C output in NOPOL size chunks, as we don't have a big Z array
+	NPT = N				! number of points remaining
+	J = 1				! index into big array
+820	CONTINUE
+	TOP = MIN(NPT,NOPOL)
+C
+C initialise OPOLZ to be constant height
+	IF (J.EQ.1) THEN
+	   DO 830, I = 1,TOP
+	      OPOLZ(I) = SRI_Z
+830	   CONTINUE
+	ENDIF
+	CALL SRI_LINE(TOP,X(J),Y(J),OPOLZ,%VAL(SRIVEC(XSRIGPL)))
+	NPT = NPT - TOP + 1
+	IF (NPT.GT.1) THEN
+	   J = N - NPT + 1
+	   GOTO 820
+	ENDIF
+C
+C and closing line
+	IF (X(1).NE.X(N).OR.Y(1).NE.Y(N)) THEN
+	   TMPX(1) = X(N)
+	   TMPX(2) = X(1)
+	   TMPY(1) = Y(N)
+	   TMPY(2) = Y(1)
+	   TMPZ(1) = SRI_Z
+	   TMPZ(2) = SRI_Z
+	   CALL SRI_LINE(2,TMPX,TMPY,TMPZ,%VAL(SRIVEC(XSRIGPL)))
+	ENDIF
+	GOTO 900
+C
+C internal error
+850	CONTINUE
+	CALL FRTWRT('Error in clipping areas - please inform Laser-Scan')
+	GOTO 900
+C	
+900	RETURN
+	END

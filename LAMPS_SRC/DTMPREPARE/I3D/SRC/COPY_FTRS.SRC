@@ -1,0 +1,214 @@
+	LOGICAL FUNCTION COPY_FTRS
+C
+***	MODULE	COPY_FTRS
+***	IDENT	30MY90
+C	
+C Copyright Laser Scan Laboratories, Cambridge, England.
+C 	
+CMOD 889 Now passes pen control to CBINOUT		TJH 30-May-1990
+C Created 						ALB 11-Apr-1988
+C
+C The purpose of this routine is to copy from an input river/ridgeline IFF
+C file to an output river/ridgeline IFF file.  All junction data 'SH', 
+C 'JB' and 'JP' data will be removed. The process will replace
+C any 2D CB string with a 3D CB string.
+C
+	IMPLICIT NONE
+C	
+C Parameters
+        INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+        INCLUDE 'LSL$CMNIFF:IFFMSG.PAR'
+        INCLUDE 'LSL$CMNI3D:I3DMSG.PAR'
+        INCLUDE 'LSL$CMNI3D:CONSTANTS.PAR'
+C
+C common blocks
+        INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+C
+C structures
+        INCLUDE 'LSL$CMNIFF:CB.STR'
+C
+C records
+	RECORD /IFF_CBH/ CBH
+	RECORD /IFF_CBD/ CBD
+C
+C Workspace
+	INTEGER*2	IELEN
+	INTEGER*2	IECODE		
+	INTEGER*2	LAY_NUM		! layer number
+	INTEGER*2	EXT_FSN		! external feature number
+	INTEGER*2	INT_FSN		! internal feature number
+	INTEGER*4	NO_POINTER	! start of layer in output IFF 
+C
+	REAL		DATA_BUFF(3,IFF_MAXCBROW) ! buff xy vals from CB
+	INTEGER		DATA_IBUFF(3,IFF_MAXCBROW)! buff xy vals from CB
+	INTEGER		FIRST_ROW	! first row to read (always 1)
+	INTEGER		NROWS		! last row to read
+	LOGICAL		FIRST_NO	! TRUE for first 'NO'
+	LOGICAL		OK		! return code
+	LOGICAL		PENDOWN		! CB pen control
+C
+	EQUIVALENCE(	DATA_BUFF, DATA_IBUFF)
+C
+C functions
+	LOGICAL		IFFOPEN
+	LOGICAL		IFFCREATE
+C
+C **********************************************************************
+C
+	COPY_FTRS = .TRUE.			! assume success
+C
+C ************************** open **************************************
+C
+C re-open IFF file using file ID
+C
+	IF (.NOT.OPEN_FILEIN) THEN
+	   OK=IFFOPEN(FILEIN_LUN,FILEIN_FNAME(FILEIN_NUM),
+     &	   FILEIN_FID(1,FILEIN_NUM),,1)
+	   IF (.NOT.OK) THEN		
+	      CALL LSL_PUTMSG(OK)
+	      COPY_FTRS = .FALSE.
+	      GOTO 999
+	   ENDIF
+	   OPEN_FILEIN = .TRUE.
+	ENDIF
+C
+C create a new output IFF file
+C
+	IF (.NOT.OPEN_FILEOUT) THEN
+	   OK = IFFCREATE(FILEOUT_LUN,FILEOUT_FNAME(FILEIN_NUM),
+     &	   ,,,1)
+	   IF (.NOT.OK) THEN		
+	      CALL LSL_PUTMSG(OK)
+	      COPY_FTRS = .FALSE.
+	      GOTO 899
+	   ENDIF
+	   OPEN_FILEOUT = .TRUE.
+	ENDIF
+C
+C select file and rewind
+C
+	CALL IFFSEL(FILEIN_LUN)		! select input IFF file	
+	CALL IFFRWD			! rewind input file
+C
+C ************************** get next entry in IFF ************************** 
+C
+C
+	FIRST_NO = .TRUE.
+90	CONTINUE
+	CALL IFFSEL(FILEIN_LUN)		! select input IFF file	
+	CALL IFFNXT(IECODE,IELEN)
+C
+	IF (IELEN.EQ.-1)GOTO 799		! end of file
+C
+	IF (IECODE.EQ.'SH') GOTO	90	! remove 'SH'
+	IF (IECODE.EQ.'JB') GOTO	90	! remove 'JB'
+	IF (IECODE.EQ.'JP') GOTO	90	! remove 'JP'
+C
+	IF (IECODE.EQ.'RA') GOTO	100	! range entry found
+	IF (IECODE.EQ.'NO') GOTO	200	! layer entry found
+	IF (IECODE.EQ.'EO') GOTO	250	! end layer found
+	IF (IECODE.EQ.'NF') GOTO	300	! feature entry found
+	IF (IECODE.EQ.'EF') GOTO	350	! end feature found
+	IF (IECODE.EQ.'CB') GOTO	400	! coordinate block
+	IF (IECODE.EQ.'EM') GOTO	500	! end of map 
+	IF (IECODE.EQ.'EJ') GOTO	500	! end of file 
+C
+C -----------------------------------------------------------------
+C copy input to output
+C
+	CALL EIHCPY(FILEOUT_LUN)	
+	GOTO 90				
+C -----------------------------------------------------------------
+C
+100	CONTINUE			! 'RA' found
+C
+	CALL EIHRR(RANGE,4,1)		! read range and save
+	CALL IFFSEL(FILEOUT_LUN)	! select output IFF file	
+	CALL IFFRA(RANGE)		! output range
+	GOTO 90				
+C -----------------------------------------------------------------
+C
+200	CONTINUE			! 'NO' found
+C
+	IF (.NOT.FIRST_NO) THEN		! Finish off previous layer
+	   CALL IFFSEL(FILEOUT_LUN)	! select output IFF file	
+	   CALL IFFUNO(NO_POINTER)
+	   CALL IFFEO
+	ENDIF
+C
+	CALL IFFSEL(FILEIN_LUN)		! select input IFF file	
+	CALL EIHRI(LAY_NUM,1,1)		! layer number
+	CALL IFFSEL(FILEOUT_LUN)	! select output IFF file	
+	NO_POINTER = LPOSE		! save position start of 'NO'
+	CALL IFFNO(LAY_NUM,0,0)
+	FIRST_NO = .FALSE.
+	GOTO 90
+C
+C -----------------------------------------------------------------
+C
+250	CONTINUE			! 'EO' found
+C
+	GOTO 90				! write out EO after updating 'NO'
+C
+C -----------------------------------------------------------------
+C
+300	CONTINUE			! 'NF' found
+C
+	CALL EIHRI(EXT_FSN,1,1)		! get external sequence number
+	CALL IFFSEL(FILEOUT_LUN)	! select output IFF file	
+	INT_FSN = 0			! set to zero, (routine take next avail)
+	CALL IFFNF(EXT_FSN,INT_FSN)
+	GOTO 90
+C
+C -----------------------------------------------------------------
+C
+350	CONTINUE			! 'EF' found
+C
+	CALL IFFSEL(FILEOUT_LUN)	! select output IFF file	
+	CALL IFFEF
+	GOTO 90
+C
+C -----------------------------------------------------------------
+C
+400	CONTINUE			! 'CB' found
+C
+C load CB data into DATA_BUFF
+	CALL CBINOUT(DATA_BUFF,.FALSE.,3,NROWS,PENDOWN)
+C
+C select output IFF file	
+	CALL IFFSEL(FILEOUT_LUN)
+C
+C write DATA_BUFF to output
+	CALL CBINOUT(DATA_BUFF,.TRUE.,3,NROWS,PENDOWN)
+C
+	GOTO 90
+C
+C -----------------------------------------------------------------
+C
+500	CONTINUE			! 'EJ' found
+C
+	CALL IFFSEL(FILEOUT_LUN)	! select output IFF file	
+	IF (.NOT.FIRST_NO) THEN		! Finish off previous layer
+	   CALL IFFUNO(NO_POINTER)
+	   CALL IFFEO
+	ENDIF
+	CALL IFFEM
+	CALL IFFEJ
+C
+C -----------------------------------------------------------------
+C
+799	CONTINUE
+C
+	CALL IFFRLA(.FALSE.)		! switch off look ahead
+	CALL IFFCLO(FILEOUT_LUN)	! close output IFF
+	OPEN_FILEOUT = .FALSE.
+899	CONTINUE	
+	CALL IFFCLO(FILEIN_LUN)		! close input IFF
+	OPEN_FILEIN = .FALSE.
+C
+999	CONTINUE
+C
+	RETURN
+C
+	END

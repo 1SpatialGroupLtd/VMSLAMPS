@@ -1,0 +1,290 @@
+	LOGICAL FUNCTION OUTPUT_LINKS(
+     &	NOD_I,NOD_R,NOD_L,ARM_I,ARM_L,LNK_I,LNK_R,LNK_L,PUP_I,
+     &	PDN_I,NET_I,STN_I,STN_R,STL_I,STL_L,MNX_I,MNX_R,PNT_I,PNT_R,
+     &	MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+C
+***	MODULE	OUTPUT_LINKS
+***	IDENT	30MY90
+C	
+C Copyright Laser Scan Laboratories, Cambridge, England.
+C 	
+CMOD 889 Now checks that R_BUF is not overflowed
+C    (SPR 718) by flushing when NROWS exceeds IFF_MAXCBROW
+C    points. Also passes pen control to CBINOUT			TJH 30-May-1990
+C Created 							ACM 20-Dec-1988
+C - from OUTPUT_FCS by ALB
+C
+C Description
+C	Creates a file of heighted river/ridgelines corresponding to input
+C	river/ridgeline file FILEIN_NUM.
+C
+	IMPLICIT NONE
+C	
+C Parameters
+        INCLUDE 'LSL$CMNI3D:CONSTANTS.PAR'
+C
+C Common blocks
+        INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+C
+C Structures
+        INCLUDE 'LSL$CMNIFF:CB.STR'
+C
+C Records
+	RECORD /IFF_CBH/ CBH
+	RECORD /IFF_CBD/ CBD
+C
+C Dynamically assigned array declarations
+	INCLUDE 'LSL$CMNI3D:VM_ARG_DECL.SRC'
+C
+C Workspace
+	INTEGER		IPNT		! PNT index
+	INTEGER		FSN		! feature number
+	INTEGER		FEAT_CODE	! feature code
+	INTEGER		NO_POINTER	! pos of layer start in outp IFF
+	INTEGER		ILNK		! riv/rdg feature index
+	INTEGER		NROWS		! num rows in CB
+C
+	INTEGER*2	IELEN
+	INTEGER*2	IECODE		
+	INTEGER*2	LAY_NUM		! layer number
+	INTEGER*2	EXT_FSN		! external feature sequence num
+	INTEGER*2	INT_FSN		! internal feature sequence num
+C
+	REAL		BUF_R(3,IFF_MAXCBROW)	! CB x,y,z coords
+C
+	LOGICAL		REQUIRED_FSN	! TRUE if rv/rd ftr to be hghted
+	LOGICAL		REQUIRED_FC	! TRUE if rv/rd ftr to be hghted
+	LOGICAL		UPDATE_POINTER	! TRUE if 'NO' needs updating
+	LOGICAL		OK		! return code
+	LOGICAL		REQUIRED	! TRUE if item found is required
+	LOGICAL		LNK_DELETED	! link is deleted
+	LOGICAL		DONE_CB		! already done coords for ftr?
+	LOGICAL		PENDOWN		! CB pen control
+C
+C Functions
+	LOGICAL		CHECK_LAYER
+	LOGICAL		CHECK_FSN
+	LOGICAL		CHECK_FC
+	LOGICAL		CHECK_GROUP
+	LOGICAL		IFFOPEN
+	LOGICAL		IFFCREATE
+C
+C **********************************************************************
+C
+	OUTPUT_LINKS = .TRUE.		! assume success
+C
+C .......................... open ......................................
+C
+C Re-open IFF file using file ID
+C
+	IF (.NOT.OPEN_FILEIN) THEN
+	   OK = IFFOPEN(FILEIN_LUN,FILEIN_FNAME(FILEIN_NUM),
+     &	      FILEIN_FID(1,FILEIN_NUM),,1)
+	   IF (.NOT.OK) THEN		
+	      CALL LSL_PUTMSG(OK)
+	      OUTPUT_LINKS = .FALSE.
+	      GOTO 999
+	   ENDIF
+	   OPEN_FILEIN = .TRUE.
+	ENDIF
+C
+C Create a new output IFF file
+C
+	IF (.NOT.OPEN_FILEOUT) THEN
+	   OK = IFFCREATE(FILEOUT_LUN,FILEOUT_FNAME(FILEIN_NUM),
+     &	      ,,,1)
+	   IF (.NOT.OK) THEN		
+	      CALL LSL_PUTMSG(OK)
+	      OUTPUT_LINKS = .FALSE.
+	      GOTO 899
+	   ENDIF
+	   OPEN_FILEOUT = .TRUE.
+	ENDIF
+C
+C Select file and rewind
+C
+	CALL IFFSEL(FILEIN_LUN)			! select input IFF file	
+	CALL IFFRWD				! rewind input file
+	ILNK = 0				! zero ftr count
+C
+C .......................... get next entry in IFF .....................
+C
+	UPDATE_POINTER = .FALSE.
+90	CALL IFFSEL(FILEIN_LUN)			! select input IFF file	
+	CALL IFFNXT(IECODE,IELEN)
+C
+	IF (IELEN.EQ.-1) GOTO 799		! end of file
+C
+	IF (IECODE.EQ.'NF') GOTO 300		! ftr entry found
+	IF (IECODE.EQ.'FS') GOTO 330		! ftr code entry found
+	IF (IECODE.EQ.'EF') GOTO 350		! end ftr found
+	IF (IECODE.EQ.'CB') GOTO 400		! coordinate block
+	IF (IECODE.EQ.'NO') GOTO 200		! layer entry found
+	IF (IECODE.EQ.'EO') GOTO 90		! write after updatng NO
+	IF (IECODE.EQ.'EM') GOTO 500		! end of map 
+	IF (IECODE.EQ.'EJ') GOTO 500		! end of file 
+	IF (IECODE.EQ.'SH') GOTO 90		! remove 'SH'
+	IF (IECODE.EQ.'JB') GOTO 90		! remove 'JB'
+	IF (IECODE.EQ.'JP') GOTO 90		! remove 'JP'
+C
+C ----------------------------------------------------------------------
+C Copy input to output
+C
+	CALL EIHCPY(FILEOUT_LUN)	
+	GOTO 90				
+C
+C ----------------------------------------------------------------------
+C NO found
+C
+200	IF (UPDATE_POINTER) THEN		! finish off prev layer
+	   CALL IFFSEL(FILEOUT_LUN)		! select output IFF file
+	   CALL IFFUNO(NO_POINTER)
+	   CALL IFFEO
+	ENDIF
+C
+	OK = CHECK_LAYER(REQUIRED,.TRUE.)
+	IF (.NOT.OK) GOTO 799
+C
+	IF (.NOT.REQUIRED) THEN			! copied
+	   UPDATE_POINTER = .FALSE.
+	ELSE	
+	   CALL IFFSEL(FILEIN_LUN)		! select input IFF file	
+	   CALL EIHRI(LAY_NUM,1,1)		! layer num
+	   CALL IFFSEL(FILEOUT_LUN)		! select output IFF file
+	   NO_POINTER = LPOSE			! save pos start of 'NO'
+	   CALL IFFNO(LAY_NUM,0,0)
+	   UPDATE_POINTER = .TRUE.
+	ENDIF
+C
+	GOTO 90	
+C
+C ----------------------------------------------------------------------
+C NF found
+C
+300	OK = CHECK_FSN(FSN,REQUIRED,.TRUE.)
+	IF (.NOT.OK) GOTO 799
+C
+	IF (.NOT.REQUIRED) THEN			! copied
+	   REQUIRED_FSN = .FALSE.
+	ELSE
+	   REQUIRED_FSN = .TRUE.
+	   CALL IFFSEL(FILEOUT_LUN)		! select output IFF file
+	   INT_FSN = 0
+	   EXT_FSN = FSN
+	   CALL IFFNF(EXT_FSN,INT_FSN)
+	ENDIF
+	LNK_DELETED = .FALSE.
+	DONE_CB = .FALSE.
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C FS found
+C
+330	OK = CHECK_FC(FEAT_CODE,REQUIRED,.TRUE.)
+	IF (.NOT.OK) GOTO 799
+C
+	IF (.NOT.REQUIRED) THEN			! copied 
+	   REQUIRED_FC = .FALSE.
+	ELSE
+C River FC?
+	   OK = CHECK_GROUP(FEAT_CODE,RIVER,.FALSE.,REQUIRED,.TRUE.)
+	   IF (.NOT.OK) GOTO 799
+	   IF (.NOT.REQUIRED) THEN
+C Ridge FC?
+	      OK = CHECK_GROUP(FEAT_CODE,RIDGE,.TRUE.,REQUIRED,.TRUE.)
+	      IF (.NOT.OK) GOTO 799
+	   ENDIF
+	ENDIF   
+	IF (REQUIRED) THEN
+	   REQUIRED_FC = .TRUE.
+	   CALL EIHCPY(FILEOUT_LUN)
+	ELSE
+	   REQUIRED_FC = .FALSE.
+	ENDIF	
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C EF found
+C
+350	IF (LNK_DELETED) GOTO 90
+	CALL IFFSEL(FILEOUT_LUN)		! select output IFF file
+	CALL IFFEF
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C CB found
+C
+400	IF (.NOT.(REQUIRED_FSN.AND.REQUIRED_FC)) THEN
+	   CALL EIHCPY(FILEOUT_LUN)		! copy input to output
+	   GOTO 90
+	END IF
+C
+	IF (DONE_CB) GOTO 90			! CB handling finished for ftr?
+C
+	PENDOWN = .FALSE.			! 1st CB is pen-up
+C
+C ............... set up output CB from VEC linked list ................
+C
+	ILNK = ILNK+1				! FTR index
+C
+C	IF (LNK_L(LNK_DEL,ILNK)) THEN
+CC
+CC Feature was deleted because it was clipped out of existence by the
+CC CLIP_LINKS unheighted-free-ends clipping routine. 
+CC
+C	   CALL IFFSEL(FILEOUT_LUN)		! select output IFF file
+C	   CALL IFFDEL				! delete whole feature
+C	   LNK_DELETED = .TRUE.
+C	   GOTO 90
+C	ENDIF
+C
+	IPNT = LNK_I(LNK_STA,ILNK)		! PNT start index
+	NROWS = 0
+	GOTO 420
+C
+410	IPNT = PNT_I(PNT_NXT,IPNT)		! get next PNT index
+	IF (IPNT.EQ.0) THEN			! end of links coords?
+	   IF (NROWS.GT.0) THEN			! don't attempt zero pt CB!
+	      CALL IFFSEL(FILEOUT_LUN)		! select IFF output
+	      CALL CBINOUT(BUF_R,.TRUE.,3,NROWS,PENDOWN)
+	   ENDIF				! write to IFF output
+	   DONE_CB = .TRUE.			! CB handling finished for ftr
+	   GOTO 90				! finished CBS for ftr
+	ENDIF
+C
+420	IF (NROWS + 1.GT.IFF_MAXCBROW) THEN	! got a full CB buffer?
+	   CALL IFFSEL(FILEOUT_LUN)		! select IFF output
+	   CALL CBINOUT(BUF_R,.TRUE.,3,NROWS,PENDOWN)
+C						! write to IFF output
+	   NROWS = 0				! and reset buffer count
+	   PENDOWN = .TRUE.			! subsequent CBs are pen-down
+	ENDIF
+	NROWS = NROWS + 1
+	BUF_R(1,NROWS) = PNT_R(PNT_XXX,IPNT)
+	BUF_R(2,NROWS) = PNT_R(PNT_YYY,IPNT)
+	BUF_R(3,NROWS) = PNT_R(PNT_ZZZ,IPNT)
+C
+	GOTO 410				! loop for next pt
+C
+C ----------------------------------------------------------------------
+C EJ found
+500	CALL IFFSEL(FILEOUT_LUN)		! select output IFF file
+	IF (UPDATE_POINTER) THEN		! Finish previous layer
+	   CALL IFFUNO(NO_POINTER)
+	   CALL IFFEO
+	ENDIF
+	CALL IFFEM
+	CALL IFFEJ
+C
+C ----------------------------------------------------------------------
+C
+799	CALL IFFRLA(.FALSE.)			! switch off look ahead
+	CALL IFFCLO(FILEOUT_LUN)		! close output IFF
+	OPEN_FILEOUT = .FALSE.
+C
+899	CALL IFFCLO(FILEIN_LUN)			! close input IFF
+	OPEN_FILEIN = .FALSE.
+C
+999	RETURN
+	END

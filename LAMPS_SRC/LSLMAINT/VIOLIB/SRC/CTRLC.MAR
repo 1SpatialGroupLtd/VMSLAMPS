@@ -1,0 +1,125 @@
+	.TITLE	CTRLC
+	.IDENT	/24JA85/
+
+;
+; program for an AST to trap <control-C>s
+;
+; author TJI, 29.June.1982
+;
+
+	.LIBRARY/LSL$LIBRARY:LSLMACLIB/
+
+	DATA_PSECT	VIO
+	$IODEF				; define I/O function codes
+	$SSDEF				; define system function codes
+
+TT_DSC:		.ASCID/SYS$INPUT/	; terminal's logical name
+TT_CHAN:	.BLKW	1		; where to put the channel no.
+
+DEV_DSC:				; descriptor for the translated
+PHYS_NAME_LEN:	.LONG	63		; terminal name - physical device
+PHYS_NAME_ADR: .ADDRESS	PHYS_NAME	; descriptor
+PHYS_NAME:	.BLKB	63
+
+CURRENT_AST:	.LONG	0	; start with an AST address of 0 - disable
+				; the <ctrl-C> AST
+CURRENT_CHAN:	.WORD	0	; current channel value, initially unset
+
+
+	CODE_PSECT	VIO
+;
+; call SET_CTRLC_AST( AST_routine, input ) from Fortran
+;
+; AST_routine is the routine to set up. This should thus be declared
+; EXTERNAL in the Fortran. If it is ommitted, then the LAST used AST
+; is used once again (starts off as address 0, ie unset AST)
+;
+; input       is the name of the input channel to place the QIO on
+; (default SYS$INPUT). This is a STRING. By default, uses the last given
+; channel.
+;
+;
+; Note that ASTs mount up - if more than one is defined, they will all
+; be called in first in, first out order on a <control-C>
+;
+; **************************************************************************
+;
+	.ENTRY	SET_CTRLC_AST, ^M<R3,R4,R11>
+;
+; first, we set up for arg reading. The first argument is a channel name
+; It is optional, and if left out then the last used one is used, unless
+; this is our first time through, when we start with SYS$INPUT.
+;
+	JSB	VIO$1ST				; init argument reading
+;
+; and now for the first argument - should be the address of the routine
+; we want to use as an AST
+	JSB	VIO$GNA				; get the arg
+	BCS	1$				; no arg, so use CURRENT_AST
+	MOVAL	(R0), CURRENT_AST		; change the AST routine
+1$:	MOVL	CURRENT_AST, R4			; remember what we're using
+;
+; now get the arg - it's the address of the quadword string descriptor
+	JSB	VIO$GNA				; get the input string arg
+	BCC	4$				; got arg, skip
+;
+; if we fall here, then there was no argument, so we either set SYS$INPUT
+; (the default) if this is our first time thro (channel = 0), or we use
+; the channel number already set up...
+;
+	CMPW	CURRENT_CHAN, #0		; is the channel zero?
+	BNEQ	2$				; jump if not
+;
+	MOVAL	TT_DSC, R0			; first time thro - use SYS$INPUT
+	BRB	4$				; go do our translation
+;
+2$:	MOVW	CURRENT_CHAN, TT_CHAN		; copy over old channel
+	BRW	10$				; jump to the QIO already
+;
+4$:	MOVAQ	(R0), R3			; transfer address of quadword
+;
+;
+; translate the logical name for our input stream...
+	$TRNLOG_S	LOGNAM = (R3),-		; translate the terminal name
+			RSLLEN = PHYS_NAME_LEN,-
+			RSLBUF = DEV_DSC
+;
+; check for an escape at the beginning of the name - remove first 4 chars
+; if we find one...
+;
+	CMPB	PHYS_NAME, #^X1B
+	BNEQ	5$			; there wasn't one
+	SUBL	#4, PHYS_NAME_LEN	; yes there was -
+	ADDL	#4, PHYS_NAME_ADR
+;
+; and join up again ready to get a channel for this device
+;
+5$:	$ASSIGN_S	DEVNAM = DEV_DSC,-	; assign the channel to it
+			CHAN = TT_CHAN
+;
+; if we had an error, then return with it
+;
+	BLBS	R0, 8$			; jump if OK
+	BRW	ERROR			; else return with error return
+;
+8$:	MOVW	TT_CHAN, CURRENT_CHAN	; remember TT_CHAN for future use
+;
+; so we are now ready to enable the control-C handling...
+;
+;
+10$:	$QIO_S		CHAN = TT_CHAN,-	; enable it on this channel
+			FUNC = #IO$_SETMODE!IO$M_CTRLCAST,-
+			P1 = (R4)	; where it's at
+	BLBS	R0, 15$			; no error if set
+	BRW	ERROR
+15$:	RET				; return neatly
+;
+; *****************************************************************************
+;
+; and our ERROR jump, for when things go wrong
+;
+ERROR:	PUSHL		R0
+	CALLS		#1,G^LIB$SIGNAL		; complain
+	RET
+;
+	.END

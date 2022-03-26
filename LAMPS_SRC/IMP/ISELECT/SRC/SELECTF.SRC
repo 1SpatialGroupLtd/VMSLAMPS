@@ -1,0 +1,441 @@
+	LOGICAL FUNCTION SELECTF(DELETE)
+C
+***	MODULE SELECTF
+***	IDENT  08MY91
+C
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,Cambridge,England
+C
+C	
+CMOD	Altered so that it will select an feature with more than one
+C	different AC in it if only one of the ACs is specified as
+C	required in the command				JMB  18-DEC-1987
+CMOD	RAnge calculated for output file		TJH  04-DEC-1986
+CMOD	/INTEGER and /REAL made to work without any
+C	arguments 					ATT  28-Nov-1986
+CMOD	/TC changed to /TCC				TJH  12-Nov-1986
+CMOD	added qualifier /EXCLUDE_FC which uses FC 
+CMOD	stored in FC and NUM_FC				 SG  02-May-1991
+CMOD	corrected bug in matching FCs with list		 SG  08-May-1991
+C	
+C	Author A.T.Timms 				      4-Nov-1986
+C	from an earlier attempt by Immanuel Freedman 
+C	
+C This module selects features from an IFF file on the basis of 
+C attributes specified by qualifiers in the command line. If nothing 
+C is selected from the input file then SELECTF returns with DELETE set 
+C .T. and the output file will then be closed and deleted.
+C
+C Module works by remembering the position of the start of a feature 
+C (actually where feature ends because of *!*! TC entries) and working 
+C through the feature. If feature fails any selection then jump to next
+C 'EF' and start again. If we reach an EF the feature has passed all
+C selection tests so go back to the start of feature in input file and
+C copy it through to output.
+C
+ 	IMPLICIT NONE 
+C
+C LSL common blocks
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+C
+C Program common blocks
+	INCLUDE 'LSL$CMNISELECT:FLAG.CMN'
+	INCLUDE 'LSL$CMNISELECT:ARG.CMN'
+	INCLUDE 'LSL$CMNISELECT:ISELECTMSG.PAR'
+C
+C Functions called
+	LOGICAL		COPY_FT		! to copy features
+C
+C Tolerance for comparing real heights
+	REAL*4		TOL
+	PARAMETER      (TOL=1E-4)
+C
+C Workspace:
+	INTEGER*2	IECODE 		! entry code
+	INTEGER*2	IELEN 		! entry length
+	INTEGER*2	ISQ		! ISN
+	INTEGER		LPOSNO		! position of IFF NO entry
+	INTEGER		FS_NUM		! FSN (longword)
+	INTEGER*2	ILAY		! layer number
+	INTEGER		IAC		! AC type
+	INTEGER		IFC		! FCode
+	INTEGER		TFC		! Text Status code
+	INTEGER		LOOP		! index
+	INTEGER		LHEIGHT		! integer contour height
+	INTEGER		NUM_SEL		! no. of selected features
+C					! per layer !!
+	REAL*4		RMODULUS	! real modulus height	
+	REAL*4		RLHEIGHT	! real contour height	
+C
+	INTEGER*2	FT_CODE 	! feature start code
+	INTEGER*4	FT_START	! feature start pos. actually
+C					! set at EF and NO because of
+C					! those lovely !**! TC entries 
+	LOGICAL		HAD_POS		! Have we a feature start pos ?
+C
+	LOGICAL		DELETE		! close and delete output file ?
+	LOGICAL		LAY_FULL	! Layer with something in ?
+	LOGICAL		NO_AC		! AC found within feature ?
+	LOGICAL		NO_TS		! TS found within feature ?
+	LOGICAL		TCC_MATCH 	! have we a matching TCC ?
+	LOGICAL		FC_IN_LIST	! is FC in list of FC's
+	LOGICAL		REMOVE_FC	! do we want FC
+C
+C......................................................................
+C Initialise everything that needs it.
+	SELECTF = .TRUE.		! assume success
+	DELETE = .FALSE.		! assume we select something
+	HAD_POS = .TRUE.
+	LAY_FULL = .FALSE.
+	IRANGE(1)=1.0E24		! initialise RAnge, XMIN
+	IRANGE(2)=-IRANGE(1)		!		    XMAX
+	IRANGE(3)=IRANGE(1)		!		    YMIN
+	IRANGE(4)=-IRANGE(1)		!		    YMAX
+C
+C......................................................................
+C Pass through input file
+C
+C Main Loop starts here
+10	CALL IFFNXT(IECODE,IELEN)	! get next entry
+C
+	IF (IELEN.EQ.-1) THEN		! Error reading next entry
+	  SELECTF = ISELECT__UNEXPEOF	! say so
+	  CALL LSL_PUTMSG(SELECTF)
+	  GOTO 999
+	ENDIF
+C
+C Remember where we are if needs be.
+	IF (.NOT.HAD_POS) THEN
+	   FT_START= LPOSH		
+	   FT_CODE = IECODE		! remember position and code
+	   HAD_POS= .TRUE.
+	ENDIF
+C
+C Main despatch table - these entries require special attention
+	IF (IECODE.EQ.'NF') GOTO 50	! New feature
+	IF (IECODE.EQ.'FS') GOTO 60	! Feature Status (code)
+	IF (IECODE.EQ.'AC') GOTO 80	! Ancillary code
+	IF (IECODE.EQ.'EF') GOTO 130	! End feature
+	IF (IECODE.EQ.'VO') GOTO 10	! ignore voids
+	IF (IECODE.EQ.'NO') GOTO 20	! New overlay
+	IF (IECODE.EQ.'EO') GOTO 30	! End overlay
+	IF (IECODE.EQ.'TS') GOTO 70	! Text Status
+	IF (IECODE.EQ.'RA') GOTO 35	! RAnge
+	IF (IECODE.EQ.'EJ') GOTO 40	! End Job (End of file)
+C
+C Deal with remaining IFF file header entries - copy to output file
+	IF (IECODE.EQ.'HI') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'MH') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'MD') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'EM') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'NS') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'CP') CALL EIHCPY(OUTLUN)
+	IF (IECODE.EQ.'CC') CALL EIHCPY(OUTLUN)
+C
+C If we have got this far the entry is not worthy of special attention
+	GOTO 10					! get next entry
+C
+C.....................................................................
+C New overlay
+20	CALL EIHRI(ILAY,1,1)			! read layer number
+	IF (HAD_LOG) THEN			! Say so if we need to
+	  SELECTF = ISELECT__LAYER
+	  CALL LSL_PUTMSG(SELECTF,ILAY)
+	ENDIF
+C
+	NUM_SEL = 0				! no selected features 
+	HAD_POS = .FALSE. 			! need to remember
+C
+	IF (HAD_LAY) THEN			! check layer
+	  DO 25 LOOP=1,NUM_LAY
+	    IF (ILAY.EQ.LAYER(LOOP)) THEN	! a selected layer
+	      CALL IFFSEL(OUTLUN)		! select outfile
+	      LPOSNO = LPOSE			! remember posn. of NO
+	      CALL IFFNO(ILAY,0,0)		! write dummy NO entry
+	      CALL IFFSEL(INLUN)		! select infile
+	      GOTO 10				! go back to main loop
+	    ENDIF
+25	  CONTINUE
+C
+C Layer doesn't match so get next EO.
+	  CALL IFFNXC('EO',IELEN)		! now at EO
+	  IF (IELEN.EQ.-1) THEN
+	    SELECTF = ISELECT__UNEXPEOF
+	    CALL LSL_PUTMSG(SELECTF)
+	    GOTO 999
+	  ENDIF
+	  GOTO 10				! and back
+	ENDIF
+C
+C If we have not had /LAYER but are selecting on the basis of something
+C within the feature then we only need write the NO entry if a feature 
+C is selected. Write one for now then go back for more.
+	CALL IFFSEL(OUTLUN)			! select outfile
+	LPOSNO = LPOSE				! remember posn. of NO
+	CALL IFFNO(ILAY,0,0)			! write dummy NO entry
+	CALL IFFSEL(INLUN)			! select infile
+	GOTO 10					! get next entry
+C
+C.....................................................................
+C End Overlay. Check that we have selected something. If so then write
+C an EO, if not go back to NO in output file.
+30	IF (NUM_SEL.EQ.0) THEN			! nothing selected
+	  CALL IFFSEL(OUTLUN)			! select out-file
+	  CALL IFFUPP(0,LPOSM,LPOSH,LPOSNO)	! put LPOSE back
+	  CALL IFFSEL(INLUN)			! reselect in-file
+	ELSE
+	  LAY_FULL = .TRUE.
+	  CALL IFFSEL(OUTLUN)
+	  CALL IFFUNO(LPOSNO)			! goto matching NO &
+	  CALL IFFEO				! write EO address
+	  CALL IFFSEL(INLUN)			! reselect in-file
+	ENDIF
+C
+	GOTO 10					! get next entry
+C
+C.......................................................................
+C
+C RA - RAnge entry
+35	CALL IFFSEL(OUTLUN)
+	CALL IFFRA(IRANGE)
+	CALL IFFSEL(INLUN)
+	GOTO 10
+C
+C.......................................................................
+C End Job (end of file)
+40	CALL IFFSEL(OUTLUN)			! select out-file
+	CALL IFFRWD				! rewind it
+	CALL IFFNXC('RA',IELEN)			! get RAnge entry
+	IF (IELEN.EQ.-1) THEN			! did we get it?
+	   SELECTF = ISELECT__UNEXPEOF		! apparently not!
+	   CALL LSL_PUTMSG(SELECTF)		! tell user &
+	   GOTO 999				! retire, injured
+	ENDIF
+	CALL EIHWR(IRANGE,4,1)			! update range, & then
+	CALL IFFEJ				! write EJ entry
+	GOTO 900				! and return
+C
+C ......................................................................
+C TC - Transmitted comment usually outside feature
+45	IF (OUTSIDE) THEN			! if outside feature
+	   HAD_POS=.TRUE.			! set flag as this
+	ENDIF					! will have to be
+	GOTO 10	   				! treated specially
+C
+C.......................................................................
+C NF (New Feature). Set flags. Have we selected on feature serial no. ?
+50	OUTSIDE=.FALSE.				! now inside feature
+	NO_AC = .TRUE.				! No AC yet
+	NO_TS = .TRUE.				! No TS yet
+	TCC_MATCH = .FALSE.			! No TCC matches
+C
+	IF (HAD_FSN) THEN			! selected ?
+	  CALL EIHRI(FS_NUM,1,1)		! read FSN from input 
+	  DO 55 LOOP=1,NUM_FSN	
+	     IF ( FS_NUM.EQ.FSN(LOOP) ) THEN 	! FSN matches 
+		GOTO 10				! go back for more
+	     ENDIF
+55	  CONTINUE
+C
+C If we have got this far then this FSN is not selected. Go to next EF
+	  CALL IFFNXC('EF',IELEN)		! skip rest of feature
+	  IF (IELEN.EQ.-1) THEN
+	    SELECTF = ISELECT__UNEXPEOF
+	    CALL LSL_PUTMSG(SELECTF)
+	    GOTO 999
+	  ENDIF
+          HAD_POS = .FALSE. 			! need to remember
+	ENDIF
+C
+	GOTO 10					! get next entry
+C
+C.......................................................................
+C FS entry (Feature Status ie. code). Have we selected on FC ?
+60	IF (HAD_FC.OR.HAD_EXCLUDE) THEN
+	  CALL EIHRI(IFC,1,1)			! read FC
+	  FC_IN_LIST = .FALSE.			! initialise flag
+	  DO 65 LOOP=1,NUM_FC
+	    IF (IFC.EQ.FC(LOOP)) FC_IN_LIST = .TRUE.
+65	  CONTINUE
+	  REMOVE_FC = .FALSE.			! initialise flag
+	  IF (FC_IN_LIST.AND.HAD_EXCLUDE) REMOVE_FC = .TRUE.
+	  IF (.NOT.FC_IN_LIST.AND.HAD_FC) REMOVE_FC = .TRUE.
+C
+	  IF (REMOVE_FC) THEN			! FC not wanted
+	    CALL IFFNXC('EF',IELEN)		! skip rest of feature
+	    IF (IELEN.EQ.-1) THEN
+	      SELECTF = ISELECT__UNEXPEOF
+	      CALL LSL_PUTMSG(SELECTF)
+	      GOTO 999
+	    ENDIF
+            HAD_POS = .FALSE. 			! need to remember
+	  ENDIF
+	ENDIF
+C
+	GOTO 10					! finished
+C
+C.......................................................................
+C TS (Text Status) entry. Have we selected on /TCC ?
+70	NO_TS = .FALSE.				! We have TS 
+	IF (HAD_TCC) THEN			! had /TCC=
+C
+	  IF (NUM_TCC.EQ.0) THEN		! no TCC value but 
+	    TCC_MATCH = .TRUE.			! we have TCC though
+	    GOTO 10
+	  ENDIF
+C
+	  CALL EIHRI(TFC,1,1)
+	  DO 75 LOOP=1,NUM_TCC
+	    IF (TFC.EQ.TCC(LOOP)) THEN		! check matches
+	      TCC_MATCH = .TRUE.		! we have one
+	      GOTO 10
+	    ENDIF
+75	  CONTINUE	  
+C
+C If we have got this far TCC doesn't match, any more ?
+	ENDIF
+C
+	GOTO 10
+C
+C.......................................................................
+C AC (Ancillary code) entry. Have we selected on /AC or one of the 
+C height options ? First /AC
+80	CALL EIHRI(IAC,1,1)
+C	NO_AC = .FALSE.				! We have an AC
+	IF (HAD_AC) THEN
+	  IF (NUM_AC.EQ.0) GOTO 90		! NO AC's specified
+	  DO 85 LOOP=1,NUM_AC			! check AC matches
+	    IF (IAC.EQ.AC(LOOP)) GOTO 90	! it does, do heights ?
+85	  CONTINUE
+C
+C AC doesn't match so ignore the rest of the feature
+C	  CALL IFFNXC('EF',IELEN)		! skip rest of feature
+C	  IF (IELEN.EQ.-1) THEN
+C	    SELECTF = ISELECT__UNEXPEOF
+C	    CALL LSL_PUTMSG(SELECTF)
+C	    GOTO 999
+C	  ENDIF
+C	  HAD_POS = .FALSE. 			! need to remember
+	  GOTO 10				! go back for more
+	ENDIF
+C
+C The AC matches one specified ,or /AC not specified, check integer,
+C modulus and real heights. First INTEGER heights. If only /INTEGER
+C specified or correct INTEGER match check reals next.
+90	IF (HAD_INT) THEN			! check integer heights
+	  IF (IAC.EQ.2) THEN
+	    CALL EIHRL(LHEIGHT,1,2)		! read int. height
+	    IF (NUM_INT.EQ.0) GOTO 100		! just /INT no args so..
+	    DO 95 LOOP=1,NUM_INT		! and check it
+	      IF (LHEIGHT.EQ.IHEIGHT(LOOP)) GOTO 100
+95	    CONTINUE
+	  ENDIF
+C
+C Integer height doesn't match or AC type doesn't match, so ignore the 
+C rest of the feature
+C	  CALL IFFNXC('EF',IELEN)		! skip rest of feature
+C	  IF (IELEN.EQ.-1) THEN
+C	    SELECTF = ISELECT__UNEXPEOF
+C	    CALL LSL_PUTMSG(SELECTF)
+C	    GOTO 999
+C	  ENDIF
+C         HAD_POS = .FALSE. 			! need to remember
+	  GOTO 10				! go back for more
+	ENDIF
+C
+C Now real heights.
+C If /REAL and no arguments check /MODULUS next.
+100	IF (HAD_REA) THEN
+	  IF (IAC.EQ.3) THEN
+	    CALL EIHRL(RLHEIGHT,1,2)		! read real height
+	    IF (NUM_REA.EQ.0) GOTO 110		! only /REAL so ...
+	    DO 105 LOOP=1,NUM_REA
+	      IF (ABS(RHEIGHT(LOOP) - RLHEIGHT).LE.TOL) GOTO 110
+	      IF (.NOT.(RANGE_FLAG(LOOP).AND.
+     &         (RHEIGHT(LOOP) - TOL.LE.RLHEIGHT).AND.
+     &	       (RHEIGHT(LOOP+1) + TOL.GE.RLHEIGHT)) ) GOTO 105
+	       GOTO 110
+105	    CONTINUE
+	  ENDIF
+C
+C Real height or AC type doesn't match so ignore the rest of the feature
+C	  CALL IFFNXC('EF',IELEN)		! skip rest of feature
+C	  IF (IELEN.EQ.-1) THEN
+C	    SELECTF = ISELECT__UNEXPEOF
+C	    CALL LSL_PUTMSG(SELECTF)
+C	    GOTO 999
+C	  ENDIF
+C         HAD_POS = .FALSE. 			! need to remember
+	  GOTO 10				! go back for more
+	ENDIF
+C
+C Now /MOD. Is the height divisible by the specified value ?
+110	IF (HAD_MOD) THEN
+	  IF (IAC.EQ.2) THEN
+	    CALL EIHRL(LHEIGHT,1,2)		! read the height
+	    DO 115 LOOP=1,NUM_MOD
+	      IF (MOD(LHEIGHT,MODULUS(LOOP)).EQ.0) GOTO 125
+115	    CONTINUE
+	  ELSE IF (IAC.EQ.3) THEN
+	    CALL EIHRL(RLHEIGHT,1,2)		! read real height
+	    DO 120 LOOP=1,NUM_MOD
+	      RMODULUS = FLOAT(MODULUS(LOOP))
+	      IF (AMOD(RLHEIGHT,RMODULUS).LT.TOL) GOTO 125
+120	    CONTINUE
+	  ENDIF
+C
+C Height isn't divisible or AC's aren't correct type so ignore the rest 
+C of the feature.
+C	  CALL IFFNXC('EF',IELEN)		! skip rest of feature
+C	  IF (IELEN.EQ.-1) THEN
+C	    SELECTF = ISELECT__UNEXPEOF
+C	    CALL LSL_PUTMSG(SELECTF)
+C	    GOTO 999
+C	  ENDIF
+C         HAD_POS = .FALSE. 			! need to remember
+	  GOTO 10
+	ENDIF
+C
+C Have an AC match
+125	NO_AC = .FALSE.
+	GOTO 10
+C
+C.......................................................................
+C EF (End feature). 
+C First check that we have had an AC or TS entry if one of the AC
+C or TCC switches was given.
+C /TCC but no TS entry, or no matching TCC word in TS entry.
+130	IF ((HAD_TCC.AND.NO_TS).OR.(HAD_TCC.AND..NOT.TCC_MATCH)) THEN
+          HAD_POS = .FALSE. 			! need to remember
+	  GOTO 10
+	ENDIF
+C one of the AC switches but no AC entry
+	IF ((HAD_AC.OR.HAD_REA.OR.HAD_INT.OR.HAD_MOD).AND.NO_AC)THEN
+          HAD_POS = .FALSE. 			! need to remember
+	  GOTO 10
+	ENDIF
+C
+C If we have got this far then the feature must have passed all 
+C selections and will be written to the output file.
+	NUM_SEL = NUM_SEL + 1			! add to counter
+C
+C Call function COPY_FT to do the writing.
+	IF (.NOT.COPY_FT(FT_START,FT_CODE)) GOTO 999 
+C
+	CALL IFFSEL(INLUN)			! select input file
+C
+	HAD_POS = .FALSE.
+C
+	GOTO 10					! go back for more
+C
+C.......................................................................
+C Check that we have had at least one selected item, otherwise the
+C output IFF file will have a header and an end but no features (or
+C worse, no layers). The latter will make LITES2 fall over. Set the
+C DELETE flag to cause CLOSEF to delete the output file if empty.
+C
+900	IF (NUM_SEL.EQ.0.AND..NOT.LAY_FULL) DELETE = .TRUE.
+C
+999	RETURN
+	END

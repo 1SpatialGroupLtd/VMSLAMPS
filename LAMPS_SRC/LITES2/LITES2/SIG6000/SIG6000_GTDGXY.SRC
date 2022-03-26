@@ -1,0 +1,284 @@
+	SUBROUTINE GTDGXY(LINE,BUTTON,XY,EXSTSU,ABORT)
+C
+***	IDENT	24MR92
+***	MODULE	GTDGXY
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RWR	22-Nov-1984
+C
+C Description
+C
+C	Subroutine to read X and Y coordinates from the digitising
+C	table.  The table must have already have been opened.
+C
+C	----	THIS SUBROUTINE IS INSTALLATION DEPENDENT   ---
+C
+C	--- this is Table Monitor/direct table + SIGMA 6100 version  ---
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:MACMEN/
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:MENUS/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:VAREFN/
+***	COMMON/CMN:WORKS/		! data about workstation
+C
+	INCLUDE '($SSDEF)'		! system paramaters
+C
+C Arguments
+	INTEGER*4	LINE		! digitiser area that was
+					! pressed
+					! = 2 for bitpad
+					! = 3 for digitiser
+	INTEGER*4	BUTTON		! button that was pressed
+	REAL		XY(2)		! table coordinates
+	LOGICAL		EXSTSU		! .TRUE. if button pressed is
+					! second highest defined
+	LOGICAL		ABORT		! .TRUE. if button pressed
+					! was highest defined, or
+					! ^C has been pressed
+C
+C Functions called
+	LOGICAL		STRDTB
+	LOGICAL		DIGTRN
+	LOGICAL		GTYPAC
+	LOGICAL		HADBREAK
+	INTEGER*4	TRNBUT
+	LOGICAL		HAD_ERROR,READ_ERROR
+	LOGICAL		HAD_PUCK,READ_PUCK
+C
+C Local Variables
+	INTEGER*4	I		! counter
+	INTEGER*4	BUFFLEN
+	PARAMETER	(BUFFLEN=40)
+	BYTE		BUFF(BUFFLEN)	! buffer for direct table reads
+	INTEGER*4	COUNT		! no of chars in typeahead buff
+	BYTE		BYTE1		! first byte
+	INTEGER*4	MASK
+	INTEGER*4	LENGTH		! I*4 value of buffer length
+C
+C additional variables for using table monitor
+	LOGICAL		DTBUP		! to remember if there is a
+					! read to direct table up
+	INTEGER*4	IERR		! return code
+	LOGICAL*1	RMON		! .TRUE. if using table monitor
+	LOGICAL*1	RSIG		! .TRUE. if using Sigmex input
+	BYTE		BU		! puck button number returned
+					! by table montor
+	INTEGER*4	IX,IY		! coordinates returned by
+					! table monitor
+C
+C and for Sigmex input
+	INTEGER		ICL,IDNR
+	LOGICAL*1	HADCH,HADLC
+C
+	EXSTSU = .FALSE.
+	ABORT  = .FALSE.
+	IF (DTRON.AND.DTBREAD) THEN
+	   CALL DTBKIL(DTBCHN)
+	   DTBREAD=.FALSE.
+	ENDIF
+	DTBUP  = .FALSE.
+	RMON   = TABINI.AND.MONOPT.AND..NOT.DTRON
+	RSIG = BITINI.OR.(TABINI.AND..NOT.MONOPT)	! use Sigmex
+	IF (RSIG) CALL WSSTM(1,1,0,1)	! disable any string device
+C
+	IF (WOSPIN.AND.BITINI) THEN
+C
+C set bitpad input devices into EVENT mode
+	   CALL WSLCM(1,2,3,1)	! locator device 2
+	   CALL WSCHM(1,4,3,1)	! choice device 4
+	ENDIF
+C
+C read table ... until we get a good result
+C direct table read
+10	IF (DTRON.AND..NOT.DTBUP) THEN
+	   IF (GTYPAC(DTBCHN,COUNT,BYTE1)) THEN	! check type ahead buff
+	      IF (COUNT.GT.MXTYPC) THEN
+	         CALL INFORM(MSG_NOMOREBUTS,COUNT/15)
+	      ENDIF
+	   ENDIF
+	   DTBUP=STRDTB(DTBFLG,DTBCHN,DTBOSB,,BUFFLEN,BUFF)
+	ENDIF
+C
+C clear flag for control C
+	CALL SYS$CLREF(%VAL(CLCFLG))
+C
+C build event flag mask, and wait for something to happen
+	MASK = 0				! clear to start with
+	CALL EFWM(MASK,CLCFLG)			! control C
+	IF (DTBUP) CALL EFWM(MASK,DTBFLG)	! add direct table read
+	IF (RMON) CALL EFWM(MASK,TABPUK,TABERR)	! monitor puck and error
+	IF (RSIG) CALL EFWM(MASK,CSRFLG)	! add Sigmex timer
+C
+C probe Sigma bitpad
+50	IF (RSIG) THEN
+	   HADCH = .FALSE.		! not had choice
+	   HADLC = .FALSE.		! not had locator
+C
+C 6100 series seems to read locator from current viewport,
+C so set this to the dummy viewport, then back again.
+C 6200 works regardless.
+60	   IF (BITINI) CALL WCVP(1,2)	! viewport 2 current
+	   CALL WWAIT(0,1,ICL,IDNR)
+	   IF (BITINI) CALL WCVP(1,1)	! back to viewport 1
+C
+	   IF (ICL.LE.0) THEN		! nothing doing
+	      IF (ICL.EQ.-2) THEN	! abort
+C
+C If ABORT (PF keys) used, then a certain amount of this stuff appears
+C necessary to keep the input devices working
+	         CALL WSLCM(1,2,0,0)	! disable all input devices
+	         CALL WSCHM(1,4,0,0)
+	         IF (BITINI) THEN
+	            CALL WSLCM(1,2,3,1)
+	            CALL WSCHM(1,4,3,1)
+	         ENDIF
+	      ELSE
+C
+C See if a MUART table event has happened
+	         IF (TABINI.AND..NOT.MONOPT) THEN
+	            CALL WGTTAB(BUTTON,XY(1),XY(2))
+	            IF (BUTTON.NE.-1) THEN
+	               LINE = DIGLIN
+	               GOTO 600
+	            ENDIF
+	         ENDIF
+	      ENDIF
+	      CALL CSRTMR		! re-time and wait
+	      GOTO 70
+	   ENDIF
+	   IF (ICL.EQ.4) THEN		! choice
+	      IF (IDNR.NE.4) THEN
+	         CALL WRITEF('??? Choice device %^L%N',IDNR)
+	         GOTO 50
+	      ENDIF
+	      CALL WGTCH(IDNR,BUTTON)
+	      BUTTON = BUTTON-1		! start at zero
+	      IF (DIAOPT) CALL WRITEF('Choice, Button %^L%N',BUTTON)
+	      HADCH = .TRUE.		! had choice
+	      IF (.NOT.HADLC) GOTO 60
+C
+	   ELSEIF (ICL.EQ.1) THEN	! locator
+	      IF (IDNR.NE.2) THEN
+	         CALL WRITEF('??? Locator device %^L%N',IDNR)
+	         GOTO 50
+	      ENDIF
+	      CALL WGTLC(IDNR,IX,IY)
+	      IF (DIAOPT) CALL WRITEF('Locator, position %N %N',IX,IY)
+	      HADLC = .TRUE.		! had locator
+	      IF (.NOT.HADCH) GOTO 60
+C
+	   ELSE
+	      CALL WRITEF('??? Input class %^L%N',ICL)
+	      GOTO 50
+	   ENDIF
+C
+C here with both a choice (BUTTON) and locator (IX,IY)
+	   XY(1) = IX			! convert to real
+	   XY(2) = IY
+	   LINE = BITLIN		! on bitpad
+	   GOTO 600
+	ENDIF
+C
+70	CALL SYS$WFLOR( %VAL(CLCFLG), %VAL(MASK) )
+C
+C check for control C
+	IF (HADBREAK()) THEN			! check for ^C
+	   ABORT=.TRUE.
+	   GOTO 999
+	ENDIF
+C
+C check what else we have got
+C
+	IF (DTBUP.AND.DTBOSB(1).NE.0) GOTO 100
+C
+C check for input from table monitor
+	IF (RMON) THEN
+	   IF (HAD_ERROR(IERR)) THEN
+	      IF (.NOT.READ_ERROR(TXTBUF,TXTPTR,I,IERR)) THEN
+	         CALL INFORM(MSG_TABMONERR,I)
+	         CALL INFORM(MSG_STRING,TXTDSC)
+	      ENDIF
+	      GOTO 10					! try again
+	   ELSEIF (HAD_PUCK(IERR)) THEN
+	      IF (.NOT.READ_PUCK(BU,IX,IY,IERR)) THEN
+	         LINE=DIGLIN
+	         BUTTON=BU
+	         XY(1)=IX
+	         XY(2)=IY
+	         IF (DTBUP) CALL DTBKIL(DTBCHN) 	! should not
+							! happen 
+	         GOTO 600
+	      ELSE					! error reading
+	         GOTO 10				! TRY AGAIN
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C was it cursor timeout?
+	IF (CSRTMO) THEN
+	   CSRTMO = .FALSE.
+	   GOTO 50				! re-time and wait
+	ENDIF
+C
+C or what else can it be?
+	CALL INFORM(MSG_NOINPUT)
+	GOTO 10
+C
+C check direct table
+C
+100	DTBUP=.FALSE.
+	IF (.NOT.DTBOSB(1)) THEN		! error
+	   CALL LITES2_SIGNAL(DTBOSB(1))
+	   GOTO 10
+	ENDIF
+C
+C translate result of read
+C
+	LENGTH=DTBOSB(2)			! I*2 -> I*4
+	IF (LENGTH.LE.0) GOTO 10
+	IF (DIGTRN(BUFF,LENGTH,BUTTON,IX,IY,USEFUN,%VAL(FUNADR))) THEN
+	   CALL INFORM(MSG_TABERRREAD,BUFF)   ! error in string
+	   GOTO 10
+	ELSE
+	   LINE=DIGLIN
+	   XY(1)=IX
+	   XY(2)=IY
+	ENDIF
+C
+C here we have got coordinates from table
+600	BUTTON=TRNBUT(BUTTON,LINE)	! normalise button number
+C
+C set EXSTSU and ABORT flags
+	IF (BUTTON.NE.-1) THEN
+	   DO 20, I=1,PUKTOP
+	      IF (PUKDEV(I).EQ.LINE) THEN
+	         IF (BUTTON.EQ.PUKBUT(I)) ABORT=.TRUE.
+	         IF (BUTTON.EQ.(PUKBUT(I)-1)) EXSTSU=.TRUE.
+	         GOTO 999
+	      ENDIF
+20	   CONTINUE
+	ENDIF
+C
+C we may have just messed up the outstanding table reads in INTERACT
+C so make sure it sets one up again
+999	TAREAD=.FALSE.
+	IF (DTRON) THEN
+	   CALL DTBKIL(DTBCHN)
+	   DTBREAD=.FALSE.
+	ENDIF
+C
+	IF (WOSPIN.AND.BITINI) THEN
+C
+C disable bitpad input devices, so that keyboard works normally
+	   CALL WSLCM(1,2,0,0)
+	   CALL WSCHM(1,4,0,0)
+	   CALL WUWK(1,1)	! flush out
+	ENDIF
+	RETURN
+	END

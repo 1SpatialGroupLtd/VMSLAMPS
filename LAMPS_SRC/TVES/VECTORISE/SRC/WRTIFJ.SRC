@@ -1,0 +1,591 @@
+	SUBROUTINE WRTIFJ
+C
+***	IDENT	10NO95
+***	MODULE	WRTIFJ
+C
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+C	Created   : ACM						       Nov 1985
+C
+CMOD1516 Transfer DTI header details to the output IFF file	 JB 10-Nov-1995
+C
+CMOD1020 Fix origin coordinates in DTI and IFF offsets		 JB 05-Aug-1991
+C
+CMOD	An additional argument added to BEZIER_INTERPOLATION
+C	to signal that the segment tolerance is not to be
+C	incremented automatically		 		 PP 11-Apr-1990
+CMOD	Fix problems with invalid junction structure		 DM 24-Oct-1989
+CMOD	Enter user supplied scale into MD and always	       MWSR 23-Jan-1989
+C	make it version 2
+CMOD	To subtract origin offset from coordinates before
+C	output							DRC 12-Jan-1989
+CMOD	Call to small area elimination routines removed
+CMOD	Order in which JP and ST entries output changed
+C	to conform with preferred IFJ structure			DRC 17-Aug-1987
+CMOD	Added extra arg to WRTSTR so that VECTORISE can
+C	use (copy of) WRTSTR from (provisional) library,
+C	with a view to using standard library if/when
+C	WRTSTR is standardised					ACM 11-Aug-1987
+C
+C	Modified  : CPs made same as RA values			DRC 01-Dec-1986
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNLSL:EXPC/
+***	COMMON/LSL$CMNIFF:IFFHAN/	! has LPOSE
+***	COMMON/LSL$CMNIFF:MHMCE/	! has default MH entry
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/LSL$CMNIFF:IFFJUN/
+***	COMMON/HERE:VEC/
+***	PARAMETER/HERE:VECTORISEMSG/
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	COMMON/LSL$CMNDTI:DTIPROJ/
+C
+C Workspace
+	REAL		LINK1(2,MAXPTS)	! coordinates of unsmoothed link
+	REAL		LINK2(2,MAXPTS) ! coordinates of smoothed link
+	REAL		XCOORD_SF	! x coordinate scaling factor
+	REAL		YCOORD_SF	! y coordinate scaling factor
+C
+	REAL		BEZIER_TOL(2)	! BEZIER lateral and hug tolerances
+C
+	INTEGER		NOPOS		! NO entry position
+	INTEGER		I,J,K,IEND
+	INTEGER		RETVAL		! function return
+	INTEGER		IPT		! point index
+	INTEGER		ILINK,JLINK	! link index
+	INTEGER*4	INODE		! node index
+	INTEGER*4	STANOD,FINNOD	! part-link end-node indices
+	INTEGER		IPTSTA,IPTFIN	! link PT start/end indices
+	INTEGER		NLPTS		! No of pts in whole link
+	INTEGER		NSLPTS		! No of pts after smoothing
+	INTEGER		JPPOS		! JP entry IFF position
+	INTEGER		JBPOS		! ptr to JB entry
+	INTEGER		STPOS		! .IFJ ST address
+	INTEGER		SECTOR		! .IFJ sector index
+	INTEGER		IARM,JARM		! arm index
+	INTEGER		IERR		! error return code
+	INTEGER		FSN		! Feature Sequence Number
+	INTEGER		ISN		! Internal Sequence Number
+	INTEGER		JOPOS		! ptr to junction
+	INTEGER*2	LFT,RGT
+	INTEGER*2	IECODE,IELEN	! for IFFPKE,IFFNXC
+	INTEGER*2	NARMS		! No. of arms at a junction
+	INTEGER*2	ISTAT(4)	! for IFFFS 
+	INTEGER*2	IEC,IEL		! for IFFPKE
+	INTEGER		IW(MAXLPTS)	! workspace for SMOOTH
+	REAL		RW(MAXLPTS)	! workspace for SMOOTH
+	REAL		XNODE,YNODE	! node coords
+	REAL		DX_SECTOR,DY_SECTOR	! sector dimensions
+	REAL		RA(4)		! for RAnge entry
+	REAL		CPARR(4,4)	! corner point info for CP entry
+	REAL		CCARR(2,10)	! calib coeffs
+	REAL		DX,DY		! line seg vector
+	REAL		PCENT,LPCENT,PCF! % process completion
+	REAL		XSTA,YSTA,XFIN,YFIN	! link start end end pts
+	LOGICAL		FREELOOP	! is link a free closed loop?
+	LOGICAL		BORDER		! is link along image boundary?
+	LOGICAL		CENTRELINE	! is link a centre-line?
+
+C Functions
+	INTEGER*4	IFFCREATE	! create IFF file
+C
+C Data
+	DATA CCARR/0.0,1.0,8*0.0,2*0.0,1.0,7*0.0/
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Writes IFJ link/node file from VECTORISE internal link/node data
+C
+C	Each link in turn is written to the IFJ file.
+C
+C	After all links have been written, all nodes are written and
+C	then a single further pass through the file is made to fill out
+C	the link-to-node and node-to-link pointer fields.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+	RETVAL = IFFCREATE(1,IFJ_NAME(:IFJ_NAME_LENGTH),,,.TRUE.)
+	IF (.NOT.RETVAL) THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  GOTO 999
+	ENDIF
+C
+C Initialise ISTAT for FS entries
+	ISTAT(2) = 0			! assorted bits
+	ISTAT(3) = 0
+	ISTAT(4) = 0
+
+C If units = metres then write the data as metre values rather
+C than column and row values (ie multiply by grid intervals before
+C output)
+C
+	IF(UNITS.EQ.2)THEN
+	  XCOORD_SF=X_GRID(1)
+	  YCOORD_SF=Y_GRID(1)
+	ELSE
+	  XCOORD_SF=1
+	  YCOORD_SF=1
+	ENDIF
+C
+C Map Descriptor  This is filled out from the DTI Map Projection
+C Record if present in the IFF file.
+C
+C zero it
+	DO 50 I = 1,MD2LEN
+	   MD2ARR(I) = 0
+50	CONTINUE
+C
+C make it a version 2
+	MATV2 = 2
+C
+C use user supplied scale
+	MD2SCL = IFF_SCALE
+C
+	IF (.NOT.HAD_PROJ_RECORD(1)) THEN
+C
+	   IF (UNITS.EQ.1 .OR. UNITS.EQ.3 .OR. UNITS.EQ.4) THEN
+		MD2LOC(1) = 0
+		MD2LOC(2) = 0
+		DTIPROJ_ORIGIN(1,1) = 0
+		DTIPROJ_ORIGIN(2,1) = 0 
+	   ENDIF
+C
+	ELSE				! had projrec
+C
+C Remember to add the SW corner of the rectangular area of
+C interest to the DTM origin offset.
+C
+	  MD2LOC(1) = DTIPROJ_ORIGIN(1,1)+((DTI_WINDOW_SWX(1)-1)
+     &                *DTIPROJ_SAMPLE(1,1))
+	  MD2LOC(2) = DTIPROJ_ORIGIN(2,1)+((DTI_WINDOW_SWY(1)-1)
+     &                *DTIPROJ_SAMPLE(2,1))
+C
+	  MD2PRJ    = DTIPROJ_PROJECTION(1)     ! projection
+	  MD2UNT    = DTIPROJ_UNITS(1)          ! units
+	  MD2SPH    = DTIPROJ_SPHEROID(1)       ! spheroid
+C
+	  MD2USP(1) = DTIPROJ_USER_SPHEROID(1,1)! user spheroid
+	  MD2USP(2) = DTIPROJ_USER_SPHEROID(2,1)! parameters
+C
+	  DO 100 I=1,15                         ! proj. params
+	    MD2PAR(I) = DTIPROJ_PROJ_PARAMS(I,1)
+100	  CONTINUE
+	ENDIF
+C
+C RA entry
+C
+	RA(1) = (DTIPROJ_ORIGIN(1,1)+((DTI_WINDOW_SWX(1)-1.5)*XCOORD_SF))
+     &          -MD2LOC(1)
+	RA(2) = (DTIPROJ_ORIGIN(1,1)+((DTI_WINDOW_NEX(1)-0.5)*XCOORD_SF))
+     &          -MD2LOC(1)
+	RA(3) = (DTIPROJ_ORIGIN(2,1)+((DTI_WINDOW_SWY(1)-1.5)*YCOORD_SF))
+     &          -MD2LOC(2)
+	RA(4) = (DTIPROJ_ORIGIN(2,1)+((DTI_WINDOW_NEY(1)-0.5)*YCOORD_SF))
+     &          -MD2LOC(2)
+C
+	CALL IFFRA(RA)
+
+C History record
+	CALL IFFHI
+C
+C SH entry
+C sector overlap by 1 pixel
+C
+	IF (UNITS.EQ.2) THEN
+C
+	  DX_SECTOR = (DTIPROJ_ORIGIN(1,1)+((XMAX_SECTOR-0.5)*XCOORD_SF))
+     &    -MD2LOC(1)
+	  DY_SECTOR = (DTIPROJ_ORIGIN(2,1)+((YMAX_SECTOR-0.5)*YCOORD_SF))
+     &    -MD2LOC(2)
+C
+	ELSE
+	  DX_SECTOR = XMAX_SECTOR
+	  DY_SECTOR = YMAX_SECTOR
+	ENDIF
+C
+	CALL IFFSH(-0.5*XCOORD_SF,-0.5*YCOORD_SF,	! lower left corner
+     &	           DX_SECTOR,DY_SECTOR,			! sector dimensions
+     &		   NX_SECTORS,NY_SECTORS)
+C
+C MH entry
+	CALL IFFMH(MHARR,MHLEN)
+C
+	CALL IFFMD(MD2ARR,MD2LEN)
+C
+C NS entry
+	CALL EXPAND('Created by VECTORISE on ')
+	CALL DATE(EXPBUF(EXPLEN+1))
+	EXPLEN = EXPLEN+9
+	CALL APPEND(' at ')
+	CALL TIME(EXPBUF(EXPLEN+1))
+	EXPBUF(EXPLEN+9) = 0
+	CALL IFFNS(EXPBUF)
+
+C CC entry
+	CALL IFFCC(CCARR)
+
+C CP entry
+	CPARR(1,1) = RA(1)		! xmin
+	CPARR(2,1) = RA(4)	        ! ymax
+	CPARR(1,2) = RA(1)              ! xmin
+	CPARR(2,2) = RA(3)              ! ymin
+	CPARR(1,3) = RA(2)    	        ! xmax
+	CPARR(2,3) = RA(3)              ! ymin
+	CPARR(1,4) = RA(2)	        ! xmax
+	CPARR(2,4) = RA(4)              ! ymax
+	DO 10 I = 1,4
+	  DO 10 J = 1,2
+10	CPARR(J+2,I) = CPARR(J,I)
+C
+	CALL IFFCP(CPARR)
+
+C NO entry
+	NOPOS = LPOSE			! note NO position	 
+	CALL IFFNO(LAYER,0,0)		! overlay 
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	FSN = 0
+	IF (N_NODES.LT.1) RETURN	! you never know
+
+	CALL FRAMED_MES(2,0)
+	IF(CRT.AND.DIAG)THEN
+	  PCF = 100.0/N_LINKS
+	  PCENT = 0
+	  LPCENT = 0
+	  CALL WRITEF(' ')
+	  WRITE(*,'(1X,F6.2,''%'')') PCENT
+	ENDIF
+C
+	DO 130 ILINK = 1,N_LINKS
+	  IF (LINKPOS(1,ILINK).LE.0) GOTO 120	! skip deleted links
+C
+	  STANOD = LINKENDS(1,ILINK)
+	  FINNOD = LINKENDS(2,ILINK)
+
+	  IARM = NDAT(AM_NDAT,STANOD)	! index of first arm from node
+	  JARM = ARM(AM_ARM,IARM)	! next arm index, or nil
+
+	  IF (JARM.EQ.NIL) THEN		! just one arm
+	    FREELOOP = .FALSE.
+	  ELSE					! 2 or more arms
+	    FREELOOP = ARM(AM_ARM,JARM).EQ.NIL	! just 2 arms
+	  END IF
+C
+	  LFT = LR(LEFT,ILINK)
+	  RGT = LR(RIGHT,ILINK)
+	  BORDER=.FALSE.
+	  IF (LFT.EQ.0 .OR. RGT.EQ.0) BORDER=.TRUE.	! border link
+
+C Take first point from NPOS
+	  NLPTS = 1
+	  LINK1(1,NLPTS) = FLOAT(NPOS(1,STANOD))
+	  LINK1(2,NLPTS) = FLOAT(NPOS(2,STANOD))
+
+C Take intermediate link points from PT array
+	  IPTSTA = LINKPOS(1,ILINK)
+	  IPTFIN = LINKPOS(2,ILINK)
+	  IF (NEXT(IPTFIN).EQ.IPTSTA) IPTFIN = IPTSTA ! incl last loop pt
+	  IPT = IPTSTA
+
+60	  IPT = NEXT(IPT)
+	  IF (IPT.EQ.IPTFIN) GOTO 65
+	  NLPTS = NLPTS+1
+	  LINK1(1,NLPTS) = FLOAT(PT(1,IPT))
+	  LINK1(2,NLPTS) = FLOAT(PT(2,IPT))
+	  GOTO 60
+
+C Take last point from NPOS
+65	  NLPTS = NLPTS+1
+	  LINK1(1,NLPTS) = FLOAT(NPOS(1,FINNOD))
+	  LINK1(2,NLPTS) = FLOAT(NPOS(2,FINNOD))
+C
+C-----------------------------------------------------------------------
+C (Smooth &) write link - do not smooth border  links
+C
+	  IF ((SMOOTHLNK) .AND. (.NOT.BORDER)) THEN
+	    BEZIER_TOL(1)=0.05
+	    BEZIER_TOL(2)=1.0           
+	    CALL BEZIER_INTERPOLATION 
+     &                 (NLPTS,LINK1,NSLPTS,LINK2,FREELOOP,
+     &                  .TRUE.,BEZIER_TOL,.FALSE.,IERR)
+	    IF (IERR.NE.0) THEN
+	      CALL LSL_PUTMSG(VEC__ERRSMOOTH,FSN)
+	      GOTO 105				! transfer unsmoothed link
+	    ENDIF
+	  ELSE
+C
+C Transfer unsmoothed link pts from LINK1 to LINK2.
+C
+105	    DO 110 I = 1,NLPTS
+	      LINK2(1,I) = LINK1(1,I)
+	      LINK2(2,I) = LINK1(2,I)
+110	    CONTINUE
+	    NSLPTS = NLPTS
+	  ENDIF
+C
+	  IF (FREELOOP.AND.SMOOTHLNK) THEN
+	    NPOS(1,STANOD) = LINK2(1,1)
+	    NPOS(2,STANOD) = LINK2(2,1)
+	  ENDIF
+C
+C-----------------------------------------------------------------------
+C
+	  FSN = FSN+1
+	  ISN = 0
+	  CALL IFFNF(FSN,ISN)		! NF entry
+	  ISTAT(1) = LINK_FC(ILINK)
+C
+	  IF(BORDER)THEN
+	    TOTAL_BORDER_LINKS = TOTAL_BORDER_LINKS + 1
+	  ELSE
+	    TOTAL_INTERIOR_LINKS = TOTAL_INTERIOR_LINKS + 1
+	  ENDIF
+C
+	  CALL IFFFS(ISTAT)		! FS entry
+C
+	  IF     (LFT.EQ.0)THEN
+	    CALL EXPAND('Surrounding void')
+	  ELSE IF(LFT.EQ.-32767)THEN
+	    CALL EXPAND('Outside range')
+	  ELSE
+	    CALL EXPAND('%^W%N',LFT)
+	  ENDIF
+C
+	  CALL IFFAC(4,0,EXPBUF)	! write left/right data
+C
+	  IF     (RGT.EQ.0)THEN
+	    CALL EXPAND('Surrounding void')
+	  ELSE IF(RGT.EQ.-32767)THEN
+	    CALL EXPAND('Outside range')
+	  ELSE
+	    CALL EXPAND('%^W%N',RGT)
+	  ENDIF
+C
+	  CALL IFFAC(5,0,EXPBUF)	! area/inter-area index
+C
+	  CALL IFFJP(STANOD,JOPOS)	! write JP for start of link
+C
+C Note position of ST
+	  LINKPOS(1,ILINK) = LPOSW	! (used to be LPOSE+4 before JP)
+	  LINKPOS(2,ILINK) = NSLPTS	! and No of pts
+C
+C If units equals metres, multiply by the grid interval
+C before writing
+C
+	  DO 115 I = 1,NSLPTS
+C
+C Use -0.5 instead -1.0 to trace round edge of pixel
+C
+	    LINK2(1,I) = (DTIPROJ_ORIGIN(1,1)+((LINK2(1,I)-0.5)*XCOORD_SF))
+     &      -MD2LOC(1)
+	    LINK2(2,I) = (DTIPROJ_ORIGIN(2,1)+((LINK2(2,I)-0.5)*YCOORD_SF))
+     &      -MD2LOC(2)
+C
+115	  CONTINUE
+C
+	  CALL WRTSTR(LINK2,NSLPTS,0)	! write link to .IFJ 
+	  TOTLINKS = TOTLINKS+1
+C
+C Write a JP entry for each end of the link to save space in the file
+C for going back to fill out later. In the mean time, use this space
+C for storing the corresponding node indices
+C
+	  CALL IFFJP(FINNOD,JOPOS)	! temp. storing end node indices
+C
+	  CALL IFFEF			! EF entry
+C
+C Show progress
+C
+120	  IF (CRT.AND.DIAG) THEN
+	    PCENT = ILINK*PCF
+	    IF (PCENT-LPCENT.GT.1) THEN
+	      WRITE(*,'(1H+,F6.2)')PCENT	! don't WRITE too often
+	      LPCENT = PCENT
+	    ENDIF
+	  ENDIF
+C
+130	CONTINUE			! loop for next node
+C
+	IF(CRT.AND.DIAG)THEN
+	  PCENT = 100
+	  WRITE(*,'(1H+,F6.2)')PCENT
+	  WRITE(*,'(1H+,''       '')')
+	ENDIF
+C
+	IF(TERM.AND.DIAG)CALL WRITEF
+     &  ('Total number of segments output ........... %N',
+     &  TOTLINKS)
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Write nodes to .IFJ
+C
+	CALL FRAMED_MES(3,0)
+C
+	IF(CRT.AND.DIAG)THEN
+	  PCF = 100.0/N_NODES
+	  PCENT = 0
+	  LPCENT = 0
+	  CALL WRITEF(' ')
+	  WRITE(*,'(1X,F6.2,''%'')')PCENT
+	ENDIF
+C
+	DO 175 IX_SECTOR = 1,NX_SECTORS
+	  DO 170 IY_SECTOR = 1,NY_SECTORS
+	    SECTOR = (IX_SECTOR-1)*NY_SECTORS+IY_SECTOR
+	    INODE = NODELIST(1,IX_SECTOR,IY_SECTOR)
+	    GOTO 36
+35	    INODE = NEXTNODE(INODE)
+36	    IF (INODE.EQ.NIL) GOTO 170
+
+C Find how many arms this node has
+	    NARMS = 0
+	    BORDER = .FALSE.
+	    IARM = NDAT(AM_NDAT,INODE)		! index of 1st arm
+	    GOTO 145
+C
+140	    IARM = ARM(AM_ARM,IARM)		! index of next arm
+C
+145	    IF (IARM.EQ.NIL) GOTO 146
+	    JLINK = ABS(ARM(LI_ARM,IARM))
+	    IF(LR(LEFT,JLINK).EQ.0) BORDER=.TRUE.
+	    IF(LR(RIGHT,JLINK).EQ.0)BORDER=.TRUE.
+	    IF (LINKPOS(1,JLINK).EQ.NIL) GOTO 146
+	    NARMS = NARMS+1
+	    GOTO 140
+C
+146	    IF (NARMS.EQ.0) GOTO 159		! skip non-nodes
+
+C Create new node entry
+C
+C Use -0.5 instead -1.0 to trace round edge of pixel
+C
+	    XNODE = (DTIPROJ_ORIGIN(1,1)+((NPOS(1,INODE)-0.5)*XCOORD_SF))
+     &      -MD2LOC(1)
+	    YNODE = (DTIPROJ_ORIGIN(2,1)+((NPOS(2,INODE)-0.5)*YCOORD_SF))
+     &      -MD2LOC(2)
+C
+	    CALL IFJCR(SECTOR,XNODE,YNODE,NARMS)
+	    TOTARMS = TOTARMS+NARMS
+C
+C Note its JB position and junction offset
+	    NDAT(JB_NDAT,INODE) = LPOSH
+	    NDAT(JO_NDAT,INODE) = IFPOSJ
+C
+C Fill out arm fields
+	    NARMS = 0
+	    IARM = NDAT(AM_NDAT,INODE)		! index of 1st arm
+C
+150	    ILINK = ARM(LI_ARM,IARM)
+	      IF (LINKPOS(1,ABS(ILINK)).EQ.NIL) GOTO 155
+	      STPOS = LINKPOS(1,ABS(ILINK))	! ST address in .IFJ
+C
+	      IF (ILINK.GT.0) THEN		! link leaves node
+	        IPT = 1				! 1st pt in link
+	      ELSE				! link enters node
+C
+C Calculate vertex offset of the last data point in the last ST.
+C NB. A ST contains a maximum of 200 coordinate points.
+C
+	        IPT = MOD(LINKPOS(2,-ILINK),200) ! last pt in link
+	        IF (IPT.EQ.0) IPT = 200
+C
+C If more than one ST then get the address of the last one.
+C
+	        IF (LINKPOS(2,-ILINK).GT.200) THEN
+		  CALL IFFPKE(IECODE,IELEN,STPOS) ! move to the first ST
+C
+151		  CALL IFFNXT(IECODE,IELEN)	! search for the last ST
+		    IF (IECODE.NE.'ST'.AND.IECODE.NE.'CB') GO TO 152
+		    STPOS=LPOSH
+		  GO TO 151
+C
+C Put ourselves back into the JB at the current junction.
+C
+152		  CALL IFJPKJ(XNODE,YNODE,I,
+     &			    NDAT(JB_NDAT,INODE),NDAT(JO_NDAT,INODE))
+	        END IF
+	      ENDIF
+C
+	      NARMS = NARMS+1
+	      CALL JIHW(NARMS,STPOS,IPT)	! fill out arm NARMS
+155	      IARM = ARM(AM_ARM,IARM)
+C
+	    IF (IARM.NE.NIL) GOTO 150
+
+C Count proper junction nodes and anchor nodes
+C
+	    IF (NARMS.GT.2) THEN
+	      IF (BORDER) THEN
+	        TOTBORDERNODES = TOTBORDERNODES+1
+	      ELSE
+	        TOTJUNCTIONS = TOTJUNCTIONS+1
+	      END IF
+	    ELSE IF (NARMS.EQ.1) THEN
+	      TOTENDS = TOTENDS+1
+	    ELSE
+	      TOTANCHR = TOTANCHR+1
+	    ENDIF
+
+C Show progress
+C
+159	    IF (CRT.AND.DIAG) THEN
+	      PCENT = (TOTJUNCTIONS+TOTBORDERNODES+TOTANCHR)*PCF
+	      IF (PCENT-LPCENT.GT.1) THEN
+	        WRITE(*,'(1H+,F6.2)')PCENT	! don't WRITE too often
+	        LPCENT = PCENT
+	      ENDIF
+	    ENDIF
+C
+	    GOTO 35				! loop for next node
+170	  CONTINUE
+175	CONTINUE
+
+	IF(CRT.AND.DIAG)THEN
+	  PCENT = 100
+	  WRITE(*,'(1H+,F6.2)') PCENT
+	  WRITE(*,'(1H+,''       '')')
+	ENDIF
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Go back through file writing node and arm location into all JP entries
+C
+	CALL IFFRWD				! rewind
+180	CALL IFFNXC('JP',IELEN)			! find next JP entry
+	IF (IELEN.LT.0) GOTO 190
+C
+	CALL EIHRI(INODE,2,1)			! recall INODE
+	JBPOS = NDAT(JB_NDAT,INODE)		! Junction Block address
+	JOPOS = NDAT(JO_NDAT,INODE)		! Junction Offset
+	CALL EIHWI(JBPOS,2,1)
+	CALL EIHWI(JOPOS,1,3)
+	GOTO 180
+C
+190	CONTINUE
+
+C Show Number of Segments and Nodes in output IFJ
+C
+	IF (TERM.AND.DIAG) THEN
+          CALL WRITEF('Total number of nodes output .............. %N',
+     &    TOTBORDERNODES+TOTJUNCTIONS+TOTANCHR)
+	  CALL WRITEF
+	ENDIF
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Write standard final IFF entries
+C
+C EO entry
+	CALL IFFPKE(IEC,IEL,NOPOS)	! position to previous NO entry
+	CALL EIHW(LPOSE,2,3)		! insert EO pos in last NO entry
+	CALL IFFEO
+C
+C EM entry
+200	CALL IFFEM
+C
+C EJ entry
+	CALL IFFEJ
+C
+999	RETURN
+	END
+C

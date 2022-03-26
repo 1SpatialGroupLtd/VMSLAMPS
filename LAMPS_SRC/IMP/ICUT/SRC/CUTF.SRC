@@ -1,0 +1,163 @@
+        INTEGER*4 FUNCTION CUTF()
+C
+***	MODULE	CUTF
+***	IDENT	24MR97
+C
+C Copyright Laser-Scan Laboratories Ltd.,Cambridge,England
+C 
+C 	Author					SG	16-May-1991
+C
+C       This module is the feature selection and processor of 
+C	 an IFF ICUT program. The external FSNs will be maintained for 
+C	un-processed features and "parent FSNs". new features will be 
+C	generated with FSNs greater than those existing in input file
+C
+CMOD	MJGW - 24-MAR-1997
+CMOD	PARENT_FSN is now bitwise ANDed with 65535 as an INTEGER*2 to stop
+CMOD	problems with FSNs greater than 32767. WI/CC 1573 - SPR 3688.
+C
+CMOD	Note that when features are cut, the original features will be 
+CMOD	replaced by new features with entirely new FSNs. THe only reference to
+CMOD	the parent features will be ancillary codes in the children.
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$CMNICUT:ARG.CMN'
+	INCLUDE 'LSL$CMNICUT:FLAG.CMN'
+	INCLUDE 'LSL$CMNICUT:ICUTMSG.PAR'
+C
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+C
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+C...................................................................
+C workspace
+C
+	INTEGER		LPOSNO			! position of IFF NO entry
+	INTEGER*4	FT_POS			! feature start position
+	INTEGER*2	FT_CODE			! feature start code
+	INTEGER		TOTAL_FTS		! number of features selected
+	INTEGER		FC_ARRAY_NUM		! for FCP, which array element
+C
+C details of input feature
+C
+	INTEGER*2	PARENT_FSN		! FSN of parent Feature
+	INTEGER*2	PARENT_FC		! FC of parent Feature
+	INTEGER*2	ISTAT(4)		! contents of FS entry
+C
+C miscellaneous variables
+C
+	INTEGER		LOOP
+	INTEGER*2	CURRENT_LAY		! current overlay
+	LOGICAL		HAD_EJ
+	LOGICAL		MATCH_LAY		! does overlay match
+	LOGICAL		MATCH_FC		! does feature code match
+	INTEGER*2	SFFTF			! 65535 as INTEGER*2
+	PARAMETER	(SFFTF = 65535)
+C
+C functions
+	INTEGER*4	PROCESS
+C
+C...................................................................
+C
+	ISQ = 0					! start sequence at 0
+	CUTF = LSL__NORMAL			! set default return code
+	CALL IFFSEL(INLUN)			! select input file
+	CALL IFFRWD				! rewind to start
+	IF (HAD_LOG) CALL WRITEF()		! blank line
+10	CALL IFFSEL(INLUN)			! read from input IFF file
+	CALL IFFNXT(IECODE,IELEN)		! get next entry
+C
+	IF (IELEN.EQ.-1) THEN			!check EOF
+	   IF (.NOT.HAD_EJ)  CALL LSL_PUTMSG(ICUT__UNEXPEOF)
+	   GOTO 999
+	ENDIF
+C
+C...................................................................
+C decide what to do on particular entries.
+C
+	IF(IECODE.EQ.'NO') THEN			! ** NEW OVERLAY **
+	  CALL EIHRI(CURRENT_LAY,1,1)		! read layer number
+	  CALL IFFSEL(OUTLUN)			! select output file
+	  LPOSNO = LPOSE			! remember position
+	  CALL IFFNO(CURRENT_LAY,0,0)		! write dummy entry
+	  CALL IFFSEL(INLUN)			! select input file
+	  MATCH_LAY = .TRUE.			! default all layers
+	  IF (HAD_LAYER) THEN
+	    DO 20 LOOP=1,NUM_LAY		! check if layer selected
+	      MATCH_LAY = CURRENT_LAY.EQ.LAYER(LOOP)
+	      IF (MATCH_LAY) GOTO 25		! yes, set flag
+20	    CONTINUE
+25	  ENDIF
+C
+	ELSEIF(IECODE.EQ.'EO') THEN		! ** END OVERLAY **
+	  CALL IFFSEL(OUTLUN)			! select output file
+	  CALL IFFUNO(LPOSNO)			! go back to dummy NO
+	  CALL IFFEO				! write EO out
+	  CALL IFFSEL(INLUN)			! back to input file
+	  MATCH_LAY = .FALSE.			! no layer selected
+C
+	ELSEIF(IECODE.EQ.'NF') THEN		! this is where the action is
+	  GOTO 100				! goto NF dispatch area
+C
+	ELSEIF(IECODE.EQ.'EJ') THEN		! should be last entry
+	  HAD_EJ = .TRUE.
+C
+	ELSE					! dont bother examining
+	  CALL EIHCPY(OUTLUN)			! copy unmodified
+	ENDIF
+	GOTO 10					! get next entry
+C
+C...................................................................
+C found a new-feature, 
+100	FT_POS = LPOSH				! remember where NF is
+	MATCH_FC = .TRUE.			! default all FCs
+	CALL EIHR(PARENT_FSN,1,1)		! remember parent's FSN
+	PARENT_FSN = IAND(PARENT_FSN,SFFTF)	! make unsigned integer
+	CALL IFFNXC('FS',IELEN)			! make EIH = next FS
+	CALL EIHRI(ISTAT,IELEN,1)		! get details
+	PARENT_FC = IAND(ISTAT(1),65535)
+C
+	IF (HAD_FC.OR.HAD_FCP) THEN		! check FCs against list
+	  DO 110 LOOP=1,NUM_FC			! check if FC wanted
+	    MATCH_FC = PARENT_FC.EQ.FC(LOOP,1)
+	    IF (MATCH_FC) GOTO 115		! yes, set flag
+110	  CONTINUE
+	ENDIF
+C
+115	IF (HAD_FCP) FC_ARRAY_NUM = LOOP	! remember array element
+	MATCH_FC = MATCH_FC.AND.MATCH_LAY	! check if layer selected
+C...................................................................
+	IF (.NOT.MATCH_FC) THEN			! if FC not wanted
+	  ISQ = ISQ +1
+	  CALL IFFSEL(OUTLUN)			! select output file
+	  CALL IFFNF(PARENT_FSN,ISQ)		! write NF entry
+	  CALL IFFFS(ISTAT)			! copy over FS entry
+	  CALL IFFSEL(INLUN)			! input file again
+120	  CALL IFFNXT(IECODE,IELEN)
+	  IF (IECODE.NE.'EF') THEN		! while no EF found
+	    CALL EIHCPY(OUTLUN)			! copy entry across
+	    GOTO 120				! go back for more
+	  ELSE
+	    CALL IFFSEL(OUTLUN)			! output file
+	    CALL IFFEF				! write EF
+	    CALL IFFSEL(INLUN)			! input file again
+	  ENDIF
+	  GOTO 10				! Next entry
+	ELSE					! it matches
+	  IF (HAD_FCP) ISTAT(1)= FC(FC_ARRAY_NUM, 2)
+	  IF (HAD_NEWFC) ISTAT(1) = OUT_FC
+	  CALL PROCESS(PARENT_FSN, PARENT_FC, ISTAT)
+	  GOTO 10
+	ENDIF
+C...................................................................
+C
+999	IF (HAD_EJ) THEN
+	  CALL IFFSEL(OUTLUN)
+	  CALL IFFEJ
+	  CALL IFFSEL(INLUN)
+	ENDIF
+	IF (HAD_LOG) CALL LSL_PUTMSG(ICUT__OUTFFT,ISQ)
+	RETURN
+	END

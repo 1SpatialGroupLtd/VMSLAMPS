@@ -1,0 +1,310 @@
+	INTEGER*4 FUNCTION DTI_OPEN ( DTI_LUN,
+     &                                NAME, NAME_LENGTH,
+     &		                      ALLOW_WRITE, RETVAL, 
+     &                                REPORT,PFC)
+C
+***	IDENT	17SE92
+***	MODULE	DTI_OPEN
+C
+C	Copyright : Laser-Scan, Cambridge, England
+C	Author    : D R Catlow
+C
+C	Modified  : DRC 02AP87 To accommodate bit data files.
+C	Modified  : DRC 25SE87 To call DTI_READ_UHL to read UHL
+C		    record when opening a UHL1 type DTI file
+C	Modified  : DRC 08FE88 To pass lun argument in range 
+C		    0-8 to VIO$OPEN_SEC
+C	Modified  : DRC 01AU88 To handle LSLA type header, and
+C		    record i/o file access status
+C	Modified  : DRC 03AU88 To report an invalid header type
+C		    and substitute DTI_TED4 for DTI_DTED
+C	Modified  : DRC 08NO88 To add an optional argument
+C		    that if present and true, causes a warning
+C	            to be generated if the matrix corner and 
+C		    direction are not the default.
+CMOD		  : DRC 16NO88 To replace SS$_NORMAL with DTI__NORMAL
+C		    after call to DTI_CLOSE.
+CMOD		    DRC 20JA89 To make DATA_SIZE into a real.
+CMOD1011	    JB  17JL91 Use NONSTDROT and UNEXPRESULTS to warn 
+C		    about non-standard corner or orientation
+CMOD1130	    JB  29JL92 Add PFC (page fault cluster) argument
+C
+C	DTILIB Function.   
+C
+C	Opens the file NAME on the specified DTI_LUN.
+C	If ALLOW_WRITE the file is opened for write access,
+C	otherwise read only is allowed.
+C	The details contained in the DTI header are extracted and
+C	placed in the common block DTIHDR.
+C
+C	The function returns true if successful; in the event of
+C	failure any system routine errors are returned in RETVAL.
+C
+C	The function interfaces directly with the LSLLIB function
+C	VIO$OPEN_SEC to map the file into virtual memory.
+C
+C--------------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters
+	INCLUDE '($SSDEF)'
+C
+***	PARAMETER/LSL$CMNDTI:DTIDEF/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C arguments
+	CHARACTER*128		NAME		!DTI filename
+	INTEGER*4		NAME_LENGTH 	!Length of filename
+	LOGICAL			ALLOW_WRITE	!Write access?
+	INTEGER*4		DTI_LUN		!LUN on which to open file
+	INTEGER*4		RETVAL		!system error (in most
+C						!cases will be undefined)
+C Optional
+	LOGICAL			REPORT		!output message if true.
+	LOGICAL			PFC		!page fault cluster
+C
+C functions
+	INTEGER*4		VIO$OPEN_SEC	!to map file into virtual mem
+	INTEGER*4		DTI_READ_HEADER !read header details
+	INTEGER*4		DTI_CLOSE	!close DTI file
+	INTEGER*4		DTI_READ_LONG_HEADER
+	INTEGER*4		DTI_READ_DSI	!read DSI of TED4 file
+	INTEGER*4		DTI_READ_UHL	!read UHL of UHL1 file	
+	INTEGER*4		DTI_READ_PROJ_REC  !to read proj details
+	LOGICAL			HAVE_I_AN_ARG	!test for presence of argument
+C
+C local variables
+	REAL*4			DATA_SIZE	!Size of data area in bytes
+	INTEGER*4		VIO_LUN		!Lun passed to VIO$OPEN_SEC
+	INTEGER*4		SECTION_ADDR	!address of mapped file
+	INTEGER*4		SECTION_SIZE	!size of mapped file
+	INTEGER*4		IERR		!function return value
+	INTEGER*4		TYPE		!DTI header identifier
+	INTEGER*4		ERROR		!Function system error code
+	LOGICAL			DO_REPORT	!.t. output rotation message
+	LOGICAL			DO_PFC		!.t. use page fault cluster
+C
+	CHARACTER*2	CORNER(3)
+	CHARACTER*13	DIRECTION(2)
+C
+	DATA CORNER/'NW','NE','SE'/
+	DATA DIRECTION/'Clockwise    ','Anticlockwise'/
+C
+C****************************************************************************
+C	Test if the supplied LUN number is valid
+C
+	IF(DTI_LUN.LT.1.OR.DTI_LUN.GT.MAX_DTI)THEN
+	  DTI_OPEN=DTI__BADLUN		! LUN out of range
+	  GOTO 999			! Return
+	ENDIF
+C
+C	Test of the supplied LUN is free
+	IF(DTILUN_INUSE(DTI_LUN))THEN
+	  DTI_OPEN=DTI__LUNINUSE	! LUN already in use
+	  GOTO 999			! Return
+	ENDIF
+C
+C	Test for the final argument which controls report of
+C	rotation
+C
+	DO_REPORT=.FALSE.
+	IF (HAVE_I_AN_ARG(6)) DO_REPORT = REPORT
+C
+C	Test for the final argument which controls report of
+C	rotation
+C
+	DO_PFC = .FALSE.
+	IF (HAVE_I_AN_ARG(7)) DO_PFC = .TRUE.
+C
+C----------------------------------------------------------------------------
+C	Let's try mapping the supplied file into virtual memory
+C	Returns %RMS$_FNF if file not found
+C
+	VIO_LUN=DTI_LUN-1
+C
+	IF (DO_PFC) THEN
+	  IERR = VIO$OPEN_SEC(
+     &		NAME(1:NAME_LENGTH),		! Filename
+     &		0,				! Size 0 since file exists
+     &		ALLOW_WRITE,			! Allow write access to file?
+     &		.FALSE.,			! Open an existing file
+     &	 	SECTION_ADDR,			! Address of mapped file
+     &	 	SECTION_SIZE,			! Size of mapped file 
+     &		VIO_LUN,			! LUN to open the file on
+     &		PFC)
+	ELSE
+	  IERR = VIO$OPEN_SEC(
+     &		NAME(1:NAME_LENGTH),		! Filename
+     &		0,				! Size 0 since file exists
+     &		ALLOW_WRITE,			! Allow write access to file?
+     &		.FALSE.,			! Open an existing file
+     &	 	SECTION_ADDR,			! Address of mapped file
+     &	 	SECTION_SIZE,			! Size of mapped file 
+     &		VIO_LUN)			! LUN to open the file on
+	ENDIF
+C
+	IF (IERR.NE.SS$_CREATED)THEN	! Unsuccessful
+	  DTI_OPEN=DTI__SYSERR	
+	  RETVAL=IERR			! Pass back system error
+	  GOTO 999
+	END IF
+C
+C	Transfer mapped file details into DTIHDR and mark LUN as used
+	DTI_NAME(DTI_LUN)	=NAME			! Filename
+	DTI_NAME_LENGTH(DTI_LUN)=NAME_LENGTH		! Length of file
+	SEC_ADDR(DTI_LUN)	=SECTION_ADDR		
+	SEC_SIZE(DTI_LUN)	=SECTION_SIZE
+	DTILUN_INUSE(DTI_LUN)	=.TRUE.			! LUN now in use
+	DATA_OFFSET(DTI_LUN)	=4			! Temporary value
+C
+	IF(ALLOW_WRITE)THEN
+	  READ_ONLY(DTI_LUN)=.FALSE.		!write access
+	ELSE
+	  READ_ONLY(DTI_LUN)=.TRUE.		!no write access
+	ENDIF
+C
+C	Determine what type of DTI file it is, and set up header type
+	IERR=DTI_READ_LONG_HEADER (DTI_LUN,TYPE,0,ERROR)
+	IF(IERR.NE.DTI__NORMAL)THEN
+	  DTI_OPEN=IERR
+	  RETVAL=ERROR
+	  GOTO 900
+	ENDIF
+C
+	IF      (TYPE.EQ.MIKE_MAKE) THEN		! MIKE type file
+	  HEADER_TYPE(DTI_LUN)=DTI_MIKE
+	ELSE IF (TYPE.EQ.UHL1_MAKE) THEN		! UHL1 type file
+	  HEADER_TYPE(DTI_LUN)=DTI_UHL1
+	ELSE IF (TYPE.EQ.TED4_MAKE) THEN		! TED4 type file
+	  HEADER_TYPE(DTI_LUN)=DTI_TED4
+	ELSE IF (TYPE.EQ.ALVY_MAKE) THEN		! ALVY type file
+	  HEADER_TYPE(DTI_LUN)=DTI_ALVY
+	ELSE IF (TYPE.EQ.LSLA_MAKE) THEN		! LSLA type file
+	  HEADER_TYPE(DTI_LUN)=DTI_LSLA
+	ELSE
+	  DTI_OPEN=DTI__INVHEAD
+	  GOTO 900		!unmap and clear common variables
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C	Extract rest of header details
+	IERR = DTI_READ_HEADER ( DTI_LUN, ERROR )
+C
+	IF(IERR.NE.DTI__NORMAL)THEN
+	  DTI_OPEN=IERR
+	  RETVAL=ERROR		!pass on system error
+	  GOTO 900
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C	If the file contains bit data, check that the Y_EXTENT is
+C	valid (ie. a multiple of 8).
+C
+	IF(DATA_TYPE(DTI_LUN).EQ.DATA_BIT)THEN
+	  IF(MOD(Y_EXTENT(DTI_LUN),8).NE.0)THEN
+	    DTI_OPEN=DTI__INVYEXTENT
+	    GOTO 900
+	  ENDIF
+	ENDIF	    
+C
+C----------------------------------------------------------------------------
+C	Check that the size of the file is valid in relation to the
+C	header size and data extent values.
+C
+	DATA_SIZE=X_EXTENT(DTI_LUN)*Y_EXTENT(DTI_LUN)
+	IF     (DATA_TYPE(DTI_LUN).EQ.DATA_WORD)THEN
+                DATA_SIZE=DATA_SIZE*2
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_LONG)THEN
+	        DATA_SIZE=DATA_SIZE*4
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_REAL)THEN
+	        DATA_SIZE=DATA_SIZE*4
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_BIT )THEN
+	        DATA_SIZE=DATA_SIZE/8
+	ENDIF
+C
+	IF(SEC_SIZE(DTI_LUN).LT.DATA_OFFSET(DTI_LUN)+DATA_SIZE)THEN
+	  DTI_OPEN=DTI__INVFILESIZE
+	  GOTO 900
+	ENDIF
+C
+	HAD_PROJ_RECORD(DTI_LUN)=.FALSE.
+C
+C--------------------------------------------------------------------------
+C	If we have a TED4 type file, also extract the latlong details from
+C	the DSI record
+C
+	IF (HEADER_TYPE(DTI_LUN).EQ.DTI_TED4)THEN
+	   IERR = DTI_READ_DSI ( DTI_LUN, ERROR)
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_OPEN=IERR	
+	     RETVAL=ERROR	! pass on system error
+	     GOTO 900		! unmap file, and reset DTIHDR variables
+	   ENDIF
+C
+C----------------------------------------------------------------------------
+C	If we have a UHL1 type file, also extract the latlong details from
+C	the UHL record
+C
+	ELSEIF (HEADER_TYPE(DTI_LUN).EQ.DTI_UHL1)THEN
+	   IERR = DTI_READ_UHL ( DTI_LUN, ERROR)
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_OPEN=IERR	
+	     RETVAL=ERROR	! pass on system error
+	     GOTO 900		! unmap file, and reset DTIHDR variables
+	   ENDIF
+C
+C----------------------------------------------------------------------------
+C	If we have an ALVY or LSLA type file, record presence or absence of a
+C	projection record, and set up projection details in common.
+C
+	ELSEIF (HEADER_TYPE(DTI_LUN).EQ.DTI_LSLA .OR.
+     &		HEADER_TYPE(DTI_LUN).EQ.DTI_ALVY) THEN
+	   IERR = DTI_READ_PROJ_REC (DTI_LUN, ERROR)
+	   IF(IERR.EQ.DTI__NORMAL)THEN
+	     HAD_PROJ_RECORD(DTI_LUN)=.TRUE.
+	   ELSE
+	     IF(IERR.NE.DTI__NOPROJREC)THEN
+	       DTI_OPEN=IERR
+	       RETVAL=ERROR
+	       GOTO 900
+	      ENDIF
+	   ENDIF
+	ENDIF	       
+C
+C----------------------------------------------------------------------------
+C	Output rotation message (if required)
+C
+	IF(DO_REPORT.AND.((DTI_ORDER_CORNER(DTI_LUN).NE.0).OR.
+     &                    (DTI_ORDER_DIRECTION(DTI_LUN).NE.0)))THEN
+	   CALL LSL_PUTMSG(DTI__NONSTDROT)
+	   CALL LSL_ADDMSG(DTI__UNEXPRESULTS)
+C
+	   CALL EXPAND('Corner of Data Origin is %S  Data Direction is %S',
+     &                 CORNER(DTI_ORDER_CORNER(DTI_LUN)),
+     &                 DIRECTION(DTI_ORDER_DIRECTION(DTI_LUN)+1))
+	   CALL TTWLIN
+	   CALL EXPAND('Unexpected results may occur')
+	   CALL TTWLIN
+	ENDIF
+C
+	DTI_OPEN=DTI__NORMAL	! signal success
+	GOTO 999
+C
+C----------------------------------------------------------------------------
+C	Unmap the file and reset header variables by calling CLOSE_DTI
+C
+900	IERR =  DTI_CLOSE ( DTI_LUN, .FALSE., .TRUE., ERROR)
+	IF(IERR.NE.DTI__NORMAL)THEN
+	  DTI_OPEN = DTI__SYSERR	! signal system error
+	  RETVAL   = ERROR		! pass on the system error
+	ENDIF	  
+C	      
+C----------------------------------------------------------------------------
+C
+999	RETURN
+	END
+C

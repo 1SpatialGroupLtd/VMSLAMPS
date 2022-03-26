@@ -1,0 +1,265 @@
+	LOGICAL*4 FUNCTION READ_RCP_FILE(
+     &		RCP_LUN,RCP_NAM,RCP_LEN,
+     &		ID,TYPE,XYZ,WGT,
+     &		N_RCPS,MAXRCPS,
+     &		N_COMMENTS,MAXCOMMENTS,
+     &		COMMENT,COMMENT_LEN,INDX,WANT_COMMENTS,IERR)
+C
+***	MODULE	READ_RCP_FILE
+***	IDENT	23NO88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C Created						ACM	Feb-1988
+C
+	IMPLICIT	NONE
+C
+C Local parameters
+	INTEGER*4	UNDEF			! the undefined-value
+	PARAMETER(	UNDEF ='80000000'X) 
+C
+C Parameters
+***	PARAMETER/LSL$CMNLSL:READSTR/
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+C
+C Data in
+	INTEGER*4	RCP_LUN			! RCP file channel
+	INTEGER*4	RCP_LEN			! RCP filespec length
+	CHARACTER*(*)	RCP_NAM			! RCP filespec
+	INTEGER*4	MAXRCPS			! RCP array dim
+	INTEGER*4	MAXCOMMENTS		! comment array dim
+	LOGICAL*4	WANT_COMMENTS		! want comment lines?
+C
+C Data out
+	INTEGER*4	IERR			! error return code
+	INTEGER*4	N_RCPS			! No.of RCPs
+	INTEGER*4	N_COMMENTS		! No.of comments
+	CHARACTER*10	ID(MAXRCPS)		! RCP id
+	CHARACTER*2	TYPE(MAXRCPS)		! RCP type
+	REAL*8		WGT(2,MAXRCPS)		! RCP XY & Z weights
+	REAL*8		XYZ(3,MAXRCPS)		! RCP XYZ coords
+	INTEGER*4	COMMENT_LEN(MAXCOMMENTS)! comment length
+	INTEGER*4	INDX(MAXRCPS+MAXCOMMENTS)! RCP/-comment indices
+	CHARACTER*132	COMMENT(MAXCOMMENTS)	! comments
+C
+C Workspace
+	INTEGER*4	LEN,I,N_LINES,JERR
+	LOGICAL*4	EOL,OK
+	BYTE		CH
+	CHARACTER*10	SPACES
+	DATA SPACES/'          '/
+C
+C Functions
+	LOGICAL*4	FLROPN,FLRCLO,FLRLIN,RDCHS,RDDBLE,READSTR
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Opens existing RCP file with given name on given LSL unit.
+C
+C	Reads contents of RCP file into memory, rejecting any RCPs which
+C	have duplicate IDs.
+C
+C	Closes CP file.
+C
+C	Error return code IERR is as follows:
+C	 0:	ok
+C	 1:	can't open RCP file
+C	 2:	too many lines in file for given data arrays
+C	 3:	too many RCP lines in file for given data arrays
+C	 4:	too many COMMENT lines in file for given data arrays
+C	 5:	line too long (> 132 characters)
+C	 6:	other error reading RCP file
+C	 7:	RCP identifier missing
+C	 8:	error reading X coordinate
+C	 9:	error reading Y coordinate
+C	10:	error reading Z coordinate
+C	11:	error reading XY weight
+C	12:	error reading Z weight
+C	13:	no valid lines found
+C	14:	error closing RCP file
+C
+C	Function is result TRUE if and only if IERR = 0
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	RCP file has format as follows:
+C
+C	* Maximum line length is 132 characters
+C
+C	* Lines with first non-blank character = '!' are comment lines
+C
+C	* Everything from '!' to EOL is ignored on other lines
+C
+C	* Each RCP has fields ID,TYPE,X,Y,Z,WXY,WZ on a single line
+C	  in fixed format as:
+C	  FORMAT(A10,2X,A2,4X,F18.8,2X,F18.8,2X,F18.8,5X,F7.3,3X,F7.3)
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+	IERR = 0			! assume success
+C
+C Open RCP file for read
+C
+	OK = FLROPN(RCP_LUN,RCP_NAM,JERR,)
+	IF (.NOT.OK) THEN
+	  IERR = 1
+	  GOTO 99910
+	END IF
+C
+C Read each RCP line
+C
+	CALL SET_TXTLIM(132)
+	N_LINES = 0
+	N_RCPS = 0
+	N_COMMENTS = 0
+C
+10	IF (N_LINES.EQ.MAXRCPS+MAXCOMMENTS) THEN
+	  IERR = 2
+	  GOTO 20
+	END IF
+	IF (N_RCPS.EQ.MAXRCPS) THEN
+	  IERR = 3
+	  GOTO 20
+	END IF
+	IF (N_COMMENTS.EQ.MAXCOMMENTS) THEN
+	  IERR = 4
+	  GOTO 999
+	END IF
+C
+	OK = FLRLIN(,,132,JERR)
+	IF (OK.EQ.LSL__EOF) THEN
+	  GOTO 20
+	ELSE IF (OK.EQ.LSL__RECTOOBIG) THEN
+	  IERR = 5
+	  GOTO 999
+	ELSE IF (.NOT.OK) THEN
+	  IERR = 6
+	  GOTO 999
+	END IF
+C
+	CALL BSLN
+	EOL = RDCHS(CH)
+	IF (EOL) GOTO 10
+	CALL BSLN
+C
+	IF (CH.EQ.'!') THEN
+	  IF (WANT_COMMENTS) THEN
+	    LEN = READSTR(COMMENT(N_COMMENTS+1),,,,JERR)
+	    IF (.NOT.JERR) THEN
+	      IERR = 6
+	      GOTO 999
+	    END IF
+	    COMMENT_LEN(N_COMMENTS+1) = LEN
+	    N_COMMENTS = N_COMMENTS+1
+	    N_LINES = N_LINES+1
+	    INDX(N_LINES) = -N_COMMENTS
+	  END IF
+	  GOTO 10
+	END IF
+C
+C Read 10 char ID from TXTBUF(1..10), skipping leading and trailing spcs
+C
+	CALL SETWIN(1,10)
+	LEN = READSTR(ID(N_RCPS+1),,ON_SPACE,,JERR)
+	IF (.NOT.JERR) THEN
+	  IERR = 6
+	  GOTO 999
+	ELSE IF (LEN.LT.1) THEN
+	  IERR = 7
+	  GOTO 999
+	END IF
+	IF (LEN.LT.10)			! pad with spaces
+     &	  ID(N_RCPS+1) = ID(N_RCPS+1)(:LEN)//SPACES(LEN+1:10)
+C
+C Check for duplicate IDs
+C
+	DO 15 I = 1,N_RCPS
+	  IF (ID(N_RCPS+1).EQ.ID(I)) GOTO 10
+15	CONTINUE
+C
+C Read 2-char TYPE from TXTBUF(13..14)
+C
+	CALL SETWIN(13,2)
+	LEN = READSTR(TYPE(N_RCPS+1),,ON_SPACE,,JERR)
+	IF (.NOT.JERR) THEN
+	  IERR = 6
+	  GOTO 999
+	ELSE IF (LEN.EQ.0) THEN			! pad with spaces
+	  TYPE(N_RCPS+1) = '  '
+	ELSE IF (LEN.LT.2) THEN
+	  TYPE(N_RCPS+1) = TYPE(N_RCPS+1)(:LEN)//SPACES(LEN+1:2)
+	END IF
+C
+	XYZ(1,N_RCPS+1) = UNDEF
+	XYZ(2,N_RCPS+1) = UNDEF
+C
+C Read X coord from TXTBUF
+C
+	CALL SETWIN(19,18)
+	OK = .NOT.RDDBLE(XYZ(1,N_RCPS+1))
+	IF (.NOT.OK) THEN
+	  IERR = 8
+	  GOTO 999
+	END IF
+C
+C Read Y coord
+C
+	CALL SETWIN(39,18)
+	OK = .NOT.RDDBLE(XYZ(2,N_RCPS+1))
+	IF (.NOT.OK) THEN
+	  IERR = 9
+	  GOTO 999
+	END IF
+C
+C Read Z coord
+C
+	CALL SETWIN(59,18)
+	OK = .NOT.RDDBLE(XYZ(3,N_RCPS+1))
+	IF (.NOT.OK) THEN
+	  IERR = 10
+	  GOTO 999
+	END IF
+C
+C Read XY weight
+C
+	CALL SETWIN(82,7)
+	OK = .NOT.RDDBLE(WGT(1,N_RCPS+1))
+	IF (.NOT.OK) THEN
+	  IERR = 11
+	  GOTO 999
+	END IF
+C
+C Read Z weight
+C
+	CALL SETWIN(92,7)
+	OK = .NOT.RDDBLE(WGT(2,N_RCPS+1))
+	IF (.NOT.OK) THEN
+	  IERR = 12
+	  GOTO 999
+	END IF
+C
+	IF (N_RCPS.GE.MAXRCPS) THEN	! check for too many RCPs
+	  IERR = 3
+	  GOTO 999			! return failure
+	END IF
+C
+C Ignore lines on which not both X and Y are defined
+C
+	IF (XYZ(1,N_RCPS+1).EQ.UNDEF.OR.XYZ(2,N_RCPS+1).EQ.UNDEF)
+     &	  GOTO 10
+C
+C Count valid RCP and go to look for another one
+C
+	N_RCPS = N_RCPS+1
+	N_LINES = N_LINES+1
+	IF (WANT_COMMENTS) INDX(N_LINES) = N_RCPS
+	GOTO 10
+C
+20	IF (N_COMMENTS+N_RCPS.LT.1) IERR = 13
+C
+C Close RCP file
+C
+999	IF (.NOT.FLRCLO(RCP_LUN,JERR)) IERR = 14
+C
+99910	READ_RCP_FILE = IERR.EQ.0
+	RETURN
+	END

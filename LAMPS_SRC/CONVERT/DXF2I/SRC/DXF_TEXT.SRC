@@ -1,0 +1,1000 @@
+	LOGICAL*4 FUNCTION DXF_TEXT()
+C
+***	MODULE DXF_TEXT
+***	IDENT 06DE94
+C
+C ©Copyright Laser-Scan Ltd, Cambridge, England.
+C
+C Author  : P Pan 					13 Mar 1990
+C
+C To read and translate DXF TEXT entity to IFF feature
+C
+C Modified: P Pan to set correct bit			23 Mar 1990
+C 	    P Pan to correct text TH entry		 2 Aug 1990
+C
+CMOD961	    J Barber					30 Jan 1991
+C	    Add 3d coord reading into ZS entries
+C	    and group 38 heights into AC type 3
+C	    Use /POINTSIZE to output text height in points;
+C	    default /NOPOINTSIZE, ie. mm./100
+C	    Change program action on DXF2I__MISENTCOL error to
+C	    continue to transfer the coordinate data regardless
+C
+CMOD1004    J Barber 					13 Jun 1991
+C	    Convert coordinates with any scale factors and x,y,z offsets
+C	    and scalings from the parameter file if an EXPAND 'symbol' 
+C	    entry exists there so that this routine is called from within 
+C	    the BLOCKS section
+C
+C	    Fix bug where '72' entry (justification flag) overwrote 
+C	    the entity colour index from '62' entry
+C
+CMOD1156    J Barber 					13 Oct 1992
+C	    Add /ABS coord changes
+C
+CMOD1172    J Barber 					03 Jan 1993
+C	    Change IFF feature entry order to:
+C		NF FS AC TH ST RO TX EF
+C
+CMOD1226    J Barber 					10 Jun 1993
+C	    Add /SCAN facility
+C
+CMOD1423    J Barber 					23 Sep 1994
+C	    Use user defined point size to mm's assignment
+C	    from parameter file TEXT SIZE entries
+C
+CMOD1414    J Barber 					09 Oct 1994
+C	    Read extra coordinates (alignmment points) in 
+C	    11,21,31 groups and ignore them, present only
+C	    if group 72 (justification type) is present and
+C	    non-zero.
+C	    Also read and ignore group 41 entries (relative x scale factor).
+C	    Also read and ignore group 51 entries (obliquing angle).
+C
+CMOD1439    Jon Barber				 	06 Dec 1994
+C	    Use IFF_ABSENT as a 'real' number in its absence from
+C	    the DXF file
+C
+	IMPLICIT NONE
+C
+	INCLUDE  'LSL$CMNIFF:CB.STR'		! for IFF_ABSENT
+	INCLUDE  'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE  'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE  'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE  'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE  'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE  'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE  'LSL$CMNDXFPAR:LOOKUP.CMN'
+	INCLUDE  'HERE:DXF2I.CMN'
+	INCLUDE  'HERE:DXF2IMSG.PAR'
+C
+C Functions
+	INTEGER		RDREAL		! Get a real
+	INTEGER		RDDBLE		! Get a real
+	INTEGER		RDINT		! Get an integer
+	INTEGER		FLRLIN		! Read a line from file
+	INTEGER		FLWSTR		! Write a line to file
+	INTEGER		READSTR		! Get a string
+	INTEGER*2	EXPAND		! Expand a string
+	LOGICAL		FRTFGT		! Get FC for GT
+C
+C Workspace
+	BYTE		TX_BUF(80)
+	INTEGER*2	TX_LEN
+	CHARACTER*255	STRING		! Any old string
+	INTEGER*4	LEN		! Length of character string
+	CHARACTER*255	ENTITY_OUT	! output string
+	INTEGER*2	EXPLEN		! expanded string length
+	CHARACTER*20	STYLE_NAME	! output string
+C
+	CHARACTER*255	LAST_ENTITY_OUT	! last output string
+	INTEGER*2	LAST_EXPLEN	! last expanded string length
+	SAVE		LAST_ENTITY_OUT	! keep last output string 
+	SAVE		LAST_EXPLEN	! keep last expanded string length
+C
+	INTEGER*2       FC(4)           ! Feature code etc.
+	INTEGER*2	FONT		! Font associated with this FC
+	INTEGER*2	COLNUM		! Feature colour
+C
+	LOGICAL		HAD_LAY		! Had layer value?
+	LOGICAL		HAD_COL 	! Had colour? 
+	LOGICAL		HAD_TX 		! Had text value?
+	LOGICAL		HAD_X		! Had x coord?
+	LOGICAL		HAD_Y		! Had y coord?
+	LOGICAL		HAD_Z		! Had z coord?
+	LOGICAL		HAD_3D		! Had 3d coord?
+	LOGICAL		HAD_HT		! Had AC height?
+	LOGICAL		HAD_STY		! Had style?
+	LOGICAL		HAD_JUST	! Had justification stuff?
+	LOGICAL		HAD_JX		! Had just. x coord?
+	LOGICAL		HAD_JY		! Had just. y coord?
+	LOGICAL		HAD_TH		! Had height?
+	LOGICAL		HAD_RO		! Had rotation?
+C
+	LOGICAL		ERRCOD		! ok?
+	INTEGER		IERR
+        INTEGER		COUNTER,I	! local counter
+	CHARACTER*255	TEXSTYNAM	! line type name
+	INTEGER		TEXSTYLEN	! line type name's length
+	CHARACTER*255	LAYERNAM	! layer name
+	INTEGER		LAYERLEN	! layer name's length
+	INTEGER		TEXNUMLIN
+C
+	INTEGER*2	ITH
+	REAL*4		TH		! DXF text size (mm's)
+	REAL*4		MM_SIZE		! text sizes (mm's)
+	REAL*4		MEAN
+	REAL*4		LO_MM_SIZE
+	REAL*4		HI_MM_SIZE
+	INTEGER*2	ILO_MM_SIZE	! text size indices
+	INTEGER*2	IHI_MM_SIZE
+	INTEGER*2	DEFAULT_PNT	! last usable point size
+C
+	REAL*4		RO
+	REAL*4		HEIGHT
+	REAL*4		X,Y,SCL
+C
+	INTEGER		INT_EQUIV	! for IFF_ABSENT
+	REAL		REAL_EQUIV
+	EQUIVALENCE	(INT_EQUIV,REAL_EQUIV)
+C
+C---------------------------------------------------------------------
+C TEXT
+C---------------------------------------------------------------------
+C Set defaults
+C
+	SELENTTYP = DXFTEXT
+	HAD_LAY  = .FALSE.
+	HAD_COL  = .FALSE.
+	HAD_X    = .FALSE.
+	HAD_Y    = .FALSE.
+	HAD_Z    = .FALSE.
+	HAD_3D   = .FALSE.
+	HAD_HT   = .FALSE.
+	HAD_TX   = .FALSE.
+	HAD_STY  = .FALSE.
+	HAD_JUST = .FALSE.
+	HAD_JX   = .FALSE.
+	HAD_JY   = .FALSE.
+	HAD_TH   = .FALSE.
+	HAD_RO   = .FALSE.
+C
+	RO = 0.0
+C
+C---------------------------------------------------------------------
+C read the entity
+C
+	TEXNUMLIN = NUMLIN
+C
+99	DXF_TEXT = FLRLIN()
+	IF (.NOT.DXF_TEXT) GOTO 99
+C
+	CALL BSLN
+	NUMLIN = NUMLIN+1
+	LEN = READSTR(STRING,,ON_EOL)
+C
+C..............................................................................
+C '8' Layer 
+C..............................................................................
+C
+	IF (STRING(1:LEN).EQ.'8') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   LAYERLEN = READSTR(LAYERNAM,,ON_EOL)
+C
+C if an empty layer name is supplied, output error message
+C
+	   IF (LAYERLEN.EQ.0) THEN
+	      CALL LSL_PUTMSG(DXF2I__ERRLAYNAM,NUMLIN)
+C
+C and use default from $CLAYER if present
+C
+	      IF (HAD_LAYER_NAME) THEN
+	         LAYERLEN = DEF_LAYER_NAME_LEN
+	         LAYERNAM = DEF_LAYER_NAME(1:LAYERLEN)
+		 IF (.NOT.HAD_QUIET) CALL LSL_ADDMSG(DXF2I__DEFLAYNAM,
+     &				    LAYERNAM(1:LAYERLEN),TEXNUMLIN)
+	      ELSE
+		 DXF_TEXT = DXF2I__UNACONT
+		 IF (.NOT.HAD_SCAN) GOTO 1000
+	      ENDIF
+	   ENDIF
+C
+	   HAD_LAY = .TRUE.
+	   GOTO 99
+C
+C..............................................................................
+C '6' line type name (unused)
+C..............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'6') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+	   NUMLIN = NUMLIN+1
+	   GOTO 99
+C
+C..............................................................................
+C '7' text style name
+C..............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'7') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   TEXSTYLEN = READSTR(TEXSTYNAM,,ON_EOL)
+C
+C if an empty line type is supplied, output error message and use default
+C
+	   IF (TEXSTYLEN.EQ.0) THEN
+ 	      CALL LSL_PUTMSG(DXF2I__ERRTEXSTY,NUMLIN)
+	      IF (HAD_TEXT_STYLE) THEN
+	         TEXSTYLEN = DEF_TEXT_STYLEN
+	         TEXSTYNAM = DEF_TEXT_STYLE(1:DEF_TEXT_STYLEN)
+	      ELSE
+		 TEXSTYLEN = 8
+		 TEXSTYNAM = 'STANDARD'
+	      ENDIF
+	      IF (.NOT.HAD_QUIET) CALL LSL_ADDMSG(DXF2I__DEFTEXSTY,
+     &				    TEXSTYNAM(1:TEXSTYLEN),TEXNUMLIN)
+	   ENDIF
+C
+	   HAD_STY = .TRUE.
+C
+C if it's not empty, go and look for the first appearance within the 
+C PARAMETER lookup table, colour not matched yet!
+C
+	   DO 5001 COUNTER = 1,CURRENTIND
+	      IF (SELENTTYP.EQ.DXFENTTYP(COUNTER)) THEN
+		 IF (TEXSTYNAM(1:TEXSTYLEN).EQ.DXFENTNAM(COUNTER)
+     &			      (1:DXFENTLEN(COUNTER)))THEN
+		    SELENTIND = COUNTER
+		    GOTO 99
+		 ENDIF
+	      ENDIF
+5001	   CONTINUE
+C
+C output error message when there is no match
+C
+	   IF (.NOT.HAD_SCAN) THEN
+	      DXF_TEXT = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRMATSTY,
+     &					TEXSTYNAM(1:TEXSTYLEN),TEXNUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   GOTO 99
+C..............................................................................
+C '38' - CONTOUR HEIGHT
+C..............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'38') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDREAL(HEIGHT)
+           IF (ERRCOD) THEN
+	      DXF_TEXT = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTACVAL,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+	   HAD_HT = .TRUE.
+	   GOTO 99
+C
+C..............................................................................
+C '62' - COLOUR
+C..............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'62') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+C if colour is by layer then colour entry is irrelevant
+C
+	   IF (BY_LAYER) THEN
+	      NUMLIN = NUMLIN+1
+	      GOTO 99
+	   ENDIF
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDINT(COLNUM)
+           IF (ERRCOD) THEN
+	      DXF_TEXT = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTCOL,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+	   HAD_COL = .TRUE.
+	   SELCOLOUR = COLNUM
+	   GOTO 99
+C
+C...............................................................................
+C '10' = X1
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'10') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDDBLE(DST(1,1))
+	   IF (ERRCOD) THEN
+	      DXF_TEXT = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRTEXSTR,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   IF (HAD_ABS) THEN
+	      ST(1,1) = DST(1,1)-MD2LOC(1)
+	   ELSE
+	      ST(1,1) = DST(1,1)
+	   ENDIF
+C
+C Initialise the third coord in case it's missing
+	   INT_EQUIV = IFF_ABSENT
+	   ZS(3,1)   = REAL_EQUIV
+C
+	   HAD_X = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '20' = Y1
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'20') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDDBLE(DST(2,1))
+	   IF (ERRCOD) THEN
+	      DXF_TEXT = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRTEXSTR,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   IF (HAD_ABS) THEN
+	      ST(2,1) = DST(2,1)-MD2LOC(2)
+	   ELSE
+	      ST(2,1) = DST(2,1)
+	   ENDIF
+C
+C Initialise the third coord in case it's missing
+	   INT_EQUIV = IFF_ABSENT
+	   ZS(3,1)   = REAL_EQUIV
+C
+	   HAD_Y = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '30' = Z1
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'30') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDREAL(ZS(3,1))
+	   IF (ERRCOD) THEN
+	      DXF_TEXT = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRTEXSTR,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   HAD_Z  = .TRUE.
+	   HAD_3D = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '11' = alignment point, present only if group 72 is present and non-zero
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'11') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+C	   CALL BSLN
+C	   NUMLIN = NUMLIN+1
+C	   ERRCOD = RDDBLE(DST(1,1))
+C	   IF (ERRCOD) THEN
+C	      DXF_TEXT = DXF2I__UNACONT
+C	      CALL LSL_PUTMSG(DXF2I__ERRTEXSTR,NUMLIN)
+C	      GOTO 1000
+C	   ENDIF
+C
+C	   IF (HAD_ABS) THEN
+C	      ST(1,1) = DST(1,1)-MD2LOC(1)
+C	   ELSE
+C	      ST(1,1) = DST(1,1)
+C	   ENDIF
+C
+C Initialise the third coord in case it's missing
+C	   INT_EQUIV = IFF_ABSENT
+C	   ZS(3,1)   = REAL_EQUIV
+C
+C	   HAD_X = .TRUE.
+C
+	   GOTO 99
+C
+C...............................................................................
+C '21' = alignment point, present only if group 72 is present and non-zero
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'21') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+C	   CALL BSLN
+C	   NUMLIN = NUMLIN+1
+C	   ERRCOD = RDDBLE(DST(2,1))
+C	   IF (ERRCOD) THEN
+C	      DXF_TEXT = DXF2I__UNACONT
+C	      CALL LSL_PUTMSG(DXF2I__ERRTEXSTR,NUMLIN)
+C	      GOTO 1000
+C	   ENDIF
+C
+C	   IF (HAD_ABS) THEN
+C	      ST(2,1) = DST(2,1)-MD2LOC(2)
+C	   ELSE
+C	      ST(2,1) = DST(2,1)
+C	   ENDIF
+C
+C Initialise the third coord in case it's missing
+C	   INT_EQUIV = IFF_ABSENT
+C	   ZS(3,1)   = REAL_EQUIV
+C
+C	   HAD_Y = .TRUE.
+C
+	   GOTO 99
+C
+C...............................................................................
+C '31' = alignment point, present only if group 72 is present and non-zero
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'31') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+C	   CALL BSLN
+C	   NUMLIN = NUMLIN+1
+C	   ERRCOD = RDREAL(ZS(3,1))
+C	   IF (ERRCOD) THEN
+C	      DXF_TEXT = DXF2I__UNACONT
+C	      CALL LSL_PUTMSG(DXF2I__ERRTEXSTR,NUMLIN)
+C	      GOTO 1000
+C	   ENDIF
+C
+C	   HAD_Z  = .TRUE.
+C	   HAD_3D = .TRUE.
+C
+	   GOTO 99
+C
+C...............................................................................
+C '40' = Text height in mm.
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'40') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDREAL(TH)		! TH in mm.
+C
+	   IF (ERRCOD .OR. TH.LE.0) THEN  ! no height present or <= 0
+	      CALL LSL_PUTMSG(DXF2I__ERRTEXHGT,NUMLIN)
+C
+C Use default from $TEXTSIZE if present
+C
+	      IF (HAD_TEXT_HEIGHT .AND. DEF_TEXT_HEIGHT.GT.0) THEN
+		 TH = DEF_TEXT_HEIGHT
+	      ELSE
+		 TH = 5		! otherwise just guess
+	      ENDIF
+	      IF (.NOT.HAD_QUIET) CALL LSL_ADDMSG
+     &				(DXF2I__DEFTEXHGT,TH,TEXNUMLIN)
+	   ENDIF
+C
+	   HAD_TH = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '41' = Relative x scale factor
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'41') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+C	   CALL BSLN
+C	   NUMLIN = NUMLIN+1
+C	   ERRCOD = RDREAL(RO)
+C	   IF (ERRCOD) THEN
+C	      DXF_TEXT = DXF2I__UNACONT
+C	      CALL LSL_PUTMSG(DXF2I__ERRTEXROT,NUMLIN)
+C	      GOTO 1000
+C	   ENDIF
+C	   RO = RO * PI/180.0		! convert degrees to radians
+C
+	   GOTO 99
+C
+C...............................................................................
+C '50' = RO
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'50') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDREAL(RO)
+	   IF (ERRCOD) THEN
+	      DXF_TEXT = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRTEXROT,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+	   RO = RO * PI/180.0		! convert degrees to radians
+	   GOTO 99
+C
+C...............................................................................
+C '51' = Obliquing angle
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'51') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+C	   CALL BSLN
+C	   NUMLIN = NUMLIN+1
+C	   ERRCOD = RDREAL(RO)
+C	   IF (ERRCOD) THEN
+C	      DXF_TEXT = DXF2I__UNACONT
+C	      CALL LSL_PUTMSG(DXF2I__ERRTEXROT,NUMLIN)
+C	      GOTO 1000
+C	   ENDIF
+C	   RO = RO * PI/180.0		! convert degrees to radians
+C
+	   GOTO 99
+C
+C...............................................................................
+C '1' = Text
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'1') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   NUMLIN = NUMLIN+1
+	   TX_LEN = TXTPTR
+	   DO 250 COUNTER = 1,TX_LEN
+	      TX_BUF(COUNTER) = TXTBUF(COUNTER)
+250	   CONTINUE
+	   HAD_TX = .TRUE.
+	   GOTO 99
+C
+C..............................................................................
+C '71' - alignment group
+C..............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'71') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   NUMLIN = NUMLIN+1
+	   GOTO 99
+C
+C..............................................................................
+C '72' - justification group
+C..............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'72') THEN
+	   DXF_TEXT = FLRLIN()
+	   IF (.NOT.DXF_TEXT) GOTO 999
+C
+	   NUMLIN = NUMLIN+1
+	   GOTO 99
+C
+C...............................................................................
+C '0'- write feature
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'0') THEN		! end of entity
+C
+C set text style, default if absent
+C
+	   IF (.NOT.HAD_STY) THEN
+	      IF (HAD_TEXT_STYLE) THEN
+	         TEXSTYLEN = DEF_TEXT_STYLEN
+	         TEXSTYNAM = DEF_TEXT_STYLE(1:DEF_TEXT_STYLEN)
+	      ELSE
+		 TEXSTYLEN = 8
+		 TEXSTYNAM = 'STANDARD'
+	      ENDIF
+	      IF (.NOT.HAD_QUIET) CALL LSL_PUTMSG(DXF2I__DEFTEXSTY,
+     &				    TEXSTYNAM(1:TEXSTYLEN),TEXNUMLIN)
+              HAD_STY   = .TRUE.
+	      SELENTIND = 1
+	   ENDIF
+C
+C Check that we have had all of the necessary bits and bobs
+C had layer?
+C
+	   IF (.NOT.HAD_LAY) THEN
+	      CALL LSL_PUTMSG(DXF2I__MISENTLAY,TEXNUMLIN)
+C
+C and use default from $CLAYER if present
+C
+	      IF (HAD_LAYER_NAME) THEN
+	         LAYERLEN = DEF_LAYER_NAME_LEN
+	         LAYERNAM = DEF_LAYER_NAME(1:LAYERLEN)
+		 IF (.NOT.HAD_QUIET) CALL LSL_ADDMSG(DXF2I__DEFLAYNAM,
+     &				    LAYERNAM(1:LAYERLEN),TEXNUMLIN)
+	      ELSE
+		 DXF_TEXT = DXF2I__UNACONT
+		 IF (.NOT.HAD_SCAN) GOTO 1000
+	      ENDIF
+	   ENDIF
+C
+C if it's not empty, go and look for the corresponding IFF layer no
+C in the PARAMETER lookup table
+C
+	   DO 4000 COUNTER = 1,CURRLAYIND
+	      IF (LAYERNAM(1:LAYERLEN).EQ.
+     &		    DXFLAYNAM(COUNTER)(1:DXFLAYLEN(COUNTER))) THEN
+		 SELLAYIND = COUNTER
+		 HAD_LAY = .TRUE.
+		 GOTO 4001
+	      ENDIF
+4000	   CONTINUE
+C
+C output error message when there is no match, even if had /SCAN -
+C it's too late now to output the layer so just give the message
+C
+	   IF (.NOT.HAD_SCAN) THEN
+	     DXF_TEXT = DXF2I__UNACONT
+	     CALL LSL_PUTMSG(DXF2I__ERRMATLAY,
+     &				LAYERNAM(1:LAYERLEN),TEXNUMLIN)
+	     GOTO 1000
+	   ELSE
+	     CALL LSL_PUTMSG(DXF2I__ERRSCANLAY,
+     &				LAYERNAM(1:LAYERLEN),TEXNUMLIN)
+	   ENDIF
+C
+4001	   CONTINUE
+C
+C now get the colour with priority
+C BY LAYER will have higher preference than '62' entry
+C
+	   IF (BY_LAYER) THEN
+              SELCOLOUR = DXFLAYCOL(SELLAYIND)
+              HAD_COL = .TRUE.
+           ENDIF
+C
+C had colour?
+C
+	   IF (.NOT.HAD_COL) THEN
+C	      DXF_TEXT = DXF2I__UNACONT
+	      IF (.NOT.HAD_QUIET) 
+     &			CALL LSL_PUTMSG(DXF2I__MISENTCOL,TEXNUMLIN)
+C
+C Allow coord entries to be read even if colour entry missing
+C
+C	      GOTO 1000
+	   ENDIF
+C
+C had x, y?
+C
+	   IF (.NOT.HAD_X .OR. .NOT.HAD_Y) THEN 
+	      DXF_TEXT = DXF2I__UNACONT
+	      CALL LSL_PUTMSG (DXF2I__MISCOOR,TEXNUMLIN)
+	      IF (.NOT.HAD_SCAN) GOTO 1000
+	   ENDIF
+C
+C had text?
+C
+	   IF (.NOT.HAD_TX) THEN
+	      DXF_TEXT = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__MISENTTXT,TEXNUMLIN)
+	      IF (.NOT.HAD_SCAN) GOTO 1000
+	   ENDIF
+C
+C had height?
+C
+	   IF (.NOT.HAD_TH) THEN	! use default if > 0
+	      IF (HAD_TEXT_HEIGHT .AND. DEF_TEXT_HEIGHT.GT.0) THEN
+		 TH = DEF_TEXT_HEIGHT
+	      ELSE
+		 TH = 5			! otherwise just guess
+	      ENDIF
+	      IF (.NOT.HAD_QUIET) CALL LSL_PUTMSG
+     &				(DXF2I__DEFTEXHGT,TH,TEXNUMLIN)
+	      HAD_TH = .TRUE.
+	   ENDIF
+C
+C Dont match FC or anything if SCAN
+C
+	   IF (HAD_SCAN) THEN		! write entity entry to scanfil
+C
+C Write out entity name to SCAN parameter file if required
+C
+C Get the first suitable FC from FRT file
+C
+	      IF (.NOT.HAD_TXT_FC) THEN
+		IF (.NOT.FRTFGT(TEXTYP,TXT_FC)) THEN	! text
+		   HAD_TXT_FC = .TRUE.
+		ENDIF
+	      ENDIF
+C
+C Format layers shorter then 20 characters
+C
+	      IF (TEXSTYLEN.LE.20) THEN
+		 CALL EXPAND('%WS% %S20',STYLE_NAME,TEXSTYNAM(1:TEXSTYLEN))
+C
+		 EXPLEN = EXPAND('%WS% ENTITY TEXT      %S%  %N%  %^W%N',
+     &				ENTITY_OUT,
+     &				STYLE_NAME(1:20),
+     &				SELCOLOUR,TXT_FC)
+C
+	      ELSE
+		 EXPLEN = EXPAND('%WS% ENTITY TEXT      %S%  %N%  %^W%N',
+     &				ENTITY_OUT,
+     &				TEXSTYNAM(1:TEXSTYLEN),
+     &				SELCOLOUR,TXT_FC)
+	      ENDIF
+C
+C Check same as last one output
+C
+	      IF (EXPLEN.EQ.LAST_EXPLEN) THEN
+		 IF (ENTITY_OUT(1:EXPLEN) .EQ.
+     &			LAST_ENTITY_OUT(1:LAST_EXPLEN)) GOTO 1000
+	      ENDIF
+C
+C Not the same as last one output, so search the entity list for a match
+C
+	     DO 4002 I = 1,ENTITY_CNT
+		IF (EXPLEN.EQ.ENTITY_LEN(I)) THEN	! matched length
+		   IF (ENTITY_OUT(1:EXPLEN) .EQ.	! match entity
+     &				 ENTITY(I)(1:ENTITY_LEN(I)) ) THEN
+			GOTO 1000
+		   ENDIF
+		ENDIF
+4002	     CONTINUE
+C
+C No match, so output it
+C
+	      DXF_TEXT = FLWSTR(ENTITY_OUT(1:EXPLEN),IERR)
+
+	      IF (.NOT.DXF_TEXT) THEN
+		 CALL LSL_PUTMSG(DXF_TEXT)
+		 IF (DXF_TEXT.EQ.LSL__SYSERR) CALL LSL_ADDMSG(IERR)
+		 GOTO 1000
+	      ENDIF
+C
+	      IF (ENTITY_CNT.EQ.MAXSCAN) THEN
+		 CALL LSL_PUTMSG(DXF2I__TOOMNYENTS,MAXSCAN)
+		 GOTO 1000
+	      ENDIF
+C
+	      ENTITY_CNT = ENTITY_CNT + 1
+C
+	      ENTITY_LEN(ENTITY_CNT) 	   = EXPLEN
+	      ENTITY(ENTITY_CNT)(1:EXPLEN) = ENTITY_OUT(1:EXPLEN)
+C
+	      LAST_EXPLEN 		     = EXPLEN
+	      LAST_ENTITY_OUT(1:LAST_EXPLEN) = ENTITY_OUT(1:EXPLEN)
+C
+	      GOTO 1000
+	   ENDIF
+C
+C now get hold of the FC from parameter lookup table
+C
+	   DO 4003 COUNTER = SELENTIND,CURRENTIND
+	      IF (SELENTTYP.EQ.DXFENTTYP(COUNTER)) THEN
+		 IF (TEXSTYNAM(1:TEXSTYLEN).EQ.DXFENTNAM(COUNTER)
+     &			      (1:DXFENTLEN(COUNTER))) THEN
+		    IF (HAD_COL .AND. SELCOLOUR.NE.ENTCOLOUR(COUNTER))
+     &							 GOTO 4003
+		    FC(1) = IFFFCCODE(COUNTER)
+		    FONT  = FONTNUMBER(COUNTER)
+C
+		    GOTO 4005
+                 ENDIF
+              ENDIF
+4003	   CONTINUE
+C
+C No match, exit
+C
+	   DXF_TEXT = DXF2I__UNACONT
+	   CALL LSL_PUTMSG(DXF2I__ERRMATFC,TEXNUMLIN)
+           GOTO 1000
+C
+C final setting for output
+C
+4005	   CONTINUE
+C
+	   IF (IN_LAYER .AND. IFFOLAYNO(SELLAYIND).NE.LSTIFFLAY) THEN
+	      CALL IFFUNO(LPOSNO)
+	      CALL IFFEO
+	   ENDIF
+C
+	   IF (.NOT.IN_LAYER .OR. IFFOLAYNO(SELLAYIND).NE.LSTIFFLAY) THEN
+	      LSTIFFLAY = IFFOLAYNO(SELLAYIND)
+	      LPOSNO = LPOSE
+	      CALL IFFNO(LSTIFFLAY,0,0)
+	      IN_LAYER = .TRUE.
+	   ENDIF
+C
+	   NF = NF+1
+	   CALL IFFNF(NF,NF)
+C
+	   CALL LIB$INSV(2,14,2,FC(3))  ! insert correct value into
+C					! right bits for call to ifffs
+	   CALL IFFFS(FC)		! write the FC
+	   FC(3) = 0			! reset text bit
+C
+	   IF (HAD_HT) CALL IFFAC(3,HEIGHT)
+C
+C Alter coordinates if called from BLOCKS section
+C
+	   IF (FROM_BLOCKS) THEN
+	      IF (EXPAND_XSCL(EXPAND_INDEX) .NE. 1) ST(1,1) = 
+     &				ST(1,1) * EXPAND_XSCL(EXPAND_INDEX)
+	      IF (EXPAND_YSCL(EXPAND_INDEX) .NE. 1) THEN
+		 ST(2,1) = ST(2,1) * EXPAND_YSCL(EXPAND_INDEX)
+		 TH = TH * EXPAND_YSCL(EXPAND_INDEX)
+	      ENDIF
+	      IF (HAD_Z .AND. EXPAND_ZSCL(EXPAND_INDEX).NE.1) ZS(3,1) = 
+     &				ZS(3,1) * EXPAND_ZSCL(EXPAND_INDEX)
+C
+	      IF (EXPAND_XOFF(EXPAND_INDEX) .NE. 0) ST(1,1) = 
+     &				ST(1,1) + EXPAND_XOFF(EXPAND_INDEX)
+	      IF (EXPAND_YOFF(EXPAND_INDEX) .NE. 0) ST(2,1) = 
+     &				ST(2,1) + EXPAND_YOFF(EXPAND_INDEX)
+	      IF (HAD_Z .AND. EXPAND_ZOFF(EXPAND_INDEX).NE.0) ZS(3,1) = 
+     &				ZS(3,1) + EXPAND_ZOFF(EXPAND_INDEX)
+	   ENDIF
+C
+	   CALL CHECK_RANGE(ST,1)	! check the range
+C
+C Scale the text height into IFF units, mm./100, or to POINTSIZE if requested
+C
+	   IF (.NOT.HAD_PNT) THEN
+	      IF (TH.GT.300) THEN
+	         ITH = 30000		! don't break integer limit
+	      ELSE
+	         ITH = NINT(100.0*TH)	! convert to mm./100
+	      ENDIF
+	   ENDIF
+C
+C Had /POINTSIZE; convert to point sizes
+C
+	   IF (HAD_PNT) THEN				! had /pointsize
+C
+C Use user defined from parameter TEXT SIZE entries
+C
+	     IF (HAD_POINT_SIZES(FONT)) THEN		! had this particular
+C							! font/FC combination
+		ILO_MM_SIZE = 0				! initialise
+		IHI_MM_SIZE = 0
+		ITH 	    = 0
+C
+C Get mm's in point_sizes(ipt,font) to get ipt with nearest mm's to TH mm's
+C
+		DO 33 I = 1,MAXPOINT
+		   MM_SIZE = POINT_SIZES(I,FONT)
+		   IF (MM_SIZE.EQ.0.0) GOTO 33
+C
+		   IF (MM_SIZE.LT.TH) THEN
+		     ILO_MM_SIZE = I
+ 		     LO_MM_SIZE  = MM_SIZE
+		     DEFAULT_PNT = I
+C
+		   ELSEIF (MM_SIZE.GE.TH) THEN
+		     IF (MM_SIZE.EQ.TH) THEN		! exact match
+			ITH = I
+			GOTO 88
+		     ENDIF
+C
+		     IHI_MM_SIZE = I
+		     HI_MM_SIZE = MM_SIZE
+C
+		     MEAN = (HI_MM_SIZE + LO_MM_SIZE)/2.0
+C
+		     IF (TH.LT.MEAN) THEN
+			ITH = ILO_MM_SIZE
+		     ELSE
+			ITH = IHI_MM_SIZE
+		     ENDIF
+C
+		     GOTO 88
+		   ENDIF
+C
+33		CONTINUE
+C
+C Output message if point size not set
+C
+		IF (ITH.EQ.0) THEN
+		  IF (.NOT.HAD_QUIET) 
+     &			CALL LSL_PUTMSG(DXF2I__UNDEFPOINTSIZE, TH)
+		  ITH = DEFAULT_PNT
+		ENDIF
+C
+	        GOTO 88
+C 
+	     ELSE					! had_point_sizes = F
+	       IF     (ABS(TH-0.8) .LE. 1E-2) THEN
+		 ITH = 3
+	       ELSEIF (ABS(TH-1.1) .LE. 1E-2) THEN
+		 ITH = 5
+	       ELSEIF (ABS(TH-1.2) .LE. 1E-2) THEN
+		 ITH = 6
+	       ELSEIF (ABS(TH-1.4) .LE. 1E-2) THEN
+		 ITH = 7
+	       ELSEIF (ABS(TH-1.6) .LE. 1E-2) THEN
+		 ITH = 8
+	       ELSEIF (ABS(TH-1.7) .LE. 1E-2) THEN
+		 ITH = 9
+	       ELSEIF (ABS(TH-2.0) .LE. 1E-2) THEN
+		 ITH = 10
+	       ELSEIF (ABS(TH-2.2) .LE. 1E-2) THEN
+		 ITH = 11
+	       ELSEIF (ABS(TH-2.4) .LE. 1E-2) THEN
+		 ITH = 12
+	       ELSEIF (ABS(TH-2.9) .LE. 1E-2) THEN
+		 ITH = 14
+	       ELSEIF (ABS(TH-3.2) .LE. 1E-2) THEN
+		 ITH = 16
+	       ELSEIF (ABS(TH-3.6) .LE. 1E-2) THEN
+		 ITH = 18
+	       ELSEIF (ABS(TH-3.9) .LE. 1E-2) THEN
+		 ITH = 20
+	       ELSEIF (ABS(TH-4.4) .LE. 1E-2) THEN
+		 ITH = 22
+	       ELSEIF (ABS(TH-5.0) .LE. 1E-2) THEN
+		 ITH = 24
+	       ELSE				! interpolate
+		 ITH = NINT(128.0*TH/25.4)
+	       ENDIF
+	     ENDIF				! had_point_sizes 
+C
+	   ENDIF				! had /pointsize
+C
+88	   CONTINUE
+C
+	   CALL IFFTH(ITH)
+C
+	   IF (HAD_3D) THEN
+	      ZS(1,1) = ST(1,1)
+	      ZS(2,1) = ST(2,1)
+C
+	      CALL IFFZS(ZS,1,0)	! write ZS entry
+	   ELSE
+	      CALL IFFST(ST,1,0)	! write ST entry
+	   ENDIF
+C
+	   CALL IFFRO(RO)
+	   CALL IFFTX(TX_BUF,TX_LEN)
+C
+	   CALL IFFEF			! and end feature
+	   GOTO 1000
+	ENDIF
+C
+	GOTO 99
+C...............................................................................
+C
+999	CALL LSL_PUTMSG(DXF2I__RDLINERR,NUMLIN)
+C
+1000	RETURN
+	END
+C

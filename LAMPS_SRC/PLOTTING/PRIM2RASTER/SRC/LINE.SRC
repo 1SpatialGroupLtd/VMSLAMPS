@@ -1,0 +1,395 @@
+	SUBROUTINE	BEGIN_LINE(CLOSED,WIDTH,CAP,JOIN)
+C
+**	MODULE	BEGIN_LINE
+**	IDENT	06MY92
+C
+C Copyright Laser-Scan Labs., Ltd., Cambridge, England.
+C
+C Author Clarke Brunt
+C
+C	Part of the IFF-to-Raster conversion program
+C
+C	 - prepares to rasterise a polyline
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:LINE/
+C
+C arguments
+	LOGICAL	CLOSED
+	REAL	WIDTH
+	INTEGER	CAP
+	INTEGER	JOIN
+C
+C save the arguments in common
+	L_CLOSED = CLOSED
+	L_WIDTH = WIDTH
+	L_CAP = CAP
+	L_JOIN = JOIN
+C
+	L_NPTS = 0	! no points so far
+	L_IND = 2	! index to receive first point
+C
+	RETURN
+	END
+CCC	
+	SUBROUTINE	ADD_POINT(COORD)
+C
+**	MODULE	ADD_POINT
+**	IDENT	09MR92
+C
+C Copyright Laser-Scan Labs., Ltd., Cambridge, England.
+C
+C Author Clarke Brunt
+C
+C	Part of the IFF-to-Raster conversion program
+C
+C	 - add point to a polyline being rasterised
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:LINE/
+C
+C arguments
+	REAL	COORD(2)
+C
+C workspace
+	INTEGER	I
+	LOGICAL	FIRST
+	INTEGER	CAP
+C
+C
+C buffer the coordinate, discarding duplicates
+	IF (L_NPTS.GT.0 .AND.
+     &	    COORD(1).EQ.L_COORD(1,L_IND-1) .AND.
+     &      COORD(2).EQ.L_COORD(2,L_IND-1) ) GOTO 999
+C
+	L_NPTS = L_NPTS+1
+	L_COORD(1,L_IND) = COORD(1)
+	L_COORD(2,L_IND) = COORD(2)
+C
+	IF (L_IND.LT.4) THEN
+	   L_IND = L_IND+1
+	   IF (L_NPTS.EQ.2) THEN
+C
+C save 2nd coordinate for use if a closed line
+	      L_COORD2(1) = COORD(1)
+	      L_COORD2(2) = COORD(2)
+	   ENDIF
+	ELSE
+C
+C now have four points buffered, so can rasterise middle segment
+	   FIRST = .FALSE.
+	   IF (L_NPTS.EQ.3) FIRST = .TRUE.
+	   CAP = L_CAP
+	   IF (L_CLOSED.AND.L_NPTS.EQ.3) CAP = 0
+	   CALL RASTER_LINE(L_COORD,L_WIDTH,CAP,L_JOIN,FIRST,.FALSE.)
+C
+C shuffle down coordinates
+	   DO 10 I=1,3
+	      L_COORD(1,I) = L_COORD(1,I+1)
+	      L_COORD(2,I) = L_COORD(2,I+1)
+10	   CONTINUE
+	ENDIF
+C
+999	RETURN
+	END
+CCC	
+	SUBROUTINE	RASTER_LINE(COORDS,WIDTH,CAP,JOIN,FIRST,LAST)
+C
+**	MODULE	RASTER_LINE
+**	IDENT	09MR92
+C
+C Copyright Laser-Scan Labs., Ltd., Cambridge, England.
+C
+C Author Clarke Brunt
+C
+C	Part of the IFF-to-Raster conversion program
+C
+C	 - rasterise a line segment
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:CLIP/
+***	COMMON/CMN:COORD/
+***	COMMON/CMN:PRIM2RASTER/
+C
+C arguments
+	REAL	COORDS(2,4)
+	REAL	WIDTH
+	INTEGER	CAP
+	INTEGER	JOIN
+	LOGICAL	FIRST
+	LOGICAL	LAST
+C
+C workspace
+	INTEGER	I,N
+	REAL	XY(2,7)
+	REAL	DX12,DY12,DX23,DY23,DX34,DY34,R
+	REAL	Y_MIN,Y_MAX
+	LOGICAL	MITER
+	REAL	SINPHI,COSPHI
+	REAL	F
+	REAL	W
+C
+	W = WIDTH/2.0
+C
+C deal with round cap at start of line, or round join in the middle
+	IF (
+     &		(FIRST.AND.CAP.EQ.1) .OR.
+     &		(.NOT.FIRST.AND.JOIN.EQ.1) ) THEN
+	   IF (COORDS(2,2)+W.GE.RCLIPLO .AND.
+     &	       COORDS(2,2)-W.LE.RCLIPHI) THEN
+	      CALL FILL_CIRCLE(
+     &				COORDS(1,2),
+     &				COORDS(2,2),
+     &				W)
+	   ENDIF
+	ENDIF
+C
+	DX23 = COORDS(1,3)-COORDS(1,2)	! vector from point 2->3
+	DY23 = COORDS(2,3)-COORDS(2,2)
+C
+	R = SQRT(DX23**2+DY23**2)
+	DX23 = DX23/R			! now unit vector
+	DY23 = DY23/R			! in direction of line
+C
+C so the vector (-DY23,DX23) is the same but rotated 90 anti-clockwise
+C
+C get points of polygon dealing with cap or join at first point
+C
+C for a butt or round cap, or a round join (done above), just need butt
+	IF (FIRST.AND.(CAP.EQ.0.OR.CAP.EQ.1) .OR. ! butt or round cap
+     &	   .NOT.FIRST.AND.JOIN.EQ.1) THEN	  ! or round join
+	   XY(1,1) = COORDS(1,2) + (-DY23)*W
+	   XY(2,1) = COORDS(2,2) + (+DX23)*W
+	   XY(1,2) = COORDS(1,2) + (+DY23)*W
+	   XY(2,2) = COORDS(2,2) + (-DX23)*W
+	   N = 2
+	ELSEIF (FIRST.AND.CAP.EQ.2) THEN	! projecting cap
+	   XY(1,1) = COORDS(1,2) + (-DX23-DY23)*W
+	   XY(2,1) = COORDS(2,2) + (-DY23+DX23)*W
+	   XY(1,2) = COORDS(1,2) + (-DX23+DY23)*W
+	   XY(2,2) = COORDS(2,2) + (-DY23-DX23)*W
+	   N = 2
+	ELSE	! must be miter or bevel join
+C
+	   DX12 = COORDS(1,2)-COORDS(1,1)	! vector from point 1->2
+	   DY12 = COORDS(2,2)-COORDS(2,1)
+C
+	   R = SQRT(DX12**2+DY12**2)
+	   DX12 = DX12/R			! now unit vector
+	   DY12 = DY12/R			! in direction of line
+C
+	   SINPHI = DX12*DY23 - DY12*DX23
+C
+	   MITER = .FALSE.
+	   IF (JOIN.EQ.0) THEN			! miter
+	      COSPHI = DX12*DX23 + DY12*DY23
+	      IF (COSPHI.GE.MITER_TEST) MITER = .TRUE.
+	   ENDIF
+C
+	   IF (SINPHI.GE.0.0) THEN
+	      XY(1,1) = COORDS(1,2) + (-DY23)*W
+	      XY(2,1) = COORDS(2,2) + (+DX23)*W
+C
+	      XY(1,2) = COORDS(1,2) + (+DY12)*W
+	      XY(2,2) = COORDS(2,2) + (-DX12)*W
+C
+	      IF (MITER) THEN
+C
+C F is TAN(PHI/2) (possibly minus it).
+C both these expressions for F should be the same, we choose to
+C avoid divide by zero (cannot happen in both)
+	         IF (ABS(DX12+DX23).GT.ABS(DY12+DY23)) THEN
+	            F = (DY23-DY12)/(DX12+DX23)
+	         ELSE
+	            F = (-DX23+DX12)/(DY12+DY23)
+	         ENDIF
+	         XY(1,3) = XY(1,2) + F*DX12*W
+	         XY(2,3) = XY(2,2) + F*DY12*W
+	      ELSE
+	         XY(1,3) = COORDS(1,2) + (+DY23)*W
+	         XY(2,3) = COORDS(2,2) + (-DX23)*W
+	      ENDIF
+C
+	   ELSE
+C
+	      XY(1,2) = COORDS(1,2) + (-DY12)*W
+	      XY(2,2) = COORDS(2,2) + (+DX12)*W
+C
+	      IF (MITER) THEN
+	         IF (ABS(DX12+DX23).GT.ABS(DY12+DY23)) THEN
+	            F = (-DY23+DY12)/(DX12+DX23)
+	         ELSE
+	            F = (DX23-DX12)/(DY12+DY23)
+	         ENDIF
+	         XY(1,1) = XY(1,2) + F*DX12*W
+	         XY(2,1) = XY(2,2) + F*DY12*W
+	      ELSE
+	         XY(1,1) = COORDS(1,2) + (-DY23)*W
+	         XY(2,1) = COORDS(2,2) + (+DX23)*W
+	      ENDIF
+C
+	      XY(1,3) = COORDS(1,2) + (+DY23)*W
+	      XY(2,3) = COORDS(2,2) + (-DX23)*W
+C
+	   ENDIF
+	   N = 3
+	ENDIF
+C
+C get points of polygon dealing with cap or join at last point
+C
+C for a butt or round cap, or a round join (done later), just need butt
+	IF (LAST.AND.(CAP.EQ.0.OR.CAP.EQ.1) .OR. ! butt or round cap
+     &	   .NOT.LAST.AND.JOIN.EQ.1) THEN	  ! or round join
+	   N = N+1
+	   XY(1,N) = COORDS(1,3) + (+DY23)*W
+	   XY(2,N) = COORDS(2,3) + (-DX23)*W
+	   N = N+1
+	   XY(1,N) = COORDS(1,3) + (-DY23)*W
+	   XY(2,N) = COORDS(2,3) + (+DX23)*W
+	ELSEIF (LAST.AND.CAP.EQ.2) THEN		! projecting cap
+	   N = N+1
+	   XY(1,N) = COORDS(1,3) + (+DX23+DY23)*W
+	   XY(2,N) = COORDS(2,3) + (+DY23-DX23)*W
+	   N = N+1
+	   XY(1,N) = COORDS(1,3) + (+DX23-DY23)*W
+	   XY(2,N) = COORDS(2,3) + (+DY23+DX23)*W
+	ELSE	! must be miter or bevel join
+C
+	   DX34 = COORDS(1,4)-COORDS(1,3)	! vector from point 3->4
+	   DY34 = COORDS(2,4)-COORDS(2,3)
+C
+	   R = SQRT(DX34**2+DY34**2)
+	   DX34 = DX34/R			! now unit vector
+	   DY34 = DY34/R			! in direction of line
+C
+	   SINPHI = DX23*DY34 - DY23*DX34
+C
+	   MITER = .FALSE.
+	   IF (JOIN.EQ.0) THEN			! miter
+	      COSPHI = DX23*DX34 + DY23*DY34
+	      IF (COSPHI.GE.MITER_TEST) MITER = .TRUE.
+	   ENDIF
+C
+	   IF (SINPHI.GE.0.0) THEN
+C
+	      N = N+1
+	      XY(1,N) = COORDS(1,3) + (+DY23)*W
+	      XY(2,N) = COORDS(2,3) + (-DX23)*W
+C
+	      IF (MITER) THEN
+	         IF (ABS(DX23+DX34).GT.ABS(DY23+DY34)) THEN
+	            F = (DY34-DY23)/(DX23+DX34)
+	         ELSE
+	            F = (-DX34+DX23)/(DY23+DY34)
+	         ENDIF
+	         XY(1,N) = XY(1,N) + F*DX23*W
+	         XY(2,N) = XY(2,N) + F*DY23*W
+	      ENDIF
+C
+	      N = N+1
+	      XY(1,N) = COORDS(1,3) + (+DY34)*W
+	      XY(2,N) = COORDS(2,3) + (-DX34)*W
+C
+	      N = N+1
+	      XY(1,N) = COORDS(1,3) + (-DY23)*W
+	      XY(2,N) = COORDS(2,3) + (+DX23)*W
+	   ELSE
+	      N = N+1
+	      XY(1,N) = COORDS(1,3) + (+DY23)*W
+	      XY(2,N) = COORDS(2,3) + (-DX23)*W
+C
+	      N = N+1
+	      XY(1,N) = COORDS(1,3) + (-DY34)*W
+	      XY(2,N) = COORDS(2,3) + (+DX34)*W
+C
+	      N = N+1
+	      XY(1,N) = COORDS(1,3) + (-DY23)*W
+	      XY(2,N) = COORDS(2,3) + (+DX23)*W
+C
+	      IF (MITER) THEN
+	         IF (ABS(DX23+DX34).GT.ABS(DY23+DY34)) THEN
+	            F = (-DY34+DY23)/(DX23+DX34)
+	         ELSE
+	            F = (DX34-DX23)/(DY23+DY34)
+	         ENDIF
+	         XY(1,N) = XY(1,N) + F*DX23*W
+	         XY(2,N) = XY(2,N) + F*DY23*W
+	      ENDIF
+C
+	   ENDIF
+	ENDIF
+C
+C check if clipped
+	Y_MAX = XY(2,1)
+	Y_MIN = Y_MAX
+	DO 100 I=2,N
+	   IF (XY(2,I).GT.Y_MAX) Y_MAX = XY(2,I)
+	   IF (XY(2,I).LT.Y_MIN) Y_MIN = XY(2,I)
+100	CONTINUE
+	IF (Y_MIN .GT. RCLIPHI) GOTO 400
+	IF (Y_MAX .LT. RCLIPLO) GOTO 400
+C
+C close the polygon
+	N = N+1
+	XY(1,N) = XY(1,1)
+	XY(2,N) = XY(2,1)
+C
+C and fill it
+	CALL FILL_SIDE(N,XY,%VAL(SIDES_ADR),%VAL(SIDPTR_ADR),
+     &				GFASCT,%VAL(INTSCT_ADR),%VAL(INTPTS_ADR))
+C
+400	RETURN
+	END
+CCC
+	SUBROUTINE	END_LINE
+C
+**	MODULE	END_LINE
+**	IDENT	09MR92
+C
+C Copyright Laser-Scan Labs., Ltd., Cambridge, England.
+C
+C Author Clarke Brunt
+C
+C	Part of the IFF-to-Raster conversion program
+C
+C	 - finishes rasterising a polyline
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:CLIP/
+***	COMMON/CMN:LINE/
+C
+	IF (L_NPTS.GT.1) THEN
+	   IF (L_CLOSED) THEN
+C
+C closed feature - closing point has already been added
+C so add second point - will cause to draw closing segment
+	      CALL ADD_POINT(L_COORD2)
+C
+C and now redraw first segment with a butt cap
+	      CALL RASTER_LINE(L_COORD,L_WIDTH,0,L_JOIN,.FALSE.,.TRUE.)
+	   ELSE
+	      IF (L_NPTS.EQ.2) THEN
+	         CALL RASTER_LINE(L_COORD,L_WIDTH,L_CAP,L_JOIN,.TRUE.,.TRUE.)
+	      ELSE
+	         CALL RASTER_LINE(L_COORD,L_WIDTH,L_CAP,L_JOIN,.FALSE.,.TRUE.)
+	      ENDIF
+C
+C it just remains to put on a final round cap if required
+	      IF (L_CAP.EQ.1) THEN
+	         IF (L_COORD(2,3)+L_WIDTH/2.0.GE.RCLIPLO .AND.
+     &	             L_COORD(2,3)-L_WIDTH/2.0.LE.RCLIPHI) THEN
+	            CALL FILL_CIRCLE(
+     &				L_COORD(1,3),
+     &				L_COORD(2,3),
+     &				L_WIDTH/2.0)
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	RETURN
+	END

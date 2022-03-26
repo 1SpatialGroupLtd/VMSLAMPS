@@ -1,0 +1,384 @@
+	LOGICAL FUNCTION IFF_TAB_BUILD()
+C
+***	MODULE	IFF_TAB_BUILD
+***	IDENT	20NO87
+C
+C	Copyright (C), Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	Created						TJH 20-Nov-1987
+C
+C Function to build the table (IFF_TAB) of IFF features ( or parts of
+C features) which lie within the blend zone defined by BLEND_ZONE. 
+C Once all the input IFF files have been opened, read, tabulated and
+C closed, we have available rapid access to only the relevant features
+C for intersection analysis with the DTM profile lines in the blend
+C zone. 
+C
+C Function returns .TRUE. if all is well
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 'LSL$CMNDTIBLEND:DTIBLENDMSG.PAR'
+	INCLUDE 'LSL$CMNDTIBLEND:PARAMS.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFSTR.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:DESCK.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:COMMAND.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:PROCESS.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:SELECTIONS.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:FILES.CMN'
+C
+C
+C IFF CB structure definition:
+	INCLUDE   'LSL$CMNIFF:CB.STR'
+C
+C W/s
+	INTEGER*2 IFIL		! current file number
+	BYTE	  IFIL_BYTE	! current file number as byte
+	BYTE	  JSECTOR	! current sector number
+	INTEGER*2 ISTART,ISTOP	! start stop pts in CB within zone
+	LOGICAL   INSECTOR	! inside blend zone sector?
+	LOGICAL	  HAD_MATCH	! had a fc or layer selection match?
+	INTEGER*2 LAYER		! layer number
+	INTEGER	  NCOORD	! total number of pts in ftr
+	INTEGER	  NF_ADDRESS	! address of NF entry
+	REAL	  RANGE(4)	! IFF file range
+	REAL	  CB_RANGE(4)	! CB's range
+	INTEGER*2 IECODE	! entry code for the entry-in-hand
+	INTEGER*2 IELEN		! length of the entry-in-hand
+	RECORD	/IFF_CBH/CBH	! CB header
+	RECORD	/IFF_CBD/CBD	! CB data
+	INTEGER	  XYCOL(2)	! for extracting X and Y from CBD
+	REAL	  XY(2)		! R*4 XY
+	LOGICAL   HAD_CLIFF	! cliff feature?
+	INTEGER   I,J		! loop counters
+	INTEGER*2 NF(2)		! FSN and internal seq no.
+	LOGICAL	  AC3HT		! .NOT. AC2HT
+	INTEGER*2 ACTYPE	! type of AC
+	INTEGER*2 FC		! feature code
+	INTEGER   LONG          ! 32 bits
+	LOGICAL   HADAC2	! note that we have had an AC 2
+	LOGICAL   HADAC3	! note that we have had an AC 3
+	LOGICAL	  OK		! function return
+C
+C Functions:
+	LOGICAL	BITMATCH
+	LOGICAL	PACK_TABLE
+C
+C ......................................................................
+C
+	IFF_TAB_BUILD=.FALSE.			! assume failure
+C
+C Did the user specify IFF underlay control files?
+	IF (NUM_IFF.EQ.0) GOTO 125
+C
+C Fill array of CB column headers
+	XYCOL(1) = IFF_C_X
+	XYCOL(2) = IFF_C_Y
+C
+C Calculate sectors for BLEND_ZONE to facilitate rapid IFF data access
+	CALL CALC_BLEND_SECTORS
+C
+C Loop for each IFF input file in turn
+	DO 120 IFIL=1,NUM_IFF
+C
+C Open file by file ID
+	   CALL WRITEF
+	   CALL WRITEF('Reading IFF control file %S',
+     &		IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)))
+	   CALL	IFFOPI(IFIL,				! LUN
+     &		IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)),! filename
+     &		FID(1,IFIL),				! file ID
+     &		0)					! open readonly
+	   CALL IFFSEL(IFIL)
+	   IFFLUN_INUSE(IFIL)=.TRUE.
+C
+C Set the IFF input revision level to 1 - treat all CB, ST and
+C ZS entries as if they are CBs 
+	   CALL IFFIRV(1)
+	   CALL IFFRWD
+C
+10	   CALL IFFNXT(IECODE,IELEN)
+	   IF (IELEN.EQ.-1) GOTO 130
+C
+C Dispatch on value of IECODE
+	   IF(IECODE.EQ.'NF') GOTO 100
+	   IF(IECODE.EQ.'FS') GOTO 80
+	   IF(IECODE.EQ.'CB') GOTO 40
+	   IF(IECODE.EQ.'AC') GOTO 90
+	   IF(IECODE.EQ.'NO') GOTO 30
+	   IF(IECODE.EQ.'RA') GOTO 20
+	   IF(IECODE.EQ.'EJ') GOTO 110
+	   GOTO 10
+C
+C RA found
+20	   CALL EIHRR(RANGE,4,1)
+	   RANGE(1)=RANGE(1)+LOCOFF(1,IFIL)
+	   RANGE(2)=RANGE(2)+LOCOFF(1,IFIL)
+	   RANGE(3)=RANGE(3)+LOCOFF(2,IFIL)
+	   RANGE(4)=RANGE(4)+LOCOFF(2,IFIL)
+C
+C Do the IFF data lie within the blend zone defined by BLEND_ZONE
+	   IF (RANGE(1).GT.BLEND_ZONE(1,4)
+     &		.OR.
+     &			RANGE(2).LT.BLEND_ZONE(1,1)
+     &		.OR.
+     &			RANGE(3).GT.BLEND_ZONE(2,4)
+     &		.OR.
+     &			RANGE(4).LT.BLEND_ZONE(2,2)) THEN
+	      CALL LSL_PUTMSG(DTIBLN__IFOUTBZ,
+     &			IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)))
+	      GOTO 110
+	   ENDIF
+	   GOTO 10
+C
+C NO found. Test whether the DESELECT LAYER option is set and we have a
+C layer so defined 
+C
+30	   CALL EIHRI(LAYER,1,1)
+	   OK=BITMATCH(IFF_USEOV(1,IFIL),LAYER,HAD_MATCH)
+	   IF (.NOT.OK) GOTO 140
+	   IF (.NOT.HAD_MATCH) THEN	! skip layer.?
+	      CALL IFFNXC('EO',IELEN)	! yes, let's waste it.
+	      IF (IELEN.LE.-1) GOTO 130	! error or eof
+	      IF (HAD_DIAG) THEN
+	         CALL EXPAND('Layer %^W%N has been DESELECT''ed',LAYER)
+	         CALL WRTAPP(' - excluding layer')
+	      ENDIF
+	      GOTO 10
+	   ENDIF
+C 
+C Check for layer 0 and ie control-ticks and skip them if found
+	   IF (LAYER.EQ.0) THEN
+	      CALL IFFNXC('EO',IELEN) 	! skip layer zero
+	      IF (IELEN.LE.-1) GOTO 40
+	   ENDIF
+	   GOTO 10
+C
+C ......................................................................
+C
+C CB (ZS or ST) all are treated as CBS under revision level one.
+C Was the feature a cliff? If so, warn the user
+40	   IF (HAD_CLIFF) THEN
+	      CALL LSL_PUTMSG(DTIBLN__IFFCLIFF,NF(1),NF(2))
+	      CALL IFFNXC('EF',IELEN)	! waste feature
+	      IF (IELEN.LE.-1) GOTO 130	! error or eof
+	      GOTO 10
+	   ENDIF
+C
+C 2) Non-cliff. Did we acually detect height entries of the desired
+C type ? 
+	   IF (((IFF_AC2HT(IFIL).AND..NOT.HADAC2)
+     &		.OR.
+     &		(AC3HT.AND..NOT.HADAC3))
+     &		.AND.
+     &		(.NOT.SIMPLE_XYZ)) THEN
+	      IF (IFF_AC2HT(IFIL)) THEN
+	         CALL LSL_PUTMSG(DTIBLN__FTNOTAC,NF(1),NF(2),ACTYPE)
+	         CALL LSL_ADDMSG(DTIBLN__FTIGN)
+	      ELSE
+	         CALL LSL_PUTMSG(DTIBLN__FTNOTAC,NF(1),NF(2),ACTYPE)
+	         CALL LSL_ADDMSG(DTIBLN__FTIGN)
+	      ENDIF
+	      CALL IFFNXC('EF',IELEN)	! waste feature
+	      IF (IELEN.LE.-1) GOTO 130	! error or eof
+	      GOTO 10
+	   ENDIF
+C
+C The feature appears to be useful. Process the features coordinates
+C If the coordinates in the string are relative to a different origin
+C offsets we must take the differing origin offsets into account by
+C using out local datum held in /PROCESS/LOCOFF. First read the CB.
+	   CALL EIHRCB_HEAD(CBH)
+	   CALL EIHRCB_DATA(CBD)
+C
+C Read 1st point in CB and initialise CB's bounding rectangle
+C for the coords in this CB
+	   CALL IFS_CB_READ(CBH,CBD,XY,2,XYCOL,1,1)
+	   CB_RANGE(1)=XY(1) + LOCOFF(1,IFIL)
+	   CB_RANGE(2)=XY(1) + LOCOFF(1,IFIL)
+	   CB_RANGE(3)=XY(2) + LOCOFF(2,IFIL)
+	   CB_RANGE(4)=XY(2) + LOCOFF(2,IFIL)
+	   DO 50 I=1,CBH.NROW
+C
+C read an XY pair from CB
+	      CALL IFS_CB_READ(CBH,CBD,XY,2,XYCOL,I,I)
+C
+C add local origin LOCOFF to X and Y
+	      XY(1) = XY(1) + LOCOFF(1,IFIL)
+	      XY(2) = XY(2) + LOCOFF(2,IFIL)
+C
+C Calculate the CB's bounding rectangle
+	      IF (XY(1).LT.CB_RANGE(1)) CB_RANGE(1)=XY(1)
+	      IF (XY(1).GT.CB_RANGE(2)) CB_RANGE(2)=XY(1)
+	      IF (XY(2).LT.CB_RANGE(3)) CB_RANGE(3)=XY(2)
+	      IF (XY(2).GT.CB_RANGE(4)) CB_RANGE(4)=XY(2)
+C
+C write it back to CB 
+	      CALL IFS_CB_WRITE(CBH,CBD,XY,2,XYCOL,I,I)
+50	   CONTINUE
+C
+C Quickly test if the CB's bounding rectangle lies even partly
+C within the blend zone zone defined by BLEND_ZONE
+	   IF (CB_RANGE(1).GT.BLEND_ZONE(1,4)
+     &		.OR.
+     &		CB_RANGE(2).LT.BLEND_ZONE(1,1)
+     &		.OR.
+     &		CB_RANGE(3).GT.BLEND_ZONE(2,4)
+     &		.OR.
+     &		CB_RANGE(4).LT.BLEND_ZONE(2,2)) THEN
+C
+C Count total # pts in feature
+	      NCOORD=NCOORD+CBH.NROW
+	      GOTO 10
+	   ENDIF
+C
+C CB lies wholly or partly within the blend zone. Calculate
+C which of the CB's vectors lie within or partly within the blend
+C zone sectors. Place the results of this test into /PROCESS/IFF_TAB,
+C /PROCESS/NF_ADDRESS and /PROCESS/ START_STOP_TAB
+C
+C For each sector in turn
+	   DO 70 J=1,NSECTOR
+C
+C Reset to outside zone if 1st pt of CB
+	      JSECTOR=J
+	      INSECTOR=.FALSE.
+	      DO 60 I=1,CBH.NROW
+C
+C Read an XY pair from CB
+	         CALL IFS_CB_READ(CBH,CBD,XY,2,XYCOL,I,I)
+	         IF (HORIZONTAL_JOIN) THEN
+	            IF ((XY(1).GE.BLEND_ZONE(1,1)
+     &				+BLEND_SECTOR_WIDTH(1)*(J-1))
+     &			.AND.
+     &			(XY(1).LE.BLEND_ZONE(1,1)
+     &				+BLEND_SECTOR_WIDTH(1)*J)
+     &			.AND.
+     &			(XY(2).GE.BLEND_ZONE(2,2))
+     &			.AND.
+     &			(XY(2).LE.BLEND_ZONE(2,4))) THEN
+	                IF (.NOT.INSECTOR) THEN
+	                  INSECTOR=.TRUE.
+	                  ISTART=MAX(NCOORD+I-1,1)
+	                ENDIF
+	             ELSE
+	                IF (INSECTOR) THEN
+	                   ISTOP=NCOORD+I
+	                   OK=PACK_TABLE(IFIL,JSECTOR,ISTART,
+     &				ISTOP,NF_ADDRESS)
+	                   IF (.NOT.OK) GOTO 140
+	                   INSECTOR=.FALSE.
+	                ENDIF
+	             ENDIF
+		  ELSE			! vertical join
+	            IF ((XY(1).GE.BLEND_ZONE(1,1))
+     &			.AND.
+     &			(XY(1).LE.BLEND_ZONE(1,3))
+     &			.AND.
+     &			(XY(2).GE.BLEND_ZONE(2,2)
+     &				+BLEND_SECTOR_WIDTH(2)*(J-1))
+     &			.AND.
+     &			(XY(2).LE.BLEND_ZONE(2,2)
+     &				+BLEND_SECTOR_WIDTH(2)*J)) THEN
+	                IF (.NOT.INSECTOR) THEN
+	                  INSECTOR=.TRUE.
+	                  ISTART=MAX(NCOORD+I-1,1)
+	                ENDIF
+	             ELSE
+	                IF (INSECTOR) THEN
+	                   ISTOP=NCOORD+I
+	                   OK=PACK_TABLE(IFIL,JSECTOR,ISTART,
+     &				ISTOP,NF_ADDRESS)
+	                   IF (.NOT.OK) GOTO 140
+	                   INSECTOR=.FALSE.
+	                ENDIF
+	             ENDIF
+		 ENDIF
+60	      CONTINUE
+	      IF (INSECTOR) THEN
+	         ISTOP=MIN(NCOORD+I,NCOORD+CBH.NROW)
+	         OK=PACK_TABLE(IFIL,JSECTOR,ISTART,
+     &				ISTOP,NF_ADDRESS)
+	         IF (.NOT.OK) GOTO 140
+	         INSECTOR=.FALSE.
+	      ENDIF
+70	   CONTINUE
+C
+C Still in sector of interest but run out of CB points?
+	   IF (INSECTOR) THEN
+	      IFIL_BYTE=IFIL
+	      OK=PACK_TABLE(IFIL,JSECTOR,ISTART,ISTOP,NF_ADDRESS)
+	      IF (.NOT.OK) GOTO  140
+	   ENDIF
+C
+C Count total # pts in feature
+	   NCOORD=NCOORD+CBH.NROW
+	   GOTO 10
+C
+C ......................................................................
+C FS - feature code
+80	   CALL EIHRI(FC,1,1)
+C
+C Check that we are to use features with this FC
+	   OK=BITMATCH(IFF_USEFC(1,IFIL),FC,HAD_MATCH)
+	   IF (.NOT.OK) GOTO 140
+	   IF (.NOT.HAD_MATCH) THEN	! skip  feat.?
+	      CALL IFFNXC('EF',IELEN)	! yes, let's waste it.
+	      IF (IELEN.LE.-1) GOTO 130	! error or eof
+	      IF (HAD_DIAG) THEN
+	         CALL EXPAND(
+     &			'Feature code %^W%N has been DESELECT''ed',FC)
+	         CALL WRTAPP(' - excluding feature with FSN %^L%N (%N)',
+     &							NF(1),NF(2))
+	      ENDIF
+	   ENDIF
+	   GOTO 10
+C
+C ......................................................................
+C AC (ancillary code)
+90	   CALL EIHRI(ACTYPE,1,1)
+	   IF (ACTYPE.EQ.2.AND.IFF_AC2HT(IFIL)) THEN 
+	      HADAC2=.TRUE.     	! note that we have had an AC
+	   ELSE IF(ACTYPE.EQ.3.AND..NOT.IFF_AC2HT(IFIL)) THEN
+	      HADAC3=.TRUE.       	! note that we have had an AC
+	   ELSE IF(ACTYPE.EQ.80) THEN
+	      HAD_CLIFF=.TRUE.
+	   ELSE IF(ACTYPE.EQ.81) THEN
+	      HAD_CLIFF=.TRUE.
+	   ELSE
+	      CALL LSL_PUTMSG(DTIBLN__UNEXPACT,ACTYPE,NF(1),NF(2))
+	   ENDIF
+	   GOTO 10
+C
+C ......................................................................
+C NF - new feature
+100	   NF_ADDRESS=LPOSH		! record address of NF entry
+	   NF(1)=0			! clear longword
+	   CALL EIHRI(NF(1),1,1)	! get FSN
+	   NF(2)=0			! clear longword
+	   CALL EIHRI(NF(2),1,2)	! get internal seq. no.
+	   HADAC2=.FALSE.		! not had a type 2 AC  - yet
+	   HADAC3=.FALSE.		! not had a type 3 AC  - yet
+	   AC3HT=.FALSE.
+	   HAD_CLIFF=.FALSE.
+	   NCOORD=0
+	   GOTO 10
+C
+C ......................................................................
+C Close IFF file
+110	   CALL IFFCLO(IFIL)
+	   IFFLUN_INUSE(IFIL)=.FALSE.
+120	CONTINUE	
+125	IFF_TAB_BUILD=.TRUE.	
+	GOTO 140
+C
+C Unexpected end of IFF file
+130	CALL LSL_PUTMSG(DTIBLN__UNEXPEOF,
+     &			IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)))
+140	RETURN
+	END

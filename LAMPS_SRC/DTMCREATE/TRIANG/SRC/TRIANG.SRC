@@ -1,0 +1,520 @@
+	PROGRAM TRIANG
+C
+***	MODULE	TRIANG
+***	IDENT	02JA91
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Calls to WAIT changed to LSL_WAIT		TJH 21-Dec-1990
+CMOD	No longer shuts down non existant graphics on
+C	processing failure				TJH 07-Jun-1988
+C 	Created from old PANACEA module PANIC		TJH 27-Jul-1987
+C
+C ---------------------------------------------------------------------
+C Program to triangulate a sequence of digitised contour and
+C ridge/valley strings
+C
+C TRIANG collects commands issued by the user using CMDLIB and sets up
+C defaults and logical variables to control the pattern of processing. 
+C
+C All logicals and run defaults are stored in COMMON /CONTRL/
+C ---------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C W/s
+	BYTE		CH	! for use with RDCHS
+	INTEGER		CMD     ! decoded command number
+	INTEGER*2	OLDPTR	! for storing DCPTR for HELP
+	INTEGER		I,J 	! temp loop vars.
+	INTEGER		IERR	! error return
+	INTEGER		INDLEN	! length of indirect file-spec
+	INTEGER 	ISTRNG	! number of strings read in
+	INTEGER	  	KAFFIR	! no. cliff lines
+	LOGICAL		HADOUT	! .T. if output file has been specified
+	INTEGER	        LAX 	! The of data points that can be held 
+C				  is reduced from NPMAX to LAX by
+C 				  the number of imaginary frame points
+C				  that are included - one
+C				  in every box around the periphery
+	INTEGER 	LIMPOL  ! number of peripheral points
+	INTEGER		NCHS	! number of chars. in input line
+	LOGICAL		OK	! function return
+	LOGICAL		OPNERR	! i/p file failed to open?
+	INTEGER		REDPTS  ! total pts. read from IFF files
+	CHARACTER*128	DCLSTR	! for SPAWN command
+	CHARACTER*128	INDFILE	! indirect command file name
+	CHARACTER*100	DEFNAM	! default device/directory for filename
+C
+C Command tables:
+	EXTERNAL	TRIANG_CMD_TABLE
+	INTEGER		TRIANG_CMD_TABLE
+C
+C Functions:
+	LOGICAL		ASSIGN_CMD	! determine assignments
+	LOGICAL		DATUM_CMD	! set height datum
+	LOGICAL		DEASSIGN_CMD	! determine deassignments
+	LOGICAL		DESELECT_CMD	! determine deselections
+	LOGICAL		DISABLE_CMD	! decode disable keywords
+	LOGICAL		ENABLE_CMD	! decode enable keywords
+	LOGICAL		EXAMINE_TERM	! examine terminal
+	LOGICAL		FILEIN_CMD	! get input file-spec
+	LOGICAL		FILEOUT_CMD	! get and open output files
+	LOGICAL		FORMAT_CMD	! decode format selections
+	INTEGER         FLRSTR		! read record from file
+	INTEGER         FLROPN		! open file for LSLLIB FILEO	
+	LOGICAL		GETFILNAM	! read file-spec
+	LOGICAL		GETFRT_CMD	! open and read FRT file
+	LOGICAL		HELP_CMD	! give help
+	LOGICAL  	INITIALISE	! set things up
+	LOGICAL  	MAXPOINTS_CMD	! get MAXPOINTS command args
+	LOGICAL  	RDCHS		! read character from line
+	LOGICAL  	RDCH		! read character from line
+	LOGICAL 	RDCOMM  	! read command from line
+	INTEGER		RDFILN		! reads and parses a filename
+	LOGICAL         READIN		! get input data
+	LOGICAL         REALIN  	! to prompt for and get reals
+	LOGICAL		SELECT_CMD	! determine selections
+	LOGICAL         SHOW_CMD	! show status
+	LOGICAL         SPAWN_CMD	! for DCL SPAWN
+	LOGICAL		SIGCHS		! gets # significant characters
+	INTEGER		TTRSTR  	! read line from terminal
+	LOGICAL		UNITS_CMD	! sets WINDOW units
+	LOGICAL		WAIT_CMD	! wait for specified time
+	LOGICAL		WINDOW_CMD	! get WINDOW command args
+	LOGICAL		WRITE_NODES	! write out nodes
+	LOGICAL		ZLIMITS_CMD	! get ZLIMITS command args
+	LOGICAL		ZONE		! oversee triang. formation
+C
+C Parameters
+	INCLUDE	'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$CMNTRIANG:TRIANGMSG.PAR'
+C
+C Common blocks...
+	INCLUDE 'LSL$CMNTRIANG:ANG.CMN'
+	INCLUDE 'LSL$CMNTRIANG:CONTRL.CMN'
+	INCLUDE 'LSL$CMNTRIANG:CHECKS.CMN'
+	INCLUDE 'LSL$CMNTRIANG:INFILES.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNTRIANG:FINDIT.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFDEV.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$CMNTRIANG:NODBUF.CMN'
+	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'LSL$CMNTRIANG:STACKA.CMN'
+	INCLUDE 'LSL$CMNTRIANG:STACKB.CMN'
+	INCLUDE 'LSL$CMNTRIANG:STORAG.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNTRIANG:ZONVAR.CMN'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C ......................................................................
+C
+C Initialise 
+	OK=INITIALISE(REDPTS,LAX,ISTRNG,KAFFIR)
+	IF (.NOT.OK) GOTO 290
+C
+C Check what SYS$OUTPUT is assigned to and if a terminal is it a CRT?
+	OK=EXAMINE_TERM()
+	IF (.NOT.OK) GOTO 290
+C
+C Get the resolution size from the logical LSL$DTMCREATE_RESOLUTION
+	CALL RESLOG()
+C
+C ......................................................................
+C
+C Get an input line from the terminal
+10	TXTPTR=80
+	IF (TTIN) THEN
+	   OK=TTRSTR(,,'TRIANG> ',IERR)
+	ELSE
+	   CALL FLRSEL(INDLUN)
+	   OK=FLRSTR(,,IERR)
+	ENDIF
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      IF (TTIN) THEN
+	         GOTO 280		! end of file = exit
+	      ELSE
+	         CALL WRITEF('%S Unexpected end of indirect command '//
+     &			'file detected',WARNING)
+	         CALL WRITEF('                RETURN command assumed '//
+     &				'- returning to terminal input')
+	         GOTO 190		! close indirect file etc.
+	      ENDIF
+	   ENDIF
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 20
+	ENDIF
+C
+C echo and decode the line
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('TRIANG> ')
+	   CALL APPEND(TXTDSC) ! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+	CALL BSLN
+C
+C Look for comment
+	IF (RDCHS(CH)) GOTO 10	! substantially empty line
+	IF (CH.EQ.'!') GOTO 10	! comment!
+C
+C Look for indirect file start
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 20
+	      ELSE
+	         CALL BSCH
+	      ENDIF
+	      DEFNAM='SYS$DISK:[]'
+	      OK=GETFILNAM(INDFILE,INDLEN,
+     &		DEFNAM(1:SIGCHS(DEFNAM))//'.COM;0',.TRUE.,%REF('!'))
+	      IF (OK) THEN
+	         CALL STR$UPCASE(INDFILE,INDFILE)
+	      ELSE
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	      OK=FLROPN(INDLUN, INDFILE(:INDLEN), IERR)
+	      IF (OK) THEN
+	         CALL WRITEF('Command input now being read from %S'
+     &					,INDFILE(:INDLEN))
+	         TTIN=.FALSE.
+	         GOTO 10
+	      ELSE
+	         CALL WRITEF('%S Can''t open indirect command file %S'
+     &			  ,WARNING,INDFILE(:INDLEN))
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+	CALL BSCH			! un-read non-'@'
+C
+	CMD=RDCOMM(TRIANG_CMD_TABLE)
+	GOTO (	20,
+     &		60,			! assign
+     &		140,			! datum
+     &		70,			! deassign
+     &		80,			! deselect
+     &		40,			! disable
+     &		30,			! enable
+     &		160,			! filein
+     &		170,			! fileout
+     &		110,			! format
+     &		150,			! frt
+     &		90,			! help
+     &		130,			! maxpoints
+     &		210,			! pause
+     &		240,			! quit
+     &		180,			! return
+     &		50,			! select
+     &		120,			! show
+     &		200,			! spawn
+     &		260,			! go
+     &		250,			! units
+     &		220,			! wait
+     &		230,			! window
+     &		100			! zlimits
+     &	      		), CMD+1
+C
+C command number out of range
+	CALL WRITEF('Command not yet implemented')
+C
+C close indirect input following disaster
+20	IF (.NOT.TTIN) THEN
+	   TTIN=.TRUE.
+	   CALL FLRCLO(INDLUN)
+	   CALL WRITEF(' ')
+	   CALL WRITEF('%S Indirect file error - returning to '//
+     &			'terminal input',WARNING)
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C Enable 'sub-command'
+C
+30	IF (.NOT.ENABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C Disable 'sub-command'
+C
+40	IF (.NOT.DISABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SELECT 'sub-command'
+C
+50	IF (.NOT.SELECT_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C ASSIGN 'sub-command'
+C
+60	IF (.NOT.ASSIGN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C DEASSIGN 'sub-command'
+C
+70	IF (.NOT.DEASSIGN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C DESELECT 'sub-command'
+C
+80	IF (.NOT.DESELECT_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C HELP
+90	IF (.NOT.HELP_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C ZLIMITS
+C
+100	IF (FIXMPT) THEN
+	   CALL WRITEF('%S You cannot reset the ZLIMITS once a '//
+     &		'file has been read in',WARNING)
+	ELSE
+	   IF (ZLIMITS_CMD()) GOTO 10
+	ENDIF
+	GOTO 20
+C
+C ......................................................................
+C FORMAT - input file format
+110	IF (.NOT.FORMAT_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SHOW
+120	IF (.NOT.SHOW_CMD(LAX)) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C MAXPOINTS - Maximum number of points expected:
+C
+130	IF (.NOT.MAXPOINTS_CMD(LAX)) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C DATUM - height datum:
+C
+140	IF (.NOT.DATUM_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C FRT [filespec] - for FC group names 
+C
+150	IF (.NOT.HADFRT) THEN
+	   IF (.NOT.GETFRT_CMD()) GOTO 20
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C FILEIN [file-spec]
+C
+160	IF (.NOT.FILEIN_CMD(HADOUT)) GOTO 20
+	FIXMPT=.TRUE.   ! prevent user changing MAXPTS from now on
+C
+C Got an input file-spec, now try to open and read from it
+	OK=READIN(LIMPOL,REDPTS,5,LAX,KAFFIR,ISTRNG,OPNERR)
+	IF (.NOT.OK) GOTO 270	! if error close down and quit
+C
+C READIN returned OK but did the input file fail to open
+	IF (OPNERR) THEN
+C
+C SYS$OUTPUT isn't a terminal - batch?
+	   IF (.NOT.IS_TERM) THEN
+	      GOTO 20
+	   ENDIF	     	
+C
+C Command input from indirect file?
+	   IF (.NOT.TTIN) THEN
+	      GOTO 20
+	   ENDIF	     	
+	ELSE
+C
+C Note spec of the file that we successfully read from for SHOW FILES
+	   IF (NUM_INFILES+1.GT.MAX_INFILES) THEN
+	       CALL WRITEF(WARNING//
+     &		'Too many input files for file-spec storage. You may')
+	       CALL WRITEF(
+     &		'                read further input files using '//
+     &		'the FILEIN command')
+	       CALL WRITEF(
+     &		'                but TRIANG will no longer store '//
+     &		'their names for the')
+	       CALL WRITEF(
+     &		'                SHOW FILES command. This warning '//
+     &		'has no effect on')
+	       CALL WRITEF(
+     &		'                data input or the triangulation '//
+     &		'process.')
+	    ELSE
+	      NUM_INFILES=NUM_INFILES+1
+	      INFILES(NUM_INFILES)=INNAM
+	    ENDIF
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C FILEOUT [filespec]
+C
+170	IF (HADOUT) THEN  ! already had FILEOUT?
+	   CALL WRITEF('%S the output files are already open!',WARNING)
+	ELSE
+	   IF (.NOT.FILEOUT_CMD()) GOTO 20
+	   HADOUT=.TRUE.
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C RETURN - return to terminal input
+C
+180	IF (TTIN) THEN
+	   CALL WRITEF(
+     &		'RETURN command ignored - command '//
+     &			'input is already from terminal')
+	ELSE
+	   CALL WRITEF(
+     &		'RETURN command detected - returning to terminal input')
+	ENDIF
+190	IF (.NOT.TTIN) CALL FLRCLO(INDLUN)
+	TTIN=.TRUE.
+	GOTO 10
+C
+C ......................................................................
+C SPAWN DCL process - primarily designed for file management
+C
+200	IF (.NOT.SPAWN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C PAUSE
+C
+210	CALL PAUSE(TTIN)
+	GOTO 10
+C
+C ......................................................................
+C WAIT
+C
+220	IF (.NOT.WAIT_CMD(TTIN)) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C WINDOW
+C
+230	IF (FIXMPT) THEN
+	   CALL WRITEF('%S You cannot reset the WINDOW once a '//
+     &		'file has been read in',WARNING)
+	   GOTO 20
+	ELSE
+	   IF (.NOT.
+     &	   	WINDOW_CMD(VMIN(1),VMIN(2),VMAX(1),VMAX(2),TTIN,UNITS)
+     &							  ) GOTO 20
+	   GEOEXT=.TRUE.		! flag that we have had a window
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C QUIT
+C
+240	OK=SS$_NORMAL
+	GOTO 290
+C
+C ......................................................................
+C UNITS
+C
+250	IF (.NOT.UNITS_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C GO
+C
+260	IF (.NOT.FIXMPT.OR.REDPTS.EQ.LIMPOL) THEN  
+	   CALL WRITEF
+     &      ('You will have to read a file in before you can '//
+     &	    'triangulate it !')
+	   GOTO 20
+	ENDIF
+C
+C Set up graphics scaling from integer to screen coordinates
+C allowing for the position of the imaginary points just outside
+C (by IOFF) the main map area. Then initialise graphics.
+	IF (GRAPHICS) THEN
+	   CALL GINIT(FLOAT(MX2+IOFF*2),FLOAT(MY2+IOFF*2))
+	ENDIF
+	IF (DIAG) THEN
+	   IF (GRAPHICS.AND.(.NOT.GPX)) THEN
+	      CALL EXPAND('Generating Delaunay triangulation')
+	      CALL TXTOUT(.TRUE.)
+	      CALL LSL_WAIT(2,2)		! wait for 2 seconds
+	   ELSE
+	      CALL FRAMED_MES(10,0)
+	   ENDIF
+	ENDIF
+
+C
+C If we are not concerned with triangle leakage through strings 
+C save data and box details into transfer file. 
+	IF (.NOT.CONSTR) THEN
+	   OK=WRITE_NODES(REDPTS,LIMPOL)
+	   IF (.NOT.OK) GOTO 270
+	ENDIF
+C
+C ......................................................................
+C
+C Triangulate the contour strings
+	OK=ZONE(REDPTS,LIMPOL)
+	IF (.NOT.OK) GOTO 270
+	CALL EXPAND('Triangulation complete'//
+     & 	' for %^L%N points, of which %N are imaginary',REDPTS,LIMPOL)
+	IF (GRAPHICS) THEN
+	   CALL LSL_WAIT(3,2)		! wait for 3 seconds
+	   CALL TXTOUT(.TRUE.)		! output EXPDSC
+	   CALL LSL_WAIT(2,2)		! wait for 2 seconds
+	ELSE
+	   CALL TXTOUT(.FALSE.)
+	ENDIF	
+C
+C ......................................................................
+C If selected, do triangulation constraint
+C
+	IF (CONSTR) THEN
+	   IF (DIAG) THEN
+	      IF (GRAPHICS.AND.(.NOT.GPX)) THEN
+	         CALL EXPAND('Starting triangulation constraint phase')
+	         CALL TXTOUT(.TRUE.)
+	         CALL LSL_WAIT(2,2)		! wait for 2 seconds
+	      ELSE
+	         CALL FRAMED_MES(8,0)
+	      ENDIF
+	   ENDIF
+	   NP=REDPTS	
+	   CALL MUCKUP(LIMPOL,KAFFIR)
+	ENDIF
+C
+C ......................................................................
+C Finish graphics if switched on
+C
+270	IF (GRAPHICS.AND.GONOFF) THEN
+	   CALL FINIT
+	ENDIF
+280	CALL FILCLO(SS$_NORMAL)
+290	IF (OK) THEN
+	   CALL LSL_EXIT(SS$_NORMAL)
+	ELSE
+	   CALL LSL_EXIT(SS$_ABORT)
+	ENDIF
+	END

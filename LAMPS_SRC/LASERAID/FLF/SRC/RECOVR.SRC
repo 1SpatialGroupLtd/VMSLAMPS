@@ -1,0 +1,148 @@
+	LOGICAL*4 FUNCTION RECOVR
+C
+***	MODULE	RECOVR
+***	IDENT	14JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+C	Created 				 DM	24-Jun-1986
+C
+C Recover from a bad CALibration.
+C Function value is .TRUE. if we fail for some reason.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/IFFPAR/
+***	PARAMETER/PARAMS/
+C
+***	COMMON/DIGC/
+***	COMMON/IFFHAN/
+***	COMMON/IFFJUN/
+C
+	INTEGER*2 IECODE,IELEN	! IFF entry
+	INTEGER*2 NARMS		! number of arms belonging to junction
+	INTEGER*2 NPTS,IENDS	! ST entry details
+	INTEGER*4 I,J,K		! temporary variables
+	INTEGER*4 LPOSCC	! position of last CC entry
+	INTEGER*4 LPOSCP	! position of last CP entry
+	REAL	  BCOEFT(10,2)	! backwards coefficients from IFF file
+	REAL	  CPNEW(4,4)	! control point data from IFF file
+	REAL	  CPSAV(4,4)	! previous CPNEW
+	REAL	  JPOS(2)	! junction position
+C
+C functions:
+	INTEGER*4 TRXSET	! sets up two-way transform coefficients
+	LOGICAL*4 CPSET		! sets up a 4-point transform
+C
+C ......................................................................
+C
+	RECOVR=.TRUE.				! assume we fail
+	LPOSCC=0
+	CALL IFFRWD				! rewind the IFF file
+C
+10	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GO TO 100		! found end of file ?
+	IF (IECODE.EQ.'ST') GO TO 60
+	IF (IECODE.EQ.'JB') GO TO 90
+	IF (IECODE.EQ.'CP') GO TO 20
+	IF (IECODE.NE.'CC') GO TO 10
+C
+C ......................................................................
+C
+C ... CC entry.
+	LPOSCC=LPOSH
+	CALL EIHRR(BCOEFT,20,1)			! get backwards coeffs
+	GO TO 10
+C
+C ......................................................................
+C
+C ... CP entry.
+20	LPOSCP=LPOSH
+	CALL EIHRR(CPNEW,16,1)
+C
+C ... calculate a 4-point transform from map space to current o/p space.
+	DO 30 I=1,4		   		! exchange CP sides
+	   CPSAV(1,I)=CPTS(3,I)
+	   CPSAV(2,I)=CPTS(4,I)
+	   CPSAV(3,I)=CPTS(1,I)
+	   CPSAV(4,I)=CPTS(2,I)
+30	CONTINUE
+C
+	IF (CPSET(CPSAV)) THEN			! get coefficients
+	   CALL WRITEF('*** Bad control points%C',7)
+	   GO TO 110				! failure
+	ENDIF
+C
+C ... set up a dummy CP entry to overlay the old data on the latest
+C ... output space.
+	DO 40 I=1,4
+	   CALL TRXUSE(CPNEW(1,I),CPNEW(2,I),BCOEFT)
+	   CPSAV(1,I)=CPNEW(1,I)	! l.h.s. is now HRD space ...
+	   CPSAV(2,I)=CPNEW(2,I)
+	   CPSAV(3,I)=CPNEW(3,I)	! r.h.s. (will be) o/p space
+	   CPSAV(4,I)=CPNEW(4,I)
+	   CALL CPUSE(CPSAV(3,I),CPSAV(4,I))
+40	CONTINUE
+C
+C ... now calculate new coefficients for this section.
+	I=TRXSET(FCOEFF,CPSAV,FCOEFP,BCOEFP)	! set up new transform
+	IF (I.NE.1) THEN
+	   IF (I.EQ.40) CALL WRITEF(
+     &	       '*** Bad control points or cubic coefficients%C',7)
+	   GO TO 110				! failure
+	ENDIF
+C
+C ... re-transform the control points themselves and write them back.
+	DO 50 I=1,4				! transform to o/p space
+	   CALL TRXUSE(CPNEW(1,I),CPNEW(2,I),FCOEFP)
+50	CONTINUE
+	CALL EIHWR(CPNEW,16,1)			! patch in new values
+C
+C ... now update the CC.
+	CALL IFFPKE(IECODE,IELEN,LPOSCC)	! go back to the CC
+	IF (IELEN.EQ.-1.OR.IECODE.NE.'CC') THEN
+	   CALL WRITEF('RECOVR: Error positioning to CC entry')
+	   GO TO 110				! failure
+	ENDIF
+C
+	CALL EIHWR(BCOEFP,20,1)			! patch in new values
+	CALL WRITEF('IFF CC entry updated successfully')
+	LPOSCC=0
+	CALL IFFPKE(IECODE,IELEN,LPOSCP)	! go back to the CP
+	GO TO 10
+C
+C ......................................................................
+C
+C ... ST entry.
+60	CALL EIHRS(NPTS,IENDS)
+	K=0
+70	J=MIN(NPTS,MAXST)
+	CALL EIHRR(STPNTS,2*J,4*K+1)
+	DO 80 I=1,J				! transform the points
+	   CALL	TRXUSE(STPNTS(X,I),STPNTS(Y,I),BCOEFT)
+	   CALL	TRXUSE(STPNTS(X,I),STPNTS(Y,I),FCOEFP)
+80	CONTINUE
+	CALL EIHWR(STPNTS,2*J,4*K+1)		! rewrite transformed ST
+	NPTS=NPTS - J
+	IF (NPTS.EQ.0) GO TO 10			! read it all now
+	K=J
+	GO TO 70
+C
+C ......................................................................
+C
+C ... JB entry.
+90	CALL IFJNXT(JPOS(X),JPOS(Y),NARMS)
+	   IF (NARMS.EQ.-1) GO TO 10		! found end of JB ?
+	   CALL TRXUSE(JPOS(X),JPOS(Y),BCOEFT)	! back to HRD space
+	   CALL TRXUSE(JPOS(X),JPOS(Y),FCOEFP)	! new output space
+	   CALL EIHWR(JPOS(X),1,IFPOSJ+JEPOSX)	! patch coordinates back
+	   CALL EIHWR(JPOS(Y),1,IFPOSJ+JEPOSY)
+	GO TO 90				! get next junction
+C
+C ......................................................................
+C
+100	RECOVR=.FALSE.				! success
+110	RETURN
+	END

@@ -1,0 +1,160 @@
+	PROGRAM NTF2I
+C
+***     MODULE NTF2I
+***     IDENT	14NO96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author	IM		18-08-87
+C
+C A program to convert from NTF levels 1, 2 and 3 to IFF
+C NTF level 3 is output as an unstructured IFF file
+C
+CMod							TJI	 6-Oct-1987
+CMod	for version 1.1				 	IM	22-Aug-1989
+CMOD	source tidied, redundant variables removed	SG	04-Jul-1991
+CMOD	added new function Create_indexed		SG	05-Jul-1991
+CMOD	removed indexed file in preference to relative (direct access)
+C	file access					SG	08-Jul-1991
+CMOD	functions dealing with NTF file shifted to CREATE_RELATIVE
+C							SG	09-Jul-1991
+CMOD	added function to clean unwanted files at end	SG	12-Jul-1991
+CMOD	moved out-of-sequence RDATT() from PROCESS_NTF_HEADER	SG 17-Sep-1991
+CMOD    call made to TEMP_FILES as part of the work for
+C       NTF v2.0 (BS7567) - Work instruction W93/12		ST 01-Jun-1993
+CMOD    Introduce a condition handler to remove any temporary	ST 20-Oct-1993
+C       files left lying around. Mod 1310.
+CMOD    Implement CITF96 changes (WI/CC 1545)                  TJM 13-Jun-1996
+C
+	IMPLICIT NONE
+C
+C Parameters
+C
+	INCLUDE  'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	 'CACHE.PAR'
+C
+C Commons:
+C
+	INCLUDE	 'NTFDATA.CMN'			! for EOR_MARKER
+	INCLUDE	 'COMMANDS.CMN'			! for OUTPUT
+	INCLUDE  'RECORD.CMN'
+	INCLUDE  'LOOKUP.CMN'
+	INCLUDE  'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE  'LSL$CMNIFF:MD2NAM.CMN'
+	INCLUDE  'CITF.CMN'
+	INCLUDE  'CITFATTS.CMN'
+	INCLUDE	 'CACHE.CMN'
+C
+C Functions:
+C
+	LOGICAL		CMDLIN			! Read & decode command line
+	LOGICAL		OPEN_LOG		! Create log (/OUTPUT) file
+	LOGICAL		CREATE_RELATIVE		! create direct access file
+	LOGICAL		PROCESS_NTF		! process the created file
+	LOGICAL		RDATT			! process attribute files
+	LOGICAL		RDLOOKUP		! process lookup table file
+	LOGICAL		TEMP_FILES		! build temporary file names
+C
+	INTEGER*4 	STATUS			! exit status
+	INTEGER*4 	DESBLK(4) 		! descr. block for exit handler
+	EXTERNAL 	EXIT_HANDLER
+C
+C Workspace:
+C
+	INTEGER		OK				! Function return
+	INTEGER 	I				! DO loop counter
+	INTEGER 	MAX_START,MAX_END		!
+C
+C .....................................................................
+C Initialise LSLLIB
+C
+	CALL LSL_INIT
+C
+C Set up exit handler
+C
+	DESBLK(2) = %LOC(EXIT_HANDLER)
+	DESBLK(3) = 0
+	DESBLK(4) = %LOC(STATUS)
+	CALL SYS$DCLEXH(DESBLK)
+C
+	EOR_MARKER = CHAR( 13 )				! <CR>
+C
+C  ....................................................................
+C  main program chunk
+C
+	OK=CMDLIN()					! read command lin
+	IF (.NOT.OK) GOTO 9000
+C
+C	......................................................................
+C       Initialise ATTRIBUTE arrays ...according to CITF OS93 or CITF OS96
+C
+	IF (HAD_CITF93) THEN
+	   NUM_CITF_ATTS = NUM_CITF93_ATTS
+	   DO 10 I = 1, NUM_CITF93_ATTS
+	   CITF_DEF_ATT(I)   = CITF93_DEF_ATT(I)
+	   CITF_DEF_WIDTH(I) = CITF93_DEF_WIDTH(I)
+	   CITF_DEF_TYPE(I)  = CITF93_DEF_TYPE(I)
+	   CITF_DEF_MULT(I)  = CITF93_DEF_MULT(I)
+ 10	   CONTINUE
+C
+	ELSEIF (HAD_CITF96) THEN
+	   NUM_CITF_ATTS = NUM_CITF96_ATTS
+	   DO 20 I = 1, NUM_CITF96_ATTS
+	   CITF_DEF_ATT(I)   = CITF96_DEF_ATT(I)
+	   CITF_DEF_WIDTH(I) = CITF96_DEF_WIDTH(I)
+	   CITF_DEF_TYPE(I)  = CITF96_DEF_TYPE(I)
+	   CITF_DEF_MULT(I)  = CITF96_DEF_MULT(I)
+ 20	   CONTINUE
+        ENDIF
+C
+C If have had /FC_LOOKUP, read and sort FC lookup file into table.
+C
+	IF (HAD_FC_LOOKUP) THEN
+	    OK = RDLOOKUP()
+	    IF ( .NOT.OK ) GOTO 9000
+	ENDIF
+C
+C	"cache" for use with OSCAR type data
+C
+	CACHE_INIT = .FALSE.
+C
+C	......................................................................
+C	process the attribute files. note that the combination of HAD_ATTRIBUTE
+C	and HAD_FRT has been validated in CMDLIN()
+C
+	IF (OK.AND.HAD_ATTRIBUTE) OK = RDATT()	! process attribute file
+C
+	IF (OK.AND.OUTPUT) OK = OPEN_LOG()	! open log file
+C
+	IF (OK) OK = TEMP_FILES()		! build temporary file names
+C
+	IF (OK) THEN
+	  IF (OK) OK = PROCESS_NTF()		! process the NTF file	
+	  IF (OUTPUT) CALL CLOSE_LOG		! close log file
+	ENDIF
+C
+C  ....................................................................
+C
+C output node/cache statistics
+C
+	DO 8000 MAX_START=CACHE_MAX_GEOM_ID,1,-1
+	   IF(CACHE_START_LEVEL(MAX_START) .GE. 0) GOTO 8010
+8000	CONTINUE
+8010	CONTINUE
+
+	DO 8100 MAX_END=CACHE_MAX_GEOM_ID,1,-1
+	   IF(CACHE_END_LEVEL(MAX_END) .GE. 0) GOTO 8110
+8100	CONTINUE
+8110	CONTINUE
+
+	PRINT*,'Cache hits:	',CACHE_HITS
+	PRINT*,'Cache misses:	',CACHE_MISSES
+	PRINT*,'Max start index:',MAX_START
+	PRINT*,'Max end index:	',MAX_END
+C
+C  finished
+C
+	IF (OK) OK = LSL__NORMAL
+ 9000	CALL LSL_EXIT(OK)
+	END
+C

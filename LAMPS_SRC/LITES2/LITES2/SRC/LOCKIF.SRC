@@ -1,0 +1,162 @@
+	LOGICAL	FUNCTION LOCKIF(RESNAM,LKID,FILNAM,CHECK)
+C
+***	MODULE	LOCKIF
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To lock resource RESNAM (up to 31 chars)
+C LKID returns the lock id of the lock (or 0 if none)
+C Returns FALSE if locked OK (nobody else using already)
+C
+C It is up to the caller to dequeue the lock returned in LKID
+C when it is no longer required.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'($JPIDEF)'
+	INCLUDE	'($LCKDEF)'
+	INCLUDE	'($LKIDEF)'
+	INCLUDE	'($SYIDEF)'
+C
+***	PARAMETER/CMN:MOANMESS/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C arguments
+	CHARACTER*(*)	RESNAM		! resource name
+	INTEGER*4	LKID		! lock id if locked OK
+	CHARACTER*(*)	FILNAM		! for error messages
+	LOGICAL*1	CHECK		! check for other users
+C
+C functions called
+	INTEGER*4	SYS$ENQW,SYS$GETLKIW
+	INTEGER*4	LIB$GETSYI,LIB$GETJPI
+	INTEGER		SIGCHS		! LITES2
+	INTEGER*2	EXPAND		! LSLLIB
+C
+C workspace
+	INTEGER*4	OK
+	INTEGER*4	LKSB(2)
+	INTEGER*2	IOSB(4)
+	INTEGER*4	ITMLST(7)
+	INTEGER*2	ITMW(14)
+	EQUIVALENCE	(ITMLST,ITMW)
+	INTEGER*4	COUNT
+	INTEGER*4	CLEN,LLEN
+	INTEGER*2	LLENW(2)
+	EQUIVALENCE	(LLEN,LLENW)
+	RECORD	/LKIDEF/LKI
+	BYTE		LKIBUF(2*LKI$K_LENGTH)
+	INTEGER		I,L
+	INTEGER*4	CSID
+	CHARACTER*15	USER
+	INTEGER		USERL
+C
+	LOCKIF = .FALSE.		! assume all OK
+	LKID = 0			! no lock id yet
+C
+C grab null lock on our resource (should always work)
+	OK = SYS$ENQW(	,			! efn
+     &			%VAL(LCK$K_NLMODE),	! mode (null)
+     &			LKSB,			! status block
+     &			,			! flags
+     &			RESNAM,			! resource name
+     &			,,,,,)			! omitted args
+	IF (.NOT.OK) THEN
+	   CALL LITES2_SIGNAL(OK)
+	   GOTO 999
+	ENDIF
+	IF (.NOT.LKSB(1)) THEN
+	   CALL LITES2_SIGNAL(LKSB(1))
+	   GOTO 999
+	ENDIF
+C
+	LKID = LKSB(2)				! return lock id
+	IF (.NOT.CHECK) GOTO 999		! return if not checking
+C
+C now check for other users of our lock
+	ITMW(1) = 4				! buffer length
+	ITMW(2) = LKI$_GRANTCOUNT
+	ITMLST(2) = %LOC(COUNT)
+	ITMLST(3) = %LOC(CLEN)
+	ITMW(7) = 2*LKI$K_LENGTH		! buffer length
+	ITMW(8) = LKI$_LOCKS
+	ITMLST(5) = %LOC(LKIBUF)
+	ITMLST(6) = %LOC(LLEN)
+	ITMLST(7) = 0
+
+	OK = SYS$GETLKIW(	,		! efn
+     &				LKID,		! lock id
+     &				ITMLST,		! item list
+     &				IOSB,		! status block
+     &				,,)		! omitted args
+	IF (.NOT.OK) THEN
+	   CALL LITES2_SIGNAL(OK)
+	   GOTO 999
+	ENDIF
+	IF (.NOT.IOSB(1)) THEN
+	   CALL LITES2_SIGNAL(IOSB(1))
+	   GOTO 999
+	ENDIF
+C
+C If more than one lock on the resource (including us), then someone
+C else is using it
+	IF (COUNT.LE.1) GOTO 999	! all OK - we've locked it
+C
+C determine some details of the other user
+C first check that we actually have information on at least two locks
+	TXTPTR = EXPAND('%Wanother user',TXTBUF)! default message
+	L = LLENW(2).AND.'7FFF'X
+	IF (LLENW(1).LT.2*L) GOTO 980	! eh?
+C
+C find which of the two locks is not ours
+C (should probably be comparing CSID with ours also, since LKID is
+C  only unique on a single node - but never mind, at worst we will
+C  output 'another user' rather than their proper name)
+	DO 10 I=0,1
+	   CALL VIOMV3(LKIBUF(1+I*L),L,LKI)
+	   IF (LKI.LKI$L_LKID.NE.LKID) GOTO 11
+10	CONTINUE
+	GOTO 980					! eh?
+C
+C Get the other user's username
+C This may well fail eg with SS$_NOPRIV, so cope with the error
+11	OK = LIB$GETJPI(JPI$_USERNAME,LKI.LKI$L_PID,,,USER,USERL)
+	IF (OK) THEN
+	   USERL = SIGCHS(USER(:USERL))
+	   TXTPTR = EXPAND('%Wuser %S',TXTBUF,USER(:USERL))
+	ENDIF
+C
+C find if the other user is on a VAXcluster, and if so, whether on
+C our node
+	IF (LKI.LKI$L_CSID.EQ.0) GOTO 900	! not a VAXcluster
+	OK = LIB$GETSYI(SYI$_NODE_CSID,CSID)	! get our CSID
+	IF (.NOT.OK) THEN
+	   CALL LITES2_SIGNAL(OK)
+	   GOTO 900
+	ENDIF
+	IF (LKI.LKI$L_CSID.EQ.CSID) GOTO 900	! on our node
+C
+C User is on another node, so get nodename
+C This should work, unless the node has shut down or something
+	OK = LIB$GETSYI(SYI$_NODENAME,,USER,USERL,LKI.LKI$L_CSID)
+	IF (OK) THEN
+	   TXTPTR = TXTPTR+EXPAND('%W on node %S',TXTBUF(TXTPTR+1),
+     &						USER(:USERL))
+	ELSE
+	   TXTPTR = TXTPTR+EXPAND('%W on node csid %X',TXTBUF(TXTPTR+1),
+     &						LKI.LKI$L_CSID)
+	ENDIF
+	GOTO 900
+C
+C append PID to the message
+900	TXTPTR = TXTPTR + EXPAND('%W (pid %X)',TXTBUF(TXTPTR+1),
+     &						LKI.LKI$L_PID)
+C
+980	CALL MOAN(MSG_IFFLOCK,TXTDSC,FILNAM)
+C
+C indicate resource locked by another user
+	LOCKIF = .TRUE.
+C
+999	RETURN
+	END

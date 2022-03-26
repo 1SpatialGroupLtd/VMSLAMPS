@@ -1,0 +1,250 @@
+	SUBROUTINE FIXCLF(LUN)
+C
+***	MODULE	FIXCLF
+***	IDENT	02JA91
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Call to WAIT changed to LSL_WAIT	    TJH  21-Dec-1990
+C	Created 				    TJH  02-Jun-1989
+C
+C Ensures that all clifflines are defined by a minimum of three points.
+C If not and a single point, downgrade to breakline. If two points
+C only, insert a third point at the mid-point between the two, taking
+C care to interpolate the Z values correctly and ensuring that
+C the inserted point is not < the min point separation distance 
+C from its neighbours.
+C
+C
+	IMPLICIT NONE
+C
+C Argument
+	INTEGER	 LUN				! file LUN
+C
+C Parameters:
+	INCLUDE 'LSL$CMNTRIANG:DIMS.PAR'
+	INCLUDE 'LSL$CMNTRIANG:TRIANGMSG.PAR'
+C
+C Common:
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$CMNTRIANG:CONTRL.CMN'
+	INCLUDE 'LSL$CMNTRIANG:DATQ.CMN'
+	INCLUDE 'LSL$CMNTRIANG:RCONVI.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFDEV.CMN'
+	INCLUDE	'LSL$CMNLSL:EXPC.CMN'
+C
+C W/s
+	INTEGER	 NEIBUF(NAYMAX)		! neighbour list
+	INTEGER	 NUMBER			! number of neighbours
+	INTEGER	 I,J,K,IFIRST,NODP
+	REAL	 DIST			! distance between cliff pts
+	INTEGER	 KSTART			! start point of current cliff
+	INTEGER	 KSTOP			! stop point of current cliff
+	INTEGER	 KLEN			! length of cliff (# nodes)
+	INTEGER	 IDAT(4),JDAT(4)	! temp point store
+	INTEGER	 IXY(2)
+	INTEGER	 IZ,JZ			! cliff LHS & RHS height
+	BYTE	 TPOL			! topology flag
+	DATA TPOL/0/
+	INTEGER	LIST(3)			! triangle vertex list
+C
+CCC	INTEGER	 LNOD,FLAG
+CCC	REAL	 XTMP,YTMP,ZTMP,ZRTMP ! for debug messages
+C ......................................................................
+C
+C Print out node number and coordinates
+CCC	CALL WRITEF
+CCC	DO 55 LNOD=1,NP
+CCC	   XTMP=(MAC(1,LNOD)-OFFSET(1))/VSCAL(1)+VMIN(1)
+CCC	   YTMP=(MAC(2,LNOD)-OFFSET(2))/VSCAL(2)+VMIN(2)
+CCC	   ZTMP=(ABS(MAC(3,LNOD))-OFFSET(3))/VSCAL(3)+VMIN(3)
+CCC	   FLAG=ISIGN(1,MAC(4,LNOD))
+CCC	   IF (KLIFFN(LNOD).EQ.-NPMAX) THEN
+CCC	   CALL WRITEF('Node: %N     X: %F  Y: %F   Z: %F %I'
+CCC     &				,LNOD,XTMP,YTMP,ZTMP,FLAG)
+CCC	   ELSE
+CCC	   ZRTMP=(ABS(KLIFFN(LNOD))-OFFSET(3))/VSCAL(3)+VMIN(3)
+CCC	   CALL WRITEF(
+CCC     &	'Node: %N     X: %F  Y: %F ZLEFT: %F ZRIGHT: %F  %I'
+CCC     &			,LNOD,XTMP,YTMP,ZTMP,ZRTMP,FLAG)
+CCC	   ENDIF
+CCC55	CONTINUE
+C
+C Are there any cliffs?
+	IF (KAFFIR.LE.0) GOTO 100			! return
+C
+C If graphics increase width of lines representing the strings
+	IF (GRAPHICS) THEN
+	   CALL WIDTH(2)
+	ENDIF
+C
+C Go through the clifflines lines to be checked/repaired
+C
+	IF (DIAG) THEN
+	   IF (GRAPHICS.AND.(.NOT.GPX)) THEN
+	      CALL EXPAND('Analysing clifflines')
+	      CALL TXTOUT(.TRUE.)
+	      CALL LSL_WAIT (1,2) ! wait for 1 sec.
+	      CALL COLOUR(7,.FALSE.)
+	   ELSE
+	      CALL FRAMED_MES(11,0)
+	   ENDIF
+	ENDIF
+C
+C Set number of "patches" to zero
+	NPATCH=0
+C
+C Store old value of NP. Any patch points inserted into two point cliffs
+C will be allocated positions in MAC() beyond the current NP'th element.
+C (NPOLDS is in /DATQ/)
+	NPOLDS=NP
+C
+C LIMPOL is the number of imaginary points
+	KSTOP=LIMPOL
+C
+C Get sign of first cliff string
+10	DO 20 KSTART=KSTOP+1,NPOLDS+1
+C
+C All done? If so windup and garbage collect
+	   IF (KSTART.GT.NPOLDS) GOTO 90
+C
+	   IF (KLIFFN(KSTART).NE.-NPMAX) THEN
+	      IFIRST=ISIGN(1,MAC(4,KSTART))
+	      GOTO 30
+	   ENDIF
+20	CONTINUE
+C
+C Find end of string
+30	DO 40 KSTOP=KSTART,NPOLDS
+	   IF (IFIRST.NE.ISIGN(1,MAC(4,KSTOP))) GOTO 50
+40	CONTINUE
+	KSTOP=NPOLDS+1
+C
+50	KLEN=KSTOP-KSTART
+	KSTOP=KSTOP-1
+C
+C ......................................................................
+C Determine whether this is a cliff that has less than three points
+	IF (KLEN.LT.3) THEN
+C
+	   IF (KLEN.EQ.2) THEN
+C
+C This is a cliffline having only two defining points. This cannot be 
+C (in terms of the cliff expansion algorithm used). Add a third point
+C mid-way between the two known points. The cliff start/stop nodes
+C KSTART and KSTOP will remain unchanged, the extra node will be 
+C added in between but positioned as a new string at the end of the 
+C data set. This requires a rather different windup procedure to 
+C sort out the muddle.
+C
+C First the nasty bit - is the new node going to be less than the
+C minimum node separation distance (LIMDIS).
+	      DO 60 J=1,3
+	         JDAT(J)=MAC(J,KSTART)
+	         IDAT(J)=MAC(J,KSTOP)
+60	      CONTINUE
+	      CALL EUCLID(IDAT(1),IDAT(2),JDAT(1),JDAT(2),DIST,1)
+C
+C Check that the 2 pt cliff is too short to interpolate a
+C mid-point. Downgrade to be a simple breakline.
+	      IF (DIST.LT.2.0*FLOAT(LIMDIS)) THEN 
+	         KLIFFN(KSTART)=-NPMAX 	! 1st pt no longer a cliff
+	         KLIFFN(KSTOP)=-NPMAX 	! 2nd pt no longer a cliff
+	         KAFFIR=KAFFIR-2	! one less cliff pt 
+	      ELSE
+C
+C Room enough for the new mid-point, get the cliff RHS Z values
+	         JDAT(4)=KLIFFN(KSTART)
+	         IDAT(4)=KLIFFN(KSTOP)
+C
+C Calculate the new middle cliff node position.
+	         IXY(1)=(IDAT(1)+JDAT(1))/2
+	         IXY(2)=(IDAT(2)+JDAT(2))/2
+	         IPKOLD=NP+1
+C		
+C Interpolate the LHS cliff height linearly between the first
+C and last point on this cliff string 
+	         IZ=(IDAT(3)+JDAT(3))/2
+C
+C Lineally interpolate height for the RHS of cliff
+	         JZ=(IDAT(4)+JDAT(4))/2
+C
+C Ensure that the string marker is set to the same value as that
+C used by the cliff string KSTART-KSTOP.
+		 LASTSN=ISIGN(1,MAC(4,KSTART))
+C
+C Add intersection point to the data set.
+	         CALL ENTPOS(IXY(1),IXY(2),IZ,JZ,TPOL)
+	         KAFFIR=KAFFIR+1	! one more cliff point!
+	         IF (GRAPHICS) THEN
+	            CALL CROSS(IXY(1),IXY(2),2)
+	         ENDIF
+C
+C Update NODP to new NP value
+	         NODP=NP
+C
+C Build vertex list for the triangle one of whose edges is to be split
+C by the new node. First get neighbours of the first cliff point
+	         CALL GETNAY(KSTART,NEIBUF,NAYMAX,NUMBER)
+	         DO 70 I=2,NUMBER
+	            J=NEIBUF(I-1)
+	            IF (NEIBUF(I).EQ.KSTOP) GOTO 80
+70	         CONTINUE
+C
+		 CALL LSL_GETMSG(TRIANG__LIST,MESSAGE,MESLEN)
+		 CALL ALARMS(MESSAGE(:MESLEN)//' - FIXCLF')
+C
+C Determine 3rd vertex of one of the 2 possible triangles which has
+C edge KSTART-KSTOP as one of its sides
+80	         LIST(1)=KSTART
+	         LIST(2)=KSTOP
+	         LIST(3)=J
+C
+C Update connections
+	         CALL ONEDGE(LIST,NAYMAX,NODP)
+C
+C Determine which nodes have been added to the structure and
+C keep a record of their location in the data array.
+C
+	         IF (IPKOLD.LE.NP) THEN
+	            IF (NPATCH.GT.MPATCH) THEN
+	               CALL LSL_GETMSG(TRIANG__TOOMNYPAT,MESSAGE,MESLEN)
+	               CALL ALARMS(MESSAGE(:MESLEN))
+	            ELSE
+	               NPATCH=NPATCH+1
+	            ENDIF
+	            IPATCH(1,NPATCH)=KSTART
+	            IPATCH(2,NPATCH)=IPKOLD
+	            IPATCH(3,NPATCH)=NP
+	         ENDIF
+	      ENDIF
+C
+C ......................................................................
+C Is this a single point cliff (boggle!) caused by clipping a cliffline
+C to the triangulation window?  If so, remove it from the
+C cliff list and down-grade the point to ordinary breakline status 
+	   ELSEIF (KLEN.EQ.1) THEN
+	      KLIFFN(KSTART)=-NPMAX 	! no longer a cliff
+	      KAFFIR=KAFFIR-1		! one less cliff point
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C Get start of next cliff string and the string sign
+	GOTO 10
+C
+C ......................................................................
+C
+C That's it. Reassemble lines so that they include the added patches
+C
+90	CALL REASSM(LUN)
+C
+C Remove any duff nodes that may have been created by vertex
+C replacement - a form of garbage collection. (Shouldn't actually
+C do any work as all the new nodes are edge intersections, not node
+C replacements).
+	CALL DUFNOD
+C
+100	RETURN
+	END

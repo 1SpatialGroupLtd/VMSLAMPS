@@ -1,5 +1,4 @@
-
-#module I2ARC "03AU89"
+#module I2ARC "12AP95"
 
 /******************************************************************************/
 /*									      */
@@ -43,13 +42,42 @@
 	Version 1.0	13/08/1988	Gary Robinson, NUTIS
 	Version 1.1	07/09/1988		"
 
-	Version 2	15/05/1989	Jon Barber
+	Version 2.0	15/05/1989	Jon Barber
 			LSL standardised (with LSL_PUTMSG etc.)
 			Command line driven
 			TS entries produce separate text features
 			ZS entries handled (to give x,y only)
 			CB entries turned into ST/ZS for x,y -
 					(set input revision level 0)
+
+	Version 3.0	06/03/1991	Steve Townrow
+	                New qualifiers /INFO_TABLES and /PARAMETER added
+			to arc attribute tables .AAT and .PAT using the
+			parameter file to describe the type of the attributes
+
+        Mod 1224	21/04/1993	Steve Townrow
+			Function st_out now writes attribute id numbers (narcs)
+			which are equal to the features to which they belong.
+
+	Mod 1333	19/1/1994	Steve Townrow
+			New global variables introduced which keep a count of
+			the number of bytes used in the AAT and PAT tables.
+			They are called aat_count and pat_count and are set
+			in routine DOTABLES.
+
+	Mod 1379	2/3/1995	Steve Townrow
+			The program now outputs sequential Internal and User
+			IDs when /NOINFO_TABLES is used. SPR 2719.
+
+	Mod 1474	2/3/1995	Steve Townrow
+			A feature with > 500 points which is broken up into
+			separate features will have each new part given a 
+			unique (sequential) Internal ID and User-ID and
+			the same attributes as on the original feature.
+
+	Mod 1485	12/4/1995	Steve Townrow
+			The program now outputs sequential Internal and User
+			IDs always.
 */
 /******************************************************************************/
 
@@ -60,14 +88,14 @@
 #include <lsldesc.h>			/* for s_Desc */
 
 #include <math.h>
-#include "cbc.h"			/* GJR's versions of C header files */
-#include "iffhan.h"
-#include "iff.h"
+#include "here:cbc.h"			/* GJR's versions of C header files */
+#include "here:iffhan.h"
+#include "here:iff.h"
 
+#include "here:frtcom.h"		/* FRT */
 #include "lsl$cmnlsl:filename.h"	/* LSLLIB filename stuff */
 #include "here:cmdline.h"		/* cmd line qualifier stuff */
 #include "here:i2arcmsg.h"		/* message param file */
-
 
 #define FILE_NAME_LEN		39	/* length for file name */
 #define MAX_VERTICES 		10000	/* just be safe! */
@@ -88,18 +116,36 @@ THICK 	thick;
 ROTATION rot;
 VERTEX2 vertex[MAX_VERTICES];
 char 	text[256];
+char	attline[80];
+char	expstr[320];
+int	lineptr;
 
 short gtype[MAX_FC], colour[MAX_FC];		/* FRT info. */
 short sc[MAX_FC]   , symbol[MAX_FC];
 
 float width[MAX_FC], size[MAX_FC];
 
+int	acnum = 0; aclist[256][7];
+
+int	blocknum = 0;	/* number of times a feature was split into blocks */
+			/* of size MAX_ARCINFO_VERTICES */
+int	narcs = 0;	/* number of arcs (line) features */
+int	nsymb = 0;	/* number of symbol features */
+int	naat = 0;	/* number of arc attributes */
+int	npat = 0;	/* number of point attributes */
+int	j = 0, i = 0;	/* general loop counters */
 int     id = 1;		/* current ID number of feature ( used to relate
 			   FSN, FC, layer no. etc. between coords & DB info */
 INT_2	fc;		/* current fc */
 int     vtot = 0;	/* accum. vertices in ST,ZS entries */
+int	aat_count;	/* number of bytes for all attributes in AAT table */
+int	pat_count;	/* number of bytes for all attributes in PAT table */
 
-FILE *fout, *ffrt, *flab, *ftxt, *ffsn, *fiac, *frac;	/* work files */
+FILE *fout, *ffrt, *fpar, *flab, *ftxt;		/* work files */
+FILE *faat, *fpat, *ffsn, *fiac, *frac;
+
+struct attlist *alist;
+struct attlist *plist;
 
 /******************************************************************************/
 
@@ -108,11 +154,18 @@ main()
 	void LSL_INIT();
 	void LSL_EXIT();
 	void LSL_PUTMSG();
+	struct attlist *addatt(struct attlist *, int);
+	struct attlist *addattval(struct attlist *, int, int, float, char *);
+	void buildlists(void);
+	void showlist(struct attlist *);
+	void writelist(struct attlist *, int);
+	void freelist(struct attlist *);
 
    /* C_MAX_SIZ = 217 in filename.h */
 
 	char IFF_file[C_MAX_SIZ+1];		/* input IFF file */
 	char FRT_file[C_MAX_SIZ+1];		/* input FRT file */
+	char PAR_file[C_MAX_SIZ+1];		/* parameter file */
 	char ARC_name[FILE_NAME_LEN-3];		/* output ARCINFO name */
 	char ARCINFO_file[FILE_NAME_LEN+1];	/* output ARCINFO file */
 
@@ -125,6 +178,8 @@ main()
 	BOOLEAN	   FSN_is_open = FALSE;
 	BOOLEAN	   IAC_is_open = FALSE;
 	BOOLEAN	   RAC_is_open = FALSE;
+	BOOLEAN	   AAT_is_open = FALSE;
+	BOOLEAN	   PAT_is_open = FALSE;
 
 	BOOLEAN	   had_ts      = FALSE;		/* had a TS entry */
 	BOOLEAN	   ok 	       = FALSE;		/* function return */
@@ -134,7 +189,9 @@ main()
 	INT_2 entry_code, entry_length, length, npts, ends, start;
 	INT_4 rev_level = 0;			/* IFF input revision level */
 
-	int len, c, icnt, cnt;		/* workspace variables */
+	char *attname;
+	int atype, dtype, ftype, nfeat;
+	int len, c, cnt;		/* workspace variables */
 	int nexist = 0;   		/* current count of FCs */
 	int niac = 0;			/* no. of integer ACs */
 	int nrac = 0;			/* no. of real ACs */
@@ -156,10 +213,12 @@ main()
    /* read and decode the command line */
 
 	had_frt = FALSE;
+	had_par = FALSE;
+	had_tab = FALSE;
 	had_log = FALSE;
 	had_debug = FALSE;
 
-	ok = read_cmdline ( IFF_file, ARC_name, FRT_file );
+	ok = read_cmdline ( IFF_file, ARC_name, FRT_file, PAR_file );
 	if ( !ok ) 
 	{
 		LSL_PUTMSG (&I2ARC__CMDLNERR);
@@ -181,23 +240,31 @@ main()
 		goto end_program;
 	}
 
-	if (had_log) printf ("\n Opening IFF file      %s \n", IFF_file);
+	if (had_log) printf ("\n Opening IFF file       %s \n", IFF_file);
 	IFF_is_open = TRUE;
 
    /* open FRT file */
 
-	if ( !(ffrt = fopen(FRT_file,"r")) )	/* open FRT file ... */
+	if ( !c_RDFRT(&FRT_file) )
 	{
 		LSL_PUTMSG (&I2ARC__FRTOPNERR);
 		goto end_program;
 	}
+	getfrt();
 
-	if (had_log) printf ("\n Opening FRT file      %s\n", FRT_file);
+	if (had_log) printf ("\n Read FRT file       %s\n", FRT_file);
 
-	getfrt();			/* ... and read in FRT info. */
+   /* open parameter file */
 
-	fclose (ffrt);
-	if (had_log) printf ("\n Closing FRT file      %s\n", FRT_file);
+	if (had_log) printf ("\n Opening parameter file %s\n", PAR_file);
+	if (had_par)
+	{ 
+	   if ( !c_rdpar(&PAR_file) )
+	   {
+		LSL_PUTMSG (&I2ARC__PAROPNERR);
+		goto end_program;
+	   }
+	}
 
    /* process output coverage file name */
 
@@ -219,30 +286,48 @@ main()
 	flab = fopen("$$lab.tmp","w");
 	ftxt = fopen("$$txt.tmp","w");
 	ffsn = fopen("$$fsn.tmp","w");
-	fiac = fopen("$$iac.tmp","w");
-	frac = fopen("$$rac.tmp","w");
 
-   /* ... & check success */
-
-	if ( !flab || !ftxt || !ffsn || !fiac || !frac )
-	{
-		LSL_PUTMSG (&I2ARC__TMPFILERR);
-		goto end_program;
-	}
+	if (had_tab)
+	   {
+		faat = fopen("$$aat.tmp","w");
+		fpat = fopen("$$pat.tmp","w");
+		if ( !flab || !ftxt || !ffsn || !faat || !fpat ) {
+			LSL_PUTMSG (&I2ARC__TMPFILERR);
+			goto end_program;
+		}
+		AAT_is_open = TRUE;
+		PAT_is_open = TRUE;
+	   }
+	else
+	   {
+		fiac = fopen("$$iac.tmp","w");
+		frac = fopen("$$rac.tmp","w");
+		if ( !flab || !ftxt || !ffsn || !fiac || !frac ) {
+			LSL_PUTMSG (&I2ARC__TMPFILERR);
+			goto end_program;
+		}
+		IAC_is_open = TRUE;
+		RAC_is_open = TRUE;
+	   }
 
 	LAB_is_open = TRUE;
 	TXT_is_open = TRUE;
 	FSN_is_open = TRUE;
-	IAC_is_open = TRUE;
-	RAC_is_open = TRUE;
 
 	if (had_log)
 	{
 		printf (" Opening work files    $$lab.tmp\n");
 		printf ("                       $$txt.tmp\n");
 		printf ("                       $$fsn.tmp\n");
-		printf ("                       $$iac.tmp\n");
-		printf ("                       $$rac.tmp\n");
+		if (had_tab) {
+			printf ("                       $$aat.tmp\n");
+			printf ("                       $$pat.tmp\n");
+		   }
+		else
+		   {
+			printf ("                       $$iac.tmp\n");
+			printf ("                       $$rac.tmp\n");
+		   }
 
 		printf ("\n Now processing the IFF file to ARC/INFO\n\n");
 	}
@@ -252,6 +337,13 @@ main()
 	fprintf (fout,"EXP  0\nARC  2\n");
 	fprintf (flab,"LAB  2\n");
 	fprintf (ftxt,"TXT  2\n");
+
+   /* first pass of IFF file builds a list of all the AC codes */
+
+	if (had_tab) {
+	   dotables();
+	   buildlists();
+	   }
 
    /* ... and start converting input IFF file ... */
 
@@ -337,6 +429,8 @@ main()
 			vtot = 0;		/* initialise vertex count */
 			had_ts     = FALSE;
 
+			blocknum = 0;
+
 			if (had_debug) printf ("%2.2s %d %d\n", 
 				(char *) &entry_code, feature.fsn, feature.isn);
 
@@ -347,8 +441,35 @@ main()
 			if (had_debug) printf ("%2.2s\n",(char *) &entry_code);
 
 			eihr (&fs, &entry_length, &one);
+
+			blocknum = 0;
+
 			fc = fs.fc;			/* store FC */
 
+			ftype = fs.flag.non_text.type;	/* store feature type */
+
+/* defer this until we process the EF */
+/*			if (had_tab) {
+			   if (ftype==0)
+			      { narcs++;
+			        if (naat>0) {
+			           fprintf(faat,"%11d%11d%11d%11d%14.7E%11d%11d\n",
+				       0,0,0,0,0.0,narcs,narcs); }
+			      }
+			   else if (ftype==1)
+			      { nsymb++;
+			        if (npat>0) {
+			           fprintf(fpat,"%14.7E%14.7E%11d%11d",
+				        0.0,0.0,nsymb,nsymb); }
+			      }
+			 }
+			else
+			  {
+			    if (ftype==0) narcs++;
+			    if (ftype==1) nsymb++;
+			  }
+			nfeat++;
+*/
 			if ( symbol[fc] == 0 )		/* no FRT entry */
 			{
 				LSL_PUTMSG (&I2ARC__NOFRTENTRY, &fc);
@@ -360,7 +481,6 @@ main()
 				exist[fc] = 1;  /* signal the FCs existance */
 				nexist++;	/* and count them */
 			}
-
 			break;
 	
 		case ST:
@@ -478,27 +598,37 @@ main()
         		
 			if (had_debug) printf ("%2.2s\n",(char *) &entry_code);
 
-			/* clear ac.text before getting next one */
-			for (icnt=0;icnt<256;icnt++) ac.text[icnt]=NULL;
+			for (i=0;i<256;i++) ac.text[i]=NULL;
 
 			eihr (&ac, &entry_length, &one);
 
-			if ( is_real_ac(&ac.type) )	/* real */
-      			{
+			if (had_tab) {
+			   atype = ac.type;
+			   if (ftype==0 && naat>0)
+			      { alist = addattval(alist,atype,ac.value.integer,
+					       ac.value.real,ac.text); }
+			   else if (ftype==1 && npat>0)
+			      { plist = addattval(plist,atype,ac.value.integer,
+					       ac.value.real,ac.text); }
+			   }
+			else {
+			   if ( is_real_ac(&ac.type) )	/* real */
+			      {
 				fprintf (frac,"%11d%11d%14.7E%s\n",
 					id,ac.type,ac.value.real,ac.text);
                 		nrac++;
 				ac.text[0] = NULL;	/* empty for next AC  */
 							/* - text is optional */
-			}
-			else				/* should be integer */
-			{
+			      }
+			   else				/* should be integer */
+			      {
 				fprintf (fiac,"%11d%11d%11d%s\n",
 					id,ac.type,ac.value.integer,ac.text);
 		                niac++;
 				ac.text[0] = NULL;	/* empty for next AC  */
 							/* - text is optional */
-        		}
+        		      }
+			   }
 			break;
 
 		case TH:
@@ -563,11 +693,38 @@ main()
 
 			output();			/* output coords */
 			vtot = 0;
-			had_ts     = FALSE;
+			had_ts = FALSE;
+			for (i=0;i<blocknum;i++) {
+			  fprintf (ffsn,"%11d%11d%11d%11d\n",
+				   id, feature.fsn, fc, overlay.number);
+			  id++;
 
-		        fprintf (ffsn,"%11d%11d%11d%11d\n",
-				id, feature.fsn, fc, overlay.number);
-        		id++;
+			  if (ftype==0) narcs++;
+			  if (ftype==1) nsymb++;
+
+			  if (had_tab) {
+			    if (ftype==0 && naat>0)
+			      {
+				fprintf(faat,
+					"%11d%11d%11d%11d%14.7E%11d%11d\n",
+					0,0,0,0,0.0,narcs,narcs);
+				writelist(alist,ftype);
+			      }
+			    else if (ftype==1 && npat>0 )
+			      {
+				fprintf(fpat,"%14.7E%14.7E%11d%11d",
+				        0.0,0.0,nsymb,nsymb);
+				writelist(plist,ftype);
+			      }
+			  }
+			  nfeat++;
+			}
+			if (had_tab) {
+			  if (ftype==0 && naat>0)
+			      { freelist(alist); }
+			  else if (ftype==1 && npat>0 )
+			      { freelist(plist); }
+			}
 			break;
 
    /* ---- ( obsolete entries ) ---- */		
@@ -628,21 +785,16 @@ windup:
 
 	if (had_log) printf ("\n Removing work file    $$txt.tmp \n");
 
-	rewind (ffsn);
-	rewind (fiac);
-	rewind (frac);
 
    /* add INFO data tables: first the RAnge */
 
 	fprintf (fout,"IFO  2\n%s.BND%-*s",ARC_name,
 						28-strlen(ARC_name)," ");
 	fprintf (fout,"XX%4d%4d%4d%10d\n",4,4,16,1);
-
 	fprintf (fout,"XMIN%14s4-1   14-1  12 3 60-1  -1  -1-1%20d\n"," ",1);
 	fprintf (fout,"YMIN%14s4-1   54-1  12 3 60-1  -1  -1-1%20d\n"," ",2);
 	fprintf (fout,"XMAX%14s4-1   94-1  12 3 60-1  -1  -1-1%20d\n"," ",3);
 	fprintf (fout,"YMAX%14s4-1  134-1  12 3 60-1  -1  -1-1%20d\n"," ",4);
-
 	fprintf (fout,"%14.7E%14.7E%14.7E%14.7E\n",
 				range.xmin,range.ymin,range.xmax,range.ymax);
 
@@ -650,10 +802,9 @@ windup:
 
 	fprintf (fout,"%s.TIC%-*s",ARC_name, 28-strlen(ARC_name)," ");
 	fprintf (fout,"XX%4d%4d%4d%10d\n",3,3,12,4);
-	fprintf (fout,"IDTIC%13s4-1   14-1   5-1 50-1  -1  -1-1%20d\n"," ",1);
+	fprintf (fout,"IDTIC%13s4-1   14-1   5 0 50-1  -1  -1-1%20d\n"," ",1);
 	fprintf (fout,"XTIC%14s4-1   54-1  12 3 60-1  -1  -1-1%20d\n"," ",2);
 	fprintf (fout,"YTIC%14s4-1   94-1  12 3 60-1  -1  -1-1%20d\n"," ",3);
-
 	fprintf (fout,"%11d%14.7E%14.7E\n",1,corner.xnwout,corner.ynwout);
 	fprintf (fout,"%11d%14.7E%14.7E\n",2,corner.xswout,corner.yswout);
 	fprintf (fout,"%11d%14.7E%14.7E\n",3,corner.xseout,corner.yseout);
@@ -663,14 +814,13 @@ windup:
 
 	fprintf (fout,"%s.FSN%-*s",ARC_name, 28-strlen(ARC_name)," ");
 	fprintf (fout,"XX%4d%4d%4d%10d\n",4,4,16,id-1);
-
 	fprintf (fout,"%s-ID%-*s4-1   14-1   5-1 50-1  -1  -1-1%20d\n",
 			ARC_name,15-strlen(ARC_name)," ",1);
-
 	fprintf (fout,"FSN%15s4-1   54-1   5-1 50-1  -1  -1-1%20d\n"," ",2);
 	fprintf (fout,"FC%16s4-1   94-1   5-1 50-1  -1  -1-1%20d\n"," ",3);
 	fprintf (fout,"LAYER%13s4-1  134-1   5-1 50-1  -1  -1-1%20d\n"," ",4);
 
+	rewind (ffsn);
 	while ( (c = getc (ffsn)) != EOF)   /* add FSN info from $$FSN.TMP */
 		putc (c,fout);
 	fclose (ffsn);
@@ -679,18 +829,32 @@ windup:
 
 	if (had_log) printf ("\n Removing work file    $$fsn.tmp \n");
 
+   /* the FC to unique SYMBOL reference table */
+
+	fprintf (fout,"%s.LUT%-*s",ARC_name,30-strlen(ARC_name)," ");
+	fprintf (fout,"%4d%4d%4d%10d\n",2,2,8,nexist);
+	fprintf (fout,"FC%16s4-1   14-1   5-1 50-1  -1  -1-1%20d\n"," ",1);
+	fprintf (fout,"SYMBOL%12s4-1   54-1   5-1 50-1  -1  -1-1%20d\n"," ",2);
+
+	for ( fc = 0; fc<MAX_FC; fc++)
+		if ( exist[fc] )
+			fprintf (fout,"%11d%11d\n",fc,symbol[fc]);
+
+   /* write .IAC and .RAC or the .AAT and .PAT */
+
+	if (!had_tab) {
+
    /* the integer AC values from $$IAC.TMP */
 
 	fprintf (fout,"%s.IAC%-*s",ARC_name, 30-strlen(ARC_name)," ");
 	fprintf (fout,"%4d%4d%4d%10d\n",4,4,52,niac);
-
 	fprintf (fout,"%s-ID%-*s4-1   14-1   5-1 50-1  -1  -1-1%20d\n",
 					ARC_name,15-strlen(ARC_name)," ",1);
-
 	fprintf (fout,"TYPE%14s4-1   54-1   5-1 50-1  -1  -1-1%20d\n"," ",2);
 	fprintf (fout,"VALUE%13s4-1   94-1   5-1 50-1  -1  -1-1%20d\n"," ",3);
 	fprintf (fout,"TEXT%13s40-1  134-1  40-1 20-1  -1  -1-1%20d\n"," ",4);
 
+	rewind (fiac);
 	while ( (c = getc (fiac)) != EOF)
 		putc (c,fout);
 	fclose (fiac);
@@ -705,11 +869,11 @@ windup:
 	fprintf (fout,"%4d%4d%4d%10d\n",4,4,52,nrac);
 	fprintf (fout,"%s-ID%-*s4-1   14-1   5-1 50-1  -1  -1-1%20d\n",
 			ARC_name,15-strlen(ARC_name)," ",1);
-
 	fprintf (fout,"TYPE%14s4-1   54-1   5-1 50-1  -1  -1-1%20d\n"," ",2);
 	fprintf (fout,"VALUE%13s4-1   94-1  12 4 60-1  -1  -1-1%20d\n"," ",3);
 	fprintf (fout,"TEXT%13s40-1  134-1  40-1 20-1  -1  -1-1%20d\n"," ",4);
 
+	rewind (frac);
 	while ( (c = getc (frac)) != EOF)
 		putc (c,fout);
 	fclose (frac);
@@ -718,17 +882,62 @@ windup:
 
 	if (had_log) printf ("\n Removing work file    $$rac.tmp \n");
 
-   /* the FC to unique SYMBOL reference table */
+	}
+	else		/* write .AAT and .PAT tables */
+	{
 
-	fprintf (fout,"%s.LUT%-*s",ARC_name,30-strlen(ARC_name)," ");
-	fprintf (fout,"%4d%4d%4d%10d\n",2,2,8,nexist);
-	fprintf (fout,"FC%16s4-1   14-1   5-1 50-1  -1  -1-1%20d\n"," ",1);
-	fprintf (fout,"SYMBOL%12s4-1   54-1   5-1 50-1  -1  -1-1%20d\n"," ",2);
+   /* write 7 standard AAT attributes */
 
-	for ( fc = 0; fc<MAX_FC; fc++)
-		if ( exist[fc] )
-			fprintf (fout,"%11d%11d\n",fc,symbol[fc]);
-    
+	 if (naat>0) {
+	    fprintf (fout,"%s.AAT%-*s",ARC_name, 28-strlen(ARC_name)," ");
+	    fprintf (fout,"XX%4d%4d%4d%10d\n",7+naat,7+naat,aat_count,narcs);
+	    fprintf (fout,"FNODE#%12s4-1   14-1   5 0 50-1  -1  -1-1%20d\n"," ",1);
+	    fprintf (fout,"TNODE#%12s4-1   54-1   5 0 50-1  -1  -1-1%20d\n"," ",2);
+	    fprintf (fout,"LPOLY#%12s4-1   94-1   5 0 50-1  -1  -1-1%20d\n"," ",3);
+	    fprintf (fout,"RPOLY#%12s4-1  134-1   5 0 50-1  -1  -1-1%20d\n"," ",4);
+	    fprintf (fout,"LENGTH%12s4-1  174-1  12 3 60-1  -1  -1-1%20d\n"," ",5);
+	    fprintf (fout,"%s#%-*s4-1  214-1   5 0 50-1  -1  -1-1%20d\n",
+					    ARC_name,17-strlen(ARC_name)," ",6);
+	    fprintf (fout,"%s-ID%-*s4-1  254-1   5 0 50-1  -1  -1-1%20d\n",
+					    ARC_name,15-strlen(ARC_name)," ",7);
+
+   /* write additional arc attributes */
+
+	    rewind (faat);
+	    while ( (c = getc (faat)) != EOF)
+		   putc (c,fout);
+	  }
+   /* write 4 standard PAT attributes */
+	 if (npat>0) {
+	    fprintf (fout,"%s.PAT%-*s",ARC_name, 28-strlen(ARC_name)," ");
+	    fprintf (fout,"XX%4d%4d%4d%10d\n",4+npat,4+npat,pat_count,nsymb);
+	    fprintf (fout,"AREA%14s4-1   14-1  12 3 60-1  -1  -1-1%20d\n"," ",1);
+	    fprintf (fout,"PERIMETER%9s4-1   54-1  12 3 60-1  -1  -1-1%20d\n"," ",2);
+	    fprintf (fout,"%s#%-*s4-1   94-1   5 0 50-1  -1  -1-1%20d\n",
+					  ARC_name,17-strlen(ARC_name)," ",3);
+	    fprintf (fout,"%s-ID%-*s4-1  134-1   5 0 50-1  -1  -1-1%20d\n",
+					  ARC_name,15-strlen(ARC_name)," ",4);
+
+   /* write additional point attributes */
+
+	    rewind (fpat);
+	    while ( (c = getc (fpat)) != EOF)
+	            putc (c,fout);
+	  }
+
+	  fclose (faat);
+	  AAT_is_open = FALSE;
+	  remove ("$$aat.tmp;");
+
+	  if (had_log) printf ("\n Removing work file    $$aat.tmp \n");
+
+	  fclose (fpat);
+	  PAT_is_open = FALSE;
+	  remove ("$$pat.tmp;");
+
+	  if (had_log) printf ("\n Removing work file    $$pat.tmp \n");
+	}
+
 	fprintf (fout,"EOI\nEOS\n");
 
 	fclose (fout);
@@ -758,38 +967,57 @@ end_program:				/* abnormal exit */
 	if (FSN_is_open) fclose (ffsn);
 	if (IAC_is_open) fclose (fiac);
 	if (RAC_is_open) fclose (frac);
+	if (AAT_is_open) fclose (faat);
+	if (PAT_is_open) fclose (fpat);
 
 	if ( !had_debug )		/* leave files for debugging */
 	{
 		remove ("$$lab.tmp;");
 		remove ("$$txt.tmp;");
 		remove ("$$fsn.tmp;");
-		remove ("$$iac.tmp;");
-		remove ("$$rac.tmp;");
+		if (had_tab) {
+		   remove ("$$aat.tmp;");
+		   remove ("$$pat.tmp;");
+		   }
+		else {
+		   remove ("$$iac.tmp;");
+		   remove ("$$rac.tmp;");
+		   }
 
 		if (had_log)
 		{
 			printf (" Removing work files   $$lab.tmp\n");
 			printf ("                       $$txt.tmp\n");
 			printf ("                       $$fsn.tmp\n");
-			printf ("                       $$iac.tmp\n");
-			printf ("                       $$rac.tmp\n\n");
+			if (had_tab) {
+			   printf ("                       $$aat.tmp\n");
+			   printf ("                       $$pat.tmp\n\n");
+			   }
+			else {
+			   printf ("                       $$iac.tmp\n");
+			   printf ("                       $$rac.tmp\n\n");
+			   }
 		}
 	}
 	else
 	{
 		printf (" Closing work files    $$lab.tmp\n");
 		printf ("                       $$txt.tmp\n");
-		printf ("                       $$fsn.tmp\n");
-		printf ("                       $$iac.tmp\n");
-		printf ("                       $$rac.tmp\n\n");
+	        printf ("                       $$fsn.tmp\n");
+		if (had_tab) {
+		   printf ("                       $$aat.tmp\n");
+		   printf ("                       $$pat.tmp\n\n");
+		   }
+		else {
+		   printf ("                       $$iac.tmp\n");
+		   printf ("                       $$rac.tmp\n\n");
+		   }
 	}
 
 exit:
 
 	LSL_EXIT();
 }
-
 
 /************************************************************************/
 /*									*/
@@ -822,7 +1050,9 @@ int output()
 	case SCAL_SYMBOL :	/* GT 9 - or 2nd point defining size & orient */
 
                 fprintf (flab,"%10d%10d%14.7E%14.7E\n",
-						id,0,vertex[0].x,vertex[0].y);
+						nsymb+1,nsymb+1,vertex[0].x,
+			                        vertex[0].y);
+		blocknum = 1;
                 fprintf (flab,"%14.7E%14.7E%14.7E%14.7E\n",
 			     vertex[0].x,vertex[0].y,vertex[0].x,vertex[0].y);
 		break;
@@ -833,10 +1063,14 @@ int output()
 		txlen = strlen(text);
 		xs = vertex[0].x; ys = vertex[0].y;
 
-		if ( size[fc] >= 0.0 )		/* use FRT value by default */
-			sz = size[fc];
-		else				/* convert point size to mm. */
-			sz = thick * 0.2 - 0.025;	/* rule of thumb */
+ 		if ( size[fc] >= 0.0 )		/* use FRT value by default */
+ 			sz = size[fc];
+ 		else				/* convert point size to mm. */
+ 			sz = thick * 0.2 - 0.025;	/* rule of thumb */
+
+		/* for CJ to have the program output heights */
+		/* as they are in the IFF file use: */
+		/* sz = thick; */
 
 		xe = xs + txlen * sz * cos(rot);
 		ye = ys + txlen * sz * sin(rot);
@@ -1002,6 +1236,7 @@ printf("r=%f dtheta=%f\n",r,dtheta);
 
 }
 
+
 /************************************************************************/
 /*									*/
 /*			st_out()					*/
@@ -1013,16 +1248,22 @@ printf("r=%f dtheta=%f\n",r,dtheta);
 
 int st_out()
 {
-	int v, vs, ve;
+	int v, vs, ve, num;
 
+/*	num = narcs;
+	num = num + blocknum;
+*/
 	for(vs=0;vs<vtot;vs+=MAX_ARCINFO_VERTICES-1)
 	{
 		ve = min(vs+MAX_ARCINFO_VERTICES,vtot) - 1;
 
+		blocknum++;
+		num = narcs + blocknum;
+
    /* output header info for this chunk */
 
 		fprintf (fout,"%10d%10d%10d%10d%10d%10d%10d\n",
-						1,id,0,0,0,0,ve-vs+1);
+						num,num,0,0,0,0,ve-vs+1);
 
 		for (v=vs;v<ve;v+=2)		/* o/p coords in pairs ... */
 		fprintf (fout,"%14.7E%14.7E%14.7E%14.7E\n",
@@ -1034,4 +1275,3 @@ int st_out()
 
 	return(1);
 }
-

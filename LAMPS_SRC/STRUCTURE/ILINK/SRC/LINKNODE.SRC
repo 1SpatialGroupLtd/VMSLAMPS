@@ -1,0 +1,462 @@
+	LOGICAL*4 FUNCTION LINKNODE(
+     &		PT,NXT,PT_DST,FTR_PTS,FTR_IFC2,FTR_LAYER,
+     &		FTR_NDS,PNT_FTR,BASE_NODE,NPT,NWT,
+C     &		NHT,
+     &		HEADARM,ARM,WORKSPACE,
+     &  	MAXPTS,MAXOUTFTRS,
+     &  	MAXARMS,MAXNODES)
+ 
+***	MODULE	LINKNODE
+***	IDENT	07NO94
+ 
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+C
+CMOD1424 Reinstate the /FCP functionality		 JB	07-Nov-1994
+C	 (by undoing MOD1073)
+C
+CMOD1073 Use FCPAIR in QUADSCAN/CHKNDS so that the correct
+C	 features are moved				 JB/WJJ	01-Mar-1993
+CMOD1171 Delete short segments regardless of whether WAS_OPEN was 
+C	 true or not					 JB/WJJ	27-Jan-1993
+CMOD1060 Use absolute coords if requested		 JB	07-Nov-1991
+CMOD	Converted to accept CB in place of ST entries	ACM	06-Apr-1988
+CMOD	Changed to use new standard QUADSCAN		ACM	10-Sep-1987
+CMOD	Changed NWT record size from *1 to *2		ACM	17-Aug-1987
+CMOD	Various minor bug fixes				ACM	14-Aug-1987
+CMOD	Now outputs a message and LITES2 message when
+C	features less than SHORT_LEN are deleted	TJH	12-Jun-1987
+CMOD	Made a function					TJH	28-May-1987
+
+C	Created:					ACM	   Dec 1986
+ 
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNIFF:MD2DES.CMN'
+ 
+C Data in/out
+	INTEGER*4	MAXPTS,MAXOUTFTRS,MAXARMS,MAXNODES
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_NDS(2,MAXOUTFTRS)
+	INTEGER*4	NXT(MAXPTS)
+	INTEGER*4	WORKSPACE(12,MAXNODES)
+	INTEGER*4	BASE_NODE(MAXNODES)
+	INTEGER*4	HEADARM(MAXNODES)
+	INTEGER*4	ARM(2,MAXARMS)
+
+	INTEGER*2	FTR_IFC2(MAXOUTFTRS)
+	INTEGER*2	FTR_LAYER(MAXOUTFTRS)
+
+	INTEGER*2	NWT(MAXNODES)
+
+	LOGICAL*1	PNT_FTR(MAXOUTFTRS)
+
+C	REAL*4		NHT(MAXNODES)
+	REAL*4		PT(2,MAXPTS)
+	REAL*4		PT_DST(MAXPTS)
+	REAL*4		NPT(2,MAXNODES)
+
+C Workspace
+	INTEGER*4	ADDR			! IFF address
+	INTEGER*4	IARM			! arm index
+	INTEGER*4	PR_FTR			! processed-ftr index
+	INTEGER*4	STANOD,FINNOD		! ftr sta/fin node inds
+	INTEGER*4	NODE_LIST(2)		! for QUADSCAN
+	INTEGER*4	NPTS			! # pts in ftr
+	INTEGER*4	IPT,IPTSTA,IPTFIN	! ftr end pt indices
+
+	REAL*4		PCENT,LPCENT,PCF	! % process completion
+	REAL*4		STA(2),FIN(2)		! ftr end pt coords
+	REAL*4		SHORT_LEN		! max length to delete
+	REAL*4		LEN,DX,DY
+
+	LOGICAL*4	WAS_OPEN		! ftr originally open?
+	LOGICAL*4	WHOLE_ORIG_FTR		! whole and original?
+
+C Externals
+	LOGICAL*4	CHKNDS			! node-pair merging sub
+	EXTERNAL	CHKNDS
+
+C Functions
+	LOGICAL*4	GET_FTR
+	LOGICAL*4	QUADSCAN
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Creates link/node structure directly from input file
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C	Initialise
+
+	LINKNODE = SS$_NORMAL
+ 
+	CALL WRITEF(' Creating link/node structure')
+	CALL WRITEF('	Setting up a node for each feature end')
+ 
+C Note: Once (for historical reasons) SHORTLEN was 3*NSTOL, but this
+C did not work properly for /LPJOIN where NSTOL is very small.
+
+	SHORT_LEN = 3*JNTOL
+	NSTOL_SQ = NSTOL*NSTOL
+	PCF = 100.0/N_PR_FTRS
+	PCENT = 0
+	LPCENT = 0
+
+	IF (HAD_MONITOR) WRITE(*,'(1X,F6.1,''%'')') PCENT
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Set all ftr end pts up as node positions
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+ 
+	DO 20 PR_FTR = 1,N_PR_FTRS
+ 
+	  IF (NEED_DATA_PER_POINT) THEN		! points are all in memory
+
+	    IPTSTA = FTR_PTS(1,PR_FTR)
+	    IPTFIN = FTR_PTS(2,PR_FTR)
+
+	    STA(1) = PT(1,IPTSTA)
+	    STA(2) = PT(2,IPTSTA)
+	    FIN(1) = PT(1,IPTFIN)
+	    FIN(2) = PT(2,IPTFIN)
+
+	    IF (PNT_FTR(PR_FTR)) THEN
+	      NPTS = 1
+	    ELSE
+	      NPTS = 2
+	    END IF
+	    GOTO 26
+
+	  ELSE			! points must be read from input file
+	    LINKNODE = GET_FTR(
+     &			PR_FTR,
+     &			%VAL(FTR_INFTR_START),
+     &			%VAL(IN_FTR_ADDR_START),
+     &			MAXINFTRS_CMN,MAXOUTFTRS_CMN)
+	    IF (.NOT.LINKNODE) GOTO 110		! return with error
+
+	    NPTS = CBH.NROW
+	    CALL IFS_CB_READ(CBH,BIG_CBD,STA,2,COLH_XY,1,1)
+	    CALL IFS_CB_READ(CBH,BIG_CBD,FIN,2,COLH_XY,NPTS,NPTS)
+	    FTR_PTS(2,PR_FTR) = NPTS		! note NPTS for each ftr
+	  END IF
+
+26	  IF (N_NODES.EQ.MAXNODES) THEN
+	    LINKNODE = ILINK__TOOMNYNDS
+	    CALL LSL_PUTMSG(LINKNODE,MAXNODES)
+	    GOTO 110
+	  END IF
+
+	  N_NODES = N_NODES+1
+	  NPT(1,N_NODES) = STA(1)
+	  NPT(2,N_NODES) = STA(2)
+	  NWT(N_NODES) = 1
+C	  NHT(N_NODES) = 0
+	  FTR_NDS(1,PR_FTR) = N_NODES
+
+	  WAS_OPEN = STA(1).NE.FIN(1) .OR. STA(2).NE.FIN(2)
+
+	  IF (NPTS.GT.1 .AND. WAS_OPEN) THEN
+	    IF (N_NODES.EQ.MAXNODES) THEN
+	      LINKNODE = ILINK__TOOMNYNDS
+	      CALL LSL_PUTMSG(LINKNODE,MAXNODES)
+	      GOTO 110
+	    END IF
+	    N_NODES = N_NODES+1
+	    NPT(1,N_NODES) = FIN(1)
+	    NPT(2,N_NODES) = FIN(2)
+	    NWT(N_NODES) = 1
+C	    NHT(N_NODES) = 0
+	  END IF
+	  FTR_NDS(2,PR_FTR) = N_NODES
+ 
+C Show progress
+ 
+	  IF (.NOT.HAD_MONITOR) GOTO 20
+	  PCENT = PR_FTR*PCF
+	  IF (PCENT-LPCENT.GT.0.1) THEN		! don't WRITE too often
+	    WRITE(*,'(1H+,F6.1)') PCENT
+	    LPCENT = PCENT
+	  END IF
+ 
+20	CONTINUE
+ 
+	PCENT = 100
+	IF (HAD_MONITOR) WRITE(*,'(1H+,F6.1)') PCENT
+	IF (SHOW_TIME) CALL LIB$SHOW_TIMER
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Merge nodes which are within NSTOL
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	CALL WRITEF('	Merging nodes separated by less than %F8.3',
+     &	  NSTOL)
+
+	NODE_LIST(1) = 1	! set up dummy start/end NPT inds
+	NODE_LIST(2) = N_NODES
+
+	IF (HAD_LCP) THEN
+	  LINKNODE = QUADSCAN(
+     &		CHKNDS,		! node-pair processing routine
+     &		MAXNODES,	! NPT dimension
+     &		NPT,		! coords of all nodes in image
+     &		N_NODES,	! num of nodes in NPT
+     &		XMIN,XMAX,YMIN,YMAX, ! node coord ranges
+     &		.FALSE.,	! NPT is contig array, not linked lst
+     &		1,		! NXT dimension
+     &		NXT,		! linked-list ptrs (not used)
+     &		NSTOL,		! Node Separation tolerance
+     &		1,		! NODE_LIST dimension
+     &		NODE_LIST,	! (list of-)node-list start/end inds
+     &		FTR_LAYER,	! ftr layer code
+     &		.TRUE.,		! treat as lines of points, not vectors
+     &		.FALSE.,	! (do not) use layer-pair check
+     &		FCPAIR,		! which FC pairs to check?
+     &		1,		! MAXFCS,	! FCPAIR dimension
+     &		.TRUE.,		! do check node-list with itself
+     &		N_NODES,	! WORKSPACE dimension
+     &		WORKSPACE,	! workspace
+     &		HAD_MONITOR)	! show running % completion?
+	ELSE
+	   LINKNODE = QUADSCAN(
+     &		CHKNDS,		! node-pair processing routine
+     &		MAXNODES,	! NPT dimension
+     &		NPT,		! coords of all nodes in image
+     &		N_NODES,	! num of nodes in NPT
+     &		XMIN,XMAX,YMIN,YMAX, ! node coord ranges
+     &		.FALSE.,	! NPT is contig array, not linked lst
+     &		1,		! NXT dimension
+     &		NXT,		! linked-list ptrs (not used)
+     &		NSTOL,		! Node Separation tolerance
+     &		1,		! NODE_LIST dimension
+     &		NODE_LIST,	! (list of-)node-list start/end inds
+     &		FTR_IFC2,	! ftr feature code (not used)
+     &		.TRUE.,		! treat as lines of points, not vectors
+     &		.FALSE.,	! HAD_FCP,	! (do not) use FC-pair check
+     &		FCPAIR,		! which FC pairs to check?
+     &		1,		! MAXFCS,	! FCPAIR dimension
+     &		.TRUE.,		! do check node-list with itself
+     &		N_NODES,	! WORKSPACE dimension
+     &		WORKSPACE,	! workspace
+     &		HAD_MONITOR)	! show running % completion?
+	ENDIF
+
+	IF (SHOW_TIME) CALL LIB$SHOW_TIMER
+	IF (.NOT.LINKNODE) GOTO 110	! return
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Set up node-to-link pointers (arms)
+C
+C	Note that all features shorter than SHORT_LEN whose end-nodes
+C	have been merged will now be marked as deleted and not added
+C	to any arm lists
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	CALL WRITEF('	Creating node arms')
+
+	PCF = 100.0/N_PR_FTRS
+	PCENT = 0
+	LPCENT = 0
+
+	IF (HAD_MONITOR) WRITE(*,'(1X,F6.1,''%'')') PCENT
+
+C Set end pt positions = corresponding node positions, and set distance
+C of each pt along ftr
+
+	IF (NEED_DATA_PER_POINT) THEN
+	  CALL FIX_ENDS(	PT,FTR_PTS,FTR_NDS,NPT,
+     &	                	MAXPTS,MAXOUTFTRS,MAXNODES)
+
+	  CALL SET_PT_DST(	PT,NXT,PT_DST,FTR_PTS,MAXPTS,MAXOUTFTRS)
+	END IF
+
+	DO 100 PR_FTR = 1,N_PR_FTRS
+
+	  IPTSTA = FTR_PTS(1,PR_FTR)
+	  IPTFIN = FTR_PTS(2,PR_FTR)
+
+	  IF (IPTSTA.EQ.NIL.AND.NEED_DATA_PER_POINT) GOTO 100
+	  IF (IPTFIN.EQ.NIL) GOTO 100
+
+	  STANOD = FTR_NDS(1,PR_FTR)
+	  FINNOD = FTR_NDS(2,PR_FTR)
+
+	  WAS_OPEN = (STANOD.NE.FINNOD)
+
+C Find index of base node at start of ftr
+
+30	  IF (BASE_NODE(STANOD).NE.NIL) THEN
+	    STANOD = BASE_NODE(STANOD)
+	    GOTO 30
+	  END IF
+	  FTR_NDS(1,PR_FTR) = STANOD
+
+C Find index of node at end of ftr
+
+60	  IF (BASE_NODE(FINNOD).NE.NIL) THEN
+	    FINNOD = BASE_NODE(FINNOD)
+	    GOTO 60
+	  END IF
+	  FTR_NDS(2,PR_FTR) = FINNOD
+
+C Delete all non-point ftrs for which ends were separate but are now
+C pulled together, and which have length < SHORT_LEN
+C
+C	  IF (WAS_OPEN .AND. STANOD.EQ.FINNOD .AND.
+C     &				.NOT.PNT_FTR(PR_FTR)) THEN
+
+
+C Delete all non-point ftrs now pulled together, and which have 
+C length < SHORT_LEN
+
+	  IF (STANOD.EQ.FINNOD .AND. .NOT.PNT_FTR(PR_FTR)) THEN
+
+	    IF (NEED_DATA_PER_POINT) THEN
+	      LEN = PT_DST(IPTFIN)
+	      PWK(1,1) = PT(1,IPTSTA)
+	      PWK(2,1) = PT(2,IPTSTA)
+	    ELSE
+	      LINKNODE = GET_FTR(		! get ftr pt coords
+     &			PR_FTR,
+     &			%VAL(FTR_INFTR_START),
+     &			%VAL(IN_FTR_ADDR_START),
+     &			MAXINFTRS_CMN,MAXOUTFTRS_CMN)
+	      IF (.NOT.LINKNODE) GOTO 110	! return with error
+	      NPTS = CBH.NROW
+	      CALL IFS_CB_READ(CBH,BIG_CBD,PWK,2,COLH_XY,1,NPTS)
+	      LEN = 0
+
+	      DO 35 IPT = 1,NPTS-1
+	        DX = PWK(1,IPT+1)-PWK(1,IPT)
+	        DY = PWK(2,IPT+1)-PWK(2,IPT)
+	        LEN = LEN+SQRT(DX*DX+DY*DY)
+35	      CONTINUE
+	    END IF
+
+C Flag feature as deleted and tell user what has happened
+
+	    IF (LEN.LT.SHORT_LEN) THEN
+	      FTR_PTS(1,PR_FTR) = NIL	! mark ftr as deleted
+	      FTR_PTS(2,PR_FTR) = NIL	! mark ftr as deleted
+
+C Warn about feature being deleted if it is a whole original feature
+
+	      WHOLE_ORIG_FTR = .TRUE.
+	      IF (PR_FTR.GT.N_ORIG_PR_FTRS) WHOLE_ORIG_FTR = .FALSE.
+
+	      IF (NEED_DATA_PER_POINT) THEN
+	        IF (IPTSTA.GT.N_ORIG_PTS) WHOLE_ORIG_FTR = .FALSE.
+	        IF (IPTFIN.GT.N_ORIG_PTS) WHOLE_ORIG_FTR = .FALSE.
+	      END IF
+
+	      IF (WHOLE_ORIG_FTR) THEN
+	        CALL LSL_PUTMSG(ILINK__DELETE,PWK(1,1),PWK(2,1))
+
+C If /LITES2 write message to LITES2 command file
+
+	        IF (HAD_LITES2) THEN
+	          CALL FLWSEL(LITES2LUN)
+	          CALL FLWRTF(
+     &	          '%%MESSAGE End nodes lie within /JNTOL '//
+     &	          'tolerance - link deleted')
+
+		  IF (HAD_ABS) THEN
+		    CALL FLWRTF('%%ABSOLUTE %^D%F %^D%F',
+     &				PWK(1,1)+MD2LOC(1),PWK(2,1)+MD2LOC(2))
+		  ELSE
+		    CALL FLWRTF('%%POSITION %F %F',PWK(1,1),PWK(2,1))
+		  ENDIF
+
+	          CALL FLWRTF('%%TEST $CURSINWIN')
+	          CALL FLWRTF('%%ELSE %%ZOOM 1')
+	          CALL FLWRTF('%%PING')
+	          CALL FLWRTF('%%RESPOND')
+	          CALL FLWRTF('%%ABANDON')
+	          CALL FLWRTF('%%ABANDON')
+	        END IF
+	      END IF
+
+	      GOTO 100			! loop for next ftr
+	    END IF
+
+	  END IF
+
+C Create arm leaving node
+ 
+	  IF (N_ARMS.EQ.MAXARMS) THEN
+	    LINKNODE = ILINK__TOOMNYARMS
+	    CALL LSL_PUTMSG(LINKNODE,MAXARMS)
+	    GOTO 110
+	  END IF
+
+	  N_ARMS = N_ARMS+1
+	  ARM(ARM_FTR,N_ARMS) = PR_FTR
+ 
+C Add arm onto end of list of arms for node STANOD
+ 
+	  IF (HEADARM(STANOD).EQ.NIL) THEN
+	    HEADARM(STANOD) = N_ARMS
+	  ELSE
+	    IARM = HEADARM(STANOD)
+	    GOTO 50
+40	    IARM = ARM(ARM_NXT,IARM)
+50	    IF (ARM(ARM_NXT,IARM).NE.NIL) GOTO 40
+	    ARM(ARM_NXT,IARM) = N_ARMS
+	  END IF
+	  ARM(ARM_NXT,N_ARMS) = NIL
+ 
+C Point ftrs have only one arm out from node
+
+	  IF (PNT_FTR(PR_FTR)) GOTO 90
+ 
+C Create arm entering node
+ 
+	  IF (N_ARMS.EQ.MAXARMS) THEN
+	    LINKNODE = ILINK__TOOMNYARMS
+	    CALL LSL_PUTMSG(LINKNODE,MAXARMS)
+	    GOTO 110
+	  END IF
+	  N_ARMS = N_ARMS+1
+	  ARM(ARM_FTR,N_ARMS) = -PR_FTR
+ 
+C Add arm onto end of list of arms for node FINNOD
+ 
+	  IF (HEADARM(FINNOD).EQ.NIL) THEN
+	    HEADARM(FINNOD) = N_ARMS
+	  ELSE
+	    IARM = HEADARM(FINNOD)
+	    GOTO 80
+70	    IARM = ARM(ARM_NXT,IARM)
+80	    IF (ARM(ARM_NXT,IARM).NE.NIL) GOTO 70
+	    ARM(ARM_NXT,IARM) = N_ARMS
+	  END IF
+ 
+C Show progress
+ 
+90	  IF (.NOT.HAD_MONITOR) GOTO 100
+	  PCENT = PR_FTR*PCF
+	  IF (PCENT-LPCENT.GT.0.1) THEN		! don't WRITE too often
+	    WRITE(*,'(1H+,F6.1)') PCENT
+	    LPCENT = PCENT
+	  END IF
+ 
+100	CONTINUE
+
+	PCENT = 100
+	IF (HAD_MONITOR) WRITE(*,'(1H+,F6.1)') PCENT
+
+110	IF (LINKNODE) LINKNODE = SS$_NORMAL
+	RETURN
+	END
+

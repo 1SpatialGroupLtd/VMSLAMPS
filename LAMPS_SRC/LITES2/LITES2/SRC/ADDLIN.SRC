@@ -1,0 +1,178 @@
+	SUBROUTINE ADDLIN(TYPACT)
+C
+***	IDENT	01JN94
+***	MODULE	ADDLIN
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RJH	11-MAR-1985
+C
+C Description
+C
+C    This subroutine is part of LITES2, and its purpose is to add the 
+C current line construction buffer to the current output item.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:AUXDEF/		! auxiliary array definitions
+***	PARAMETER/CMN:PACK/		! external pack definitions
+***     PARAMETER/CMN:START/		! digitising procedures
+C
+***	COMMON/CMN:ATTBTS/
+***	COMMON/CMN:CSTRCT/		! feature being constructed
+***	COMMON/CMN:DEFINE/
+***	COMMON/CMN:OIIH/		! output item data
+***	COMMON/CMN:OPTION/
+C
+C Arguments
+	INTEGER		TYPACT		! type of action
+C
+C Local Variables
+	INTEGER		TOTAL		! total no. of points
+	INTEGER		FIRST		! index for 1st. point of curve
+	INTEGER		FLAG		! flags for point
+	INTEGER		I		! counter
+	LOGICAL*1	LASTCV		! last point is a curve ?
+	LOGICAL*1	THISCV		! this point is a curve ?
+	LOGICAL*1	NEXTCV		! next point is a curve ?
+	INTEGER		OPER
+C
+C Find total number of points
+C
+	IF (TYPACT .GE. START_END) THEN
+	   TOTAL = CONIND		! ending construction
+	ELSE
+	   TOTAL = CONFLS		! flushing full buffer
+	ENDIF
+C
+C Reverse points if necessary. Note that constructions with more than a
+C single buffer load are reversed, as they are added to the IFF file 
+C elsewhere.
+C
+	IF (TYPACT .EQ. START_REVERSE) CALL REVLIN(TOTAL)
+C
+C Initialise control variables
+C
+	FIRST = 1			! assume point 1 start of curve
+	THISCV = CONCUR			! current point same as before
+	FLAG = CONFLG(1)
+	NEXTCV = (IAND(FLAG,START_CURVE) .NE. 0)
+C
+C Deal with each point in turn
+C
+	DO 10 I=1,TOTAL
+C
+C do we want Z value?
+C (CCB 1/6/94 - this used to get into COIZ, but since buffers increased
+C  to 1000 points, COIZ isn't long enough. Use CONZ instead. Seems that
+C  Z might be in CONZ already, but don't want to change.)
+	   IF (ZOPT) CALL GETZ_LIST(CONZ(I),CONLST(I))
+C
+C Set logicals indicating whether or not the last, current and next
+C points are curves.
+C
+	   LASTCV = THISCV
+	   THISCV = NEXTCV
+	   IF ((I .EQ. TOTAL) .AND. (TYPACT .GE. START_END)) THEN
+	      NEXTCV = .FALSE.		! no next point in this case
+	   ELSE
+	      FLAG = CONFLG(I+1)
+	      NEXTCV = (IAND(FLAG,START_CURVE) .NE. 0)
+	   ENDIF
+C
+C If the current point is a curve, nothing is done. Otherwise, the
+C action depends on whether the previous and next points are curves.
+C
+	   IF (.NOT. THISCV) THEN
+C
+C If the last point is a curve, then all preceding curve points have to
+C be interpolated, the current point being the end of that curve. Note
+C that this takes care of curves which started in the previous buffer. 
+C If the next point is also a curve, i.e. we have the sequence
+C	CURVE  START  CURVE
+C the current point is also the start of a new interpolated curve. It is
+C therefore removed from the current output item as it will be added
+C again when the second curve is interpolated.
+C
+	      IF (LASTCV) THEN
+C
+C set up array of attributes for ADDPTS to use
+C This uses the set of point attributes that were set when the last
+C point was digitised
+	         CALL LSTARR(CONLST(FIRST),CONATT,COATTC,COATTV,.FALSE.)
+C
+C add those attributes that are set up for generated curve point, or if
+C there are none, those that are set up for "other"
+	         OPER = DEFINITION(P_CURVE)
+	         IF (OPER.EQ.0) OPER = DEFINITION(P_OTHER)
+	         CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+C
+	         CALL INTERP(I-(FIRST-1),CONXY(1,FIRST),.NOT.CONINT,
+     &	               .TRUE.,.FALSE.,.FALSE.,CONZ(FIRST),ZOPT)
+		 CONINT = .FALSE.	! no overlap now
+		 IF (NEXTCV) THEN	! next point a curve
+		    COIIND = COIIND-1	! remove current point
+		    FIRST = I		! start of new curve
+		 ENDIF
+C
+C If the current point is invisible, the buffer is first of all flushed.
+C If the last point is not a curve, then if the next point is a curve,
+C the current point is the start of a new interpolated curve. Otherwise,
+C the current point is added to the current output item.
+C
+	      ELSE
+		 FLAG = CONFLG(I)
+		 IF (IAND(FLAG,START_VISIBLE) .EQ. 0) THEN
+		    CALL FLUSH(1)	! flush the buffer
+		    OIENDS = 0		! invisible
+		 ENDIF
+		 IF (NEXTCV) THEN	! next point is a curve
+		    FIRST = I		! start of new curve
+		 ELSE			! next point not a curve
+C
+C set up array of attributes
+C This uses the set of point attributes that were set when this
+C point was digitised
+	            CALL LSTARR(CONLST(I),CONATT,COATTC,COATTV,.FALSE.)
+C
+C add those attributes that are set up for digitised point, or if
+C there are none, those that are set up for "other"
+	            OPER = DEFINITION(P_DIGITISE)
+	            IF (OPER.EQ.0) OPER = DEFINITION(P_OTHER)
+	            CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+C
+C add point to output item, using point attribute in CSTRCT common block
+	            CALL ADCORD(CONXY(1,I),CONATT,COATTC,COATTV)
+		 ENDIF
+	      ENDIF
+	   ENDIF
+10	CONTINUE
+C
+C Any unfinished curves have to be interpolated as far as they go.
+C
+	IF ((LASTCV .AND. NEXTCV) .OR. THISCV) THEN
+C
+C set up array of attributes for ADDPTS to use
+C This uses the set of point attributes that were set when the last
+C point was digitised
+	   CALL LSTARR(CONLST(FIRST),CONATT,COATTC,COATTV,.FALSE.)
+C
+C add those attributes that are set up for generated curve point, or if
+C there are none, those that are set up for "other"
+	   OPER = DEFINITION(P_CURVE)
+	   IF (OPER.EQ.0) OPER = DEFINITION(P_OTHER)
+	   CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+C
+	   CALL INTERP(TOTAL-(FIRST-1),CONXY(1,FIRST),.NOT.CONINT,
+     &	               .FALSE.,.FALSE.,.FALSE.,CONZ(FIRST),ZOPT)
+	   CONINT = .TRUE.		! interp. to continue
+	ENDIF
+C
+C Save indication of whether or not the last point is curved.
+C
+	CONCUR = THISCV
+C
+	RETURN
+	END

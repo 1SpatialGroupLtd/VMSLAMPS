@@ -1,0 +1,453 @@
+        INTEGER FUNCTION PROCESS_FEATURE_ATTR
+C
+***	MODULE	PROCESS_FEATURE_ATTR
+***	IDENT	21FE97
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,England
+C
+C Created  J Barber  19-Aug-1988
+C
+C Reads the Features not in layer 0
+C
+C Values are output to the FEA record after the DSI record
+C
+	IMPLICIT NONE
+C
+***     PARAMETER/HERE:I2CEDDMSG/
+***     COMMON/LSL$CMNIFF:IFFHAN/
+***     COMMON/LSL$CMNFRT:FRTACD/
+***     COMMON/LSL$CMNFRT:FRTCOM/
+***     COMMON/HERE:DESCR/
+***     COMMON/HERE:PARAMS/
+C
+C  functions
+C
+        LOGICAL         ACDFND     
+        LOGICAL         FRTFND
+        LOGICAL         CVTDATE            ! convert days to
+                                           !   dd/mm/yy
+	INTEGER		FINISH_BLOCK
+C
+C  workspace
+C
+        INTEGER         J
+        INTEGER         RETVAL
+	INTEGER*2	IELEN	           ! length of
+	INTEGER*2	IECODE             ! IFF entry
+        INTEGER*2       LEN
+        INTEGER*2       ACTYPE
+	INTEGER		AC4TYPE		   ! longword for ACDFND
+        INTEGER*2       IFC                ! feature code
+C
+        INTEGER         ACVAL
+	REAL		ACREALVAL
+	EQUIVALENCE	(ACVAL,ACREALVAL)
+C
+        INTEGER         DATE
+        INTEGER         DD
+        INTEGER         MM
+        INTEGER         YY
+C
+        INTEGER         DATA_TYPE
+        CHARACTER*20    NAME_STRING        ! acd NAME
+C
+        LOGICAL         HAD_AC_TEXT
+C
+        BYTE            TEXT_STRING(20)    ! for TEXT AC
+C
+        BYTE            FEA_BYTBUF(179)    ! for value fields
+        BYTE            REAL_FIELD(3)
+C
+C  **********************************************************
+C  assume success
+C
+        PROCESS_FEATURE_ATTR = I2CEDD__NORMAL
+C
+        HAD_NF = .FALSE.
+        COUNT = 0
+C
+C  reposition to start of first non-zero layer
+C
+        CALL IFFPKE (IECODE, IELEN, LPOSNO(1))
+C
+        IF (IELEN.EQ.-1) THEN
+           CALL LSL_PUTMSG (I2CEDD__UNEXPENDIFF)
+           CALL WRITEF ('  in first non-zero layer')
+           PROCESS_FEATURE_ATTR = I2CEDD__UNEXPENDIFF
+           GOTO 999
+        ENDIF
+C
+        IF (IECODE.NE.'NO') THEN
+           CALL LSL_PUTMSG (I2CEDD__NOREPOSERR, LPOSNO(1))
+           CALL WRITEF (' searching for first non-zero layer')
+           PROCESS_FEATURE_ATTR = I2CEDD__NOREPOSERR
+           GOTO 999
+        ENDIF
+C
+        CALL EIHR (LAYER, 1, 1)          ! get layer number
+        CALL EIHRL (LPOSEO(1), 1, 3)
+C
+C  get next NF entry
+C
+10	CALL IFFNXC ('NF', IELEN)
+C
+C Check that end of file has not been reached
+C
+	IF (IELEN.EQ.-1) THEN
+           IF (.NOT.HAD_NF) THEN
+              PROCESS_FEATURE_ATTR = I2CEDD__UNEXPENDIFF
+              CALL LSL_PUTMSG (I2CEDD__UNEXPENDIFF)
+              CALL WRITEF (' in layer %^W%N', LAYER)
+              GOTO 999
+           ELSE
+              GOTO 999
+           ENDIF
+        ENDIF
+C
+        HAD_AC_TEXT = .FALSE.
+        HAD_AC = .FALSE.
+        HAD_FS = .FALSE.
+C
+C Set buffer to contain spaces
+C
+        DO 5 J = 1,179
+           FEA_BYTBUF(J) = ' '
+5       CONTINUE
+C
+C Set flag to indicate that we have found at least one NF
+C
+	HAD_NF = .TRUE.
+C
+C Read FSN and ISN
+C
+        CALL EIHR (FSN, 1, 1)
+        CALL EIHR (ISN, 1, 2)
+C
+C Ouput diagnostic message saying what is happening
+C
+	IF (DIAG) CALL WRITEF(
+     &		'.Writing FEA entry for feature FSN %^W%N',FSN)
+C
+C  got NF new feature, count it
+C
+        INFTR = .TRUE.
+        COUNT = COUNT + 1
+C
+        CALL EXPAND ('%W%P %I6', FEA_BYTBUF(1), COUNT)
+C
+C  get next entry
+C
+20      CALL IFFNXT (IECODE, IELEN)                
+C
+	IF (IELEN.EQ.-1) THEN
+           PROCESS_FEATURE_ATTR = I2CEDD__UNEXPENDIFF
+           CALL LSL_PUTMSG (I2CEDD__UNEXPENDIFF)
+           CALL WRITEF 
+     & (' in feature no. %N with FSN %^W%N (ISN %^W%N)', 
+     &                                    COUNT, FSN, ISN)
+           GOTO 999
+        ENDIF
+C
+        IF (IECODE.EQ.'FS') THEN
+           HAD_FS = .TRUE.
+           CALL EIHR (IFC, 1, 1)           ! get feature code
+C 
+           IF (FRTFND (IFC)) THEN
+              CALL LSL_PUTMSG (I2CEDD__FRTFNDERR, IFC)
+              CALL WRITEF 
+     & (' in feature no. %N with FSN %^W%N (ISN %^W%N)', 
+     &                                    COUNT, FSN, ISN)
+           ENDIF
+C
+C  FC entered into /FRTCOM/
+C  assume the feature type is a point unless line or area GT
+C
+           CALL EXPAND ('%WP', FEA_BYTBUF(7))
+C
+           IF (FRTGT.EQ.LINTYP) CALL EXPAND ('%WL', FEA_BYTBUF(7))
+           IF (FRTGT.EQ.ARETYP) CALL EXPAND ('%WA', FEA_BYTBUF(7))
+C
+	   GOTO 20
+C
+C  AC - Attribute codes
+C
+        ELSEIF (IECODE.EQ.'AC') THEN
+C
+           HAD_AC = .TRUE.
+           GOTO 30                          ! do the business
+C
+        ELSEIF (IECODE.EQ.'EF' .OR. IECODE.EQ.'EM' 
+     &                         .OR. IECODE.EQ.'EJ') THEN
+C
+           INFTR = .FALSE.
+           IF (.NOT.HAD_FS) CALL LSL_PUTMSG 
+     &                        (I2CEDD__FSMISSING, FSN, ISN)
+           IF (.NOT.HAD_AC) CALL LSL_PUTMSG
+     &                        (I2CEDD__ACMISSING, FSN, ISN)
+C
+C  fill some final entries
+C    the no. of header blocks = 4
+C
+           CALL EXPAND ('%W04', FEA_BYTBUF(8))
+C
+C    the no. of segments assoc with feature = 1
+C
+           CALL EXPAND ('%W001', FEA_BYTBUF(170))
+C
+C    the segment direction = F
+C
+           CALL EXPAND ('%WF', FEA_BYTBUF(173))
+C
+C    the segment ID = feature ID
+C
+           CALL EXPAND ('%W%P %I6', FEA_BYTBUF(174), COUNT)
+C
+C  append the stuff to FEAture record
+C
+           CALL APPEND_TO_BLOCK (FEA_BYTBUF, 179, 'FEA')
+
+           IF (IECODE.EQ.'EF') THEN
+              GOTO 10                 ! find next feature
+C
+           ELSE
+              CALL LSL_PUTMSG (I2CEDD__UNEXPENDIFF)
+              CALL WRITEF 
+     & ('  in feature no. %N with FSN %^W%N (ISN %^W%N)',
+     &                                      COUNT, FSN, ISN)
+C
+              IF (.NOT.HAD_FS) CALL LSL_PUTMSG 
+     &                        (I2CEDD__FSMISSING, FSN, ISN)
+              IF (.NOT.HAD_AC) CALL LSL_PUTMSG
+     &                        (I2CEDD__ACMISSING, FSN, ISN)
+C
+              GOTO 999                        ! to exit
+C
+           ENDIF
+C
+        ELSE
+C
+           GOTO 20                         ! get next entry
+C
+        ENDIF
+C
+C   do the AC attribute codes here
+C
+30      HAD_AC = .TRUE.
+C
+        CALL EIHRI (ACTYPE, 1, 1)	   ! read AC type
+        CALL EIHRL (ACVAL, 1, 2)           ! read value field
+C
+	AC4TYPE = ACTYPE
+        IF (.NOT.ACDFND (AC4TYPE, .TRUE.)) THEN
+           NAME_STRING = ACD_NAME (:ACD_NAME_LEN)
+           DATA_TYPE = ACD_DATA_TYPE
+        ELSE 
+           CALL LSL_PUTMSG (I2CEDD__ACDFNDERR, ACTYPE)
+           CALL WRITEF 
+     & (' in feature no. %N with FSN %^W%N (ISN %^W%N)', 
+     &                                    COUNT, FSN, ISN)
+           GOTO 20            ! give up on AC, get next entry
+        ENDIF
+C
+        IF (DATA_TYPE.EQ.ACD_DATATYPE_D) THEN
+           DATE = ACVAL
+C
+C   convert to days, months, year
+C
+           IF (.NOT.CVTDATE (DATE, DD, MM, YY)) THEN
+              CALL LSL_PUTMSG (I2CEDD__YMDCONVERR, DATE, ACTYPE)
+              CALL WRITEF (' in feature with FSN  %^W%N', FSN)
+              YY = -1
+              GOTO 20             ! give up on AC
+           ENDIF
+           YY = MOD(YY, 100)
+C
+        ENDIF
+C
+C  is it a 3-byte real field?
+C
+        IF (DATA_TYPE.EQ.ACD_DATATYPE_R) THEN
+           IF (NAME_STRING.NE.'Value_attribute_A' .AND.
+     &                  NAME_STRING.NE.'Value_attribute_B') THEN
+              IF (ACREALVAL.LT.9.95) THEN
+                 CALL EXPAND ('%W%F3.1', REAL_FIELD(1), ACREALVAL)
+              ELSEIF (ACREALVAL.GE.9.95 .AND. ACREALVAL.LE.99.5) THEN
+                 CALL EXPAND ('%W%F3.0', REAL_FIELD(1), ACREALVAL)
+              ELSEIF (ACREALVAL.GT.99.5) THEN
+                 CALL EXPAND ('%W%I3', REAL_FIELD(1), NINT(ACREALVAL))
+              ENDIF
+           ENDIF
+        ENDIF
+C
+C  AC successfully read
+C    now the AC entries in turn
+C
+        IF (NAME_STRING.EQ.'Source_code') THEN 
+           IF (ACVAL.GT.0) CALL EXPAND 
+     &                 ('%W%P %I2', FEA_BYTBUF(10), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Source_scale') THEN 
+           CALL EXPAND ('%W%P %I8', FEA_BYTBUF(12), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Source_date') THEN 
+	   IF (YY.GE.0) THEN
+              CALL EXPAND ('%W%P0%I2', FEA_BYTBUF(20), YY)
+              CALL EXPAND ('%W%P0%I2', FEA_BYTBUF(22), MM)
+              CALL EXPAND ('%W%P0%I2', FEA_BYTBUF(24), DD)
+	   ENDIF
+C
+        ELSEIF (NAME_STRING.EQ.'Collection_system') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(26), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Maintenance_date') THEN 
+	   IF (YY.GE.0) THEN
+              CALL EXPAND ('%W%P0%I2', FEA_BYTBUF(28), YY)
+              CALL EXPAND ('%W%P0%I2', FEA_BYTBUF(30), MM)
+              CALL EXPAND ('%W%P0%I2', FEA_BYTBUF(32), DD)
+	   ENDIF
+C
+        ELSEIF (NAME_STRING.EQ.'Feature_horiz_acc') THEN 
+           CALL EXPAND ('%W%P %I4', FEA_BYTBUF(34), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Feature_vert_acc') THEN 
+           CALL EXPAND ('%W%P %I4', FEA_BYTBUF(38), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Base_product') THEN 
+           CALL EXPAND ('%W%P %I3', FEA_BYTBUF(42), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Security_class') THEN 
+           CALL EXPAND ('%W%A1', FEA_BYTBUF(45), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Data_handling') THEN 
+           CALL EXPAND ('%W%A2', FEA_BYTBUF(46), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Portrayal') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(48), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'FACS_prefix') THEN 
+           CALL EXPAND ('%W%A1', FEA_BYTBUF(50), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'FACS_code') THEN 
+           CALL EXPAND ('%W%A4', FEA_BYTBUF(51), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_A') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(56), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_B') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(58), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_C') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(60), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_D') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(62), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_E') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(64), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_F') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(66), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_G') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(68), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_H') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(70), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_I') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(72), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'R_FACS_attribute_J') THEN 
+           CALL EXPAND ('%W%A3', FEA_BYTBUF(74), REAL_FIELD)
+C
+        ELSEIF (NAME_STRING.EQ.'R_FACS_attribute_K') THEN 
+           CALL EXPAND ('%W%A3', FEA_BYTBUF(77), REAL_FIELD)
+C
+        ELSEIF (NAME_STRING.EQ.'R_FACS_attribute_L') THEN 
+           CALL EXPAND ('%W%A3', FEA_BYTBUF(80), REAL_FIELD)
+C
+        ELSEIF (NAME_STRING.EQ.'R_FACS_attribute_M') THEN 
+           CALL EXPAND ('%W%A3', FEA_BYTBUF(83), REAL_FIELD)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_N') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(86), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_O') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(88), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_P') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(90), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_Q') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(92), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_R') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(94), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_S') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(96), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_T') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(98), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_U') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(100), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'I_FACS_attribute_V') THEN 
+           CALL EXPAND ('%W%P %I2', FEA_BYTBUF(102), ACVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'R_FACS_attribute_W') THEN 
+           CALL EXPAND ('%W%A3', FEA_BYTBUF(104), REAL_FIELD)
+C
+        ELSEIF (NAME_STRING.EQ.'R_FACS_attribute_X') THEN 
+           CALL EXPAND ('%W%A3', FEA_BYTBUF(107), REAL_FIELD)
+C
+        ELSEIF (NAME_STRING.EQ.'R_FACS_attribute_Y') THEN 
+           CALL EXPAND ('%W%A3', FEA_BYTBUF(110), REAL_FIELD)
+C
+        ELSEIF (NAME_STRING.EQ.'R_FACS_attribute_Z') THEN 
+           CALL EXPAND ('%W%A3', FEA_BYTBUF(113), REAL_FIELD)
+C
+        ELSEIF (NAME_STRING.EQ.'Value_attribute_A') THEN 
+           CALL EXPAND ('%W%F7.2', FEA_BYTBUF(116), ACREALVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Value_attribute_B') THEN 
+           CALL EXPAND ('%W%F7.2', FEA_BYTBUF(123), ACREALVAL)
+C
+        ELSEIF (NAME_STRING.EQ.'Text_attribute') THEN
+           LEN = ACVAL                          ! 10 or 20
+           CALL EIHR (TEXT_STRING(1), LEN/2, 4)
+           IF (LEN.EQ.10) THEN
+              IF (.NOT.HAD_AC_TEXT) THEN
+                 CALL EXPAND ('%W%A10', FEA_BYTBUF(130), TEXT_STRING)
+                 HAD_AC_TEXT = .TRUE.
+              ELSE
+                 CALL EXPAND ('%W%A10', FEA_BYTBUF(140), TEXT_STRING)
+              ENDIF
+           ELSEIF (LEN.EQ.20) THEN
+              CALL EXPAND ('%W%A20', FEA_BYTBUF(150), TEXT_STRING)
+           ELSE
+              CALL LSL_PUTMSG (I2CEDD__ACLENERR, ACTYPE, LEN)
+              CALL WRITEF 
+     & ('  in feature no. %N with FSN %^W%N (ISN %^W%N)', 
+     &                                      COUNT, FSN, ISN)
+           ENDIF
+C
+        ELSE
+           CALL LSL_PUTMSG (I2CEDD__ACWRONGFTR, ACTYPE)
+           CALL WRITEF 
+     & ('  in feature no. %N with FSN %^W%N (ISN %^W%N)', 
+     &                                      COUNT, FSN, ISN)
+        ENDIF
+C
+C  AC's done
+C
+        GOTO 20                          ! for next entry
+C
+C  exit
+C
+999     PROCESS_FEATURE_ATTR = FINISH_BLOCK()
+C
+        RETURN
+	END
+C

@@ -1,0 +1,624 @@
+	SUBROUTINE CREATE
+C
+***	IDENT	10SE91
+***	MODULE	CREATE
+C
+C	Copyright : Laser-Scan, Cambridge, England
+C	Author    : D R Catlow
+C
+CMOD	For use with ENABLE ABSOLUTE and UNITS PROJ  DRC 02DE88
+C	Modified to use DTILIB	21JL87	DRC
+C
+C	Routine for COVER to create a new cover matrix
+C	from an input cover matrix.
+C	Selection of which observers are output to the new
+C	matrix is specified by the user via the SELECT command.
+C	In the absence of a selection, (SELECT ALL) a straight 
+C	copy of the input matrix is made.
+C
+C	The input   matrix is opened on DTILUN 4
+C	The output  matrix is opened on DTILUN 3
+C	The input matrix is encoded in a bit-wise manner.
+C	If more than 1 observer is selected, then a temporary
+C	matrix is created on DTILUN 5
+C
+	IMPLICIT NONE
+C
+C	DTILIB common
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	COMMON/LSL$CMNDTI:DTIPROJ/
+C
+C 	DTILIB parameter
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+C
+C	COVER commons
+***	COMMON/HERE:OBSERVER/
+***	COMMON/HERE:COVER/
+***	COMMON/HERE:DISPLY/		!observer details for
+					!input image
+C
+C locals:
+	REAL			CONE_LEFT	  !passed to DISPLAY_INSIDE
+	REAL			CONE_RIGHT
+	INTEGER*4		I		  !Counter
+	INTEGER*4		COL		  !Column counter
+	INTEGER*4		ROW		  !Row counter
+	INTEGER*4		RETVAL		  !Function error code
+	INTEGER*4		ERROR		  !System error code
+	INTEGER*4		NUMBER		  !number of observers output
+	INTEGER*4		HEADER_OFFSET	  !offset in header 
+C						  !of observer details
+	INTEGER*4		OUT_HEADER_OFFSET !offset in output file
+	INTEGER*4		SHEET_OFFSET	  !offset in header
+C						  !of latlong details
+	INTEGER*4		OUT_SHEET_OFFSET  !offset of sheet details
+C						  !in output file
+C
+	INTEGER*4		DTILUN		  ! matrix number
+	INTEGER*4		OUTLUN
+	INTEGER*4		TMPLUN
+	INTEGER*4		INLUN
+	PARAMETER		(INLUN=4)
+	PARAMETER		(OUTLUN=3)
+	PARAMETER		(TMPLUN=5)
+C
+	INTEGER*4		LLDEGS(4)	!temp holds latlong in .1 secs
+	INTEGER*4		DEGR,MINU,SECO
+	INTEGER*4		SAVED_UNITS	!copy of units value
+	INTEGER*2		CELL		!cell value
+	LOGICAL			NEGA
+	BYTE			CH
+C
+C 	DTILIB functions:
+	INTEGER*4	        DTI_CLOSE
+	INTEGER*4		DTI_MINMAX_DATA	
+	INTEGER*4		DTI_READ_WORD_HEADER	
+	INTEGER*4		DTI_READ_LONG_HEADER
+	INTEGER*4		DTI_READ_REAL_HEADER
+	INTEGER*4		DTI_WRITE_WORD_HEADER
+	INTEGER*4		DTI_WRITE_LONG_HEADER
+	INTEGER*4		DTI_WRITE_REAL_HEADER
+	INTEGER*4		DTI_READ_WORD_DATA
+	INTEGER*4		DTI_WRITE_WORD_DATA
+C
+C	COVER functions
+	LOGICAL			DISPLAY_INSIDE	!test pt against cone of vision
+	LOGICAL			RDCHS		!test for EOLN
+	LOGICAL			WAIT_INPUT   	!get terminal input
+	LOGICAL			CREATE_FILE  	!create output matrix
+	LOGICAL			OPEN_FILE    	!open input matrices
+	INTEGER*4		DTI_UNITS	!to test units
+C
+C***********************************************************************
+C Input file must be specified first in order to determine
+C the size of the output matrix.
+C
+C Open the input cover map
+	IF(RDCHS(CH))GOTO 15
+	CALL BSCH
+C
+10	IF (.NOT.OPEN_FILE(INLUN))THEN		! Error already output 
+15	  CALL BSLN
+	  IF(.NOT.WAIT_INPUT('Input cover map filename',.FALSE.,.TRUE.))
+     &    GOTO 999
+	  GOTO 10
+	ENDIF
+C
+	IF(RDCHS(CH))GOTO 25
+	CALL BSCH
+C
+C and create the output matrix on channel 3
+C
+20	IF (.NOT.CREATE_FILE(OUTLUN,X_EXTENT(INLUN),
+     &				    Y_EXTENT(INLUN),.TRUE.))THEN
+25	  CALL BSLN
+	  IF (.NOT.WAIT_INPUT('Output cover map filename',.FALSE.,.TRUE.))
+     &    GOTO 999
+	  GOTO 20
+	ENDIF
+C
+C Transfer header details from input to output matrix
+	X_GRID(OUTLUN) = X_GRID(INLUN)
+	Y_GRID(OUTLUN) = Y_GRID(INLUN)
+	MIN_LVALUE(OUTLUN) = -1		!initial minimum data value
+	MAX_LVALUE(OUTLUN) = 0		!initial maximum data value
+C
+C These values (including the updated minimum and maximum height
+C are written to the mapped file on closing.
+C	     	
+C Get lat/long sheet details from input header.
+C	These are stored in the header at byte offset 220 onwards
+C	in an old style visibility map, and at byte offset 280 
+C	in a new style cover map.
+C
+	IF(HEADER_TYPE(INLUN).EQ.DTI_MIKE)THEN
+	  SHEET_OFFSET=220
+	ELSE
+	  SHEET_OFFSET=280
+	ENDIF
+	OUT_SHEET_OFFSET=280
+C
+C Lat origin value in tenths of seconds
+C
+	RETVAL=DTI_READ_LONG_HEADER
+     &		(INLUN,LATREC(1,4),SHEET_OFFSET,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C Lon origin value in tenths of seconds
+C
+	RETVAL=DTI_READ_LONG_HEADER
+     &		(INLUN,LONREC(1,4),SHEET_OFFSET+4,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C Lat interval in tenths of seconds
+C
+	RETVAL=DTI_READ_LONG_HEADER
+     &		(INLUN,LATINT(4),SHEET_OFFSET+8,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C Lon interval in tenths of seconds
+C
+	RETVAL=DTI_READ_LONG_HEADER
+     &		(INLUN,LONINT(4),SHEET_OFFSET+12,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C Matrix offset values
+C
+	RETVAL=DTI_READ_WORD_HEADER
+     &		(INLUN,DISPLAY_XOFFSET,SHEET_OFFSET+16,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+	RETVAL=DTI_READ_WORD_HEADER
+     &		(INLUN,DISPLAY_YOFFSET,SHEET_OFFSET+18,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C and transfer to output:
+C	Lat origin value in tenths of seconds
+C
+	RETVAL=DTI_WRITE_LONG_HEADER
+     &		(OUTLUN,LATREC(1,4),OUT_SHEET_OFFSET,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C	Lon origin value in tenths of seconds
+C
+	RETVAL=DTI_WRITE_LONG_HEADER
+     &		(OUTLUN,LONREC(1,4),OUT_SHEET_OFFSET+4,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C	Lat interval in tenths of seconds
+C
+	RETVAL=DTI_WRITE_LONG_HEADER
+     &		(OUTLUN,LATINT(4),OUT_SHEET_OFFSET+8,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C	Lon interval in tenths of seconds
+C
+	RETVAL=DTI_WRITE_LONG_HEADER
+     &		(OUTLUN,LONINT(4),OUT_SHEET_OFFSET+12,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C	Matrix offset values
+C
+	RETVAL=DTI_WRITE_WORD_HEADER
+     &		(OUTLUN,DISPLAY_XOFFSET,OUT_SHEET_OFFSET+16,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+	RETVAL=DTI_WRITE_WORD_HEADER
+     &		(OUTLUN,DISPLAY_YOFFSET,OUT_SHEET_OFFSET+18,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C-------------------------------------------------------------------------
+C
+	CALL WRITEF(' ')
+	CALL EXPAND('Observer values ')
+C
+C	Test if current units setting is sensible for this file.
+C	If not then output details in matrix units.
+C	Save units and test whether current units setting
+C	is sensible for current display file
+C
+	SAVED_UNITS=UNITS
+	RETVAL=DTI_UNITS(INLUN,SAVED_UNITS)
+	IF(.NOT.RETVAL)SAVED_UNITS=1		!matrix units
+C
+	IF(SAVED_UNITS.EQ.1)CALL APPEND('(Units are DTI Matrix Values)')
+	IF(SAVED_UNITS.EQ.2)CALL APPEND('(Units are Metres)')
+	IF(SAVED_UNITS.EQ.3)CALL APPEND('(Units are Seconds)')
+        IF(SAVED_UNITS.EQ.4)CALL APPEND
+     &  ('(Units are Degrees, Minutes, Seconds)')
+	IF(SAVED_UNITS.EQ.5)CALL APPEND('(Units are Projection Units)')
+	CALL TTWSTR
+C
+	CALL WRITEF
+     &	('Observer       Position          Height    Direction
+     &     Cone     Distance')
+C
+	NUMBER=0
+	DTILUN=OUTLUN
+C
+C	If input file is a MIKE type header, then its an old
+C	style visibility grid with different offset values.
+C	A file with the new style is always created.
+C
+	IF(HEADER_TYPE(INLUN).EQ.DTI_MIKE)THEN
+	  HEADER_OFFSET=0
+	ELSE
+	  HEADER_OFFSET=16
+	ENDIF
+	OUT_HEADER_OFFSET=16
+C
+	DO 500 I=1,8
+	   HEADER_OFFSET=HEADER_OFFSET+24
+	   OUT_HEADER_OFFSET=OUT_HEADER_OFFSET+24
+C
+	   IF(.NOT.SELOBS(I))GOTO 500	!this observer not selected
+C
+C	Note values put into display observer variables, to prevent
+C	overwriting of main set of observer values
+C
+	   RETVAL = DTI_READ_REAL_HEADER
+     &              (INLUN,CON_D_OBSERVERS(I),HEADER_OFFSET+8,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   IF(CON_D_OBSERVERS(I).EQ.0)GOTO 500	!though selected,
+C
+C	this observer was not used in the cover map generation
+C
+	   RETVAL = DTI_READ_WORD_HEADER
+     &              (INLUN,DTI_D_OBSERVERS(I,1),HEADER_OFFSET,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL = DTI_READ_WORD_HEADER
+     &              (INLUN,DTI_D_OBSERVERS(I,2),HEADER_OFFSET+2,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   POS_D_OBSERVERS(I,1)=DTI_D_OBSERVERS(I,1)*X_GRID(INLUN)
+	   POS_D_OBSERVERS(I,2)=DTI_D_OBSERVERS(I,2)*Y_GRID(INLUN)
+C
+	   RETVAL = DTI_READ_REAL_HEADER
+     &              (INLUN,POS_D_OBSERVERS(I,3),HEADER_OFFSET+4,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL = DTI_READ_REAL_HEADER
+     &              (INLUN,DIR_D_OBSERVERS(I),HEADER_OFFSET+12,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL = DTI_READ_REAL_HEADER
+     &              (INLUN,DIS_D_OBSERVERS(I,1),HEADER_OFFSET+16,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL = DTI_READ_REAL_HEADER
+     &              (INLUN,DIS_D_OBSERVERS(I,2),HEADER_OFFSET+20,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+C	and output details to terminal...
+C
+C	Branch according to UNITS
+C
+	   GOTO (310,320,330,340,345)SAVED_UNITS
+C
+310	   CALL WRITEF
+     &	   ('%I3   %^W%I8   %^W%I8      %F7.1    %F7.1
+     &     %F7.1     %F7.1',
+     &	   I,
+     &     DTI_D_OBSERVERS(I,1),
+     &     DTI_D_OBSERVERS(I,2),
+     &     POS_D_OBSERVERS(I,3),
+     &	   DIR_D_OBSERVERS(I),
+     &     CON_D_OBSERVERS(I),
+     &     DIS_D_OBSERVERS(I,1))
+	   GOTO 350
+C
+320	   IF(ABSOLUTE)THEN
+	     CALL WRITEF
+     &	     ('%I3   %F10.1 %F10.1    %F7.1    %F7.1
+     &       %F7.1     %F7.1',
+     &	     I,
+     &       X_OFFSET(INLUN)+((DTI_D_OBSERVERS(I,1)-1)*X_GRID(INLUN)),
+     &       Y_OFFSET(INLUN)+((DTI_D_OBSERVERS(1,2)-1)*Y_GRID(INLUN)),
+     &       POS_D_OBSERVERS(I,3),
+     &	     DIR_D_OBSERVERS(I),
+     &       CON_D_OBSERVERS(I),
+     &       DIS_D_OBSERVERS(I,2))
+	     GOTO 350
+	   ELSE
+	     CALL WRITEF
+     &	     ('%I3   %F10.1 %F10.1    %F7.1    %F7.1
+     &       %F7.1     %F7.1',
+     &	     I,
+     &       (DTI_D_OBSERVERS(I,1)-1)*X_GRID(INLUN),
+     &       (DTI_D_OBSERVERS(1,2)-1)*Y_GRID(INLUN),
+     &       POS_D_OBSERVERS(I,3),
+     &	     DIR_D_OBSERVERS(I),
+     &       CON_D_OBSERVERS(I),
+     &       DIS_D_OBSERVERS(I,2))
+	     GOTO 350
+	   ENDIF
+C
+330	   LLDEGS(1)=(LONREC(1,4)+((DTI_D_OBSERVERS(I,1)-1)*LONINT(4)))/10
+	   LLDEGS(2)=(LATREC(1,4)+((DTI_D_OBSERVERS(I,2)-1)*LATINT(4)))/10
+	   IF(DTI_D_OBSERVERS(I,1).EQ.0)LLDEGS(1)=0
+	   IF(DTI_D_OBSERVERS(I,2).EQ.0)LLDEGS(2)=0
+C
+	   CALL WRITEF
+     &	   ('%I3    %^L%I9 %I9     %F7.1    %F7.1
+     &     %F7.1     %F7.1',
+     &	   I,				!observer number
+     &	   LLDEGS(2),			!x observer position (secs)
+     &	   LLDEGS(1),			!y observer position (secs)
+     &	   POS_D_OBSERVERS(I,3),	!height (metres)
+     &	   DIR_D_OBSERVERS(I),		!direction (degrees from N)
+     &     CON_D_OBSERVERS(I),		!cone of vision (degrees)
+     &	   DIS_D_OBSERVERS(I,2))	!distance (metres)
+	   GOTO 350
+C
+340	   LLDEGS(1)=LONREC(1,4)+((DTI_D_OBSERVERS(I,1)-1)*LONINT(INLUN))
+	   LLDEGS(2)=LATREC(1,4)+((DTI_D_OBSERVERS(I,2)-1)*LATINT(INLUN))
+C
+	   CALL EXPAND('%I3    ',I)	!observer
+	   IF(DTI_D_OBSERVERS(I,1).EQ.0)THEN
+	     CALL APPEND('  0 00 00    0 00 00    ')
+	   ELSE
+	     CALL DTI_CVTANG(LLDEGS(2),NEGA,DEGR,MINU,SECO)
+	     CALL APPEND('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	     IF(NEGA)THEN
+	       CALL APPEND('S ')
+	     ELSE
+	       CALL APPEND('N ')
+	     ENDIF
+C
+	     CALL DTI_CVTANG(LLDEGS(1),NEGA,DEGR,MINU,SECO)
+	     CALL APPEND('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	     IF(NEGA)THEN
+	       CALL APPEND('W   ')
+	     ELSE
+	       CALL APPEND('E   ')
+	     ENDIF
+	   ENDIF
+C
+	   CALL APPEND('%P %F7.1  ',POS_D_OBSERVERS(I,3))
+	   CALL APPEND('  %P %F7.1 ',DIR_D_OBSERVERS(I))
+	   CALL APPEND('    %P %F7.1 ',CON_D_OBSERVERS(I))
+	   CALL APPEND('    %P %F7.1',DIS_D_OBSERVERS(I,2))
+	   CALL TTWSTR
+	   GOTO 350
+C
+345	   IF(ABSOLUTE)THEN
+	     CALL WRITEF
+     &	     ('%I3   %F10.1 %F10.1    %F7.1    %F7.1
+     &       %F7.1     %F7.1',
+     &	     I,
+     &       DTIPROJ_ORIGIN(1,INLUN)+((DTI_D_OBSERVERS(I,1)-1)
+     &       *DTIPROJ_SAMPLE(2,INLUN)),
+     &       DTIPROJ_ORIGIN(2,INLUN)+((DTI_D_OBSERVERS(1,2)-1)
+     &       *DTIPROJ_SAMPLE(2,INLUN)),
+     &       POS_D_OBSERVERS(I,3),
+     &	     DIR_D_OBSERVERS(I),
+     &       CON_D_OBSERVERS(I),
+     &       DIS_D_OBSERVERS(I,2))
+	     GOTO 350
+	   ELSE
+	     CALL WRITEF
+     &	     ('%I3   %F10.1 %F10.1    %F7.1    %F7.1
+     &       %F7.1     %F7.1',
+     &	     I,
+     &       (DTI_D_OBSERVERS(I,1)-1)*DTIPROJ_SAMPLE(1,INLUN),
+     &       (DTI_D_OBSERVERS(1,2)-1)*DTIPROJ_SAMPLE(2,INLUN),
+     &       POS_D_OBSERVERS(I,3),
+     &	     DIR_D_OBSERVERS(I),
+     &       CON_D_OBSERVERS(I),
+     &       DIS_D_OBSERVERS(I,2))
+	     GOTO 350
+	   ENDIF
+C
+350	   CONTINUE
+C
+C and transfer observer details to output file
+C
+	   RETVAL=DTI_WRITE_WORD_HEADER
+     &            (OUTLUN,DTI_D_OBSERVERS(I,1),OUT_HEADER_OFFSET,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL=DTI_WRITE_WORD_HEADER
+     &         (OUTLUN,DTI_D_OBSERVERS(I,2),OUT_HEADER_OFFSET+2,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL=DTI_WRITE_REAL_HEADER
+     &         (OUTLUN,POS_D_OBSERVERS(I,3),OUT_HEADER_OFFSET+4,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL=DTI_WRITE_REAL_HEADER
+     &         (OUTLUN,CON_D_OBSERVERS(I),OUT_HEADER_OFFSET+8,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL=DTI_WRITE_REAL_HEADER
+     &         (OUTLUN,DIR_D_OBSERVERS(I),OUT_HEADER_OFFSET+12,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL = DTI_WRITE_REAL_HEADER
+     &        (OUTLUN,DIS_D_OBSERVERS(I,1),OUT_HEADER_OFFSET+16,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   RETVAL = DTI_WRITE_REAL_HEADER
+     &        (OUTLUN,DIS_D_OBSERVERS(I,2),OUT_HEADER_OFFSET+20,ERROR)
+	   IF(RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+C
+	   NUMBER=NUMBER+1
+C
+	   IF (NUMBER.GT.1) THEN
+C
+C    Open temporary visibility matrix on dtilun 5
+C
+	     DTILUN = TMPLUN
+	     IF(.NOT.CREATE_FILE(DTILUN,X_EXTENT(INLUN),
+     &                          Y_EXTENT(INLUN),.TRUE.)) GOTO 999
+	   ENDIF
+C	
+	   CONE_LEFT=DIR_D_OBSERVERS(I)-(CON_D_OBSERVERS(I)*0.5)
+	   IF (CONE_LEFT.LT.0.0) CONE_LEFT=CONE_LEFT+360.0
+C
+	   CONE_RIGHT=DIR_D_OBSERVERS(I)+(CON_D_OBSERVERS(I)*0.5)
+	   IF(CONE_RIGHT.GT.360.0) CONE_RIGHT=CONE_RIGHT-360.0
+C
+C-------------------------------------------------------------------------
+C
+	   DO 200 COL=1,X_EXTENT(INLUN)
+C
+	      DO 100 ROW=1,Y_EXTENT(INLUN)
+C
+C Test if cell is inside area of vision of current observer		
+C
+		 IF(.NOT.DISPLAY_INSIDE(COL,ROW,I,
+     &                      CONE_LEFT,CONE_RIGHT,
+     &                      4))GOTO 100
+C
+		 RETVAL=DTI_READ_WORD_DATA (INLUN,CELL,COL,ROW)
+	   	 IF(RETVAL.NE.DTI__NORMAL)CALL LSL_PUTMSG(RETVAL)
+C
+	         IF(CELL.EQ.0)THEN
+		   RETVAL=DTI_WRITE_WORD_DATA (DTILUN,0,COL,ROW)
+	   	   IF(RETVAL.NE.DTI__NORMAL)CALL LSL_PUTMSG(RETVAL)
+		   GOTO 100
+	         ENDIF
+C
+C Test the appropriate bit
+C
+	         IF(BTEST(CELL,I-1))THEN
+		   RETVAL=DTI_WRITE_WORD_DATA (DTILUN,I,COL,ROW)
+	   	   IF(RETVAL.NE.DTI__NORMAL)CALL LSL_PUTMSG(RETVAL)
+	         ELSE
+		   RETVAL=DTI_WRITE_WORD_DATA (DTILUN,0,COL,ROW)
+	   	   IF(RETVAL.NE.DTI__NORMAL)CALL LSL_PUTMSG(RETVAL)
+	         ENDIF
+C
+100	     CONTINUE
+C
+200	  CONTINUE
+C
+	  IF(NUMBER.EQ.1)THEN
+	    IF(I.GT.2)CALL COMBINE (OUTLUN,0)
+	    GOTO 500
+	  ELSE
+C
+C	Combine temporary matrix (5) with output cover map (3)
+C
+	    CALL COMBINE(OUTLUN,TMPLUN)
+	  ENDIF
+C	
+500	CONTINUE
+C
+	CALL WRITEF
+C
+C************************************************************************
+C	All done, so close all mapped files
+C	No updating required for input
+C
+999	IF(DTILUN_INUSE(INLUN)) RETVAL = 
+     &			DTI_CLOSE(INLUN,.FALSE.,.TRUE.,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C Update minimum and maximum values in output
+C
+	IF(DTILUN_INUSE(OUTLUN)) RETVAL = 
+     &			DTI_MINMAX_DATA(OUTLUN,.FALSE.,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C Update header when closing the output file
+C
+	IF (DTILUN_INUSE(OUTLUN)) RETVAL = 
+     &			DTI_CLOSE(OUTLUN,.TRUE.,.TRUE.,ERROR)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C************************************************************************
+C
+	RETURN
+	END
+C

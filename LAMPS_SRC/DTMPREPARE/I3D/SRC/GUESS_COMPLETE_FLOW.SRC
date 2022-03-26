@@ -1,0 +1,192 @@
+C TRUE = complete legal flow can be found
+C
+	LOGICAL FUNCTION GUESS_COMPLETE_FLOW(
+     &		FLOW_UNIQUE,
+     &		NOD_I,NOD_R,NOD_L,ARM_I,ARM_L,LNK_I,LNK_R,LNK_L,
+     &		PUP_I,PDN_I,NET_I,STN_I,STN_R,STL_I,STL_L,MNX_I,
+     &		MNX_R,PNT_I,PNT_R,
+     &		MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+C
+***	MODULE	GUESS_COMPLETE_FLOW
+***	IDENT	11JN90
+C
+C Copyright Laser Scan Laboratories, Cambridge, England.
+C 
+CMOD 896 Now tests for link having same node at both ends
+C	 and no longer falls into infinite loop		TJH 11-Jun-1990
+C Created						ACM 08-Jan-1989
+C
+C Description
+C	Searches for a complete legal flow (ie. every link directed and
+C	no sources or sinks except at free ends). If there is more than
+C	one possible such flow, the one returned will be the first one.
+C
+C ----------------------------------------------------------------------
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE 'LSL$CMNI3D:CONSTANTS.PAR'
+	INCLUDE 'LSL$CMNI3D:I3DMSG.PAR'
+C
+C Common blocks
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+C
+C Dynamically assigned array argument declarations
+	INCLUDE 'LSL$CMNI3D:VM_ARG_DECL.SRC'
+C
+C Data out
+	LOGICAL		FLOW_UNIQUE	! is the found flow unique
+C
+C Workspace
+	INTEGER		INOD,IARM
+	INTEGER		ILNK,JLNK,CUR_LNK
+	INTEGER		LEVEL
+	INTEGER		FLOW,GUESS_FLOW
+C
+	LOGICAL		FLOW_LEGAL
+	LOGICAL		FLOW_COMPLETE
+	LOGICAL		COMPLETE_LEGAL_FLOW_FOUND
+	LOGICAL		CAN_PUSH
+	LOGICAL		RERUN
+	LOGICAL		NO_POSSIBLE_FLOW
+	LOGICAL		HAD_FLOW_OUT
+	LOGICAL		HAD_SECOND_GUESS
+C
+C Functions
+	LOGICAL		CHECK_FLOW
+C
+C ----------------------------------------------------------------------
+	COMPLETE_LEGAL_FLOW_FOUND = .FALSE.
+	FLOW_UNIQUE = .FALSE.
+	RERUN = .FALSE.
+	NO_POSSIBLE_FLOW = .FALSE.
+	HAD_SECOND_GUESS = .FALSE.
+C
+10	DO 20 ILNK = 1,NUM_LNKS	! undirect all guessed link directions
+	   IF (LNK_L(LNK_GES,ILNK)) LNK_I(LNK_FLO,ILNK) = UNDIRECTED
+20	CONTINUE
+	LEVEL = 0				! zero stack level
+	CUR_LNK = 0
+C
+C Find  next undirected link
+C
+30	DO 80 ILNK = CUR_LNK+1,NUM_LNKS
+C	   IF (LNK_L(LNK_DEL,ILNK)) GOTO 80
+	   IF (LNK_I(LNK_GRP,ILNK).NE.RIVER) GOTO 80
+	   IF (LNK_I(LNK_FLO,ILNK).NE.UNDIRECTED) GOTO 80
+	   CUR_LNK = ILNK
+C
+C It is important to guess the "nicest" flow direction first. Otherwise
+C a legal flow may well be found which is not at all what is desired.
+C The rule used will be to assume that it is more likely for a river
+C network to flow from tree leaf to root than from root to leaf.
+C
+C ie. if start node has an out flow, then guess flow is into start node
+C else if fin node has an out flow then guess flow is into fin node
+C else guess flow is into start node
+C
+C See whether start/fin node had out flow (ie. downhill from node)
+C
+	   INOD = LNK_I(LNK_ND1,ILNK)
+	   GOTO 50
+40	   INOD = LNK_I(LNK_ND2,ILNK)
+50	   HAD_FLOW_OUT = .FALSE.
+	   IARM = NOD_I(NOD_ARM,INOD)
+60	   IF (IARM.EQ.NIL) GOTO 70
+	   JLNK = ARM_I(ARM_LNK,IARM)
+	   FLOW = LNK_I(LNK_FLO,JLNK)
+	   HAD_FLOW_OUT = HAD_FLOW_OUT.OR.(FLOW.NE.UNDIRECTED.AND.
+     &	      ((FLOW.EQ.DOWNHILL).EQV.(LNK_I(LNK_ND1,JLNK).EQ.INOD)))
+	   IARM = ARM_I(ARM_NXT,IARM)
+	   GOTO 60
+C
+C If out flow found, then guess flow into corresponding node
+C
+70	   IF (HAD_FLOW_OUT) THEN		! flow into node
+	      IF (INOD.EQ.LNK_I(LNK_ND1,ILNK)) THEN
+	         GUESS_FLOW = UPHILL
+	      ELSE
+	         GUESS_FLOW = DOWNHILL
+	      ENDIF
+	      GOTO 90				! check resuling flow
+	   ENDIF
+C
+C If currently on start node, try end node - but check that the start
+C and end nodes are not actually the same or we will loop to infinity!
+	   IF (INOD.EQ.LNK_I(LNK_ND1,ILNK)
+     &	   .AND.(LNK_I(LNK_ND1,ILNK) .NE. LNK_I(LNK_ND2,ILNK))) GOTO 40
+C
+C No out flow found, so just make an arbitary guess
+C
+	   GUESS_FLOW = UPHILL
+	   GOTO 90				! check resulting flow
+80	CONTINUE
+C
+C No undirected link remaining
+C
+	CAN_PUSH = .FALSE.
+	GOTO 110
+C
+90	LEVEL = LEVEL+1				! push link stack
+	STL_L(STL_BEF,LEVEL) = .FALSE.
+100	STL_I(STL_LNK,LEVEL) = CUR_LNK
+
+C See whether current flow is legal
+C
+	LNK_I(LNK_FLO,CUR_LNK) = GUESS_FLOW	! set link flow
+	FLOW_LEGAL = CHECK_FLOW(
+     &		.TRUE.,				! flow is experimental
+     &		RERUN,				! hold onto complete flo
+     &		NO_POSSIBLE_FLOW,		! first scan exhausted?
+     &		FLOW_COMPLETE,			! result flow complete?
+     &		NOD_I,NOD_R,NOD_L,ARM_I,ARM_L,LNK_I,LNK_R,LNK_L,PUP_I,
+     &		PDN_I,NET_I,STN_I,STN_R,STL_I,STL_L,MNX_I,MNX_R,PNT_I,
+     &		PNT_R,MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,
+     &		MAX_STLS)
+	IF (FLOW_LEGAL.AND.FLOW_COMPLETE) THEN
+	   IF (COMPLETE_LEGAL_FLOW_FOUND) THEN
+	      IF (RERUN) GOTO 999
+C
+C Find first solution again by starting at the beginning
+C
+	      RERUN = .TRUE.
+	      GOTO 10
+	   ENDIF
+	   COMPLETE_LEGAL_FLOW_FOUND = .TRUE.
+	END IF
+	IF (FLOW_LEGAL) GOTO 30			! find next undir. link
+C
+C Flow is either illegal or complete
+C
+110	IF (.NOT.STL_L(STL_BEF,LEVEL))THEN
+	   GUESS_FLOW = -LNK_I(LNK_FLO,STL_I(STL_LNK,LEVEL))
+	   STL_L(STL_BEF,LEVEL) = .TRUE.
+	   GOTO 100				! try alternative flow
+	ELSE
+	   CUR_LNK = STL_I(STL_LNK,LEVEL)
+	   LNK_I(LNK_FLO,CUR_LNK) = UNDIRECTED	! undirect link
+	   LEVEL = LEVEL-1			! decr stack index
+	   IF (LEVEL.GT.0) GOTO 90		! pop link stack
+	ENDIF
+C
+C No more solutions are possible
+C
+	IF (COMPLETE_LEGAL_FLOW_FOUND) THEN	! legal flow is unique
+C
+C Find first solution again by starting at the beginning
+C
+	   FLOW_UNIQUE = .TRUE.
+	   RERUN = .TRUE.
+	   GOTO 10
+	END IF
+C
+	IF (.NOT.NO_POSSIBLE_FLOW) THEN
+	  NO_POSSIBLE_FLOW = .TRUE.
+	  GOTO 10
+	ENDIF
+	CALL LSL_PUTMSG(I3D__NOFLOW)
+	FLOW_LEGAL = .FALSE.			! no legal flow exists
+C
+999	GUESS_COMPLETE_FLOW = FLOW_LEGAL
+	RETURN
+	END

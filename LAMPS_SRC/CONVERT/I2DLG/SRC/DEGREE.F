@@ -1,0 +1,45 @@
+	REAL FUNCTION DEGREE( RADIANS )
+C
+***	IDENT	31JA85
+***	MODULE	DEGREE
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 18 January 1985, borrowed by JMC.
+C
+	IMPLICIT NONE
+C
+C This function converts the argument in radians into degrees
+C
+C Argument is:
+C
+	REAL		RADIANS
+C
+C we need a value for PI
+C
+	REAL		 PI
+	PARAMETER	(PI = 3.141593)
+C
+C and some workspace
+C
+	REAL		TEMP
+C
+C
+	TEMP = RADIANS*180.0/PI
+C
+C ensure that we are within the range 0-360 degrees
+C
+	IF (ABS(TEMP).GT.360.0) THEN
+	   TEMP = MOD(TEMP,360.0)
+	ENDIF
+C
+	IF (TEMP.LT.0) THEN
+	   TEMP = 360+TEMP
+	ENDIF
+C
+C so return the result
+C
+	DEGREE = TEMP
+C
+	RETURN
+	END

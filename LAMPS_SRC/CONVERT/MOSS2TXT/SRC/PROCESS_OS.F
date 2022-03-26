@@ -54,11 +54,11 @@ C
 	REAL*4		COORD(1000,3)
 	REAL*4		RAC(1000,3)
 	REAL*8		RVAL
-	CHARACTER*4	TXTAC(1000),SVAL
+	CHARACTER*44	TXTAC(1000),SVAL
 	INTEGER*4	TXTLEN(1000)
 	INTEGER*4	NUM
 	LOGICAL		RREAL8
-	LOGICAL		FOUND
+	LOGICAL		FOUND,MATCH
 	INTEGER*4	PTR,PEN
 C
 C Logical
@@ -220,10 +220,7 @@ C
 	      CALL EXPAND('EF')
 	      CALL FLWLIN(EXPBUF)
 	   ENDIF
-	   NF = NF + 1
 	   CALL FLWSEL(TXTLUN)
-	   CALL EXPAND('NF %^W%I0 %^W%I0',NF,NF)
-	   CALL FLWLIN(EXPBUF)
 	   OK = FLRLIN(TXT,,80,)
 	   IF (OK.EQ.LSL__EOF) GOTO 220
 	   CALL BSLN
@@ -254,7 +251,7 @@ C
 			     TXTAC(NUM)(1:LEN) = SVAL(1:LEN)
 			     TXTLEN(NUM) = LEN
 			  ELSE
-			     TXTAC(NUM)(1:4)='XXXX'
+			     TXTAC(NUM)(1:44)='XXXX'
 			  ENDIF
 		       ELSE
 			  RAC(NUM,J) = REAL(RVAL)
@@ -268,83 +265,134 @@ C
  200	   CONTINUE
 	   IF (COORD(NUM,1).EQ.0.0.AND.COORD(NUM,2).EQ.0.0) THEN
 	      NUM = NUM - 1
-	      IF (NUM.EQ.1) THEN
-		 CALL EXPAND('FS 2 0 0 0')
-	      ELSE
-		 CALL EXPAND('FS 1 0 0 0')
-	      ENDIF
-	      CALL FLWLIN(EXPBUF)
-	      CALL EXPAND('AC 1 0 "%S"',CODE(1:4))
-	      CALL FLWLIN(EXPBUF)
 	      P = 1
-	      PEN = 0
- 201	      CALL EXPAND('CB FL %^W%I0',PEN)
-	      CALL FLWLIN(EXPBUF)
-	      IF (NUM.EQ.1) THEN 
-		 CALL EXPAND('   GT 7')
+	      MATCH = (CODE(1:4).EQ.'PFF0'.OR.
+     &	          CODE(1:4).EQ.'PGM0'.OR.
+     &	          CODE(1:4).EQ.'PTB0'.OR.
+     &	          CODE(1:4).EQ.'PM00'.OR.
+     &	          CODE(1:4).EQ.'PFC0'.OR.
+     &	          CODE(1:4).EQ.'PBM0'.OR.
+     &	          CODE(1:4).EQ.'PP00'.OR.
+     &	          CODE(1:4).EQ.'PC00')
+	      IF (NLINE.EQ.2.OR.MATCH) THEN
+ 667		 IF (P.GT.NUM) GOTO  205
+		 NF = NF + 1
+		 CALL EXPAND('NF %^W%I0 %^W%I0',NF,NF)
+		 CALL FLWLIN(EXPBUF)
+		 IF (MATCH) THEN
+		    CALL EXPAND('FS 27 0 0 0')
+		    CALL FLWLIN(EXPBUF)
+		    CALL EXPAND('AC 1 0 "%S"',CODE(1:4))
+		 ELSE
+		    IF (CODE(1:1).EQ.'*') THEN
+		       CALL EXPAND('FS 28 0 0 0')
+		       CALL FLWLIN(EXPBUF)
+		       CALL EXPAND('AC 1 0 "%S4"',CODE(1:4))
+		    ELSE
+		       CALL EXPAND('FS 25 0 0 0')
+		       CALL FLWLIN(EXPBUF)
+		       CALL EXPAND('AC 1 0 "%S44"',TXTAC(P)(1:TXTLEN(P)))
+		    ENDIF
+		 ENDIF
+		 CALL FLWLIN(EXPBUF)
+		 CALL EXPAND('TH %F11.4',COORD(P,3))
+		 CALL FLWLIN(EXPBUF)
+		 CALL EXPAND('CB FL 0')
+		 CALL FLWLIN(EXPBUF)
+		 IF (CODE(1:1).EQ.'*') THEN
+		    CALL EXPAND('   GT 10')
+		 ELSE
+		    CALL EXPAND('   GT 7')
+		 ENDIF
+		 CALL FLWLIN(EXPBUF)
+		 CALL EXPAND('   NR 1')
+		 CALL FLWLIN(EXPBUF)
+		 CALL EXPAND('   NC %^W%I0',2)
+		 CALL FLWLIN(EXPBUF)
+		 CALL EXPAND('   HC 91 92')
+		 CALL FLWLIN(EXPBUF)
+		 CALL EXPAND('   DA %F11.4 %F11.4',COORD(P,1),
+     &		                                   COORD(P,2))
+		 CALL FLWLIN(EXPBUF)
+		 IF (CODE(1:1).EQ.'*') THEN
+		    CALL EXPAND('RO %F11.4',RAC(P,1))
+		    CALL FLWLIN(EXPBUF)
+		    CALL EXPAND('TX %S44',TXTAC(P)(1:44))
+		    CALL FLWLIN(EXPBUF)
+		 ENDIF
+		 IF (P.LT.NUM) THEN
+		    CALL EXPAND('EF')
+		    CALL FLWLIN(EXPBUF)
+		 ENDIF
+		 P = P + 1
+		 GOTO 667
 	      ELSE
-		 CALL EXPAND('   GT 1')
-	      ENDIF
-	      CALL FLWLIN(EXPBUF)
-	      IF (NUM.LE.200) THEN
-		 CALL EXPAND('   NR %^W%I0',NUM)
-	      ELSEIF (NUM-P.GT.200) THEN
+		 NF = NF + 1
+		 CALL EXPAND('NF %^W%I0 %^W%I0',NF,NF)
+		 CALL FLWLIN(EXPBUF)
+		 IF (CODE(1:1).EQ.'P') THEN
+		    CALL EXPAND('FS 10 0 0 0')
+		 ELSEIF (CODE(1:1).EQ.'F') THEN
+		    CALL EXPAND('FS 9 0 0 0')
+		 ELSEIF (CODE(1:1).EQ.'H') THEN
+		    CALL EXPAND('FS 8 0 0 0')
+		 ELSEIF (CODE(1:1).EQ.'E') THEN
+		    CALL EXPAND('FS 7 0 0 0')
+		 ELSEIF (NUM.EQ.1) THEN
+		    CALL EXPAND('FS 2 0 0 0')
+		 ELSE
+		    CALL EXPAND('FS 1 0 0 0')
+		 ENDIF
+		 CALL FLWLIN(EXPBUF)
+		 CALL EXPAND('AC 1 0 "%S"',CODE(1:4))
+		 CALL FLWLIN(EXPBUF)
+		 PEN = 0
+ 201		 CALL EXPAND('CB FL %^W%I0',PEN)
+		 CALL FLWLIN(EXPBUF)
+		 IF (CODE(1:1).EQ.'P') THEN
+		    CALL EXPAND('   GT 11')
+		 ELSEIF (NUM.EQ.1) THEN 
+		    CALL EXPAND('   GT 7')
+		 ELSE
+		    CALL EXPAND('   GT 1')
+		 ENDIF
+		 CALL FLWLIN(EXPBUF)
+		 IF (NUM.LE.200) THEN
+		    CALL EXPAND('   NR %^W%I0',NUM)
+		 ELSEIF (NUM-P.GT.200) THEN
 		    CALL EXPAND('   NR 200')
 	         ELSE
 		    CALL EXPAND('   NR %^W%I0',NUM-P+1)
-	      ENDIF
-	      CALL FLWLIN(EXPBUF)
-	      IF (NLINE.EQ.2) THEN 
-		 CALL EXPAND('   NC %^W%I0',5)
-	      ELSE
-		 CALL EXPAND('   NC %^W%I0',3)
-	      ENDIF
-	      CALL FLWLIN(EXPBUF)
-	      IF (NLINE.EQ.1) THEN 
-		 CALL EXPAND('   HC 91 92 93')
+		 ENDIF
 		 CALL FLWLIN(EXPBUF)
-		 CALL EXPAND('   DA %F11.4 %F11.4 %F11.4',COORD(P,1),
+		 CALL EXPAND('   NC %^W%I0',3)
+		 CALL FLWLIN(EXPBUF)
+		 IF (NLINE.EQ.1) THEN 
+		    CALL EXPAND('   HC 91 92 93')
+		    CALL FLWLIN(EXPBUF)
+		    CALL EXPAND('   DA %F11.4 %F11.4 %F11.4',COORD(P,1),
      &		                                          COORD(P,2),
      &		                                          COORD(P,3))
-		 CALL FLWLIN(EXPBUF)
-	      ENDIF
-	      IF (NLINE.EQ.2) THEN 
-		 CALL EXPAND('   HC 91 92 93 1004 1005')
-		 CALL FLWLIN(EXPBUF)
-		 CALL EXPAND('   DA %F11.4 %F11.4 %F11.4 %F11.4 %S4',
-     &		                                          COORD(P,1),
-     &		                                          COORD(P,2),
-     &		                                          COORD(P,3),
-     &		                                          RAC(P,1),
-     &		                                          TXTAC(P)(1:4))
-		 CALL FLWLIN(EXPBUF)
-	      ENDIF
-	      IF (NUM.GT.1) THEN 
- 202		 P = P + 1
-		 IF (P.GT.NUM) GOTO  205
-		 IF (MOD(P,200).EQ.1) THEN
-		    PEN = 1
-		    GOTO  201
+		    CALL FLWLIN(EXPBUF)
 		 ENDIF
-		 IF (NLINE.EQ.1) THEN 
-		    CALL EXPAND('      %F11.4 %F11.4 %F11.4',COORD(P,1),
+		 IF (NUM.GT.1) THEN 
+ 202		    P = P + 1
+		    IF (P.GT.NUM) GOTO  205
+		    IF (MOD(P,200).EQ.1) THEN
+		       PEN = 1
+		       GOTO  201
+		    ENDIF
+		    IF (NLINE.EQ.1) THEN 
+		       CALL EXPAND('      %F11.4 %F11.4 %F11.4',COORD(P,1),
      &			                                     COORD(P,2),
      &		                                             COORD(P,3))
-		    CALL FLWLIN(EXPBUF)
+		       CALL FLWLIN(EXPBUF)
+		    ENDIF
+		    GOTO 202
+ 205		    CONTINUE
 		 ENDIF
-		 IF (NLINE.EQ.2) THEN 
-		    CALL EXPAND('      %F11.4 %F11.4 %F11.4 %F11.4 %S4',
-     &			                                     COORD(P,1),
-     &			                                     COORD(P,2),
-     &			                                     COORD(P,3),
-     &	  	                                             RAC(P,1),
-     &			                                     TXTAC(P)(1:4))
-		    CALL FLWLIN(EXPBUF)
-		 ENDIF
-		 GOTO 202
- 205		 CONTINUE
+		 NUM = 0
 	      ENDIF
-	      NUM = 0
 	   ENDIF
 	ENDIF
 C

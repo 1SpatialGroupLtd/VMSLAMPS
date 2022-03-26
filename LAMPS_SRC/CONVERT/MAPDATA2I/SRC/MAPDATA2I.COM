@@ -3,6 +3,8 @@ $	ver=f$verify(0)
 $!
 $! Copyright Laser-Scan Limited, Cambridge, England.
 $!
+$! Mod1435 Use new frtshr			JB 25-Nov-1994
+$!
 $! Command file for building MAPDATA2I
 $!
 $	on error then goto mapdata2iex
@@ -72,12 +74,13 @@ $	   over_limit	 = "t"
 $	   coord	 = "t"
 $	   retain_flags	 = "t"
 $	   check_ac_code = "t"
-$	   set_ac_details = "t"
-$	   get_ac_code = "t"
-$	   get_ac_name = "t"
-$	   get_strpar = "t"
-$	   check_fc = "t"
+$	   set_ac_details= "t"
+$	   get_ac_code 	 = "t"
+$	   get_ac_name	 = "t"
+$	   get_strpar	 = "t"
+$	   check_fc	 = "t"
 $	   check_md_code = "t"
+$	   shuffle_points= "t"
 $!
 $	   goto a11
 $!
@@ -105,18 +108,20 @@ $	   inq/nop get_ac_name   "Compile GET_AC_NAME? "
 $	   inq/nop get_strpar    "Compile GET_STRPAR? "
 $	   inq/nop check_fc	 "Compile CHECK_FC? "
 $	   inq/nop check_md_code "Compile CHECK_MD_CODE? "
+$	   inq/nop shuffle_points "Compile SHUFFLE_POINTS? "
+$!
 $	   write sys$output " "
 $ a11:	   inq/nop mes "Generate message definitions? "
 $	   inquire/nop lnkit "Link ? "
 $	   if .not. lnkit then goto notkb
 $!
-$	   linkver="mapdata2i"
-$	   inquire/nop answer "Experimental version? "
-$	   if answer then linkver="mapdata2ix"
-$!
 $	   linkopts="/map"
 $	   inquire/nop answer "Link with debug? "
 $	   if answer then linkopts=linkopts+"/debug"
+$!
+$	   linkver="mapdata2i"
+$	   inquire/nop answer "Experimental version? "
+$	   if answer then linkver="mapdata2ix"
 $!
 $	   inquire/nop answer "Cross reference map ? "
 $	   if answer then linkopts=linkopts+"/cross"
@@ -351,7 +356,7 @@ $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 		purge/nolog check_fc.lis"
 $!
-$a2300:	   if .not. check_md_code then goto a3000
+$a2300:	   if .not. check_md_code then goto a2400
 $		wc "$ set noverify"
 $		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
 $		wc "$ set verify"
@@ -360,6 +365,16 @@ $		wc "$ 		purge/nolog check_md_code.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
 				wc "$ 		purge/nolog check_md_code.lis"
+$!
+$a2400:	   if .not. shuffle_points then goto a3000
+$		wc "$ set noverify"
+$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$ set verify"
+$	   	wc "$ 		fort''fsw1' shuffle_points.f"
+$		wc "$ 		purge/nolog shuffle_points.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 		purge/nolog shuffle_points.lis"
 $!
 $a3000:	   if .not. retain_flags then goto lnkonly
 $		wc "$ set noverify"
@@ -401,10 +416,11 @@ $		wc "		get_ac_name, -"
 $		wc "		get_strpar, -"
 $		wc "		check_fc, -"
 $		wc "		check_md_code, -"
+$		wc "		shuffle_points, -"
 $		wc "		mapdata2i.promsg_obj, -"
 $		wc "		lsl$library:coordlib/lib, -"
-$!		wc "lsl$source_root:[lslmaint.coordlib.test]coordlib/lib, -"
-$		wc "		lsl$library:lslfrtlib/lib,-"
+$!		wc "	lsl$source_root:[lslmaint.coordlib.test]coordlib/lib, -"
+$		wc "		lsl$library:frtshr/opt,-"
 $	   	wc "		lsl$library:iffshr/opt,lslshr/opt"
 $ nolnk:
 $		wc "$ 		mapdata2iex:"
@@ -427,8 +443,10 @@ $	if .not.answer then goto mapdata2iex
 $	deass/group lsl$mapdata2i_building
 $	@mapdata2ibat.com
 $	goto mapdata2ix2
+$!
 $ mapdata2iex:
 $	deass/group lsl$mapdata2i_building
+$!
 $ mapdata2ix2:
 $	if ver then set verify
 $	pur mapdata2ibat.com

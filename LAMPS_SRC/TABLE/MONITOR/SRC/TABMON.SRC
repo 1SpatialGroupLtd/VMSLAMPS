@@ -1,0 +1,224 @@
+	PROGRAM	TABLE_MONITOR
+C
+***	IDENT	16DE89
+***	MODULE	TABLE_MONITOR
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 26 July 1984
+C
+C TVES Digitising table monitor program
+C
+C This program runs as a detached process, monitoring the output
+C from the digitising table, and keeping the table global section
+C up to date
+C
+	IMPLICIT NONE
+C
+C system parameter defintions
+C
+	INCLUDE	'($PSLDEF)'
+	INCLUDE	'($SSDEF)'
+	INCLUDE '($JPIDEF)'
+C
+C other parameter and common blocks
+C
+***	PARAMETER/CMN:TABMON/		! for event flag number
+***	PARAMETER/HERE:ERROR/		! error codes
+***	COMMON/HERE:DIGADR/		! for decode function address
+***	COMMON/HERE:TABIFC/		! table interface (for TABEFN)
+***	COMMON/CMN:TABNAMES/
+***	COMMON/HERE:GEN/		! for GOT_TABLE
+C
+C functions
+C
+	LOGICAL		ASCEFC		! associate event flag cluster
+	LOGICAL		NEWSEC		! make & map a global section
+	LOGICAL		GETLOCK		! start off a lock
+	LOGICAL		LOCK_TABLE	! start off another lock
+	LOGICAL		GETTAB		! get ready to listen to table
+	LOGICAL		RELTAB		! release the table again
+	LOGICAL		STR$COMPARE
+	INTEGER*4	TRNALL
+	INTEGER*4	LIB$GET_EF	! get an event flag
+	INTEGER*4	SYS$PURGWS	! purge our working set
+	INTEGER*4	SYS$HIBER	! hibernate this process
+	INTEGER*4	LIB$FIND_FILE
+	INTEGER*4	LIB$FIND_IMAGE_SYMBOL
+	INTEGER*4	LIB$GETJPI
+C
+C workspace
+C
+	EXTERNAL	EXP_HAND_FIMS
+C
+	INTEGER*4	IERR		! error return
+	INTEGER*4	INADR(2)	! input for SYS$PURGWS
+	INTEGER*4	CONTEXT		! context for LIB$FIND_FILE
+	CHARACTER*255	RESULT
+	INTEGER*4	RESULTL
+	LOGICAL		DEFAULT
+	INTEGER		PRSTRFUNC	! address of prmt string function
+C
+C *********************************************************************
+C
+C get name of this process
+C
+	IERR=LIB$GETJPI(JPI$_PRCNAM,,,,RESULT,RESULTL)
+	IF (.NOT.IERR) CALL ABANDON('failed to get process name',IERR)
+C
+C use this name to decide whether to use old or new naming conventions
+C
+	DEFAULT=STR$COMPARE(RESULT(1:RESULTL),DEF_T_NAME).EQ.0
+C
+C get terminal line name to use for new naming conventions
+C
+	IERR=TRNALL('SYS$INPUT',RESULT)	! this had really better work
+	IF (IERR.NE.SS$_NORMAL) THEN
+	   CALL ABANDON('failed to translate SYS$INPUT',IERR)
+	ENDIF
+C	
+C get the names we want into the common block TABNAMES
+C
+	CALL GET_NAMES(DEFAULT,RESULT)
+C
+C next, we must create the global section
+C
+	IF ( NEWSEC(IERR) ) THEN
+	   CALL ABANDON('no global section',IERR)
+	ENDIF
+C
+C next, we must establish our lock, with a null lock on the resource
+C
+	IF ( GETLOCK(IERR) ) THEN
+	   CALL ABANDON('no lock',IERR)
+	ENDIF
+C
+C and get a null lock for communication with TABLIB
+C
+	IF ( LOCK_TABLE(IERR) ) THEN
+	   CALL ABANDON('no lock',IERR)
+	ENDIF
+C
+C and then we associate with a common event flag cluster (for talking
+C to the library routines)
+C
+	IF ( ASCEFC( IERR, .TRUE. ) ) THEN
+	   CALL ABANDON('no common event flag cluster',IERR)
+	ENDIF
+C
+C and decide on an event flag number for the table
+C
+	TABEFN = TABLE_EFN		! from the common cluster
+C
+C are we trying for a user supplied decode routine?
+C Check whether file exists, using same default as LIB$FIND_IMAGE_SYMBOL
+C
+	USEFUN = .FALSE.		! assume not
+	CONTEXT = 0			! clear context
+	IERR = LIB$FIND_FILE(
+     &		ROUTINE_NAME(1:ROUTINEL),RESULT,CONTEXT,'SYS$SHARE:.EXE')
+	CALL LIB$FIND_FILE_END(CONTEXT)
+C
+	IF (IERR) THEN
+C
+C now try to get entry point, and activate the image
+C
+	   IERR = LIB$FIND_IMAGE_SYMBOL(
+     &			ROUTINE_NAME(1:ROUTINEL),'DECODE',FUNADR)
+	   IF (IERR) USEFUN = .TRUE.
+	ENDIF
+C
+C set up prompt for reading table
+C
+	IF (USEFUN) THEN
+	   CALL LIB$ESTABLISH(EXP_HAND_FIMS)	! set  condition handler
+	   IERR = LIB$FIND_IMAGE_SYMBOL(
+     &			ROUTINE_NAME(1:ROUTINEL),'GET_TABLE_PROMPT',
+     &	                           PRSTRFUNC)
+	   CALL LIB$REVERT		! take down condition handler
+	ELSE
+	   IERR = .FALSE.
+	ENDIF
+C
+	IF (IERR) THEN
+	   CALL CALLR(TABPROMPT,TABPROMPTMAX,TABPROMPTL,%VAL(PRSTRFUNC))
+	ELSE
+	   TABPROMPT(1) = 'V'
+	   TABPROMPTL   = 1
+	ENDIF
+C
+C *********************************************************************
+C
+C we come back to here after being told to shut down again
+C
+100	CONTINUE
+C
+C and thus we must relinquish the digitisng table (in case anyone else
+C wants to ASSIGN it whilst we're hibernating)
+C
+	IF ( GOT_TABLE ) THEN		! but only if we've got it
+	   IF ( RELTAB(IERR) ) THEN
+	      CALL ERROR( ERR_RELTAB, IERR )
+	   ENDIF
+	ENDIF
+C
+C before hibernating, we shall purge our working set - try to reduce
+C its size to a minimum whilst we are asleep - it will automatically
+C come back up to size when needed
+C
+	INADR(1) = 0			! we specify the
+	INADR(2) = '7FFFFFFF'X		! whole address range
+	IERR = SYS$PURGWS( INADR )
+	IF ( IERR.NE.SS$_NORMAL ) THEN
+	   CALL ERROR( ERR_PURGWS, IERR )
+	ENDIF
+C
+C and now we hibernate, until some other process wakes us up again
+C
+	IERR = SYS$HIBER()
+C
+C and inspect the result of our resuming execution
+C
+	IF ( IERR.NE.SS$_NORMAL ) THEN
+	   CALL ERROR( ERR_HIBER, IERR )
+	ENDIF
+C
+C now, we attempt to set up channels for talking to the table
+C (there's no point in doing this before, since we only want the table
+C when we're actually using it)
+C - if we fail to get a table, then give up
+C
+	IF ( GETTAB(IERR) ) THEN
+	   CALL ERROR( ERR_GETTAB, IERR )
+	   IF ( .NOT.GOT_TABLE ) THEN
+	      CALL ABANDON('unable to assign/allocate SYS$INPUT:',
+     &			   IERR)
+	   ENDIF
+	ENDIF
+C
+C and we must now go into our main loop,
+C
+C	     $(
+C
+C		wait for a button press
+C		check the string from the table
+C		set a lock on the global section
+C		write the information to the section
+C		release the lock
+C
+C	     $)		REPEATUNTIL told to stop
+C
+C all of the details are hidden in the following
+C
+	CALL DO_TABLE
+C
+C and if we return from that, then we wish to hibernate again
+C
+	GOTO 100
+C
+C *********************************************************************
+C
+C and that is all of this program - no provision for stopping it
+C (at least at this level)
+C
+	END

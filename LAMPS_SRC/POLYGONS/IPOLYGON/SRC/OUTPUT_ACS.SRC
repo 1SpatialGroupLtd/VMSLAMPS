@@ -1,0 +1,374 @@
+	INTEGER FUNCTION OUTPUT_ACS(SYMBOL,APOINT,FSN,BADSEG)
+C
+***	MODULE	OUTPUT_ACS
+***	IDENT	01NO91
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD1056 Send abs coords to LITES2 if requested		JB  01-Nov-1991
+C
+CMOD	Now passes output file LUN to GET_POLY_LABEL	TJH 29-Mar-1989
+C
+C 	Author						AC  31-May-1988
+C	(modified from part of OUTPUT_LRSEG)
+C
+C	Function to write out ACs that code a segment - note that the
+C       segment	may include single coord STs - ie symbol features.
+C
+C ........................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNIPOLYGON:IPOLYGONMSG.PAR'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'LSL$CMNPOLYGONS:COVERAGES.CMN'
+	INCLUDE		'LSL$CMNIPOLYGON:COMMAND.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE		'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE		'LSL$CMNLSL:TXTC.CMN'
+
+C Arguments:
+	LOGICAL		SYMBOL			! is this segment a symbol?
+	REAL		APOINT(2)		! a point on this segment
+	INTEGER		FSN			! the FSN of this segment
+	LOGICAL		BADSEG			! set to .T. if coding of
+C						! this segment fails
+C W/s:
+	INTEGER		LFT_POLY_INDX		! polygon to the left
+	INTEGER		RGT_POLY_INDX		! polygon to the right
+	CHARACTER*255	LFT_TEXT(COVMAX)	! left poly labels/identifier
+	CHARACTER*255	RGT_TEXT(COVMAX)	! right poly labels/identifier
+	INTEGER*2	LFT_LEN(COVMAX)		! length of LFT_TEXT
+	INTEGER*2	RGT_LEN(COVMAX)		! length of RGT_TEXT
+	LOGICAL		DOAC			! copy input ACs to output?
+	LOGICAL		GOT_TEXT 		! LFT_TEXT or RGT_TEXT already
+C						! set up
+	LOGICAL		SAME_POLY		! same poly on left and right
+	LOGICAL		UNDEF			! unable to get poly label
+	INTEGER*4	TMP_MARK		! mark in IFF file so can set
+C						! back before routine exit
+	INTEGER*2	IECODE			! IFF entry type
+	INTEGER*2	IELEN			! end-of-file?
+	CHARACTER*(255)	MESTXT			! error message text
+	INTEGER*2 	MESLEN			! length of MESTXT	 
+	INTEGER		I
+C
+C Functions:
+	INTEGER		GET_POLY_LABEL		! get polygon label
+	INTEGER		GET_POLY_IDENT		! get polygon identifier
+	INTEGER		FIND_POLY		! determine which polygon
+C						! a specified point lies in
+	INTEGER		EXPAND			! generate error message text
+	LOGICAL		PROCESS_AC_TEXT		! modify propagated AC texts
+C
+C .........................................................................
+C
+	OUTPUT_ACS = %LOC(SS$_NORMAL)
+C
+	SAME_POLY = .FALSE.
+	DOAC = .FALSE.
+	BADSEG = .FALSE.
+	GOT_TEXT = .FALSE.
+C
+C remember where we were in the input IFF file
+	CALL IFFSEL(INLUN)
+	TMP_MARK = LPOSH
+C
+C Now get the polygon on the left of this segment
+	LFT_POLY_INDX=0				! clear longword
+	LFT_POLY_INDX=LR_SEGMENT(1,FSN)		! convert to longword
+C
+C Now get the polygon on the right of this segment
+	RGT_POLY_INDX=0				! clear longword
+	RGT_POLY_INDX=LR_SEGMENT(2,FSN)		! convert to longword
+C
+C .........................................................................
+C	S E L E C T   L E G A L   C O M B I N A T I O N S
+C
+C The most usual situation is to have two non-zero LEFT and RIGHT poly indexes
+	IF ((LFT_POLY_INDX.NE.0).AND.(RGT_POLY_INDX.NE.0)) THEN
+C
+C If the polygon indexes are different then all OK
+	   IF (LFT_POLY_INDX.NE.RGT_POLY_INDX) GOTO 20
+C
+C The only way they should be the same is if the /ONEARM=USE qualifier is
+C present...
+	   IF (ONE_USE) THEN
+	      SAME_POLY = .TRUE.
+	      GOTO 20
+	   ENDIF
+C
+C So the poly indexes were non-zero but the same and /ONEARM=USE was not 
+C present so we have a problem
+	   GOTO 10
+	ENDIF
+C
+C It is possible that a feature has neither a left nor a right code...
+	IF ((RGT_POLY_INDX.EQ.0).AND.(LFT_POLY_INDX.EQ.0)) THEN
+C
+C but only by being a symbol or the presence of the /ONEARM=CONTAIN options
+	   IF (SYMBOL.OR.ONE_CTN) THEN
+C
+C 	Now find which polygon it belongs to (noting that both LEFT and RIGHT
+C	will be the same) ....
+	      OUTPUT_ACS = FIND_POLY(APOINT,LFT_POLY_INDX)
+	      IF (.NOT.OUTPUT_ACS) GOTO 40
+	      RGT_POLY_INDX=LFT_POLY_INDX		
+	      SAME_POLY = .TRUE.
+C
+C	Routine may not have been able to determine polygon
+	      IF (LFT_POLY_INDX.EQ.-1) THEN
+		 GOT_TEXT = .TRUE.
+		 LFT_TEXT(1) = 'Lost Polygon'
+		 LFT_LEN(1) = 12
+		 RGT_TEXT(1) = 'Lost Polygon'
+		 RGT_LEN(1) = 12
+	      ENDIF
+C
+C 	Now have a legal setup...
+	      GOTO 20
+	   ENDIF
+C
+C or by having junctions (so must preserve all features since preserving
+C junction structure but deleteing features connected to oneram juncts ie
+C /ONEARM=DELETE and /SEGMENTS=JUNCTIONS. Note ONE_DEL and ONE_CTN are similar
+C except that we use the 'Ignored Segment' label in the ONE_DEL case for 
+C contained segments. Also notice that the .NOT.HAD_JUN.AND.ONE_DEL case
+C will have removed the segment already.
+	   IF (HAD_JUN.AND.ONE_DEL) THEN
+	      SAME_POLY = .TRUE.
+	      GOT_TEXT = .TRUE.
+	      LFT_TEXT(1) = 'Ignored Segment'
+	      LFT_LEN(1) = 15
+	      RGT_TEXT(1) = 'Ignored Segment'
+	      RGT_LEN(1) = 15
+	      GOTO 20
+	   ENDIF
+C
+C To get here must have had zero LEFT and RIGHT polygon codes - but unable to
+C determine why so complain
+	   GOTO 10
+	ENDIF
+C
+C To get here must have had one zero and one non-zero polygon code - that
+C should not happen so complain
+C
+C .........................................................................
+C		I L L E G A L   C O M B I N A T I O N
+C
+C An illegal combination - most unexpected - complain
+10	MESLEN=EXPAND('%WSUnable to generate consistent identifiers for '//
+     &			'segment with FSN %N',MESTXT,FSN)
+C
+C Now output error messages...
+	IF (HAD_LITES) THEN
+	   CALL FLWSEL(LITESLUN)
+	   CALL FLWRTF('%%MESSAGE Identifier failure:')
+	ENDIF
+C
+C Output to error log...
+	CALL MES_OUT(APOINT,MESTXT,MESLEN)
+C
+C Make up the 'Confused' text
+	LFT_TEXT(1) = 'Confused'
+	LFT_LEN(1) = 8
+	CALL IFFSEL(SEGLUN)
+	TXTPTR=LFT_LEN(1)
+	CALL COPY_STRING(LFT_TEXT(1),TXTDSC)
+C
+C If there is any labelling to be done then output the label 'Confused'
+	IF (SEG_LABEL) THEN
+	   IF(HAD_PROP)THEN
+	      IF (ONE_CTN) THEN
+		  CALL IFFAC(CTN_CVR_AC(1),0.0,TXTBUF,LFT_LEN(1))
+	      ELSE
+		  CALL IFFAC(RGT_CVR_AC(1),0.0,TXTBUF,LFT_LEN(1))
+		  CALL IFFAC(LFT_CVR_AC(1),0.0,TXTBUF,LFT_LEN(1))
+	      ENDIF
+	   ELSE
+	      IF (ONE_CTN) THEN
+		  CALL IFFAC(CTN_LABEL_AC,0.0,TXTBUF,LFT_LEN(1))
+	      ELSE
+		  CALL IFFAC(RGT_LABEL_AC,0.0,TXTBUF,LFT_LEN(1))
+		  CALL IFFAC(LFT_LABEL_AC,0.0,TXTBUF,LFT_LEN(1))
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C If there is any identification to be done then output the identifier 'Confused'
+	IF (SEG_IDENT) THEN
+	   IF (ONE_CTN) THEN
+		CALL IFFAC(CTN_IDENT_AC,0.0,TXTBUF,LFT_LEN(1))
+	   ELSE
+		CALL IFFAC(RGT_IDENT_AC,0.0,TXTBUF,LFT_LEN(1))
+		CALL IFFAC(LFT_IDENT_AC,0.0,TXTBUF,LFT_LEN(1))
+	   ENDIF
+	ENDIF
+C
+C We have made an entry in the error log and flagged the relevant segments
+C as confused - so carry on as normal...
+	OUTPUT_ACS = %LOC(SS$_NORMAL)
+	GOTO 40
+C
+C .........................................................................
+C		L E G A L   C O M B I N A T I O N S
+C
+C OUTPUT segment labels
+20	IF (.NOT.SEG_LABEL) GOTO 30
+C
+C Get the LEFT poly text label (if necess.) checking that label had consistent
+C labeling.
+	UNDEF = .FALSE.
+	IF (.NOT.GOT_TEXT) OUTPUT_ACS=GET_POLY_LABEL(LFT_POLY_INDX,
+     &		LFT_TEXT,LFT_LEN,UNDEF,DOAC,SEGLUN)
+	IF (.NOT.OUTPUT_ACS) GOTO 40
+	IF (UNDEF) BADSEG = .TRUE.
+C
+C Set it up to be written out to the output IFF file
+	CALL IFFSEL(SEGLUN)
+C
+	IF(HAD_PROP)THEN
+C
+C fiddle about with the text prefixes, and concatenate if required
+	   OUTPUT_ACS=PROCESS_AC_TEXT(LFT_TEXT,LFT_LEN)
+	   IF (.NOT.OUTPUT_ACS) GOTO 40
+C
+	   IF(SAME_POLY)THEN
+C copy ACs from left side to right
+	      DO 22 I=1,NUM_COVER
+	      RGT_TEXT(I)=LFT_TEXT(I)
+	      RGT_LEN(I)=LFT_LEN(I)
+22	      CONTINUE
+	   ELSE
+C get right ACs
+	      UNDEF = .FALSE.
+	      IF (.NOT.GOT_TEXT)OUTPUT_ACS=GET_POLY_LABEL
+     &	         (RGT_POLY_INDX,RGT_TEXT,RGT_LEN,UNDEF,DOAC,SEGLUN)
+	      IF (.NOT.OUTPUT_ACS) GOTO 40
+	      IF (UNDEF) BADSEG = .TRUE.
+C
+C must also modify right texts
+	      OUTPUT_ACS=PROCESS_AC_TEXT(RGT_TEXT,RGT_LEN)
+	      IF (.NOT.OUTPUT_ACS) GOTO 40
+	   ENDIF
+C
+C output an AC for each coverage, or just one if concatenating
+	   CALL IFFSEL(SEGLUN)
+	   DO 25 I=1,NUM_COVER
+	   TXTPTR=LFT_LEN(I)
+	   CALL COPY_STRING(LFT_TEXT(I),TXTDSC)
+C Use the contain AC if the /ONEARM=CONTAIN qualifier was present and
+C this AC matches on left and right
+	   IF(ONE_CTN.AND.LFT_LEN(I).EQ.RGT_LEN(I).AND.
+     &        LFT_TEXT(I)(:LFT_LEN(I)).EQ.RGT_TEXT(I)(:RGT_LEN(I))) THEN
+	      CALL IFFAC(CTN_CVR_AC(I),0.0,TXTBUF,LFT_LEN(I))
+	   ELSE
+	      CALL IFFAC(LFT_CVR_AC(I),0.0,TXTBUF,LFT_LEN(I))
+	      TXTPTR=RGT_LEN(I)
+	      CALL COPY_STRING(RGT_TEXT(I),TXTDSC)
+	      CALL IFFAC(RGT_CVR_AC,0.0,TXTBUF,RGT_LEN(I))
+	   ENDIF
+	   IF(HAD_CONCAT.AND.I.EQ.1)GOTO 26	! only need to output first
+25	   CONTINUE
+	ELSE
+	   TXTPTR=LFT_LEN(1)
+	   CALL COPY_STRING(LFT_TEXT(1),TXTDSC)
+C Use the contain AC if the /ONEARM=CONTAIN qualifier was present and indeed
+C contained - ie has the same poly index on each side.
+	   IF (ONE_CTN.AND.SAME_POLY) THEN
+	      CALL IFFAC(CTN_LABEL_AC,0.0,TXTBUF,LFT_LEN(1))
+	   ELSE
+	      CALL IFFAC(LFT_LABEL_AC,0.0,TXTBUF,LFT_LEN(1))
+
+	      UNDEF = .FALSE.
+	      IF (.NOT.GOT_TEXT) OUTPUT_ACS=GET_POLY_LABEL(RGT_POLY_INDX,
+     & 			RGT_TEXT,RGT_LEN,UNDEF,DOAC,SEGLUN)
+	      IF (.NOT.OUTPUT_ACS) GOTO 40
+	      IF (UNDEF) BADSEG = .TRUE.
+C
+	      CALL IFFSEL(SEGLUN)
+	      TXTPTR=RGT_LEN(1)
+	      CALL COPY_STRING(RGT_TEXT(1),TXTDSC)
+	      CALL IFFAC(RGT_LABEL_AC,0.0,TXTBUF,RGT_LEN(1))
+	   ENDIF
+	ENDIF
+C 
+C If labels are expected to be different but are the same then signal error
+26	IF(.NOT.SAME_POLY)THEN
+	   IF(HAD_PROP)THEN
+	      DO 27 I=1,NUM_COVER
+	      IF(LFT_LEN(I).NE.RGT_LEN(I).OR.
+     &        LFT_TEXT(I)(:LFT_LEN(I)).NE.
+     &        RGT_TEXT(I)(:RGT_LEN(I)))GOTO 30
+	      IF(HAD_CONCAT.AND.I.EQ.1)GOTO 30	! only need to check first
+27	      CONTINUE
+	   ELSE
+	      IF(LFT_LEN(1).NE.RGT_LEN(1).OR.
+     &        LFT_TEXT(1)(:LFT_LEN(1)).NE.
+     &        RGT_TEXT(1)(:RGT_LEN(1)))GOTO 30
+	   ENDIF
+C
+C all labels are the same
+C
+	   IF (HAD_ABS) THEN
+	      MESLEN=EXPAND(
+     &	        '%WSSegment has same polygon code on both sides '//
+     &		'at (%F, %F)',MESTXT,APOINT(1)+MD2LOC(1),
+     &				     APOINT(2)+MD2LOC(2))
+	   ELSE
+	      MESLEN=EXPAND(
+     &	        '%WSSegment has same polygon code on '//
+     &		'both sides at (%F, %F)',MESTXT,APOINT(1),APOINT(2))
+	   ENDIF
+C
+   	   IF (HAD_LITES) THEN
+	      CALL FLWSEL(LITESLUN)
+	      CALL FLWRTF('%%MESSAGE Seed point assignment error:')
+	   ENDIF
+C
+C And output the message
+	   CALL MES_OUT(APOINT,MESTXT,MESLEN)
+	ENDIF
+C
+C
+C OUTPUT segment identifiers
+30	IF (.NOT.SEG_IDENT) GOTO 40
+C
+C Get the segment identifier (if necess.)
+	IF (.NOT.GOT_TEXT) OUTPUT_ACS=GET_POLY_IDENT(LFT_POLY_INDX,
+     &						LFT_TEXT,LFT_LEN)
+	IF (.NOT.OUTPUT_ACS) GOTO 40
+C
+C Set it up to be written out to the output IFF file
+	CALL IFFSEL(SEGLUN)
+	TXTPTR=LFT_LEN(1)
+	CALL COPY_STRING(LFT_TEXT(1),TXTDSC)
+C
+C Output the identifier
+	IF (ONE_CTN.AND.SAME_POLY) THEN
+	   CALL IFFAC(CTN_IDENT_AC,0.0,TXTBUF,LFT_LEN(1))
+	ELSE
+	   CALL IFFAC(LFT_IDENT_AC,0.0,TXTBUF,LFT_LEN(1))
+	   IF (.NOT.GOT_TEXT) OUTPUT_ACS=GET_POLY_IDENT(RGT_POLY_INDX,
+     &						RGT_TEXT,RGT_LEN)
+	   IF (.NOT.OUTPUT_ACS) GOTO 40
+	   CALL IFFSEL(SEGLUN)
+	   TXTPTR=RGT_LEN(1)
+	   CALL COPY_STRING(RGT_TEXT(1),TXTDSC)
+	   CALL IFFAC(RGT_IDENT_AC,0.0,TXTBUF,RGT_LEN(1))
+	ENDIF
+C
+C Return to where we were in input IFF file
+40	CALL IFFSEL(INLUN)
+	CALL IFFPKE(IECODE,IELEN,TMP_MARK)
+C
+C finished...
+	RETURN
+	END
+C

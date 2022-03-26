@@ -1,0 +1,435 @@
+	PROGRAM IOFFSET
+C
+***	MODULE IOFFSET
+***	IDENT 24NOV88
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					SGH	24-Nov-1988
+C
+C Description
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNIOFFSET:IOFFSET/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+C
+	INTEGER*4	I,J,K
+	INTEGER*4	II,JJ,KK
+C
+	INTEGER*4	NF		! number of selected features
+	INTEGER*4	NULL		! value to indicate feature not
+C					! reqd or already accounted for
+	INTEGER*2	IENDS		! pen up/down marker
+	INTEGER*2	NPTS		! no of points in ST
+	REAL*4		Z(2,200)	! co-ords
+C
+	INTEGER*4	FTRNUM
+	INTEGER*4	FTRS
+C
+	INTEGER*2	IECODE		! entry code
+	INTEGER*2	IELEN		! length of IECODE
+	INTEGER*2	IOVNUM		! output overlay number
+	INTEGER*2	IOVS		! 
+	INTEGER*4	NOPOS		! NO position
+	INTEGER*4	EOPOS		! EO pointer
+	INTEGER*2	FSTAT(4)	! from FS entry
+	INTEGER*2	IFCODE		! feature code(=FSTAT(1))
+	INTEGER*4	JBPOS		! junction block position
+	INTEGER*4	JBOFF		! junction block offset
+	INTEGER*4	CURPOS		! current position
+	INTEGER*4	CURRST		! current (or next, at start
+C					! of feature) ST position
+	INTEGER*2	CURCRD		! vertex position corresponding
+C					! to CURRST
+	LOGICAL		HADST
+C
+	REAL		XJUN,YJUN
+	REAL		XJUNA,YJUNA
+C
+	INTEGER*2	NARMS		! arms of junction from JB
+	INTEGER*2	ARM
+	INTEGER*4	STPOS		! ST position from JB
+	INTEGER*2	COORD		! co-ordinate from JB
+C
+	INTEGER*4	RTTURN(2,MAXNF)
+	INTEGER*4	IF
+	INTEGER*4	ID
+	INTEGER*4	ISAV
+	INTEGER*4	NCHAIN
+C
+C Functions called
+C
+	LOGICAL		GET_COMMAND	! get and decode command line
+C
+C Initialise libraries
+C
+	CALL LSL_INIT(.TRUE.)
+	CALL IFFTDY
+C
+C Get and decode the command line
+C
+	IF (.NOT.GET_COMMAND()) GOTO 9000
+C
+C open input file read only
+C
+	CALL IFFOPN(1,IPFILE,0)
+C
+C open output file
+C
+	CALL IFFOPN(2,OPFILE)
+	CALL IFFSEL(1)
+C
+	NCHAIN=0
+	DLOOP=.TRUE.
+c
+	debug=.TRUE.
+C
+C set feature number in file
+C
+	NF=0
+C
+C initialise arrays
+C
+	DO 10 I=1,MAXNF
+	NFPOS(I)=0
+	RTTURN(1,I)=-1
+	RTTURN(2,I)=-1
+10	CONTINUE
+C
+	DO 20 I=0,MAXFC
+	WIDTH(I)=-1.0
+20	CONTINUE
+	CALL GETWID
+	FTRNUM=0			! output feature number
+C
+C first read through of file: store NF positions and positions of
+C STs defining right turns forward & backward from each feature
+C
+100	CALL IFFNXT(IECODE,IELEN)
+	IF(IELEN.LT.0) GOTO 200		! end of input
+C
+	IF(IECODE.EQ.'NF')THEN
+C
+C increment feature counter and store position
+C
+	   HADST=.FALSE.
+	   NF=NF+1
+	   NFPOS(NF)=LPOSH
+C
+	ELSE IF(IECODE.EQ.'FS')THEN
+C
+C get feature code and save in NFFC
+C
+	   CALL EIHR(FSTAT,4,1)
+	   IFCODE=FSTAT(1)
+	   IF(WIDTH(IFCODE).LT.0.0)THEN
+	      CALL IFFNXC('EF',IELEN)
+	      GOTO 100
+	   ENDIF
+	   NFFC(NF)=IFCODE
+C
+	ELSE IF(IECODE.EQ.'JP')THEN
+C
+C extract JB position
+C
+	   CALL EIHRL(JBPOS,1,1)
+	   CALL EIHR (JBOFF,1,3)
+C
+C save current position
+C
+	   CURPOS=LPOSH
+C
+C get ST position if at start of feature
+C
+	   IF(.NOT.HADST)THEN
+	      CALL IFFNXC('ST',IELEN)
+	      CURRST=LPOSH
+	      CURCRD=1
+C
+C extract co-ords of junction for checking
+C
+	      CALL EIHRS( NPTS, IENDS)
+	      CALL EIHRR(XJUNA,1,1)
+	      CALL EIHRR(YJUNA,1,3)
+	   ENDIF
+C
+C go to junction block and get junction position
+C
+	   CALL IFFPKE(IECODE,IELEN,JBPOS)
+C
+C junction co-ords (only required for checking)
+C
+	   CALL EIHRR(XJUN,1,JBOFF+1)
+	   CALL EIHRR(YJUN,1,JBOFF+3)
+	   IF(ABS(XJUN-XJUNA).GT.0.1.OR.ABS(YJUN-YJUNA).GT.0.1)THEN
+	      PRINT*,'JUNCTION MISMATCH IN FEATURE',NF
+	   ENDIF
+C
+C number of arms
+C
+	   CALL EIHR(NARMS,1,JBOFF)
+C
+	   DO 140 I=1,NARMS
+	   CALL EIHRL(STPOS,1,JBOFF+2+(I*3))
+	   CALL EIHR (COORD,1,JBOFF+4+(I*3))
+C
+C if this is the current feature, we want the next arm to get the right
+C turn (unless we're at the last arm, in which case we want the first)
+C
+	   IF(STPOS.EQ.CURRST.AND.COORD.EQ.CURCRD)THEN	! current feature
+	      ARM=I
+	      GOTO 150
+	   ENDIF
+140	   CONTINUE
+C
+C never got current ST, so assume dangling feature but report error
+C
+	   STPOS=0
+	   PRINT*,'Error - arm not found at junction'
+	   GOTO 160
+150	   IF(ARM.LT.NARMS)THEN
+	      CALL EIHRL(STPOS,1,JBOFF+5+(ARM*3))
+	      CALL EIHR (COORD,1,JBOFF+7+(ARM*3))
+C
+C fudge required here as number of arms in data presently available is
+C often set greater than actual number
+C
+	      IF(STPOS.EQ.0)GOTO 155			! ??*!@@@?%%
+	   ELSE
+155	      CALL EIHRL(STPOS,1,JBOFF+5)
+	      CALL EIHR (COORD,1,JBOFF+7)
+	   ENDIF
+C
+C store junction position in arrays which will later hold feature
+C numbers - when whole file has been read these will be converted
+C to (+/-) feature numbers
+C
+C the direction of the connecting arm in its feature is determined
+C by whether the ST vertex is 1 (forwards) or >1 (backwards)
+C WHAT IF ST HAS 1 PAIR OF COORDINATES ?????
+C record this as sign of STPOS
+C
+160	   IF(COORD.GT.1)STPOS=-STPOS
+C
+	   IF(HADST)THEN
+	      RTTURN(1,NF)=STPOS
+	   ELSE
+	      RTTURN(2,NF)=STPOS
+	   ENDIF
+C
+C go back to main body of file
+C
+	   CALL IFFPKE(IECODE,IELEN,CURPOS)
+C
+	ELSE IF(IECODE.EQ.'ST')THEN
+C
+C Record that ST has been seen, so that we know we are at the start
+C or end if a JP is encountered (these are the only possibilities)
+C
+	   CURRST=LPOSH
+C
+	   CALL EIHRS( NPTS, IENDS)
+	   IF(NPTS.LT.2)THEN
+	      PRINT*,'Feature',NF,' has',NPTS,' points'
+C	      RTTURN(1,NF)=-1
+C	      RTTURN(2,NF)=-1
+C	      NFPOS(NF)=0
+C	      CALL IFFNXC('EF',IELEN)
+C	      GOTO 100
+	   ENDIF
+	   CALL EIHRR(XJUNA,1,NPTS*4-3)
+	   CALL EIHRR(YJUNA,1,NPTS*4-1)
+	   CURCRD=NPTS
+ 	   HADST=.TRUE.
+	ELSE IF(IECODE.EQ.'MH'
+	1   .OR.IECODE.EQ.'MD'
+	1   .OR.IECODE.EQ.'CP'
+	1   .OR.IECODE.EQ.'CC'
+	1   .OR.IECODE.EQ.'NS'
+	1   .OR.IECODE.EQ.'RA')THEN
+	   CALL EIHCPY(2)
+	ENDIF
+	GOTO 100
+C
+C next write NO to output file
+C
+200	CALL IFFSEL(2)
+	IOVNUM=1
+	NOPOS=LPOSE
+	CALL IFFNO(IOVNUM,IOVS,EOPOS)	
+C
+C convert addresses in RTTURN to feature numbers
+C
+	NULL=NF+1
+	DO 250 IF=1,NF
+	DO 250 ID=1,2
+	J=RTTURN(ID,IF)
+C
+C null value for unwanted features (-1 will not do)
+C
+	IF(J.EQ.-1)THEN
+	   RTTURN(ID,IF)=NULL
+	   GOTO 250
+	ENDIF
+	IF(J.EQ.0)GOTO 250
+	CALL ADD2NF(IABS(J),K,NF)
+	IF(J.LT.0)K=-K
+	RTTURN(ID,IF)=K
+250	CONTINUE	
+C
+C get rid of results of 1-armed junctions 
+C
+300	DO 310 I=1,NF
+	IF(RTTURN(1,I).EQ.-I)RTTURN(1,I)=0
+	IF(RTTURN(2,I).EQ.I) RTTURN(2,I)=0
+310	CONTINUE
+C
+	IF(DEBUG)THEN
+	   OPEN(UNIT=1,FILE='CONNECTIONS',STATUS='NEW')
+	   DO 360 II=1,NF
+	   WRITE(1,9500)II,RTTURN(1,II),RTTURN(2,II)
+9500	   FORMAT(3I8)
+360	   CONTINUE
+	ENDIF
+C
+C extract open chains from RTTURN
+C
+400	PRINT*,'Processing open chains'
+	DO 450 IF=1,NF
+	DO 450 ID=2,1,-1
+	IF(RTTURN(ID,IF).NE.0)GOTO 450
+C
+C feature IF (direction 3-ID) is the start of an open chain
+C
+	CHNLEN=0
+	I=IF*(2*ID-3)			! 1 -> -1, 2 -> 1
+410	CHNLEN=CHNLEN+1
+	CHAIN(CHNLEN)=I
+	IF(I.GT.0)THEN
+	   J=1
+	ELSE
+	   J=2
+	ENDIF
+	IF(RTTURN(J,IABS(I)).EQ.0)THEN
+	   NCHAIN=NCHAIN+1
+	   CALL PROCESS(.FALSE.,FTRS)
+	   FTRNUM=FTRNUM+FTRS
+	   IF(DEBUG)THEN
+	      WRITE(1,9501)FTRNUM+1-FTRS,FTRNUM
+9501	      FORMAT(' Open  : output ftrs',2I5)
+	      WRITE(1,9502)(CHAIN(II),II=1,CHNLEN)
+9502	      FORMAT(8I6)
+420	      CONTINUE
+	   ENDIF
+	   GOTO 450
+	ELSE
+	   I=RTTURN(J,IABS(I))
+C
+C next condition shouldn't happen unless a feature is joined to
+C a rejected one - this is possible
+C
+	   IF(I.EQ.NULL.OR.I.EQ.0)GOTO 450
+	   GOTO 410
+	ENDIF
+450	CONTINUE
+C
+C knock out connections for open chains (set to NF+1)
+C
+	DO 480 IF=1,NF
+	DO 480 ID=2,1,-1
+	IF(RTTURN(ID,IF).NE.0)GOTO 480
+	I=IF*(2*ID-3)			! 1 -> -1, 2 -> 1
+460	IF(I.GT.0)THEN
+	   J=1
+	ELSE
+	   J=2
+	ENDIF
+	IF(RTTURN(J,IABS(I)).EQ.0)THEN
+	   GOTO 480
+	ELSE
+	   ISAV=I
+	   I=RTTURN(J,IABS(I))
+C
+C next condition shouldn't happen unless a feature is joined to
+C a rejected one - this is possible
+C
+	   IF(I.EQ.NULL.OR.I.EQ.0)GOTO 480
+C
+	   RTTURN(J,IABS(ISAV))=NULL
+	   GOTO 460
+	ENDIF
+480	CONTINUE
+C
+C extract closed chains from RTTURN
+C
+500	PRINT*,'Processing closed chains'
+	DO 550 IF=1,NF
+	DO 550 ID=1,2
+	IF(RTTURN(ID,IF).EQ.0.OR.RTTURN(ID,IF).EQ.NULL)GOTO 550
+	I=IF*(3-2*ID)			! 1 -> 1, 2 -> -1
+	CHNLEN=1
+	CHAIN(CHNLEN)=I
+	IF(RTTURN(ID,IF).EQ.CHAIN(1))THEN
+	   NCHAIN=NCHAIN+1
+	   CALL PROCESS(.TRUE.,FTRS)
+	   FTRNUM=FTRNUM+FTRS
+	   RTTURN(ID,IF)=0
+	   IF(DEBUG)THEN
+	      WRITE(1,9503)FTRNUM+1-FTRS,FTRNUM
+9503	      FORMAT(' Closed: output ftrs',2I5)
+	      WRITE(1,9502)(CHAIN(II),II=1,CHNLEN)
+	   ENDIF
+	   GOTO 550
+	ENDIF
+	I=RTTURN(ID,IF)
+C
+C next condition shouldn't happen unless a feature is joined to
+C a rejected one - this is possible
+C
+	IF(I.EQ.NULL.OR.I.EQ.0)GOTO 550
+C
+	RTTURN(ID,IF)=0
+510	CHNLEN=CHNLEN+1
+	CHAIN(CHNLEN)=I
+	IF(I.GT.0)THEN
+	   J=1
+	ELSE
+	   J=2
+	ENDIF
+	IF(RTTURN(J,IABS(I)).EQ.CHAIN(1))THEN
+	   NCHAIN=NCHAIN+1
+	   CALL PROCESS(.TRUE.,FTRS)
+	   RTTURN(J,IABS(I))=0
+	   FTRNUM=FTRNUM+FTRS
+	   IF(DEBUG)THEN
+	      WRITE(1,9503)FTRNUM+1-FTRS,FTRNUM
+	      WRITE(1,9502)(CHAIN(II),II=1,CHNLEN)
+	   ENDIF
+	   GOTO 550
+	ELSE
+	   ISAV=I
+	   I=RTTURN(J,IABS(I))
+C
+C knock out connections as we go along
+C
+	   RTTURN(J,IABS(ISAV))=0
+	   GOTO 510
+	ENDIF
+550	CONTINUE
+	IF(DEBUG)CLOSE(UNIT=1)
+C
+900	CALL IFFCLO(1)
+	CALL IFFSEL(2)
+	EOPOS=LPOSE
+	CALL IFFPKE(IECODE,IELEN,NOPOS)
+	CALL EIHWL(EOPOS,1,3)
+	CALL IFFEO
+	CALL IFFEM
+	CALL IFFEJ
+	CALL IFFCLO(2)
+C
+C Set the return status and finish up
+C
+9000	CALL LSL_EXIT
+	END

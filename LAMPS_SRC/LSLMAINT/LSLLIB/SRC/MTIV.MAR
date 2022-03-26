@@ -1,0 +1,593 @@
+	.TITLE	MTIV
+	.IDENT	/22AP94/
+ 
+; Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+;
+; Author	Susan Manning, 29-Jan-1981
+; from PDP 11 routines by Paul Hardy
+;
+;MOD PGH, 30-Oct-1987
+;MOD MTIRDB was looking for wrong SS$_ code in case of block too long
+;
+;MOD CCB, 10-Sep-1987
+;MOD Remove MTDESC (not used, and should have had .ADDRESS in it)
+;MOD Move constants into CODE_PSECT from DATA_PSECT
+;MOD # in front of MT$M_BOT
+;
+;MOD TJI, 16-Mar-1987	mod 2/429
+;MOD	MTIEOV should not branch to ERR after the call to MTISPC fails,
+;MOD	as ERR moves the (cleared by ERR in MTISPC itself) zero value in
+;MOD	MTIISB into MTIERR, thus obscuring the error - branch to EXIT instead
+;
+;MOD TJI, 03-Sep-1986
+;MOD	new argument to MTINIT (optionally) states that this is a Kennedy
+;MOD	tape drive, so that we don't have to make up our own mind
+;
+;MOD LAJ, 04-Aug-1986
+;MOD	Now allows either parallel or serial connections to mag tape units.
+;
+;MOD TJH, 19-Feb-1986
+;MOD	Upgraded to LSLLIB standard, routines return longword LSLLIB message
+;MOD	codes in R0, longword system message codes in COMMON MTIERR
+ 
+; Magtape Input Routines
+ 
+; assemble with LSL$CMNLSL:MTIVCM.MAR
+ 
+; Definitions
+ 
+	$IODEF
+	$MTDEF
+	$QIODEF
+	$DCDEF				; For Device Class definitions
+ 
+; Macro definition
+ 
+	.MACRO	QIOTSTERR,QSTAT,QIOSB,QERREX,?QL1,?QL2
+.IF NB QSTAT				; check queuing of I/O request ?
+	BLBS	QSTAT,QL1		; okay ?
+.IIF NB QIOSB,	MOVW	QSTAT,QIOSB	; duplicate error
+	BRW	QERREX			; branch to error routine
+.ENDC
+QL1:
+.IF NB QIOSB				; check result of I/O request ?
+	BLBS	QIOSB,QL2		; okay ?
+.IIF NB QSTAT,	MOVW	QIOSB,QSTAT	; duplicate error
+	BRW	QERREX			; branch to error routine
+.ENDC
+QL2:
+	.ENDM	QIOTSTERR
+ 
+; Workspace
+ 
+	DATA_PSECT	LSL
+ 
+; general tape name descriptor
+MTGDSC:	.ASCID	/MTA0/
+
+; Tape characteristics buffer
+MTIPAR:	.LONG	0
+
+; Tape I/O status block
+MTIISB:	.BLKW	1	; status return
+MTICNT:	.BLKW	1	; byte count
+MTDINF:	.BLKL	1	; device information
+ 
+; QIO directive parameter block
+MTIDPB:	$QIOW	FUNC=IO$_READVBLK,-
+		IOSB=MTIISB
+ 
+QI.FUNC	= MTIDPB+QIO$_FUNC
+QI.CHAN	= MTIDPB+QIO$_CHAN
+QI.BUF	= MTIDPB+QIO$_P1
+QI.LEN	= MTIDPB+QIO$_P2
+QI.TIME = MTIDPB+QIO$_P3
+QI.TERM = MTIDPB+QIO$_P4
+
+; QIO functions.
+QI.WRITE = IO$_WRITEVBLK ! IO$M_NOFORMAT
+QI.READT = IO$_TTYREADALL ! IO$M_TIMED ! IO$M_NOECHO 
+QI.READ  = IO$_TTYREADALL              ! IO$M_NOECHO 
+;
+TERM:	.BLKL	1
+LENGTH:	.BLKL	1
+;
+; Item-list buffer for $GETDVI call.
+ILIST:
+BUFLEN:	.BLKW	1		; Length of buffer for GETDVI (bytes)
+CODE:	.BLKW	1		; Item code 
+RETBUF:	.ADDRESS TERM		; Return buffer
+	.ADDRESS LENGTH		; No. of bytes returned
+ENDLST:	.LONG	0		; Buffer terminator
+
+; Variables
+STATBL:	.BLKB	2		; Buffer for status bytes from the serial MT
+BLDATA:	.BLKB	2		; Buffer for read block length from serial MT
+CHARBF:	.BLKB	1		; For single character reads
+MTRUN:	.BLKW	1		; Non-zero => mag tape on-line
+MTIITP:	.BLKW	1		; Temporary store for serial MT status
+
+	CONST_PSECT	LSL
+ 
+; Default arguments
+FALSE:				; ie .FALSE.
+NORMAL:				; not a Kennedy 9600 serial magtape
+TERMSK:	.QUAD	0		; Terminator Mask for QIOs
+
+; serial mag tape command sequences.
+DLERDB:	.BYTE	16.,48.		; Read block
+DLEWTB:	.BYTE	16.,49.		; Write block
+DLESPF:	.BYTE	16.,50.		; Space forward one block
+DLESPB:	.BYTE	16.,51.		; Space back one block
+DLEREW:	.BYTE	16.,52.		; Rewind tape
+DLEWFM:	.BYTE	16.,54.		; Write a tape mark
+DLEFFM:	.BYTE	16.,58.		; Forward one filemark
+DLESTR:	.BYTE	16.,60.		; Status request
+DLEPE:	.BYTE	16.,63.,48.,49.	; Set phase encoded - 1600 bpi
+DLENRZ:	.BYTE	16.,63.,48.,48.	; Set NRZI - 800 bpi
+
+	CODE_PSECT	LSL
+;
+; ......................................................................
+;
+; MTINIT( [name] , [norew], [drive] )
+; initialises named device (default MTA0), assigns it to a channel,
+; rewinds it positioning tape at BOT (unless <norew>, whose value
+; is FALSE in default). If <drive> is 0 or absent, then a normal tape
+; drive, and if 1 then a Kennedy 9600 serial tape drive
+ 
+ .ENTRY	MTINIT,^M<R2,R11>
+ 
+	MOVW	#1,MTRUN			; Assume on-line for init
+	JSB	VIO$1ST				; init argument mechanism
+	MOVAQ	MTGDSC,R0			; default name MTA0
+	JSB	VIO$GNA				; get [name] argument
+	$ASSIGN_S	DEVNAM=(R0),-		; assign to channel
+			CHAN=QI.CHAN
+	MOVW	#SS$_NORMAL, MTIISB		; frig to use QIOTSTERR
+	QIOTSTERR	R0,MTIISB,ERR_INIT	; check result
+ 
+	MOVAL	FALSE,R0			; default next argument
+	JSB	VIO$GNA				; get [norew] arg
+	MOVL	(R0),R2				; save it for later
+
+	MOVAL	NORMAL,R0			; default next arg
+	JSB	VIO$GNA				; get [drive] arg
+	MOVL	(R0),TERM			; save it
+;
+; skip the next bit if this is an ordinary magtape...
+	BLBC	TERM,25$			; If serial, set-up device
+	INSV	#MT$K_NORMAL11,-		; characteristics, since the
+		#MT$V_FORMAT,#MT$S_FORMAT,-	; Serial MT drive doesn't return
+		MTIPAR
+	INSV	#MT$K_PE_1600,-			; this information to us.
+		#MT$V_DENSITY,#MT$S_DENSITY,-	; Set NORMAL11, and 1600 bpi.
+		MTIPAR
+;
+; perform a MTISNS, just to check that serial magtape is alive
+	PUSHAL	-(SP)				; argument on stack
+	CALLS	#1,W^MTISNS
+	TSTL	(SP)+				; ditch argument
+	BLBC	R0,50$				; return MTISNS status
+;
+; and all routes join up here again
+25$:	BLBSW	R2,50$				; finished if not rewinding
+	CALLS	#0,B^MTIRWD			; rewind tape to BOT
+40$:	RET					; return MTIRWD or MTISNS status
+
+; success
+50$:	MOVL	#LSL__NORMAL, R0
+	CLRL	MTIERR
+	CLRW	MTIISB
+	RET
+;
+; Some form of MTINIT error was detected. Put LSLLIB message code into R0.
+
+ERR_INIT:
+	CMPW	R0, #SS$_NOSUCHDEV
+	BNEQ	15$
+	MOVL	#LSL__NOSUCHDEV, R0
+	BRW	30$
+15$:	CMPW	R0, #SS$_DEVALLOC
+	BNEQ	20$
+	MOVL	#LSL__DEVALLOC, R0
+	BRB	30$
+20$:	MOVL	#LSL__SYSERR, R0
+30$:	MOVZWL	MTIISB,	MTIERR
+	CLRW	MTIISB
+	RET
+
+;
+; ......................................................................
+; 
+; Rewind magtape
+ 
+ .ENTRY	MTIRWD,^M<>
+	BLBC	TERM,10$			; Clear if not serial MT
+	MOVL	#2,QI.LEN			; Set up rewind command in 
+	MOVAB	DLEREW,QI.BUF			; buffer to write to the
+	MOVL	#QI.WRITE,QI.FUNC		; tape controller
+	BRB	15$
+
+10$:	MOVL	#IO$_REWIND,QI.FUNC
+
+15$:	$QIOW_G		MTIDPB
+	CLRL		MTINBL
+	QIOTSTERR	R0,MTIISB,ERR_RWD	; check okay
+	BLBC		TERM,20$		; For serial MT, need to check
+	BSBW		RSTAT			; its own status bytes
+	BLBC		MTIISB,ERR_RWD		; See if any error in them
+
+20$:	MOVL	#LSL__NORMAL, R0
+	CLRL	MTIERR
+	CLRW	MTIISB
+	RET
+;
+; Some form of MTIREW error was detected. Put LSLLIB message code into R0.
+
+ERR_RWD:
+	MOVL	#LSL__SYSERR, R0
+	MOVZWL	MTIISB,	MTIERR
+	CLRW	MTIISB
+	RET
+ ;
+; ......................................................................
+;
+; MTIRDB(BUFFER,LENGTH,BYTCNT) reads from tape
+ 
+ .ENTRY	MTIRDB,^M<R2,R3>
+	BLBS	TERM,5$			; If set, it is the serial MT
+	BRW	20$
+5$:	MOVL 	#2,QI.LEN		; We must request the read
+	MOVAB 	DLERDB,QI.BUF		; explicitly from the controller
+	MOVL		#QI.WRITE,QI.FUNC
+	$QIOW_G	MTIDPB
+	INCL		MTINBL			; Increment block count
+	CLRL		@12(AP)			; Say no bytes read yet
+	QIOTSTERR	R0,MTIISB,ERR_RDB	; If it failed here, just exit
+	BSBW		STATUS			; Get the serial MT status
+	BLBS		MTIISB,10$		; Now see if error in status
+	BRW		ERR_RDB			; and exit with it flagged
+10$:	BSBW		RBLFMT			; Read block length, & re-format
+	MOVAB		@4(AP),QI.BUF		; No - read the block data
+	MOVL		@8(AP),R2
+	CMPL		R2,R3			; See if supplied buffer is
+						; long enough
+	BGEQ		12$			; Yes - no probs!
+	SUBL2		R2,R3			; Else get diff in R3
+	BRB		14$
+
+12$:	MOVL		R3,R2			; For common read
+	CLRL		R3			; Flag no more to read
+	
+14$:	MOVL		R2,QI.LEN		; Now read data into buffer
+	BSBW		INCHT
+	MOVL		R2,@12(AP)		; Say how much fits
+	TSTL		R3			; See if more to get rid of
+	BEQL		18$			; No exit with success
+	MOVAB		CHARBF,QI.BUF		; Read off the excess
+	MOVL		#1,QI.LEN		; in single char reads
+
+16$:	BSBW		INCHT
+	SOBGTR		R3,16$
+	MOVW		#SS$_BUFFEROVF,MTIISB	; Set up overflow error
+	BRW		ERR_RDB			; Exit, flagging the trouble
+
+18$:	MOVL	#LSL__NORMAL, R0
+	CLRL	MTIERR
+	CLRW	MTIISB
+	RET
+
+20$:	MOVL		@8(AP),QI.LEN		; set buffer size
+	MOVL		4(AP),QI.BUF		; buffer address
+	MOVL		#IO$_READVBLK,QI.FUNC
+	$QIOW_G	MTIDPB
+	INCL		MTINBL
+	MOVZWL	MTICNT,@12(AP)		; return bytes read
+	QIOTSTERR	R0,MTIISB,ERR_RDB	; test for error
+	MOVL	#LSL__NORMAL, R0
+	CLRL	MTIERR
+	CLRW	MTIISB
+	RET
+
+;   
+; Some form of MTIRDB error was detected. Put LSLLIB message code into R0.
+
+ERR_RDB:
+	MOVW	MTIISB, R0
+	CMPW	R0, #SS$_DATAOVERUN
+	BNEQ	10$
+	MOVL	#LSL__BUFOVFLW, R0
+	BRB	30$
+10$:	CMPW	R0, #SS$_BUFFEROVF
+	BNEQ	15$
+	MOVL	#LSL__BUFOVFLW, R0
+	BRB	30$
+15$:	CMPW	R0, #SS$_ENDOFFILE
+	BNEQ	20$
+	MOVL	#LSL__EOF, R0
+	BRB	30$
+20$:	MOVL	#LSL__SYSERR, R0
+30$:	MOVZWL	MTIISB,	MTIERR
+	CLRW	MTIISB
+	RET
+
+;
+; ......................................................................
+;
+; MTIEOV skips blocks to end of volume
+
+ .ENTRY	MTIEOV,^M<R2,R4>
+ 
+	BLBCW	TERM,50$			; If clear, not the serial MT
+
+5$:
+
+; Advance to next filemark on serial magtape
+	CLRL	MTINBL				; set blk. counter to 0
+	MOVAB	DLEFFM,QI.BUF			; forward a filemark
+	MOVL	#2,QI.LEN
+	MOVL	#QI.WRITE,QI.FUNC
+	$QIOW_G	MTIDPB
+	QIOTSTERR	R0,MTIISB,ERR_MTISP	; Check QIO
+	BSBW	RSTAT				; Check serial MT status
+	CMPW	MTIISB,#SS$_ENDOFFILE		; End of file read?
+	BEQL	35$
+	BRW	ERR_MTISP			; Error - exit and report
+35$:
+	CALLS	#0,W^MTISPC			; look for another EOF
+	CMPW	MTIITP,#SS$_ENDOFFILE		; Is it EOF?
+	BNEQ	5$				; No - go round again
+	CALLS	#0,B^MTIBCK			; Backspace past the last EOF
+	MOVZWL	#SS$_ENDOFVOLUME,MTIERR		; Set up EOV
+;;;	MOVL	#LSL__ENDOFVOL,R0
+	MOVL	#LSL__NORMAL, R0
+	CLRL	MTIERR
+	CLRW	MTIISB
+	RET
+
+50$:	CALLS	#0,W^MTISPC			; space by one block
+	CMPL	#LSL__NORMAL, R0		; positive if okay
+	BEQL	50$				; keep on spacing
+	CMPL	#SS$_ENDOFVOLUME, MTIERR
+	BNEQ	60$
+	MOVL	#LSL__NORMAL, R0
+	CLRL	MTIERR
+	CLRW	MTIISB
+	RET
+
+60$:	CLRW	MTIISB
+	RET
+; 
+; ......................................................................
+;
+; either space blocks by BLKNO 		- MTISPC(BLKNO)
+; or come back by one block		- MTIBCK
+ 
+ .ENTRY	MTIBCK,^M<R2,R4>
+	MNEGL	#1, R2				; come back by one block
+	BRB	$MTISP
+; 
+; ......................................................................
+;
+
+.ENTRY	MTISPC,^M<R2,R4,R11>
+
+	JSB	VIO$1ST				; init argument mechanism
+	JSB	VIO$GNA				; get first argument
+	BCC	10$				; if CC, it's there
+	MOVL	#1, R2				; default 1 block forward
+	BRB	$MTISP
+10$:	MOVL	(R0), R2			; get nblk
+ 
+$MTISP:	MOVL	#IO$_SKIPRECORD,QI.FUNC
+	MOVL	R2,QI.BUF
+	ADDL2	R2, MTINBL			; OK - count blocks
+	TSTL	MTINBL				; if -ve block number
+	BGEQ	15$
+	CLRL	MTINBL				; set blk. counter to 0
+
+15$:	BLBS		TERM,17$		; If clear, not the serial MT
+	BRW		40$
+
+17$:	CLRL		R4			; Flag forwards
+	TSTL		R2			; See which way
+	BGEQ		20$			; +ve - go forwards
+	MNEGL		R2,R2			; Make R2 +ve
+	INCL		R4			; Flag move backwards
+19$:	MOVAB		DLESPB,QI.BUF		; Set space back sequence
+	BRB		25$
+
+20$:	MOVAB		DLESPF,QI.BUF		; Set space forwards
+25$:	MOVL		#2,QI.LEN		; Send sequence to serial MT
+	MOVL		#QI.WRITE,QI.FUNC
+
+30$:	$QIOW_G		MTIDPB
+	QIOTSTERR	R0,MTIISB,ERR_MTISP	; Check for QIO error
+	BSBW		STATUS			; Get serial MT status
+	CMPW		MTIISB,#SS$_ENDOFFILE	; Allow end of file
+	BEQL		35$
+	BLBS		MTIISB,35$
+	BRB		ERR_MTISP		; Else report error
+
+35$:	DECL		R2			; Count down number of blocks
+						; to space
+	BEQL		38$			; Finished
+	TSTL		R4			; See which way to go
+	BNEQW		19$			; Backwards
+	BRW		20$			; Forwards
+
+38$:	MOVW		MTIISB,MTIITP		; Save condition for MTEOV
+	BRB		50$
+
+40$:	$QIOW_G	MTIDPB
+	CMPW	#SS$_ENDOFFILE,MTIISB		; allow eof
+	BEQL	50$
+	QIOTSTERR	R0,MTIISB,ERR_MTISP	; test result
+
+50$:	MOVL	#LSL__NORMAL, R0
+	CLRL	MTIERR
+	CLRW	MTIISB
+	RET
+
+;
+; Some form of MTISPC error was detected. Put LSLLIB message code into R0.
+
+ERR_MTISP:
+	CMPW	R0, #SS$_ENDOFTAPE		; hit EOT or BOT marker?
+	BNEQ	10$
+	MOVL	#LSL__ENDOFTAPE, R0
+	BRB	30$
+10$:	CMPW	R0, #SS$_ENDOFVOLUME		; hit end of volume?
+	BNEQ	20$
+	MOVL	#LSL__ENDOFVOL, R0
+	BRB	30$
+20$:	MOVL	#LSL__SYSERR, R0
+30$:	MOVZWL	MTIISB,	MTIERR
+	CLRW	MTIISB
+	RET
+ 
+;
+; ......................................................................
+;
+; Sense characteristics and return in argument
+ 
+ .ENTRY	MTISNS,^M<>
+ 
+	BLBC		TERM,10$
+	MOVL		#2,QI.LEN		; Get serial MT status bytes
+ 	MOVAB		DLESTR,QI.BUF
+	MOVL		#QI.WRITE,QI.FUNC
+	$QIOW_G		MTIDPB
+	QIOTSTERR	R0,MTIISB,ERR_SNS	; Check for QIO error
+	BSBW		STATUS			; De-code status bytes
+	BLBC		MTIISB,ERR_SNS		; Report any errors
+	BRB		20$
+
+10$:	MOVL		#IO$_SENSEMODE,QI.FUNC
+	$QIOW_G		MTIDPB
+
+	QIOTSTERR	R0, MTIISB, ERR_SNS	; check for errors
+
+20$:	MOVL		MTDINF,	@4(AP)		; OK - return info as arg
+	MOVL	#LSL__NORMAL, R0
+	CLRL	MTIERR
+	CLRW	MTIISB
+	RET
+;
+; Some form of MTISNS error was detected. Put LSLLIB message code into R0.
+
+ERR_SNS:
+	MOVL	#LSL__SYSERR, R0
+	MOVZWL	MTIISB,	MTIERR
+	CLRW	MTIISB
+	RET
+ ;
+; ......................................................................
+;
+;
+; QIO error found on READT
+ERR_RDT:
+	MOVL	#LSL__SYSERR,R0			; say system error
+	MOVZWL	MTIISB,	MTIERR
+	CLRW	MTIISB
+	RET
+ ;
+; ......................................................................
+;
+; Routine to read and de-code the serial MT status bytes.
+
+; entry from MTIRWD - no timeout on read
+RSTAT:	MOVAB	STATBL,QI.BUF			; Set buffer 
+	MOVL	#2,QI.LEN			; How much to read
+
+; Read a set amount of data from the serial line into a buffer 
+; with timeout.  Timeout set to 30 seconds at present.
+
+; entry for MTIRWD - no timeout
+	MOVL	#QI.READ,QI.FUNC		; Set read without timeout
+	BRB	IN1
+
+INCHT:	MOVL	#QI.READT,QI.FUNC		; Set read with timeout
+	MOVL	#30,QI.TIME			; of 30 seconds
+
+IN1:	MOVAQ	TERMSK,QI.TERM			; Set terminator mask
+	TSTW	MTRUN				; See if serial MT is on-line
+	BEQL	10$				; No - exit
+	$QIOW_G	MTIDPB				; Send read
+	QIOTSTERR	R0,MTIISB,ERR_RDT	; Check QIO
+10$:	BRB	STAT1
+
+STATUS:	MOVAB	STATBL,QI.BUF			; Set buffer 
+	MOVL	#2,QI.LEN			; How much to read
+	BSBW	INCHT				; Get the bytes
+
+STAT1:	MOVW	#SS$_NORMAL,MTIISB		; OK unless we find otherwise
+	MOVL	MTIPAR,MTDINF			; initial device info
+	BLBC	STATBL,10$			; Test low bit
+	BRW	60$				; Error to report, maybe!
+
+10$:	BLBS	STATBL+1,15$			; Test low bit, second byte
+	MOVW	MTIISB,R0			; Duplicate status in R0
+	RSB					; Not set, exit
+
+; Here to handle bits set in the second status byte.  N.B. in both bytes, bits
+; 6 and 7 are reserved.
+
+15$:	MOVAB	STATBL+1,R1
+	BBC	#1,(R1),20$			; Bit 1
+	MOVW	#SS$_ENDOFFILE,MTIISB		; Set up status
+	BISL2	#MT$M_EOF,MTDINF		; Set up device char. bit
+	BRB	25$
+20$:	BICL2	#MT$M_EOF,MTDINF		; Else clear device char bit
+
+25$:	BBC	#2,(R1),30$			; Bit 2
+	BISL2	#MT$M_BOT,MTDINF		; Set at BOT
+	BRB	35$
+30$:	BICL2	#MT$M_BOT,MTDINF		; Else say we're not at BOT
+
+35$:	BBC	#3,(R1),40$			; Bit 3
+	MOVW	#SS$_ENDOFTAPE,MTIISB		; Set status
+	BISL2	#MT$M_EOT,MTDINF		; and device char - EOT
+	BRB	45$
+40$:	BICL2	#MT$M_EOT,MTDINF		; Else clear this bit
+
+45$:	BBC	#5,(R1),50$			; Bit 5
+	CLRW	MTRUN				; set device off-line flag
+	MOVW	#SS$_DEVOFFLINE,MTIISB		; and status
+	BRB	55$
+50$:	MOVW	#1,MTRUN			; Else say on-line
+
+55$:	MOVW	MTIISB,R0			; Duplicate status in R0
+	RSB					; Exit
+
+; Here to test bits of first status byte.  Bit 1 is of no interest, since it is
+; only set during write continuous operations, and we do not use this option.
+
+60$:	MOVAB	STATBL,R1
+	BBC	#2,(R1),65$			; Bit 2
+	MOVW	#SS$_ILLIOFUNC,MTIISB		; we received an illegal command
+
+65$:	BBS	#3,(R1),70$			; Bit 3
+	BBC	#4,(R1),75$			; Bit 4
+70$:	MOVW	#SS$_PARITY,MTIISB		; Both are parity error
+	
+75$:	BBC	#5,(R1),80$			; Bit 5
+	MOVW	#SS$_RESULTOVF,MTIISB		; If set, read buffer overflowed
+80$:	BRW	10$				; Then check 2nd byte
+
+;
+; ......................................................................
+;
+; Routine to format the block length returned in two bytes by the serial MT
+; into a standard block length format for return to the calling program.
+
+RBLFMT:	MOVAB	BLDATA,QI.BUF			; Buffer for data
+	MOVL	#2,QI.LEN			; Amount to read
+	BSBW	INCHT				; Go get it
+	MOVZBL	BLDATA+1,R3			; Move in BLL
+	INSV	BLDATA,#7,#7,R3			; Insert BLM
+	RSB					; Exit
+ 
+	.PSECT
+	.END

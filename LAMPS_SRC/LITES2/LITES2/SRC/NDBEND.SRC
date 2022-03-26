@@ -1,0 +1,693 @@
+	LOGICAL FUNCTION NDBEND
+C
+***     IDENT   02DE96
+***     MODULE  NDBEND
+C
+C       Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C       Written                                 RWR	20-Nov-1986
+C
+C Description
+C
+C	LITES2 cartographic editor END BEND routine
+C	Returns FALSE if successful
+C
+        IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CONSTS/
+***	PARAMETER/CMN:CTXS/
+***     PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***     PARAMETER/CMN:START/
+C
+***	COMMON/CMN:CTXS/
+***	COMMON/CMN:DEFINE/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNFRT:FRTTRI/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:MODIFY/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:STRIKE/
+C
+C workspace
+C
+	REAL		LENGTH		! length of text
+	REAL		HEIGHT		! height of text
+	REAL		LEN_SO_FAR	! length so far
+	REAL		SPACE		! amount to space by
+	REAL		WIDTH		! width of character
+	REAL		SAVXY(3)	! save of cursor position
+	INTEGER		NOCHAR		! number of sig. chars
+	INTEGER		FIRST_CHAR	! index of 1st char of subtext
+	REAL		DIR		! direction of curve
+	INTEGER		IDIR
+	LOGICAL		R_TO_L		! right to left text
+	INTEGER		LOCATE		! justification code of text
+	REAL		BENDANG		! total angle to stretch round
+	REAL		STAANG,ENDANG
+	REAL		OFFSET
+	REAL		ANG
+	INTEGER		I,J,N
+	INTEGER		INDEX
+	REAL		DX,DY
+	REAL		TOT_LEN
+	REAL		VEC_LEN		! length of current vector
+	INTEGER		LOWVRT,HIGVRT	! first and last vertices
+	REAL		LOWXY(2),HIGXY(2) ! first and last points
+	LOGICAL		ONEVEC		! two points within same vector
+	LOGICAL		OFFEND
+	REAL		Z
+	LOGICAL		D
+	INTEGER*4	DSC(2)
+C
+C functions
+	LOGICAL		THISCTX
+	LOGICAL		CHKLIN
+	INTEGER		COUNT_CHAR
+	INTEGER		NEXT_CHAR
+	LOGICAL		ADDDEF
+C
+	NDBEND = .TRUE.			! assume failure
+C
+C must have a linear found object or an arc
+	IF (.NOT.CHKLIN(.FALSE.)) GOTO 999
+C
+C for BEND STRETCH, must have same found object as before
+C
+	IF (BNDSTR.AND. (FOPAK(PAKPNF).NE.BENDPNF.OR.
+     &		FOPAK(PAKMAP).NE.BENDMAP) ) THEN
+	   CALL MOAN(MSG_NOTSAMEBEND)
+	   CALL LEARN(MSG_FINDSAMEBEND)
+	   GOTO 999
+	ENDIF
+C
+C must be on line
+C
+	IF (.NOT.FONLIN) THEN
+	   CALL MOAN(MSG_NOTONLINE)
+	   CALL LEARN(MSG_USEON)
+	   GOTO 999
+	ENDIF
+C
+C make sure that CTXBUF (and COI variables) is filled
+C
+	COICTXD(CTXD_CUR) = COICTXD(CTXD_FSTCTX)
+	IF (THISCTX(COICTXD)) GOTO 999
+	SAVXY(1) = CSXY(1)
+	SAVXY(2) = CSXY(2)
+	CALL PUTLNG(CSXY(3),SAVXY(3))
+	CALL LOADCOI(.FALSE.)		! transfer to COI variables
+					! and make home
+C
+C LOADCOI moves cursor to start of COI object, so set it back
+	CSXY(1) = SAVXY(1)
+	CSXY(2) = SAVXY(2)
+	CALL PUTLNG(SAVXY(3),CSXY(3))
+C
+C delete existing CTX's for COICTXD
+C
+	IF (COICTXD(CTXD_NCTX).NE.0) CALL FREECTX(COICTXD)
+C
+C get rid of any point attributes
+C
+	CALL DELDEF(CTXBUFL(CTX_L_ATTR))
+C
+C get justification of text
+	LOCATE=CTXBUFW(CTX_W_TS3).AND.'F'X	! justification point
+	IF (LOCATE.GT.8) LOCATE=0
+C
+C fill frtcom
+C
+	CALL FRTFND(COIFC)		! had better not fail!
+C
+C work out total size of text
+C
+	LENGTH = COIAUX(MAXXI)-COIAUX(MINXI)
+	HEIGHT = COIAUX(MAXYI)-COIAUX(MINYI)
+	R_TO_L = (LENGTH.LT.0.0)	! right to left text
+	IF (R_TO_L) LENGTH = -LENGTH
+C
+C count number of non-zero-width characters (only if stretching)
+	IF (BNDSTR) NOCHAR = COUNT_CHAR(COIDSC)
+C
+C jump on graphical type (already checked for texts or symbols)
+	GOTO(100,200,200,200,200,100,999,999,999,999,100,100),
+     &	                     FOPAK(PAKGT)
+C
+C******************************************************************
+C Graphical types 1,6,11 and 12
+C
+  100	CONTINUE
+	OFFEND = .FALSE.
+C
+	IF (R_TO_L) BNDFWD = .NOT.BNDFWD
+	IF (BNDFWD) THEN
+	   IDIR = 1
+	ELSE
+	   IDIR = -1
+	ENDIF
+C
+C work out spacing required
+C
+	SPACE = 0.0
+	IF (BNDSTR) THEN
+C
+C find start and end vertices, and points
+	   IF (FMVRT.LT.FOVRT.OR.
+     &	      ((FMVRT.EQ.FOVRT).AND.FMNVRT)) THEN	! easy
+	      ONEVEC = (FMVRT.EQ.FOVRT) .OR.
+     &	               (FMVRT.EQ.(FOVRT-1).AND.FONVRT)
+	      LOWVRT = FMVRT + 1
+	      LOWXY(1) = FMCXY(1)
+	      LOWXY(2) = FMCXY(2)
+	      IF (FONVRT) THEN		! previous vertex is last one
+	         HIGVRT = FOVRT -1
+	      ELSE
+	         HIGVRT = FOVRT
+	      ENDIF
+	      HIGXY(1) = FOCXY(1)
+	      HIGXY(2) = FOCXY(2)
+	   ELSEIF (FOVRT.LT.FMVRT.OR.
+     &	         ((FMVRT.EQ.FOVRT).AND.FONVRT)) THEN	! also easy
+	      ONEVEC = (FMVRT.EQ.FOVRT) .OR.
+     &	               (FOVRT.EQ.(FMVRT-1).AND.FMNVRT)
+	      LOWVRT = FOVRT + 1
+	      LOWXY(1) = FOCXY(1)
+	      LOWXY(2) = FOCXY(2)
+	      IF (FMNVRT) THEN		! previous vertex is last one
+	         HIGVRT = FMVRT -1
+	      ELSE
+	         HIGVRT = FMVRT
+	      ENDIF
+	      HIGXY(1) = FMCXY(1)
+	      HIGXY(2) = FMCXY(2)
+	   ELSE				! both points within same vector
+	      ONEVEC = .TRUE.
+	      LOWVRT = FOVRT + 1
+	      HIGVRT = FOVRT
+	      INDEX = FOVRT - FOVO
+	      DX = FOXY(1,INDEX+1) - FOXY(1,INDEX)
+	      DY = FOXY(2,INDEX+1) - FOXY(2,INDEX)
+C
+C use larger of DX and DY to find out which of the two points is nearer
+C the start of the vector
+C
+	      I = 1				! assume using X
+	      IF (ABS(DX).LT.ABS(DY)) I = 2	! use Y in fact
+	      IF (ABS(FMCXY(I)-FOXY(I,INDEX)).LE.
+     &	          ABS(FOCXY(I)-FOXY(I,INDEX))) THEN
+	         LOWXY(1) = FMCXY(1)
+	         LOWXY(2) = FMCXY(2)
+	         HIGXY(1) = FOCXY(1)
+	         HIGXY(2) = FOCXY(2)
+	      ELSE
+	         LOWXY(1) = FOCXY(1)
+	         LOWXY(2) = FOCXY(2)
+	         HIGXY(1) = FMCXY(1)
+	         HIGXY(2) = FMCXY(2)
+	      ENDIF
+	   ENDIF
+C
+C now get total length
+C	
+	   IF (ONEVEC) THEN	! both points within same vector
+	      TOT_LEN = SQRT((HIGXY(1)-LOWXY(1))**2+
+     &	                        (HIGXY(2)-LOWXY(2))**2)
+	   ELSE
+	      FOVRT = LOWVRT		! make sure start vertix in FOXY
+	      CALL HAULIN(0)
+C
+C start with bit of line from first point to first vertex
+C
+	      INDEX =FOVRT-FOVO
+	      TOT_LEN = SQRT((FOXY(1,INDEX)-LOWXY(1))**2 + 
+     &	                        (FOXY(2,INDEX)-LOWXY(2))**2)
+C
+C add on whole vectors
+C
+	      DO 110, FOVRT = LOWVRT,HIGVRT-1
+	         INDEX = FOVRT - FOVO
+	         DX = FOXY(1,INDEX+1) - FOXY(1,INDEX)
+	         DY = FOXY(2,INDEX+1) - FOXY(2,INDEX)
+	         TOT_LEN = TOT_LEN + SQRT(DX**2 + DY**2)
+	         IF (INDEX.EQ.(FOTOP-1).AND.FOVRT.NE.(FOLST-1)) THEN
+	             CALL HAULIN(0)
+	         ENDIF
+  110	      CONTINUE
+C
+C add on bit at end
+C
+	      INDEX = HIGVRT - FOVO
+	      TOT_LEN = TOT_LEN +
+     &	                SQRT((FOXY(1,INDEX)-HIGXY(1))**2 +
+     &	                     (FOXY(2,INDEX)-HIGXY(2))**2)
+	   ENDIF
+C
+C extra space is divided evenly between characters. For closed features
+C there is one extra space
+C
+	   IF (HIGXY(1).NE.LOWXY(1).OR.HIGXY(2).NE.LOWXY(2)) THEN
+	      IF (NOCHAR.LE.1) THEN
+	         SPACE = 0.0	! not significant for one char
+	      ELSE
+	         SPACE = (TOT_LEN - LENGTH)/(NOCHAR-1)
+	      ENDIF
+	   ELSE
+	      SPACE = (TOT_LEN - LENGTH)/NOCHAR
+	   ENDIF
+C	
+	ELSE				! for not stretching
+	   IF (BNDFWD) THEN
+	      LOWVRT = MIN(FMVRT + 1, FOLST)
+	      LOWXY(1) = FMCXY(1)
+	      LOWXY(2) = FMCXY(2)
+	   ELSE
+	      HIGVRT = MIN(FMVRT, FOLST - 1)
+	      HIGXY(1) = FMCXY(1)
+	      HIGXY(2) = FMCXY(2)
+	   ENDIF
+	ENDIF   
+C
+C justify text, if bending normally
+C
+	IF (.NOT.BNDSTR.AND.LOCATE.GE.3) THEN
+	   CALL HAULIN(0)		! get some (any) vertices in
+C
+C get length to justify by
+C
+	   IF (LOCATE.GE.6) THEN
+	      OFFSET = LENGTH
+	   ELSE
+	      OFFSET = LENGTH*0.5
+	   ENDIF
+C
+C find length of next segment of linear feature
+C
+120	   CONTINUE
+  	   IF (BNDFWD) THEN
+	      FOVRT = LOWVRT - 1
+	   ELSE
+	      FOVRT = HIGVRT + 1
+	   ENDIF
+C
+C get vertices into FOXY, if necessary
+C	   
+	   IF (((FOVRT-FOVO).EQ.FOTOP.AND.
+     &	            (FOVRT+FOVO).NE.FOLST).OR.
+     &	       (FOVRT.EQ.FOVO)) CALL HAULIN(0)
+C
+C find length of current vector
+C
+	   INDEX = FOVRT - FOVO
+	   IF (BNDFWD) THEN
+	      DX = FOXY(1,INDEX) - LOWXY(1)
+	      DY = FOXY(2,INDEX) - LOWXY(2)
+	   ELSE
+	      DX = FOXY(1,INDEX) - HIGXY(1)
+	      DY = FOXY(2,INDEX) - HIGXY(2)
+	   ENDIF
+C
+	   VEC_LEN = SQRT(DX**2 + DY**2)
+C
+C does text start in this vector?
+C
+	   IF (VEC_LEN.LT.OFFSET.AND.
+     &	       ((BNDFWD.AND.FOVRT.NE.1).OR.
+     &	        (.NOT.BNDFWD.AND.FOVRT.NE.FOLST))) THEN
+C
+C no, subtract it from length to justify, and move onto next vector
+C
+	      OFFSET = OFFSET - VEC_LEN
+	      IF (BNDFWD) THEN
+	         LOWXY(1) = FOXY(1,INDEX)
+	         LOWXY(2) = FOXY(2,INDEX)
+	         LOWVRT = LOWVRT - 1
+	      ELSE
+	         HIGXY(1) = FOXY(1,INDEX)
+	         HIGXY(2) = FOXY(2,INDEX)
+	         HIGVRT = HIGVRT + 1
+	      ENDIF
+C
+	      GOTO 120
+C
+C starting outside feature?
+C
+	   ELSEIF (VEC_LEN.LT.OFFSET.AND.
+     &	       ((BNDFWD.AND.FOVRT.EQ.1).OR.
+     &	        (.NOT.BNDFWD.AND.FOVRT.EQ.FOLST))) THEN
+	      OFFEND = .TRUE.
+	   ENDIF
+C
+C justified text starts in this vector, find out where. If VEC_LEN is zero at
+C this point, ATAN2(DY,DX) will fail (SPR 3542), so use alternative method
+C to find angle. Alternative code remains untested if BNDFWD is false, since it
+C should never be invoked, but it's there just in case.
+C
+	   IF (VEC_LEN .GT. 0.0) THEN			! Failure trap
+	      ANG = ATAN2(DY,DX)
+	   ELSE
+	      IF (BNDFWD) THEN
+		ANG = ATAN2(FOXY(2,LOWVRT-FOVO-1) - FOXY(2,LOWVRT-FOVO),
+     &			FOXY(1,LOWVRT-FOVO-1) - FOXY(1,LOWVRT-FOVO))
+	      ELSE
+		ANG = ATAN2(FOXY(2,HIGVRT-FOVO+1) - FOXY(2,HIGVRT-FOVO),
+     &			FOXY(1,HIGVRT-FOVO+1) - FOXY(1,HIGVRT-FOVO))
+	      ENDIF
+	   ENDIF
+	   IF (BNDFWD) THEN
+	      LOWXY(1) = LOWXY(1) + COS(ANG)*OFFSET
+	      LOWXY(2) = LOWXY(2) + SIN(ANG)*OFFSET
+	   ELSE
+	      HIGXY(1) = HIGXY(1) + COS(ANG)*OFFSET
+	      HIGXY(2) = HIGXY(2) + SIN(ANG)*OFFSET
+	   ENDIF
+	ENDIF
+C
+C initialise drawing position and angle
+C
+	IF (BNDFWD) THEN
+	   FOVRT = LOWVRT - 1
+	ELSE
+	   FOVRT = HIGVRT + 1
+	ENDIF
+	CALL HAULIN(0)
+	INDEX = FOVRT - FOVO
+	IF (BNDFWD) THEN
+	   DX = LOWXY(1) - FOXY(1,INDEX) 
+	   DY = LOWXY(2) - FOXY(2,INDEX) 
+	ELSE
+	   DX = HIGXY(1) - FOXY(1,INDEX) 
+	   DY = HIGXY(2) - FOXY(2,INDEX) 
+	ENDIF
+	LEN_SO_FAR = SQRT(DX**2+DY**2)
+C
+C starting outside feature?
+	IF (OFFEND) LEN_SO_FAR = -LEN_SO_FAR
+C
+	IF (LEN_SO_FAR.GT.0.0) THEN
+	   ANG = ATAN2(DY,DX)
+	ELSE			! start point is vertex, use next vector
+				! for angle
+	   ANG = ATAN2(FOXY(2,INDEX+IDIR)-FOXY(2,INDEX),
+     &	               FOXY(1,INDEX+IDIR)-FOXY(1,INDEX))
+	ENDIF
+	IF (R_TO_L) ANG = ANG-PI
+	IF (ANG.LT.0.0) ANG=ANG+TWOPI
+	VEC_LEN = SQRT((FOXY(1,INDEX+IDIR)-FOXY(1,INDEX))**2 + 
+     &	               (FOXY(2,INDEX+IDIR)-FOXY(2,INDEX))**2)
+C
+C calculate position of each character in COIBUF
+C
+	FIRST_CHAR = 0
+	I = 0
+C
+190	I = I+1
+	IF (I.GT.COILEN) GOTO 900
+	DSC(1) = COILEN-I+1
+	DSC(2) = %LOC(COIBUF(I))
+	N = NEXT_CHAR(DSC)
+	DSC(1) = N
+	CALL TRISCN(DSC,FRTSC,WIDTH,HWTOPT.AND.FRTHWS)
+	IF (FIRST_CHAR.EQ.0) FIRST_CHAR = I
+	I = I+N-1
+	IF (WIDTH.EQ.0.0.AND.I.LT.COILEN) GOTO 190
+C
+	WIDTH = WIDTH*HEIGHT		! width in IFF units
+	IF (R_TO_L) WIDTH = -WIDTH
+C
+C justify character - increase LEN_SO_FAR by the appropriate size
+C
+	OFFSET = (WIDTH - JSTPROP*HEIGHT) * 0.5 * (LOCATE/3)
+C
+	LEN_SO_FAR = LEN_SO_FAR + OFFSET
+C
+C this is locating point - get it on feature
+C
+C
+C check to see if gone past a vertex.  If so recompute LEN_SO_FAR;
+C if past the last (or first) vertex, just keep going in this direction
+C
+  180	IF (LEN_SO_FAR.GE.(VEC_LEN+1.0E-6*VEC_LEN).AND.
+     &	    ((BNDFWD.AND.FOVRT.NE.(FOLST-1)).OR.
+     &	     (.NOT.BNDFWD.AND.FOVRT.NE.2))) THEN
+	   LEN_SO_FAR =LEN_SO_FAR - VEC_LEN
+	   FOVRT = FOVRT + IDIR
+  185	   INDEX = FOVRT - FOVO
+	   IF ((BNDFWD.AND.INDEX.EQ.(FOTOP-1).AND.
+     &	        FOTOP.NE.(FOLST-FOVO)).OR.
+     &	       (.NOT.BNDFWD.AND.INDEX.EQ.2.AND.FOVO.NE.0)) THEN
+	      CALL HAULIN(0)
+	      GOTO 185
+	   ENDIF
+	   DX = FOXY(1,INDEX+IDIR) - FOXY(1,INDEX)
+	   DY = FOXY(2,INDEX+IDIR) - FOXY(2,INDEX)
+	   VEC_LEN = SQRT(DX**2 + DY**2)
+	   ANG = ATAN2(DY,DX)
+	   IF (R_TO_L) ANG = ANG-PI
+	   IF (ANG.LT.0.0) ANG = ANG + TWOPI
+	   GOTO 180			! check again
+	ENDIF
+
+C
+C rotation of character
+C
+	CTXBUFR(CTX_L_RO) = ANG
+C
+C coordinates of locating point of character
+C
+	BENDANG = ANG	! use as temporary
+	IF (R_TO_L) BENDANG = BENDANG-PI
+	CTXBUFR(CTX_L_X) = FOXY(1,INDEX) + COS(BENDANG)*LEN_SO_FAR
+	CTXBUFR(CTX_L_Y) = FOXY(2,INDEX) + SIN(BENDANG)*LEN_SO_FAR
+C
+C is Z required?
+	IF (ZOPT) THEN
+C
+C interpolate height of this point from original vector
+	   IF (FO_Z_COL.GT.0) THEN
+	      CALL LINEAR_INTERPL(FOXY(1,INDEX),FOXY(1,INDEX+1),
+     &			CTXBUFR(CTX_L_X),FOATTV(FO_Z_COL,INDEX),
+     &			FOATTV(FO_Z_COL,INDEX+1),Z)
+	   ELSE
+	      Z = IFF_ABSENT
+	   ENDIF
+C
+C add it to list of attributes
+	   IF (.NOT.ADDDEF(CTXBUFL(CTX_L_ATTR),IFF_C_Z,Z,D)) GOTO 999
+	ENDIF
+C
+C and text, from FIRST_CHAR to current character (I)
+C
+	CTXBUFW(CTX_W_TXTLEN) = I-FIRST_CHAR+1
+	DO 187 J=1,I-FIRST_CHAR+1
+	   CTXTEXT(J) = COIBUF(FIRST_CHAR+J-1)
+187	CONTINUE
+	FIRST_CHAR = 0
+C
+C add this CTX
+C
+	CALL ADDCTX(COICTXD,.FALSE.)
+C
+C update distance so far (reduce by offset)
+C
+	LEN_SO_FAR = LEN_SO_FAR + WIDTH + SPACE - OFFSET
+	GOTO 190
+C
+C******************************************************************
+C circle arcs
+C
+  200	CONTINUE
+C
+C work out angle to start at
+C
+	LEN_SO_FAR = ATAN2(FMCXY(2)-FOAUX(YCENI),FMCXY(1)-FOAUX(XCENI))
+	IF (LEN_SO_FAR.LT.0.0) LEN_SO_FAR = LEN_SO_FAR + TWOPI
+C
+C work out direction of text
+C
+	ANG = LEN_SO_FAR - COIAUX(ANGI)	! difference between radius
+					! and text angle
+C
+C get angle in range -PI < ANG => +PI
+C
+  210	IF (ANG.LT.-PI) THEN
+	   ANG = ANG + TWOPI
+	   GOTO 210
+	ELSEIF (ANG.GE.PI) THEN
+	   ANG = ANG - TWOPI
+	   GOTO 210
+	ENDIF
+C
+	IF (ANG.LT.0.0) THEN
+	   DIR = 1.0				! anticlockwise
+	ELSE
+	   DIR = -1.0				! clockwise
+	ENDIF
+	IF (R_TO_L) DIR = -DIR
+C
+C For stretching texts work out space between characters
+C and start position of texts (taking account of justification)
+C
+	SPACE = 0.0
+	IF (BNDSTR) THEN
+	   ANG = ATAN2(FOCXY(2)-FOAUX(YCENI),FOCXY(1)-FOAUX(XCENI))
+	   IF (ANG.LT.0.0) ANG = ANG + TWOPI
+C
+	   STAANG = LEN_SO_FAR - FOAUX(STAI)
+	   ENDANG = ANG - FOAUX(STAI)
+C
+C make sure both points are in arc
+	   IF (FOAUX(TOTI).GT.0.0) THEN
+	      IF (STAANG.LT.0.0) STAANG = STAANG + TWOPI
+	      IF (ENDANG.LT.0.0) ENDANG = ENDANG + TWOPI
+	   ELSE
+	      IF (STAANG.GT.0.0) STAANG = STAANG - TWOPI
+	      IF (ENDANG.GT.0.0) ENDANG = ENDANG - TWOPI
+	   ENDIF
+C
+	   BENDANG = ENDANG - STAANG
+C
+C use direction of text, to decide which part of complete circle to use
+C and convert tiny arc to be full circle for these
+C
+	   IF(ABS(FOAUX(TOTI)).EQ.SNGL(TWOPI)) THEN
+	      IF (ABS(BENDANG).LE.1.0E-05) BENDANG = 0.0
+	      IF (DIR.GT.0.0) THEN		! want anticlockwise arc
+	         IF (BENDANG.LT.0.0) BENDANG = BENDANG + TWOPI
+	         IF (BENDANG.EQ.0.0) BENDANG = + TWOPI
+	      ELSE
+	         IF (BENDANG.GT.0.0) BENDANG = BENDANG - TWOPI
+	         IF (BENDANG.EQ.0.0) BENDANG = - TWOPI
+	      ENDIF
+	   ENDIF
+C
+	   TOT_LEN = FOAUX(RADI) * ABS(BENDANG)
+C
+C space between characters is available space divided by no of chars - 1
+C (for complete circles, this gives first and last chars close together,
+C so divide by no of chars)
+C
+	   IF (ABS(BENDANG).EQ.SNGL(TWOPI)) THEN
+	      SPACE = (TOT_LEN - LENGTH)/NOCHAR 	! may be negative
+C
+C justification - if centrally justified, start opposite
+C	        - if right justified, start one space on
+	      IF (LOCATE.GE.3.AND.LOCATE.LE.5) THEN
+	         LEN_SO_FAR = LEN_SO_FAR + 
+     &	                      PI + DIR*SPACE*0.5/FOAUX(RADI)
+	      ELSEIF (LOCATE.GE.6) THEN
+	         LEN_SO_FAR = LEN_SO_FAR + DIR*SPACE/FOAUX(RADI)
+	      ENDIF
+	   ELSE
+C
+C justification only on output
+C
+	      IF (NOCHAR.LE.1) THEN
+	         SPACE = 0.0	! not significant for one char
+	      ELSE
+	         SPACE = (TOT_LEN - LENGTH)/(NOCHAR-1) ! may be negative
+	      ENDIF
+	      IF (DIR.GT.0.0.NEQV.BENDANG.GT.0.0) THEN
+	         LEN_SO_FAR = ANG		! start at other end
+	      ENDIF
+	   ENDIF
+C
+C justification for normal bending
+C
+	ELSE
+	   LEN_SO_FAR = LEN_SO_FAR -
+     &		DIR*LENGTH*0.5/FOAUX(RADI) * (LOCATE/3)
+	ENDIF
+C
+C calculate position of each character in COIBUF
+C
+	FIRST_CHAR = 0
+	I = 0
+C
+290	I = I+1
+	IF (I.GT.COILEN) GOTO 900
+	DSC(1) = COILEN-I+1
+	DSC(2) = %LOC(COIBUF(I))
+	N = NEXT_CHAR(DSC)
+	DSC(1) = N
+	CALL TRISCN(DSC,FRTSC,WIDTH,HWTOPT.AND.FRTHWS)
+	IF (FIRST_CHAR.EQ.0) FIRST_CHAR = I
+	I = I+N-1
+	IF (WIDTH.EQ.0.0.AND.I.LT.COILEN) GOTO 290
+C
+C justify start of text - locating point (and angle) is taken on the
+C arc of circle, so adjust first character to take account of space
+C at end of characters
+C
+	IF (I.EQ.1) THEN
+	   OFFSET = JSTPROP*HEIGHT*0.5/FOAUX(RADI) * (LOCATE/3)
+	   LEN_SO_FAR = LEN_SO_FAR - DIR*OFFSET
+	ENDIF
+C
+	WIDTH = WIDTH*HEIGHT			! width in IFF units
+	IF (R_TO_L) WIDTH = -WIDTH
+C
+C work out angle to locating point of this character
+C
+	OFFSET = WIDTH*0.5/FOAUX(RADI) * (LOCATE/3)
+	ANG = LEN_SO_FAR + (DIR * OFFSET)
+C
+C rotation of character is perp to this line
+C
+	CTXBUFR(CTX_L_RO) = ANG + (DIR*PIBI2)
+	IF (R_TO_L) CTXBUFR(CTX_L_RO) = CTXBUFR(CTX_L_RO) - PI
+  220	IF (CTXBUFR(CTX_L_RO).LT.0.0) THEN
+	   CTXBUFR(CTX_L_RO) = CTXBUFR(CTX_L_RO) + TWOPI
+	   GOTO 220
+	ELSEIF (CTXBUFR(CTX_L_RO).GE.TWOPI) THEN
+	   CTXBUFR(CTX_L_RO) = CTXBUFR(CTX_L_RO) - TWOPI
+	   GOTO 220
+	ENDIF
+C
+C coordinates of locating point of character
+C
+	CTXBUFR(CTX_L_X) = FOAUX(XCENI) + COS(ANG)*FOAUX(RADI)
+	CTXBUFR(CTX_L_Y) = FOAUX(YCENI) + SIN(ANG)*FOAUX(RADI)
+C
+C is Z required?
+	IF (ZOPT.AND.FOC_DEFINED) THEN
+C
+C interpolate height of this point from original vector
+	   CALL PLANE_INTERPL(CTXBUFR(CTX_L_X),FOCOEFFS,Z)
+C
+C add it to list of attributes
+	   IF (.NOT.ADDDEF(CTXBUFL(CTX_L_ATTR),IFF_C_Z,Z,D)) GOTO 999
+	ENDIF
+C
+C and text, from FIRST_CHAR to current character (I)
+C
+	CTXBUFW(CTX_W_TXTLEN) = I-FIRST_CHAR+1
+	DO 287 J=1,I-FIRST_CHAR+1
+	   CTXTEXT(J) = COIBUF(FIRST_CHAR+J-1)
+287	CONTINUE
+	FIRST_CHAR = 0
+C
+C add this CTX
+C
+	CALL ADDCTX(COICTXD,.FALSE.)
+C
+C update angle so far
+C
+	LEN_SO_FAR = LEN_SO_FAR + DIR * (WIDTH+SPACE)/FOAUX(RADI)
+	GOTO 290
+C
+  900	CONTINUE
+	COICTXD(CTXD_CUR) = COICTXD(CTXD_FSTCTX)
+	IF (THISCTX(COICTXD)) GOTO 999
+	CALL LOADCOI(.FALSE.)		! transfer to COI variables
+					! and make home
+	FLG_GEOCHANGE = .TRUE.		! geometrical change
+	CALL FRECUR			! free cursor
+	NDBEND = .FALSE.		! success
+C
+  999	RETURN
+        END

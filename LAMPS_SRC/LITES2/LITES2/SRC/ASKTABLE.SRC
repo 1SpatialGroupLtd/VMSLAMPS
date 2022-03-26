@@ -1,0 +1,217 @@
+	SUBROUTINE ASKTABLE(OUTXY)
+C
+***	IDENT   09MY96
+***	MODULE  ASKTABLE
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					RWR	28-JAN-1988
+C
+C	LITES2 cartographic editor ASK TABLE command.
+C
+	IMPLICIT NONE
+C
+C argument
+	REAL	OUTXY(2)		! in IFF units
+C
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MACMEN/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:TRNTYP/
+C
+***	COMMON/CMN:DOUT/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:OSCOEF/
+***	COMMON/CMN:OTRANS/
+***	COMMON/CMN:SAVFLE/
+***	COMMON/CMN:TRACKS/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:WORKS/
+C
+	INCLUDE		'($IODEF)'
+	INCLUDE		'($SSDEF)'
+C
+C local variables
+	INTEGER		I
+	INTEGER		IERR
+	INTEGER*4	LEN
+	INTEGER*2	IOSB(4)
+	BYTE		BUFF(40)	! return string
+	INTEGER*4	BUTTON
+	INTEGER*4	IX,IY		! table coordinates
+	REAL		TABXY(2)	! table coordinates
+	INTEGER*4	MENU		! menu that digitised point
+					! falls in
+	INTEGER*4	SETUP_NO	! map setup that digitised point
+					! falls in
+	INTEGER*4	TRACK		! tracking area that digitised
+					! point falls in
+	INTEGER*4	PUCK		! number of puck that was used
+	INTEGER*4	BUT		! "normalised" button number
+					! returned (-1 for not
+					! available)
+	INTEGER*4	SET,ROW,COL	! position in OS setup matrix
+	REAL		GRDX,GRDY	! grid intervals (os setup)
+	REAL		X,Y,OTABXY(2)	! temp coords (OS setup)
+C
+	EXTERNAL	MOAN,NASTY
+C
+C functions
+	INTEGER*4	SYS$QIOW
+	LOGICAL		DIGTRN
+	INTEGER		DTBKIL
+	LOGICAL		HAD_ERROR,READ_ERROR
+	LOGICAL		ASK_TAB
+C
+	IF (DTRON) THEN		! direct table reading
+C
+C if there is a read up to the table, cancel it
+	   IF (DTBREAD) THEN
+	      IERR = DTBKIL(DTBCHN)
+	      IF (.NOT.IERR) THEN
+	         CALL MOAN(MSG_ERRINCANCEL,'table read')
+	         CALL LITES2_SIGNAL(IERR)
+	         GOTO 9999
+	      ENDIF
+	      DTBREAD = .FALSE.
+	   ENDIF
+C
+C send qio
+	   IERR=SYS$QIOW(,			! efn
+     &	              %VAL(DTBCHN),		! channel
+     &	              %VAL(IO$_READPROMPT.OR.
+     &	              IO$M_PURGE.OR.IO$M_TIMED.OR.
+     &	              IO$M_NOECHO),	! function
+     &	              IOSB,		! iosb
+     &	              ,			! astadr
+     &	              ,			! astprm
+     &	              BUFF,		! 
+     &	              %VAL(40),		! length of BUFF
+     &	              %VAL(10),		! p3 - time out (10 seconds)
+     &	              ,			! p4
+     &	              TABPROMPT,	! p5 - prompt string
+     &	              %VAL(TABPROMPTL))	! p6 - prompt string length
+C
+	   IF (.NOT.IERR) THEN
+	      CALL MOAN(MSG_DUFFQIO)
+	      CALL LITES2_SIGNAL(IERR)
+	      GOTO 9999
+	   ENDIF
+C
+	   IF (.NOT.IOSB(1)) THEN
+	      IF (IOSB(1).EQ.SS$_TIMEOUT) THEN
+	         CALL MOAN(MSG_NOTABLERESPONSE,10)
+	         IF (.NOT.TABPROMDECOD)
+     &	            CALL LEARN(MSG_NOGETPROM)
+	      ELSE
+	         CALL MOAN(MSG_ERRINTABRD)
+	         CALL LITES2_SIGNAL(IOSB(1))
+	      ENDIF
+	      GOTO 9999
+	   ENDIF
+	   LEN = IOSB(2)
+C
+C interpret response from table
+	   IF (DIGTRN(BUFF,LEN,BUTTON,IX,IY,USEFUN,%VAL(FUNADR))) THEN
+	      CALL MOAN(MSG_TABERRREAD,BUFF)   ! error in string
+	      GOTO 9999
+	   ENDIF
+	ELSE
+C
+C table monitor
+	   IF (ASK_TAB(IERR)) THEN		! ask for position
+	      CALL MOAN(MSG_ERRCOMTABMON)
+	      CALL LITES2_SIGNAL(IERR)
+	      GOTO 9999
+	   ENDIF
+C
+C has TABMON signalled an error?
+	   IF (HAD_ERROR(IERR)) THEN
+	      IF (.NOT.READ_ERROR(TXTBUF,TXTPTR,I,IERR)) THEN
+	         IF (I.EQ.SS$_TIMEOUT) THEN
+	            CALL MOAN(MSG_NOTABLERESPONSE,10)
+	         ELSE
+	            CALL MOAN(MSG_ERRINTABRD)
+	            CALL LITES2_SIGNAL(I)
+	         ENDIF
+	      ENDIF
+	      GOTO 9999
+	   ENDIF
+	   CALL READ_TABLE(IX,IY,IERR)
+	ENDIF	   
+C
+C interpret table coordinates
+900	CONTINUE
+	TABXY(1) = IX				! I*4 -> R*4
+	TABXY(2) = IY
+	CALL TSTDGI(DIGLIN,BUTTON,TABXY,0.1,MENU,SETUP_NO,TRACK,PUCK,BUT)
+C
+C check for in a map
+	IF (SETUP_NO.NE.-1) THEN
+C
+	   IF (MAPTABSUP(SETUP_NO).EQ.TABSUP_OS) THEN ! os setup
+	      OTABXY(1)=TABXY(1)		 ! save table coords
+	      OTABXY(2)=TABXY(2)
+	   ENDIF
+C
+C	   get coords in IFF units
+C
+	   CALL TRNUSE(TABXY(1),TABXY(2),CPSCOF(1,1,SETUP_NO),
+     &	            MAPTRNTYP(SETUP_NO))
+C
+C	   if using os setup, refine these coordinates
+C
+	   IF (MAPTABSUP(SETUP_NO).EQ.TABSUP_OS) THEN	! os setup
+	      GRDX=(CRNPTS(3,4,SETUP_NO)-CRNPTS(3,1,SETUP_NO))/
+     &	                           MAPCPFULX(SETUP_NO)
+	      GRDY=(CRNPTS(4,1,SETUP_NO)-CRNPTS(4,2,SETUP_NO))/
+     &	                           MAPCPFULY(SETUP_NO)
+	      X=TABXY(1)-CRNPTS(3,2,SETUP_NO)	! position within map
+	      Y=TABXY(2)-CRNPTS(4,2,SETUP_NO)
+C
+C	      make sure point is really within map
+C
+	      IF (X.LE.0.0) THEN
+	         X=GRDX/2
+	      ELSEIF (X.GE.GRDX*MAPCPFULX(SETUP_NO)) THEN
+	         X=GRDX*MAPCPFULX(SETUP_NO)-GRDX/2
+	      ENDIF
+	      IF (Y.LE.0.0) THEN
+	         Y=GRDY/2
+	      ELSEIF (Y.GE.GRDY*MAPCPFULY(SETUP_NO)) THEN
+	         Y=GRDY*MAPCPFULY(SETUP_NO)-GRDY/2
+	      ENDIF
+C
+C	      find row and column, and thus set
+C
+	      X=X/GRDX			! real division
+	      Y=Y/GRDY
+	      COL=X+1			! convert to integer
+	      ROW=Y
+	      SET=ROW*MAPCPFULX(SETUP_NO)+COL
+C
+C	      transform original coordinates again
+C
+	      TABXY(1)=OTABXY(1)
+	      TABXY(2)=OTABXY(2)
+	      CALL TRNUSE(TABXY(1),TABXY(2),OSCOEF(1,1,SET,SETUP_NO),
+     &	                  MAPTRNTYP(SETUP_NO))
+	   ENDIF
+C
+C or tracking area
+	ELSEIF (TRACK.NE.-1) THEN
+	   CALL TRNUSE(TABXY(1),TABXY(2),TRCOEF(1,1,TRACK),TRNTYP_AFFINE)
+	   TABXY(1) = (WINDOW(2)-WINDOW(1))*TABXY(1)+WINDOW(1)
+	   TABXY(2) = (WINDOW(4)-WINDOW(3))*TABXY(2)+WINDOW(3)
+	ELSE
+	   CALL MOAN(MSG_CURSNOTINMAP)
+	   GOTO 9999
+	ENDIF
+C
+C set up return coordinates
+	OUTXY(1) = TABXY(1)
+	OUTXY(2) = TABXY(2)
+C
+9999	RETURN
+	END

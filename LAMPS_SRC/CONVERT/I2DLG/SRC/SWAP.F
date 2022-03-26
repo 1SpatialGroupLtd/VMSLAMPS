@@ -1,0 +1,33 @@
+	SUBROUTINE SWAP ( NODE_POS, INDEX1, INDEX2)
+C
+C
+CDEC$	IDENT	'06OC89'
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,England
+C
+C Created.					  FJB  25-Sept-1989
+C
+C Swap routine for sorting array of node positions
+C
+	IMPLICIT NONE
+C
+C Parameters:                                          
+	INCLUDE 'LSL$CMNI2DLG:PARAMS.PAR/LIST'
+C
+C
+C Workspace:
+	INTEGER*2	INDEX1
+	INTEGER*2	INDEX2
+	INTEGER*4	TEMP_POS
+	INTEGER*4	TEMP_OFF
+	INTEGER*4	NODE_POS(MAX_NODES,2)
+C
+	TEMP_POS = NODE_POS(INDEX1,1)
+	TEMP_OFF = NODE_POS(INDEX1,2)
+	NODE_POS(INDEX1,1) = NODE_POS(INDEX2,1)
+	NODE_POS(INDEX1,2) = NODE_POS(INDEX2,2)
+	NODE_POS(INDEX2,1) = TEMP_POS
+	NODE_POS(INDEX2,2) = TEMP_OFF
+C
+	RETURN
+	END

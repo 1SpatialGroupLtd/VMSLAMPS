@@ -1,0 +1,392 @@
+	SUBROUTINE S_DRAFTR(PACK)
+C
+***	MODULE	S_DRAFTR
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	23-July-1984
+C
+C To draw the feature pointed at by PACK once, with either the represention
+C in the PACK or in PRIO_FC
+C
+C This version uses optimised IFF reading routine
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+C
+***	COMMON/CMN:CB/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:OIIH/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:WORKS/
+***	COMMON/CMN:WORK_DRAW/
+C
+C arguments
+C
+	INTEGER*4 PACK(PAKLEN)	! a pack for the feature
+C
+C functions called
+C
+	LOGICAL	FRTFND		! find a feature code
+	LOGICAL GENAUX		! generate auxiliary array for symbols,
+C				! texts, and arcs
+	LOGICAL LOOPY		! check if curve is a closed loop
+	LOGICAL	IFF_COORDS	! optimised IFF routine - IFFLIB
+	LOGICAL	GEOG_TRANS_ARRAY
+	LOGICAL	LIB$EXTV
+C
+C w/s
+C
+	INTEGER		ADDR	! save of IFF address
+	LOGICAL		LAST	! had last coordinates
+	LOGICAL		FAST	! using fast IFF routine
+	INTEGER		I
+	INTEGER*2	IECODE,IELEN	! for reading from IFF
+	INTEGER*2	ISTAT(4)	! feature status words
+	INTEGER		TXSIZE		! text size from TH entry
+	LOGICAL		HADST
+	INTEGER 	LOCAL_PACK(PAKLEN) ! local copy of pack
+	INTEGER 	TMPPAK(PAKLEN)	! local copy of pack
+	INTEGER		FC
+	INTEGER*2	TSTAT(4)	! text status words
+	LOGICAL		HADTS	
+	LOGICAL		SEGOPN		! segment has been been opened
+	INTEGER		SAV_OVCOL
+	LOGICAL		BBOX		! want text/symbol bounding box
+	LOGICAL		BOXCMPLX	! complex box?
+	REAL		BOXOFF		! box offset
+	INTEGER*4	STAT_ADDR
+C
+C set of variables for STDRAW, local so independent of all others
+C these are in DRAW_WORK.CMN
+	REAL		AUX(AUXLEN)	! auxiliary array
+	REAL		ANG		! angle
+	LOGICAL		FST		! first bit?
+	LOGICAL		LOOP		! closed loop?
+C
+	SAV_OVCOL = OVCOL
+C
+C don't do anything if no display
+	IF (NODISP) GOTO 999
+C
+	CALL LSG_BEGIN_FEATURE	! probably only for GKSPSLIB plotting
+C
+C get correct map (only if not already for optimisation)
+	IF (PACK(PAKMAP).NE.MAPCUR) CALL SELIF(PACK(PAKMAP))
+C
+C set up the feature code
+C (use FC in pack rather than reading IFF file)
+	IF (DRAW_PRIORITY) THEN
+	   FC = PRIO_FC  	! set by DRWSAV or DRAFTR
+	ELSE
+	   FC = PACK(PAKFC)
+	ENDIF
+C
+	IF ( FRTFND(FC)) THEN
+	   CALL NASTY(MSG_BADCODE,FC)
+	   CALL COLAPS(MSG_BADCODE)
+	   GOTO 999
+	ENDIF
+C
+C if using prioritised drawing, allow colour 0 from FRT
+	IF (DRAW_PRIORITY.AND.FRTCOL.EQ.0.AND.OVCOL.LT.0) OVCOL = 0
+C
+C check if we are drawing a symbol/text as a line/area (i.e.
+C want a bounding box). Only check for change of GT, so beware
+C if we ever allow symbols to have a *different* symbol GT.
+C Get the offset (from FRTSIZ) and 'complex' (from FRTFLG), then
+C change back to the original feature code
+C 
+	BBOX = .FALSE.
+	IF (DRAW_PRIORITY) THEN
+	   IF ((PACK(PAKGT).GE.UNOTYP.AND.PACK(PAKGT).LE.TEXTYP).AND.
+     &		FRTGT.NE.PACK(PAKGT)) THEN
+	      BBOX = .TRUE.
+	      BOXOFF = FRTSIZ
+	      BOXCMPLX = LIB$EXTV(15,1,FRTFLG)
+	      IF ( FRTFND(PACK(PAKFC))) THEN
+	         CALL NASTY(MSG_BADCODE,FC)
+	         CALL COLAPS(MSG_BADCODE)
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C make local copy of pack, for drawing purposes only. Set up FC in it, and
+C use it in rest of routine
+	CALL CPYPAK(PAKLEN,PACK,LOCAL_PACK)
+	IF (.NOT.BBOX) LOCAL_PACK(PAKFC) = FC
+C
+C use fast IFF routine for all except GT 8,9,10 (which
+C need FS, RO, TX entries reading)
+C GT 6 (CURTYP) is currently excluded because LOOPY must be called.
+C Expect to allow 6 also eventually.
+	FAST = .FALSE.
+	IF ((FRTGT.LT.UNOTYP.OR.FRTGT.GE.STRTYP.OR.
+     &	    ((FRTGT.EQ.UNOTYP).AND.(SYMBAD.EQ.0))).AND.
+     &	     FRTGT.NE.CURTYP) FAST = .TRUE.
+C
+C position onto the feature
+	IF (FAST) THEN
+	   ADDR = LOCAL_PACK(PAKPNF)
+	   GOTO 10
+	ENDIF
+C
+	CALL IFFPKE( IECODE, IELEN, LOCAL_PACK(PAKPNF) )
+	IF (IECODE.NE.'NF'.AND.IECODE.NE.'TC'.AND.IECODE.NE.'CH'
+     &					.AND.IECODE.NE.'VO') THEN
+	   CALL NASTY(MSG_BADPNF)
+	   CALL COLAPS(MSG_BADPNF)
+	   GOTO 999
+	ENDIF
+C
+C Initialise
+10	HADST = .FALSE.
+	HADTS = .FALSE.
+	TXSIZE = 0
+	TXTPTR = 0			! in case text has no TX entry
+	FST = .TRUE.			! will be drawing first bit
+	ANG = 0.0
+	ISTAT(3)=0			! text position to 0, by default
+	SEGOPN = .FALSE.
+C
+C open segment if renewing picture on segmented display
+C
+	IF (VIEWNG.AND.UPDATE_SEG.AND.USESEG) THEN
+	   CALL LCRSG(LOCAL_PACK)		
+	   SEGOPN = .TRUE.
+	ENDIF
+C
+	LAST = .FALSE.
+20	IF (FAST) THEN
+	   IF (LAST) GOTO 120
+	   GOTO 70
+	ENDIF
+	CALL IFFNXT(IECODE, IELEN)
+C
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999
+	ENDIF
+C
+	IF (IECODE.EQ.'CB') GOTO 70
+	IF (IECODE.EQ.'EF') GOTO 120
+	IF (IECODE.EQ.'RO') GOTO 390
+C
+C need FS entry for symbols being drawing with external routine, and texts
+	IF (.NOT.(FRTTEX.OR.(FRTSYM.AND.(SYMBAD.NE.0)))) GOTO 20
+	IF (IECODE.EQ.'FS') GOTO 330
+	IF (.NOT.FRTTEX) GOTO 20	! FS,TH,TX,TS only for text
+	IF (IECODE.EQ.'TH') GOTO 350
+	IF (IECODE.EQ.'TX') GOTO 320
+	IF (IECODE.EQ.'TS') GOTO 400
+	GOTO 20				! ignore anything else
+C
+C ST (CB) - string of coordinates
+70	CONTINUE
+C
+C Draw the previous ST if there was such
+	IF (HADST) THEN
+	   CALL STDRAW(
+     &		CBH.NROW,XY,
+     &		NATT,OIH_MAX_ATTR,ATTC,ATTV,
+     &		AUX,TXTDSC,FST,.FALSE.,CBH.FLAGS,LOOP,PACK,ISTAT)
+	   FST = .FALSE.		! not first bit any more
+	ELSE
+C
+C generate auxiliary array for symbol strings
+	   IF (FRTGT.EQ.STRTYP) THEN
+C
+C GENAUX will produce its own error message if it fails,
+C which is sufficiently disastrous for us to reject the feature
+	      IF (GENAUX(CBH.NROW,XY,AUX,TXTDSC,ANG,TXSIZE,LOCAL_PACK,ISTAT)
+     &				) GOTO 999
+	   ENDIF
+	ENDIF
+C
+	NATT = 0
+	IF (FAST) THEN
+	   LAST = IFF_COORDS(ADDR,CBH.NROW,CBH.FLAGS,XY,
+     &				NATT,OIH_MAX_ATTR,ATTC,ATTV)
+	   GOTO 71
+	ENDIF
+C
+	CALL EIHRCB_HEAD(CBH)
+C
+C If on first ST or this ST starts 'pen up' then
+C see whether a curve feature is a closed loop
+	IF (FRTCUR.AND.((.NOT.HADST).OR.((CBH.FLAGS.AND.1).EQ.0))) THEN
+	   LOOP = LOOPY()
+	ENDIF
+C
+C read in the points
+	IF (SIMPLE_XY) THEN	! read whole thing direct to XY
+	   CALL EIHRCB_DATA(XY)
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract XY
+C
+C only need attributes if there is a symbol drawing routine so...
+	   IF ((SYMBAD.NE.0.AND.FRTSYM).OR.KRSINI) THEN
+	      CALL GETATT(XY,NATT,OIH_MAX_ATTR,ATTC,ATTV,0,1,CBH.NROW)
+	   ELSE
+	      CALL IFS_CB_READ(CBH,CBD,XY,2,COLHXY,1,CBH.NROW)
+	   ENDIF
+	ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+71	CONTINUE
+	IF (DO_FLY_TRANS) THEN
+	   IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                         CURR_UNIT,CURR_ORG,
+     &	                         LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                         LITES2UNIT,LITES2ORG,
+     &	                         CBH.NROW,XY)) GOTO 999
+	ELSEIF (USE_ORG) THEN
+	   CALL ADDORG(ORGXY,XY,CBH.NROW)	! add origin of map
+	ENDIF
+C
+C mark we've had an ST
+	HADST = .TRUE.
+	GOTO 20
+C
+C EF - end feature
+120	CONTINUE
+C
+C generate auxiliary array for texts,symbols,circles
+	IF (FRTARC.OR.(FRTSYM.AND.FRTGT.NE.STRTYP).OR.FRTTEX) THEN
+C
+C GENAUX will produce its own error message if it fails,
+C which is sufficiently disastrous for us to reject the feature
+	   IF (HADTS) THEN
+	      IF (GENAUX(CBH.NROW,XY,AUX,TXTDSC,ANG,TXSIZE,TMPPAK,TSTAT)
+     &				) GOTO 999
+	   ELSE
+	      IF (GENAUX(CBH.NROW,XY,AUX,TXTDSC,ANG,TXSIZE,LOCAL_PACK,ISTAT)
+     &				) GOTO 999
+	   ENDIF
+	ENDIF
+C
+C draw last bit of feature (maybe all of it!)
+	IF (HADTS) THEN
+	   STAT_ADDR = %LOC(TSTAT)
+	ELSE
+	   STAT_ADDR = %LOC(ISTAT)
+	ENDIF
+C
+C drawing bounding box of text/symbol?
+	IF (BBOX) THEN
+	   CALL BOX_STDRAW(FC,BOXOFF,BOXCMPLX,
+     &		XY,
+     &		NATT,OIH_MAX_ATTR,ATTC,ATTV,
+     &		AUX,TXTDSC,PACK,%VAL(STAT_ADDR))
+	ELSE
+	   CALL STDRAW(
+     &		CBH.NROW,XY,
+     &		NATT,OIH_MAX_ATTR,ATTC,ATTV,
+     &		AUX,TXTDSC,FST,.TRUE.,CBH.FLAGS,LOOP,PACK,%VAL(STAT_ADDR))
+	ENDIF
+	TXTPTR = 0			! in case messes up INTERACT
+	GOTO 999			! tara
+C
+C TX - text string
+320	IF (IELEN.EQ.0) GOTO 999	! null???
+	IELEN = MIN(IELEN,(CTXMAX+1)/2)
+	CALL EIHR(TXTBUF,IELEN,1)
+	TXTPTR = IELEN*2
+C Remove any trailing null
+	IF (TXTBUF(TXTPTR).EQ.0) TXTPTR = TXTPTR-1
+	TXTPTR = MIN(TXTPTR,CTXMAX)
+	GOTO 20
+C
+C FS entry
+330	CALL EIHRI(ISTAT,MIN(IELEN,4),1)
+	GOTO 20
+C
+C TH entry
+350	TXSIZE = 0				! blank out longword
+	CALL EIHRI(TXSIZE,1,1)			! read word into bottom
+	GOTO 20
+C
+C RO - symbol or text rotation
+390	CALL EIHRR(ANG,1,1)
+	GOTO 20
+C
+C TS - text status
+400	IF (HADST) THEN			! draw previous text component
+	   IF (GENAUX(CBH.NROW,XY,AUX,TXTDSC,ANG,TXSIZE,TMPPAK,TSTAT)
+     &				) GOTO 999
+C
+C drawing bounding box of text/symbol?
+	   IF (BBOX) THEN
+	      CALL BOX_STDRAW(FC,BOXOFF,BOXCMPLX,
+     &		XY,
+     &		NATT,OIH_MAX_ATTR,ATTC,ATTV,
+     &		AUX,TXTDSC,PACK,TSTAT)
+	   ELSE
+	      CALL STDRAW(
+     &		CBH.NROW,XY,
+     &		NATT,OIH_MAX_ATTR,ATTC,ATTV,
+     &		AUX,TXTDSC,FST,.TRUE.,CBH.FLAGS,LOOP,PACK,TSTAT)
+	   ENDIF
+	   TXTPTR = 0			! wait for next TX entry
+	ELSE
+C
+C this must be first TS, so make a copy of the pack for use of
+C compound texts
+	   CALL CPYPAK(PAKLEN,LOCAL_PACK,TMPPAK)
+	ENDIF
+C
+	TSTAT(3) = 0
+	CALL EIHRI(TSTAT,MIN0(IELEN,4),1)
+C
+C if using priority drawing, and the text component code is the same
+C as the feature code (as is usual when all TCCs are the same), then
+C use the prio code instead. The main remaining non-working case
+C is using different TCCs and drawing more than once with different
+C prio FCs - will be drawn with the TCCs each time.
+410	IF ( DRAW_PRIORITY .AND. TSTAT(1).EQ.ISTAT(1) ) THEN
+	   TMPPAK(PAKFC) = LOCAL_PACK(PAKFC)
+	ELSE
+	   TMPPAK(PAKFC) = TSTAT(1)	! store in PACK for GENAUX
+	ENDIF
+C
+	IF (FRTFND(TMPPAK(PAKFC))) THEN
+	   CALL MOAN(MSG_BADTC,TMPPAK(PAKFC),TMPPAK(PAKFSN))
+	   GOTO 420
+	ENDIF
+C
+	IF (.NOT.FRTTEX) THEN
+	   CALL MOAN(MSG_TCNOTTEXT,TMPPAK(PAKFC),TMPPAK(PAKFSN))
+	   GOTO 420
+	ENDIF
+	GOTO 440
+C
+C default to fs entry
+420	CALL INFORM(MSG_DEFAULTFS)
+	DO 430, I= 1,4
+	   TSTAT(I) = ISTAT(I)
+430	CONTINUE
+	GOTO 410
+
+440	IF (HADTS) THEN
+	   TXSIZE = 0
+	   HADST = .FALSE.
+	ENDIF
+	HADTS = .TRUE.
+	GOTO 20
+C
+999	IF (SEGOPN) CALL LCLSG		! close opened segment
+	IF (.NOT.NODISP) CALL LSG_END_FEATURE
+	OVCOL = SAV_OVCOL
+	RETURN
+	END

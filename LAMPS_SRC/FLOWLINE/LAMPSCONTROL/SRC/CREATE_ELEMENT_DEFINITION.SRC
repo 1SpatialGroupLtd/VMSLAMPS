@@ -1,0 +1,591 @@
+	INTEGER FUNCTION CREATE_ELEMENT_DEFINITION()
+C
+***	MODULE CREATE_ELEMENT_DEFINITION
+***	IDENT 03SE91
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C Author: J.M. Billing			2 September 1988
+C
+C Routine to allow the user to enter, on the ELEMENT_DEFINITION_FORM, 
+C details of a element definition, and to edit its command procedure 
+C file, with callable EDT, if required.
+C
+C The routine allows the altering of an existing element definition,
+C or the entry of a completely new one.
+C
+	IMPLICIT NONE
+C
+C common blocks
+	INCLUDE 'LSL$CMNFLOWLINE:FLOWLINEMSG.PAR'
+	INCLUDE 'LSL$CMNFLOWLINE:FLOW.PAR'
+C
+	INCLUDE 'LSL$LAMPSCONTROL:NEXT_FUNCTION.CMN'
+	INCLUDE 'LSL$LAMPSCONTROL:INTERACTIVE_IO.CMN'
+	INCLUDE 'LSL$LAMPSCONTROL:LARGE_ARRAYS.CMN'
+C
+	INCLUDE 'LSL$LAMPSCONTROL:LAMPSCONTROLMSG.PAR'
+C
+C arguments
+C
+C workspace
+	CHARACTER*20	FLN_ID		! flowline identifier
+	CHARACTER*20	ELEM_ID		! element identifier
+	LOGICAL		EXISTS		! .T. if element definition
+					! already present in db
+	CHARACTER*255	NEW_ELEM_COMPROC! new element command procedure
+	CHARACTER*255	OLD_ELEM_COMPROC! old element command procedure
+	INTEGER		ELEM_PRIORITY	! element priority
+	CHARACTER*20	PROC_ID		! procedure identifier
+	CHARACTER*255	ACTIVE_CONDS	! element activation conditions
+C
+	INTEGER		OUTCOME(FLN_MAX_OUTCOME)! element's outcomes
+	INTEGER		NUM_OUTCOME		! number of outcomes
+	INTEGER		CURRENT_OUTCOME		! outcome currently
+						! entered/edited.
+						! it will be at top of
+						! scrolled area.
+C
+	CHARACTER*50	FID		! form field identifier
+	INTEGER		TERM		! form field terminator
+	INTEGER		PROMPT_TERM	! form prompt terminator
+	CHARACTER*255	FVAL		! form field value
+	CHARACTER*100	RESPONSE	! response to a form prompt
+	LOGICAL		USED_EDT	! .T. if edited with EDT
+	LOGICAL		HAD_ELEM_ID	! .T. if element id has been
+					! entered already
+	INTEGER		STATUS		! status return code
+	INTEGER		LENGTH
+	CHARACTER*20	ID,NEW_ID
+C
+C The following arrays have been transfered to 'LARGE_ARRAYS.CMN', which
+C allowsthe program's storage requirements to be reduced by sharing the 
+C larger arrays among a number of routines.
+C Since these arrays can be used by other routines, care must be taken 
+C that their values are not overwritten by any of the routines called by
+C this routine.
+C
+CCC	CHARACTER*20	A_WIRE_ID(FLN_MAX_OUTCOME)     ! wires activated
+C						       ! by outcomes
+C
+C functions
+	INTEGER		FLN_RETRIEVE_ELEMENT_DEF
+	INTEGER		FLN_DEFINE_ELEMENT
+	INTEGER		FLN_REMOVE_SPACES
+	INTEGER		FORM_GETLINE
+	INTEGER		EDIT_FILE
+	INTEGER		LIB$DELETE_FILE
+	INTEGER		RDINT
+	INTEGER		DISPLAY_ELEMENT_OUTCOMES_AREA
+	INTEGER		GET_ELEMENT_OUTCOMES_AREA
+	INTEGER		SIGCHS
+C
+C Assume success
+C
+	CREATE_ELEMENT_DEFINITION = LSC__NORMAL
+C
+C Clear the screen and display the form
+C
+	CALL FDV$CLRSH('ELEMENT_DEFINITION_FORM')
+C
+C Set flag to indicate screen does not have a reusable menu on it
+C
+	PREVIOUS_MENU_USABLE = .FALSE.
+C
+C Clear flag to indicate that we have not yet had element id entered
+C
+	HAD_ELEM_ID = .FALSE.
+C
+C Default priority
+C
+	ELEM_PRIORITY = 4
+C
+C Initaliase outcome currently being edited/entered to be the first
+C outcome
+C
+	CURRENT_OUTCOME = 1
+C
+C Setup identifier of next field to be entered to be for element id
+C
+	FID = 'FLOWLINE_ID'
+C
+C Retrieve the next field from the form
+C
+10	CALL FDV$GET(FVAL,TERM,FID)
+C
+C Clear the message lines on the screen, if they need it
+C
+	CALL CLEAR_MESSAGE_LINES()
+C
+C If the abort form terminator was used, move up to system defintn menu
+C
+	IF (TERM.EQ.ABORT_FORM) THEN
+	   NEXT_FUNCTION = DO_MOVE_UP_LEVEL
+	   GOTO 900
+	ENDIF
+C
+C Check which field was entered
+C
+C Flowline id
+C
+	IF (FID.EQ.'FLOWLINE_ID') THEN
+C
+C Remove spaces
+C
+	   ID = FVAL
+	   CREATE_ELEMENT_DEFINITION = FLN_REMOVE_SPACES(
+     &						ID,NEW_ID,LENGTH)
+	   IF (.NOT.CREATE_ELEMENT_DEFINITION) GOTO 900
+C
+	   FLN_ID = NEW_ID(1:LENGTH)
+C
+C Element id
+C
+	ELSEIF (FID.EQ.'ELEMENT_ID') THEN
+C
+C If the terminator used was a backspace, and the field is blank,
+C then ignore the contents of this field for the moment
+C
+	   IF ( (TERM.EQ.PREV_FIELD).AND.
+     &		(FVAL.EQ.' ') ) GOTO 101
+C
+C Otherwise, process the contents of this field
+C
+C Remove spaces
+C
+	   ID = FVAL
+	   CREATE_ELEMENT_DEFINITION = FLN_REMOVE_SPACES(
+     &						ID,NEW_ID,LENGTH)
+	   IF (.NOT.CREATE_ELEMENT_DEFINITION) GOTO 900
+C
+	   ELEM_ID = NEW_ID(1:LENGTH)
+C
+C Check if this is the first time this field has been entered - if it
+C is, then attempt to retrieve the information on the element with
+C this identifier.
+C
+	   IF (.NOT.HAD_ELEM_ID) THEN
+C
+C Set flag to indicate this field has now been entered at least once
+C
+	      HAD_ELEM_ID = .TRUE.
+C
+C Initialise old element command procedure (this will be compared
+C with new command procedure to determine if the user should be
+C asked whether to delete the old command procedure)
+C
+	      OLD_ELEM_COMPROC = ' '
+C
+C Attempt to retrieve the information on this element
+C
+	      CREATE_ELEMENT_DEFINITION = FLN_RETRIEVE_ELEMENT_DEF(
+     &		FLN_ID,		! flowline identifier
+     &		ELEM_ID,	! element identifier
+     &		EXISTS,		! .T. if flowine definition exists
+     &		OLD_ELEM_COMPROC,! element command procedure
+     &		ELEM_PRIORITY,	! element priority
+     &		PROC_ID,	! procedure identifier
+     &		ACTIVE_CONDS,	! activation conditions
+     &		NUM_OUTCOME,	! number of outcomes/wire ids
+     &		OUTCOME,	! outcomes
+     &		A_WIRE_ID)	! wire identifiers activated by outcomes
+C
+C Set new command procedure to be, initially, the same as the old one
+C This allows for the case when the user does not alter it.
+C
+	      NEW_ELEM_COMPROC = OLD_ELEM_COMPROC
+C
+C Test if the element actually exists, if it does, output the
+C information on the form
+C
+	      IF (EXISTS) THEN
+C
+C Tell the user
+C
+	         CALL FORM_PUTMSG('Element definition exists',0,0)
+C
+C Display scrolled area with the outcome/wire identifier pairs.
+C
+	         CREATE_ELEMENT_DEFINITION = 
+     &			DISPLAY_ELEMENT_OUTCOMES_AREA(
+     &				OUTCOME,
+     &				A_WIRE_ID,
+     &				NUM_OUTCOME,
+     &				CURRENT_OUTCOME)
+C
+C Output each single unscrolled field value
+C
+	         CALL FDV$PUT(FLN_ID,'FLOWLINE_ID')
+	         CALL FDV$PUT(ELEM_ID,'ELEMENT_ID')
+	         CALL FDV$PUT(OLD_ELEM_COMPROC,'COMPROC')
+	         CALL FDV$PUT(PROC_ID,'PROCEDURE_ID')
+C
+	         CALL EXPAND('%WS%I2',FVAL,ELEM_PRIORITY)
+	         CALL FDV$PUT(FVAL,'PRIORITY')
+C
+C Display the multiple activation conditions fields
+C
+	         CALL FDV$PUT(ACTIVE_CONDS(1:64),
+     &				'ACTIVATION_CONDITIONS_1')
+	         CALL FDV$PUT(ACTIVE_CONDS(65:128),
+     &				'ACTIVATION_CONDITIONS_2')
+	         CALL FDV$PUT(ACTIVE_CONDS(129:192),
+     &				'ACTIVATION_CONDITIONS_3')
+	         CALL FDV$PUT(ACTIVE_CONDS(193:255),
+     &				'ACTIVATION_CONDITIONS_4')
+C
+C Now, because FMS is so useless when it comes to dealing with
+C scrolled areas that it loses track of which field its is currently
+C at when you output anything to a scrolled area, we must process
+C the field terminator ourselves to decide which field to enter
+C next.
+C
+	         IF (TERM.EQ.PREV_FIELD) THEN
+	            FID = 'FLOWLINE_ID'
+	         ELSE
+	            FID = 'PROCEDURE_ID'
+	         ENDIF
+C
+C Jump back to allow entry of next field
+C
+	         GOTO 10
+	      ENDIF
+	   ENDIF
+C
+C Procedure id
+C
+	ELSEIF (FID.EQ.'PROCEDURE_ID') THEN
+	   PROC_ID = FVAL
+C
+C Priority
+C
+	ELSEIF (FID.EQ.'PRIORITY') THEN
+C
+C Set decode pointer to field value prior to reading number
+C
+	   CALL SETAUX(%REF(FVAL),20)
+C
+C Read the number
+C
+	   IF (RDINT(ELEM_PRIORITY)) THEN
+	      CALL FORM_PUTMSG('Illegal priority',-1,0)
+	      GOTO 10
+	   ENDIF
+C
+C Command procedure
+C
+	ELSEIF (FID.EQ.'COMPROC') THEN
+	   NEW_ELEM_COMPROC = FVAL
+C
+C Activation conditions - deal with each of the four fields on the
+C form by inserting its contents in the relevant position in the 
+C activation conditions string.
+C In final field, ('_4'), check if the last character has anything
+C in it, and warn user that the final character has been discarded
+C if it is non-null.
+C
+	ELSEIF (FID.EQ.'ACTIVATION_CONDITIONS_1') THEN
+	   ACTIVE_CONDS(1:64) = FVAL
+	ELSEIF (FID.EQ.'ACTIVATION_CONDITIONS_2') THEN
+	   ACTIVE_CONDS(65:128) = FVAL
+	ELSEIF (FID.EQ.'ACTIVATION_CONDITIONS_3') THEN
+	   ACTIVE_CONDS(129:192) = FVAL
+	ELSEIF (FID.EQ.'ACTIVATION_CONDITIONS_4') THEN
+	   ACTIVE_CONDS(193:255) = FVAL(1:63)
+C
+C Check if last character is non-null, and warn user that is has been
+C discarded.
+C
+	   IF (SIGCHS(FVAL).GT.63) 
+     &		CALL FORM_PUTMSG(
+     &		'Final character of activation conditions discarded',
+     &		-1,0)
+	ENDIF
+C
+101	CONTINUE
+C
+C If GOLD D (delete entry) key sequence was used, attempt to 
+C delete the element
+C
+	IF ((TERM.EQ.(GOLD_BASE + ICHAR('D'))).OR.
+     &	    (TERM.EQ.(GOLD_BASE + ICHAR('d')))) THEN
+C
+C Check that the element id has been entered, and force user to do it
+C if not
+C
+	   IF (.NOT.HAD_ELEM_ID) THEN
+	      CALL FORM_PUTMSG('Please enter element identifier',-1,0)
+	      GOTO 10
+	   ENDIF
+C
+C Prompt user to make sure deletion is required
+C
+15	   CREATE_ELEMENT_DEFINITION = FORM_GETLINE(
+     &		RESPONSE,
+     &		PROMPT_TERM,
+     &		0,
+     &		'Delete element definition from database (Y/N) ? ')
+C
+C Check for, and report, any errors.
+C If an error occurs, loop back and allow re-entry of response.
+C
+	   IF (.NOT.CREATE_ELEMENT_DEFINITION) THEN
+	      CALL LCONT_PUTMSG(CREATE_ELEMENT_DEFINITION,0)
+	      GOTO 15
+	   ENDIF
+C
+C Clear the message lines on the screen
+C
+	   CALL CLEAR_MESSAGE_LINES()
+C
+C Check if response is 'Y...', return to allow field re-entry if it
+C is not.
+C
+	   IF ( (RESPONSE(1:1).NE.'Y').AND.
+     &		(RESPONSE(1:1).NE.'y')) GOTO 10
+C
+C Delete entry from database
+C
+	   CREATE_ELEMENT_DEFINITION = FLN_DEFINE_ELEMENT(
+     &		FLN_ID,		! flowline identifier
+     &		ELEM_ID,	! element to be deleted
+     &		NEW_ELEM_COMPROC,! command procedure (dummy - not used)
+     &		ELEM_PRIORITY,	! priority (dummy - not used)
+     &		PROC_ID,	! procedure ident (dummy - not used)
+     &		ACTIVE_CONDS,	! activation conditions (dummy)
+     &		NUM_OUTCOME,	! number of outcomes (dummy)
+     &		OUTCOME,	! numeric element outcomes (dummy)
+     &		A_WIRE_ID,	! idents of activated wires (dummy)
+     &		.TRUE.)		! delete only flag .T. so del element
+C
+C Check for, and report, any errors.
+C If an error occurs, return to allow re-entry of information.
+C
+	   IF (.NOT.CREATE_ELEMENT_DEFINITION) THEN
+C
+C Illegal priorities
+C
+	      IF (CREATE_ELEMENT_DEFINITION.EQ.FLN__ILLEGPRI) THEN
+	         CALL FORM_PUTMSG('Illegal priority',-1,0)
+	         FID = 'PRIORITY'
+C
+C No such flowline
+C
+	      ELSEIF (CREATE_ELEMENT_DEFINITION.EQ.FLN__NOSUCHFLN) THEN
+	         CALL FORM_PUTMSG('No such flowline',-1,0)
+	         FID = 'FLOWLINE_ID'
+C
+C No such element
+C
+	      ELSEIF (CREATE_ELEMENT_DEFINITION.EQ.FLN__NOSUCHELMNT) 
+     &	      THEN
+	         CALL FORM_PUTMSG('No such element',-1,0)
+	         FID = 'ELEMENT_ID'
+C
+C Unrecognised error
+C
+	      ELSE
+	         CALL LCONT_PUTMSG(LSC__UNDELELEM,0)
+	         CALL LCONT_ADDMSG(CREATE_ELEMENT_DEFINITION,0)
+	         CALL FORM_PUTMSG('Try re-entering information',-1,0)
+	         FID = 'ELEMENT_ID'
+	      ENDIF
+C
+C Repeat the loop to retry entry
+C
+	      GOTO 10
+	   ENDIF
+	ENDIF
+C
+C Process the terminator
+C
+	CALL FDV$PFT(TERM)
+C
+C Find the status, i.e. is everything ok
+C
+	CALL FDV$STAT(STATUS)
+C
+C Determine the next field to be entered
+C
+	CALL FDV$RETFN(FID)
+C
+C Deal with the possibility that the field just entered is in
+C the scrolled area for the outcomes/wire identifiers.
+C Call a routine to deal with this scrolled area.
+C
+	IF ((FID.EQ.'WIRE_ID').OR.(FID.EQ.'OUTCOME')) THEN
+	   CREATE_ELEMENT_DEFINITION = GET_ELEMENT_OUTCOMES_AREA(
+     &		OUTCOME,	! element outcomes
+     &		A_WIRE_ID,	! wires activated by outcomes
+     &		NUM_OUTCOME,	! number of outcomes
+     &		CURRENT_OUTCOME,! current outcome being edited
+     &		TERM)		! terminator used to exit from area
+C
+C Field to be accessed after the scrolled area must be the last
+C line of activation conditions
+C
+	   FID = 'ACTIVATION_CONDITIONS_4'
+	ENDIF
+C
+C If not RETURN, loop again
+C
+	IF (TERM.NE.RETURN_KEY) GOTO 10
+C
+C If status not ok (i.e. form not complete), loop again
+C
+	IF (STATUS.NE.1) GOTO 10
+C
+C Return key (finish form) was used so go on and allow user to edit
+C the command procedure and delete any old command procedure as 
+C appropriate
+C
+C Clear flag to indicate EDT has not yet been used
+C
+	USED_EDT = .FALSE.
+C
+C Check if user wants to edit the command procedure with EDT
+C
+20	CREATE_ELEMENT_DEFINITION = FORM_GETLINE(
+     &		RESPONSE,
+     &		PROMPT_TERM,
+     &		0,
+     &		'Edit command procedure (Y/N) ? ')
+C
+C Check for, and report, any errors.
+C If an error occurs, loop back and allow re-entry of response.
+C
+	IF (.NOT.CREATE_ELEMENT_DEFINITION) THEN
+	   CALL LCONT_PUTMSG(CREATE_ELEMENT_DEFINITION,0)
+	   GOTO 20
+	ENDIF
+C
+C Clear the message lines on the screen
+C
+	CALL CLEAR_MESSAGE_LINES()
+C
+C Check if response is 'Y...', and allow editing of file if it is.
+C
+	IF ((RESPONSE(1:1).EQ.'Y').OR.(RESPONSE(1:1).EQ.'y')) THEN
+C
+C Mark form as undisplayed, prior to editing with EDT
+C
+	   CALL FDV$NDISP
+C
+C Edit the command procedure
+C
+	   CREATE_ELEMENT_DEFINITION = EDIT_FILE(NEW_ELEM_COMPROC)
+C
+C Check for errors, report, refresh screen, redisplay form and loop 
+C back to allow user to re-enter details on form or exit without editing
+C
+	   IF (.NOT.CREATE_ELEMENT_DEFINITION) THEN
+	      CALL LCONT_PUTMSG(CREATE_ELEMENT_DEFINITION,0)
+	      CALL FDV$DISPW
+	      GOTO 10
+	   ENDIF
+C
+C Set flag to indicate EDT has been used
+C
+	   USED_EDT = .TRUE.
+C
+C Restore the FMS screen, by clearing it, refreshing it, and then 
+C exiting, so leaving the way clear for the menu to be redisplayed.
+C
+	   CALL FDV$RFRSH
+	ENDIF
+C
+C Find out if the element command procedure spec has been altered,
+C and whether there was an old command procedure spec
+C
+	IF ( (OLD_ELEM_COMPROC.NE.NEW_ELEM_COMPROC).AND.
+     &	     (OLD_ELEM_COMPROC.NE.' ')) THEN
+C
+C If EDT has been used, redisplay the form
+C
+	   IF (USED_EDT) CALL FDV$DISPW
+C
+C And clear flag to indicate that the effects of EDT on the screen
+C are nolonger hanging around
+C
+	   USED_EDT = .FALSE.
+C
+C Ask if user wants to delete the existing command procedure
+C
+30	   CREATE_ELEMENT_DEFINITION = FORM_GETLINE(
+     &		RESPONSE,
+     &		PROMPT_TERM,
+     &		0,
+     &		'Delete previous command procedure (Y/N) ? ')
+C
+C Check for, and report, any errors.
+C If an error occurs, loop back and allow re-entry of response.
+C
+	   IF (.NOT.CREATE_ELEMENT_DEFINITION) THEN
+	      CALL LCONT_PUTMSG(CREATE_ELEMENT_DEFINITION,0)
+	      GOTO 30
+	   ENDIF
+C
+C Clear the message lines on the screen, if they need it
+C
+	   CALL CLEAR_MESSAGE_LINES()
+C
+C Check if response is 'Y...', and delete file if it is.
+C
+	   IF ((RESPONSE(1:1).EQ.'Y').OR.(RESPONSE(1:1).EQ.'y')) THEN
+	      CREATE_ELEMENT_DEFINITION = 
+     &			LIB$DELETE_FILE(OLD_ELEM_COMPROC)
+C
+C Check for errors, report and loop back to allow user to change
+C form entry, or exit without deleting
+C
+	      IF (.NOT.CREATE_ELEMENT_DEFINITION) THEN
+	         CALL LCONT_PUTMSG(CREATE_ELEMENT_DEFINITION,0)
+	         GOTO 10
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C Attempt to output new definition to the database
+C
+	CREATE_ELEMENT_DEFINITION = FLN_DEFINE_ELEMENT(
+     &		FLN_ID,		! flowline identifier
+     &		ELEM_ID,	! element to be deleted
+     &		NEW_ELEM_COMPROC,! command procedure 
+     &		ELEM_PRIORITY,	! priority 
+     &		PROC_ID,	! procedure identifier
+     &		ACTIVE_CONDS,	! activation conditions
+     &		NUM_OUTCOME,	! number of outcomes
+     &		OUTCOME,	! numeric element outcomes
+     &		A_WIRE_ID,	! identifiers of activated wires
+     &		.FALSE.)	! delete only flag .T. so del element
+C
+C Check for, and report, any errors.
+C If an error occurs, loop back and allow re-entry of definition.
+C
+	IF (.NOT.CREATE_ELEMENT_DEFINITION) THEN
+	   CALL LCONT_PUTMSG(LSC__UNDEFELEM,0)
+	   CALL LCONT_ADDMSG(CREATE_ELEMENT_DEFINITION,0,0)
+C
+C If EDT has been used, redisplay the form
+C
+	   IF (USED_EDT) CALL FDV$DISPW
+C
+C And clear flag to indicate that the effects of EDT on the screen
+C are nolonger hanging around
+C
+	   USED_EDT = .FALSE.
+C
+C Go back to allow reentry of form information
+C
+	   GOTO 10
+	ENDIF
+C
+C Set semaphore to indicate that we want to re-enter the system deftn 
+C menu
+C
+	NEXT_FUNCTION = DO_MOVE_UP_LEVEL
+C
+C Exit
+C
+900	RETURN
+	END
+C

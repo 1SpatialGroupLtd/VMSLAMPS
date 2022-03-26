@@ -1,0 +1,192 @@
+	LOGICAL FUNCTION READ_NTF
+C
+***	IDENT	05JL93
+***	MODULE	READ_NTF
+C
+C	Copyright (C) Laser-Scan Ltd, Cambridge, England
+C
+C	Author TJ Ibbs, 6 October 1987
+C	The main routine that controls the reading of the NTF data
+C
+C	Stolen & Modified I McLeman 7 April 1988
+C
+CMOD	Added comment blocks to make code understandable. 
+C	IM has a lot to answer for 				SG 16-Aug-1991
+CMOD    Fix selection of specified section from the NTF file. 
+C	[So has SG !!!!]					JB 21-Oct-1991
+C
+CMOD1119 Cope with variable length records for Version 1.1 NTF	JB 18-May-1992
+C						level 4
+CMOD	 Cope with multiple tape volumes		       JMC 17-Dec-1992
+C
+CMOD1242 Cope with variable length records for Version 2.0 NTF	JB 21-Jun-1993
+C						level 5
+C
+	IMPLICIT NONE
+C
+C Message files:
+	INCLUDE	'HERE:NTF2DTIMSG.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'LSL$CMNDTI:DTILIBMSG.PAR'
+C
+C Common files:
+	INCLUDE	'HERE:COMMANDS.CMN'
+	INCLUDE	'HERE:NTF2DTI.CMN'
+	INCLUDE	'HERE:NTFDATA.CMN'
+	INCLUDE	'HERE:RECORD.CMN'
+C
+C Functions
+	LOGICAL		READ_NTF_RECORD		! read next record from NTF
+	LOGICAL		READ_VOLHDREC
+	LOGICAL		READ_DBQUAL
+	LOGICAL		READ_DBHREC
+	LOGICAL		READ_CONTINUE
+	LOGICAL		READ_FEATCLASS
+	LOGICAL		READ_SECTION
+	LOGICAL		READ_VOLTERM
+	LOGICAL		READ_DATADESC
+C
+C Workspace
+	LOGICAL		OK,FOUND			! Function return
+	INTEGER		IERR,RETVAL			! Ditto
+	INTEGER		I				! DO loop counter
+C
+C ......................................................................
+C
+	OK     = .TRUE.				! assume success
+	RECNUM = 0				! no records read yet
+C
+C---------------------------------------------------------------------
+C read each record in order, hope that they are in sensible order
+C The Volume header record will be dealt with in READ_VOLHDREC (called
+C in READ_NTF_RECORD) to extract the version, level and fixed/variable 
+C record flags
+C
+2000	OK=READ_NTF_RECORD()
+	IF (.NOT.OK) GOTO 9999
+	NTF$_REC_DESCR = STRING(1:2)
+C
+C	..............................................................
+C
+	IF ( NTF$_REC_DESCR.EQ.'01' ) THEN		! VOLHDREC
+C							! already done in
+C							! READ_NTF_RECORD
+C
+	ELSEIF ( NTF$_REC_DESCR.EQ.'06' ) THEN		! database quality
+	   CALL READ_DBQUAL				! report on it
+C
+C	..............................................................
+C
+	ELSE IF ( NTF$_REC_DESCR.EQ.'02' ) THEN		! database header
+	   OK = READ_DBHREC()
+	   IF (.NOT.OK) CALL WRITEF('%%NTF2DTI-W-MISC, error reading DBHREC')
+C
+C	..............................................................
+C
+	ELSE IF ( NTF$_REC_DESCR.EQ.'05' ) THEN		! feature classification
+	   OK = READ_FEATCLASS()			! report on it
+	   IF (.NOT.OK) CALL WRITEF('%%NTF2DTI-W-MISC, error reading FEATCLASS')
+C
+C	..............................................................
+C	If SECTION has a value other than 0 then it was specified as a qualifier
+C	on the command line. In this case read only the section specified,
+C	otherwise read all the sections.
+C
+	ELSE IF ( NTF$_REC_DESCR.EQ.'07' ) THEN		! section header SECHREC
+	   COUNT_SECTION=COUNT_SECTION+1
+C
+	   IF (SECTION.NE.0) THEN			! want particular section
+C
+	     DO WHILE (COUNT_SECTION.NE.SECTION)
+	       NTF$_REC_DESCR = '90'			! disregard current rec
+C
+	       DO WHILE (NTF$_REC_DESCR.NE.'07')	! look for next SECHREC
+	         OK=READ_NTF_RECORD()
+		 NTF$_REC_DESCR = STRING(1:2)
+	         IF (.NOT.OK) GOTO 9999
+C
+		 IF (NTF$_REC_DESCR.EQ.'99') THEN	! end of volume
+		   CALL WRITEF()
+		   CALL WRITEF('%%NTF2DTI-W-MISC, section %N not found',
+     &								SECTION)
+		   CALL READ_VOLTERM()			! report on it
+		   IF (.NOT.MULTIVOLUME) GOTO 9999	! and that's the end
+		 ENDIF
+	       END DO
+C
+	       COUNT_SECTION=COUNT_SECTION+1
+	     END DO
+	   ENDIF
+C
+106	   OK = READ_SECTION()		! read & start new DTI file
+	   IF (.NOT.OK) CALL LSL_PUTMSG(NTF2DTI__SECTION, COUNT_SECTION)
+C
+C If end of file, give up, otherwise get next section
+	   IF (OK.EQ.LSL__EOF .OR. OK.EQ.DTI__SYSERR) GOTO 9999		
+C
+	   IF (SECTION.NE.0) GOTO 9999		! Found required section
+C
+C	..............................................................
+C
+	ELSE IF ( NTF$_REC_DESCR.EQ.'99' ) THEN		! volume termination
+	   CALL READ_VOLTERM()				! report on it
+	   IF (.NOT.MULTIVOLUME) GOTO 9999		! and that's the end
+C
+C	..............................................................
+C
+	ELSE IF ( NTF$_REC_DESCR.EQ.'90' ) THEN		! comment
+	   CALL READ_COMMENT				! report on it
+C
+C	..............................................................
+C
+C	ELSE IF ( NTF$_REC_DESCR.EQ.'00' ) THEN		! comment
+C	   CALL READ_CONTINUE				! report on it
+C
+C	..............................................................
+C
+	ELSE IF ( NTF$_REC_DESCR.EQ.'03' ) THEN		! data description
+C
+C Get GRIDVAL field width - same format for name and width in level 4 and 5)
+C
+	  IF (LEVEL.EQ.4 .OR. LEVEL.EQ.5) THEN		! must be level 4 or 5
+	    FOUND = READ_DATADESC(STRING,LENGTH,'GRIDVAL',7,RETVAL)
+	    IF (FOUND) THEN
+	      FIELD_WIDTH = RETVAL
+	      CALL WRITEF('%%NTF2DTI-I-MISC, field_width set to %I',
+     &							FIELD_WIDTH)
+	    ENDIF
+	  ENDIF
+C
+C	..............................................................
+C
+     	ELSE IF	( NTF$_REC_DESCR.EQ.'04' ) THEN		! data format DATAFMT
+C
+	  IF (.NOT.FIXED) LENGTH = LENGTH - 1		! miss EOR marker
+C
+	  DO WHILE (OK .AND. STRING(LENGTH:LENGTH).EQ.'1')
+	    OK = READ_CONTINUE('DATAFMT')		! ignore these for now
+C
+	    IF (.NOT.FIXED) LENGTH = LENGTH - 1		! miss EOR marker
+	  END DO
+C
+	  IF (.NOT.OK) GOTO 9999			! and any continuations
+C
+C	..............................................................
+C	the only way that we get here is if the functions above didn't
+C	process all their records. Bad records are trapped by READ_NTF_RECORD 
+C
+	ELSE
+	   CALL LSL_PUTMSG(NTF2DTI__UNEXPREC,NTF$_REC_DESCR,RECNUM)
+	ENDIF
+C
+	GOTO 2000				! read the next record
+C
+C .....................................................................
+C Sort out our return status
+C
+9999	IF (.NOT.OK) CALL WRITEF('%%NTF2DTI-E-MISC, error in READ_NTF')
+	READ_NTF = OK
+C
+	RETURN
+	END
+C

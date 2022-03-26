@@ -34,6 +34,18 @@ $	ws	= "write sys$output"
 $	wsb	= "write sys$output """""
 $	inq	= "inquire"
 $!
+$! check for AXP version
+$!
+$	ARCH_NAME=F$GETSYI("ARCH_NAME")
+$	IF ARCH_NAME.EQS."Alpha" 
+$	THEN 
+$	   TVS="_TV"
+$	   AXPS="_AXP"
+$	ELSE
+$	   TVS=""
+$	   AXPS=""
+$	ENDIF
+$!
 $! *************************************************************************
 $!
 $!	inquire testing_version "Is this a testing version "
@@ -76,6 +88,10 @@ $	dbg	= "/debug/noopt"
 $	cleanup	= "purge"
 $	ver	= ""
 $no_debug:
+$	IF ARCH_NAME.EQS."Alpha" 
+$	THEN 
+$	   dbg=dbg + "/TIE/FLOAT=D/SEPARATE"
+$	ENDIF
 $!
 $! *************************************************************************
 $! if we are creating a library from scratch, then we shall insert modules
@@ -86,7 +102,12 @@ $!
 $	   do_msg	= 0
 $	   do_ini	= 0
 $	   do_inq	= 0
+$	   do_getcitf	= 0
+$	   do_getdiv	= 0
+$	   do_getpos	= 0
 $	   do_getfld	= 0
+$	   do_putcitf	= 0
+$	   do_putflg	= 0
 $	   do_putint	= 0
 $	   do_putstr	= 0
 $	   bin		= 0
@@ -101,24 +122,29 @@ $! now do the action
 $!
 $	if .not.new_library then goto ask_what_to_replace
 $!
-$	library/create  osmhlib_destination:osmhlib
-$	libr = "library/insert/log osmhlib_destination:osmhlib"
+$	library/create  osmhlib_destination:osmhlib'AXPS'
+$	libr = "library/insert/log osmhlib_destination:osmhlib"+AXPS
 $	goto compilation
 $!
 $! *************************************************************************
 $ask_what_to_replace:
 $!
-$	libr = "library/replace/log  osmhlib_destination:osmhlib"
+$	libr = "library/replace/log  osmhlib_destination:osmhlib"+AXPS
 $!
 $	wsb
 $	ws "What to replace -"
 $	wsb
-$	inq	do_msg     "OSMHLIB.MES       - new messages       "
-$	inq	do_inq	   "OSMH_NEW_INQTABLE - table inquire      "
-$	inq	do_ini	   "OSMH_NEW_INI      - initialisation     "
-$	inq	do_getfld  "OSMH_NEW_GETFLD   - get header field   "
-$	inq	do_putint  "OSMH_NEW_PUTINT   - put integer field  "
-$	inq	do_putstr  "OSMH_NEW_PUTSTR   - put string  field  "
+$	inq	do_msg     "OSMHLIB.MES            - new messages       "
+$	inq	do_inq	   "OSMH_NEW_INQTABLE      - table inquire      "
+$	inq	do_ini	   "OSMH_NEW_INI           - initialisation     "
+$	inq	do_getfld  "OSMH_NEW_GETFLD        - get header field   "
+$	inq	do_getcitf "OSMH_NEW_GET_CITF_LINE - get CITF line      "
+$	inq	do_getdiv  "OSMH_NEW_GET_DIV_POSN  - get divider posn   "
+$	inq	do_getpos  "OSMH_NEW_GET_FLD_POSN  - get field position "
+$	inq	do_putcitf "OSMH_NEW_PUT_CITF_LINE - put CITF line      "
+$	inq	do_putint  "OSMH_NEW_PUTINT        - put integer field  "
+$	inq	do_putstr  "OSMH_NEW_PUTSTR        - put string  field  "
+$	inq	do_putflg  "OSMH_NEW_PUTFLG        - put flag field     "
 $	inq	bin        "OSMH_BINDAY               "
 $	inq	my         "OSMH_MY                   "
 $	inq	chr        "OSMH_CHAR                 "
@@ -179,6 +205,46 @@ $	   cleanup		OSMH_NEW_GETFLD.obj'ver'
 $	   cleanup		OSMH_NEW_GETFLD.for'ver'
 $!
 $no_getfld:
+$	   if not_all .and. .not. do_getcitf then goto no_getcitf
+$	   ws		"OSMH_NEW_GET_CITF_LINE"
+$	   adc		 OSMH_NEW_GET_CITF_LINE/co='from'OSMH_NEW_GET_CITF_LINE
+$	   fort/extend'dbg'	OSMH_NEW_GET_CITF_LINE
+$	   pvv			OSMH_NEW_GET_CITF_LINE
+$	   libr 		OSMH_NEW_GET_CITF_LINE
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW_GET_CITF_LINE.obj'ver'
+$	   cleanup		OSMH_NEW_GET_CITF_LINE.for'ver'
+$no_getcitf:
+$	   if not_all .and. .not. do_getdiv then goto no_getdiv
+$	   ws		   "OSMH_NEW_GET_DIV_POSN"
+$	   adc		   OSMH_NEW_GET_DIV_POSN/co='from'OSMH_NEW_GET_DIV_POSN
+$	   fort/extend'dbg'	OSMH_NEW_GET_DIV_POSN
+$	   pvv			OSMH_NEW_GET_DIV_POSN
+$	   libr 		OSMH_NEW_GET_DIV_POSN
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW_GET_DIV_POSN.obj'ver'
+$	   cleanup		OSMH_NEW_GET_DIV_POSN.for'ver'
+$no_getdiv:
+$	   if not_all .and. .not. do_getpos then goto no_getpos
+$	   ws		   "OSMH_NEW_GET_FLD_POSN"
+$	   adc		   OSMH_NEW_GET_FLD_POSN/co='from'OSMH_NEW_GET_FLD_POSN
+$	   fort/extend'dbg'	OSMH_NEW_GET_FLD_POSN
+$	   pvv			OSMH_NEW_GET_FLD_POSN
+$	   libr 		OSMH_NEW_GET_FLD_POSN
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW_GET_FLD_POSN.obj'ver'
+$	   cleanup		OSMH_NEW_GET_FLD_POSN.for'ver'
+$no_getpos:
+$	   if not_all .and. .not. do_putcitf then goto no_putcitf
+$	   ws		"OSMH_NEW_PUT_CITF_LINE"
+$	   adc		 OSMH_NEW_PUT_CITF_LINE/co='from'OSMH_NEW_PUT_CITF_LINE
+$	   fort/extend'dbg'	OSMH_NEW_PUT_CITF_LINE
+$	   pvv			OSMH_NEW_PUT_CITF_LINE
+$	   libr 		OSMH_NEW_PUT_CITF_LINE
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW_PUT_CITF_LINE.obj'ver'
+$	   cleanup		OSMH_NEW_PUT_CITF_LINE.for'ver'
+$no_putcitf:
 $	   if not_all .and. .not. do_putint then goto no_putint
 $	   ws			"OSMH_NEW_PUTINT"
 $	   adc			OSMH_NEW_PUTINT/co = 'from'OSMH_NEW_PUTINT
@@ -199,6 +265,17 @@ $	   delete/noconfirm	ADC.IDE;*
 $	   cleanup		OSMH_NEW_PUTSTR.obj'ver'
 $	   cleanup		OSMH_NEW_PUTSTR.for'ver'
 $no_putstr:
+$!
+$	   if not_all .and. .not. do_putflg then goto no_putflg
+$	   ws			"OSMH_NEW_PUTFLG"
+$	   adc			OSMH_NEW_PUTFLG/co = 'from'OSMH_NEW_PUTFLG
+$	   fort/extend'dbg'	OSMH_NEW_PUTFLG
+$	   pvv			OSMH_NEW_PUTFLG
+$	   libr 		OSMH_NEW_PUTFLG
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW_PUTFLG.obj'ver'
+$	   cleanup		OSMH_NEW_PUTFLG.for'ver'
+$no_putflg:
 $!
 $	ws "Compiling old routines..."
 $	from = "[lslmaint.osmhlib.osmh]"
@@ -274,7 +351,7 @@ $! *************************************************************************
 $! come here for a tidy exit
 $!
 $tidy_exit:
-$	purge osmhlib_destination:osmhlib.olb
+$	purge osmhlib_destination:osmhlib.olb'AXPS'
 $	set noverify
 $	deassign  start_directory
 $	exit

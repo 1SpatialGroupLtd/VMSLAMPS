@@ -1,0 +1,305 @@
+	LOGICAL*4 FUNCTION SURE(FSTCON,CONGOT)
+C
+***	MODULE	SURE
+***	IDENT	21JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+CMOD	Don't do point pos. if chain has 1 point DM	21-Jul-1986
+CMOD	Converged				 DM	28-May-1986
+C	Created 				 DM	17-Feb-1986
+C
+C Are we sure we know which chain element to append next ?
+C If so, return it as the only candidate.
+C At present we can only append to a limited number of connection types.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/PARAMS/
+C
+	PARAMETER NEGEDG='37770'O	! negative edge encounter
+	PARAMETER WIDFLD='37777'O	! width field of encounter
+C
+	INTEGER*2 FSTCON		! next available place in list
+	INTEGER*2 CONGOT		! number of connections found
+C
+***	COMMON/ANACOM/
+***	COMMON/LINKS/
+***	COMMON/LKFOLL/
+***	COMMON/LKPARM/
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+***	COMMON/TRKSEG/
+C
+	INTEGER*4 CONCHN,CONEDG,CONEND	! details of new connection
+	INTEGER*4 CONOFF,CONSGN,CONTYP	! edge/line offset, sign & type
+	INTEGER*4 EDG1,EDG2		! edges of LSTSEL
+	INTEGER*4 ENDENC		! encounter number of CONEND
+	INTEGER*4 FARENC,ONEAGO		! far end & 'far-1'th encounters
+	INTEGER*4 FAREND,NEARND		! far, near end of LSTSEL
+	INTEGER*4 I			! temporary variable
+	INTEGER*4 LSTCHN,LSTEND,LSTTYP	! details of previous connection
+	INTEGER*4 MIDPNT,PRVPNT		! middle, previous pnt on LSTSEL
+	INTEGER*4 MIDWID		! width of mid-point of LSTSEL
+	INTEGER*4 POS(2)		! new point position
+	INTEGER*4 SIDE			! side of chain element (1 or 2)
+	INTEGER*4 TMPCHN,TMPEDG,TMPEND	! temporary variables
+	LOGICAL*1 LSTWID		! was previous connection wide ?
+	REAL	  DU,DV			! vector components
+	REAL	  NEARWD		! width of connection's near end
+	REAL	  NORMWD		! normalised width of near end
+	REAL	  NRMFAR		! normalised width of far end
+	REAL	  PRVTRK		! trackwidth before last segment
+	REAL	  SECANT		! secant of gradient of edge(s)
+C
+C function:
+	LOGICAL*4 ELEMNT		! get next chain element on edge
+C
+C ......................................................................
+C
+	SURE=.FALSE.			! because we aren't
+	IF (LSTSEL.LE.0) GO TO 70	! any previous selection ?
+	IF (ANLYZD.LT.0) GO TO 70	! data structure set up ?
+	IF (JINHIB) THEN		! junctions inhibited ?
+	   JINHIB=.FALSE.		! yes ...
+	   CONGOT=0			! make us get LOST
+	   GO TO 60
+	ENDIF
+C
+C ... get details of previous connection.
+C ... we are only interested in LINE, EDGE or WIDE (for now at least).
+	LSTTYP=CONNCT(4,LSTSEL)
+	IF (LSTTYP.EQ.0.OR.LSTTYP.EQ.1) THEN	! simple line or edge ?
+	   IF ((IMOD.AND.1).NE.0) THEN		! in line mode ?
+	      IF (TRKWID.LT.1.0E-6) GO TO 70	! any info about track ?
+	      PRVTRK=TRKWID
+	      LSTWID=.FALSE.
+	   ENDIF
+	   SIDE=1
+	ELSEIF (LSTTYP.EQ.2) THEN	! WIDE line ?
+	   PRVTRK=(4.0*TRKWID-SEGWID)/3.0  ! N.B. must match APPSEG !!
+	   IF (PRVTRK.LT.1.0E-6) GO TO 70  ! any info about this track ?
+	   LSTWID=.TRUE.
+	   IF (CONNCT(1,LSTSEL).LT.0) THEN
+	      SIDE=IU			! (edge furthest from last MP)
+	   ELSE
+	      SIDE=IV
+	   ENDIF
+	ELSE
+	   GO TO 70			! not interested
+	ENDIF
+	LSTCHN=CONNCT(2,LSTSEL)		! previous chain element
+	EDG1=CHNEDG(SIDE,LSTCHN)	! edges of previous chn element
+	EDG2=CHNEDG(3-SIDE,LSTCHN)
+	LSTEND=3 - CONNCT(3,LSTSEL)	! end to which we want to append
+C
+C ... see what we can find out about what's to come.
+	IF (ELEMNT(LSTEND,LSTCHN,EDG1,CONEND,CONCHN,CONEDG)) THEN
+	   IF (ELEMNT(LSTEND,LSTCHN,EDG2,CONEND,CONCHN,CONEDG)) GO TO 70
+	   GO TO 30			! only connection is on edge 2
+	ELSE				! found connection on edge 1
+	   IF (ELEMNT(LSTEND,LSTCHN,EDG2,TMPEND,TMPCHN,TMPEDG)) GO TO 30
+	ENDIF
+C
+C ......................................................................
+C
+C ... found connections on both edges.
+C ... only append if we're going 'forwards'.
+	IF (CONEND.NE.3-LSTEND) THEN
+	   IF (TMPEND.NE.3-LSTEND) GO TO 70
+	   CONEND=TMPEND		! swap the connections over
+	   TMPEND=LSTEND		! (so that CONCHN is best)
+	   I=CONCHN
+	   CONCHN=TMPCHN
+	   TMPCHN=I
+	   I=CONEDG
+	   CONEDG=TMPEDG
+	   TMPEDG=I
+	   I=EDG1
+	   EDG1=EDG2
+	   EDG2=I
+	ENDIF
+C
+C ... check whether the connection is a special case (e.g. WIDE).
+	IF (EDGCHN(CONCHN)) GO TO 40	! is connection an edge ?
+C
+C ... first calculate the current line gradient.
+	IF (CONEDG.NE.EDG1) THEN	! use edge(s) NOT forming CONCHN
+	   SECANT=SQRT(1.0 + EVGRAD(EDG1)**2)
+	   IF (TMPEDG.NE.EDG2)
+     &	      SECANT=0.5*(SECANT + SQRT(1.0 + EVGRAD(EDG2)**2))
+	ELSEIF (TMPEDG.NE.EDG2) THEN	! or TMPCHN
+	   SECANT=SQRT(1.0 + EVGRAD(EDG2)**2)
+	ELSE				! connected to the same edges !!
+	   IF (CONCHN.NE.TMPCHN) THEN	! is it a consistent picture ?
+	      IF (LSTWID) THEN		! watch out for sideways steps
+		 IF (JOINED(CHNEDG(1,CONCHN),CHNEDG(2,CONCHN))) THEN
+		    EDG1=CHNEDG(1,CONCHN)   ! is opposite edge short ?
+		    IF (EDG1.EQ.CONEDG) EDG1=CHNEDG(2,CONCHN)
+		    IF (EDGLEN(EDG1).LT.NINT(PRVTRK/FLOAT(IPIT))) THEN
+		       CONGOT=0		    ! yes - make us get LOST
+		       GO TO 60
+		    ENDIF
+		 ENDIF
+		 IF (JOINED(CHNEDG(1,TMPCHN),CHNEDG(2,TMPCHN))) THEN
+		    EDG1=CHNEDG(1,TMPCHN)   ! is opposite edge short ?
+		    IF (EDG1.EQ.TMPEDG) EDG1=CHNEDG(2,TMPCHN)
+		    IF (EDGLEN(EDG1).LT.NINT(PRVTRK/FLOAT(IPIT))) THEN
+		       CONGOT=0		    ! yes - make us get LOST
+		       GO TO 60
+		    ENDIF
+		 ENDIF
+	      ENDIF
+	      GO TO 70			! don't understand this ...
+	   ENDIF
+	   SECANT=1.0			! or this really (though we try)
+	   IF (TMPCHK) CALL WRITEF(
+     &	      'SURE: Chain %^L%N has no edge transition',CONCHN)
+	ENDIF
+C
+10	ENDENC=NODE(CHEND(CONCHN,CONEND))
+	NEARWD=FLOAT(ENCBUF(W,ENDENC).AND.WIDFLD)
+	NORMWD=NEARWD/SECANT		! normalised width of near end
+C
+C ... compare the connection width with that of the current track.
+	IF ((NORMWD - PRVTRK)/PRVTRK.GE.WIDDIF) THEN
+	   CONSGN=1			! it's WIDE - get sign of offset
+	   IF ((ENCBUF(IV,ENDENC) -
+     &		ENCBUF(IV,NODE(CHEND(LSTCHN,LSTEND)))).GT.0) CONSGN=-1
+	   IF (LENGTH(CONCHN).GT.1) THEN	! check for APEX
+	      IF (JOILST(3-CONEND,CONEDG).EQ.NEIGBR(CONEDG)) THEN
+		 NRMFAR=FLOAT(ENCBUF(W,NODE(CHEND(CONCHN,3-CONEND)))
+     &			      .AND.WIDFLD)
+     &			/(0.5*(SQRT(1.0 + EVGRAD(CONEDG)**2) +
+     &			       SQRT(1.0 + EVGRAD(TMPEDG)**2)))
+		 IF (NRMFAR.LT.NORMWD*WGHT(3)) THEN
+		    CONTYP=3		! it's an APEX - guess at offset
+		    CONOFF=INT(NEARWD/4.0 + 0.5)*CONSGN
+		    GO TO 50
+		 ENDIF
+	      ENDIF
+	   ENDIF
+	   IF (CONCHN.NE.TMPCHN) THEN	! is it a consistent picture ?
+	      TMPEDG=CHNEDG(1,CONCHN)		! no - get opposite edge
+	      IF (TMPEDG.EQ.CONEDG) TMPEDG=CHNEDG(2,CONCHN)
+	      IF (EDG1.EQ.CONEDG) EDG1=EDG2	! see if they're joined
+	      IF (.NOT.JOINED(TMPEDG,EDG1)) GO TO 70
+	   ENDIF
+	   CONTYP=2			! it's a simple WIDE line
+	   CONOFF=INT(0.5*(NORMWD - TRKWID)*SECANT)*CONSGN
+	   GO TO 50
+	ELSE				! not WIDE - probably just line
+	   IF (CONCHN.NE.TMPCHN) THEN	! is it a consistent picture ?
+	      TMPEDG=CHNEDG(1,CONCHN)		! no - get opposite edge
+	      IF (TMPEDG.EQ.CONEDG) TMPEDG=CHNEDG(2,CONCHN)
+	      IF (EDG1.EQ.CONEDG) EDG1=EDG2	! see if they're joined
+	      IF (.NOT.JOINED(TMPEDG,EDG1)) GO TO 70
+	   ENDIF
+	   IF (JNCING) THEN		! near end not WIDE - far end ?
+	      IF (LENGTH(CONCHN).GT.1) THEN
+		 FARENC=CHEND(CONCHN,3-CONEND)	     ! far end encounter
+		 ONEAGO=FARENC + CONEND + CONEND - 3 ! one back from end
+		 DU=FLOAT(ABS(ENCBUF(IU,NODE(FARENC)) -
+     &			      ENCBUF(IU,NODE(ONEAGO))))
+		 DV=FLOAT(ENCBUF(IV,NODE(FARENC)) -
+     &			  ENCBUF(IV,NODE(ONEAGO)))
+		 NRMFAR=FLOAT(ENCBUF(W,NODE(FARENC)).AND.WIDFLD)*
+     &			DU/SQRT(DU*DU + DV*DV)
+		 IF ((NRMFAR - PRVTRK)/PRVTRK.GE.WIDDIF) THEN
+		    IF (NORMWD.LT.NRMFAR*WGHT(3)) THEN
+		       CONTYP=6		! it's a REVERSE APEX
+		       GO TO 20		! (treat it like a line for now)
+		    ENDIF
+		 ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C ... it's an ordinary line connection.
+	CONTYP=0
+20	CONOFF=0			! reverse apex also comes here
+C
+C ... try to improve the point positioning if the PREVIOUS connection
+C ... was WIDE and CONCHN is on the far side of it (i.e. sideways step).
+	IF (LSTWID) THEN
+	   IF (LENGTH(CONCHN).EQ.1) GO TO 50	    ! CONCHN too short ?
+	   IF (CHNMAP(CONCHN,CHNEDG(3-SIDE,CONCHN)).NE.0) GO TO 50
+	   IF (CHNMAP(CONCHN,CHNEDG(SIDE,CONCHN)).EQ.0) GO TO 50
+	   FAREND=CHEND(LSTCHN,3-LSTEND)
+	   NEARND=CHEND(LSTCHN,LSTEND)	! end nearest to new connection
+	   IF (MOD(LENGTH(LSTCHN),1).EQ.0) THEN
+	      MIDPNT=FAREND + (NEARND - FAREND)/2   ! middle pnt of WIDE
+	      PRVPNT=MIDPNT - (3 - LSTEND - LSTEND) ! pnt nearer CONCHN
+	      POS(X)=(ENCBUF(X,NODE(MIDPNT)) + ENCBUF(X,NODE(PRVPNT)))/2
+	      POS(Y)=(ENCBUF(Y,NODE(MIDPNT)) + ENCBUF(Y,NODE(PRVPNT)))/2
+	      MIDWID=((ENCBUF(W,NODE(MIDPNT)).AND.WIDFLD) +
+     &		      (ENCBUF(W,NODE(PRVPNT)).AND.WIDFLD))/2
+	   ELSE				! odd number of points in LSTCHN
+	      MIDPNT=(FAREND + NEARND)/2
+	      POS(X)=ENCBUF(X,NODE(MIDPNT))
+	      POS(Y)=ENCBUF(Y,NODE(MIDPNT))
+	      MIDWID=ENCBUF(W,NODE(MIDPNT)).AND.WIDFLD
+	   ENDIF
+C
+C ... move CONEND of CONCHN to the new position (easiest way to do it).
+C ... don't modify the width, which will be required by NXTSEG.
+	   ENCBUF(IU,ENDENC)=POS(IU)
+	   ENCBUF(IV,ENDENC)=POS(IV) - SIGN(1,CONNCT(1,LSTSEL))*
+     &				       (MIDWID - INT(PRVTRK*SECANT))/2
+	ENDIF
+	GO TO 50
+C
+C ......................................................................
+C
+C ... found a connection on one edge only.
+C ... for now we insist that the connection is relatively simple.
+30	IF (.NOT.EDGCHN(CONCHN)) THEN	! line connection ?
+	   IF (CONEND.NE.3-LSTEND) GO TO 70
+	   TMPEDG=CHNEDG(1,CONCHN)	! yes - get other edge
+	   IF (TMPEDG.EQ.CONEDG) TMPEDG=CHNEDG(2,CONCHN)
+	   IF (LSTTYP.EQ.1) THEN	! was last connection an edge ?
+	      IF (JOINED(CONEDG,TMPEDG)) THEN ! yes - beware of corners
+		 IF (EDGLEN(TMPEDG).LT.NINT(PRVTRK/FLOAT(IPIT))) THEN
+		    CONGOT=0			      ! make us get LOST
+		    GO TO 60
+		 ENDIF
+	      ENDIF
+	      SECANT=SQRT(1.0 + EVGRAD(CONEDG)**2)    ! (best we can do)
+	   ELSE
+	      IF (EDG1.EQ.CONEDG) EDG1=EDG2   ! no - opp. edges joined ?
+	      IF (.NOT.JOINED(TMPEDG,EDG1)) GO TO 70  ! exit if not
+	      SECANT=SQRT(1.0 + EVGRAD(TMPEDG)**2)    ! (best we can do)
+	   ENDIF
+	   TMPCHN=CONCHN		! having survived all that ...
+	   GO TO 10			! join common code
+	ENDIF
+C
+40	IF (ELF) THEN			! edge connection
+	   CONTYP=0			! pretend it's a line
+	   CONOFF=TRKPOL		! easy !!
+	ELSE
+	   IF ((IMOD.AND.1).EQ.0) THEN	! are we in edge mode ?
+	      CONTYP=0			! yes - pretend it's a line
+	      CONOFF=0
+	   ELSE				! we are in line mode
+	      IF (.NOT.EDGING) GO TO 70	! are we using edge info ?
+	      CONTYP=1			! edge connection
+	      CONOFF=INT(0.5*PRVTRK*SQRT(1.0 + EVGRAD(CONEDG)**2))
+	      IF ((EDGBIT(CONEDG).AND.WIDFLD).EQ.NEGEDG) CONOFF=-CONOFF
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C
+C ... return this connection as the only candidate.
+50	CONNCT(1,FSTCON)=CONOFF
+	CONNCT(2,FSTCON)=CONCHN
+	CONNCT(3,FSTCON)=CONEND
+	CONNCT(4,FSTCON)=CONTYP
+	QUALTY(FSTCON)=LIMIT(7)		! don't let us get confused
+	CONGOT=1
+60	SURE=.TRUE.			! because we are now
+70	RETURN
+	END

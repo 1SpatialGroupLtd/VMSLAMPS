@@ -1,0 +1,174 @@
+	INTEGER*4 FUNCTION VS_GET_SYSC( FILENAME )
+C
+***	IDENT	22NO87
+***	MODULE	VS_GET_SYSC
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ IBBS
+C
+C Fortran subroutine called by VSINIT to read in the Sigma system
+C constants file, which defines the colour table (video transformation
+C table) and the blink generator programming. The colour table starts
+C off at zero in all elements (black)
+C
+C The system constants file has the following format...
+C
+C    <colour_number>     [; <comment>]
+C
+C                                                             N
+C  { <red>   <green>   <blue>   [<blink>|;]      [<comment>] }
+C
+C                                                       4
+C  { <gen_no>   <on_period>    <off_period> [<comment> }
+C
+C
+C where a line is in curly brackets ( { and } ) it is repeated the
+C number of times given by the superscript. A parameter in square
+C brackets ( [ and ] ) is optional.
+C
+C spaces and tabs are equivalent, and serve merely as field separators-
+C they are otherwise ignored.
+C
+C N is equal to the <colour_number>
+C
+C Comment lines are preceded by a semi-colon, and may be interspersed
+C at will.
+C
+	IMPLICIT NONE
+C
+	INCLUDE		'($SSDEF)'
+C
+	PARAMETER	SCOLON = 59	! semicolon for comments
+C
+C we were passed
+C
+	CHARACTER*(*)	FILENAME	! the file name to open for
+C
+C functions used
+C
+	LOGICAL		VS_RDCHS		! read a character
+	LOGICAL		VS_RDINT, VS_RDHEX	! read a number
+	LOGICAL		VS_GETLIN	! read a significant line
+	INTEGER*4	VS_OPSYSC	! open system const file
+	INTEGER*4	VS_CLSYSC	! close it again
+	INTEGER*4	VS_RDSYSC	! read a line from it
+C
+C and declare what else we need
+C
+***	COMMON/LSL$CMNVS:SGCOLT/		! the colour table & length
+C
+	LOGICAL		ERROR			! result
+	INTEGER*4	RET,ERR			! and again
+	INTEGER*4	IERR
+	INTEGER*4	INC			! count variable
+	INTEGER*4	LINE			! how many lines read
+	BYTE		CH			! character read
+	BYTE		NUMB			! byte part of...
+	INTEGER*4	NUM			! number read
+	INTEGER*4	ON,OFF			! on,off for blink
+C
+	EQUIVALENCE	(NUMB,NUM)
+C
+C
+C and now the code...
+C
+	RET = VS_OPSYSC( FILENAME, IERR ) ! open the constants file
+	IF (RET.LT.0) THEN
+	   VS_GET_SYSC = IERR
+	   RETURN			! with the error
+	ENDIF
+C
+C so we have the file open - read it line by line
+C we use the function VS_GETLIN, which reads a significant line for us-
+C ie it reads through the file until it finds a non-blank line which
+C does not start with semi-colon. Thus blank and comment lines are
+C never visible to us
+C
+	IF ( VS_GETLIN(IERR) ) THEN
+	   VS_GET_SYSC = IERR		! remember the error
+	   GOTO 1000			! and return with it
+	ENDIF
+C
+C
+C the first line contains a single integer which says how many colours
+C (16 or 256, one would expect) are being defined.
+C
+	IF ( VS_RDINT(NUM) ) GOTO 999	! read the (decimal) number
+	IF (NUM.GT.MAXCOL) GOTO 999	! is it too big?
+        SGCLEN = NUM			! remember how many colours
+C
+C
+C data lines are 3 hex numbers, specifying Red, Green, Blue values in
+C the video transformation table, optionally followed by a 4th hex
+C value defining the blink byte in the table (which is zero by default)
+C
+C
+	DO 40 LINE = 1, SGCLEN		! read all the colour lines
+C
+	   IF ( VS_GETLIN(IERR) ) THEN
+	      VS_GET_SYSC = IERR	! save the error
+	      GOTO 1000			! and return it
+	   ENDIF
+C
+	   DO 30 INC = 1,3
+	      IF ( VS_RDHEX(NUM) ) GOTO 999
+	      SGCTAB( INC, LINE ) = NUMB	! byte only
+30	   CONTINUE
+C
+C	 and we have the optional 4th parameter - see if there is owt
+C
+	   IF ( VS_RDCHS(CH) ) GOTO 40		! nowt there
+	   IF ( CH.EQ.SCOLON ) GOTO 40
+	   CALL VS_BSCH
+	   IF ( VS_RDHEX(NUM) ) GOTO 999
+	   SGCTAB( 4, LINE ) = NUMB		! blink byte
+C
+40	CONTINUE				! ready for next line
+C
+C so when we reach here, we have read in all of the colour table.
+C
+	CALL VSSGCT( SGCLEN, SGCTAB )		! output colours
+C
+C
+C Having read in and used the colour table, we must now deal with the
+C Blink Generator programming
+C
+	DO 50 LINE = 1, 4			! read for each
+C
+	   IF ( VS_GETLIN(IERR) ) THEN
+	      VS_GET_SYSC = IERR		! note the error
+	      GOTO 1000				! and report it
+	   ENDIF
+C
+C so we have a line - now interpret it
+C
+	   IF ( VS_RDINT(NUM) ) GOTO 999	! read the <gen_no>
+	   IF (NUM.LT.1.OR.NUM.GT.4) GOTO 999	! check its range
+C
+	   IF ( VS_RDHEX(ON ) ) GOTO 999	! read the on period
+	   IF ( VS_RDHEX(OFF) ) GOTO 999	! and the off period
+C
+	   SGBLNK(1,NUM) = ON			! remember the ON
+	   SGBLNK(2,NUM) = OFF			! and the OFF period
+C
+	   CALL VSSGPB( NUM, ON, OFF )		! and program the blink
+C
+50	CONTINUE				! ready for next line
+C
+C
+C so we have finished with the system constants file - close it
+C
+	ERR = VS_CLSYSC( IERR )
+	IF (ERR.LT.0) THEN
+	   VS_GET_SYSC = IERR			! failure
+	ELSE
+	   VS_GET_SYSC = SS$_NORMAL		! success
+	ENDIF
+	RETURN					! finished with that
+C
+999	VS_GET_SYSC = SS$_BADPARAM
+1000	CALL VS_CLSYSC				! try to close
+	RETURN
+C
+	END

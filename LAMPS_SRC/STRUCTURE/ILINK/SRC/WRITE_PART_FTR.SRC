@@ -1,0 +1,574 @@
+	LOGICAL*4 FUNCTION WRITE_PART_FTR(
+     &		I_PR_FTR,PT,CC,NEAREST,NXT,PRV,
+     &		FTR_PTS,FTR_START,FTR_INFTR,FTR_IFC2,PNT_FTR,FTR_NDS,
+     &		FTR_DAT,IN_FTR_STATUS,IN_FTR_ADDR,
+     &		HEADSHR,SHR,
+     &		MAXPTS,MAXINFTRS,MAXOUTFTRS,MAXSHRS)
+C
+***	MODULE	WRITE_PART_FTR
+***	IDENT	13OC93
+C
+C	Copyright: Laser-Scan Ltd., Cambridge, England
+C
+CMOD1304 Add KEEP=PARENT to transfer AC type 9 entries	 JB 13-Oct-1993
+
+CMOD1073 Transfer RO entries for features -
+C	 Assume we are after the CB's by label 112 	WJJ 08-Mar-1993
+C
+CMOD1132 Use /KEEP=FSN to get the parent FSN for the output feature
+C	 components (/BREAK or /MERGE)			 JB 07-Aug-1992
+C
+CMOD	Bug-fix last bug-fix: Don't add AC's 1,9 to	WJJ 26-Apr-1990
+C	unshared or unbroken features
+CMOD	Bug-fix on output of shared-feature AC's	WJJ 07-Dec-1989
+C	Assume always called with a base-feature now
+CMOD	Changed a comment (only) concerning AC1 entries	ACM 22-Feb-1989
+CMOD	Converted to accept CB in place of ST entries	ACM 06-Apr-1988
+CMOD	Made to copy over entries after ST and before EF
+C	whenever feature is a "base-feature"		ACM 26-Oct-1987
+CMOD	Changed to use INT_RIPPLESORT and INT_REORDER in
+C	place of COSORT, so that these can be called
+C	from LSLLIB when/if they are standardised.	ACM 12-Aug-1987
+CMOD	Made a function					TJH 27-May-1987
+C
+C	Created   : ACM					      July 1986
+
+	IMPLICIT NONE
+
+C Parameters:
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+	INCLUDE		'($SSDEF)'
+
+C Common:
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'	! has LPOSE
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINKCHAR.CMN'
+
+C Arguments:
+	INTEGER*4	I_PR_FTR		! pr-ftr index
+
+	INTEGER*4	MAXPTS,MAXINFTRS,MAXOUTFTRS,MAXSHRS
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_START(MAXOUTFTRS)
+	INTEGER*4	FTR_NDS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_DAT(2,MAXOUTFTRS)
+	INTEGER*4	FTR_INFTR(MAXOUTFTRS)
+	INTEGER*4	IN_FTR_ADDR(MAXINFTRS)
+	INTEGER*4	NXT(MAXPTS),PRV(MAXPTS)
+	INTEGER*4	NEAREST(MAXPTS)
+	INTEGER*4	HEADSHR(MAXOUTFTRS)
+	INTEGER*4	SHR(2,MAXSHRS)
+
+	BYTE		IN_FTR_STATUS(MAXINFTRS)
+	INTEGER*4	CC(MAXPTS)
+
+	INTEGER*2	FTR_IFC2(MAXOUTFTRS)
+
+	LOGICAL*1	PNT_FTR(MAXOUTFTRS)
+
+	REAL*4		PT(2,MAXPTS)
+
+C Workspace
+	INTEGER*4	I,J,K
+	INTEGER*4	IN_FTR			! input ftr index
+	INTEGER*4	PR_FTR			! pr-ftr index
+	INTEGER*4	BASE_FTR		! base-ftr index
+	INTEGER*4	STANOD,FINNOD		! end node indices
+	INTEGER*4	ISHR			! shared ftr index
+	INTEGER*4	NSHR			! No.of ftrs shrd by ftr
+	INTEGER*4	N_DIFF_SHR		! No.of diff FCs in ftr
+	INTEGER*4	ADDR			! IFF address
+	INTEGER*4	FC4,TEMP		! 4-byte FC-code
+	INTEGER*4	SFC4(MAXFCPFCC)		! FC-combination
+	INTEGER*4	DIFF_SFC4(MAXFCPFCC)	! FC-list
+	INTEGER*4	IFTR(MAXFCPFCC)		! ftr-index list
+	INTEGER*4	WKSPC(MAXFCPFCC)	! INT_REORDER workspace
+	INTEGER*4	INDEX(MAXFCPFCC)	! FC  comb index
+
+	INTEGER*2	FSN,ISN			! for NF entry
+	INTEGER*2	ACTYPE			! AC type
+	INTEGER*2	FC2			! ftr code
+	INTEGER*2	IECODE,IELEN		! for IFFPKE
+
+	LOGICAL*4	CLOSED			! ftr closed loop?
+	LOGICAL*4	IS_BROKEN		! ftr "broken"?
+	LOGICAL*4	IS_SHARED		! ftr "shared"?
+	LOGICAL*4	IS_BASE_FTR		! base-ftr?
+	LOGICAL*4	START
+	LOGICAL*4	HAD_CB
+	LOGICAL*4	FORWARDS		! ftr dir same as base?
+
+C Functions
+	LOGICAL*4	APPEND_FTR
+	LOGICAL*4	SET_CB
+
+C Preset data
+	INTEGER*2	ISTAT(4)		! for IFFFS
+	DATA ISTAT/4*0/
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Writes part-feature with processed-ftr index I_PR_FTR
+C	originating from input ftr IN_FTR
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Assume success
+	WRITE_PART_FTR = SS$_NORMAL
+
+C Set up PT indices for output points in feature I_PR_FTR
+C in ORIG_IPT/BASE_IPT/N_OUT_PTS in ILINK.CMN
+
+	N_OUT_PTS = 0
+
+	WRITE_PART_FTR = APPEND_FTR(
+     &		I_PR_FTR,
+     &		PT,NEAREST,NXT,PRV,FTR_PTS,FTR_START,
+     &		BASE_FTR,MAXPTS,MAXOUTFTRS)
+
+	IF (.NOT.WRITE_PART_FTR) GOTO 120
+
+CBUG check that given feature was a base feature
+
+	IF (I_PR_FTR.NE.BASE_FTR) THEN
+	  WRITE_PART_FTR = ILINK__INTRNLERR
+	  CALL LSL_PUTMSG(WRITE_PART_FTR,3,'WRITE_PART_FTR')	! debug
+	  GOTO 120
+	ENDIF
+
+	IF (N_OUT_PTS.LT.1) GOTO 120		! return
+
+C Check for one-vec ftrs with zero length
+
+	CLOSED = PT(1,BASE_IPT(1)).EQ.PT(1,BASE_IPT(N_OUT_PTS)) .AND.
+     &	         PT(2,BASE_IPT(1)).EQ.PT(2,BASE_IPT(N_OUT_PTS))
+
+C Check for one-vec ftrs with zero length
+
+	IF (N_OUT_PTS.EQ.2 .AND. CLOSED) N_OUT_PTS = 1
+
+C Don't output ftrs with 1-pt which are not point-ftrs
+
+	IF (N_OUT_PTS.EQ.1 .AND. .NOT.PNT_FTR(I_PR_FTR)) GOTO 120
+
+C Get ftr indices and associated feature-codes for all ftrs sharing this
+C ftr
+
+	PR_FTR = I_PR_FTR
+	START  = .TRUE.
+	NSHR   = 0
+	GOTO 30
+
+C See how many ftrs share this ftr
+
+5	ISHR = HEADSHR(I_PR_FTR)
+	GOTO 20
+
+10	ISHR = SHR(SHR_NXT,ISHR)
+20	IF (ISHR.EQ.NIL) GOTO 40
+
+	PR_FTR = SHR(SHR_FTR,ISHR)
+
+30	NSHR = NSHR+1
+
+C Note ftr index
+
+	IFTR(NSHR) = PR_FTR
+
+C Note ftr code
+
+	FC2 = FTR_IFC2(PR_FTR)
+
+C If FCP file was given then FCS4 array holds FC4 and FTR_IFC2 array
+C holds the FC4 index within FCS4
+
+	IF (HAD_FCP) THEN
+	  SFC4(NSHR) = FCS4(FC2)
+
+	ELSEIF (FC2.LT.0) THEN
+	  SFC4(NSHR) = FC2+65536	! signed *2 to unsigned *4
+
+	ELSE
+	  SFC4(NSHR) = FC2
+	ENDIF
+
+	IF (START) THEN
+	  START = .FALSE.
+	  GOTO 5
+	ENDIF
+
+	GOTO 10
+
+40	CONTINUE
+
+C Find whether ftr is broken &/or shared
+
+	IN_FTR    = FTR_INFTR(I_PR_FTR)
+	IS_BROKEN = IN_FTR_STATUS(IN_FTR).EQ.BROKEN
+	IS_SHARED = NSHR.GT.1
+
+C If is shared then find whether a special feature-code was specified
+C for this combination
+
+	IF (.NOT.IS_SHARED) THEN
+	  FC4 = SFC4(1)
+
+	ELSE
+	  FC2 = SHRFC2			! set default FC
+	  IF (FC2.LT.0) THEN
+	    FC4 = FC2+65536		! signed *2 to unsigned *4
+	  ELSE
+	    FC4 = FC2
+	  ENDIF
+	ENDIF
+
+	IF (HAD_FCC .AND. IS_SHARED) THEN
+
+CBUG This scrambles the order and causes havoc below - 
+C						(fixed WJJ 7-Dec-1989)
+C Sort FCs into increasing order
+ 
+	  CALL INT_RIPPLESORT(SFC4,INDEX,NSHR,.TRUE.)
+
+C Sort IFTR into same order as FCs have been sorted
+
+	  CALL INT_REORDER(IFTR,WKSPC,INDEX,NSHR)
+
+C Eliminate any duplicate FCs
+
+	  N_DIFF_SHR = 1
+	  DIFF_SFC4(1) = SFC4(1)
+
+	  DO 50 J = 2,NSHR
+	    IF (SFC4(J).EQ.DIFF_SFC4(N_DIFF_SHR)) GOTO 50
+	    N_DIFF_SHR = N_DIFF_SHR+1
+	    DIFF_SFC4(N_DIFF_SHR) = SFC4(J)
+50	  CONTINUE
+
+C See whether FC-combination has been assigned a special FC
+
+	  DO 70 I = 1,N_FCCS
+	    IF (N_FCPFCC(I).NE.N_DIFF_SHR) GOTO 70
+
+	    DO 60 J = 1,N_DIFF_SHR
+	      IF (DIFF_SFC4(J).NE.FCC4(J,I)) GOTO 70
+60	    CONTINUE
+
+	    FC4 = SHFC4(I)
+	    GOTO 80
+70	  CONTINUE
+	ENDIF
+
+C Get signed *2 FC from unsigned *4
+
+80	IF (FC4.LE.32767) THEN
+	  FC2 = FC4
+
+	ELSE
+	  TEMP = FC4-65536
+	  FC2  = TEMP
+	ENDIF
+
+C Find ftr corresponding to original ftr IN_FTR in input file
+
+	CALL IFFSEL(INLUN)
+	ADDR = IN_FTR_ADDR(IN_FTR)
+	CALL IFFPKE(IECODE,IELEN,ADDR)
+
+	IF (IECODE.NE.'NF') THEN
+	  WRITE_PART_FTR = ILINK__BADADDR
+	  CALL LSL_PUTMSG(WRITE_PART_FTR)
+	  GOTO 120
+	ENDIF
+C
+C Get the original FSN if requested
+C
+	IF (HAD_KEEP_FSN) THEN
+C
+C Write NF entry with FSN = parent
+	   CALL EIHRI(FSN,1,1)		! read FSN
+	   ISN = 0			! clear longword
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFNF(FSN,ISN)
+C
+	ELSE
+C
+C Write NF entry with FSN = feature count
+	   N_OT_FTRS = N_OT_FTRS+1
+	   ISN = 0
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFNF(N_OT_FTRS,ISN)
+	ENDIF
+
+	CALL IFFSEL(INLUN)
+	CALL IFFNXT(IECODE,IELEN)
+
+	IF (IELEN.EQ.-1) THEN
+	  WRITE_PART_FTR = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(WRITE_PART_FTR,INFILE(:IN_LEN))
+	  GOTO 120
+	ENDIF
+
+	IF (IECODE.NE.'FS') THEN
+	  WRITE_PART_FTR = ILINK__INTRNLERR
+	  CALL LSL_PUTMSG(WRITE_PART_FTR,1,'WRITE_PART_FTR')	! debug
+	  GOTO 120
+	ENDIF
+
+C Write FS entry
+
+	IF (IS_SHARED) THEN		! write shared-ftr code
+	  CALL IFFSEL(OUTLUN)
+	  ISTAT(1) = FC2
+	  CALL IFFFS(ISTAT)
+
+	ELSE				! write original FC
+	  CALL EIHCPY(OUTLUN)
+	  CALL IFFSEL(OUTLUN)
+	ENDIF
+
+CBUGCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+CBUG Don't do anything special for the first feature anymore
+C
+C If ftr is shared, write an AC type-1 entry with first FC
+C
+C	IF (IS_SHARED) CALL IFFAC(1,SFC4(1))
+C
+C For broken or shared ftrs, write AC 9 with unique feature identifier
+C from ftr IN_FTR 
+C
+C	IF ((IS_BROKEN.OR.IS_SHARED).AND.HAD_PARENT) THEN
+C	  IN_FTR = FTR_INFTR(IFTR(1))
+C	  CALL IFFAC(9,IN_FTR)
+C	END IF
+C
+C Write any other AC entries for this ftr
+C
+C Base feature is always output forwards
+C
+C	CALL IFFSEL(INLUN)
+C90	CALL IFFNXT(IECODE,IELEN)
+C
+C	IF (IELEN.EQ.-1) THEN
+C	  WRITE_PART_FTR = ILINK__UNEXPEOF
+C	  CALL LSL_PUTMSG(WRITE_PART_FTR,INFILE(:IN_LEN))
+C	  GOTO 120
+C	END IF
+C
+C	IF (IECODE.EQ.'FS') GOTO 90		! ignore FS entry
+C	IF (IECODE.EQ.'AC') THEN
+C	  CALL EIHRI(ACTYPE,1,1)
+C	  IF (ACTYPE.NE.9) CALL EIHCPY(OUTLUN)
+C	  GOTO 90
+C	END IF
+CBUGCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C Write AC1 entry and AC entries from original input ftrs for any ftrs
+C sharing this ftr. 
+C Bug-fix (WJJ 7-Dec-1989) Loop over ALL features.
+C Bug-fix (WJJ 26-Apr-1990) Conditionalise IFFAC(1, IFFAC(9, calls
+
+CBUG	DO 110 I = 2,NSHR
+
+	DO 110 I = 1,NSHR
+	  CALL IFFSEL(OUTLUN)
+	  FC4 = SFC4(I)
+	  IF (IS_SHARED) CALL IFFAC(1,FC4)	! write AC 1 entry if shared
+	  PR_FTR = IFTR(I)			! get pr-ftr index
+	  IN_FTR = FTR_INFTR(PR_FTR)		! get input-ftr index
+
+C Write AC 9 entry if broken or shared
+
+	  IF ((IS_BROKEN .OR. IS_SHARED) .AND. HAD_PARENT)
+     &						CALL IFFAC(9,IN_FTR)
+
+C Find sense of original feature traversal with respect to its base ftr
+
+	  FORWARDS = .TRUE.
+
+95	  IS_BASE_FTR = (FTR_PTS(1,ABS(PR_FTR)).NE.NIL)
+
+	  IF (.NOT.IS_BASE_FTR) THEN
+	    PR_FTR = FTR_PTS(2,ABS(PR_FTR))
+	    IF (PR_FTR.LT.0) FORWARDS = .NOT.FORWARDS
+
+	    IF (PR_FTR.EQ.NIL) THEN
+	      WRITE_PART_FTR = ILINK__INTRNLERR
+	      CALL LSL_PUTMSG(WRITE_PART_FTR,2,'WRITE_PART_FTR')
+	      GOTO 120				! return
+	    ENDIF
+
+	    GOTO 95
+	  ENDIF
+
+	  CALL IFFSEL(INLUN)
+	  ADDR = IN_FTR_ADDR(IN_FTR)		! find PR_FTR in IFF
+	  CALL IFFPKE(IECODE,IELEN,ADDR)
+
+	  IF (IECODE.NE.'NF') THEN
+	    WRITE_PART_FTR = ILINK__BADADDR
+	    CALL LSL_PUTMSG(WRITE_PART_FTR)
+	    GOTO 120
+	  ENDIF
+
+100	  CALL IFFSEL(INLUN)
+	  CALL IFFNXT(IECODE,IELEN)
+
+	  IF (IELEN.EQ.-1) THEN
+	    WRITE_PART_FTR = ILINK__UNEXPEOF
+	    CALL LSL_PUTMSG(WRITE_PART_FTR,INFILE(:IN_LEN))
+	    GOTO 120
+	  ENDIF
+
+	  IF (IECODE.EQ.'FS') GOTO 100		! ignore FS entry
+
+	  IF (IECODE.EQ.'AC') THEN		! copy AC entries
+	    CALL EIHRI(ACTYPE,1,1)
+	    IF (ACTYPE.NE.9) THEN
+
+	      IF (FORWARDS) THEN
+	        CALL EIHCPY(OUTLUN)
+	      ELSE
+	        DO 102 J = 1,N_ACPRS
+	          IF (ACTYPE.EQ.ACPAIR(1,J).OR.ACTYPE.EQ.ACPAIR(2,J))
+     &	            THEN
+	            IF (ACTYPE.EQ.ACPAIR(1,J)) THEN
+	              ACTYPE = ACPAIR(2,J)
+	            ELSE
+	              ACTYPE = ACPAIR(1,J)
+	            ENDIF
+	            GOTO 104
+	          ENDIF
+102	        CONTINUE
+
+	        CALL EIHCPY(OUTLUN)
+	        GOTO 100
+
+104	        CALL IFFSEL(OUTLUN)		! select output file
+	        ADDR = LPOSE			! note addr for AC start
+	        CALL IFFSEL(INLUN)		! select input file
+	        CALL EIHCPY(OUTLUN)		! copy over AC entry
+	        CALL IFFSEL(OUTLUN)		! select output file
+	        CALL IFFPKE(IECODE,IELEN,ADDR)	! move to start of AC
+
+	        IF (IECODE.NE.'AC') THEN
+	          WRITE_PART_FTR = ILINK__BADADDR
+	          CALL LSL_PUTMSG(WRITE_PART_FTR)
+	          GOTO 120
+	        ENDIF
+
+	        CALL EIHWI(ACTYPE,1,1)	! overwrite new AC code
+	      ENDIF			! .not. forwards
+
+	    ELSE			! ac type .eq. 9
+	      IF (HAD_KEEP_PARENT) CALL EIHCPY(OUTLUN)
+	    ENDIF	
+
+	    GOTO 100
+	  ENDIF				! ac entry
+
+110	CONTINUE				! loop for shared ftrs
+
+C Write JP entry if start of link is at a node
+
+	STANOD = FTR_NDS(1,I_PR_FTR)		! start node index
+	FINNOD = FTR_NDS(2,I_PR_FTR)		! end node index
+
+	IF (HAD_STRUCTURE) THEN
+	  CALL IFFSEL(OUTLUN)
+	  N_JPS = N_JPS+1
+	  CALL IFFJP(STANOD,ADDR)
+	ENDIF
+
+C Prepare to write CB entry
+
+	FTR_DAT(FTR_ST,I_PR_FTR) = LPOSE	! note CB IFF address
+	FTR_DAT(FTR_NP,I_PR_FTR) = N_OUT_PTS	! and no of pts
+
+C Decide which feature to take any non X,Y attributes from
+
+	IF (HAD_MERGE) THEN
+	  PR_FTR = BASE_FTR
+	ELSE
+	  PR_FTR = I_PR_FTR
+	ENDIF
+
+	IN_FTR = FTR_INFTR(PR_FTR)
+
+C Assemble CB for output in CBH/BIG_CBD using PT indices set up by
+C APPEND_FTR
+
+	WRITE_PART_FTR = SET_CB(
+     &		IN_FTR,PT,CC,FTR_PTS,FTR_START,IN_FTR_ADDR,nearest,
+     &		MAXPTS,MAXINFTRS,MAXOUTFTRS)
+
+	IF (.NOT.WRITE_PART_FTR) GOTO 120
+
+C Write CB entry
+
+	CALL IFFSEL(OUTLUN)
+	CALL PUT_CB()
+
+C Count each type of ftr output
+
+	IF (N_OUT_PTS.EQ.1) THEN
+	  N_PR_PFTRS = N_PR_PFTRS+1		! count point-ftrs
+
+	ELSEIF (CLOSED) THEN
+	  N_PR_CFTRS = N_PR_CFTRS+1		! count closed-ftrs
+
+	ELSE
+	  N_PR_OFTRS = N_PR_OFTRS+1		! count open-ftrs
+	ENDIF
+
+C Write JP entry if end of link is at a node
+
+	IF (HAD_STRUCTURE.AND.N_OUT_PTS.GT.1) THEN
+	  N_JPS = N_JPS+1
+	  CALL IFFJP(FINNOD,ADDR)
+	ENDIF
+
+C If base-feature, then also copy over any IFF entries between CB end EF
+
+	IS_BASE_FTR = FTR_PTS(1,I_PR_FTR).GT.0
+
+	IF (IS_BASE_FTR) THEN
+CMOD						! WJJ	 8-Mar-1993
+CMOD	  HAD_CB = .FALSE.			! not yet seen CB entry
+CMOD	  IF (IECODE.EQ.'CB') HAD_CB = .TRUE.
+C
+	  CALL IFFSEL(INLUN)
+	  ADDR = LPOSH				! get current address
+	  CALL IFFPKE(IECODE,IELEN,ADDR)	! get entry details
+	  HAD_CB = .TRUE.			! should be, after a SET_CB
+	  GOTO 113
+CMOD
+112	  CALL IFFNXT(IECODE,IELEN)
+
+113	  IF (IELEN.EQ.-1) THEN
+	    WRITE_PART_FTR = ILINK__UNEXPEOF
+	    CALL LSL_PUTMSG(WRITE_PART_FTR,INFILE(:IN_LEN))
+	    GOTO 120
+	  ENDIF
+
+	  IF (IECODE.EQ.'NF') GOTO 114
+	  IF (IECODE.EQ.'EO') GOTO 114
+	  IF (IECODE.EQ.'EF') GOTO 114
+
+	  IF (IECODE.EQ.'CB') THEN
+	    HAD_CB = .TRUE.
+	    GOTO 112
+	  ENDIF
+
+	  IF (IECODE.EQ.'JP') GOTO 112		! ignore any JP entries
+	  IF (HAD_CB) CALL EIHCPY(OUTLUN)
+	  GOTO 112
+	ENDIF
+
+C Write EF entry
+
+114	CALL IFFSEL(OUTLUN)
+	CALL IFFEF
+
+120	RETURN
+	END
+

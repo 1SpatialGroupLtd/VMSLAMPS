@@ -1,0 +1,209 @@
+	LOGICAL FUNCTION READ_ATTDESC
+C
+***	MODULE	READ_ATTDESC
+***	IDENT	07JL93
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England.
+C
+C	Created 	IMcL	31-Jul-1989
+CMOD			VLG	12-Apr-1990
+CMOD	tidied source, removed unused variables, compressed duplicated code
+C	added new function is_continuation		SG 25-June-1991
+C
+CMOD	replaced STR$FIND_FIRST_IN_SET with INDEX
+C	tidied further					SG 04-July-1991
+CMOD	BS7567 (v2.0) support added (W93/13)		ST 07-July-1993
+C
+C Description
+C
+C	Reads the attribute description record which gives details 
+C	of how attributes are to be interpretted.
+C	For ordinary errors, we attempt to continue with the file
+C	Returns FALSE if something drastic goes wrong, TRUE otherwise
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+C
+	INCLUDE 'NTF2IMSG.PAR'			! message definitions
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'  	! LSLLIB message definitions
+	INCLUDE 'LUNS.PAR'			! Logical units
+C
+C Functions
+C
+	INTEGER		RDINT
+	LOGICAL		IS_CONTINUATION		
+	LOGICAL		READ_CONTINUE		! Read continuation record
+C
+C Common Blocks
+C
+	INCLUDE 'LSL$CMNFRT:FRTCOM.CMN'	! general FRT stuff
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'	! default attribute info
+	INCLUDE 'ATTRIBUTE.CMN'		! attribute description table
+	INCLUDE 'COMMANDS.CMN'		! various options
+	INCLUDE 'NTFDATA.CMN'		! for the NTF version
+	INCLUDE 'RECORD.CMN'		! the read string etc
+C
+C Local Variables
+C
+	INTEGER*2	ATT_PTR		! Pointer into attribute table
+	INTEGER*2	FWIDTH		! The width of the field
+C
+	INTEGER*4	ITYPE		! Attribute type (Interpretation)
+	INTEGER*4	ITMP		! counters
+	INTEGER*4	DP_POS		! location of dp in real def'n
+C
+	INTEGER*2	ATT_TYPE
+	LOGICAL		OK,MATCH	! Success flags
+	CHARACTER*5	FINTER		! How the field should be read
+C
+	CHARACTER*2	NTF$_VAL_TYPE 
+	CHARACTER*3	NTF$_FWIDTH
+	CHARACTER*5	NTF$_FINTER
+	CHARACTER*1	DP
+C
+C ..................................................................
+C initialise
+C
+10	OK = .TRUE.
+	NTF$_VAL_TYPE = STRING(3:4)
+	NTF$_FWIDTH   = STRING(5:7)
+	NTF$_FINTER   = STRING(8:12)
+C
+C..................................................................
+C See if attribute was in the parameter file
+C
+	MATCH = .FALSE.
+	ITMP = 0
+C
+	DO WHILE ((.NOT.MATCH) .AND. (ITMP.LT.ATTR_PTR))
+	  ITMP = ITMP +1
+	  MATCH = ( NTF_ATT_NAME( ITMP ) .EQ. NTF$_VAL_TYPE)
+	END DO
+	ATT_PTR = ITMP					! store then check
+C
+C##############################################################################
+C Not found, warn and store separately
+C	
+	IF (.NOT.MATCH) THEN
+C
+C At v2.0, don't warn if there is the absence of FC, OR or HT becuase they are
+C catered for individually. They don't need to be in the parameter file
+C although they can be.
+C
+	  IF (VERSION.EQ.2.0.AND.
+     &        NTF$_VAL_TYPE.NE.'OR'.AND.
+     &	      NTF$_VAL_TYPE.NE.'HT'.AND.
+     &	      NTF$_VAL_TYPE.NE.'FC')
+     &		CALL LSL_PUTMSG( NTF2I__NOTRANS, NTF$_VAL_TYPE )
+	  NTF_NAM_IGN( IGN_PTR ) = NTF$_VAL_TYPE
+C
+	  IF ( NTF$_FINTER(2:2).NE.'*') THEN	      
+	     CALL SETAUX( %REF(NTF$_FWIDTH), 3 )
+	     OK = .NOT.RDINT( FWIDTH )
+	     IF (OK) THEN
+	       NTF_LEN_IGN ( IGN_PTR ) = FWIDTH
+	     ELSE
+	       CALL LSL_PUTMSG(NTF2I__ATTDESC,'FWIDTH',SEC_REC)
+	       CALL LSL_ADDSTR(NTF$_FWIDTH)
+	       GOTO 9999
+	     ENDIF
+	  ELSE
+	     NTF_LEN_IGN ( IGN_PTR ) = 255
+	  ENDIF
+	  IGN_PTR = IGN_PTR + 1
+	  GOTO 150
+	ENDIF
+
+C
+C##############################################################################
+C found, read rest of values
+C
+C Get the type ( FINTER ) of form : In  Rn,d  An  A*  DATE, and map onto
+C AC types 1 to 4. 6 is when text is the IFF optional text string
+C
+	ITYPE = INDEX ( 'IRAD', NTF$_FINTER(1:1))	! find type
+C
+	IF ( ITYPE .EQ. 0 ) THEN			! Illegal type
+	   CALL LSL_PUTMSG( NTF2I__ATTDESC,'FINTER',SEC_REC )
+	   CALL LSL_ADDSTR( NTF$_FINTER)
+	   NTF_ATT_NAME(ATT_PTR) = '@@'			! Blank it out of list
+	   GOTO 150					! And carry on anyway 
+	ENDIF
+C
+C	.......................................................................
+C	check attribute type is the same as the IFF AC type read from FRT.
+C
+	ATT_TYPE = ATTR_TRANS(ATT_PTR)			! copy of attribute type
+	IF ( ATT_TYPE .NE. ITYPE ) THEN			! isn't same type
+!	   IF (ATT_TYPE.NE.6) THEN
+	   IF (ATT_TYPE.NE.6 .AND. ATT_TYPE.NE.4) THEN
+	      CALL LSL_PUTMSG(NTF2I__TYPECONFL,NTF_ATT_NAME(ATT_PTR))
+	   ENDIF
+	   IF (     ( ATT_TYPE.EQ.1).AND.(ITYPE.EQ.2)  ) THEN
+	      ATTR_TRANS(ATT_PTR) = 7			! Flag R -> I conversion
+	   ELSEIF(  ( ATT_TYPE.EQ.2).AND.(ITYPE.EQ.1)  ) THEN
+	      ATTR_TRANS(ATT_PTR) = 8			! Flag I -> R conversion
+	   ELSEIF(  (ATT_TYPE.NE.6).AND.
+     &		    (ATT_TYPE.NE.5).AND.
+     &		    (ATT_TYPE.NE.4) ) THEN ! Time
+	      CALL LSL_ADDMSG(NTF2I__ATTIGN)		! suplementary message
+	      NTF_ATT_NAME(ATT_PTR) = '@@'		! Blank it out of list
+	   ENDIF
+	ENDIF
+C
+C	.......................................................................
+C	If the field is not free format then read its width ( length )
+C
+	IF ( NTF$_FINTER(2:2).EQ.'*') THEN		! free format      
+	   FIELD_WIDTH ( ATT_PTR ) = 255		! default length
+	ELSE						! not free format
+	   CALL SETAUX( %REF(NTF$_FWIDTH), 3 )		! set input buffer
+	   OK = .NOT.RDINT(FWIDTH)			! read length
+	   IF (OK) THEN					! success
+	      FIELD_WIDTH ( ATT_PTR ) = FWIDTH		! store
+	   ELSE						! ERROR
+	      CALL LSL_PUTMSG(NTF2I__ATTDESC,'FWIDTH',SEC_REC)
+	      CALL LSL_ADDSTR(NTF$_FWIDTH)
+	      GOTO 9999
+	   ENDIF
+	ENDIF
+C
+C	..................................................................
+C	if a real attribute, find decimal places (comes after comma)
+C
+	   IF ( NTF$_FINTER(1:1).EQ.'R') THEN		!real
+	      DP_POS = INDEX( NTF$_FINTER , ',')+1	!find comma
+	      IF ( DP_POS.EQ.1 ) THEN 			! No comma => mult = 1
+	         ATT_R_MULT( ATT_PTR ) = 1
+	      ELSE					! found comma, thus DP
+		 DP = NTF$_FINTER(DP_POS:DP_POS)
+	         CALL SETAUX( %REF(DP), 1)
+		 OK = .NOT.RDINT( ATT_R_MULT(ATT_PTR) )	
+		 IF (OK) THEN
+		    ATT_R_MULT( ATT_PTR ) = 10**ATT_R_MULT( ATT_PTR )
+		 ELSE
+		    CALL LSL_PUTMSG(NTF2I__ATTDESC,'FINTER',SEC_REC)
+		    CALL LSL_ADDSTR(NTF$_FINTER)
+		    GOTO 9999
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C
+C##############################################################################
+C Finished with this attribute - are there any more
+C
+150	IF ( IS_CONTINUATION(STRING,LENGTH)) THEN	! any more ?
+	  OK = READ_CONTINUE('ATTDESC')			! check record exists
+	  IF (OK) THEN
+	     IF (STRING(1:2).EQ.REC$_ATTREC) GOTO 10	! go back and get more
+	  ELSE
+	     GOTO 150				! read continuation record
+	  ENDIF
+	ENDIF
+C
+C##############################################################################
+C
+9999	READ_ATTDESC = OK
+	RETURN
+	END

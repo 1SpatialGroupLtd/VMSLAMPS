@@ -1,0 +1,258 @@
+	LOGICAL FUNCTION INTSECT_SPOT(
+     &		NUM_TERRAIN_VECS,
+     &		LNK_IBUFF,
+     &		LNK_RBUFF,
+     &		PNT_RBUFF,
+C
+     &		NOD_I,
+     &		NOD_R,
+     &		NOD_L,
+     &		LNK_I,
+     &		LNK_R,
+     &		MNX_I,
+     &		PNT_I,
+     &		PNT_R,
+     &		MAX_NODS,
+     &		MAX_LNKS,
+     &		MAX_PNTS)
+C
+***	MODULE	INTSECT_SPOT
+***	IDENT	16JA89
+C	
+C Copyright Laser Scan Laboratories, Cambridge, England.
+C 	
+C Created 						ALB 31-May-1988
+C
+CMOD	Changed the order in which I3D does things in so that the ONEARM
+C	stage is no longer required			ACM 21-Dec-1988
+C
+C This routine finds all intersections between current spot height
+C feature and all river/ridgeline features. Where intersections are found
+C these are inserted into the river/ridgeline linked list as heighted pts.
+C
+	IMPLICIT NONE
+C	
+C Parameters
+        INCLUDE 'LSL$CMNI3D:CONSTANTS.PAR'
+        INCLUDE 'LSL$CMNI3D:I3DMSG.PAR'
+C
+C common blocks
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+C
+C structure (included here to get IFF_MAXCBROW parameter)
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+C
+	INTEGER		MAXCBROW
+	PARAMETER	(MAXCBROW = IFF_MAXCBROW + 1)	
+C
+C dynamically allocated array declarations
+	INTEGER		MAX_NODS	! max num of nodes 
+	INTEGER		MAX_LNKS	! max num of links
+	INTEGER		MAX_PNTS	! max num of points
+C
+	INTEGER		NOD_I(NOD_ATTRIBS,MAX_NODS)
+	REAL		NOD_R(NOD_ATTRIBS,MAX_NODS)
+	LOGICAL		NOD_L(NOD_ATTRIBS,MAX_NODS)
+	INTEGER		LNK_I(LNK_ATTRIBS,MAX_LNKS)	
+	REAL		LNK_R(LNK_ATTRIBS,MAX_LNKS)
+	INTEGER		MNX_I(MNX_ATTRIBS,MAX_LNKS)	
+	INTEGER		PNT_I(PNT_ATTRIBS,MAX_PNTS)
+	REAL		PNT_R(PNT_ATTRIBS,MAX_PNTS)
+C
+C other arguments
+	INTEGER		NUM_TERRAIN_VECS
+	INTEGER		LNK_IBUFF(LNK_ATTRIBS)
+	REAL		LNK_RBUFF(LNK_ATTRIBS)
+	REAL		PNT_RBUFF(PNT_ATTRIBS,MAXCBROW)
+C
+C Workspace
+	INTEGER		PNT_STA,PNT_FIN	! PNT indices
+	INTEGER		IMNX		! MNX index
+	INTEGER		ILNK		! LNK index
+	INTEGER		I,J,K		! loop counters
+C
+	REAL		XY1(2)		! coords of spot height 
+	REAL		XY2(2)		! coords of nearest pt on rv/rg
+	REAL		XY3(2)		! start coords of ridge vector 
+	REAL		XY4(2)		! end coords of ridge vector 
+	REAL		X_MIN		! X minimum of Jth vector
+	REAL		X_MAX		! X maximum of Jth vector
+	REAL		Y_MIN		! X minimum of Jth vector
+	REAL		Y_MAX		! X maximum of Jth vector
+C
+	REAL		XLEN		! x comp of vector length
+	REAL		YLEN		! y comp of vector length
+	REAL		XDIFF	! x dist from J vertex to intsect point
+	REAL		YDIFF	! y dist from J vertex to intsect point
+	REAL		XDIFF1	! x dist from J vertex to spot height
+	REAL		YDIFF1	! y dist from J vertex to spot height
+	REAL		XDIFF2	! x dist from J+1 vertex to spot height
+	REAL		YDIFF2	! y dist from J+1 vertex to spot height
+	REAL		XDIFF3	! x dist from nearest point to spot hgt
+	REAL		YDIFF3	! y dist from nearest point to spot hgt
+	REAL		VEC_LENGTH	! length of vector
+	REAL		DIST	! dist from vertex to intsect point
+	REAL		DIST1	! dist from J vertex to spot height
+	REAL		DIST2	! dist from J+1 vertex to spot height
+	REAL		DIST3	! dist from nearest point to spot height
+	REAL		FRACT_DIST ! fract dist to pt nearest spot hgt
+	REAL		ANGLE_1	! bearing of end vec from start vec
+	REAL		ANGLE_2	! bearing of start vec from end vec
+	REAL		ANGLE_3	! bearing of spot height from start vec
+	REAL		ANGLE_4	! bearing of spot height from end vec
+	REAL		ANGLE_A	! angle between r/r vec start - spot vec
+	REAL		ANGLE_B	! angle between r/r vec end - spot vec
+C
+	LOGICAL		VECS_CROSS	! TRUE if vectors cross
+C
+C functions
+	LOGICAL		CROSS,INSERT_PT
+C
+C **********************************************************************
+C
+	INTSECT_SPOT = .TRUE.			! assume success
+C
+C .......................  initialise ..................................
+	XY1(1) = PNT_RBUFF(PNT_XXX,1)		! x coord of spot height
+	XY1(2) = PNT_RBUFF(PNT_YYY,1)		! y coord of spot height
+C ----------------------------------------------------------------------
+C Outer loop for checking terrain box against ridge line boxes
+C
+	DO 600 IMNX = 1,NUM_LNKS
+C
+	   ILNK = MNX_I(MNX_LNK,IMNX)	! get next LNK index
+C
+CC bypass if river
+C	   IF (LNK_I(LNK_GRP,ILNK).EQ.RIVER) GOTO 600
+C
+C ......................................................................
+C If max x of terrain box less than min x of a river box then finish
+C intersection processing for this spot height, because there can be
+C no more intersections for this spot height feature as ri/rg features
+C are sorted on x min 
+C
+	   IF(LNK_RBUFF(LNK_MXX).LT.(LNK_R(LNK_MNX,ILNK)-TOUCH_TOL))
+     &	      GOTO 999 
+C ......................................................................
+C If max y of terrain box less than min y of a ridge box then
+C bypass processing for this ridge line feature.
+C 
+	   IF(LNK_RBUFF(LNK_MXY).LT.(LNK_R(LNK_MNY,ILNK)-TOUCH_TOL))
+     &	      GOTO 600
+C ......................................................................
+C If min x of terrain box greater than max x of a ridge box then
+C bypass processing for this ridge line feature.
+C 
+	   IF(LNK_RBUFF(LNK_MNX).GT.(LNK_R(LNK_MXX,ILNK)+TOUCH_TOL))
+     &	      GOTO 600
+C ......................................................................
+C If min y of terrain box greater than max y of a ridge box then
+C bypass processing for this ridge line feature.
+C 
+	   IF(LNK_RBUFF(LNK_MNY).GT.(LNK_R(LNK_MXY,ILNK)+TOUCH_TOL))
+     &	      GOTO 600
+C ......................................................................
+C get start and (fin-1) PNT indices for river or ridge feature
+C	   
+	   PNT_STA = LNK_I(LNK_STA,ILNK)
+	   PNT_FIN = LNK_I(LNK_FIN,ILNK)-1
+C
+C ----------------------------------------------------------------------
+C loop for checking spot height against ridge line vectors
+C
+	   DO 400 J = PNT_STA,PNT_FIN
+	      XY3(1) = PNT_R(PNT_XXX,J)
+	      XY3(2) = PNT_R(PNT_YYY,J)
+	      XY4(1) = PNT_R(PNT_XXX,J+1)
+	      XY4(2) = PNT_R(PNT_YYY,J+1)
+	      X_MIN = MIN(XY3(1),XY4(1))
+	      Y_MIN = MIN(XY3(2),XY4(2))
+	      X_MAX = MAX(XY3(1),XY4(1))
+	      Y_MAX = MAX(XY3(2),XY4(2))
+C ----------------------------------------------------------------------
+C Test whether spot height box intersects with vector box. Bypass if not
+C
+	      IF (LNK_RBUFF(LNK_MXX).LT.(X_MIN-TOUCH_TOL)) GOTO 400 
+	      IF (LNK_RBUFF(LNK_MXY).LT.(Y_MIN-TOUCH_TOL)) GOTO 400 
+	      IF (LNK_RBUFF(LNK_MNX).GT.(X_MAX+TOUCH_TOL)) GOTO 400 
+	      IF (LNK_RBUFF(LNK_MNY).GT.(Y_MAX+TOUCH_TOL)) GOTO 400 
+C
+	      IF (J.EQ.PNT_STA) THEN	! extend start vec by touch_tol 
+		 XLEN = XY3(1) - XY4(1)
+		 YLEN = XY3(2) - XY4(2)
+		 VEC_LENGTH = SQRT(XLEN**2 + YLEN**2)
+		 XY3(1) =XY3(1) + XLEN * TOUCH_TOL / VEC_LENGTH
+		 XY3(2) =XY3(2) + YLEN * TOUCH_TOL / VEC_LENGTH
+	      ENDIF
+	      IF (J.EQ.PNT_FIN) THEN	! extend end vec by touch_tol
+		 XLEN = XY4(1) - XY3(1)
+		 YLEN = XY4(2) - XY3(2)
+		 VEC_LENGTH = SQRT(XLEN**2 + YLEN**2)
+		 XY4(1) =XY4(1) + XLEN * TOUCH_TOL / VEC_LENGTH
+		 XY4(2) =XY4(2) + YLEN * TOUCH_TOL / VEC_LENGTH
+	      ENDIF
+C ----------------------------------------------------------------------
+C find point along vector which is closest to spot height
+C
+	      XLEN = XY4(1) - XY3(1)	
+	      YLEN = XY4(2) - XY3(2)
+	      VEC_LENGTH = SQRT(XLEN**2 + YLEN**2)
+	      XDIFF1 = XY1(1) - XY3(1)
+	      YDIFF1 = XY1(2) - XY3(2)
+	      XDIFF2 = XY1(1) - XY4(1)
+	      YDIFF2 = XY1(2) - XY4(2)
+	      DIST1 = SQRT(XDIFF1**2 + YDIFF1**2)
+	      DIST2 = SQRT(XDIFF2**2 + YDIFF2**2)
+	      FRACT_DIST = DIST1/(DIST1 + DIST2)
+	      XDIFF =  XLEN * FRACT_DIST
+	      YDIFF =  YLEN * FRACT_DIST
+	      XY2(1) = XY3(1) + XDIFF
+	      XY2(2) = XY3(2) + YDIFF
+C ----------------------------------------------------------------------
+C find angle between vector start -> end and spot height (ANGLE_A)
+C also find angle between vector end -> start and spot height (ANGLE_B)
+C
+	      ANGLE_1 = 0
+	      ANGLE_2 = 0
+	      ANGLE_3 = 0
+	      ANGLE_4 = 0
+	      IF (ABS(YLEN).GT.COORD_TOL.OR.ABS(XLEN).GT.COORD_TOL) THEN
+	         ANGLE_1 = ATAN2(YLEN,XLEN)
+	         ANGLE_2 = ATAN2(-YLEN,-XLEN)
+	      ENDIF
+C
+	      IF (ABS(YDIFF1).GT.COORD_TOL.OR.
+     &	          ABS(XDIFF1).GT.COORD_TOL)
+     &	         ANGLE_3 = ATAN2(YDIFF1,XDIFF1)
+C
+	      IF (ABS(YDIFF2).GT.COORD_TOL.OR.
+     &	          ABS(XDIFF2).GT.COORD_TOL)
+     &	         ANGLE_4 = ATAN2(YDIFF2,XDIFF2)
+C
+	      ANGLE_A = ANGLE_1 - ANGLE_3
+	      ANGLE_B = ANGLE_2 - ANGLE_4
+C ----------------------------------------------------------------------
+C Test whether closest point to spot height is within touch tolerance
+C
+	      XDIFF3 = XY1(1) - XY2(1)
+	      YDIFF3 = XY1(2) - XY2(2)
+	      DIST3 = SQRT(XDIFF3**2 + YDIFF3**2)
+	      IF ((DIST3.LE.TOUCH_TOL).AND.
+     &	         (ABS(ANGLE_A).LE.PI/2).AND.(ABS(ANGLE_B).LE.PI/2)) THEN
+C
+C insert intersection point into PNT linked list, creating a new
+C point only when int pos is not within TOUCH_TOL of an existing point 
+C
+	         INTSECT_SPOT = INSERT_PT(
+     &				J,
+     &				PNT_R,PNT_I,
+     &				XY2(1),XY2(2),		! int x,y coords
+     &				LNK_RBUFF(LNK_ZZZ),	! int z coord
+     &				MAX_PNTS)
+	         IF (.NOT.INTSECT_SPOT) GOTO 999
+	      ENDIF
+400	   CONTINUE
+600	CONTINUE
+C
+999	RETURN
+	END

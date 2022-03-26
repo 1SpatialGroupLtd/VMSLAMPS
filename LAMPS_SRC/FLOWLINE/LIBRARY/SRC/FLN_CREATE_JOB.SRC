@@ -1,0 +1,275 @@
+	INTEGER*4 FUNCTION FLN_CREATE_JOB
+     &	(FLN_ID,PROJ_ID,JOB_NAME,OUTER_TASK,OPERATOR_ID,
+     &	PRIORITY,JOB_ID,COMMAND_PROC,PROJ_COMPROC)
+C
+***	MODULE	FLN_CREATE_JOB
+***	IDENT	22JN90
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    29-Feb-1988
+C
+C	Modified				  JB	20-Jun-1990
+C	To strip spaces from procedure and flowline names
+C
+C creates the specified job on the system
+C returns status of transaction 
+C OUTER_TASK should be non-zero if the job is a sub-job 
+C and is the task_id of the calling task
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$CMNFLOWLINE:FLOW.PAR'
+	INCLUDE	'LSL$CMNFLOWLINE:FLOWLINEMSG.PAR'
+C
+C Arguments
+	CHARACTER*(*)	FLN_ID		! IN - flowline ID
+	CHARACTER*(*)   PROJ_ID		! IN - project id
+	CHARACTER*(*)   JOB_NAME	! IN - job name
+	CHARACTER*(*)   OPERATOR_ID	! IN - job initiator
+	INTEGER*4	PRIORITY	! IN - job priority
+	INTEGER*4	OUTER_TASK	! IN - the calling TASK
+	INTEGER*4	JOB_ID		! OUT - job id 
+	CHARACTER*(*)	COMMAND_PROC	! OUT - flowline command file
+	CHARACTER*(*)	PROJ_COMPROC    ! OUT - project command proc
+C
+C Common Blocks
+C
+C RDB return codes
+	INTEGER*4	RDB$_DEADLOCK
+	EXTERNAL	RDB$_DEADLOCK
+	INTEGER*4	RDB$_NO_DUP
+	EXTERNAL	RDB$_NO_DUP
+C Functions
+	INTEGER*4	FLN_GET_JOB_ID	
+	INTEGER*4	FLN_REMOVE_SPACES
+C
+C Local Variables
+	CHARACTER*20	NEW_JOB_NAME
+	CHARACTER*20	NEW_PROJ_ID
+	CHARACTER*20	NEW_FLN_ID
+C
+	CHARACTER*20	ELMNT_ID	! element id
+	INTEGER*4	NUM_FLN
+	INTEGER*4	NUM_PROJ
+	INTEGER*4	NUM_JOB
+	INTEGER*4	NUM_ERR
+	INTEGER*4	LENGTH_JOB
+	INTEGER*4	LENGTH_PRJ
+	INTEGER*4	LENGTH_FLN
+C 
+&RDB&	DATABASE FILENAME 'LSL$FLN_DATABASE:FLOWLINE'
+C
+C validate priority
+	IF (PRIORITY .LT. 1 .OR. PRIORITY .GT. 16) THEN
+	    FLN_CREATE_JOB= FLN__ILLEGPRI
+	    GOTO 999
+	ENDIF
+C
+C check for spaces in job name
+	FLN_CREATE_JOB = FLN_REMOVE_SPACES(JOB_NAME,
+     &					   NEW_JOB_NAME,
+     &					   LENGTH_JOB)
+	IF(.NOT. FLN_CREATE_JOB) GOTO 999
+C
+C check for spaces in project id
+	FLN_CREATE_JOB = FLN_REMOVE_SPACES(PROJ_ID,
+     &					   NEW_PROJ_ID,
+     &					   LENGTH_PRJ)
+	IF(.NOT. FLN_CREATE_JOB) GOTO 999
+C	    
+C check for spaces in flowline id
+	FLN_CREATE_JOB = FLN_REMOVE_SPACES(FLN_ID,
+     &					   NEW_FLN_ID,
+     &					   LENGTH_FLN)
+	IF(.NOT. FLN_CREATE_JOB) GOTO 999
+C	    
+C  get a unique job id for this job
+	FLN_CREATE_JOB= FLN_GET_JOB_ID(JOB_ID)
+	IF (.NOT. FLN_CREATE_JOB) GOTO 999
+C
+	NUM_ERR = 0
+20	CONTINUE
+&RDB&   START_TRANSACTION READ_WRITE RESERVING JOB FOR 
+&RDB&   PROTECTED WRITE , 
+&RDB&   FLOWLINE,PROJECT,JOB_HISTORY FOR SHARED READ WAIT
+&RDB&	ON ERROR
+	   NUM_ERR = NUM_ERR+1
+	   IF (NUM_ERR .GT. 5) THEN
+	      FLN_CREATE_JOB = RDB$STATUS
+	      GOTO 999
+	   ENDIF
+C
+C try again - probably deadlock
+	   CALL LIB$WAIT(FLN_PSE)
+	   GOTO 20
+&RDB&	END_ERROR
+C
+C retrieve the flowline command file
+	NUM_FLN = 0
+&RDB&   FOR F IN FLOWLINE WITH F.FLOWLINE_ID = NEW_FLN_ID(1:LENGTH_FLN)
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+	         FLN_CREATE_JOB = RDB$STATUS
+&RDB&            ROLLBACK
+	         GOTO 999
+	      ENDIF
+C
+C try again - probably deadlock
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+	   NUM_FLN = NUM_FLN+1
+&RDB&      GET
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+	            FLN_CREATE_JOB = RDB$STATUS
+&RDB&               ROLLBACK
+	            GOTO 999
+	         ENDIF
+C
+C try again - probably deadlock
+&RDB&            ROLLBACK
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+&RDB&      COMMAND_PROC  = F.COMMAND_PROC;
+&RDB&      END_GET
+&RDB&   END_FOR
+C
+	IF(NUM_FLN .EQ. 0) THEN
+	   FLN_CREATE_JOB = FLN__NOSUCHFLN
+&RDB&      ROLLBACK
+	   GOTO 999
+	ENDIF
+C
+	NUM_PROJ = 0
+&RDB&   GET    	   
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+	         FLN_CREATE_JOB= RDB$STATUS
+&RDB&            ROLLBACK
+	         GOTO 999
+	      ENDIF
+C
+C try again - probably deadlock
+&RDB&         ROLLBACK
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+&RDB&      NUM_PROJ = COUNT OF P IN PROJECT 
+&RDB&      WITH P.PROJECT_ID = NEW_PROJ_ID(1:LENGTH_PRJ)
+&RDB&      AND P.PROJECT_STATUS EQ 'Active'
+&RDB&   END_GET
+C
+	IF (NUM_PROJ .EQ. 0) THEN
+	   FLN_CREATE_JOB = FLN__NOSUCHPROJ
+&RDB&      ROLLBACK
+	   GOTO 999
+	ENDIF
+C
+C get the project command file
+C
+&RDB&   FOR P IN PROJECT WITH P.PROJECT_ID = NEW_PROJ_ID(1:LENGTH_PRJ)
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+	         FLN_CREATE_JOB= RDB$STATUS
+&RDB&            ROLLBACK
+	         GOTO 999
+	      ENDIF
+C
+C try again - probably deadlock
+&RDB&         ROLLBACK
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+&RDB&      GET
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+	         FLN_CREATE_JOB= RDB$STATUS
+&RDB&            ROLLBACK
+	         GOTO 999
+	      ENDIF
+C
+C try again - probably deadlock
+&RDB&         ROLLBACK
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+&RDB&      PROJ_COMPROC  = P.COMMAND_PROC;
+&RDB&      END_GET
+&RDB&   END_FOR
+C
+C create the job
+&RDB&   STORE J IN JOB USING
+&RDB&	   ON ERROR
+C
+C if its a deadlock then retry after waiting
+	      NUM_ERR = NUM_ERR+1
+	      IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	      .AND. NUM_ERR .LT. 10)THEN
+	         CALL LIB$WAIT(FLN_PSE)
+&RDB&	         ROLLBACK
+	         GOTO 20
+	      ELSEIF (RDB$STATUS .EQ. %LOC(RDB$_NO_DUP)) THEN 
+	         FLN_CREATE_JOB= FLN__DUPJOB
+&RDB&	         ROLLBACK
+	         GOTO 999
+	      ELSE
+	         FLN_CREATE_JOB = RDB$STATUS
+&RDB&            ROLLBACK
+	         GOTO 999
+	      ENDIF
+&RDB&	   END_ERROR
+&RDB&      J.JOB_ID = JOB_ID;
+&RDB&      J.PROJECT_ID = NEW_PROJ_ID(1:LENGTH_PRJ);
+&RDB&      J.FLOWLINE_ID = NEW_FLN_ID(1:LENGTH_FLN);
+&RDB&      J.JOB_STATUS = 'Created';
+&RDB&      J.PRIORITY = PRIORITY;
+&RDB&      J.INITIATOR_ID  = OPERATOR_ID;
+&RDB&      J.JOB_NAME = NEW_JOB_NAME(1:LENGTH_JOB);
+&RDB&      J.OUTER_TASK_ID = OUTER_TASK;
+C
+&RDB&   END_STORE
+C
+C check JOB_HISTORY as well - don't want to duplicate anything there
+C either
+&RDB&   GET    	   
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+	         FLN_CREATE_JOB= RDB$STATUS
+&RDB&            ROLLBACK
+	         GOTO 999
+	      ENDIF
+C
+C try again - probably deadlock
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+&RDB&      NUM_JOB = COUNT OF JH IN JOB_HISTORY WITH JH.PROJECT_ID  
+&RDB&       = NEW_PROJ_ID(1:LENGTH_PRJ) AND JH.JOB_NAME 
+&RDB&       = NEW_JOB_NAME(1:LENGTH_JOB)
+&RDB&       
+&RDB&   END_GET
+C
+	IF (NUM_JOB .GT. 0) THEN
+	   FLN_CREATE_JOB = FLN__DUPJOB
+&RDB&      ROLLBACK	
+	   GOTO 999
+	ENDIF
+C
+&RDB&   COMMIT
+C
+	FLN_CREATE_JOB = RDB$STATUS
+999	RETURN
+	END
+C

@@ -1,0 +1,330 @@
+	INTEGER*4 FUNCTION DTI_COPY_HEADER
+     &                     ( FROM_DTI_LUN, TO_DTI_LUN,
+     &			     RETVAL, PROJECTION)
+C
+***	IDENT	27NO91
+***	MODULE	DTI_COPY_HEADER
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C
+C	Modified  : 30MA88   To ensure latlong variables in DTIHDR
+C		    are correctly updated when a UHL record is copied
+C	Modified  : DRC 01AU88 to check for write access to the file
+C 	            opened on TO_DTI_LUN
+C	Modified  : DRC 03AU88 Parameter DTI_DTED changed to DTI_TED4
+C		    and use of DEFAULT_AVLY_HEADER removed.
+C	Modified  : DRC 22AU88 to allow copying of header from ALVY
+C		    to LSLA file.
+C	Modified  : DRC 08NO88 to reimplement the above MOD correctly
+CMOD		  : DRC 16NO88 to set up projection varaibles in
+C		    common for output file if input file has a 
+C		    projection record.
+CMOD		  : DRC 29NO88 to copy data order values for LSLA files
+CMOD		  : DRC 07DE88 to make copying of projection information
+C		    optional
+C
+C	DTILIB Function.   
+C
+C	To copy the header of 1 mapped DTI file
+C	to a second mapped DTI file
+C	Only the second part of the header is transfered.
+C	Thus:
+C	If the files are both UHL1 then the UHL block is transferred
+C	If the files are both DTED then the DSI and ACC are transferred,
+C	and the latlong origin, interval and corner variables are copied.
+C	If the files are both ALVY or LSLA then the free format part 
+C	of the header is copied.
+C
+C	The function returns true if successful.
+C	Any system error is returned in RETVAL.
+C
+C------------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters
+	INCLUDE '($SSDEF)'
+C
+***	PARAMETER/LSL$CMNDTI:DTIDEF/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	COMMON/LSL$CMNDTI:DTIPROJ/
+C
+C arguments
+	INTEGER*4		FROM_DTI_LUN	!source DTI file?
+	INTEGER*4		TO_DTI_LUN	!destination DTI file?
+	INTEGER*4		RETVAL		!error return code
+	LOGICAL			PROJECTION	!if present and false
+C						!don't copy proj information
+C
+C local
+	INTEGER*4		MAX_BYTES	!max number of bytes
+C						!that may be transferred
+C						!in one go
+	PARAMETER		(MAX_BYTES=4096)
+	INTEGER*4		TOTAL_BYTES	!total no. of bytes to copy
+	INTEGER*4		BYTE_OFFSET	!byte offset
+	INTEGER*4		NUMBER_BYTES_DONE!no. of bytes so far copied
+	INTEGER*4		NUMBER_BYTES	!number of bytes to transfer
+						!this time round
+C	
+	INTEGER*4		ERROR		!system error code
+	INTEGER*4		IERR		!function return
+	INTEGER*4		I		!counter
+	LOGICAL			COPY_PROJECTION	!copy projection details
+	BYTE			BYTE_VALUE	!single byte value
+	BYTE			HEAD_ARRAY(MAX_BYTES)
+C						!header transfer array
+C
+C function
+	LOGICAL			HAVE_I_AN_ARG	!test for presence of argument
+	INTEGER*4		DTI_COPY_BYTE_HEADER	!transfer data
+C							!from or to header
+	INTEGER*4		DTI_WRITE_DSI		!write DSI record
+	INTEGER*4		DTI_WRITE_BYTE_HEADER	!to write byte to
+C							!the header
+C****************************************************************************
+C
+C	Test if the FROM_DTI_LUN and TO_DTI_LUN are valid
+	IF(FROM_DTI_LUN.LT.1.OR.FROM_DTI_LUN.GT.MAX_DTI.OR.
+     &     TO_DTI_LUN.LT.1.OR.TO_DTI_LUN.GT.MAX_DTI)THEN
+	   DTI_COPY_HEADER=DTI__BADLUN		!LUN out of range
+	   GOTO 999				!Return
+	ENDIF
+C
+C	Test if both the supplied DTI_LUNs are in use
+	IF(.NOT.DTILUN_INUSE(FROM_DTI_LUN).OR.
+     &     .NOT.DTILUN_INUSE(TO_DTI_LUN))THEN
+	   DTI_COPY_HEADER=DTI__LUNUNUSED	!LUN not in use
+	   GOTO 999				!Return
+	ENDIF
+C
+C	Check for case of allowable header mismatch
+C	ie. ALVY to LSLA
+	IF(HEADER_TYPE(TO_DTI_LUN).EQ.DTI_LSLA.AND.
+     &     HEADER_TYPE(FROM_DTI_LUN).EQ.DTI_ALVY)GOTO 50
+C
+C	otherwise...
+C	test if both the files have the same header type
+	IF(HEADER_TYPE(TO_DTI_LUN).NE.
+     &     HEADER_TYPE(FROM_DTI_LUN))THEN
+           DTI_COPY_HEADER=DTI__HEADMISMATCH	!header types differ
+	   GOTO 999
+	ENDIF
+C
+C	Test for write access to the file opened on TO_DTI_LUN
+50	IF(READ_ONLY(TO_DTI_LUN))THEN
+	   DTI_COPY_HEADER=DTI__READONLY	!read only access
+	   GOTO 999
+	ENDIF
+C
+C	Test for the final argument which controls whether the
+C	projection details are transferred
+	IF(HAVE_I_AN_ARG(4))THEN
+	  COPY_PROJECTION=PROJECTION
+	ELSE
+	  COPY_PROJECTION=.TRUE.
+	ENDIF
+C----------------------------------------------------------------------------
+C
+C	If both files are UHL1 copy the UHL record
+	IF(HEADER_TYPE(TO_DTI_LUN).EQ.DTI_UHL1.AND.
+     &     HEADER_TYPE(FROM_DTI_LUN).EQ.DTI_UHL1)THEN
+C
+C	Use DTI_COPY_BYTE_HEADER to extract relevant bit of header
+C	from the first file, and then write it to the second
+	   IERR=DTI_COPY_BYTE_HEADER ( FROM_DTI_LUN,
+     &          HEAD_ARRAY,.FALSE.,DTI_DMA_UHLSZ,
+     &          DTI_DMA_TYPE,ERROR )
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_COPY_HEADER=IERR		!transfer error code
+	     RETVAL=ERROR			!system error
+	     GOTO 999
+	   ENDIF
+C
+	   IERR=DTI_COPY_BYTE_HEADER ( TO_DTI_LUN,
+     &          HEAD_ARRAY,.TRUE.,DTI_DMA_UHLSZ,
+     &          DTI_DMA_TYPE,ERROR )
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_COPY_HEADER=IERR		!transfer error code
+	     RETVAL=ERROR			!system error
+	     GOTO 999
+	   ENDIF
+C
+C	Now update LATLONG values from first file
+	   LATORI(TO_DTI_LUN)=LATORI(FROM_DTI_LUN)
+	   LONORI(TO_DTI_LUN)=LONORI(FROM_DTI_LUN)
+	   LATINT(TO_DTI_LUN)=LATINT(FROM_DTI_LUN)
+	   LONINT(TO_DTI_LUN)=LONINT(FROM_DTI_LUN)
+C
+	   DO 300 I=1,4
+	      LATREC(I,TO_DTI_LUN)=LATREC(I,FROM_DTI_LUN)
+	      LONREC(I,TO_DTI_LUN)=LONREC(I,FROM_DTI_LUN)
+300	   CONTINUE	      
+C
+	ENDIF
+C	        
+C-------------------------------------------------------------------------
+C	If both files are DTED then copy the ACC and DSI records
+	IF(HEADER_TYPE(TO_DTI_LUN).EQ.DTI_TED4.AND.
+     &     HEADER_TYPE(FROM_DTI_LUN).EQ.DTI_TED4)THEN
+C
+C	Use DTI_COPY_BYTE_HEADER to extract relevant bit of header
+C	from the first file, and then write it to the second
+	   IERR=DTI_COPY_BYTE_HEADER ( FROM_DTI_LUN,
+     &          HEAD_ARRAY,.FALSE.,DTI_TED_DSISZ+DTI_TED_ACCSZ,
+     &          DTI_TED_DSI,ERROR )
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_COPY_HEADER=IERR		!transfer error code
+	     RETVAL=ERROR			!system error
+	     GOTO 999
+	   ENDIF
+C
+	   IERR=DTI_COPY_BYTE_HEADER ( TO_DTI_LUN,
+     &          HEAD_ARRAY,.TRUE.,DTI_TED_DSISZ+DTI_TED_ACCSZ,
+     &          DTI_TED_DSI,ERROR )
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_COPY_HEADER=IERR		!transfer error code
+	     RETVAL=ERROR			!system error
+	     GOTO 999
+	   ENDIF
+C
+C	Now update DSI with LATLONG values from first file
+	   LATORI(TO_DTI_LUN)=LATORI(FROM_DTI_LUN)
+	   LONORI(TO_DTI_LUN)=LONORI(FROM_DTI_LUN)
+	   LATINT(TO_DTI_LUN)=LATINT(FROM_DTI_LUN)
+	   LONINT(TO_DTI_LUN)=LONINT(FROM_DTI_LUN)
+C
+	   DO 500 I=1,4
+	      LATREC(I,TO_DTI_LUN)=LATREC(I,FROM_DTI_LUN)
+	      LONREC(I,TO_DTI_LUN)=LONREC(I,FROM_DTI_LUN)
+500	   CONTINUE	      
+C
+C	And write these to the mapped file by calling DTI_WRITE_DSI
+	   IERR=DTI_WRITE_DSI( TO_DTI_LUN, ERROR)
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_COPY_HEADER=IERR		!transfer error code
+	     RETVAL=ERROR			!system error
+	     GOTO 999
+	   ENDIF
+	ENDIF
+C
+C---------------------------------------------------------------------------
+C	If the input file is a LSLA or ALVY, and the output file is
+C	LSLA or ALVY copy the free format part of the header
+C	and the data order values
+C
+	IF ((HEADER_TYPE(FROM_DTI_LUN).EQ.DTI_ALVY .OR.
+     &       HEADER_TYPE(FROM_DTI_LUN).EQ.DTI_LSLA) .AND.
+     &      (HEADER_TYPE(TO_DTI_LUN).EQ.DTI_ALVY .OR.
+     &       HEADER_TYPE(TO_DTI_LUN).EQ.DTI_LSLA)) THEN
+C
+C	Check for header length mismatch
+	   IF (DATA_OFFSET(TO_DTI_LUN).LT.DATA_OFFSET(FROM_DTI_LUN))THEN
+	     DTI_COPY_HEADER=DTI__BADHEADSIZE
+	     GOTO 999
+	   ENDIF
+C	   
+C	Transfer data order values
+	   DTI_ORDER_CORNER(TO_DTI_LUN)=DTI_ORDER_CORNER(FROM_DTI_LUN)
+	   DTI_ORDER_DIRECTION(TO_DTI_LUN)=
+     &     DTI_ORDER_DIRECTION(FROM_DTI_LUN)
+C
+C	Write to the file, but first concatenate the two values
+C	into a byte.
+	   CALL LIB$INSV(DTI_ORDER_CORNER(TO_DTI_LUN),0,4,BYTE_VALUE)
+	   CALL LIB$INSV(DTI_ORDER_DIRECTION(TO_DTI_LUN),4,4,BYTE_VALUE)
+	   IERR=DTI_WRITE_BYTE_HEADER
+     &	       (TO_DTI_LUN,BYTE_VALUE,DTI_LSLA_DORD,ERROR)
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_COPY_HEADER=IERR		!transfer error code
+	     RETVAL=ERROR			!system error
+	     GOTO 999
+	   ENDIF
+C
+C	Use DTI_COPY_BYTE_HEADER to extract relevant bit of header
+C	from the first file, and then write it to the second
+C	The header has to be transferred in chunks, MAX_BYTES at a time.
+C
+	   TOTAL_BYTES = DATA_OFFSET(FROM_DTI_LUN)-DEFAULT_LSLA_HEADER
+C
+	   NUMBER_BYTES_DONE=0
+C
+600	   BYTE_OFFSET      =DEFAULT_LSLA_HEADER+NUMBER_BYTES_DONE
+	   NUMBER_BYTES     =MIN(MAX_BYTES,TOTAL_BYTES-NUMBER_BYTES_DONE)
+C
+	   IF(NUMBER_BYTES.EQ.0)THEN		!nothing to transfer
+	     DTI_COPY_HEADER=DTI__NORMAL
+	     GOTO 999
+	   ENDIF
+C
+	   IERR=DTI_COPY_BYTE_HEADER ( FROM_DTI_LUN,
+     &          HEAD_ARRAY,.FALSE.,
+     &		NUMBER_BYTES,
+     &          BYTE_OFFSET,
+     &		ERROR )
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_COPY_HEADER=IERR		!transfer error code
+	     RETVAL=ERROR			!system error
+	     GOTO 999
+	   ENDIF
+C
+	   IERR=DTI_COPY_BYTE_HEADER ( TO_DTI_LUN,
+     &          HEAD_ARRAY,.TRUE.,
+     &		NUMBER_BYTES,
+     &          BYTE_OFFSET,
+     &		ERROR )
+	   IF(IERR.NE.DTI__NORMAL)THEN
+	     DTI_COPY_HEADER=IERR		!transfer error code
+	     RETVAL=ERROR			!system error
+	     GOTO 999
+	   ENDIF
+C
+	   NUMBER_BYTES_DONE=NUMBER_BYTES_DONE+NUMBER_BYTES
+	   IF(NUMBER_BYTES_DONE.LT.TOTAL_BYTES)GOTO 600
+C
+C	If the input file has a projection record transfer common
+C	block variables
+	   IF (HAD_PROJ_RECORD(FROM_DTI_LUN) .AND. COPY_PROJECTION)THEN
+	     HAD_PROJ_RECORD(TO_DTI_LUN)=.TRUE.
+	     DTIPROJ_RECORD_OFFSET(TO_DTI_LUN)=
+     &       DTIPROJ_RECORD_OFFSET(FROM_DTI_LUN)
+	     DTIPROJ_ORIGIN(1,TO_DTI_LUN)=DTIPROJ_ORIGIN(1,FROM_DTI_LUN)
+	     DTIPROJ_ORIGIN(2,TO_DTI_LUN)=DTIPROJ_ORIGIN(2,FROM_DTI_LUN)
+	     DTIPROJ_SAMPLE(1,TO_DTI_LUN)=DTIPROJ_SAMPLE(1,FROM_DTI_LUN)
+	     DTIPROJ_SAMPLE(2,TO_DTI_LUN)=DTIPROJ_SAMPLE(2,FROM_DTI_LUN)
+	     DTIPROJ_UNITS(TO_DTI_LUN)   =DTIPROJ_UNITS(FROM_DTI_LUN)
+	     DTIPROJ_SPHEROID(TO_DTI_LUN)=DTIPROJ_SPHEROID(FROM_DTI_LUN)
+	     DTIPROJ_PROJECTION(TO_DTI_LUN)=DTIPROJ_PROJECTION(FROM_DTI_LUN)
+	     DTIPROJ_USER_SPHEROID(1,TO_DTI_LUN)=
+     &       DTIPROJ_USER_SPHEROID(1,FROM_DTI_LUN)
+	     DTIPROJ_USER_SPHEROID(2,TO_DTI_LUN)=
+     &       DTIPROJ_USER_SPHEROID(2,FROM_DTI_LUN)
+C
+	     DO 700 I=1,15
+	        DTIPROJ_PROJ_PARAMS(I,TO_DTI_LUN)=
+     &          DTIPROJ_PROJ_PARAMS(I,FROM_DTI_LUN)
+700	     CONTINUE
+C
+	     LATORI(TO_DTI_LUN)=LATORI(FROM_DTI_LUN)
+	     LONORI(TO_DTI_LUN)=LONORI(FROM_DTI_LUN)
+	     LATINT(TO_DTI_LUN)=LATINT(FROM_DTI_LUN)
+	     LONINT(TO_DTI_LUN)=LONINT(FROM_DTI_LUN)
+C
+	     DO 800 I=1,4
+	       LATREC(I,TO_DTI_LUN)=LATREC(I,FROM_DTI_LUN)
+	       LONREC(I,TO_DTI_LUN)=LONREC(I,FROM_DTI_LUN)
+800	     CONTINUE	      
+C
+	  ENDIF
+	ENDIF
+C
+C---------------------------------------------------------------------------
+	DTI_COPY_HEADER=DTI__NORMAL
+C
+999	RETURN
+	END	   
+C

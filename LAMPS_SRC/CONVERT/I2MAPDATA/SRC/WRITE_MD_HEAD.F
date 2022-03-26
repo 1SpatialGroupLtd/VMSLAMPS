@@ -1,6 +1,6 @@
 	SUBROUTINE WRITE_MD_HEAD
 C
-CDEC$	IDENT	'27SE94'
+CDEC$	IDENT	'12OC94'
 C
 C	Copyright (C) Laser-Scan Ltd., Cambridge, England.
 C
@@ -22,7 +22,7 @@ C Just write the three lines.
 C
 	CALL FLWRTF
 	CALL FLWRTF
-	CALL FLWRTF('100 100 0.01')
+	CALL FLWRTF('     100.000     100.000  0.01')
 C
 C Return
 C

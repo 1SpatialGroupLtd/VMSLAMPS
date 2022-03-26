@@ -1,0 +1,162 @@
+	LOGICAL FUNCTION SERV_FOLLOW
+C
+***	IDENT	05AP89
+***	MODULE	SERV_FOLLOW
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RWR	15-Mar-1989
+C
+C To service an interrupt obtained from the following timer
+C Returns .TRUE. if useful coordinate found, and .FALSE. otherwise
+C If an error occurs, then following is cancelled
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:CONSTS/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:CSTRCT/
+***	COMMON/CMN:FOLLOW/
+***	COMMON/CMN:GLOBAL/
+***	COMMON/CMN:OPTION/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:STATE/
+***	COMMON/CMN:WORKS/
+C
+C functions
+	INTEGER		EXPAND
+	LOGICAL		RUBISH
+	LOGICAL		FOLLOW_FLUSH
+C
+C w/s
+	REAL		XYZ(3)
+	REAL		NEW_XYZ(3)
+	LOGICAL		TWOD
+	REAL		DIST
+	REAL		DISTMP
+	REAL		LINE(2,2)
+	LOGICAL		OUTPUT
+	REAL		PROP
+	INTEGER		I
+C
+C statement function
+	REAL		DST
+	REAL		PT2X,PT2Y
+	DST(PT2X,PT2Y) = SQRT((XYZ(1)-PT2X)**2+(XYZ(2)-PT2Y)**2)
+C
+C assume failure
+	SERV_FOLLOW = .FALSE.
+	OUTPUT = .FALSE.
+C
+C get coordinate from appropriate device
+	CALL FOLLOW_COORD(FOLLOW_WHERE,XYZ,TWOD)
+C
+C check if coordinate is OK to use
+	IF (MOANED) THEN
+	   CALL ENDFOLL
+	   GOTO 999
+	ENDIF
+C
+C is it in range?
+	IF (RUBISH(XYZ)) GOTO 999	! ignore if outside map
+C
+C debug
+	IF (DIAOPT) FOLLOW_EVENTS = FOLLOW_EVENTS+1
+C
+C if not in CONSTRUCT state, then accept the coordinate and initialise
+C buffer, otherwise check bunch criteria
+	IF (SINDEX.EQ.STATE_CONSTRUCT) THEN
+	   IF (FOLLOW_JUST_STARTED) GOTO 560	! put point in buffer
+C
+C get distance from last master point
+	   DISTMP = DST(CONXY(1,CONIND),CONXY(2,CONIND))
+C
+C and distance from last point in buffer
+	   IF (FOLLOW_BUF_PTR.GT.0) THEN
+	      DIST = MIN(DISTMP,DST(FOLLOW_BUF(1,FOLLOW_BUF_PTR),
+     &	                            FOLLOW_BUF(2,FOLLOW_BUF_PTR)))
+	   ELSE
+	      DIST = DISTMP
+	   ENDIF
+C
+C test 1): if distance is less than minimum distance, ignore point
+	   IF (DIST.LT.FOLLOW_EIFFDIST) THEN
+	      IF (DIAOPT) FOLLOW_E = FOLLOW_E + 1
+	      GOTO 999
+C
+C test 2): if distance to last master point is greater than maximum
+C          distance, then flush out buffers
+	   ELSEIF (FOLLOW_SIFFDIST.GT.0.0.AND.
+     &	           FOLLOW_SIFFDIST.LT.DISTMP) THEN
+	      OUTPUT = FOLLOW_FLUSH(NEW_XYZ)
+	      IF (DIAOPT) FOLLOW_S = FOLLOW_S + 1
+C
+C test 3): if any existing points in buffer are greater then lateral
+C          tolerance away from line from last master point to this
+C	   point, then flush out buffers
+	   ELSE
+	      LINE(1,1) = CONXY(1,CONIND)
+	      LINE(2,1) = CONXY(2,CONIND)
+	      LINE(1,2) = XYZ(1)
+	      LINE(2,2) = XYZ(2)
+	      DO 550, I=1,FOLLOW_BUF_PTR
+	         CALL PRPDST(FOLLOW_BUF(1,I),LINE,DIST,PROP)
+	         IF (DIST.GT.FOLLOW_HIFFDIST) THEN
+	            OUTPUT = FOLLOW_FLUSH(NEW_XYZ)
+	            IF (DIAOPT) FOLLOW_H = FOLLOW_H + 1
+	         ENDIF
+	         IF (OUTPUT) GOTO 555
+  550	      CONTINUE
+  555	      CONTINUE
+	   ENDIF
+C
+C if buffer is full, compress it up to this point
+  560	   CONTINUE
+	   IF (FOLLOW_BUF_PTR.GE.FOLLOW_BUF_SIZ) THEN
+	      CALL FOLLOW_COMPRESS(XYZ)
+	      IF (DIAOPT) FOLLOW_O = FOLLOW_O + 1
+	   ENDIF
+C
+C add this point to buffer
+	   FOLLOW_BUF_PTR = FOLLOW_BUF_PTR + 1
+	   DO 570, I= 1,3
+	      FOLLOW_BUF(I,FOLLOW_BUF_PTR) = XYZ(I)
+  570	   CONTINUE
+	ELSE
+	   OUTPUT = .TRUE.
+	   FOLLOW_BUF_PTR = 0
+	   DO 600, I=1,3
+	      NEW_XYZ(I) = XYZ(I)
+  600	   CONTINUE
+	ENDIF
+C
+	FOLLOW_JUST_STARTED = .FALSE.
+C
+C construct a suitable POSITION and START command in TXTBUF
+	IF (OUTPUT) THEN
+C
+C don't output duplicate point - 2 IF statements to avoid SUBRNGs
+	   IF (SINDEX.EQ.STATE_CONSTRUCT) THEN
+	      IF (NEW_XYZ(1).EQ.CONXY(1,CONIND).AND.
+     &	          NEW_XYZ(2).EQ.CONXY(2,CONIND)) GOTO 999
+	   ENDIF
+C
+	   IF (TWOD) THEN
+	      TXTPTR=EXPAND('%W%%POS %G0.8 %G0.8#%%START',TXTBUF,
+     &	                     NEW_XYZ(1),NEW_XYZ(2))
+	   ELSE
+	      TXTPTR=EXPAND('%W%%POS %G0.8 %G0.8 %G0.8#%%START',TXTBUF,
+     &	                    NEW_XYZ(1),NEW_XYZ(2),NEW_XYZ(3))
+	   ENDIF
+C
+	   FOLLOW_START = .TRUE.		! START command has come
+						! from here
+C
+	   SERV_FOLLOW = .TRUE.	   
+	ENDIF
+C
+999	RETURN
+	END

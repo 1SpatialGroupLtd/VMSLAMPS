@@ -1,0 +1,216 @@
+	SUBROUTINE CUTLER(IU,IV,HOLE,RIPPLE)
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+C Author M.C.Fulford
+C
+C	Created 19.vii.77
+C	Last edited 29/i/79
+C
+C A routine for making forks out of data points.
+C Works similarly to GROW, but attempts to identify
+C converging & diverging lines as it grows the chains.
+C The width information is used to do this.
+C
+C
+***	COMMON/PARAMS/
+C
+C arguments
+	INTEGER IU,IV		!  axes relative to scan direction
+	INTEGER HOLE		! maximum hole in line
+	INTEGER RIPPLE		! maximum sideways ripple on line
+C
+***	COMMON/LINKS/		! data structure
+***	COMMON/RSE/		! raw scan encounters
+***	COMMON/FORKS/		! more structure
+C
+C external functions
+	LOGICAL NEBIT
+	INTEGER ADDCHN,ADDFRK
+C workspace
+	INTEGER EDGE		! -1,1 => leading,trailing edge
+	INTEGER CHN		! current chain
+	INTEGER ENC		! current encounter
+	INTEGER LSTENC		! end of scan line
+	INTEGER FST		! first encounter on scan line
+	INTEGER LST		! first encounter on next line
+	INTEGER WAY		! direction of line
+	INTEGER JUNCTN		! type of junction:-
+C		<0 => divergence, |JUNCTN| is the other encounter
+C		=0 => continuation of line
+C		>0 => convergence, JUNCTN  is the other chain
+	INTEGER VENC		! V-coord of encounter's edge
+	INTEGER VCHN		! V-coord of chain's edge
+	INTEGER DV		! difference
+	LOGICAL*1 NMD		! No More Data
+C
+C
+C clear data structures
+	DO 10 I = 1,MAXCHN
+	  ENDFRK(1,I) = 0
+	  ENDFRK(2,I) = 0
+	  NXTCHN(I) = 0
+10	  CONTINUE
+	NXTCHN(0) = -1
+	DO 20 I = 1,MAXFRK
+	  FRKTYP(I) = 0
+20	  CONTINUE
+C
+	RETRY = .TRUE.
+	ENC = 0
+	LSTENC = 0
+	CHN = 0
+	LST = 1
+	NMD = .FALSE.
+	NEHI = -1		! no data yet
+C set up for leading edge (black -> white)
+100	EDGE = -1
+C get the next encounter
+200	IF (NMD) GOTO 900	!  the end
+C end of scan line's data ?
+220	IF (ENC .NE. LSTENC) GOTO 270
+C Yes
+C no more to do, sort out the next line
+	FST = LST
+	WAY = 0
+230	LST = LST+1
+235	IF (LST .LE. NEHI) GOTO 240
+C need some more data
+	NMD = .NOT.NEBIT(NELO,NEHI)
+	IF (NMD) GOTO 250
+	GOTO 235		! check again
+C
+240	IF ((NEBUF(1,LST).AND."40000) .EQ. 0) GOTO 250
+	IF (WAY .NE. 0) GOTO 230
+	WAY = -1
+	IF (NEBUF(IV+1,LST) .GT. NEBUF(IV+1,FST))WAY = 1
+	GOTO 230
+C
+250	IF (WAY .EQ. 0) WAY = 1	! only one encounter on line
+	ENC = FST
+	IF (WAY .LT. 0) ENC = LST-1
+	LSTENC = FST+LST-1 - ENC
+C de-activate any chains that are overlapped by more recent ones,
+C or that are simply lagging behind the point of interest.
+C	[remove overlapped ones]
+C this code will appear when I find the piece of paper
+C that I wrote it on!
+C
+C remove lagging chains
+	N = NXTCHN(0)
+	NU = NEBUF(IU+1,ENC)
+260	K = N
+	IF (K .LE. 0) GOTO 265
+	IDU = NEBUF(IU+1,CHAIN(K))-NU
+	N = NXTCHN(K)
+	IF (ABS(IDU) .GT. HOLE) CALL REMCHN(K)
+	GOTO 260
+C
+265	CHN = NXTCHN(0)		! begin at the beginning
+	JUNCTN = 0		! forget pending junctions
+	EDGE = -1		! start afresh
+C ready to start a new scan line
+	GOTO 275
+C extract next encounter and check for edge
+270	ENC = ENC+WAY
+275	IW = NEBUF(1,ENC).AND."37774
+	IF (IW .EQ. "37770 .OR.
+     *      IW .EQ. "37774) GOTO 200		! skip edges
+C
+C compare the chosen edges of the current encounter and
+C the current chain.
+280	IF (CHN .LE. 0) GOTO 500
+	K = CHAIN(CHN)
+	IF (NEBUF(IU+1,K).EQ.NEBUF(IU+1,ENC))
+     *      CALL WRITEF('K(U) = ENC(U) !')
+	VCHN = NEBUF(IV+1,K)+((NEBUF(1,K).AND."37777)*EDGE)/2
+	VENC = NEBUF(IV+1,ENC)+((NEBUF(1,ENC).AND."37777)*EDGE)/2
+	DV = VCHN - VENC
+	IF (DV .GT. RIPPLE) GOTO 500
+	IF (DV .LT.-RIPPLE) GOTO 400
+C
+C edges (nearly) correspond
+C
+300	IF (EDGE) 310,800,340		! two lines
+C leading edges => start of junction
+310	EDGE = 1		! change to trailing
+	JUNCTN = 0
+	GOTO 280		! look at other side
+C trailing edges => end of junction, so see what sort
+340	IF (JUNCTN) 360,350,380
+C straightforward link
+C we can add to the chain directly, since it will not
+C be looked at again in this scan line's processing.
+350	NXT(ENC) = CHAIN(CHN)
+	CHAIN(CHN) = ENC
+	LENGTH(CHN) = LENGTH(CHN)+1
+	CHN = NXTCHN(CHN)
+	GOTO 100
+C divergence
+360	NEWCHN = NXTCHN(CHN)
+	CALL REMCHN(CHN)		! remove stem chain
+	K1 = ADDCHN(IV,-JUNCTN)		! create branch chains
+	K2 = ADDCHN(IV,ENC)
+C create a fork if the two new chains were created
+	IF (K1.NE.0 .AND. K2.NE.0) CALL ADDFRK(1,CHN,-K1,-K2)
+	CHN = NEWCHN
+	GOTO 100
+C convergence
+380	NEWCHN = NXTCHN(CHN)
+	CALL REMCHN(JUNCTN)
+	CALL REMCHN( CHN )
+	K1 = ADDCHN(IV,ENC)
+C again, check that chain was created
+	IF (K1.NE.0) CALL ADDFRK(2,-K1,JUNCTN,CHN)
+	CHN = NEWCHN
+	GOTO 100
+C
+C Chain's edge came first
+C
+400	IF (EDGE) 420,800,450
+C leading edge => hole in a line
+C ignore hole and it will go away as the chain will
+C be de-activated when it lags behind too much.
+420	GOTO 480
+C
+C trailing edge => possible convergence
+450	IF (JUNCTN) 460,470,480
+C we thought we were diverging though
+460	NEWCHN = NXTCHN(CHN)
+	CALL REMCHN(CHN)
+	CALL ADDCHN(IV,-JUNCTN)
+	CHN = NEWCHN
+	JUNCTN = 0
+	EDGE = -1
+	GOTO 280
+C store the convergence information
+470	JUNCTN = CHN
+480	CHN = NXTCHN(CHN)
+	GOTO 280
+C
+C Encounter's edge came first
+C
+500	IF (EDGE) 510,800,550
+C leading edge => new line appearing
+510	CALL ADDCHN(IV,ENC)
+	GOTO 200
+C trailing edge => possible divergence
+550	IF (JUNCTN) 580,570,560
+C just a minute, weren't we converging ?
+560	CALL REMCHN(JUNCTN)
+	CALL ADDCHN(IV,ENC)
+	JUNCTN = 0
+	GOTO 100
+C store the divergence information
+570	JUNCTN = -ENC
+580	GOTO 200
+C
+C Various errors
+C
+800	CALL WRITEF('EDGE %N !',EDGE)
+	GOTO 900
+C
+C Exit
+C
+900	RETURN
+	END

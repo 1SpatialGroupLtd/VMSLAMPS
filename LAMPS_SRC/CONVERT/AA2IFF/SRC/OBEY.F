@@ -1,9 +1,11 @@
 	INTEGER FUNCTION OBEY
-CDEC$	IDENT	'19AP91'
+CDEC$	IDENT	'07AP93'
 C
 C	Copyright (C)				Laser-Scan Ltd., Cambridge
-C	Created			13-Nov-1989			A.P.Brown
+C	Created					A.P.Brown 13-Nov-1989
 C
+C	Add /LOG and /MULTIPLY 			J Barber   5-Apr-1993
+
 C Description:
 C
 C	Read the CCG SIF AA file
@@ -18,6 +20,7 @@ C
 	INCLUDE 'LSL$CMNLSL:CLD.CMN'	    	! LSLLIB command language
 	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'   	! LSLLIB file names
 	INCLUDE	'CMN:FILE.CMN'      		! 
+	INCLUDE	'CMN:IFF.CMN'      		! 
 C
 C External functions
 C
@@ -28,6 +31,7 @@ C
 	LOGICAL		DCL_STARTUP		! Command line read and parse
 	LOGICAL		DCL_FILE		! Get file name
 	LOGICAL		DCL_QUAL		! Get a qualifier 
+	LOGICAL		DCL_INT			! Get an integer
 C
 	INTEGER		FLROPN			! Open AA file
 	INTEGER		IFFCREATE		! Start IFF
@@ -43,8 +47,10 @@ C
 C-------------------------------------------------------------------------------
 C Initialise
 C
-	HAD_PAR = .FALSE.
-	HAD_FRT = .FALSE.
+	HAD_LOG  = .FALSE.
+	HAD_MULT = .FALSE.
+	HAD_PAR  = .FALSE.
+	HAD_FRT  = .FALSE.
 C
 C Read and parse the command line
 C
@@ -100,6 +106,26 @@ C
 	   PARLEN  = FIL_LEN(1)
 	   PARFILE = FILARY(1)(1:PARLEN)
 	ENDIF
+C
+C Get LOG
+C
+	STATUS = DCL_QUAL('LOG', HAD_LOG, LOCAL, LOCNEG, .TRUE.)
+	IF (.NOT.STATUS) GOTO 999
+C
+C Get MULTIPLY
+C
+	SCALE_FACTOR = 1
+C
+	STATUS = DCL_QUAL('MULTIPLY', HAD_MULT, LOCAL, LOCNEG, .TRUE.)
+	IF (.NOT.STATUS) GOTO 999
+C
+	IF (HAD_MULT) THEN
+	   STATUS= DCL_INT ('MULTIPLY', .TRUE.)
+           IF (.NOT.STATUS) GOTO 999
+C
+	   MULTIPLY = IARRAY(1)
+	   SCALE_FACTOR = MULTIPLY
+        ENDIF
 C
 C Open input AA file
 C

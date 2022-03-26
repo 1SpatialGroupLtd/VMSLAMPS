@@ -1,0 +1,1 @@
+$srinorm == "$lsl$exe:srinorm"

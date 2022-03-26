@@ -1,0 +1,248 @@
+	.TITLE	VSOD
+ 
+	.IDENT	/13NO81/
+ 
+	.PSECT	VSCODE
+ 
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+ 
+; Author:	Susan Manning
+ 
+ 
+; VS11 GRAPHIC LIBRARY ODDMENTS
+ 
+ 
+; Origin Change
+; currently supports only '-1' version of LDLIB 'ORIGIN'
+ 
+.ENTRY	VSORGN,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R7
+	MOVF	@8(AP),R9
+	BSBB	VS$ORIG
+	RET
+ 
+VS$ORIG:MOVAB	VSRDOX,R10
+	MOVF	R7,(R10)+		; preserve display values
+	MOVF	R9,(R10)+
+	MOVF	VSSCF,R6		; current scale
+VSSETUO:DIVF3	R6,R7,(R10)+		; user values
+	DIVF3	R6,R9,(R10)+
+ 
+; move to new origin
+	CLRF	R7
+	CLRF	R9
+	JSB	VS$MTO
+	RSB
+ 
+ 
+ 
+; Units Change
+ 
+.ENTRY	VSUNIT,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R6
+	BSBB	VS$UNIT
+	RET
+ 
+VS$UNIT:MOVF	R6,VSSCF		; preserve new scale
+	MULF3	VSBSTR,R6,VSTR		; derive VSTR = BASETR * VSSCF
+	MOVAB	VSRDOX,R10		; adjust user origin to new units
+	MOVF	(R10)+,R7
+	MOVF	(R10)+,R9
+	BRB	VSSETUO
+ 
+ 
+ 
+; VSCOL(N)	Colour Selection Change
+; 		colour range (N) is 0 -> 15
+ 
+.ENTRY	VSCOL,^M<R6>
+	MOVZWL	@4(AP),R6
+	BSBB	VS$COL
+	RET
+ 
+VS$COL:	BICL2	#MASK4,R6		; mask into range
+	ASHL	#CSPOS,R6,R6		; move into position
+	CMPL	VSCOLR,R6		; really changed ?
+	BEQL	20$			; no, so do nothing
+	MOVL	R6,VSCOLR
+	BISL2	#VFLG_M_SETCOL,VSFLAG	; mark colour changed
+	CLRW	VSMOD			; force o/p of new set mode
+20$:	RSB
+ 
+ 
+ 
+; VSCLR(N)  	Clear Image Memory
+; 		N=1,2,3		( 3 => both)
+ 
+.ENTRY	VSCLR,^M<R4,R5,R6,R8,R9>
+	MOVZWL	@4(AP),R6
+	BSBB	VS$CLR
+	RET
+ 
+VS$CLR:	BICL2	#MASK2,R6		; mask to 2 bits
+	BEQL	30$			; check some operation specified
+	CLRL	R1			; don't update stored Status Reg C's
+	MOVL	#WPOS,R0		; change write enable bit
+	BSBW	$STCRW
+	MOVW	#L.A!CLEAR,R4		; load Status Reg A to clear
+	JSB	$VSCBFW			;    write-enabled image memories
+	CMPW	VSSTC1,R8		; restore to previous status if nec.
+	BEQL	10$
+	MOVW	VSSTC1,R4
+	JSB	$VSCBFW
+10$:	CMPW	VSSTC2,R9
+	BEQL	20$
+	MOVW	VSSTC2,R4
+	JSB	$VSCBFW
+20$:	JSB	$VFLUSH			; flush out main display file
+	BISL2	#VFLG_M_FRCABS,VSFLAG	; force to absolute just in case
+30$:	RSB
+ 
+ 
+ 
+; VSPIC(N)	defines the image memory to receive the pixel data
+;		N = 1,2  	illegal arguments default to 1 (& warning)
+ 
+.ENTRY	VSPIC,^M<R4,R5,R6,R8,R9>
+	MOVZWL	@4(AP),R6
+	BSBB	VS$PIC
+	RET
+ 
+VS$PIC:	BICL2	#MASK2,R6		; mask to 2 bits
+	CMPW	R6,#1			; check in range
+	BEQL	10$
+	CMPW	R6,#2
+	BEQL	10$
+	MOVL	#SS$_BADPARAM ,R0		; output warning message
+	XORL2	#^O6,R0			; reduce severity to warning
+	JSB	VSERRSIG
+	MOVL	#1,R6			; default to N=1
+10$:	MOVL	#WPOS,R0		; change write-enable bit
+	MOVL	R0,R1			; mark update stored Status Reg C's
+	BSBB	$STCRW
+	BISL2	#VFLG_M_FRCABS,VSFLAG	; force 1st pos. to be in abs. pt. mode
+	RSB
+ 
+ 
+; VSSEL(N)	selects which image memories are to be displayed
+;		N=0,1,2,3		( 0 => none, 3 => both)
+ 
+.ENTRY	VSSEL,^M<R4,R5,R6,R8,R9>
+	MOVZWL	@4(AP),R6
+	BSBB	VS$SEL
+	RET
+ 
+VS$SEL:	BICL2	#MASK2,R6		; mask to 2 bits
+	MOVL	#RPOS,R0		; change read-enable bits
+	MOVL	R0,R1			; update stored Status Reg Cs
+	BSBB	$STCRW
+	JSB	$VFLUSH			; flush it for immediate display
+	RSB
+ 
+ 
+; Sets or Clears the Read or Write enable bits for each image memory
+; according to the bitwise coding of R6
+; d0 of R6 refers to image memory 1 ( d0=1  => enable R/W bit
+;				      d0=0  => disable "   "   )
+; d1 of R6 refers to image memory 2
+;
+; R0 contains the position within the STC of the bit to be modified
+; R1 zero/nonzero => don't/do update the stored STCs
+ 
+$STCRW:	MOVZWL	VSSTC1,R8		; take copies of stored STC's
+	MOVZWL	VSSTC2,R9
+	INSV	R6,R0,#1,R8		; modify enable bit as spec by R6
+	ASHL	#-1,R6,R6
+	INSV	R6,R0,#1,R9
+	CMPW	VSSTC1,R8		; any actual mod. take place ?
+	BEQL	10$			; if no, branch
+	MOVW	R8,R4
+	JSB	$VSCBFW			; write new STC to display file
+10$:	CMPW	VSSTC2,R9		; similarly for image memory 2
+	BEQL	20$
+	MOVW	R9,R4
+	JSB	$VSCBFW
+20$:	TSTW	R1			; update stored STCs
+	BEQL	30$			; if eq, no
+	MOVW	R8,VSSTC1
+	MOVW	R9,VSSTC2
+30$:	RSB
+ 
+ 
+ 
+; VSGEN		flush out display file to the current image memory
+ 
+.ENTRY	VSGEN,^M<R4,R5>
+	JSB	$VFLUSH			; flush the buffer
+	RET
+ 
+ 
+ 
+; VSINIT(SW)	initialise display
+;
+; SW coded bitwise
+; d0 = 0 => complete drawing, disable, detach display
+;    = 1 => attach, enable display, decode other bits
+; d1 = 1 => clear both image memories
+; d2 = 1 => set default scale and origin
+; ( d0 = 1 also does a VSSEL(3) and VSPIC(1) )
+ 
+ 
+.ENTRY	VSINIT,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVW	@4(AP),R6
+	BLBS	R6,1$
+	BRW	VSOFF			; if d0=0 - switch off
+1$:	MOVW	R6,-(SP)
+	TSTB	VSENBL			; VS11 already on ?
+	BNEQ	VSONOK			; if ne, yes
+ 
+; translate logical name for device and assign a channel to it
+	$TRNLOG_S	LOGNAM=VSDESC,-
+			RSLLEN=VSEQVLEN,-
+			RSLBUF=VSEQVDSC
+	CMPW	R0,#SS$_NORMAL
+	BEQL	5$
+	JSB	VSERRSIG		; signal any errors
+5$:	$ASSIGN_S	DEVNAM=VSEQVDSC,-
+			CHAN=VO.CHAN
+	CMPW	R0,#SS$_NORMAL
+	BEQL	10$
+	JSB	VSERRSIG		; signal any errors
+ 
+10$:	MOVW	VO.CHAN,VI.CHAN		; same channel for i/p and o/p
+	DECB	VSENBL			; VS11 now thought to be on
+ 
+VSONOK:	BBC	#1,(SP),20$
+	MOVL	#3,R6
+	BSBW	VS$CLR			; clear both image memories
+20$:	BBC	#2,(SP)+,30$
+	MOVF	#^F1.0,R6
+	BSBW	VS$UNIT			; set default scale
+	CLRF	R7
+	CLRF	R9
+	BSBW	VS$ORIG			; set default origin
+30$:	MOVL	#3,R6
+	BSBW	VS$SEL			; display both image memories
+	MOVL	#1,R6
+	BSBW	VS$PIC			; picture for image memory 1
+	MOVL	#15,R6
+	BSBW	VS$COL			; set default colour (white!)
+	MOVZWL	VSJST,R4		; default cursor to off
+	JSB	$VSCBFW			; output by flush in VSCSWT
+	CLRF	R7
+	CLRF	R9
+	JSB	VS$CSWT			; default cursor position to origin
+	RET
+ 
+; to switch VS11 off
+VSOFF:	TSTB	VSENBL			; already off ?
+	BEQL	VSOFFOK			; yes
+	JSB	$VFLUSH			; flush out last
+	CLRB	VSENBL			; display off
+ 
+VSOFFOK:$DASSGN_S	CHAN=VO.CHAN	; deassign channel
+	RET
+	
+	.END
+ 

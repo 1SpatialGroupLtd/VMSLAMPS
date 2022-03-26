@@ -1,0 +1,374 @@
+
+	LOGICAL FUNCTION EXPRESSION()
+C
+***	MODULE	EXPRESSION
+***	IDENT	11AP91
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+CMOD	Fixed bug refered to by SPR 379			ACM	13-Mar-1989
+CMOD	added MAX,MIN,logical and bitwise operators	SG	8-apr-1991
+CMOD	FIXED possible bug  in Bracket detection	SG	9-apr-1991
+CMOD	fixed bug in max/min				SG	10-apr-1991
+CMOD	fixed bug in nesting of brackets,block markers	SG	10-apr-1991
+CMOD	made LNOT and BNOT uranary operators		SG	11-apr-1991
+C Reads an expression in the current decoding buffer and puts
+C in EXPRSN tokens for the content of the expression in arithmetic
+C form. Constants are placed in ARGVAL and variables (A thru H)
+C are placed in ARGMAP. Great care is exercised to recognise function
+C names and to flag these as unary operators. Once the expression has
+C been analysed for argument and function content, it is passed to
+C PARSE to convert it into its reverse polish form. 
+C
+C Returns .TRUE. if succeeds.
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNDTICOMBINE:XPRPAR.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNDTICOMBINE:CONTROL.CMN'
+	INCLUDE 'LSL$CMNDTICOMBINE:XPRCMN.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:EXCEPTION.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C
+C Functions 
+	LOGICAL		RDCH,RDCHS,RDREAL
+	INTEGER		PARSE		! generates reverse polish
+	INTEGER		RDCOMM
+	EXTERNAL	FUNC_CMD_TABLE	! function command table
+C
+C Workspace
+	BYTE	CH,CHX		! characters read
+	REAL	RNUM		! real constant from expression
+	INTEGER	MAXOP		! number of operators
+	INTEGER	MAXFUN		! number of functions
+	INTEGER TOTOP		! total number of operators
+	INTEGER MAXNEST		! levels of nesting of brackets
+	INTEGER NESTPTR		! pointer to stack of bracket tokens
+
+	PARAMETER (MAXFUN = IFTHEN - UNA)
+	PARAMETER (MAXOP = EXP - PLS)
+	PARAMETER (TOTOP = UNA+MAXFUN)
+	PARAMETER (MAXNEST = 7)	!7 levels of nesting should be enuf
+
+	BYTE	NEST(MAXNEST)	! stack of open bracket types
+	BYTE	OPCHAR(MAXOP)	! operator symbols
+	DATA	OPCHAR/'+','-','*','/','^','|','&'/
+
+	INTEGER	OP,WASOP		! current operator
+	INTEGER	I
+	INTEGER	IERR	
+	INTEGER*2	SAVDP
+	LOGICAL*1	EOL
+	LOGICAL*1	ERR
+C
+C ......................................................................
+C
+CCC 	EXPRESSION = .FALSE.		! assume failure
+C
+C Initialise evaluation routine arrays
+	DO 10 I = 1,MAXARGS
+	   ARGLST(I) = 0
+	   ARGMAP(I) = 0
+10	CONTINUE
+	NOMESS = .TRUE.		! disable CMDLIB messages
+	ARGNUM = 1
+	EXPRLN = 1
+	EOL = .FALSE.		! not had end of line
+	NESTPTR = 0		! pointer to levels of nesting
+C
+C Make a copy of the expression just in case we succeed!
+	CALL COPY_STRING(TXTDSC,EXPSTR)
+	CALL STR$UPCASE(EXPSTR,EXPSTR)
+C
+C ......................................................................
+C 	D E C O D E   L H S  O F   E X P R E S S I O N
+C
+	IF (RDCHS(CH)) THEN
+	   CALL WRITEF(ERROR//'Unexpected end of expression')
+	   GOTO 160
+	ENDIF
+	IF (CH.NE.'=') THEN
+	   CALL WRITEF(ERROR//'equals sign is missing')
+	   GOTO 160
+	ENDIF
+C
+C ......................................................................
+C 	D E C O D E   R H S  O F   E X P R E S S I O N
+C
+20	OP = 0			! no operator yet
+C
+C now looking for opening (, a number, or a unary +-~
+30	IF (RDCHS(CH)) THEN
+	   CALL WRITEF(ERROR//'Unexpected end of expression')
+	   GOTO 160
+	ENDIF
+C
+C Is it a (. If so then count it and repeat.
+	IF (CH.EQ.'(') THEN
+	   IF (EXPRLN.EQ.MAXCHRS) THEN
+		CALL WRITEF(ERROR//'expression is too complex')
+		GOTO 160
+	    ELSE IF (NESTPTR.GE.MAXNEST) THEN
+		CALL WRITEF(ERROR//'too many levels of nesting')
+		GOTO 160
+	    ELSE
+		EXPRSN(EXPRLN) = LBR
+		EXPRLN = EXPRLN+1
+		NESTPTR = NESTPTR+1
+		NEST(NESTPTR) = LBR
+	    ENDIF
+	   GOTO 30
+	ENDIF
+C
+C Try for a number instead. If succeeds then off to get operator.
+	CALL BSCH
+	ERRNUM = LSL__NORMAL			! clear CMDLIB error
+	CALL DCPSAV(SAVDP)
+C
+C Prevent RDREAL from seeing any / characters
+	I = 0
+40	IF (RDCH(CHX)) GOTO 50
+	I = I+1
+	IF (CHX.NE.'/') GOTO 40
+	I = I-1
+50	CALL SETWIN(SAVDP,I)
+	ERR = RDREAL(RNUM)
+	CALL SETWIN(,)
+	IF (.NOT.ERR) THEN
+	   ARGLST(ARGNUM) = RNUM
+	   IF (ARGNUM+1.GT.MAXARGS) THEN
+	      CALL WRITEF(ERROR//'too many operands in expression')
+	      GOTO 160
+	   ELSE
+	      ARGNUM = ARGNUM+1
+	      EXPRSN(EXPRLN) = NUM	! NUM is the number token
+	      IF (EXPRLN+1.GT.MAXCHRS) THEN
+	         CALL WRITEF(ERROR//'expression is too complex')
+	         GOTO 160
+	      ELSE
+	         EXPRLN = EXPRLN+1
+	      ENDIF
+	      GOTO 60
+	   ENDIF
+	ENDIF
+C
+C failed as a number, was it a unary + or -
+	CALL DCPSET(SAVDP+1)		! set pointer after char
+	IF (CH.EQ.'+') GOTO 30		! just ignore +
+	IF ((CH.EQ.'-').OR.(CH.EQ.'~')) THEN
+	   IF (EXPRLN+1.GT.MAXCHRS) THEN
+	      CALL WRITEF(ERROR//'expression is too complex')
+	      GOTO 160
+	   ENDIF
+	   IF (CH.EQ.'~') THEN		! character for LNOT found
+	      OP = LNOT
+	      IF (RDCHS(CHX)) THEN	! read next character
+	         CALL WRITEF(ERROR//'Unexpected end of expression')
+	         GOTO 160
+	      ELSE IF(CHX.EQ.'~') THEN	! if another ~ found
+ 		 OP = BNOT		! bitwise NOT
+	      ELSE
+	         CALL BSCH		! otherwise ungetch
+	      ENDIF
+	   ELSE
+	      OP = UNA			! 
+	   ENDIF
+	   EXPRSN(EXPRLN) = OP
+	   EXPRLN = EXPRLN+1
+	   GOTO 20
+	 ENDIF
+C
+C If number reading failed because of an unexpected character, then
+C try for a function or variable name
+	IF (ERRNUM.EQ.LSL__NONUM) THEN
+	   CALL BSCH
+	   OP = RDCOMM(FUNC_CMD_TABLE)
+	   IF (OP.LE.0) THEN
+	      CALL WRITEF(ERROR//
+     &		'parsing function or variable in expression')
+	      GOTO 160
+	   ENDIF
+	   OP = OP + UNA		! offset past operators
+	   IF (OP.GT.TOTOP) THEN	! variable?
+	      OP = OP-TOTOP
+	      EXPRSN(EXPRLN) = NUM		! number token
+	      IF (EXPRLN+1.GT.MAXCHRS) THEN
+	         CALL WRITEF(ERROR//'expression is too complex')
+	         GOTO 160
+	      ELSE
+	         EXPRLN = EXPRLN+1
+	      ENDIF
+	      ARGMAP(ARGNUM) = OP		! store as DTI lun
+	      OP = 0			! operand not genuine operator
+	      IF (ARGNUM+1.GT.MAXARGS) THEN
+	         CALL WRITEF(ERROR//'too many operands in expression')
+	         GOTO 160
+	      ELSE
+	         ARGNUM = ARGNUM+1
+	      ENDIF
+	      GOTO 60			! treat as a real constant
+C
+C ---------------- modification for MAX and MIN and IFTHEN------------
+C
+	   ELSE IF ((OP.GE.MAX).AND.(OP.LE.IFTHEN)) THEN
+	      IF (RDCHS(CH)) THEN
+		CALL WRITEF(ERROR//'Unexpected End of expression')
+		GOTO 160
+	      ELSE
+		IF (CH.NE.'(') THEN
+		   CALL WRITEF(ERROR//'expected bracket not found')
+		   GOTO 160
+		ELSE
+		  IF ((EXPRLN+2).GT.MAXCHRS) THEN
+		     CALL WRITEF(ERROR//'expression is too complex')
+		     GOTO 160
+		  ELSE IF (NESTPTR.GE.MAXNEST) THEN
+		     CALL WRITEF(ERROR//'too many levels of nesting')
+		     GOTO 160
+		  ELSE
+		     EXPRSN(EXPRLN) = OP	! push opcode
+		     EXPRSN(EXPRLN +1) = STAB	! push block start
+		     EXPRLN = EXPRLN +2		! move stack pointer
+		     NESTPTR = NESTPTR + 1	! keep track of nesting
+		     NEST(NESTPTR) = STAB	! put STAB on nest stack
+		     GOTO 30			! do what ( does
+		  ENDIF
+		ENDIF
+	      ENDIF
+C
+C ----------------------end of modification------------------------------
+C
+	   ELSE					!else a function
+	     EXPRSN(EXPRLN) = OP
+	     IF (EXPRLN+1.GT.MAXCHRS) THEN
+		CALL WRITEF(ERROR//'expression is too complex')
+		GOTO 160
+	     ELSE
+		EXPRLN = EXPRLN+1
+	     ENDIF
+	     GOTO 20
+	   ENDIF
+	ENDIF
+C
+C total rubbish
+	IF (ERRNUM.NE.LSL__HADEXCP) THEN
+	   CALL WRITEF(ERROR//'reading number in expression')
+	ELSE
+	   CALL LSL_PUTMSG(LSL_EXCP)	! exception in number
+	ENDIF
+	GOTO 160
+C
+C now looking for an operator, or )
+60	IF (.NOT.RDCHS(CH)) THEN
+	   GOTO 80
+	END IF
+	EOL = .TRUE.			! had end of line
+	GOTO 150			! finished
+C
+C here to process )
+C ------------------------modification--------------------------
+80	IF (CH.EQ.')') THEN
+90 	  IF (NESTPTR.LE.0) THEN
+	    CALL WRITEF(ERROR//'mismatched bracket')
+	    GOTO 160
+	  ELSE
+	    IF (NEST(NESTPTR).EQ.LBR) THEN
+		OP = RBR
+	    ELSE
+		OP = ENDB
+	    ENDIF
+	    NESTPTR = NESTPTR -1		!one less level of nesting
+	  ENDIF
+	  IF (EXPRLN+1.GT.MAXCHRS) THEN
+	     CALL WRITEF(ERROR//'expression is too complex')
+	     GOTO 160
+	  ELSE
+	     EXPRSN(EXPRLN) = OP
+	     EXPRLN = EXPRLN+1
+	  ENDIF
+	  GOTO 60
+	ENDIF
+C ---------------------------------------------------------------
+C have we got an operator?
+	IF (CH.EQ.',') GOTO 120			!IF COMMA FOUND
+	DO 110 OP = 1,MAXOP	
+	   IF ( CH.EQ.OPCHAR(OP) ) GOTO 120
+110	CONTINUE
+	CALL WRITEF(ERROR//'unexpected symbol found in expression')
+	GOTO 160
+C
+C must have an operator now, 
+C check it isn't an operator with repeating symbols
+C
+120	IF ((OP.EQ.TMS).OR.((OP.GE.LXOR).AND.(OP.LE.LAND))) THEN
+	   IF (RDCHS(CHX)) THEN	! read next character
+	      CALL WRITEF(ERROR//'Unexpected end of expression')
+	      GOTO 160
+	   ELSE IF (CHX.EQ.CH) THEN
+	      IF (OP.EQ.TMS) THEN
+	   	OP = EXP
+	      ELSE IF (OP.EQ.LOR) THEN
+	   	OP = BOR
+	      ELSE IF (OP.EQ.LAND) THEN
+	   	OP = BAND
+	      ELSE IF (OP.EQ.LXOR) THEN
+	   	OP = BXOR
+	      ENDIF
+	   ELSE
+	       CALL BSCH
+	   ENDIF
+C     ----------------- modification TO DEAL WITH COMMA----------------
+	ELSE IF (CH.EQ.',') THEN
+	  IF ((NESTPTR.LE.0).OR.(NEST(NESTPTR).NE.STAB)) THEN
+	    CALL WRITEF(ERROR//'Unexpected comma in expression')
+	    GOTO 160
+	  ELSE
+	    OP = CMA
+	  ENDIF
+	ENDIF
+
+	IF (EXPRLN.GE.MAXCHRS) THEN
+	   CALL WRITEF(ERROR//'expression is too complex')
+	   GOTO 160
+	ELSE
+	   EXPRSN(EXPRLN) = OP		! store operator token
+	   EXPRLN = EXPRLN+1
+	   IF ((OP.EQ.LNOT).OR.(OP.EQ.BNOT)) GOTO 20
+	ENDIF
+C
+C If we haven't got an operator, then must be doing ) or end of line
+130	IF (OP.EQ.0) THEN		! no operator
+	   IF (EOL) THEN
+	      GOTO 150			! process end of line
+	   ELSE
+	      GOTO 90			! continue to process )
+	   ENDIF
+	ENDIF
+C
+C We have got an operator, so back to check it out
+	GOTO 20
+C
+C Finished - convert expression into reverse polish notation
+150	IERR = PARSE(EXPRSN,EXPRLN)
+	ARGNUM = ARGNUM-1
+	IF (IERR.GE.0) THEN
+	   CALL EXPAND(ERROR//'in expression')
+	   IF (IERR.EQ.1) THEN
+	      CALL WRITAP(' - bracket mismatch')
+	   ELSEIF (IERR.GT.1) THEN
+	      CALL WRITAP(' - invalid syntax')
+	   ENDIF
+	ELSE
+	   EXPRESSION = .TRUE.
+	ENDIF
+C
+160	NOMESS = .FALSE.
+	RETURN
+	END

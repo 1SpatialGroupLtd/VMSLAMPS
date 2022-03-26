@@ -1,0 +1,301 @@
+	LOGICAL FUNCTION COPY_INPUT
+C
+***	IDENT	15MR91
+***	MODULE	COPY_INPUT
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RJH	04-Sep-1986
+C
+CMOD	Add ZS reading				 JB	14-Mar-1991
+C
+C	OS RELHT Program - Copy data from input file to output file
+C
+C Description
+C
+C	Copies all data from the input file into the output file, 
+C	ignoring the junction structure, and creating AC entries to 
+C	represent the relative heights of the start and end of each 
+C	link. At the same time, lists are made of pointers to :-
+C
+C		a) all FS entries in the input file, and
+C		b) all AC entries in the output file
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+C
+***	PARAMETER/HERE:LUN/		! logical unit numbers
+***	PARAMETER/HERE:RELHTMSG/	! message definitions
+C
+C Local Parameters
+C
+	INTEGER*4	MAX_SHARED	! maximum no. of shared FC's
+	PARAMETER	(MAX_SHARED = 10)
+	INTEGER*4	AC_RELHT_START	! AC type for height at start
+	PARAMETER	(AC_RELHT_START= 10)
+	INTEGER*4	AC_RELHT_END	! AC type for height at end
+	PARAMETER	(AC_RELHT_END= 11)
+C
+C Common Blocks
+C
+***	COMMON/HERE:CONTROL/		! control variables
+***	COMMON/HERE:POINTERS/		! pointers into IFF files
+***	COMMON/HERE:PRIO_TABLE/		! feature code priority table
+***	COMMON/LSL$CMNIFF:IFFHAN/	! current position in IFF file
+***	COMMON/LSL$CMNIFF:MD2DES/	! Type 2 map descriptor
+C
+C Local Variables
+C
+	INTEGER*4	SHARED_FC(MAX_SHARED)	! shared feature code
+	INTEGER*4	SHARED_PRIO(MAX_SHARED)	! shared feat. prio.'s
+	INTEGER*4	AC1_COUNT	! no. of AC type 1's in feature
+	INTEGER*4	THIS_AC		! current AC
+	INTEGER*4	CONFLICT	! no. of priority conflicts
+	INTEGER*4	NOPOSN		! position of NO
+	INTEGER*2 	IECODE		! IFF entry code 
+	INTEGER*2 	IELEN		! IFF entry length
+	INTEGER*2 	FSN		! feature serial number
+	INTEGER*2 	ISQ		! internal sequence number
+	INTEGER*2 	OVNUM(2)	! NO entry values
+	INTEGER*2	AC_TYPE		! AC type
+	LOGICAL		IN_FEAT		! in feature ?
+	LOGICAL		HAD_FS		! had FS entry ?
+	LOGICAL		HAD_ST		! had ST entry ?
+	LOGICAL		HAD_ZS		! had ZS entry ?
+	LOGICAL		HAD_EJ		! had EJ entry ?
+	LOGICAL		ADD_AC		! output height AC's yet ?
+	LOGICAL		ALL_COPIED	! copying successful ?
+C
+C Initialisation
+C
+	LIST_TOP = 0
+	IN_FEAT = .FALSE.
+	HAD_EJ = .FALSE.
+	ALL_COPIED = .TRUE.
+C
+C Select the the input file 
+C
+	CALL IFFSEL(IN_LUN)
+	IF (HAD_LOG) CALL LSL_PUTMSG(RELHT__COPYING)
+C
+C Read the next entry
+C
+100	CALL IFFNXT(IECODE,IELEN)
+C
+C Check for end of file
+C
+	IF (IELEN.EQ.-1) THEN
+	   CALL LSL_PUTMSG(RELHT__UNEXPEOI)
+	   GO TO 900
+	ENDIF
+C
+C Ignore junction entries
+C
+	IF (IECODE.EQ.'JP') GOTO 100
+	IF (IECODE.EQ.'JB') GOTO 100
+	IF (IECODE.EQ.'SH') GOTO 100
+C
+C Deal with NF/EF and NO/EO entries explicitely
+C
+	IF (IECODE.EQ.'NF') GOTO 110
+	IF (IECODE.EQ.'EF') GOTO 120
+	IF (IECODE.EQ.'NO') GOTO 130
+	IF (IECODE.EQ.'EO') GOTO 140
+C
+C Before copying the first ST or TH (i.e. after any existing AC's have 
+C been copied over), output 2 AC's with zero height priority for now
+C
+	IF ( (IECODE.EQ.'TH'.OR.IECODE.EQ.'ST'.OR.IECODE.EQ.'ZS') 
+     &					.AND. .NOT. ADD_AC) THEN
+	   CALL IFFSEL(OUT_LUN)
+	   AC_LIST(FIRST,LIST_TOP) = LPOSE	! pointer to first AC
+	   CALL IFFAC(AC_RELHT_START,0)
+	   AC_LIST(LAST,LIST_TOP) = LPOSE	! pointer to second AC
+	   CALL IFFAC(AC_RELHT_END,0)
+	   CALL IFFSEL(IN_LUN)
+	   ADD_AC = .TRUE.
+	ENDIF
+C
+C Copy anything else to the output file
+C
+	CALL EIHCPY(OUT_LUN)
+C
+C Do some more for the following entries
+C
+	IF (IECODE.EQ.'MD') GOTO 145
+	IF (IECODE.EQ.'FS') GOTO 150
+	IF (IECODE.EQ.'AC') GOTO 155
+	IF (IECODE.EQ.'ST') GOTO 160
+	IF (IECODE.EQ.'ZS') GOTO 161
+	IF (IECODE.EQ.'EJ') GOTO 170
+C
+C Branch back for next entry
+C
+	GOTO 100
+C
+C --------------------------------------------------------------------
+C NF - initialise for the new feature.
+C
+110	IN_FEAT = .TRUE.
+	HAD_FS = .FALSE.
+	HAD_ST = .FALSE.
+	HAD_ZS = .FALSE.
+	AC1_COUNT = 0
+	ADD_AC = .FALSE.
+C
+C Read the details and create the output file entry
+C
+	CALL EIHRI(FSN,1,1)
+	CALL EIHRI(ISQ,1,2)
+	CALL IFFSEL(OUT_LUN)
+	CALL IFFNF(FSN,ISQ)
+	CALL IFFSEL(IN_LUN)
+C
+C Check for too many features
+C
+	IF (LIST_TOP .GE. MAXFEA) THEN
+	   CALL LSL_PUTMSG(RELHT__TOOMANYFEAT,MAXFEA)
+	   GOTO 900
+	ENDIF
+C
+	GOTO 100
+C
+C --------------------------------------------------------------------
+C EF - if feature wasn't empty, create the EF entry.
+C
+120	CALL IFFSEL(OUT_LUN)
+	IF ( (HAD_ST.OR.HAD_ZS) .AND. HAD_FS) THEN
+	   CALL IFFEF
+C
+C If it is a shared feature, we have to check that the height 
+C priorities do not conflict - we can only have one feature with a 
+C priority greater than zero. If there are more, then we note that this 
+C feature is in doubt. The feature code is that for the first in the 
+C list if all priorities are zero; otherwise it is the first in the 
+C list with a non-zero priority.
+C
+	   IF (AC1_COUNT .GE. 2) THEN
+	      ALL_FC(LIST_TOP) = SHARED_FC(1)
+	      CONFLICT = 0
+	      DO 122 THIS_AC=1,AC1_COUNT
+	         IF (SHARED_PRIO(THIS_AC) .NE. 0) THEN
+	            CONFLICT = CONFLICT + 1
+	            IF (CONFLICT .EQ. 1) THEN
+	               ALL_FC(LIST_TOP) = SHARED_FC(THIS_AC)
+	            ENDIF
+	         ENDIF
+122	      CONTINUE
+	      IF (CONFLICT .GT. 1) ALL_DOUBT(LIST_TOP) = .TRUE.
+	   ENDIF
+C
+C Warn them and delete the feature if it was empty
+C
+	ELSE
+	   CALL LSL_PUTMSG(RELHT__FEATINCOMP,FSN)
+	   CALL IFFDEL
+	   IF (HAD_ST .OR. HAD_ZS) LIST_TOP = LIST_TOP - 1
+	ENDIF
+C
+C Reselect input file and go back for more
+C
+	CALL IFFSEL(IN_LUN)
+	IN_FEAT = .FALSE.
+C
+	GOTO 100
+C
+C --------------------------------------------------------------------
+C NO - save a pointer and create the entry
+C
+130	CALL EIHRI(OVNUM(1),2,1)
+	IF (HAD_LOG) CALL LSL_PUTMSG(RELHT__NEWLAYER,OVNUM(1))
+	CALL IFFSEL(OUT_LUN)
+	NOPOSN = LPOSE
+	CALL IFFNO(OVNUM(1),OVNUM(2),0)
+	CALL IFFSEL(IN_LUN)
+C
+	GOTO 100
+C
+C --------------------------------------------------------------------
+C EO - update the NO and create the EO
+C
+140	CALL IFFSEL(OUT_LUN)
+	CALL IFFUNO(NOPOSN)
+	CALL IFFEO
+	CALL IFFSEL(IN_LUN)
+C
+	GOTO 100
+C
+C --------------------------------------------------------------------
+C MD - read it in
+C
+145	CALL EIHR(MD2ARR,MIN(MD2LEN,IELEN),1)
+C
+	GOTO 100
+C
+C --------------------------------------------------------------------
+C FS - read the FC and save a pointer to the entry
+C
+150	LIST_TOP = LIST_TOP + 1
+	CALL EIHRI(ALL_FC(LIST_TOP),1,1)! feature code
+	FS_LIST(LIST_TOP) = LPOSH	! pointer to FS
+	FS_LIST(LIST_TOP+1) = LPOSE	! bounding value for list
+	HAD_FS = .TRUE.
+C
+	GOTO 100
+C
+C --------------------------------------------------------------------
+C AC - for type 1 AC's, note the FC and priority
+C
+155	CALL EIHRI(AC_TYPE,1,1)
+	IF (AC_TYPE .EQ. 1) THEN
+	   IF (AC1_COUNT .GE. MAX_SHARED) THEN
+	      CALL LSL_PUTMSG(RELHT__TOOMANYSHARED,MAX_SHARED)
+	   ELSE
+	      AC1_COUNT = AC1_COUNT + 1
+	      CALL EIHRL(SHARED_FC(AC1_COUNT),1,2)
+	      SHARED_PRIO(AC1_COUNT) = FC_PRIO(1,SHARED_FC(AC1_COUNT))
+	   ENDIF
+	ENDIF
+C
+	GO TO 100
+C
+C --------------------------------------------------------------------
+C ST - just set the flag
+C
+160	HAD_ST = .TRUE.
+	GOTO 100
+C
+C --------------------------------------------------------------------
+C ZS - just set the flag
+C
+161	HAD_ZS = .TRUE.
+	GOTO 100
+C
+C --------------------------------------------------------------------
+C EJ - assume end of file
+C
+170	HAD_EJ = .TRUE.
+C
+C Check that we are not in a feature
+C
+	IF (IN_FEAT) THEN
+	   CALL LSL_PUTMSG(RELHT__EOIINFEAT)
+	ELSE
+	   GOTO 999
+	ENDIF
+C
+C Warn that the output file is incomplete
+C
+900	CALL LSL_ADDMSG(RELHT__ABAOUTFIL)
+	ALL_COPIED = .FALSE.
+C
+C Assign function value
+C
+999	COPY_INPUT = ALL_COPIED
+C
+C Return
+C
+	RETURN
+	END
+C

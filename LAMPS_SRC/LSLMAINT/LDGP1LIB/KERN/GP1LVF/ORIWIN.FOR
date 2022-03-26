@@ -43,8 +43,9 @@ C... and get answer (3 times a coordinate pair)
 
       BUFF (6:6) = CHAR (0)
       BUFLEN     = 9
-      MAX_TIME   = 10
-
+cccc  MAX_TIME   = 10
+      MAX_TIME   = 200
+C...
       FUN_STATUS = SYS$QIOW (,%VAL(GP1_CHAN),
      +                  %VAL(FUN_QIO_R),
      +                  ISTS,,,

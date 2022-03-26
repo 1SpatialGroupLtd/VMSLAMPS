@@ -1,0 +1,180 @@
+	.TITLE	TTRTS
+	.IDENT	/01JL82/
+;
+; Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+;
+; Author M.C.Fulford
+;
+;	Created 20/ix/79
+;	Last edit - see .IDENT
+;
+;	Terminal routines for LIOLIB, using .MOLUN
+;
+;	Last edited				TJI	01-July-1982
+;	add TTATC				TJI	01-July-1982
+;	Write Logical Block substituted for write break-through
+;	  if Full Duplex Terminal (RSX 3.2)	~23-APR-1981
+;	Modification no. ?
+;	Error return argument for TTRLIN
+;				16/Oct/80	M.C.Fulford
+;
+
+; conditional assembly
+
+.IIF NDF LIOFDX LIOFDX=1	; by default select full duplex output
+;
+
+	.MCALL	QIO$S,WTSE$S,ASTX$S
+
+; COMMON blocks
+
+	.PSECT	TXTC	GBL,OVR,D
+DCPTR:	.WORD	0
+TXTPTR:	.WORD	0
+TXTLIM:	.WORD	80.
+TXTBUF:	.BLKB	80.
+
+	.PSECT	EXPC	GBL,OVR,D
+EXPLEN:	.WORD	0
+EXPVFC:	.WORD	40
+EXPBUF:	.BLKB	80.
+
+	.PSECT
+;
+;	Routines supplied in this module are:
+;
+;	TTRLIN				read line from terminal
+;
+;	TTWLIN				write line to terminal
+;
+;	TTATT				attach terminal
+;
+;	TTDET				detach terminal
+;
+;	TTATC( ASTroutine )		attach terminal, set up AST
+;					for control-C
+;
+
+TTRLIN::MOV  #TXTBUF,R1			; set default arguments
+	MOV  #TXTPTR,R2
+	MOV  #TXTLIM,R3
+	MOV  #-1, R4
+	CALL LI$ARG			; fetch real arguments
+	MOV	R2,-(SP)		; R2,R3 were backwards!!!!
+	MOV  @R3,R2			; buffer size
+	DEC  R2
+	MOV	(SP)+,R3		; this is address of byte count
+	JSR  R5, LI$QIO			; read the line
+	  .WORD  IO.RLB
+	MOV  LI.BCT, @R3		; return length
+	ADD  LI.BCT, R1
+	CLRB @R1			; add terminating null
+	CMP  R4, #-1			; 4th arg given ?
+	BEQ  20$			; j if not
+	MOVB R0,R0			; extend the sign
+	MOV  R0, @R4			; return the error code
+20$:	RETURN
+
+WRTEXP::CLR  R5 
+TTWLIN::MOV  #EXPBUF, R1
+	MOV  #-1,     R2
+	MOV  #EXPVFC, R3
+	CALL LI$ARG
+	CMP  R2, #-1			; length given ?
+	BEQ  4$				; j if not
+	MOV  @R2, R2			; get the value
+	BR   10$			; go and use it
+;
+4$:	ADD  R1, R2			; compute length ourselves
+5$:	INC  R2
+	TSTB 1(R2)
+	BNE  5$
+	SUB  R1,R2
+	INC  R2
+10$:	MOVB @R3, R3			; vertical format character
+	MOV  #-1, R4
+	JSR  R5, LI$QIO
+	.IF NE LIOFDX
+	  .WORD  IO.WLB		; full duplex uses WLB
+	.IFF
+	  .WORD  IO.WBT		; half duplex uses WBT
+	.ENDC
+	MOV  #40, EXPVFC		; reset default format
+	RETURN
+
+TTATT:: MOV  #-1, R4
+	JSR  R5, LI$QIO
+	  .WORD  IO.ATT
+	RETURN
+
+TTDET:: MOV  #-1, R4
+	JSR  R5, LI$QIO
+	  .WORD  IO.DET
+	RETURN
+
+;
+; call TTATC( ASTroutine )
+;
+; AST routine must be EXTERNAL in the Fortran code.
+; it must be a macro subroutine, ending with the sequence:
+;
+;	TST	(SP)+		; remove top word of stack
+;	ASTX$S			; AST exit (may have an error routine
+;				; address as arg to ASTX$S)
+;
+
+TTATC:: MOV	#-1, R4		; no error arg provided
+	CALL	LI$ARG		; get control-C AST routine
+	MOV	R1, R3		; put the address in the right place
+	CLR	R1		; and have no first parameter
+	JSR	R5, LI$QIO
+	  .WORD  IO.ATA		; attach with AST
+	RETURN
+
+; routine to fetch argument addresses into registers
+
+LI$ARG::MOVB @R5, R0
+	BLE  20$
+	CMP  2(R5), #-1
+	BEQ  5$
+	MOV  2(R5), R1
+5$:	DEC  R0
+	BLE  20$
+	CMP  4(R5), #-1
+	BEQ  10$
+	MOV  4(R5), R2
+10$:	DEC  R0
+	BLE  20$
+	CMP  6(R5), #-1
+	BEQ  15$
+	MOV  6(R5), R3
+15$:	DEC  R0
+	BLE  20$
+	CMP  10(R5), #-1
+	BEQ  20$
+	MOV  10(R5), R4
+20$:	MOVB  @R5, R0
+	RETURN
+
+; routine to perform a QIO, picking up function after call
+
+LI$QIO:	QIO$S  (R5)+,.MOLUN,.MOLUN,,#LI$ISB,,<R1,R2,R3>
+	BCS  5$
+	WTSE$S  .MOLUN
+	BCS  5$
+	MOV  LI$ISB, R0
+	CMPB R0, #IS.SUC
+	BNE  10$
+	RTS  R5
+; errors
+5$:	MOV  $DSW, R0
+10$:	CMP  R4, #-1	; receptacle for error ?
+	BNE  20$	; j if there is, else break
+	BPT		; R0 word negative => DSW error, else I/O error
+20$:	RTS  R5
+
+LI$ISB:	.BYTE	0,0
+LI.BCT:	.WORD	0
+
+
+	.END

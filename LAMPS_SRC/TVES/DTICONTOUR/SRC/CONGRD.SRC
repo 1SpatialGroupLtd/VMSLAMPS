@@ -1,0 +1,490 @@
+	LOGICAL FUNCTION CONGRD(NDTM,BYTE_BUFF,WORD_BUFF,LONG_BUFF,
+     &					REAL_BUFF)
+C
+***	MODULE	CONGRD
+***	IDENT	10JA94
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD1318						JB  10-Jan-1994
+C	Do not use WORD_BUFF(JC) when this array has not been
+C	dynamically allocated, ie. not using a WORD DTI file.
+C
+CMOD1076						JB  08-Jan-1992
+C	Use DTILIB DTI_NULL_REAL and DTI_NULL_LONG to flag null
+C	values of -32767 in NDTM, as well as values of -32767(.0)
+C 	for all data types.
+C	Fix the errors in setting NDTM for real DTI's (introduced
+C	in the fix of contour siting), letting it go negative 
+C	prematurely, resulting in the loss of zero level contours.
+C	Fix the contouring at an interval of 1 with a zero level;
+C	it used to oscillate between +0.5 and -0.5 in R_MIN_HEIGHT.
+C
+CMOD948 Set correct positioning of contours wrt the pixels for real
+C	DTI values 					DRM 19-Dec 1990
+C
+C	NB INTEGER DTI contours still offset by half a pixel
+C
+CMOD782 Double precision variables introduced to eliminate spurious
+C	contour kinks arising from rounding errors	JB  03-Jul-1989
+C
+CMOD	NDTM now scaled from 1 to 32001 instead of 0 to 32000 so that
+C	flagging by setting negative actually works (-0 = 0!)
+C							JB  12-May-1989
+C
+CMOD	Projection units added to XOFF,YOFF		JB  27-May-1989
+CMOD	Takes care of -32767 null values and treats
+C	bytes as unsigned				TJH 29-Nov-1988
+CMOD577 Now calls IFF_HEADER after it has set up the
+C	origin offset!!!				TJH 06-Jun-1988
+C
+C	From old PANACEA's TIMPANI			TJH 03-NOV-1987
+C
+C Contour a grid obtained from a DTI file, outputting the results as an
+C IFF file. If too large to be eaten in one chunk CONGRD divides
+C the DTI file up into manageable pieces and passes these in NDTM to
+C ISOLIN for actual contouring.
+C
+C Function returns SS$_NORMAL if all is well
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 'LSL$CMNDTI:DTIPAR.PAR'
+	INCLUDE 'LSL$CMNDTICONTOUR:PARAMS.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C Common:
+	INCLUDE 'LSL$CMNDTICONTOUR:ANNOT.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:CONTR.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:FILES.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:IFCTRL.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:COMMAND.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:MAPARE.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:RCONVI.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:SMTCMN.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIPROJ.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+C Arguments:
+	INTEGER*2	NDTM(WIN_NUM_ROW,WIN_NUM_COL)
+	BYTE		BYTE_BUFF(WIN_NUM_ROW)
+	INTEGER*2 	WORD_BUFF(WIN_NUM_ROW)
+	INTEGER 	LONG_BUFF(WIN_NUM_ROW)
+	REAL		REAL_BUFF(WIN_NUM_ROW)
+C
+C W/s
+	INTEGER	 	IERR		! function error return
+	INTEGER		I,J,IC,JC	! temp vars.
+	INTEGER*4	DEGR		! degree part of latlong
+	INTEGER*4	MINU		! minute part of latlong
+	INTEGER*4	SECO		! seconds part of latlong
+	LOGICAL		NEGA		! neg latlong value
+	BYTE		BVAL		! signed byte
+	INTEGER*2	UNSIGNED_BVAL	! unsigned byte
+	EQUIVALENCE(UNSIGNED_BVAL,BVAL)	
+C
+C Functions:
+	LOGICAL	DTI_COPY_BYTE_DATA	! DTILIB routine
+	LOGICAL	DTI_COPY_WORD_DATA	! DTILIB routine
+	LOGICAL	DTI_COPY_LONG_DATA	! DTILIB routine
+	LOGICAL	DTI_COPY_REAL_DATA	! DTILIB routine
+	LOGICAL	IFF_FIN			! finish off IFF structure
+	LOGICAL	ISOLIN			! generate the contours
+	INTEGER	SIGCHS
+C .....................................................................
+C
+	CONGRD=SS$_NORMAL
+C
+C Write out window limits if required. 
+C
+	IF (HAD_DIAG) THEN
+	   CALL WRITEF
+	   CALL WRITEF('=====================  STARTING '//
+     &			'CONTOUR GENERATION  =====================')
+C
+	   GOTO (10,20,30,40,50), UNITS
+C ........................................................................
+C Matrix units
+C
+10	   CALL WRITEF
+	   CALL WRITEF ('Units are matrix rows and columns')
+	   CALL WRITEF
+	   CALL WRITEF 
+     &        ('Matrix Coverage   SW:     1     1  NE: %I5 %I5',
+     &                             X_EXTENT(DTILUN), Y_EXTENT(DTILUN))
+	   IF (DTI_WINDOW_NEX(DTILUN).GT.0 
+     &                              .AND. DTI_WINDOW_NEY(DTILUN).GT.0)
+     &	      CALL WRITEF ('Contouring window SW: %I5 %I5  NE: %I5 %I5',
+     &           DTI_WINDOW_SWX(DTILUN), DTI_WINDOW_SWY(DTILUN),
+     &           DTI_WINDOW_NEX(DTILUN), DTI_WINDOW_NEY(DTILUN))
+	   GOTO 60
+C.......................................................................
+C Metres
+C
+20	   CALL WRITEF
+	   CALL WRITEF ('Units are metres')
+	   CALL WRITEF
+C
+	   IF (ABSOLUTE) THEN
+	      XOFF = X_OFFSET(DTILUN)
+	      YOFF = Y_OFFSET(DTILUN)
+	   ELSE
+	      XOFF = 0.0
+	      YOFF = 0.0
+	   ENDIF
+C
+	   CALL WRITEF
+     &      ('Matrix Coverage   SW: %F10.2 %F10.2    NE: %F10.2 %F10.2',
+     &	        XOFF,YOFF, XOFF+((X_EXTENT(DTILUN)-1)*X_GRID(DTILUN)),
+     & 	                   YOFF+((Y_EXTENT(DTILUN)-1)*Y_GRID(DTILUN)))
+C
+	   IF (DTI_WINDOW_NEX(DTILUN).GT.0
+     &                              .AND. DTI_WINDOW_NEY(DTILUN).GT.0)
+     &	      CALL WRITEF
+     &	('Contouring window SW: %F10.2 %F10.2    NE: %F10.2 %F10.2',
+     &        XOFF+((DTI_WINDOW_SWX(DTILUN)-1)*X_GRID(DTILUN)),
+     &	      YOFF+((DTI_WINDOW_SWY(DTILUN)-1)*Y_GRID(DTILUN)),
+     &        XOFF+((DTI_WINDOW_NEX(DTILUN)-1)*X_GRID(DTILUN)),
+     &	      YOFF+((DTI_WINDOW_NEY(DTILUN)-1)*Y_GRID(DTILUN)))
+C
+	   GOTO 60
+C.......................................................................
+C Seconds
+C
+30	   CALL WRITEF
+	   CALL WRITEF ('Units are seconds')
+	   CALL WRITEF
+	   CALL WRITEF ('Matrix Origin       : %I10 %I10',
+     &        LATORI(DTILUN)/10, LONORI(DTILUN)/10)
+C
+	   CALL WRITEF
+     &	        ('Matrix Coverage   SW: %I10 %I10    NE: %I10 %I10',
+     &                      LATREC(1,DTILUN)/10,LONREC(1,DTILUN)/10,
+     &	                    LATREC(3,DTILUN)/10,LONREC(3,DTILUN)/10)
+C
+	   IF (DTI_WINDOW_NEX(DTILUN).GT.0
+     &                              .AND. DTI_WINDOW_NEY(DTILUN).GT.0)
+     &        CALL WRITEF
+     &	         ('Contouring window SW: %I10 %I10    NE: %I10 %I10',
+     & (LATREC(1,DTILUN)+(DTI_WINDOW_SWY(DTILUN)-1)*LATINT(DTILUN))/10,
+     & (LONREC(1,DTILUN)+(DTI_WINDOW_SWX(DTILUN)-1)*LONINT(DTILUN))/10,
+     & (LATREC(1,DTILUN)+(DTI_WINDOW_NEY(DTILUN)-1)*LATINT(DTILUN))/10,
+     & (LONREC(1,DTILUN)+(DTI_WINDOW_NEX(DTILUN)-1)*LONINT(DTILUN))/10) 
+C
+	   GOTO 60
+C.......................................................................
+C Deg, min, secs
+C
+40	   CALL WRITEF
+	   CALL WRITEF ('Units are degrees, minutes, seconds')
+	   CALL WRITEF
+C
+C  Convert values from tenths secs of arc
+C
+ 	   CALL DTI_CVTANG (LATORI(DTILUN),NEGA,DEGR,MINU,SECO)
+	   CALL EXPAND ('Matrix Origin       : ')
+	   CALL APPEND ('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	   IF(NEGA)THEN
+	      CALL APPEND('S  ')
+	   ELSE
+	      CALL APPEND('N  ')
+	   ENDIF
+C
+	   CALL DTI_CVTANG(LONORI(DTILUN),NEGA,DEGR,MINU,SECO)
+	   CALL APPEND('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	   IF(NEGA)THEN
+	      CALL APPEND('W  ')
+	   ELSE
+	      CALL APPEND('E  ')
+	   ENDIF
+	   CALL TTWSTR
+C
+	   CALL DTI_CVTANG(LATREC(1,DTILUN),NEGA,DEGR,MINU,SECO)
+	   CALL EXPAND('Matrix Coverage   SW: ')
+	   CALL APPEND('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	   IF(NEGA)THEN
+	      CALL APPEND('S  ')
+	   ELSE
+	      CALL APPEND('N  ')
+	   ENDIF
+C
+	   CALL DTI_CVTANG(LONREC(1,DTILUN),NEGA,DEGR,MINU,SECO)
+	   CALL APPEND('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	   IF(NEGA)THEN
+	      CALL APPEND('W  ')
+	   ELSE
+	      CALL APPEND('E  ')
+	   ENDIF
+C	  
+       	   CALL DTI_CVTANG(LATREC(3,DTILUN),NEGA,DEGR,MINU,SECO)
+	   CALL APPEND (' NE: ')
+	   CALL APPEND ('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	   IF (NEGA) THEN
+	      CALL APPEND('S  ')
+	   ELSE
+	      CALL APPEND('N  ')
+	   ENDIF
+C
+	   CALL DTI_CVTANG (LONREC(3,DTILUN),NEGA,DEGR,MINU,SECO)
+	   CALL APPEND ('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	   IF (NEGA) THEN
+	      CALL APPEND('W  ')
+	   ELSE
+	      CALL APPEND('E  ')
+	   ENDIF
+C
+	   CALL TTWSTR
+C
+	   IF (DTI_WINDOW_NEX(DTILUN).GT.0
+     &               .AND. DTI_WINDOW_NEY(DTILUN).GT.0) THEN
+	      CALL EXPAND ('Contouring window SW: ')
+	      CALL DTI_CVTANG (LATREC(1,DTILUN)+
+     &                 ((DTI_WINDOW_SWY(DTILUN)-1)*LATINT(DTILUN)),
+     &	               NEGA,DEGR,MINU,SECO)
+	      CALL APPEND ('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	      IF (NEGA) THEN
+	         CALL APPEND('S  ')
+	      ELSE
+	         CALL APPEND('N  ')
+	      ENDIF
+C
+	      CALL DTI_CVTANG (LONREC(1,DTILUN)+
+     &             ((DTI_WINDOW_SWX(DTILUN)-1)*LONINT(DTILUN)),
+     &	           NEGA,DEGR,MINU,SECO)
+	      CALL APPEND('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	      IF (NEGA) THEN
+	         CALL APPEND('W  ')
+	      ELSE
+	         CALL APPEND('E  ')
+	      ENDIF
+C	  
+	      CALL DTI_CVTANG (LATREC(1,DTILUN)
+     &             +((DTI_WINDOW_NEY(DTILUN)-1)*LATINT(DTILUN)),
+     &	             NEGA,DEGR,MINU,SECO)
+	      CALL APPEND (' NE: ')
+	      CALL APPEND ('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	      IF (NEGA) THEN
+	         CALL APPEND('S  ')
+	      ELSE
+	         CALL APPEND('N  ')
+	      ENDIF
+C
+	      CALL DTI_CVTANG (LONREC(1,DTILUN)
+     &           +((DTI_WINDOW_NEX(DTILUN)-1)*LONINT(DTILUN)),
+     &	           NEGA,DEGR,MINU,SECO)
+	      CALL APPEND ('%P %I3 %P0%I2 %P0%I2',DEGR,MINU,SECO)
+	      IF (NEGA) THEN
+	         CALL APPEND('W  ')
+	      ELSE
+	         CALL APPEND('E  ')
+	      ENDIF
+C
+	      CALL TTWSTR
+	   ENDIF
+C
+	   GOTO 60
+C.......................................................................
+C  Projection Units
+C
+50	   CALL WRITEF
+C
+C All spheroids known by GCTP are specified in International 
+C  metres. If user specified spheroid, then we talk about 
+C  projection units.
+C Also when dealing with Oblique Stereographic (UKSL format) 
+C  with user specified conformal earth's radius, then talk
+C  about projection units
+C
+	   IF (DTIPROJ_SPHEROID(DTILUN).EQ.101 .OR.
+     &	           (DTIPROJ_PROJECTION(DTILUN).EQ.22 .AND.
+     &             DTIPROJ_PROJ_PARAMS(4,DTILUN).GT.0.0) ) THEN
+	      UNITS_TEXT(5)='projection units'
+	   ELSE
+	      UNITS_TEXT(5)='metres'
+	   ENDIF
+C
+	   CALL WRITEF('Units are %S',
+     &	            UNITS_TEXT(UNITS)(1:SIGCHS(UNITS_TEXT(UNITS))))
+C
+	   IF (ABSOLUTE)THEN
+	      XOFF=DTIPROJ_ORIGIN(1,DTILUN)
+	      YOFF=DTIPROJ_ORIGIN(2,DTILUN)
+	   ELSE
+	      XOFF=0.0
+	      YOFF=0.0
+	   ENDIF
+C
+	   CALL WRITEF
+	   CALL WRITEF
+     &     ('Matrix Coverage   SW: %F10.2 %F10.2    NE: %F10.2 %F10.2',
+     &	     XOFF, YOFF, 
+     &          XOFF+((X_EXTENT(DTILUN)-1)*DTIPROJ_SAMPLE(1,DTILUN)),
+     &	        YOFF+((Y_EXTENT(DTILUN)-1)*DTIPROJ_SAMPLE(2,DTILUN)))
+C
+	   IF (DTI_WINDOW_NEX(DTILUN).GT.0
+     &                  .AND. DTI_WINDOW_NEY(DTILUN).GT.0) CALL WRITEF
+     &	    ('Contouring window SW: %F10.2 %F10.2    NE: %F10.2 %F10.2',
+     &       XOFF+((DTI_WINDOW_SWX(DTILUN)-1)*DTIPROJ_SAMPLE(1,DTILUN)),
+     &	     YOFF+((DTI_WINDOW_SWY(DTILUN)-1)*DTIPROJ_SAMPLE(2,DTILUN)),
+     &       XOFF+((DTI_WINDOW_NEX(DTILUN)-1)*DTIPROJ_SAMPLE(1,DTILUN)),
+     &	     YOFF+((DTI_WINDOW_NEY(DTILUN)-1)*DTIPROJ_SAMPLE(2,DTILUN)))
+C
+C ......................................................................
+C Tell user about ZLIMITS to contouring
+C
+60	   CALL WRITEF
+	   IF (ZSET) THEN
+	      CALL WRITEF 
+     &           ('ZLIMITS have been specified, only heights '//
+     &		 'between %F and %F', ZWINMIN, ZWINMAX)
+	      CALL WRITEF ('will be contoured')
+	   ELSE
+	      CALL WRITEF 
+     &           ('All heights between %F and %F will be contoured'
+     &					,ZMIN,ZMAX)
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C Diagnostics stuff finished
+C ......................................................................
+C Copy the data values from the selected x,y window (if specified) to
+C   the respective data buffers
+C
+	IF (DATA_TYPE(DTILUN).EQ.DATA_BYTE) THEN
+	   DO 80 IC = WIN_START_COL, WIN_STOP_COL
+	      CONGRD = DTI_COPY_BYTE_DATA(DTILUN, BYTE_BUFF,
+     &			.FALSE., IC, WIN_START_ROW, 1, WIN_NUM_ROW)
+	      IF (.NOT.CONGRD) THEN
+	         CALL LSL_PUTMSG(CONGRD)
+	         IF (.NOT.IERR) CALL LSL_ADDMSG(IERR)
+	         GOTO 160
+	      ENDIF
+C
+C and across to the integer array NDTM, scaled so that the full DTI 
+C  value range (unmultiplied by MFACTR etc) becomes 1 to 32001
+C
+	      DO 70 JC=1, WIN_NUM_ROW
+	         BVAL = BYTE_BUFF(JC)		! convert byte to unsigned
+	         NDTM ((WIN_NUM_ROW+1)-JC, IC-WIN_START_COL+1) = 1 +
+     &		   NINT(FLOAT(UNSIGNED_BVAL-MIN_WVALUE(DTILUN)) * ZSC)
+70	      CONTINUE
+C
+80	   CONTINUE
+C
+	ELSEIF (DATA_TYPE(DTILUN).EQ.DATA_WORD) THEN	   
+           DO 100 IC = WIN_START_COL, WIN_STOP_COL
+	      CONGRD = DTI_COPY_WORD_DATA(DTILUN, WORD_BUFF,
+     &			.FALSE., IC, WIN_START_ROW, 1, WIN_NUM_ROW)
+	      IF (.NOT.CONGRD) THEN
+	         CALL LSL_PUTMSG(CONGRD)
+	         IF (.NOT.IERR) CALL LSL_ADDMSG(IERR)
+	         GOTO 160
+	      ENDIF
+C
+	      DO 90 JC=1, WIN_NUM_ROW
+	         IF (WORD_BUFF(JC).EQ.DTI_NULL_WORD) THEN
+	            NDTM((WIN_NUM_ROW+1)-JC, IC-WIN_START_COL+1) = -32767
+	         ELSE
+	            NDTM((WIN_NUM_ROW+1)-JC, IC-WIN_START_COL+1) = 1 +
+     &		      NINT(FLOAT(WORD_BUFF(JC)-MIN_WVALUE(DTILUN)) * ZSC)
+		 ENDIF
+90	      CONTINUE
+C
+100	   CONTINUE
+C
+	ELSEIF (DATA_TYPE(DTILUN).EQ.DATA_LONG) THEN
+	   DO 120 IC = WIN_START_COL, WIN_STOP_COL
+	      CONGRD = DTI_COPY_LONG_DATA(DTILUN, LONG_BUFF,
+     &			.FALSE., IC, WIN_START_ROW, 1, WIN_NUM_ROW)
+	      IF (.NOT.CONGRD) THEN
+	         CALL LSL_PUTMSG(CONGRD)
+	         IF (.NOT.IERR) CALL LSL_ADDMSG(IERR)
+	         GOTO 160
+	      ENDIF
+C
+	      DO 110 JC = 1, WIN_NUM_ROW
+	         IF (LONG_BUFF(JC).EQ.-32767 .OR. 
+     &		     LONG_BUFF(JC).EQ.DTI_NULL_LONG) THEN
+	            NDTM((WIN_NUM_ROW+1)-JC, IC-WIN_START_COL+1) = -32767
+	         ELSE
+	            NDTM ((WIN_NUM_ROW+1)-JC, IC-WIN_START_COL+1) = 1 +
+     &   	      NINT(FLOAT(LONG_BUFF(JC)-MIN_LVALUE(DTILUN)) * ZSC)
+		 ENDIF
+110	      CONTINUE
+C
+120	   CONTINUE
+C
+	ELSEIF (DATA_TYPE(DTILUN).EQ.DATA_REAL) THEN
+	   DO 140 IC = WIN_START_COL, WIN_STOP_COL
+	      CONGRD = DTI_COPY_REAL_DATA(DTILUN, REAL_BUFF,
+     &			.FALSE., IC, WIN_START_ROW, 1, WIN_NUM_ROW)
+	      IF (.NOT.CONGRD) THEN
+	         CALL LSL_PUTMSG(CONGRD)
+	         IF (.NOT.IERR) CALL LSL_ADDMSG(IERR)
+	         GOTO 160
+	      ENDIF
+C
+	      DO 130 JC = 1,WIN_NUM_ROW
+	         IF (REAL_BUFF(JC).EQ.-32767.0 .OR.
+     &		     REAL_BUFF(JC).EQ.DTI_NULL_REAL) THEN
+	            NDTM((WIN_NUM_ROW+1)-JC, IC-WIN_START_COL+1) = -32767
+	         ELSE
+C
+C Do not let NDTM get negative, but keep -0.5 to get contours at the right 
+C position (required by ISOLIN). May result in very small contours being lost
+C
+	            NDTM((WIN_NUM_ROW+1)-JC,IC-WIN_START_COL+1) = MAX(
+     &	 	   1 + NINT((REAL_BUFF(JC)-MIN_RVALUE(DTILUN)-0.5)*ZSC),1)
+C
+CDRM	            NDTM((WIN_NUM_ROW+1)-JC,IC-WIN_START_COL+1) =
+CDRM &	 	   1 + NINT((REAL_BUFF(JC)+0.5-MIN_RVALUE(DTILUN))*ZSC)
+		 ENDIF
+130	      CONTINUE
+C
+140	   CONTINUE
+	ENDIF
+C
+C Determine x and y offset for the lower left corner of window
+C  in IFF units so that the type 2 MD origin offset can be set
+C
+C Take account of the user's UNITS command
+C
+	IF (UNITS.EQ.UNITS_DTI) THEN		! DTI rows and cols
+	   XOFF = WIN_START_COL - 1
+	   YOFF = WIN_START_ROW - 1
+C
+	ELSEIF (UNITS.EQ.UNITS_MET) THEN	! metres
+	   XOFF = (WIN_START_COL-1)*X_GRID(DTILUN)
+	   YOFF = (WIN_START_ROW-1)*Y_GRID(DTILUN)
+C
+	ELSEIF (UNITS.EQ.UNITS_PROJ) THEN	! projection
+           XOFF = (WIN_START_COL-1) * DTIPROJ_SAMPLE(1,DTILUN)
+           YOFF = (WIN_START_ROW-1) * DTIPROJ_SAMPLE(2,DTILUN)
+C
+	ELSE					! seconds or Latlong
+	   XOFF = (WIN_START_COL-1)*LONINT(DTILUN)
+	   YOFF = (WIN_START_ROW-1)*LATINT(DTILUN)
+	ENDIF
+C
+C Write header stuff into the IFF outfile
+	CALL IFF_HEADER
+C
+	SRINC = 1.0D0/MIN(300000.0D0/XLEN, 300000.0D0/YLEN)
+	NROW  = WIN_NUM_ROW
+	NCOL  = WIN_NUM_COL
+C
+C Actually trace the contours through the grid
+C
+	CONGRD = ISOLIN (NDTM,WIN_NUM_ROW,WIN_NUM_COL,ZGAP,INDX_ZGAP)
+	IF (.NOT.CONGRD) GOTO 160
+C
+C Put the finishing touches to the IFF file
+C
+150	CONGRD = IFF_FIN()
+C
+160	RETURN
+	END
+C

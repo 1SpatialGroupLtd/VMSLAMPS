@@ -1,0 +1,190 @@
+	SUBROUTINE CLEAN(IU,IV,ID,NPIT,NROWS,NHRT)
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+C Author M.C.Fulford
+C
+C	Created 18.x.77
+C	Last edited 19/v/78
+C
+C This routine is called after doing a scan vector.
+C It takes the data from the digitiser, cleans it & inserts
+C it into /RSE/ in such a way that subsequent calls to NEBIT
+C will return encounters in the normal way.
+C
+***	COMMON/PARAMS/
+C
+	INTEGER IU,IV		! direction of scan
+	INTEGER ID(2)		! scan vector
+	INTEGER NPIT		! pitch
+	INTEGER NROWS		! size of area to average over
+	INTEGER NHRT		! half rise time of an edge
+C
+***	COMMON/RSE/		! cleaned encounters go in here
+C
+C w/s
+	INTEGER BUFENC(0:2)	! raw scan encounter
+C list of edges in the current area:
+	INTEGER EDGEU(0:MAXEDG)	! U-coordinate
+	INTEGER EDGEV(0:MAXEDG)	! V-coordinate
+ 	INTEGER DELTAG(0:MAXEDG)! & polarities of edges
+C				(  -1 or +1 )
+	INTEGER NXTEDG(-1:MAXEDG)! ordering of edges
+	INTEGER UC		! U-coordinate
+	INTEGER WAY		! direction of ID(IU)
+	INTEGER SPIT		! NPIT with direction
+	INTEGER DU		! difference between two U coordinates
+	INTEGER UGAP		! limit to DU
+	INTEGER LSTV		! V coord for pending edge
+	INTEGER THRESH		! threshold
+	INTEGER FSTR, LSTR	! circular buffer pointers
+	INTEGER ROOM		! room in buffer
+	LOGICAL*1 COLOUR,LSTCOL	! present colour & previous one
+	LOGICAL*1 GOTENC	! got an encounter in BUFENC
+	LOGICAL*1 AGAIN		! whether it has two sides or not
+	LOGICAL*1 GOTLST	! an edge is pending
+C
+C
+C initialise
+	FSTR = 0
+	LSTR = 0
+	ROOM = MAXEDG - 1
+	GOTENC = .FALSE.
+	WAY = SIGN(1, ID(IU))
+	SPIT = NPIT*WAY
+	UC = 0
+	NEGOT = NEOLD
+	UGAP =  NROWS*NPIT
+C
+50	IF (GOTENC) GOTO 100		! do we have an encounter?
+	INE = NEGET(BUFENC(0),1)	! no - get one
+	GOTENC = INE.GT.0		! record success or failure
+	IF (GOTENC) GOTO 100		! got one now ?
+	IF (FSTR .EQ. LSTR) GOTO 900 	! finished
+	GOTO 280
+C here we have an encounter - see if it's inside the area considered
+100	DU = BUFENC(IU) - UC
+	IF (DU*WAY.GT.UGAP) GOTO 280	! j if it isn't
+C inside - add to list
+	IW = BUFENC(0).AND."37777
+	IF (IW .EQ. "37770) GOTO 140	! -ve edge
+	IF (IW .EQ. "37774) GOTO 150	! +ve edge
+	AGAIN = .TRUE.			! a line has two edges ...
+	IDV = -IW/2			! ... & a non-zero width
+	IDG = 1
+	GOTO 180
+C edges
+140	IDG = -1
+	GOTO 160
+150	IDG = 1
+160	AGAIN = .FALSE.
+	IDV = 0
+C add the edge(s) to list
+180	DO 200 J = -1,1,2	! edge has two corners
+	  IF (ROOM .LE. 0) GOTO 240	! full
+	  I = LSTR
+	  EDGEU( I ) = BUFENC(IU)
+	  EDGEV( I ) = BUFENC(IV)+IDV+NHRT*J
+	  DELTAG( I ) = -IDG*J
+	  LSTR = MOD(LSTR+1,MAXEDG)
+	  ROOM = ROOM-1
+200	  CONTINUE
+	  IF (.NOT. AGAIN) GOTO 240
+	   IDG = -IDG
+	   IDV = -IDV
+	   AGAIN = .FALSE.
+	   GOTO 180
+C no room for encounter - carry on regardless
+240	GOTENC = .FALSE.		! used up our encounter
+	GOTO 50				! go and see about another one
+C Having obtained the edge list - sort it into order of IV coordinate
+C and get initial intensity, while we have the chance
+280	NXTEDG(-1) = -1
+	I = FSTR
+290	  IF (I .EQ. LSTR) GOTO 350	! end of list
+	  NV = EDGEV(I)			! for each edge ...
+	  L = -1
+300	  K = NXTEDG(L)
+	  IF (K .LT. 0) GOTO 310	! ... find its place ...
+	  IF (EDGEV(K) .GT. NV) GOTO 310
+	  L = K
+	  GOTO 300
+C
+310	  NXTEDG(L) = I			! ... and insert it.
+	  NXTEDG(I) = K
+	  I = MOD(I+1, MAXEDG)
+	  GOTO 290
+C
+C Using the sorted edge list, make some encounters
+350	THRESH = NHRT*(NROWS*2+1)
+	MZ = 0
+	DO 490 IPASS=1,2
+	GOTLST = .FALSE.
+	LINBIT = 0
+	N = NXTEDG(-1)
+	IF (N .LT. 0) GOTO 490		! nothing to do
+	NGRAD = DELTAG(N)		! initial gradient
+	IZ = -MZ			! initial intensity
+	COLOUR = IZ .GT. THRESH
+C
+370	K = N
+	LSTCOL = COLOUR
+	LSTZ = IZ
+	N = NXTEDG(N)
+	IF (N .LT. 0) GOTO 420		! end of list
+	IZ = IZ+NGRAD*(EDGEV(N)-EDGEV(K))
+	NGRAD = NGRAD+DELTAG(N)
+	IF (IPASS .EQ. 2) GOTO 380
+C get minimum intensity on first pass
+	IF (IZ .LT. MZ) MZ = IZ
+	GOTO 370
+C
+380	COLOUR = IZ .GT. THRESH
+	IF (COLOUR.EQV.LSTCOL) GOTO 370
+	A = IZ-THRESH
+	B = THRESH-LSTZ
+	NV = (A*EDGEV(K)+B*EDGEV(N))/(A+B)
+	IF (COLOUR) GOTO 400
+C negative edge - see if there's a corresponding positive one
+	IF (.NOT. GOTLST) GOTO 390
+C yes there is - make a line encounter
+	NW = NV - LSTV
+	NV = (NV + LSTV)/2
+	GOTLST = .FALSE.
+	GOTO 440
+C No there isn't - record an edge
+390	NW = "37770
+	GOTO 440
+C positive edge - record it
+400	LSTV = NV
+	GOTLST = .TRUE.
+	GOTO 370
+C end of scan line - see about pending edge
+420	IF (IPASS .EQ. 1) GOTO 490
+	IF (.NOT. GOTLST) GOTO 490
+	NW = "37774
+	NV = LSTV
+C store the encounter
+440	IF (NEGOT .GE. NESIZE) GOTO 490	! full- can do no more
+	NEGOT = NEGOT + 1
+	NEBUF(1,NEGOT) = NW+LINBIT
+	NEBUF(1+IU,NEGOT) = UC
+	NEBUF(1+IV,NEGOT) = NV
+	LINBIT = "40000
+	IF (N .GE. 0) GOTO 370
+490	CONTINUE
+C move to next scan line
+	UC = UC+SPIT
+	IF (ABS(UC) .GT. ABS(ID(IU))) GOTO 600
+C remove lagging encounters
+515	  IF (FSTR .EQ. LSTR) GOTO 50	! end of list
+	  DU = EDGEU(FSTR)-UC
+	  IF (DU*WAY .GE. -UGAP) GOTO 50	! in area now
+	  FSTR = MOD(FSTR+1, MAXEDG)	! remove outside point
+	  ROOM = ROOM+1
+	  GOTO 515
+C done
+600	CONTINUE
+C
+900	RETURN
+	END

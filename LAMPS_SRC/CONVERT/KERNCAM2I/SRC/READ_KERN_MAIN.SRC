@@ -1,0 +1,459 @@
+	INTEGER FUNCTION READ_KERN_MAIN()
+C
+***	IDENT	11NO88
+***	MODULE	READ_KERN_MAIN
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author J Barber 14 Sep 1988 for KERNCAM2I
+C
+CMOD  Major revisions for extended format              JDB 28-Oct-1988
+CMOD  HATCHING lines now ignored till END HATCHING
+CMOD  NETWORK used to create extra point symbols as well as the
+C       line feature
+CMOD  user comment lines ignored (TC entries no longer used)
+C
+CMOD  Symbol FCs 6000 - 6999                           JDB 11-Nov-1988
+C
+CMOD  FC_NAME no longer includes <CR> or odd end-of-line chars
+C
+CMOD  TEXT_ROTATION added to list for text features
+C
+C This routine reads the KERN main program lines and puts the data into 
+C    the IFF feature entries
+C All data lines are stored for the current feature until a CHANGE PEN 
+C   UP/DOWN or a coordinate line is encountered where the IFF feature
+C   or symbol is output
+C
+	IMPLICIT NONE
+C
+C common blocks...
+C
+***     PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***     PARAMETER/LSL$CMNLSL:READSTR/
+***     PARAMETER/HERE:KERNCAM2IMSG/
+***     COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/HERE:PARAMS/
+***     COMMON/HERE:DESCR/
+***     COMMON/HERE:BUFFER/
+C
+C  functions
+C
+        INTEGER           READSTR
+        INTEGER           READ_LINE
+C
+        LOGICAL           READ_REAL
+        LOGICAL           READ_INTEGER
+        LOGICAL           READ_DOUBLE
+        LOGICAL           READ_COORD_LINE
+C
+C  workspace...
+C
+        INTEGER           RETVAL
+        INTEGER           TERM_COND
+C
+        LOGICAL           READOK
+        LOGICAL           HAD_END
+        LOGICAL           HATCHING
+C
+        CHARACTER*10      TITLE
+        BYTE              TERM_CHAR        ! <CR> termination
+        DATA              TERM_CHAR /Z0D/  !   character
+C                                        
+C **********************************************************
+C Assume success
+C
+	READ_KERN_MAIN = KERN2I__NORMAL		  
+C
+        HAD_END = .FALSE.
+        HATCHING = .FALSE.
+C
+C   read the next line into STRING in BUFFER
+C
+10      READ_KERN_MAIN = READ_LINE()
+C
+        IF (.NOT.READ_KERN_MAIN) THEN
+           IF (.NOT.HAD_END .AND. READ_KERN_MAIN.EQ.LSL__EOF) 
+     &                    CALL LSL_PUTMSG (KERN2I__UNEXPEOF)
+           GOTO 999
+        ENDIF
+C
+C Ignore input lines that construct hatching - if HATCHING ignore till 
+C   END HATCHING
+C
+        IF (HATCHING .AND. STRING(11:22).NE.'END HATCHING') GOTO 10
+C
+C  now have data in STRING to process
+C
+20      IF (STRING(1:10).EQ.'CHANGE TO ') THEN
+C
+	   IF (STRING(11:22).EQ.'END HATCHING') THEN
+C
+	      HATCHING = .FALSE.
+C
+	      IF (DIAG) CALL WRITEF (' Hatching ended - output resumed')
+C
+	      GOTO 10
+C
+	   ELSEIF (STRING(11:24).EQ.'START HATCHING') THEN
+C
+C Turn off processing of all lines between START and END of HATCHING
+C
+	      HATCHING = .TRUE.
+C
+	      IF (DIAG) CALL WRITEF
+     &			(' Hatching started - output suppressed')
+C
+	      GOTO 10
+C
+           ELSEIF (STRING(11:18).EQ.'LINETYPE') THEN
+C
+              CALL EXPAND ('%W%S32', BYTBUF(1), STRING(19:50))
+              CALL SETAUX (BYTBUF, 32)
+C
+              TITLE = ' Linetype'
+C
+C   first 4 chars contain feature code
+C
+              CALL SETWIN (1,4)
+              IF (.NOT.READ_INTEGER (4, IFC, TITLE, 1))
+     &                       CALL LSL_PUTMSG (KERN2I__UNSETFC)
+C
+              IF (DIAG) CALL WRITEF (' Linetype FC: %^W%N', IFC)
+C
+C   assume straight line by default
+C
+              HAD_FC      = .TRUE.
+C
+C   qualify line type FC
+C
+              HAD_FC_LINE = .TRUE.
+              HAD_FC_CONT = .FALSE.
+              HAD_FC_CURV = .FALSE.
+              HAD_FC_SYMB = .FALSE.
+              HAD_FC_ARC  = .FALSE.
+C
+C   remainder contains comment/description, max 16 chars
+C
+              CALL EXPAND ('%W%S', BYTBUF(1), STRING (35:50))
+              CALL SETAUX (BYTBUF, 16)
+C
+C   get length of valid text without trailing spaces from READSTR
+C
+              FC_NAME_LEN = READSTR (FC_NAME, , , .TRUE., RETVAL)
+C
+              IF (FC_NAME_LEN.LE.0) GOTO 100
+C
+C   re-expand to lose any term chars
+C
+              CALL EXPAND ('%W%S', BYTBUF(1), FC_NAME(:FC_NAME_LEN))
+              CALL SETAUX (BYTBUF, FC_NAME_LEN)
+C
+C   get rid of any undesired term. char (<CR>) 
+C
+              TERM_COND = ON_CHAR
+              FC_NAME_LEN = READSTR (FC_NAME, TERM_CHAR, TERM_COND, 
+     &                                               .TRUE., RETVAL)
+C
+100           IF (FC_NAME_LEN.GT.0) THEN
+                 IF (DIAG) CALL WRITEF (' FC Name: %S', 
+     &                                     FC_NAME(:FC_NAME_LEN))
+                 HAD_FC_NAME = .TRUE.
+              ELSE
+                 HAD_FC_NAME = .FALSE.
+              ENDIF
+C
+              GOTO 10
+C
+           ELSEIF (STRING(11:17).EQ.'CONTOUR') THEN
+C
+C  change feature code from straight line segment to interpolated 
+C     curve as contour
+C
+              HAD_FC_LINE = .FALSE.
+              HAD_FC_CONT = .TRUE.
+              HAD_FC_CURV = .FALSE.
+              HAD_FC_SYMB = .FALSE.
+              HAD_FC_ARC  = .FALSE.
+C
+              IF (HAD_FC) IFC = IFC + 2000
+              IF (DIAG) CALL WRITEF (' Linetype FC now: %^W%N', IFC)
+C
+              GOTO 10
+C
+           ELSEIF (STRING(11:15).EQ.'CURVE') THEN
+C
+C  change feature code from straight line segment to interpolated 
+C     curve 
+C
+              HAD_FC_LINE = .FALSE.
+              HAD_FC_CONT = .FALSE.
+              HAD_FC_CURV = .TRUE.
+              HAD_FC_SYMB = .FALSE.
+              HAD_FC_ARC  = .FALSE.
+C
+              IF (HAD_FC) IFC = IFC + 1000
+              IF (DIAG) CALL WRITEF (' Linetype FC now: %^W%N', IFC)
+C
+              GOTO 10
+C
+           ELSEIF (STRING(11:13).EQ.'ARC') THEN
+C
+C  change feature code from straight line segment to arc
+C
+              HAD_FC_LINE = .FALSE.
+              HAD_FC_CONT = .FALSE.
+              HAD_FC_CURV = .FALSE.
+              HAD_FC_SYMB = .FALSE.
+              HAD_FC_ARC  = .TRUE.
+C
+C  treat as part arc (GT 4) until told otherwise by closed
+C    coordinates to bemome full circle (GT 5) and the feature
+C    modified in OUTPUT_ARC
+C
+              IF (HAD_FC) IFC = IFC + 3000
+              IF (DIAG) CALL WRITEF (' Linetype FC now: %^W%N', IFC)
+C
+              GOTO 10
+C
+           ELSEIF (STRING(11:14).EQ.'HOUR') THEN
+C
+              CALL EXPAND ('%W%S15', BYTBUF(1), STRING(15:29))
+              CALL SETAUX (BYTBUF, 15)
+C
+              TITLE = ' Hour'
+C
+              CALL SETWIN (1,15)
+              IF (.NOT.READ_REAL (15, HOUR, TITLE, 0))
+     &                            CALL LSL_PUTMSG (KERN2I__UNSETHOUR)
+C
+              IF (DIAG) CALL WRITEF (' Hour: %F15.2', HOUR)
+C
+              HAD_AC_HOUR = .TRUE.
+C
+              GOTO 10
+C
+           ELSEIF (STRING(11:15).EQ.'SCALE') THEN
+C
+              CALL EXPAND ('%W%S18', BYTBUF(1), STRING(16:33))
+              CALL SETAUX (BYTBUF, 18)
+C
+              TITLE = ' Scale'
+C
+              CALL SETWIN (1,18)
+              IF (.NOT.READ_DOUBLE (18, SCALE, TITLE, 1))
+     &                         CALL LSL_PUTMSG (KERN2I__UNSETSCALE)
+C
+              IF (DIAG) CALL WRITEF (' Scale: %^D%F18.6', SCALE)
+C
+              HAD_AC_SCALE = .TRUE.           
+C
+              GOTO 10
+C
+           ELSEIF (STRING(11:25).EQ.'SYMBOL ROTATION') THEN
+C
+              CALL EXPAND ('%W%S10', BYTBUF(1), STRING(26:35))
+              CALL SETAUX (BYTBUF, 10)
+C
+              TITLE = 'Symb. rotn'
+C
+C  first 10 chars are rotation in radians
+C
+              CALL SETWIN (1,10)
+              READOK = READ_DOUBLE (10, SYMB_ROTN, TITLE, 0)
+C
+              HAD_SYMB_ROTN = .TRUE.
+C
+              IF (DIAG) CALL WRITEF (' Symbol rotation: %^D%F10.6',
+     &                                                    SYMB_ROTN)
+              GOTO 10
+C
+           ELSEIF (STRING(11:23).EQ.'TEXT ROTATION') THEN
+C
+              CALL EXPAND ('%W%S12', BYTBUF(1), STRING(24:35))
+              CALL SETAUX (BYTBUF, 12)
+C
+              TITLE = 'Text rotn'
+C
+C  first 10 chars are rotation in radians
+C
+              CALL SETWIN (1,12)
+              READOK = READ_DOUBLE (12, TEXT_ROTN, TITLE, 0)
+C
+              HAD_TEXT_ROTN = .TRUE.
+C
+              IF (DIAG) CALL WRITEF (' Text rotation: %^D%F10.6',
+     &                                                    TEXT_ROTN)
+              GOTO 10
+C
+           ELSEIF (STRING(11:16).EQ.'SYMBOL') THEN
+C
+              CALL EXPAND ('%W%S34', BYTBUF(1), STRING(17:50))
+              CALL SETAUX (BYTBUF, 34)
+C
+C  scaled and oriented symbol feature
+C
+              TITLE = ' Symbol'
+C
+C  first 6 chars are feature code
+C
+              CALL SETWIN (1,6)
+              IF (.NOT.READ_INTEGER (6, IFC, TITLE, 1))
+     &                            CALL LSL_PUTMSG (KERN2I__UNSETFC)
+              IFC = IFC + 6000
+C
+              IF (DIAG) CALL WRITEF (' Symbol FC: %^W%N', IFC)
+C
+              HAD_FC = .TRUE.
+C
+              HAD_FC_LINE = .FALSE.
+              HAD_FC_CONT = .FALSE.
+              HAD_FC_CURV = .FALSE.
+              HAD_FC_ARC  = .FALSE.
+              HAD_FC_SYMB = .TRUE.
+C
+C   remainder contains comment/description, max 16 chars
+C
+              CALL EXPAND ('%W%S', BYTBUF(1), STRING (35:50))
+              CALL SETAUX (BYTBUF, 16)
+C
+C   get length of valid text without trailing spaces from READSTR
+C
+              FC_NAME_LEN = READSTR (FC_NAME, , , .TRUE., RETVAL)
+C
+              IF (FC_NAME_LEN.LE.0) GOTO 200
+C
+C   re-expand to lose any term chars
+C
+              CALL EXPAND ('%W%S', BYTBUF(1), FC_NAME(:FC_NAME_LEN))
+              CALL SETAUX (BYTBUF, FC_NAME_LEN)
+C
+C   get rid of any undesired term. char (<CR>) 
+C
+              TERM_COND = ON_CHAR
+              FC_NAME_LEN = READSTR (FC_NAME, TERM_CHAR, TERM_COND, 
+     &                                               .TRUE., RETVAL)
+C
+200           IF (FC_NAME_LEN.GT.0) THEN
+                 IF (DIAG) CALL WRITEF (' FC Name: %S', 
+     &                                     FC_NAME(:FC_NAME_LEN))
+                 HAD_FC_NAME = .TRUE.
+              ELSE
+                 HAD_FC_NAME = .FALSE.
+              ENDIF
+C
+              GOTO 10
+C
+	   ELSEIF (STRING(11:17).EQ.'NETWORK') THEN
+C
+	      HAD_NETWORK = .TRUE.
+C
+	      IF (DIAG) CALL WRITEF (' Networking started')
+C
+	      GOTO 10
+C
+           ELSEIF (STRING(11:16).EQ.'PEN UP') THEN
+C
+C  coordinates for new feature
+C    so create the collected entries so far
+C
+              PEN_UP   = .TRUE.
+              IENDS = 0
+C
+C  read next line for coordinates
+C
+              READ_KERN_MAIN = READ_LINE()
+C
+              IF (.NOT.READ_KERN_MAIN) THEN
+                 CALL LSL_PUTMSG (KERN2I__UNEXPEOF)
+                 GOTO 999
+              ENDIF
+C
+C  next line after first PEN UP should be coordinates  
+C
+              IF (.NOT.READ_COORD_LINE()) THEN
+                 CALL LSL_PUTMSG (KERN2I__RDCOORDERR, STRING)
+                 GOTO 10
+              ELSE
+                 GOTO 900
+              ENDIF
+C
+           ELSEIF (STRING(11:18).EQ.'PEN DOWN') THEN
+C
+              PEN_UP   = .FALSE.
+              IENDS = 1
+C
+C  read next line for coordinates
+C
+              READ_KERN_MAIN = READ_LINE()
+C
+              IF (.NOT.READ_KERN_MAIN) THEN
+                 CALL LSL_PUTMSG (KERN2I__UNEXPEOF)
+                 GOTO 999
+              ENDIF
+C
+C  next line after first PEN DOWN should be coordinates  
+C
+              IF (.NOT.READ_COORD_LINE()) THEN
+                 CALL LSL_PUTMSG (KERN2I__RDCOORDERR, STRING)
+                 GOTO 10
+              ELSE
+                 GOTO 900
+              ENDIF
+C
+           ELSE
+C
+C  unwanted/unused line
+C
+              IF (DIAG) CALL WRITEF (' Line ignored: %S', STRING)
+              GOTO 10
+           ENDIF
+C
+        ELSEIF (STRING(1:4).EQ.'QUIT') THEN
+C
+C   end of file/program
+C
+           IF (INFTR) CALL END_FEATURE
+C
+           IF (INLAY) CALL END_LAYER
+C
+           CALL IFFEM
+           CALL IFFEJ
+C
+           GOTO 999
+C
+        ELSE
+C
+C  this is a user comment line (CHAR*40) or coordinates (3F12.3)
+C
+           IF (.NOT.READ_COORD_LINE()) THEN
+C
+C  if failed to read a real*8, it is a comment, write it out
+C
+              IF (DIAG) CALL WRITEF (' User comment: %S40', 
+     &                                             STRING(:40))
+              GOTO 10
+           ELSE
+C
+C  coordinates
+C
+              GOTO 900
+           ENDIF
+        ENDIF
+C
+C  line of coordinates successfully read, start feature with 
+C    parameters already set up 
+C
+900     IF (HAD_FC_SYMB) THEN
+           CALL OUTPUT_IFF_SYMBOL     ! with the coordinates
+        ELSE
+           CALL OUTPUT_IFF_FEATURE    ! with the coordinates
+        ENDIF
+C
+C  return with unused STRING in hand - process it
+C
+        GOTO 20
+C
+999	RETURN
+	END
+C

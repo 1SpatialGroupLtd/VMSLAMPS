@@ -1,0 +1,600 @@
+	PROGRAM PID
+C
+***	MODULE PID
+***	IDENT 22MR90
+C
+**	UNLESS PDP
+	IMPLICIT NONE
+**	ENDC
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England
+C Author R. Fairbairns
+C
+C Original coded 25 May 81
+C Retyped, after clag-up, June 1985
+C
+C To patch the ** IDENT in a .SRC file or a .<burble>_SRC file, or
+C	   the .IDENT in a .MAX or a .MAR file, or
+C	   the IDENT attribute in a .PAS file
+C Gives up if IDENT not found in first block of the file
+C
+C Now also does .[<burble>_]C (#module),
+C		.CLD (** IDENT again), and
+C		.F,.FOR,.PFO,.SFO,.SF (CDEC$ IDENT) files
+C
+**	IF PDP
+C
+***	COMMON/BRECAC/
+***	COMMON/[COMMON.PDP.LIOLIB]TXTC/
+C
+**	IFF
+C
+***	COMMON/LSL$CMNVIO:TXTC/
+C
+C extend TXTBUF to improve responsiveness to silly files
+	PARAMETER	TXTBUF_EXTRA_LEN = 220
+	BYTE		TXTBUF_EXTN(TXTBUF_EXTRA_LEN)
+	COMMON	/TXTC/	TXTBUF_EXTN
+C
+C size of TXTBUF as it actually stands
+	PARAMETER	TXTBUF_ACTUAL_LEN = 300
+C
+C length of source file title
+	PARAMETER	SRCTIT_LEN = 256
+C
+C number of records we'll scan
+	PARAMETER	MAX_RECNO = 50	! oh! so generous
+C
+	INCLUDE		'($RMSDEF)/NOLIST'
+C
+**	ENDC
+C
+C w/s
+	INTEGER*4	PTR,RECPTR,EOF	! file pointers
+	INTEGER		IRC,RECNO,RECLEN,LEN
+	INTEGER		DAY,MONTH,YEAR	! to get the current date from
+C					!  the FORTRAN OTS
+	INTEGER*4	I, J		! loop variables
+	INTEGER		SAVE_I		! what it says
+**	UNLESS PDP
+	INTEGER		ERRVAL		! return from FLRSTR
+	INTEGER		IERR		! error number
+	INTEGER*2	NCHS		! length of what's read from CLI
+**	ENDC
+	BYTE		RECH,TERM
+**	IF PDP
+	BYTE		SRCTIT(61)	! to hold the title of the
+**	IFF
+	BYTE		SRCTIT(SRCTIT_LEN) ! to hold the title of the
+C					!  file to be patched
+	INTEGER*4	SRC_DESC(2)	! pseudo-descriptor for source title
+	BYTE		TXTBUF_SAVE(300)! saved copy of TXTBUF to see if
+C					!   it's changed
+	LOGICAL		TXTBUF_CHANGED	! well, has it?
+**	ENDC
+	LOGICAL		INDIR		! used in evaluating SRC
+	LOGICAL		INSQB		! T=>in PASCAL attribute section
+	LOGICAL		PASCAL		! T,F => .PAS, other
+	LOGICAL		SRC		! T,F => .SRC,.MAC/.MAR or other
+	LOGICAL		C		! T,F => .C, all the rest
+	LOGICAL		ADC_SRC_STYLE	! T => allow *** IDENT
+	LOGICAL		FOR_SRC_STYLE	! T => allow CDEC$ IDENT
+	LOGICAL		FOUND_IDENT	! what it says
+C
+	BYTE		MATCH_CH	! used in common code for C #module
+C					!     and Fortran CDEC$ IDENT
+C
+C functions called
+	INTEGER		RFWORD
+	LOGICAL		BRECH, BRECHS, BRECWD
+**	UNLESS PDP
+	LOGICAL		FLWUPD		! open file for extension
+	LOGICAL		FLRREW		! rewind (read) file
+	INTEGER		FLRSTR		! read record from file
+	LOGICAL		FLULIN		! update the record just read
+	INTEGER*2	GETCLI		! read from command line
+	LOGICAL		RDFILT		! read file title
+**	ENDC
+C
+C table for standard 2-character representations of month names
+	INTEGER*2 MONTHS(12)
+	DATA MONTHS/'JA','FE','MR','AP',
+     &		    'MY','JN','JL','AU',
+     &		    'SE','OC','NO','DE'/
+C
+C other presets
+	DATA RECPTR,RECNO/0,0/
+C
+**	IF PDP
+C
+C find the name of the object file to be patched
+10	CALL GETCML(TXTBUF, IRC)
+	IF (IRC) 20, 10, 30
+C
+C error - end of CML, on supposes
+20	CALL EXIT
+C
+C 'successful command read' - prepare for decode
+30	TXTPTR = IRC
+	CALL BSLN
+C
+C get file title
+	CALL RDFILT(SRCTIT,60,'SY:XXX.SRC',
+     &		    .FALSE.,.TRUE.,.FALSE.,IRC)
+	IF (IRC.GT.0) GOTO 50
+C
+C file title decode failed
+	CALL WRITEF('File title decode error %N', IRC)
+	CALL EXIT
+C
+**	IFF
+C
+C initialise VIOLIB common blocks
+	TXTLIM = 80+TXTBUF_EXTRA_LEN
+	TXTPTR = TXTLIM
+C
+C find title of file to work on
+	NCHS = GETCLI(TXTDSC)		! read anything on CLI
+	IF (NCHS.EQ.0) CALL EXIT	! ignore call with no title
+	CALL BSLN			! prepare to read
+C
+C get file title
+	SRC_DESC(1) = SRCTIT_LEN
+	SRC_DESC(2) = %LOC(SRCTIT(1))
+	IF (RDFILT(SRC_DESC, SRCTIT_LEN, '.SRC',
+     &		   .FALSE., .TRUE., .FALSE., IRC)) THEN
+	  CALL TTWSTR('Error in file title -')
+	  CALL FLTERR(IRC)
+	  CALL EXIT
+	ENDIF
+	SRC_DESC(1) = IRC		! save actual length of title
+C
+**	ENDC
+C
+C inspect file title: does it specify .SRC?
+50	SRC = .TRUE.			! assume it's going to
+	ADC_SRC_STYLE = .TRUE.		!  ditto
+	FOR_SRC_STYLE = .TRUE.
+	PASCAL = .FALSE.
+	FOUND_IDENT = .FALSE.
+C
+C find the extension...
+	INDIR = .FALSE.
+	DO I = 1,IRC-1
+	  IF (SRCTIT(I).EQ.'<' .OR.
+     &	      SRCTIT(I).EQ.'[')     INDIR = .TRUE.
+	  IF (SRCTIT(I).EQ.'>' .OR.
+     &	      SRCTIT(I).EQ.']')     INDIR = .FALSE.
+	  IF (SRCTIT(I).EQ.'.' .AND. .NOT.INDIR) GOTO 60
+	ENDDO
+C
+C it specifies no type: clever
+	GOTO 890
+C
+C is it .C?
+60	IF (SRCTIT(I+1).NE.'C') GOTO 65
+	IF (I.EQ.IRC-1) THEN			! it's a C program
+	  C = .TRUE.
+	  GOTO 90
+	ENDIF
+C
+C is it .CLD?
+	IF (I.EQ.IRC-3 .AND.
+     &      SRCTIT(I+2).EQ.'L' .AND. SRCTIT(I+3).EQ.'D') THEN
+	  C = .FALSE.
+	  FOR_SRC_STYLE = .FALSE.		! don't allow CDEC$s,
+C						!  but otherwise
+	  GOTO 90				! treat as .SRC
+	ENDIF
+C
+C not .C; try .<burble>_C
+65	IF (SRCTIT(IRC-1).EQ.'_' .AND.
+     &	    SRCTIT(IRC)  .EQ.'C'      ) THEN
+	  C = .TRUE.
+	  GOTO 90
+	ENDIF
+C
+C not a C program - note this and carry on
+70	C = .FALSE.
+C
+C try for .F
+	IF (SRCTIT(I+1).EQ.'F') THEN
+	  IF (I.EQ.IRC-1) GOTO 74
+	ENDIF
+C
+C so much for the single-letter file types -
+C  just quickly look for .SF (Ingres preprocessor)
+	IF (I.EQ.IRC-2 .AND.
+     &	    SRCTIT(IRC-1).EQ.'S' .AND. SRCTIT(IRC).EQ.'F') GOTO 74
+C
+C all other recognised types are at least 3 characters long...
+	IF (I.GT.IRC-3) GOTO 890
+	SAVE_I = I
+C
+C check that the type specified is .SRC
+72	IF (I.LT.IRC-3) GOTO 75
+	IF (SRCTIT(I+1).NE.'S') GOTO 75
+	IF (SRCTIT(I+2).NE.'R') GOTO 73
+	IF (SRCTIT(I+3).EQ.'C') THEN
+	  GOTO 90
+	ELSE
+	  GOTO 75
+	ENDIF
+C
+C look for .SFO (Rdb preprocessor)
+73	IF (SRCTIT(I+2).NE.'F' .OR. SRCTIT(I+3).NE.'O') GOTO 75
+C
+C .F, .PFO, .SFO or .SF
+74	ADC_SRC_STYLE = .FALSE.
+	GOTO 90
+C
+C it's not .SRC - how about .<burble>_SRC
+75	IF (I.EQ.IRC-3) GOTO 80
+	DO J = I+1,IRC-3
+	  IF (SRCTIT(J).EQ.'_') THEN
+	    I = J
+	    GOTO 72
+	  ENDIF
+	ENDDO
+C
+C set 'not .SRC file'
+80
+	IF (SAVE_I.NE.IRC-3) GOTO 890
+C
+C is it .FOR (VAX Fortran v5 has `CDEC$ IDENT') or .PFO (Oracle preproc)
+	IF ((SRCTIT(I+1).EQ.'F' .AND. SRCTIT(I+2).EQ.'O' .AND.
+     &	     SRCTIT(I+3).EQ.'R') .OR.
+     &	    (SRCTIT(I+1).EQ.'P' .AND. SRCTIT(I+2).EQ.'F' .AND.
+     &	     SRCTIT(I+3).EQ.'O') GOTO 74
+	SRC = .FALSE.
+C
+C letter 'A' is common to .MAC, .MAR, and .PAS
+	IF (SRCTIT(I+2).NE.'A') GOTO 890
+C
+C if not .SRC, ensure it's some sort of MACRO file
+	IF (SRCTIT(I+1).NE.'M') GOTO 85
+	IF (SRCTIT(I+3).EQ.'R' .OR.
+     &	    SRCTIT(I+3).EQ.'C') GOTO 90
+C
+C finally, try for it to be a PASCAL file
+85	IF (SRCTIT(I+1).NE.'P') GOTO 890
+	IF (SRCTIT(I+3).NE.'S') GOTO 890
+	PASCAL = .TRUE.			! so THAT's what it was
+	INSQB = .FALSE.			! set our state
+C
+C open the file and prepare to read it
+90	CONTINUE
+**	IF PDP
+C
+	OPEN (UNIT=1, NAME=SRCTIT, TYPE='OLD', ERR=900)
+	CALL FLBSEL(1)
+C
+C initialise reading
+	CALL FLBFE(,EOF)
+	IF (EOF.GT.512) EOF = 512	! limit extent of search
+C
+C loop for records within the file
+100	RECNO = RECNO+1			! count records
+	PTR = RECPTR			! copy for reading record
+	RECLEN = RFWORD(PTR)		! get record length
+	RECPTR = (PTR+RECLEN+1).AND.(-2) ! point to next record
+	IF (RECPTR.GT.EOF) GOTO 910	! this records spans end of block
+C
+C prepare to read record
+	BRECPT = PTR
+	BRECLE = RECLEN
+C
+**	IFF
+C
+	IF (FLWUPD(1, SRC_DESC, IERR)) GOTO 900
+	CALL FLWSEL(1)
+	CALL FLRSEL(1)
+	IF (FLRREW(, IERR)) THEN
+	  CALL WRITEF('Can''t rewind input file - error %^L%X', IERR)
+	  CALL FLWCLO(1)
+	  CALL EXIT(IERR)
+	ENDIF
+C
+C loop for records within the file
+100	IF (RECNO.GT.MAX_RECNO) GOTO 910
+	RECNO = RECNO+1			! count records
+	ERRVAL = FLRSTR(, IERR)
+	IF (ERRVAL.LT.0) THEN
+	  IF (IERR.EQ.RMS$_EOF) GOTO 910
+	  CALL WRITEF('Error %^L%X reading file line %N', IERR, RECNO)
+	  CALL FLWCLO(1)
+	  CALL EXIT(IERR)
+	ENDIF
+C
+**	ENDC
+C
+C split on type of files
+	IF (C) GOTO 220			! go to find # module
+	IF (SRC) GOTO 120		! go to find *** IDENT
+	IF (PASCAL) GOTO 160		! go to find [ ... IDENT ... ]
+C
+C*******************************************************************************
+C*******************************************************************************
+C****									    ****
+C****									    ****
+C****			Macro-11 or Macro-32				    ****
+C****									    ****
+C****									    ****
+C*******************************************************************************
+C*******************************************************************************
+C
+C look for .IDENT
+	IF (BRECHS(RECH)) GOTO 100	! loop if empty line
+	IF (RECH.NE.'.') GOTO 100	!  or if first char not '.'
+	IF (BRECWD('IDENT')) GOTO 100	! check for IDENT
+	IF (BRECHS(TERM)) GOTO 920	! get terminator
+**	IF PDP
+	PTR = BRECPT			! save this position
+**	IFF
+	PTR = DCPTR			! get position from VIOLIB
+**	ENDC
+	LEN = -1			! init length:
+C					!  -1 for closing terminator
+110	IF (BRECH(RECH)) GOTO 940	! jump=> premature e.o.l.
+	LEN = LEN+1			! count space in IDENT
+	IF (RECH.NE.TERM) GOTO 110	! loop if not yet at end
+	IF (LEN.NE.6) GOTO 920		! jump=> IDENT wrong length
+	GOTO 140
+C
+C*******************************************************************************
+C*******************************************************************************
+C****									    ****
+C****									    ****
+C****			Fortran/ADC style (or .CLD)			    ****
+C****									    ****
+C****									    ****
+C*******************************************************************************
+C*******************************************************************************
+C
+C find ** IDENT
+120	IF (.NOT.ADC_SRC_STYLE) GOTO 250! only CDEC$ IDENT to find
+	IF (BRECH(RECH)) GOTO 100	! loop if empty line
+	IF (RECH.NE.'*') THEN		! or if not a directive line
+	  IF (FOR_SRC_STYLE) GOTO 270	! we still have CDEC$ IDENT to do
+	ENDIF
+130	IF (BRECH(RECH)) GOTO 100	! get past asterisks
+	IF (RECH.EQ.'*') GOTO 130
+	CALL BSRECH
+	IF (BRECHS(RECH)) GOTO 100	! skip spaces after asterisks
+	CALL BSRECH
+	IF (BRECWD('IDENT')) GOTO 100	! check patchable record
+	IF (BRECHS(RECH)) GOTO 100	! get to start of actual IDENT
+	CALL BSRECH			! and back before it
+**	IF PDP
+	IF (BRECLE.NE.6) GOTO 930	! collapse if space left wrong
+	PTR = BRECPT
+**	IFF
+	IF (TXTPTR-DCPTR+1.NE.6) GOTO 930 ! ensure correct amount of space left
+	PTR = DCPTR
+**	ENDC
+C
+C mark had one
+	ADC_SRC_STYLE = .FALSE.
+C
+C all routes common - get date
+140	CALL IDATE(MONTH, DAY, YEAR)
+C
+**	UNLESS PDP
+C
+C copy to save buffer, in case its ident was originally today's
+	DO I = 1,TXTPTR
+	  TXTBUF_SAVE(I) = TXTBUF(I)
+	ENDDO
+C
+**	ENDC
+C
+C transmit date to file
+	CALL DITFIL(DAY, PTR)
+	CALL WFWORD(PTR, MONTHS(MONTH))
+	CALL DITFIL(YEAR, PTR)
+C
+C write back block and close the file
+C
+**	IF PDP
+C
+	CALL RWFUPD
+	CALL FLBCLO
+	CALL WRITEF('Successfully patched IDENT in line %N',RECNO)
+C
+**	IFF
+C
+C remember we've found at least one (for the benefit of .SRC files)
+	FOUND_IDENT = .TRUE.
+C
+C now - has the record changed?
+	TXTBUF_CHANGED = .FALSE.
+	DO I = 1,TXTPTR
+	  IF (TXTBUF(I).NE.TXTBUF_SAVE(I)) TXTBUF_CHANGED = .TRUE.
+	ENDDO
+	IF (TXTBUF_CHANGED) THEN
+	  IF (FLULIN(TXTBUF, TXTPTR, IERR)) THEN
+	    CALL WRITEF('Can''t update IDENT record in line %N - error %^L%X',
+     &							 RECNO,		IERR)
+	    CALL FLWCLO(1)
+	    CALL EXIT(IERR)
+	  ENDIF
+	  CALL WRITEF('Successfully patched IDENT in line %N',RECNO)
+	ELSE
+	  CALL WRITEF('No change to IDENT in line %N', RECNO)
+	ENDIF
+C
+C if it's a .SRC, we COULD have TWO idents in the file to patch
+	IF (SRC .AND. (ADC_SRC_STYLE .OR.
+     &		       FOR_SRC_STYLE)    ) GOTO 100
+	CALL FLWCLO(1)
+C
+**	ENDC
+C
+	CALL EXIT
+C
+C*******************************************************************************
+C*******************************************************************************
+C****									    ****
+C****									    ****
+C****				Pascal					    ****
+C****									    ****
+C****									    ****
+C*******************************************************************************
+C*******************************************************************************
+C
+C find IDENT attribute of a .PAS file
+160	IF (INSQB) GOTO 170		! j if actually in attribute section
+	IF (BRECHS(RECH)) GOTO 100	! loop if end of line
+	IF (RECH.EQ.'[') INSQB = .TRUE.	! mark opening attribute section
+	GOTO 160
+C
+C in attribute section - look for IDENT attribute
+170	IF (.NOT.BRECWD('IDENT')) GOTO 200 ! j if found IDENT
+180	IF (BRECHS(RECH)) GOTO 100	! j at end of line
+190	IF (RECH .EQ. ',') GOTO 170	! loop for next attribute
+	IF (RECH .NE. ']') GOTO 180	! not found end of attributes
+	INSQB = .FALSE.			! reset state
+	GOTO 160
+C
+C find (, ' in sequence
+200	IF (BRECHS(RECH)) GOTO 100	! fall out at end of line
+C					!  (ignore IDENT we found!)
+	IF (RECH.NE.'(') GOTO 190	! ignore IDENT not followed by (
+	IF (BRECHS(RECH)) GOTO 100	! as above
+	IF (RECH.NE.'''') GOTO 190	! ignore if not followed by ('
+**	IF PDP
+	PTR = BRECPT			! save this position
+**	IFF
+	PTR = DCPTR			! get pointer from VIOLIB
+**	ENDC
+	LEN = -1			! init length (-1 for closing ')
+210	IF (BRECH(RECH)) GOTO 950	! j at premature eol
+	LEN = LEN+1			! count room in ident
+	IF (RECH.NE.'''') GOTO 210	! loop if not yet at end
+	IF (LEN.NE.6) GOTO 960
+	GOTO 140
+C
+C*******************************************************************************
+C*******************************************************************************
+C****									    ****
+C****									    ****
+C****				C					    ****
+C****									    ****
+C****									    ****
+C*******************************************************************************
+C*******************************************************************************
+C
+C find '#<sps>module' at start of line
+220	IF (BRECH(RECH)) GOTO 100	! ignore blank lines
+	IF (RECH.NE.'#') GOTO 100	! and those not starting '#'
+	IF (BRECHS(RECH)) GOTO 100	! check there's summat still to come
+	CALL BSRECH
+	IF (BRECWD('module', .TRUE.)) GOTO 100 ! ignore other preprocessor lines
+	MATCH_CH = '"'
+C
+C now, NB that RECH contains 'm' (or the like) as we enter this section
+230	DO WHILE (RECH.NE.MATCH_CH)
+	  IF (BRECH(RECH)) GOTO 100	! look for string introducer, give up
+C					!  if there's nowt more on the line
+	ENDDO
+C
+C we have just read a " character: so we do have an ident for this module
+	PTR = DCPTR			! remember where it is
+C
+C now check it's got the right length
+	DO I = 1,6
+	  IF (BRECH(RECH)) GOTO 880	! way too short (wrong syntax, too,
+C					!			presumably)
+	  IF (RECH.EQ.MATCH_CH) GOTO 880	! too short, if nothing else
+	ENDDO
+	IF (.NOT.BRECH(RECH)) THEN	! I don't actually CARE
+C					!		about the syntax!
+	  IF (RECH.NE.MATCH_CH) GOTO 870! but we mustn't have TOO LONG an ident
+	ENDIF
+	FOR_SRC_STYLE = .FALSE.		! may be irrelevant (if C)
+	GOTO 140
+C
+C*******************************************************************************
+C*******************************************************************************
+C****									    ****
+C****									    ****
+C****				VMS Fortran v5				    ****
+C****									    ****
+C****									    ****
+C*******************************************************************************
+C*******************************************************************************
+C
+C find `CDEC$ <sps> IDENT'
+250	IF (.NOT.FOR_SRC_STYLE) GOTO 100
+260	IF (BRECH(RECH)) GOTO 100		! empty line
+270	CALL BSRECH
+	IF (BRECWD('CDEC$')) GOTO 100		! not an appropriate line
+	IF (BRECHS(RECH)) GOTO 100		! skip over spaces
+	CALL BSRECH
+	IF (BRECWD('IDENT')) GOTO 100		! some other form of special
+	MATCH_CH = ''''
+	GOTO 230
+C
+C * * *		E r r o r   e x i t s
+C		=========   =========
+C
+C
+C ident part of a C #module too long
+C (NB this route assumes we're going to fall through from above)
+870	IF (C) THEN
+	CALL WRITEF('Ident part of #module in line %^L%N too long', RECNO)
+	ELSE
+	CALL WRITEF('Text of CDEC$ IDENT in line %^L%N too long', RECNO)
+	ENDIF
+	CALL EXIT
+C
+C ident part of a C #module too short
+880	IF (C) THEN
+	CALL WRITEF('Ident part of #module in line %^L%N only %N long',
+     &						   RECNO,      I	)
+	ELSE
+	CALL WRITEF('Text of CDEC$ IDENT in line %^L%N only %N long',
+     &						 RECNO,      I	)
+	ENDIF
+	CALL EXIT
+C
+C not a .MAC, .MAR, .PAS, .C, .CLD or .SRC file
+890	CALL WRITEF('File type not relevant to PID')
+	CALL EXIT
+C
+C other error exits - see their messages for details
+900	CONTINUE
+**	IF PDP
+	CALL WRITEF('can''t open file to patch')
+	CALL EXIT
+910	CALL WRITEF('No IDENT in first block')
+	GOTO 990
+**	IFF
+	CALL WRITEF('Can''t open file to patch - error %^L%X', IERR)
+	CALL EXIT(IERR)
+910	IF (.NOT.FOUND_IDENT)
+     &	    CALL WRITEF('No IDENT in first %^L%N lines', MAX_RECNO)
+	GOTO 995
+**	ENDC
+920	CALL WRITEF('.IDENT is %N long - should be 6', LEN)
+	GOTO 990
+930	CALL WRITEF('*** IDENT doesn''t offer space for date')
+	GOTO 990
+940	CALL WRITEF('.IDENT termianted prematurely')
+	GOTO 990
+950	CALL WRITEF('IDENT attribute string terminated prematurely')
+	GOTO 990
+960	CALL WRITEF('IDENT attribute string is %N long - should be 6',
+     &					      LEN)
+C	goto 990
+990	CONTINUE
+**	IF PDP
+	CALL WRITEF('In line %N of file %S',RECNO,SRCTIT)
+	CALL FLBCLO
+**	IFF
+	CALL WRITEF('In line %N of file %S', RECNO, SRC_DESC)
+995	CALL FLWCLO(1)
+**	ENDC
+	CALL EXIT
+C
+	END

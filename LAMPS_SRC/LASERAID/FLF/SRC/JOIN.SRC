@@ -1,0 +1,462 @@
+	SUBROUTINE JOIN(IU,IV)
+C
+***	MODULE	JOIN
+***	IDENT	03JN86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Converged				 DM	28-Jan-1986
+CMOD	Area scan stuff added			 DM	27-May-1983
+CMOD	Fix bug to do with deleting NXTCHNs	WJJ	05-May-1983
+CMOD	Fix bug at end of scan-line		WJJ	25-Oct-1982
+CMOD	Flip arrays JOICHN,JOICOR		WJJ	21-Oct-1982
+CMOD	Created					WJJ	23-Jun-1982
+C
+C A routine for making joints and chains out of data points.
+C Works similarly to GROW, but attempts to retain info about
+C how the chains are connected to one another, by their corners.
+C Any chain has four corners;  for a line these are the left and
+C right sides(edges) of the first and last ends. For an edge, one
+C side is always the edge of scan.  For a total white scan, both
+C sides are on the scan edges. The corners are numbered 1 to 4 in
+C order first left, first right, last left, last right.
+C    A joint joins two corners; normally corner 3 of a chain to
+C corner 1 of the next, and corner 4 to corner 2. Where chains
+C diverge or merge, the joins of one end of a chain are to
+C different chains; where a chain stops the two corners are joined
+C together; where a chain falls of the end of scan, the joins are
+C to (dummy) chain number -1.
+C
+C All current chains are held in V order in NXTCHN(I). All 
+C  encounters on one scan line are examined in V order, and compared 
+C  with the current chains by their edges. If both edges match, the
+C  encounter is added to the chain. If one edge matches, we may have
+C  divergence or convergence of lines. There may also be the start of
+C  new chains or the termination of current ones.
+C
+C    In the code, OLD means related to the data already chained, and
+C NEW relates to the current scan-line.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+***	PARAMETER/PARAMS/
+C
+C arguments
+	INTEGER IU,IV		! axes relative to scan direction
+C
+**	IF AREA
+***	COMMON/AREA/
+***	COMMON/XYPIXC/
+**	ENDC
+***	COMMON/FORKS/		! more structure
+***	COMMON/JOINTS/		! joints are here
+***	COMMON/LINKS/		! data structure
+***	COMMON/LKPARM/		! CHLIM(4) is here
+***	COMMON/RSE/		! raw scan encounters
+***	COMMON/SCPARM/		! IPIT is here
+C
+C external functions
+	LOGICAL NEBIT
+	INTEGER ATTCHN
+C
+C workspace
+	INTEGER OLDCHN,NEWCHN		! current chains
+	INTEGER OLDTYP,NEWTYP		! current chain types
+	INTEGER OLDSID,NEWSID		! current chain sides
+	INTEGER OLDV(2),NEWV(2)		! V-coords of sides
+	INTEGER LSTCHN,LSTCOR		! remembered corner to join to
+	INTEGER CCHN,CCORN		! current corner
+	INTEGER OLDENC,ENC		! current encounter
+	INTEGER FST		! first encounter on scan line
+	INTEGER LSTENC		! last encounter on scan line
+	INTEGER LST		! first encounter on next line
+	INTEGER WAY		! direction of line (+/- 1)
+	INTEGER DELTAV		! discrepancy allowed in V for chaining
+C
+C Note: ENC runs from FST to LSTENC by WAY while examining a scan-line
+	INTEGER DV			! V-diff of old and new sides
+	INTEGER I
+	INTEGER NELO,NEHI
+	LOGICAL*1 NMD			! No More Data
+	LOGICAL*1 ENDSCN		! .TRUE. at either end of scan
+	LOGICAL*1 NXTOLD,NXTNEW		! .TRUE. if to get next enc.
+C
+C clear data structure
+	DO 10 I = 0,MAXCHN
+	  NXTCHN(I) = 0
+10	CONTINUE
+C
+	RETRY = .TRUE.
+	LST = 1			! first encounter of next scan-line
+	NMD = .FALSE.		! assume there will be some data
+**	IF AREA
+	NEHI=ENCARE		! no. of encounters got from area scan
+**	IFF
+	NEHI = -1		! no data yet
+**	ENDC
+	ENDSCN = .TRUE.		! at first end of scan
+C
+	DELTAV = CHLIM(4)*IPIT
+C
+	GOTO 52
+C
+C Here at the end of each scan line
+50	IF (.NOT.NMD) GOTO 51		!  the end
+	IF (ENDSCN) GOTO 990		! the end
+	ENDSCN = .TRUE.			! tidy the scan end
+	GOTO 80				! .. with one more pass
+C
+51	ENDSCN = .FALSE.		! usually not the end of scan
+C
+52	FST = LST		! LST is first encounter of next line
+	WAY = 0			! dirn of scan-line is not determined
+54	LST = LST+1		! look at next encounter
+56	IF (LST .LE. NEHI) GOTO 58	! check that it is there
+C
+C need some more data
+**	IF AREA
+	NMD=.TRUE.		! ... but we know that there isn't any
+	GO TO 60
+**	IFF
+	NMD = .NOT.NEBIT(NELO,NEHI)	! get more encounters
+	IF (NMD) GOTO 60	! if no more data, process what we have
+	GOTO 56			! see if there is another encounter yet
+**	ENDC
+C
+C here with the next encounter, does it belong on this line
+58	IF ((NEBUF(1,LST).AND.NEGMUL) .EQ. 0) GOTO 60	! j if new line
+	IF (WAY .NE. 0) GOTO 54	! jump if we know the line direction
+C set WAY on the basis of the V coords of the first two encounters
+	WAY = -1		! assume dirn is backwards
+	IF (NEBUF(IV+1,LST) .GT. NEBUF(IV+1,FST))WAY = 1
+	GOTO 54
+C
+C here when we have an encounter from the next scan-line
+C set up ENC, LSTENC to cycle through encounter in V order
+60	IF (WAY .EQ. 0) WAY = 1	! only one encounter on line
+	ENC = FST
+	IF (WAY .LT. 0) ENC = LST-1
+	LSTENC = FST+LST-1 - ENC
+C
+	ENC = ENC-WAY		! preset ENC
+	NXTNEW = .TRUE.		! force to get a new encounter
+	NEWSID = 2
+C
+C come here to flush out chains at end of scan
+80	OLDCHN = 0		! set to start of chain list
+	NXTOLD = .TRUE.		! force to get next chain
+	OLDSID = 2
+C
+C
+C Here at the start of each scan line. First we get the next
+C encounter from NEW and OLD, if NXTNEW and NXTOLD are set.
+100	IF (.NOT.NXTNEW) GOTO 140	! skip if already have an enc
+	  NXTNEW = .FALSE.		! say we now have one
+	  NEWSID = 3-NEWSID		! switch to other side
+	  IF (NEWSID.EQ.2) GOTO 140	! easy if on side 2
+	    IF (ENC.EQ.LSTENC) GOTO 120 ! easy if at end of scan-line
+	      ENC = ENC+WAY		! go to next encounter
+	      NEWSID = 1		! set to first side
+	      CALL EVENC(ENC, IV, NEWTYP,NEWV) ! set type and V values
+	      GOTO 140
+C
+120	NEWTYP = 0			! end of scan-line, set type 0
+C
+C Now get next old encounter, if wanted
+140	IF (.NOT.NXTOLD) GOTO 180	! skip if we have an old enc
+	  NXTOLD = .FALSE.		! now we do have one
+	  OLDSID = 3-OLDSID		! switch to other side
+	  IF (OLDSID.EQ.2) GOTO 180	! easy if side is 2
+C *** the next two lines will not work if this code is re-entered on
+C *** THIS scan line
+	    OLDCHN = NXTCHN(OLDCHN)	! get next chain now
+	    IF (OLDCHN.LE.0) GOTO 160	! easy if end of chains
+	      OLDENC = CHAIN(OLDCHN)	! get the last point
+	      OLDSID = 1		! say first side
+	      CALL EVENC(OLDENC,IV,OLDTYP,OLDV) ! set type and V coord
+	      GOTO 180
+C
+160	OLDTYP = 0			! set type 0 if at end of chains
+C
+C
+C Here we are with the next encounters, old and new, along the scan line
+C Test for all sorts of special cases.
+180	IF (OLDTYP.EQ.0 .AND. NEWTYP.EQ.0) GOTO 50 ! end of scan-line
+	IF (OLDTYP.EQ.0) GOTO 320	! only a new encounter
+	IF (NEWTYP.EQ.0) GOTO 310	! only an old encounter
+C We have both old and new encounters.
+	DV = OLDV(OLDSID)-NEWV(NEWSID)	! compute V difference
+	IF (DV.GT.DELTAV) GOTO 320	! new encounter is much earlier
+	IF (DV.LT.-DELTAV) GOTO 310	! old encounter is much earlier
+C The encounters are close
+	IF (NEWSID.NE.OLDSID) GOTO 300	! but the sides are different
+	IF (NEWTYP.NE.OLDTYP) GOTO 200	! but the types are different
+	IF (NEWSID.NE.1) GOTO 200	! but this is the second side
+	IF (ABS(OLDV(2)-NEWV(2)).GT.DELTAV) GOTO 200 ! but second sides
+						     ! don't match
+C The encounter can be added to the chain - hooray!
+	NXT(ENC) = CHAIN(OLDCHN)	! add to chain
+	CHAIN(OLDCHN) = ENC
+	LENGTH(OLDCHN) = LENGTH(OLDCHN)+1 ! increase length of chain
+C We have used both new and old encounters, so force to get both
+	NEWSID = 2			! claim we were on sides 2
+	OLDSID = 2
+190	NXTOLD = .TRUE.			! say we've used both encs
+	NXTNEW = .TRUE.
+	GOTO 100			! go to get next things
+C
+C Here with matching side. If leading, create new chain. If trailing,
+C  remove old chain. Join sides anyway.
+200	IF (NEWSID.NE.1) GOTO 220	! jump if second side
+	  NEWCHN = ATTCHN(ENC,OLDCHN)	! make a new chain, put it in 
+					! the list before OLDCHN
+	  IF (NEWCHN.LE.0) GOTO 980	! give up if no room for chain
+	  CALL JOINCH(NEWCHN,1,OLDCHN,3) ! join the two corners
+	  GOTO 190			! go get next encs.
+C Here with matching second side
+220	CALL DETCHN(OLDCHN)		! detach old chain
+	CALL JOINCH(NEWCHN,2,OLDCHN,4)	! join corners
+	GOTO 190
+C
+C
+C Here with opposite sides, pick the earlier.
+300	IF (DV.GT.0) GOTO 320		! jump if new enc is earlier
+C
+C Here with an old side
+310	NXTOLD = .TRUE.			! ensure we get another old enc
+	IF (OLDSID.EQ.2) CALL DETCHN(OLDCHN) ! drop old chain if side 2
+	CCHN = OLDCHN			! record it as current chain
+	CCORN = OLDSID+2		! record current corner
+	GOTO 330
+C
+C Here with a new side
+320	NXTNEW = .TRUE.			! ensure we get another new enc
+	IF (NEWSID.NE.1) GOTO 325	! if this is side 1 ...
+	NEWCHN = ATTCHN(ENC,OLDCHN)	! ..make new chain, list before 
+					! ..old one
+	IF (NEWCHN.LE.0) GOTO 980	! give up if no room for chain
+325	CCHN = NEWCHN			! record the new chain 
+	CCORN = NEWSID			! record the corner
+C
+330	IF (.NOT.ENDSCN) GOTO 340	! jump if not end of scan vector
+	JOICHN(CCORN,CCHN) = -1		! special joint if so
+	GOTO 100
+C
+C We have a corner. If sides are the same, remember it for the next 
+C corner, else join it to the remembered corner.
+340	IF (NEWSID.NE.OLDSID) GOTO 350	! jump if sides are different
+	LSTCHN = CCHN			! remember corner for next time
+	LSTCOR = CCORN
+	GOTO 100
+C
+C Join this corner to the last one
+350	CALL JOINCH(LSTCHN,LSTCOR,CCHN,CCORN)
+	GOTO 100
+C
+980	CALL WRITEF('*** JOIN *** No room to add new chains')
+990	RETURN
+	END
+	SUBROUTINE EVENC(ENC, IV, TYPE, VCOORD)
+C
+***	MODULE	EVENC
+***	IDENT	25JN82
+C
+**	IF VAX
+	  IMPLICIT NONE
+**	ENDC
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+C	Created					WJJ	24-Jun-1982
+C
+C arguments
+	INTEGER ENC		! encounter index
+	INTEGER IV		! V direction
+	INTEGER TYPE		! encounter type returned:
+				!	0 - empty scan (black)
+				!	1 - edge (black->white)
+				!	2 - edge (white->black)
+				!	3 - line
+				!	4 - white scan
+	INTEGER VCOORD(2)	! sides of encounter returned:
+				! type 0 - not used
+				! type 1 - (1) is coord, (2) is MAXINT
+				! type 2 - (2) is -MAXINT, (1) is coord
+				! type 3 - (1),(2) are computed sides
+				! type 4 - (1),(2) are +/- MAXINT
+C
+***	PARAMETER/PARAMS/
+***	COMMON/RSE/
+C
+	PARAMETER MAXINT=16000
+C Workspace
+	INTEGER IW
+C
+C Code
+	IW = NEBUF(1,ENC) .AND. NEGWID	! get width info
+	IF (IW.GT.NEGLIN) GOTO 100	! jump if not a line
+	TYPE = 3
+	VCOORD(1) = NEBUF(IV+1,ENC) - IW/2	! set coords
+	VCOORD(2) = VCOORD(1) +IW
+	GOTO 990
+C
+100	VCOORD(1) = -MAXINT
+	VCOORD(2) = MAXINT
+	IF (IW.NE.NEGPOS) GOTO 200	! jump if not positive edge
+	TYPE = 1
+	VCOORD(1) = NEBUF(IV+1,ENC)
+	GOTO 990
+C
+200	IF (IW.NE.NEGNEG) GOTO 300	! jump if not negative edge
+	TYPE = 2
+	VCOORD(2) = NEBUF(IV+1,ENC)
+	GOTO 990
+C
+300	IF (IW.NE.NEGWHI) GOTO 400	! jump if not white scan
+	TYPE = 4
+	GOTO 990
+C
+400	TYPE = 0			! assume empty scan
+C
+990	RETURN
+	END
+	SUBROUTINE JOINCH(CHN1,COR1,CHN2,COR2)
+C
+***	MODULE	JOINCH
+***	IDENT	24JN82
+C
+**	IF VAX
+	  IMPLICIT NONE
+**	ENDC
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+CMOD	Flip arrays JOICHN,JOICOR		WJJ	21-Oct-1982
+CMOD	Created					WJJ	24-Jun-1982
+C
+C Routine to join (bi-directionally) two chain corners
+C
+C arguments
+	INTEGER CHN1,CHN2	! chains to join
+	INTEGER COR1,COR2	! resp corners to join
+C
+***	PARAMETER/PARAMS/
+C
+***	COMMON/JOINTS/
+C
+C Code
+	JOICHN(COR1,CHN1) = CHN2
+	JOICOR(COR1,CHN1) = COR2
+	JOICHN(COR2,CHN2) = CHN1
+	JOICOR(COR2,CHN2) = COR1
+C
+	RETURN
+	END
+	SUBROUTINE DETCHN(N)
+C
+***	MODULE DETCHN
+***	IDENT  24JN82
+C
+**	IF VAX
+	  IMPLICIT NONE
+**	ENDC
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+C	Created from MCF's REMCHN		WJJ	24-June-1982
+C
+C
+C Remove chain N from active list, do nothing
+C if it isn't active.
+C
+C parameters:
+***	PARAMETER/PARAMS/
+C
+C argument:
+	INTEGER N
+C
+C common block:
+***	COMMON/FORKS/
+C
+C workspace:
+	INTEGER K,L
+C
+	L = 0
+C
+10	K = NXTCHN(L)
+	IF (K .LE. 0) GOTO 30
+	IF (K .EQ. N) GOTO 20
+	L = K
+	GOTO 10
+C
+20	NXTCHN(L) = NXTCHN(K)
+CCCCC	NXTCHN(K) = 0
+C
+30	RETURN
+	END
+C
+	INTEGER*4 FUNCTION ATTCHN(ENC,CHN)
+C
+***	MODULE ATTCHN
+***	IDENT  24JN82
+C
+**	IF VAX
+	  IMPLICIT NONE
+**	ENDC
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+C	Created					WJJ	24-June-1982
+C
+C Start up a new chain, using point ENC from NEBUF, adding
+C it into the active list, before chain CHN.
+C The new chain number is returned, 0 if no room for it
+C
+C parameters:
+***	PARAMETER/PARAMS/
+C
+C arguments:
+	INTEGER ENC		! the first point
+	INTEGER CHN		! the next chain
+C
+C common blocks:
+***	COMMON/RSE/
+***	COMMON/LINKS/
+***	COMMON/FORKS/
+C
+C workspace:
+	INTEGER I,K,L,NV
+C
+C Find a free chain
+	DO 10 I=1,MAXCHN
+	  ATTCHN = I
+	  IF (CHAIN(I) .EQ. 0) GOTO 20
+10	CONTINUE
+C
+C no room for it
+	ATTCHN = -1
+	GOTO 50
+C
+C find chains's position
+20	L = 0
+30	K = NXTCHN(L)
+	IF (K .EQ. CHN) GOTO 40		! found our chain
+	IF (K .LE. 0) GOTO 35		! didn't find our chain
+	L = K
+	GOTO 30
+C
+C failed to find the next chain
+35	ATTCHN = -2
+	GOTO 50
+C
+C found our place
+40	NXTCHN(L) = ATTCHN
+	NXTCHN(ATTCHN) = K
+	CHAIN(ATTCHN) = ENC	! start the chain
+	LENGTH(ATTCHN) = 1
+	NXT(ENC) = 0
+C
+50	RETURN
+	END

@@ -1,0 +1,282 @@
+	PROGRAM PASCAL_UP
+C
+***	MODULE PASCAL_UP
+***	IDENT 05SE86
+C
+	IMPLICIT NONE
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England
+C Author R. Fairbairns
+C
+C Coded January 1984
+C
+C Program to put reserved words in a PASCAL program into upper case
+C
+	PARAMETER	IN_LUN = 1	! input FILEIO LUN
+	PARAMETER	OUT_LUN = 2	! output FILEIO LUN
+C
+C workspace:
+	BYTE		CH		! character read from line
+	INTEGER*4	CMD_INDEX	! found command index
+	BYTE		COMMENT		! character to delimit comment
+	INTEGER*2	ERROR		! for opening files
+	CHARACTER*60	FILENAME	! for reading title into
+	LOGICAL*1	HAD_TAB		! had a tab since last printing char
+	INTEGER*4	I		! loop variable
+	INTEGER*4	IERR		! VMS return code
+	INTEGER*2	IRC		! error code from RDFILT
+	INTEGER*2	NCHS		! number of characters read
+	INTEGER*4	LINE_NUMBER	! (you guessed) ... line number
+	INTEGER*4	SHIFT		! shift when compacting spaces
+	INTEGER*4	START_GAP	! start of last sequence of
+C					!  spaces (until terminated)
+	INTEGER*4	TAB_POS		! current tabulation position
+	INTEGER*4	START_WORD	! TXTBUF start of word-in-hand
+	INTEGER*4	END_WORD	! ditto end of word
+	LOGICAL*1	UPPER		! 'this word all upper-case'
+	BYTE		WORD_BUFFER(132)! buffer associated with
+C					!	WORD_STRING
+	INTEGER*4	WORD_INDEX	! part of WORD_STRING
+	INTEGER*4	WORD_STRING(2)	! used for reading words prior
+C					!  testing for reservedness
+C lay out
+	EQUIVALENCE	(WORD_STRING(1), WORD_INDEX)
+C
+C 'command' (reservedness) table
+	EXTERNAL	PASCAL_CMD_TABLE
+	INTEGER*4	PASCAL_CMD_TABLE
+C
+C functions called
+	INTEGER*4	FIND_CMD	! look up word's reservedness
+	INTEGER*2	FLROPN		! open for reading
+	INTEGER*2	FLRSTR		! read from input file
+	INTEGER*2	FLWOPN		! open for writing
+	LOGICAL		GETCLI		! 'get' from CLI command line
+	LOGICAL		RDCH		! read character from line
+	LOGICAL		RDCHS		! ditto, ignoring spaces
+	LOGICAL		RDFILT		! read title from TXTBUF
+C
+***	COMMON/LSL$CMNVIO:TXTC/
+C
+C extend TXTBUF (by more than is needed)
+	BYTE		TXTBUF_EXTN(132)
+	COMMON  /TXTC/	TXTBUF_EXTN
+C
+C
+C * * *		initialise
+C		==========
+C
+	WORD_STRING(2) = %LOC(WORD_BUFFER(1))
+	TXTPTR = 72
+	TXTADD = %LOC(TXTBUF(1))
+C
+C find title of file to work on
+	NCHS = GETCLI(TXTDSC)		! read anything on CLI
+	IF (NCHS.EQ.0) CALL EXIT	! ignore call with no file title
+	CALL BSLN			! prepare to read
+	IF (RDFILT(FILENAME, 60, 'HERE:.PAS',
+     &		   .FALSE., .FALSE., .FALSE., IRC)) THEN
+	   CALL TTWSTR('Can''t read input file name')
+	   CALL FLTERR(IRC)
+	   CALL EXIT
+	ENDIF
+C
+C now open files for VIOLIB FILEIO routines
+	ERROR = FLROPN(IN_LUN, FILENAME, IERR)
+	IF (ERROR.LT.0) THEN
+	   CALL WRITEF('Error %^L%X opening source file',
+     &			       IERR)
+	   CALL EXIT(IERR)
+	ENDIF
+	ERROR = FLWOPN(OUT_LUN, FILENAME, IERR)
+	IF (ERROR.LT.0) THEN
+	   CALL WRITEF('Error %^L%X opening destination file',
+     &			       IERR)
+	   CALL EXIT(IERR)
+	ENDIF
+	CALL FLRSEL(IN_LUN)
+	CALL FLWSEL(OUT_LUN)
+C
+C finally, ensure the table of names is correctly sorted
+	CALL SORTAB(PASCAL_CMD_TABLE)
+C
+C
+C * * *		main loop
+C		=========
+C
+C reading lines of input file
+	TXTLIM = 132			! maximum length we can read
+	LINE_NUMBER = 0			! to begin at the beginning
+100	LINE_NUMBER = LINE_NUMBER+1	! ... and to follow on
+	NCHS = FLRSTR(,IERR)		! get a line
+	IF (NCHS.LT.0) THEN		! error
+	  IF (NCHS.NE.-10) THEN	! not straight end-of-line	
+	    CALL WRITEF('Error %^L%X reading source file line %N',
+     &				IERR,		     LINE_NUMBER  )
+	  ELSE IF (COMMENT.NE.0) THEN	! end of file in comment
+	    CALL EXPAND('End of file while looking for %^B%C',
+     &						     COMMENT  )
+	    IF (COMMENT.EQ.'*')
+     &		       CALL APPEND(')')	! it's '*)' not just '*'
+	    CALL APPEND(' in line %^L%N', LINE_NUMBER)
+	    CALL TTWSTR		! output whole diagnostic
+	  ENDIF
+C
+C now tidy up and exit
+	  CALL FLWCLO(OUT_LUN)		! terminate output
+	  CALL FLRCLO(IN_LUN)		! terminate input
+	  IF (NCHS.EQ.-10) THEN		! end of file
+	    CALL EXIT			!  - normal exit
+	  ELSE				! read failure
+	    CALL EXIT(IERR)		!  - error exit
+	  ENDIF
+C
+	ENDIF
+C
+C got a line in memory: read it
+	CALL BSLN
+	IF (RDCHS(CH)) THEN		! empty line
+	  CALL FLWRTF			! output a REALLY empty one
+	  GOTO 100
+	ENDIF
+	CALL BSLN			! forget what's been done so far
+	TAB_POS = 0			! mark at start of line
+	START_GAP = 0			! not yet in gap
+	HAD_TAB = .FALSE.
+C
+C loop looking for a letter to start a word
+110	IF (RDCH(CH)) THEN		! end of line
+	  CALL FLWSTR(TXTDSC)		! output it (as modified)
+	  GOTO 100			! go get next one
+	ENDIF
+C
+C evaluate tabulation position
+	IF (CH.EQ.9) THEN		! tabulate
+	  TAB_POS = (TAB_POS+8).AND.(-8)
+	  HAD_TAB = .TRUE.
+	ELSE				! just one space further
+	  TAB_POS = TAB_POS+1
+	ENDIF
+	IF (COMMENT.EQ.0) GOTO 120	! not in comment
+C
+C look for comment terminator
+115	IF (CH.NE.COMMENT) GOTO 110	! not comment terminator
+	IF (CH.EQ.'*') THEN		! we want '*)'
+	  IF (RDCH(CH)) GOTO 110	! look for next (RDCHS
+C					!		will reject)
+	  IF (CH.EQ.9) THEN		! count position on line
+	    TAB_POS = (TAB_POS+8).AND.(-8)
+	    HAD_TAB = .TRUE.
+	  ELSE
+	    TAB_POS = TAB_POS+1
+	  ENDIF
+	  IF (CH.NE.')') GOTO 115	! not 'complete' terminator -
+C					!  check for '**)' case
+	ENDIF	
+	COMMENT = 0 			! got this far => comment ended
+	GOTO 110			! start looking for name again
+C
+C not in comment
+120	IF (CH.EQ.9) THEN		! fold spaces into following tab
+	  IF (START_GAP.NE.0) THEN	! there are some
+	    SHIFT = DCPTR-1-START_GAP	! amount to be moved
+	    DO I = DCPTR-1,TXTPTR
+	      TXTBUF(I-SHIFT) = TXTBUF(I) ! shift down
+	    ENDDO
+	    TXTPTR = TXTPTR-SHIFT	! shorten the line
+	    DCPTR = DCPTR-SHIFT		! and move decode pointer back
+	    START_GAP = 0		! forget about the spaces eaten
+	  ENDIF
+	  GOTO 110
+	ELSE IF (CH.EQ.' ') THEN	! prepare to fold a space
+	  IF (MOD(TAB_POS,8).EQ.0 .AND.
+     &	      (START_GAP.NE.0 .OR. HAD_TAB)) THEN ! got to tab position
+	    TXTBUF(DCPTR-1) = 9		! replace space by tab
+	    IF (START_GAP.NE.0) THEN	! not isolated space
+	      SHIFT = DCPTR-1-START_GAP ! amount to be removed
+	      DO I = DCPTR-1,TXTPTR
+	        TXTBUF(I-SHIFT) = TXTBUF(I) ! shift down
+	      ENDDO
+	      TXTPTR = TXTPTR-SHIFT	! shorten the line
+	      DCPTR = DCPTR-SHIFT	! and move decode pointer back
+	      START_GAP = 0		! and forget about the gap
+	      HAD_TAB = .TRUE.		! but remember the tab
+	    ENDIF
+	  ELSE IF (START_GAP.EQ.0) THEN	! we're starting a gap
+	    START_GAP = DCPTR-1		! remember where
+	  ENDIF
+	  GOTO 110
+	ENDIF
+C
+C not space or tab
+	START_GAP = 0			! forget any gap
+	HAD_TAB = .FALSE.		! or tab
+	IF (CH.GE.'a'.AND.CH.LE.'z' .OR.
+     &	    CH.GE.'A'.AND.CH.LE.'Z' .OR.
+     &	    CH.EQ.'%') 	GOTO 130	! starting word
+C
+C look for start of comment
+	IF (CH.EQ.'{') THEN		! '{' introduces comment
+	   COMMENT = '}'		! matching bracket
+	   GOTO 110
+	ENDIF
+	IF (CH.EQ.'''') THEN		! ' introduces string constant
+	   COMMENT = ''''		! close-string value is same
+	   GOTO 110
+	ENDIF
+	IF (CH.NE.'(') GOTO 110		! not '(*' comment
+	IF (RDCH(CH)) GOTO 110		! actually '(<eol>' here
+	IF (CH.EQ.9) THEN		! count position in line
+	   TAB_POS = (TAB_POS+8).AND.(-8)
+	ELSE
+	   TAB_POS = TAB_POS+1
+	ENDIF
+	IF (CH.EQ.'*') THEN		! got '(*'
+	   COMMENT = '*'		! look for '*)'
+	   GOTO 110
+	ELSE
+	   GOTO 120			! re-evaluate second character
+	ENDIF
+C
+C start reading word
+130	UPPER = CH.GE.'A' .AND. CH.LE.'Z' ! 'upper case only'
+	WORD_INDEX = 0			! set start of string
+	START_WORD = DCPTR-1		! not rational to use DCPSAV
+C
+C loop reading word
+140	WORD_INDEX = WORD_INDEX+1	! advance length
+	WORD_BUFFER(WORD_INDEX) = CH	! buffer one character
+	IF (RDCH(CH)) THEN		! end of line terminates
+	   END_WORD = DCPTR-1		! last letter is one before
+C					!		 end line
+	   GOTO 150
+	ENDIF
+	IF (CH.EQ.9) THEN		! count effect on position
+	   TAB_POS = (TAB_POS+8).AND.(-8)
+	ELSE
+	   TAB_POS = TAB_POS+1
+	ENDIF
+	IF (CH.GE.'a' .AND. CH.LE.'z') THEN ! lower case letter
+	   UPPER = .FALSE.		! not all upper-case
+	   GOTO 140			! get rest of word
+	ELSE IF (CH.GE.'A'.AND.CH.LE.'Z' .OR.
+     &		 CH.GE.'0'.AND.CH.LE.'9' .OR.
+     &		 CH.EQ.'_' .OR. CH.EQ.'$' .OR.
+     &		 CH.EQ.'%' ) THEN
+	   GOTO 140			! another OK char
+	ENDIF
+	END_WORD = DCPTR-2		! last letter is one before
+C					!	terminating character
+C
+C not a word character - find reservedness
+150	IF (UPPER) GOTO 115		! already upper case,
+C					!	so don't care
+	CMD_INDEX = FIND_CMD(WORD_STRING, PASCAL_CMD_TABLE)
+	IF (CMD_INDEX.GT.0) THEN	! it's a reserved word
+	   DO I = START_WORD,END_WORD	! upper-case the word
+	      CALL UPCASE(TXTBUF(I))	!   in the buffer
+	   ENDDO
+	ENDIF
+	GOTO 115
+C
+	END

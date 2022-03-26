@@ -1,0 +1,363 @@
+	LOGICAL FUNCTION GET_CMDS()
+C
+***	MODULE	GET_CMDS
+***	IDENT	13AU92
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+C	Created 				TJH	26-Apr-1988
+C
+CMOD1137 Fix loop if no GO command in command file (went to label 170
+C	 = SHOW_CMD repeatedly!)		 JB	13-Aug-1992
+C
+C Function reads the user input to DTIBLEND, checks that the command
+C is valid against DTIBLEND_CMDTAB and passes control to the appropriate
+C routine for further processing
+C
+	IMPLICIT NONE
+C
+C Parameters:
+C
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNDTIBLEND:PARAMS.PAR'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C Common blocks:
+C
+	INCLUDE 'LSL$CMNDTIBLEND:COMMAND.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNDTIBLEND:FILES.CMN'
+	INCLUDE 'LSL$CMNDTIBLEND:SELECTIONS.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C W/s:
+	BYTE		CH		! for use with RDCHS
+	INTEGER		CMD     	! decoded command number
+	LOGICAL		OK		! function return
+	INTEGER		IERR		! error code
+	BYTE		ALL_SET		! -1 - all 8 bits set
+	DATA		ALL_SET /-1/
+C
+C Define command tables:
+	EXTERNAL	DTIBLEND_CMD_TABLE
+	INTEGER		DTIBLEND_CMD_TABLE
+C
+C Functions:
+	LOGICAL		BLEND_CMD	! get input DTI file-spec
+	LOGICAL		BORDER_CMD	! get WINDOW command args
+	LOGICAL		DESELECT_CMD	! determine deselections
+	LOGICAL		DISABLE_CMD	! decode disable keywords
+	LOGICAL		ENABLE_CMD	! decode enable keywords
+	LOGICAL		GETFRT_CMD	! open and read FRT file
+	LOGICAL		IFF_CMD		! get input IFF file-spec
+	LOGICAL		GETFILNAM	! get the name of the input file
+	LOGICAL		GO_CMD		! performs checking
+	LOGICAL		HELP_CMD	! give help
+	LOGICAL		HOLD_CMD	! get input DTI file-spec
+	LOGICAL		LIST_CMD	! opens listing file 
+	LOGICAL		NULL_CMD	! sets null value for checking
+	LOGICAL		PAUSE_CMD	! get pause command
+	LOGICAL		QUIT		! quit the program
+	LOGICAL		RETURN_CMD	! return to terminal control
+	LOGICAL		RDCHS		! read character
+	LOGICAL		RDCOMM		! read command
+	LOGICAL		ROVER_CMD	! open a ROVER command file 
+	LOGICAL		SELECT_CMD	! determine selections
+	LOGICAL         SHOW_CMD	! show status
+	LOGICAL		THRESHOLD_CMD	! set the THRESHOLD value 
+	LOGICAL         SPAWN_CMD	! for DCL SPAWN
+	LOGICAL		WAIT_CMD	! wait for specified time
+C
+C LSLLIB functions
+	INTEGER		FLROPN
+	INTEGER		FLRSTR
+	INTEGER		TTRSTR
+C
+C ......................................................................
+C Initialise all the command flags
+C
+	TTIN   		=.TRUE.		! assume reading from terminal
+	PMEING		=.FALSE.	! PME running?
+	INSITU		=.FALSE.
+	BORDER_WIDTH	= 3
+	HAD_THRESH	=.FALSE.
+	THRESHOLD_VALUE = 0.0
+	MFACTR		= 1.0
+	NULL_VALUE	= -32767
+C
+C Ensure that all IFF feature codes and layers are initially selected
+	FCSMOD=.FALSE.
+	LYSMOD=.FALSE.
+	CALL VIOCLR(USEFC,BMAX*4,ALL_SET)
+	CALL VIOCLR(USEOV,BMAX*4,ALL_SET)
+C
+C
+C ......................................................................
+C
+	GET_CMDS = SS$_NORMAL
+C
+C Get an input line from the terminal or from the command file
+C
+10	TXTPTR=80
+	IF (TTIN) THEN
+	   OK=TTRSTR(,,'DTIBLEND> ',IERR)
+	ELSE
+	   CALL FLRSEL(INDLUN)
+	   OK=FLRSTR(,,IERR)
+	ENDIF
+C
+C If an error is detected in the indirect command file, close and return
+C to the terminal
+C
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      GET_CMDS=SS$_ABORT
+	      IF (TTIN) GOTO 250		! end of file = exit
+	   ENDIF
+C
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 20
+	ENDIF
+C
+C Otherwise, ( command seems to be ok ), echo and decode the line
+C
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('DTIBLEND> ')
+	   CALL APPEND(TXTDSC) ! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+	CALL BSLN
+C
+C Look for comment
+C
+	IF (RDCHS(CH)) GOTO 10	! substantially empty line
+	IF (CH.EQ.'!') GOTO 10	! comment!
+C
+C Look for indirect file start
+C
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 20
+	      ELSE
+	         CALL BSCH
+	      ENDIF
+	      OK=GETFILNAM(IND_NAME,IND_NAME_LENGTH,
+     &				'SYS$DISK:[].COM;0',.TRUE.,%REF('!'))
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	      OK=FLROPN(INDLUN, IND_NAME(:IND_NAME_LENGTH), IERR)
+	      IF (OK) THEN
+	         CALL WRITEF('Command input now being read from %S'
+     &					,IND_NAME(:IND_NAME_LENGTH))
+	         TTIN=.FALSE.
+	         GOTO 10
+	      ELSE
+	         CALL WRITEF('%S Can''t open indirect command file %S'
+     &			  ,ERROR,IND_NAME(:IND_NAME_LENGTH))
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+	CALL BSCH			! un-read non-'@'
+C
+C Command must be input from the terminal, so check input against valid
+C commands listed in DTIBLEND_CMDTAB.MAR
+C
+	CMD=RDCOMM(DTIBLEND_CMD_TABLE)
+	GOTO (	20,	! unknown
+     &		22,	! blend
+     &		24,	! border
+     &		25,	! deselect
+     &		40,	! disable
+     &		50,	! enable
+     &		77,	! frt
+     &		70,	! go
+     &		80,	! help
+     &		85,	! hold
+     &		90,	! iff
+     &		100,	! list
+     &		110,	! null
+     &		120,	! pause
+     &		240,	! quit
+     &		130,	! return
+     &		150,	! rover
+     &		155,	! select
+     &		170,	! show
+     &		200,	! spawn
+     &		190,	! threshold
+     &		220	! wait
+     &	      		), CMD+1
+C
+C command number out of range
+C
+	CALL WRITEF('Command not yet implemented')
+	GOTO 10
+C
+C ......................................................................
+C BLEND 'file-spec' ['file-spec']
+C
+22	IF (.NOT.BLEND_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C BORDER 'integer'
+24	IF (.NOT.BORDER_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C DESELECT 'sub-command'
+C
+25	IF (.NOT.DESELECT_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C Disable 'sub-command'
+C
+40	IF (.NOT.DISABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C Enable 'sub-command'
+C
+50	IF (.NOT.ENABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C BLEND file-spec [file-spec]
+C
+60	IF (.NOT.BLEND_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C FRT [filespec] - for FC group names 
+C
+77	IF (HAD_FRT) THEN
+	   CALL WRITEF(WARNING//
+     &		'An FRT file has already been specified')
+	ELSE
+	   IF (.NOT.GETFRT_CMD()) GOTO 20
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C GO - perform checking
+C
+70	IF ( .NOT. GO_CMD() ) GOTO 20
+	GET_CMDS=SS$_NORMAL
+	GOTO 250
+C
+C ......................................................................
+C HELP
+C
+80	IF (.NOT.HELP_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C HOLD file-spec
+C
+85	IF (.NOT.HOLD_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C IFF - input an IFF file
+C
+90	IF (.NOT.IFF_CMD()) GOTO 20
+	GOTO 10
+C ......................................................................
+C LIST - output a listing file
+C
+100	IF ( .NOT. LIST_CMD() ) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C NULL 
+C
+110	IF ( .NOT. NULL_CMD() ) GOTO 20
+	GOTO 10
+C ......................................................................
+C PAUSE
+C
+120	CALL PAUSE(TTIN)
+	GOTO 10
+C
+C ......................................................................
+C RETURN - return to terminal input
+C
+130	IF (TTIN) THEN
+	   CALL WRITEF(
+     &		'RETURN command ignored - command '//
+     &			'input is already from terminal')
+	ELSE
+	   CALL WRITEF(
+     &		'RETURN command detected - returning to terminal input')
+	ENDIF
+C
+	IF (.NOT.TTIN) CALL FLRCLO(INDLUN)
+	TTIN=.TRUE.
+	GOTO 10
+C
+C ......................................................................
+C ROVER
+C
+150	IF ( .NOT.ROVER_CMD() ) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SELECT 'sub-command'
+C
+155	IF (.NOT.SELECT_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SHOW
+C
+170	IF (.NOT.SHOW_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C THRESHOLD
+C
+190	IF ( .NOT. THRESHOLD_CMD() ) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SPAWN DCL process - primarily designed for file management
+C
+200	IF (.NOT.SPAWN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C WAIT
+C
+220	IF (.NOT.WAIT_CMD(TTIN)) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C QUIT
+C
+C close indirect input following disaster
+C
+20	IF (.NOT.TTIN) THEN
+	   TTIN=.TRUE.
+	   CALL FLRCLO(INDLUN)
+	   CALL WRITEF(' ')
+	   CALL WRITEF('%S Indirect file error - returning to '//
+     &			'terminal input',WARNING)
+	ENDIF
+	GOTO 10
+C
+240	GET_CMDS=SS$_ABORT
+C
+250	RETURN
+	END
+C

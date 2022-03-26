@@ -1,0 +1,351 @@
+	LOGICAL*4 FUNCTION LLJOIN(PT,CC,NXT,PRV,NEAREST,
+     &				MINSQDIST,PT_DST,PT_SEEN,
+     &				PDAT,QDAT,PT_PR_FTR,FTR_PTS,FTR_START,
+     &				FTR_IFC2,FTR_LAYER,FTR_INFTR,
+     &				PNT_FTR,FTR_ORIG_PR_FTR,IN_FTR_STATUS,
+     &				WORKSPACE,
+     &				MAXPTS,MAXINFTRS,MAXOUTFTRS,MAXNODES)
+
+***	MODULE	LLJOIN
+***	IDENT	26MY93
+
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+
+CMOD	 Stopped deleting pts that shouldn't have been
+C	 - I hope there aren't any side-effects		ACM 06-Sep-1988
+CMOD	 Made a function				TJH 29-May-1987
+
+CMOD1232 Pass PT array to DEL1 & DEL3			 JB 25-May-1993
+
+C	Created   : ACM					       Jul 1986
+
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+	INTEGER*4	N_STEPS			! num of process steps
+	PARAMETER(	N_STEPS = 10)
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNLSL:STATUS.CMN'
+
+C Data in/out
+	INTEGER*4	MAXPTS,MAXINFTRS,MAXOUTFTRS,MAXNODES
+	INTEGER*4	NXT(MAXPTS)
+	INTEGER*4	PRV(MAXPTS)
+	INTEGER*4	NEAREST(MAXPTS)
+	INTEGER*4	PT_PR_FTR(MAXPTS)
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_START(MAXOUTFTRS)
+	INTEGER*4	FTR_INFTR(MAXOUTFTRS)
+	INTEGER*4	FTR_ORIG_PR_FTR(MAXOUTFTRS)
+	INTEGER*4	WORKSPACE(12,MAXNODES)	
+	INTEGER*4	CC(MAXPTS)
+
+	INTEGER*2	FTR_IFC2(MAXOUTFTRS)
+	INTEGER*2	FTR_LAYER(MAXOUTFTRS)
+
+	REAL*4		PT(2,MAXPTS)
+	REAL*4		MINSQDIST(MAXPTS)
+	REAL*4		PT_DST(MAXPTS)
+
+	LOGICAL*1	PT_SEEN(MAXPTS)
+	LOGICAL*1	PDAT(MAXPTS),QDAT(MAXPTS)
+	LOGICAL*1	PNT_FTR(MAXOUTFTRS)
+
+	BYTE		IN_FTR_STATUS(MAXINFTRS)
+
+C Externals
+	LOGICAL*4	CHKVEX1,CHKPTS1,CHKPTS2
+	EXTERNAL	CHKVEX1,CHKPTS1,CHKPTS2
+
+C Functions
+	LOGICAL*4	L2A
+	LOGICAL*4	BREAK_FTRS
+	LOGICAL*4	QUADSCAN
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Does everything needed for the LLJOIN process
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Assume success
+	LLJOIN = SS$_NORMAL
+
+C Insert pts into every vector where it is intersected by any other
+C eligible vector, and also where it comes within JNTOL of any other
+C vector end
+
+	CALL WRITEF('	Inserting additional points for 1-1 alignment')
+
+	IF (HAD_LCP) THEN
+	  LLJOIN = QUADSCAN(
+     &		CHKVEX1,	! vector-pair processing routine
+     &		MAXPTS,		! PT dimension
+     &		PT,		! coords of all points in image
+     &		N_PTS,		! num of pts in PT
+     &		XMIN,XMAX,YMIN,YMAX,! point coord ranges
+     &		.FALSE.,	! treat PT as contig array, not lnkd lst
+     &		1,		! not using linked-list pointers
+     &		NXT,		! linked-list ptrs for PT
+     &		JNTOL,		! join tolerance
+     &		N_PR_FTRS,	! num of ftrs
+     &		FTR_PTS,	! list of lin start/end PT inds
+     &		FTR_LAYER,	! ftr LAYER LAYER INDEX
+     &		.FALSE.,	! treat as lines of vectors, not points
+     &		.TRUE.,		! use layer-pair check
+     &		FCPAIR,		! which FC pairs to check?
+     &		MAXFCS,		! FCPAIR dimension
+     &		.FALSE.,	! do not check any feature with itself
+     &		MAXNODES,	! WORKSPACE dimension
+     &		WORKSPACE,	! workspace
+     &		HAD_MONITOR)	! show running % completion?
+	ELSE
+	  LLJOIN = QUADSCAN(
+     &		CHKVEX1,	! vector-pair processing routine
+     &		MAXPTS,		! PT dimension
+     &		PT,		! coords of all points in image
+     &		N_PTS,		! num of pts in PT
+     &		XMIN,XMAX,YMIN,YMAX,! point coord ranges
+     &		.FALSE.,	! treat PT as contig array, not lnkd lst
+     &		1,		! not using linked-list pointers
+     &		NXT,		! linked-list ptrs for PT
+     &		JNTOL,		! join tolerance
+     &		N_PR_FTRS,	! num of ftrs
+     &		FTR_PTS,	! list of lin start/end PT inds
+     &		FTR_IFC2,	! ftr feature code
+     &		.FALSE.,	! treat as lines of vectors, not points
+     &		HAD_FCP,	! use FC-pair check if had FCPfile only
+     &		FCPAIR,		! which FC pairs to check?
+     &		MAXFCS,		! FCPAIR dimension
+     &		.FALSE.,	! do not check any feature with itself
+     &		MAXNODES,	! WORKSPACE dimension
+     &		WORKSPACE,	! workspace
+     &		HAD_MONITOR)	! show running % completion?
+	END IF
+	IF (.NOT.LLJOIN) GOTO 10		! return
+
+	IF (SHOW_TIME) CALL LIB$SHOW_TIMER
+
+C Convert from contiguous-array to linked-list feature representation
+
+	CALL A2L(PT,NXT,PRV,FTR_PTS,MAXPTS,MAXOUTFTRS)
+
+C Point every point to the nearest point with highest higher ftr
+C priority to it within JNTOL, marking every point ever pointed to
+C with SEEN = .TRUE.
+
+	CALL WRITEF('	Finding alignment')
+
+	IF (HAD_LCP) THEN
+	  LLJOIN = QUADSCAN(
+     &		CHKPTS1,	! point-pair processing routine
+     &		MAXPTS,		! PT dimension
+     &		PT,		! coords of all points in image
+     &		N_PTS,		! num of pts in PT
+     &		XMIN,XMAX,YMIN,YMAX,! point coord ranges
+     &		.TRUE.,		! treat PT as lnkd lst, not contig array
+     &		MAXPTS,		! linked-list pointers are being used
+     &		NXT,		! linked-list ptrs for PT
+     &		JNTOL+COORD_TOL,! tolerance
+     &		N_PR_FTRS,	! num of ftrs
+     &		FTR_PTS,	! list of lin start/end PT inds
+     &		FTR_LAYER,	! ftr layer LAYER index
+     &		.TRUE.,		! treat as lines of points, not vectors
+     &		.TRUE.,		! use layer-pair check
+     &		FCPAIR,		! which FC pairs to check?
+     &		MAXFCS,		! FCPAIR dimension
+     &		.FALSE.,	! do not check any feature with itself
+     &		MAXNODES,	! WORKSPACE dimension
+     &		WORKSPACE,	! workspace
+     &		HAD_MONITOR)	! show running % completion?
+	ELSE
+	  LLJOIN = QUADSCAN(
+     &		CHKPTS1,	! point-pair processing routine
+     &		MAXPTS,		! PT dimension
+     &		PT,		! coords of all points in image
+     &		N_PTS,		! num of pts in PT
+     &		XMIN,XMAX,YMIN,YMAX,! point coord ranges
+     &		.TRUE.,		! treat PT as lnkd lst, not contig array
+     &		MAXPTS,		! linked-list pointers are being used
+     &		NXT,		! linked-list ptrs for PT
+     &		JNTOL+COORD_TOL,! tolerance
+     &		N_PR_FTRS,	! num of ftrs
+     &		FTR_PTS,	! list of lin start/end PT inds
+     &		FTR_IFC2,	! ftr feature code
+     &		.TRUE.,		! treat as lines of points, not vectors
+     &		HAD_FCP,	! use FC-pair check if had FCPfile only
+     &		FCPAIR,		! which FC pairs to check?
+     &		MAXFCS,		! FCPAIR dimension
+     &		.FALSE.,	! do not check any feature with itself
+     &		MAXNODES,	! WORKSPACE dimension
+     &		WORKSPACE,	! workspace
+     &		HAD_MONITOR)	! show running % completion?
+	END IF
+	IF (.NOT.LLJOIN) GOTO 10	! return
+
+	IF (SHOW_TIME) CALL LIB$SHOW_TIMER
+
+C Delete all inserted points now "seen" but not pointing or pointed to
+
+	CALL VIOCLR(QDAT,N_PTS,-1)	! set all QDAT = .TRUE.
+
+	CALL DEL1(	NXT,PRV,NEAREST,PT_PR_FTR,PT_SEEN,PDAT,QDAT,
+     &			FTR_PTS,PNT_FTR,.FALSE.,.TRUE.,
+     &			PT,MAXPTS,MAXOUTFTRS)
+
+C Release pts in the vicinity of junctions where ftrs almost touch or
+C cross, where alignment should not occur
+
+	CALL SET_PT_DST(PT,NXT,PT_DST,FTR_PTS,MAXPTS,MAXOUTFTRS)
+
+	CALL MARK_ALIGN(PT,NXT,PRV,NEAREST,PT_DST,PT_PR_FTR,
+     &			PT_SEEN,QDAT,FTR_PTS,PNT_FTR,
+     &			MAXPTS,MAXOUTFTRS,%val(ftr_ifc2_start))
+
+C Point all points through to highest point which points no further and
+C is marked for alignment
+
+	CALL GROUND(	PT,NXT,NEAREST,QDAT,MINSQDIST,FTR_PTS,
+     &			MAXPTS,MAXOUTFTRS)
+ 
+C Free runs of pts which are now SEEN but not DIRECTED, and are
+C bounded by a point which is free (neither SEEN nor DIRECTED)
+
+	CALL DISCON1(	NXT,PRV,NEAREST,MINSQDIST,FTR_PTS,
+     &			MAXPTS,MAXOUTFTRS)
+
+C Free runs of pts A which are directed to a pair, one of which is
+C in the same feature as A, and are bounded by a point which is free
+C (neither SEEN nor DIRECTED) 
+
+	CALL DISCON2(	NXT,PRV,NEAREST,PT_SEEN,PDAT,FTR_PTS,
+     &			MAXPTS,MAXOUTFTRS)
+
+C Now that some points have had their NEAREST pointers disconnected,
+C reset PT_SEEN so that points no longer within join tolerance of
+C some point which is pointing to some other point are no longer
+C marked as seen.
+
+	CALL WRITEF('	Checking alignment')
+	CALL VIOCLR(PT_SEEN,N_PTS)	! set PT_SEEN = .FALSE.
+
+	IF (HAD_LCP) THEN
+	  LLJOIN = QUADSCAN(
+     &		CHKPTS2,	! point-pair processing routine
+     &		MAXPTS,		! PT dimension
+     &		PT,		! coords of all points in image
+     &		N_PTS,		! num of pts in PT
+     &		XMIN,XMAX,YMIN,YMAX,! point coord ranges
+     &		.TRUE.,		! treat PT as lnkd lst, not contig array
+     &		MAXPTS,		! linked-list pointers are being used
+     &		NXT,		! linked-list ptrs for PT
+     &		JNTOL+COORD_TOL,! tolerance
+     &		N_PR_FTRS,	! num of ftrs
+     &		FTR_PTS,	! list of lin start/end PT inds
+     &		FTR_LAYER,	! ftr layer LAYER index
+     &		.TRUE.,		! treat as lines of points, not vectors
+     &		.TRUE.,		! use layer-pair check
+     &		FCPAIR,		! which FC pairs to check?
+     &		MAXFCS,		! FCPAIR dimension
+     &		.FALSE.,	! do not check any feature with itself
+     &		MAXNODES,	! WORKSPACE dimension
+     &		WORKSPACE,	! workspace
+     &		HAD_MONITOR)	! show running % completion?
+	ELSE
+	  LLJOIN = QUADSCAN(
+     &		CHKPTS2,	! point-pair processing routine
+     &		MAXPTS,		! PT dimension
+     &		PT,		! coords of all points in image
+     &		N_PTS,		! num of pts in PT
+     &		XMIN,XMAX,YMIN,YMAX,! point coord ranges
+     &		.TRUE.,		! treat PT as lnkd lst, not contig array
+     &		MAXPTS,		! linked-list pointers are being used
+     &		NXT,		! linked-list ptrs for PT
+     &		JNTOL+COORD_TOL,! tolerance
+     &		N_PR_FTRS,	! num of ftrs
+     &		FTR_PTS,	! list of lin start/end PT inds
+     &		FTR_IFC2,	! ftr feature code
+     &		.TRUE.,		! treat as lines of points, not vectors
+     &		HAD_FCP,	! use FC-pair check if had FCPfile only
+     &		FCPAIR,		! which FC pairs to check?
+     &		MAXFCS,		! FCPAIR dimension
+     &		.FALSE.,	! do not check any feature with itself
+     &		MAXNODES,	! WORKSPACE dimension
+     &		WORKSPACE,	! workspace
+     &		HAD_MONITOR)	! show running % completion?
+	END IF
+	IF (.NOT.LLJOIN) GOTO 10	! return
+
+	IF (SHOW_TIME) CALL LIB$SHOW_TIMER
+
+C Delete all points now "seen" but not pointing or pointed to
+C because they have been disconnected by DISCON1 OR DISCON2
+
+	CALL DEL1(	NXT,PRV,NEAREST,PT_PR_FTR,PT_SEEN,PDAT,QDAT,
+     &			FTR_PTS,PNT_FTR,.TRUE.,.TRUE.,
+     &			PT,MAXPTS,MAXOUTFTRS)
+
+C Delete all consecutive one-way connected points which map to same pt
+
+	CALL DEL3(	NXT,PRV,NEAREST,PT_PR_FTR,
+     &			FTR_PTS,PNT_FTR,PT,
+     &			MAXPTS,MAXOUTFTRS)
+
+C Straighten out any confusion near to aligned junctions by ensuring
+C that all sections are aligned continuously alongside one-another
+
+	CALL CHECK_ALIGNMENT(
+     &			PT,NXT,PRV,NEAREST,
+     &			%VAL(NEAREST_INV_START),
+     &			PT_PR_FTR,
+     &			FTR_PTS,PNT_FTR,PT_DST,
+     &			MAXPTS,MAXOUTFTRS)
+
+C Debug aid
+
+	IF (HAD_DEBUG) THEN
+	  CALL IFFOPN(3,'LSL$IF:ILINKMAP.IFF',,)
+	  CALL IFFSEL(3)
+	END IF
+
+C Mark points where shared-line index changes along each ftr
+
+	CALL MARK_NODES(NXT,NEAREST,PT_PR_FTR,PDAT,FTR_PTS,
+     &			MAXPTS,MAXOUTFTRS)
+
+C Move third-party pts to final position
+
+	CALL WRITEF('	Moving lines identically together')
+
+	CALL MOV2(	PT,NXT,NEAREST,PDAT,FTR_PTS,
+     &			MAXPTS,MAXOUTFTRS)
+
+	IF (HAD_DEBUG) CALL IFFCLO(3)		! debug aid
+
+C Convert from (closed-loop) linked-list to contiguous-array feature
+C representation (in which end pts in closed loops are duplicated) 
+
+	LLJOIN = L2A(	PT,CC,NXT,PRV,PT_PR_FTR,PDAT,
+     &			FTR_PTS,MAXPTS,MAXOUTFTRS)
+	IF (.NOT.LLJOIN) GOTO 10
+
+	IF (SHOW_TIME) CALL LIB$SHOW_TIMER
+
+C Break ftrs into separate links at every node
+
+	CALL WRITEF('	Breaking features at every node')
+	LLJOIN = BREAK_FTRS(PT,CC,NXT,PRV,NEAREST,PT_PR_FTR,PDAT,
+     &			FTR_PTS,FTR_START,FTR_INFTR,FTR_IFC2,FTR_LAYER,
+     &			FTR_ORIG_PR_FTR,IN_FTR_STATUS,
+     &			MAXPTS,MAXINFTRS,MAXOUTFTRS)
+	IF (.NOT.LLJOIN) GOTO 10
+
+10	IF (LLJOIN) LLJOIN = SS$_NORMAL
+
+	RETURN
+	END
+

@@ -1,0 +1,713 @@
+	SUBROUTINE T2ICB
+C
+***	MODULE	T2ICB
+***	IDENT	09AU94
+C
+C Copyright Laser-Scan Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    26-Oct-1987
+C
+CMOD955 Modified to set pen up/down flags correctly for CB coordinate 
+C	blocks extending beyond 200 points	  JB	10-Jan-1991
+CMOD1387Add /ORIGIN				  JB	09-Aug-1994
+C
+C Deals with CB entry
+C
+	IMPLICIT NONE
+C
+C Parameters
+***     COMMON/LSL$CMNIFROMTEXT:IFROMMSG.PAR/
+C
+C Common blocks
+***	COMMON/LSL$CMNIFF:CB.STR/		! CB structure
+***     COMMON/LSL$CMNFRT:FRTACD/		! ACD stuff
+***	COMMON/LSL$CMNIFROMTEXT:T2IPAR/		! global variables
+***     COMMON/LSL$CMNIFROMTEXT:T2ICOM.CMN/	! local command stuff
+***     COMMON/LSL$CMNIFROMTEXT:CBCMN.CMN/	! local CB stuff
+***	COMMON/LSL$CMNLSL:CMDCOM/		! has NOMESS
+C
+C Functions
+	LOGICAL   	T2ILIN			! reads in next line
+	LOGICAL	  	T2IREA			! reads a real
+	LOGICAL	  	T2IREAL8		! reads a real*8
+	LOGICAL   	T2IDATE			! reads a date
+	LOGICAL   	T2ITIME			! reads a date
+	LOGICAL   	T2ICHAR			! reads a date
+	LOGICAL	  	T2ILONACD		! reads a longword and gets ACD
+	LOGICAL	  	T2ILON			! reads a longword
+	LOGICAL   	T2ISEP			! looks for valid separator
+	LOGICAL	  	RDCHS			! reads a character
+	LOGICAL   	ACDFND			! finds ACD code
+	LOGICAL	  	T2ICB_MISSING         	! looks for "missing" character
+	INTEGER*4 	RDCOMM			! reads a command
+	INTEGER*4 	CVT_DAY_STR		! converts to date string
+	INTEGER*4 	CVT_TIME_STR 		! converts to a time string
+C
+	INTEGER		T2ICBC_CMD_TABLE
+	EXTERNAL	T2ICBC_CMD_TABLE
+C
+C Local variables
+	REAL*8		REAL8			! real*8 number
+	INTEGER   	CBNUM			! command number 
+	INTEGER   	INDX			! index into array
+	LOGICAL	 	NEWLIN			! new line ?
+	LOGICAL	  	EOLN			! end of line ?
+	INTEGER   	COLNO			! current column counter
+	INTEGER   	DTYPES(IFF_MAXCBCOL)  	! datatypes stored per column	
+	INTEGER   	I			! counter
+	BYTE	  	NXTCH			! next character
+	LOGICAL   	FAILED			! failed read?
+	LOGICAL   	IS_MISSING            	! is character the designated
+C						! missing character
+	INTEGER      	DMIN_I(IFF_MAXCBCOL)  	! min val stored by column
+	REAL	     	DMIN_R(IFF_MAXCBCOL)  	! min val stored by column
+C
+	INTEGER      	DMAX_I(IFF_MAXCBCOL)  	! max val stored by column
+	REAL	     	DMAX_R(IFF_MAXCBCOL)  	! max val stored by column
+	CHARACTER*11 	DATE_STR              	! date string
+	CHARACTER*11 	TIME_STR              	! time string
+	INTEGER      	LNTH		   	! length of char string
+	INTEGER      	XPTR,YPTR		! point to X and Y coords
+	INTEGER	     	RET		   	! return code
+	INTEGER      	CBLIN		   	! line number of CB
+	INTEGER      	XCODE,YCODE,ZCODE	! x,y and z codes
+	LOGICAL	    	FIRST_TIME		! true if first CB output
+	LOGICAL	     	MOAN		   	! true if to moan on output
+	LOGICAL	     	DONT_OUTPUT	   	! nothing to output
+C
+	RECORD /IFF_CBH/ CBH			! header record
+	RECORD /IFF_CBD/ CBD			! data record
+C
+	EQUIVALENCE	(DMIN_I,DMIN_R)
+	EQUIVALENCE	(DMAX_I,DMAX_R)
+C
+C Set up CB component logicals
+	HADFL = .FALSE.
+	HADGT = .FALSE.
+	HADNR = .FALSE.
+	HADNC = .FALSE.
+	HADNA = .FALSE.
+	HADAT = .FALSE.
+	HADHC = .FALSE.
+	HADDA = .FALSE.
+C
+	MOAN  = .TRUE.
+	FIRST_TIME  = .TRUE.
+	DONT_OUTPUT = .FALSE.
+C
+C Set up default values
+	CBH.FLAGS = 1
+	CBH.NROW  = 1
+	CBH.NCOL  = 2			! X and Y only
+	CBH.GTYPE = 1
+C
+C Set codes for x,y and z
+	XCODE 	    = IFF_C_X
+	CBH.COLH(1) = IFF_C_X
+	YCODE 	    = IFF_C_Y
+	CBH.COLH(2) = IFF_C_Y
+	ZCODE 	    = IFF_C_Z
+	CBH.COLH(3) = IFF_C_Z	
+C
+C and their datatypes
+	DTYPES(1) = ACD_DATATYPE_R 	! real
+	DTYPES(2) = ACD_DATATYPE_R 	! real
+	DTYPES(3) = ACD_DATATYPE_R 	! real
+C
+C min and max values
+	DO 10 I = 1,3
+	   DMIN_R(I) = ACD_MIN_MAX_R(1)
+	   DMAX_R(I) = ACD_MIN_MAX_R(2)
+10	CONTINUE
+C
+C Set line number of CB entry
+	CBLIN = CURLIN
+C
+C Attributes
+	DO 20 I = 1,IFF_MAXCBATT
+	   CBH.ATT(I).ATTC  = 1
+	   CBH.ATT(I).IATTV = 0
+20	CONTINUE
+C
+C Column headers apart from x,y,z
+	DO 30 I = 4,IFF_MAXCBCOL
+	   CBH.COLH(I) = 1
+	   DTYPES(I) = ACD_DATATYPE_I  	! integer
+30	CONTINUE
+C
+	CBH.NATT = 0			! no fixed attributes
+	CBD.R(1) = 0.0			! default x coord
+	CBD.R(2) = 0.0                  ! default y coord 
+	CBD.R(3) = 0.0			! default z coord
+C
+C Initialise counters
+	ATTNO = 0
+	HCNO  = 0 
+	ROWNO = 0
+	XPTR  = 1
+	YPTR  = 2
+C
+C Check separator is valid
+	IF (T2ISEP()) GOTO 310
+C
+C Get ready to read CB code
+	EOLN = RDCHS(NXTCH) 
+	IF (EOLN .OR. NXTCH .EQ.'!') THEN
+	   GOTO 40
+	ELSE
+	   CALL BSCH
+	   GOTO 50
+	ENDIF
+C
+C Main loop
+40	IF (DONE) GOTO 310
+C
+	IF (GOTNXT) GOTO 50
+	CALL T2ILIN
+C
+50	NOMESS = .TRUE.
+C
+	CBNUM = RDCOMM(T2ICBC_CMD_TABLE)	! read CB code
+	IF (CBNUM.LE.0) THEN			! check if error
+	   CALL BSLN
+C
+C no valid CB code so finish
+	   GOTO 310
+CCC		CALL LSL_PUTMSG(IFROM__UNEXPCBENT,CURLIN)
+	ENDIF
+C
+	GOTNXT = .FALSE.
+C
+C jump according to the read CB code
+	GOTO (60,70,80,90,100,110,180,220),CBNUM
+C
+C-----------------------------------------------------------------------
+C FL flags
+60	IF (HADFL) THEN
+	   CALL LSL_PUTMSG(IFROM__REPFLIGN,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	FAILED = T2ILON(CBH.FLAGS,.TRUE.)
+	IF (.NOT.FAILED) THEN
+	   HADFL = .TRUE.
+	ELSE
+	   IF (.NOT. (GOTNXT.OR.DONE)) CALL T2ISKP
+	ENDIF
+C
+	GOTO 40
+C
+C-----------------------------------------------------------------------
+C GT - Graphical type
+70	IF (HADGT) THEN
+	   CALL LSL_PUTMSG(IFROM__REPGTIGN,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	FAILED = T2ILON(CBH.GTYPE, .TRUE.)
+	IF (.NOT.FAILED) THEN
+	   HADGT = .TRUE.
+	ELSE
+	   IF (.NOT. (GOTNXT .OR. DONE)) CALL T2ISKP
+	ENDIF
+C
+	GOTO 40
+C
+C-----------------------------------------------------------------------
+C NR - Number of rows
+80	IF (HADNR)THEN
+	   CALL LSL_PUTMSG(IFROM__REPNRIGN,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	IF (HADDA) THEN
+	   CALL LSL_PUTMSG(IFROM__NRAFTERDA,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF   
+C
+	FAILED = T2ILON(CBH.NROW,.TRUE.)
+	IF (.NOT.FAILED) THEN
+	   HADNR = .TRUE.
+	ELSE
+	   IF (.NOT. (GOTNXT .OR. DONE)) CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	IF (CBH.NROW.GT.IFF_MAXCBROW .OR. CBH.NROW.LT. 0) THEN
+	   CALL LSL_PUTMSG(IFROM__NROUTRAN,CBH.NROW,CURLIN)
+	   HADNR = .FALSE.
+	   CBH.NROW = MAX(IFF_MAXCBROW, MIN(CBH.NROW,0))
+	ENDIF
+C
+	GOTO 40
+C
+C-----------------------------------------------------------------------
+C NC - Number of columns
+90	IF (HADNC)THEN
+	   CALL LSL_PUTMSG(IFROM__REPNCIGN,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	IF (HADHC) THEN
+	   CALL LSL_PUTMSG(IFROM__NCAFTERHC,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF   
+C
+	IF (HADDA) THEN
+	   CALL LSL_PUTMSG(IFROM__NCAFTERDA,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	FAILED = T2ILON(CBH.NCOL,.TRUE.)
+C
+	IF (.NOT. FAILED) THEN
+	   HADNC = .TRUE.
+	ELSE
+	   IF (.NOT. (GOTNXT .OR. DONE)) CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	IF (CBH.NCOL.GT.IFF_MAXCBCOL .OR. CBH.NCOL.LT.0) THEN
+	   CALL LSL_PUTMSG(IFROM__NCOUTRAN,CBH.NCOL,CURLIN)
+	   HADNC = .FALSE.
+	   CBH.NCOL = 2
+	ENDIF
+C
+	GOTO 40
+C
+C-----------------------------------------------------------------------
+C NA - Number of attributes
+100	IF (HADNA) THEN
+	   CALL LSL_PUTMSG(IFROM__REPNAIGN,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	IF (HADAT) THEN
+	   CALL LSL_PUTMSG(IFROM__NAAFTERAT,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	FAILED = T2ILON(CBH.NATT,.TRUE.)
+C
+	IF (.NOT.FAILED) THEN	
+	   HADNA = .TRUE.
+	ELSE
+	   IF (.NOT. (GOTNXT .OR. DONE)) CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	IF (CBH.NATT.GT.IFF_MAXCBCOL .OR. CBH.NATT.LT.0) THEN
+	   CALL LSL_PUTMSG(IFROM__NAOUTRAN,CBH.NATT,CURLIN)
+	   HADNA = .FALSE.
+	   CBH.NATT = 0
+	ENDIF
+C
+	GOTO 40
+C
+C-----------------------------------------------------------------------
+C AT - ATtributes
+110	ATTNO = ATTNO + 1
+C
+C  read attribute code
+	FAILED = T2ILONACD(CBH.ATT(ATTNO).ATTC,.TRUE.)
+	IF (FAILED) THEN
+C
+C skip to next entry if error
+	   IF (.NOT. (GOTNXT.OR.DONE)) CALL T2ISKP
+	   GOTO 170
+	ENDIF
+C
+	HADAT = .TRUE.
+C
+C check for "missing indicator"
+	IF (ACD_DATA_TYPE .EQ. 3) THEN
+	   FAILED = T2ICB_MISSING(.TRUE.,IS_MISSING)
+	ELSE
+	   FAILED = T2ICB_MISSING(.FALSE.,IS_MISSING)
+	ENDIF 
+C
+	IF (FAILED) THEN
+C
+C skip to next entry if error
+	   IF (.NOT. (GOTNXT.OR.DONE)) CALL T2ISKP
+	   GOTO 170
+	ENDIF
+C
+	IF (IS_MISSING) THEN
+	   CBH.ATT(ATTNO).IATTV = IFF_ABSENT
+	   GOTO 40
+	ENDIF
+C
+C read the attribute value depending on the data type
+	GOTO (120,130,140,150,160) ACD_DATA_TYPE
+C
+C integer
+120	FAILED = T2ILON(CBH.ATT(ATTNO).IATTV,.FALSE.)	
+	IF (FAILED) THEN 
+C
+C skip to next entry if error
+	   IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	   GOTO 170
+	ENDIF
+C
+C check its in range
+	IF ((CBH.ATT(ATTNO).IATTV .LT. ACD_MIN_MAX_I(1)) .OR.
+     &	    (CBH.ATT(ATTNO).IATTV .GT. ACD_MIN_MAX_I(2))) THEN
+	   CALL LSL_PUTMSG(IFROM__INTOUTRAN,CBH.ATT(ATTNO).IATTV,CURLIN)
+	   CALL LSL_ADDMSG(IFROM__ATDEFAULT)
+	   CBH.ATT(ATTNO).IATTV = MAX(ACD_MIN_MAX_I(1),
+     &			MIN(CBH.ATT(ATTNO).IATTV,ACD_MIN_MAX_I(2)))
+	ENDIF
+C
+	GOTO 40
+C
+C real
+130	FAILED = T2IREA(CBH.ATT(ATTNO).RATTV, .FALSE.)
+	IF (FAILED) THEN
+C
+C skip to next entry if error
+	   IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	   GOTO 170
+	ENDIF
+C
+C check its in range
+	IF ((CBH.ATT(ATTNO).RATTV .LT. ACD_MIN_MAX_R(1)) .OR.
+     &	    (CBH.ATT(ATTNO).RATTV .GT. ACD_MIN_MAX_R(2))) THEN
+	   CALL LSL_PUTMSG(IFROM__REAOUTRAN,CBH.ATT(ATTNO).RATTV,CURLIN)
+	   CALL LSL_ADDMSG(IFROM__ATDEFAULT)
+	   CBH.ATT(ATTNO).RATTV = MAX(ACD_MIN_MAX_R(1),
+     &			MIN(CBH.ATT(ATTNO).RATTV,ACD_MIN_MAX_R(2)))
+	ENDIF
+C
+	GOTO 40
+C
+C character
+140	FAILED = T2ICHAR(CBH.ATT(ATTNO).CATTV,.FALSE.)
+	IF (FAILED) THEN
+C
+C skip to next entry if error
+	   IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	   GOTO 170
+	ENDIF
+C
+	IF ((CBH.ATT(ATTNO).IATTV .LT. ACD_MIN_MAX_I(1)) .OR.
+     &	    (CBH.ATT(ATTNO).IATTV .GT. ACD_MIN_MAX_I(2))) THEN
+	   CALL LSL_PUTMSG(IFROM__CHAROUTRAN,CBH.ATT(ATTNO).CATTV,CURLIN)
+	   CALL LSL_ADDMSG(IFROM__ATDEFAULT)
+	   CBH.ATT(ATTNO).IATTV = MAX(ACD_MIN_MAX_I(1),
+     &			MIN(CBH.ATT(ATTNO).IATTV,ACD_MIN_MAX_I(2)))
+	ENDIF
+C
+	GOTO 40
+C
+C date
+150	FAILED = T2IDATE(CBH.ATT(ATTNO).IATTV,.FALSE.)
+	IF (FAILED) THEN 
+C
+C skip to next entry if error
+	   IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	   GOTO 170
+	ENDIF
+C
+C check its in range
+	IF ((CBH.ATT(ATTNO).IATTV .LT. ACD_MIN_MAX_I(1)) .OR.
+     &	    (CBH.ATT(ATTNO).IATTV .GT. ACD_MIN_MAX_I(2))) THEN
+	   RET = CVT_DAY_STR(CBH.ATT(ATTNO).IATTV,LNTH,DATE_STR)
+	   CALL LSL_PUTMSG(IFROM__DATOUTRAN,DATE_STR(:LNTH),CURLIN)
+	   CALL LSL_ADDMSG(IFROM__ATDEFAULT)
+	   CBH.ATT(ATTNO).IATTV = MAX(ACD_MIN_MAX_I(1),
+     &			MIN(CBH.ATT(ATTNO).IATTV,ACD_MIN_MAX_I(2)))
+	ENDIF
+C
+	GOTO 40
+C
+C time
+160	FAILED = T2ITIME(CBH.ATT(ATTNO).IATTV,.FALSE.)
+	IF (FAILED) THEN 
+C
+C skip to next entry if error
+	   IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	   GOTO 170
+	ENDIF
+C
+C check its in range
+	IF ((CBH.ATT(ATTNO).IATTV .LT. ACD_MIN_MAX_I(1)) .OR.
+     &      (CBH.ATT(ATTNO).IATTV .GT. ACD_MIN_MAX_I(2))) THEN
+	   RET = CVT_TIME_STR(CBH.ATT(ATTNO).IATTV,LNTH,TIME_STR)
+	   CALL LSL_PUTMSG(IFROM__TIMOUTRAN,TIME_STR(:LNTH),CURLIN)
+	   CALL LSL_ADDMSG(IFROM__ATDEFAULT)
+	   CBH.ATT(ATTNO).IATTV = MAX(ACD_MIN_MAX_I(1),
+     &			MIN(CBH.ATT(ATTNO).IATTV,ACD_MIN_MAX_I(2)))
+	ENDIF
+C
+	GOTO 40
+C
+170	ATTNO = ATTNO-1
+	GOTO 40
+C
+C-----------------------------------------------------------------------
+C HC Header Codes - expect NCOL of them
+180	IF (HADHC) THEN
+	   CALL LSL_PUTMSG(IFROM__REPHCIGN,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	IF (HADDA) THEN
+	   CALL LSL_PUTMSG(IFROM__HCAFTERDA,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF   
+C
+	HCNO = 0
+190	HCNO = HCNO+1
+C
+C read either code or name
+	FAILED = T2ILONACD(CBH.COLH(HCNO),.TRUE.)
+	IF (FAILED) THEN
+C
+C skip to next entry if error
+	   IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	   HCNO = HCNO - 1
+	   GOTO 40
+	ENDIF
+C
+	HADHC = .TRUE. 
+C
+C check if its X or Y
+	IF (CBH.COLH(HCNO) .EQ. XCODE) XPTR = HCNO 
+	IF (CBH.COLH(HCNO) .EQ. YCODE) YPTR = HCNO 
+C
+	DTYPES(HCNO) = ACD_DATA_TYPE
+C
+C store min-max values by datatype
+	GOTO (200,210,200,200,200)ACD_DATA_TYPE
+C
+200	DMIN_I(HCNO) = ACD_MIN_MAX_I(1)
+	DMAX_I(HCNO) = ACD_MIN_MAX_I(2)
+	GOTO 190
+C
+210	DMIN_R(HCNO) = ACD_MIN_MAX_R(1)
+	DMAX_R(HCNO) = ACD_MIN_MAX_R(2)
+	GOTO 190
+C
+C-----------------------------------------------------------------------
+C DAta    
+220	IF (HADDA)THEN
+	   CALL LSL_PUTMSG(IFROM__REPDAIGN,CURLIN)
+	   CALL T2ISKP
+	   GOTO 40
+	ENDIF
+C
+	ROWNO = 0
+	INDX  = 0
+C
+C read the rows of data
+230	ROWNO = ROWNO + 1
+	COLNO = 0
+	IF ((ROWNO).GT.IFF_MAXCBROW) THEN
+C
+C more values than current max - so output CB now
+	   ROWNO = ROWNO - 1
+	   IF (.NOT. FIRST_TIME) THEN
+	      MOAN = .FALSE.
+	      CBH.GTYPE = 1
+	      CBH.FLAGS = 1	! flag pen down
+	   ENDIF
+C
+	   CALL T2ICB_OUTPUT(CBH,CBD,MOAN,CBLIN)
+C
+	   FIRST_TIME = .FALSE. 
+	   CBH.FLAGS = 1	! flag pen down for next block
+	   ROWNO = 1
+	   INDX = 0
+	ENDIF
+C
+	HADDA = .TRUE.
+C
+C read across row of data
+240	COLNO = COLNO+1
+C
+	IF (COLNO .LE. CBH.NCOL) THEN
+	   INDX = INDX+1
+C
+C check for "missing indicator"
+	   IF (DTYPES(COLNO) .EQ. 3) THEN
+	      FAILED = T2ICB_MISSING(.TRUE.,IS_MISSING)
+	   ELSE
+	      FAILED = T2ICB_MISSING(.FALSE.,IS_MISSING)
+	   ENDIF 
+C
+	   IF (FAILED) THEN
+C skip to next entry if error
+	      IF (.NOT. (GOTNXT.OR.DONE)) CALL T2ISKP
+	      GOTO 300
+	   ENDIF
+C
+	   IF (IS_MISSING) THEN
+	       CBD.I(INDX) = IFF_ABSENT
+	       GOTO 240
+	   ENDIF
+C
+C read the value according to its datatype
+	   GOTO(250,260,270,280,290) DTYPES(COLNO)
+C
+C integer value
+250	   FAILED = T2ILON(CBD.I(INDX),.FALSE.)
+C
+	   IF (FAILED) THEN
+C skip to next entry if error
+	      IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	      GOTO 300
+	   ENDIF
+C
+C check it's in range
+	   IF ((CBD.I(INDX).LT. DMIN_I(COLNO)) .OR.
+     &	       (CBD.I(INDX).GT. DMAX_I(COLNO))) THEN
+	      CALL LSL_PUTMSG(IFROM__INTOUTRAN,CBD.I(INDX),CURLIN)
+	      CALL LSL_ADDMSG(IFROM__DATVALDEFAULT)
+	      CBD.I(INDX) = MAX(DMIN_I(COLNO),
+     &			    MIN(CBD.I(INDX),DMAX_I(COLNO)))
+	   ENDIF
+C
+	   GOTO 240
+C
+C real value
+260	   CONTINUE
+C
+	   IF (HAD_ORIGIN) THEN
+	     FAILED = T2IREAL8(REAL8,.FALSE.)		! read real*8
+C
+	     IF     (CBH.COLH(COLNO) .EQ. XCODE) THEN
+		CBD.R(INDX) = REAL8 - ORIGIN(1)		! convert x to real
+	     ELSEIF (CBH.COLH(COLNO) .EQ. YCODE) THEN
+		CBD.R(INDX) = REAL8 - ORIGIN(2)		! convert y to real
+	     ELSE
+		CBD.R(INDX) = REAL8			! convert to real
+	     ENDIF
+C
+	   ELSE
+	     FAILED = T2IREA(CBD.R(INDX),.FALSE.)	! read real
+	   ENDIF
+C
+	   IF (FAILED) THEN
+C skip to next entry if error
+	      IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	      GOTO 300
+	   ENDIF
+C
+C check its in range
+	   IF ((CBD.R(INDX).LT. DMIN_R(COLNO)) .OR.
+     &	       (CBD.R(INDX).GT. DMAX_R(COLNO))) THEN
+	      CALL LSL_PUTMSG(IFROM__REAOUTRAN,CBD.R(INDX),CURLIN)
+	      CALL LSL_ADDMSG(IFROM__DATVALDEFAULT)
+	      CBD.R(INDX) = MAX(DMIN_R(COLNO),
+     &			    MIN(CBD.R(INDX),DMAX_R(COLNO)))
+	   ENDIF
+C
+C update range if its X or Y
+	   IF (COLNO .EQ. XPTR) THEN
+	      GOTPTS = .TRUE.
+	      IF (CBD.R(INDX).LT. CURRA(1)) CURRA(1) = CBD.R(INDX)
+	      IF (CBD.R(INDX).GT. CURRA(2)) CURRA(2) = CBD.R(INDX)
+	   ELSEIF (COLNO .EQ. YPTR) THEN
+	      GOTPTS = .TRUE.
+	      IF (CBD.R(INDX).LT. CURRA(3)) CURRA(3) = CBD.R(INDX)
+	      IF (CBD.R(INDX).GT. CURRA(4)) CURRA(4) = CBD.R(INDX)
+	   ENDIF
+C
+	   GOTO 240
+C
+C character value
+270	   FAILED = T2ICHAR(CBD.C(INDX),.FALSE.)
+C
+	   IF (FAILED) THEN
+C skip to next entry if error
+	      IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	      GOTO 300
+	   ENDIF
+C
+C check its in range
+	   IF ((CBD.I(INDX).LT. DMIN_I(COLNO)) .OR.
+     &	       (CBD.I(INDX).GT. DMAX_I(COLNO))) THEN
+	      CALL LSL_PUTMSG(IFROM__CHAROUTRAN,CBD.C(INDX),CURLIN)
+	      CALL LSL_ADDMSG(IFROM__DATVALDEFAULT)
+	      CBD.I(INDX) = MAX(DMIN_I(COLNO),
+     &			    MIN(CBD.I(INDX),DMAX_I(COLNO)))
+	   ENDIF
+C
+	   GOTO 240
+C
+C date value
+280	   FAILED = T2IDATE(CBD.I(INDX),.FALSE.)
+	   IF (FAILED) THEN
+C skip to next entry if error
+	      IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	      GOTO 300
+	   ENDIF
+C
+C check its in range
+	   IF ((CBD.I(INDX).LT. DMIN_I(COLNO)) .OR.
+     &	       (CBD.I(INDX).GT. DMAX_I(COLNO))) THEN
+	      RET = CVT_DAY_STR(CBD.I(INDX),LNTH,DATE_STR)
+	      CALL LSL_PUTMSG(IFROM__DATOUTRAN,DATE_STR(:LNTH),CURLIN)
+	      CALL LSL_ADDMSG(IFROM__DATVALDEFAULT)
+	      CBD.I(INDX) = MAX(DMIN_I(COLNO),
+     &			    MIN(CBD.I(INDX),DMAX_I(COLNO)))
+	   ENDIF
+C
+	   GOTO 240
+C
+C TIME value
+290	   FAILED = T2ITIME(CBD.I(INDX),.FALSE.)
+	   IF (FAILED) THEN
+C
+C skip to next entry if error
+	      IF (.NOT. (GOTNXT.OR. DONE)) CALL T2ISKP
+	      GOTO 300
+	   ENDIF
+C
+C check its in range
+	   IF ((CBD.I(INDX).LT. DMIN_I(COLNO)) .OR.
+     & 	       (CBD.I(INDX).GT. DMAX_I(COLNO))) THEN
+	      RET = CVT_DAY_STR(CBD.I(INDX),LNTH,DATE_STR)
+	      CALL LSL_PUTMSG(IFROM__TIMOUTRAN,TIME_STR(:LNTH),CURLIN)
+	      CALL LSL_ADDMSG(IFROM__DATVALDEFAULT)
+	      CBD.I(INDX) = MAX(DMIN_I(COLNO),
+     &			    MIN(CBD.I(INDX),DMAX_I(COLNO)))
+	   ENDIF
+C
+	   GOTO 240
+	ENDIF
+C
+	GOTO 230
+C
+C finished reading rows of data
+300	ROWNO = ROWNO - 1
+	IF (ROWNO.EQ.0 .AND. (.NOT.FIRST_TIME)) DONT_OUTPUT = .TRUE.
+	IF (ROWNO.EQ.0) ROWNO = 1
+	GOTO 40
+C 
+C actually output the CB 
+310	IF (.NOT. FIRST_TIME) THEN
+	   MOAN = .FALSE.
+	   CBH.GTYPE = 1
+	   CBH.FLAGS = 1	! flag pen down
+	ENDIF
+C
+	IF (.NOT.DONT_OUTPUT) CALL T2ICB_OUTPUT(CBH,CBD,MOAN,CBLIN)
+C
+	RETURN
+	END
+C

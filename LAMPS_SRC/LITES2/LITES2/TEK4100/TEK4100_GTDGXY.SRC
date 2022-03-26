@@ -1,0 +1,285 @@
+	SUBROUTINE GTDGXY(LINE,BUTTON,XY,EXSTSU,ABORT)
+C
+***	IDENT	24MR92
+***	MODULE	GTDGXY
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RWR	22-Nov-1984
+C
+C Description
+C
+C	Subroutine to read X and Y coordinates from the digitising
+C	table.  The table must have already have been opened.
+C
+C	----	THIS SUBROUTINE IS INSTALLATION DEPENDENT   ---
+C
+C	--- this is TEK bitpad/Table Monitor /direct table version  ---
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:MACMEN/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:TEK4100/
+C
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:MENUS/
+***	COMMON/CMN:OPTION/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:VAREFN/
+***	COMMON/CMN:WORKS/		! data about workstation
+C
+	INCLUDE '($SSDEF)'		! system paramaters
+C
+C Arguments
+	INTEGER*4	LINE		! digitiser area that was
+					! pressed
+					! = 2 for bitpad
+					! = 3 for digitiser
+	INTEGER*4	BUTTON		! button that was pressed
+	REAL		XY(2)		! table coordinates
+	LOGICAL		EXSTSU		! .TRUE. if button pressed is
+					! second highest defined
+	LOGICAL		ABORT		! .TRUE. if button pressed
+					! was highest defined, or
+					! ^C has been pressed
+C
+C Functions called
+	LOGICAL		STRDTB
+	LOGICAL		DIGTRN
+	LOGICAL		GTYPAC
+	LOGICAL		HADBREAK
+	INTEGER*4	TRNBUT
+	LOGICAL		HAD_ERROR,READ_ERROR
+	LOGICAL		HAD_PUCK,READ_PUCK
+C
+C Local Variables
+	BYTE		TKBUF(16)	! TEK input buffer
+	INTEGER		TKBUT		! TEK button
+	REAL		VXY(2)		! X and Y coords
+	INTEGER		VIEW		! viewport number
+	EQUIVALENCE	(TKBUT,TKBUF(1)),(VXY(1),TKBUF(5))
+	EQUIVALENCE	(VIEW,TKBUF(13))
+	INTEGER*2	IOSB(4)		! return status
+	INTEGER*4	I		! counter
+C
+	INTEGER*4	BUFFLEN
+	PARAMETER	(BUFFLEN=40)
+	BYTE		BUFF(BUFFLEN)	! buffer for direct table reads
+	INTEGER*4	COUNT		! no of chars in typeahead buff
+	BYTE		BYTE1		! first byte
+	INTEGER*4	MASK
+	INTEGER*4	LENGTH		! I*4 value of buffer length
+	REAL		DIFFWX,DIFFWY,FACTOR
+C
+C additional variables for using table monitor
+	LOGICAL*1	TKUP		! to remember if there is a 
+					! read to the TEK outstanding
+	LOGICAL*1	DTBUP		! to remember if there is a
+					! read to direct table up
+	INTEGER*4	IERR		! return code
+	LOGICAL*1	RMON		! .TRUE. if using table monitor
+	BYTE		BU		! puck button number returned
+					! by table montor
+	INTEGER*4	IX,IY		! coordinates returned by
+					! table monitor
+C
+	EXSTSU = .FALSE.
+	ABORT  = .FALSE.
+	TKUP   = .FALSE.
+	IF (BITINI) CALL TKKILL 	! kill TEK read from INTERACT
+	IF (DTRON.AND.DTBREAD) THEN
+	   CALL DTBKIL(DTBCHN)
+	   DTBREAD=.FALSE.
+	ENDIF
+	DTBUP  = .FALSE.
+	RMON   = TABINI.AND.MONOPT.AND..NOT.DTRON
+C
+C read table ... until we get a good result
+10	IF (BITINI) THEN		! if TEK bitpad
+C
+C enable GIN on Westward
+	   IF (WTYPES(1).EQ.1000) THEN
+	      CALL WENGIN(8,0)
+	      CALL LDWAIT
+	   ENDIF
+C
+C get read going
+	   IF (.NOT.TKUP) THEN
+	      CALL TKREAD(TABFLG,IOSB)
+	      TKUP=.TRUE.
+	   ENDIF
+	ENDIF
+C
+C or if direct table read
+	IF (DTRON.AND..NOT.DTBUP) THEN
+	   IF (GTYPAC(DTBCHN,COUNT,BYTE1)) THEN	! check type ahead buff
+	      IF (COUNT.GT.MXTYPC) THEN
+	         CALL INFORM(MSG_NOMOREBUTS,COUNT/15)
+	      ENDIF
+	   ENDIF
+	   DTBUP=STRDTB(DTBFLG,DTBCHN,DTBOSB,,BUFFLEN,BUFF)
+	ENDIF
+C
+C clear flag for control C
+	CALL SYS$CLREF(%VAL(CLCFLG))
+C
+C build event flag mask, and wait for something to happen
+	MASK = 0				! clear to start with
+	CALL EFWM(MASK,CLCFLG)			! control C
+	IF (TKUP) CALL EFWM(MASK,TABFLG)	! add TEK bitpad
+	IF (DTBUP) CALL EFWM(MASK,DTBFLG)	! add direct table read
+	IF (RMON) CALL EFWM(MASK,TABPUK,TABERR)	! monitor puck and error
+	CALL SYS$WFLOR( %VAL(CLCFLG), %VAL(MASK) )
+C
+C disable GIN on Westward
+	IF (BITINI.AND.WTYPES(1).EQ.1000) THEN
+	   CALL WDSGIN(8)
+	   CALL LDWAIT
+	ENDIF
+C
+C check for control C
+	IF (HADBREAK()) THEN			! check for ^C
+	   ABORT=.TRUE.
+	   IF (TKUP) CALL TKKILL
+	   GOTO 999
+	ENDIF
+C
+C check what else we have got
+C
+	IF (DTBUP.AND.DTBOSB(1).NE.0) GOTO 100
+	IF (TKUP.AND.IOSB(1).NE.0) GOTO 200
+C
+C check for input from table monitor
+	IF (RMON) THEN
+	   IF (HAD_ERROR(IERR)) THEN
+	      IF (.NOT.READ_ERROR(TXTBUF,TXTPTR,I,IERR)) THEN
+	         CALL INFORM(MSG_TABMONERR,I)
+	         CALL INFORM(MSG_STRING,TXTDSC)
+	      ENDIF
+	      GOTO 10					! try again
+	   ELSEIF (HAD_PUCK(IERR)) THEN
+	      IF (.NOT.READ_PUCK(BU,IX,IY,IERR)) THEN
+	         LINE=DIGLIN
+	         BUTTON=BU
+	         VXY(1)=IX
+	         VXY(2)=IY
+	         IF (TKUP) CALL TKKILL
+	         IF (DTBUP) CALL DTBKIL(DTBCHN) 	! should not
+							! happen 
+	         GOTO 600
+	      ELSE					! error reading
+	         GOTO 10				! TRY AGAIN
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C or what else can it be?
+C
+	CALL INFORM(MSG_NOINPUT)
+	GOTO 10
+C
+C check direct table
+C
+100	DTBUP=.FALSE.
+	IF (.NOT.DTBOSB(1)) THEN		! error
+	   CALL LITES2_SIGNAL(DTBOSB(1))
+	   GOTO 10
+	ENDIF
+C
+C translate result of read
+C
+	LENGTH=DTBOSB(2)			! I*2 -> I*4
+	IF (LENGTH.LE.0) GOTO 10
+	IF (DIGTRN(BUFF,LENGTH,BUTTON,IX,IY,USEFUN,%VAL(FUNADR))) THEN
+	   CALL INFORM(MSG_TABERRREAD,BUFF)   ! error in string
+	   GOTO 10
+	ELSE
+	   LINE=DIGLIN
+	   VXY(1)=IX
+	   VXY(2)=IY
+	   IF (TKUP) CALL TKKILL
+	ENDIF
+	GOTO 600
+C
+C check TEK
+C
+200	TKUP=.FALSE.
+C 
+C if result is not acceptable, write message and read again
+C
+	IF (.NOT.IOSB(1)) THEN
+	   CALL LITES2_SIGNAL(IOSB(1))
+	   GOTO 10
+	ENDIF
+C
+C Retrieve TEK input. Supply buffer length 12 and I as dummy
+	CALL TKGTXY(LINE,0,TKBUF,I)
+	IF (LINE.EQ.1) GOTO 10		! TEK keyboard input??
+C
+	BUTTON = TKBUT
+	IF (WTYPES(1).EQ.1000) THEN	! Westward
+	   IF (VIEW.EQ.MAP_VIEW) THEN
+	      CALL GKSD2W(1,VXY(1),VXY(2),VXY(1),VXY(2))
+	      DIFFWX = WINDOW(2)-WINDOW(1)
+	      DIFFWY = WINDOW(4)-WINDOW(3)
+	      IF ((DIFFWX/DIFFWY).GT.(SCRNSX(1)/SCRNSY(1))) THEN
+	         FACTOR = SCRNSX(1)/DIFFWX
+	      ELSE
+	         FACTOR = SCRNSY(1)/DIFFWY
+	      ENDIF
+	      VXY(1) = (VXY(1)-WINDOW(1))*FACTOR+SCRSZX(1)*WKVSWX(1)
+	      VXY(2) = (VXY(2)-WINDOW(3))*FACTOR+SCRSZY(1)*WKVSWY(1)
+	   ELSEIF (VIEW.EQ.MENU_VIEW) THEN
+	      IF (SCRMEN_SIZX.GT.SCRMEN_SIZY) THEN
+	         FACTOR = SCRMEN_BRDR(1,3)-SCRMEN_BRDR(1,2)
+	      ELSE
+	         FACTOR = SCRMEN_BRDR(2,1)-SCRMEN_BRDR(2,2)
+	      ENDIF
+	      VXY(1) = SCRMEN_BRDR(1,2)+FACTOR*VXY(1)
+	      VXY(2) = SCRMEN_BRDR(2,2)+FACTOR*VXY(2)
+	   ELSE
+	      VXY(1) = VXY(1)*SCRSZX(1)
+	      VXY(2) = VXY(2)*SCRSZX(1)
+	   ENDIF
+	ELSE				! TEK
+C
+C Convert from NDC (0-1) to a map coordinate
+	   CALL GKSD2W(1,VXY(1),VXY(2),VXY(1),VXY(2))
+C
+C and then convert to a bitpad coordinate (0-1 is whole map area)
+	   VXY(1) = (VXY(1)-WINDOW(1))/(WINDOW(2)-WINDOW(1))
+	   VXY(2) = (VXY(2)-WINDOW(3))/(WINDOW(4)-WINDOW(3))
+	ENDIF
+C
+C increase 0-1 range to 'bitpad counts'
+	VXY(1) = 1000.0*VXY(1)
+	VXY(2) = 1000.0*VXY(2)
+	IF (DTBUP) CALL DTBKIL(DTBCHN)
+	GOTO 600
+C
+C here we have got coordinates from the bitpad or table
+600	BUTTON=TRNBUT(BUTTON,LINE)	! normalise button number
+	XY(1)=VXY(1)
+	XY(2)=VXY(2)
+C
+C set EXSTSU and ABORT flags
+	IF (BUTTON.NE.-1) THEN
+	   DO 20, I=1,PUKTOP
+	      IF (PUKDEV(I).EQ.LINE) THEN
+	         IF (BUTTON.EQ.PUKBUT(I)) ABORT=.TRUE.
+	         IF (BUTTON.EQ.(PUKBUT(I)-1)) EXSTSU=.TRUE.
+	         GOTO 999
+	      ENDIF
+20	   CONTINUE
+	ENDIF
+C
+C we may have just messed up the outstanding table reads in INTERACT
+C so make sure it sets one up again
+999	TAREAD=.FALSE.
+	IF (DTRON) THEN
+	   CALL DTBKIL(DTBCHN)
+	   DTBREAD=.FALSE.
+	ENDIF
+	RETURN
+	END

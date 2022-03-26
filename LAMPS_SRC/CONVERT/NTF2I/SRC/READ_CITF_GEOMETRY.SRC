@@ -1,0 +1,447 @@
+	LOGICAL FUNCTION READ_CITF_GEOMETRY(NUMPTS,IS_TEXT)
+C
+***     MODULE READ_CITF_GEOMETRY
+***     IDENT	18JN96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C       Author					S Townrow 5-Nov-1992
+C
+C Description
+C
+C A parallel routine to READ_LINEAR which just handle CITF files.
+C It is intended to deal with feature level CITF attributes.
+C
+CMOD    Implement CITF96 changes (WI/CC 1545)           TJM     18-Jun-1996
+C
+	IMPLICIT NONE
+C
+C Messages:
+C
+	INCLUDE 'HERE:NTF2IMSG.PAR'
+C
+C Arguments:
+	INTEGER		NUMPTS			! the actual number of points
+	LOGICAL		IS_TEXT			! is this a text feature?
+C Common
+	INCLUDE 'CITF.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE 'LUNS.PAR'
+	INCLUDE 'FILE_REC.CMN'
+C
+C Functions:
+	LOGICAL		RDINT			! read integer from buffer
+	LOGICAL		RDLONG			! read long integer from buffer
+	LOGICAL		READ_RECORD		! read the next record
+	LOGICAL		IS_CONTINUATION
+	LOGICAL		READ_CONTINUE		! read a continuation record
+	LOGICAL		READ_NEXT_CITF_GEOM
+	REAL		XCONVERT
+	REAL		YCONVERT
+	REAL		ZCONVERT
+	REAL		HTCONVERT
+C
+C Workspace:
+C
+	LOGICAL		OK			! Success flag
+	INTEGER		I,J			! Loop counter
+	INTEGER		CPOS,OFF		! Current position in STRING
+	INTEGER		PT			! Current point index
+	INTEGER		X_COORD,Y_COORD		! NTF coordinates
+	INTEGER		Z_COORD,DIFF_HT		! NTF coordinates
+C
+	CHARACTER*6	NTF$_GEOM_ID		! NTF$_GEOM_ID field
+	CHARACTER*4	NTF$_NUM_COORD		! NUM_COORD field
+	CHARACTER*2	NTF$_REC_DESCR
+	CHARACTER*10	NTF$_X_COORD
+	CHARACTER*10	NTF$_Y_COORD
+	CHARACTER*1	NTF$_XY_ACQ
+	CHARACTER*1	NTF$_QPLAN
+	CHARACTER*10	NTF$_Z_COORD
+	CHARACTER*10	NTF$_DIFF_HT
+	CHARACTER*1	NTF$_Z_ACQ
+	CHARACTER*1	NTF$_QHT
+	CHARACTER*1	NTF$_QDIFF_HT
+C
+	LOGICAL*1	HAD_XY_ACQ
+	LOGICAL*1	HAD_QPLAN
+	LOGICAL*1	HAD_Z_COORD
+	LOGICAL*1	HAD_DIFF_HT
+	LOGICAL*1	HAD_Z_ACQ
+	LOGICAL*1	HAD_QHT
+	LOGICAL*1	HAD_QDIFF_HT
+C
+	LOGICAL		JUMPED
+	INTEGER		INITIAL_REC
+	INTEGER*4	ANINT
+	CHARACTER*4	CHARINT
+	REAL*4		REALINT
+	EQUIVALENCE 	(ANINT,CHARINT)
+	EQUIVALENCE 	(ANINT,REALINT)
+	INTEGER*4	COLS(CITF_POINT_NUMATT)		! the 9 geometry fields
+C       
+C------------------------------------------------------------------------------
+C
+	OK = .TRUE.
+	INITIAL_REC = SEC_REC				!starting record
+	JUMPED = .FALSE.				!still with orig record
+	NTF$_GEOM_ID = '      '
+C
+C------------------------------------------------------------------------------
+C
+	IF (.NOT.REC_IN_HAND) THEN ! havent record in hand
+	   OK = READ_RECORD()	! get record
+	   IF (.NOT.OK) GOTO 999 ! check for errors
+	   REC_IN_HAND = .TRUE.	! now have record
+	ENDIF
+C       
+	IF ( STRING(1:2).NE.REC$_GEOMETRY1 .AND.
+     &	     STRING(1:2).NE.REC$_GEOMETRY2) THEN	!not GEOMETRY*
+	   IF (IS_TEXT) THEN
+	      CALL LSL_PUTMSG(NTF2I__BADNAMEREC)
+	   ELSE
+	      CALL LSL_PUTMSG(NTF2I__NOGEOMETRY)
+	   ENDIF
+	   CALL LSL_ADDMSG(NTF2I__UNEXPREC,STRING(1:2),SEC_REC)
+	   OK = .FALSE.
+	ENDIF
+	IF (.NOT.OK) GOTO 999
+C
+C------------------------------------------------------------------------------
+C have we got a geometry1 or 2?
+C
+	NTF$_REC_DESCR = STRING(1:2)
+	IF (NTF$_REC_DESCR.EQ.REC$_GEOMETRY1) THEN
+	  GEOM_REC = 1
+	ELSEIF (NTF$_REC_DESCR.EQ.REC$_GEOMETRY2) THEN
+	  GEOM_REC = 2
+	ENDIF
+C
+C Set up CB header definitions
+C
+	OUTBUFCOL = 0
+C
+	DO 50 I = POINT_X, POINT_QPLAN
+	   IF (CITF_POINT_ACD_DEF(I)) THEN
+	      OUTBUFCOL = OUTBUFCOL + 1
+	      OUTBUFC(OUTBUFCOL) = CITF_POINT_ACD_CODE(I)
+	      COLS(I) = OUTBUFCOL
+	   ELSE
+	      COLS(I) = 0
+	   ENDIF
+50	CONTINUE
+C
+	IF (GEOM_REC.EQ.2) THEN
+	   DO 60 I = POINT_Z, POINT_QDIFF_HT
+	      IF (CITF_POINT_ACD_DEF(I)) THEN
+		 OUTBUFCOL = OUTBUFCOL + 1
+		 OUTBUFC(OUTBUFCOL) = CITF_POINT_ACD_CODE(I)
+		 COLS(I) = OUTBUFCOL
+	      ELSE
+		 COLS(I) = 0
+	      ENDIF
+ 60	   CONTINUE
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Find out how many points there are
+C
+	NTF$_NUM_COORD = STRING(4:7)
+	CALL SETAUX(%REF(NTF$_NUM_COORD),4)
+	OK = .NOT.RDINT(NUMPTS)				! read NUM_COORD field
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)	!error
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'NTF$_NUM_COORD')
+	   CALL LSL_ADDSTR(NTF$_NUM_COORD)
+	   GOTO 999
+	ENDIF
+C
+	IF ( NUMPTS.GT.MCOORDS ) THEN			! too many points
+	   CALL LSL_PUTMSG(NTF2I__TOOMNYPTS,NTF$_GEOM_ID,NUMPTS)
+	   CALL LSL_ADDMSG(NTF2I__TRUNCATED,MCOORDS)
+	   NUMPTS = MCOORDS
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Read data from record
+C
+	PT  = 0					! No coordinates in COORDS yet
+	CPOS = 8				! Where the coordinates start
+C
+C	.....................................................................
+C	for as many points as there are in the Geometry record
+C
+	DO WHILE ( (OK).AND.(PT.LT.NUMPTS) )
+C
+C See if X coord is on the line and read it
+C
+	   OFF = CPOS
+C
+	   IF ((OFF+XYLEN).GT.LENGTH-1) THEN 		!no space for data
+	      OK = READ_NEXT_CITF_GEOM(CPOS)
+	      IF (.NOT.OK) GOTO 999
+	      OFF = CPOS
+	      NTF$_X_COORD(1:XYLEN) = STRING(OFF:OFF+XYLEN-1)
+	   ELSE
+	      NTF$_X_COORD(1:XYLEN) = STRING(OFF:OFF+XYLEN-1)
+	   ENDIF
+	   OFF = OFF + XYLEN
+C
+C See if Y coord is on the line and read it
+C
+	   IF ((OFF+XYLEN).GT.LENGTH-1) THEN 		!no space for data
+	      OK = READ_NEXT_CITF_GEOM(CPOS)
+	      IF (.NOT.OK) GOTO 999
+	      OFF = CPOS
+	      NTF$_Y_COORD(1:XYLEN) = STRING(OFF:OFF+XYLEN-1)
+	   ELSE
+	      NTF$_Y_COORD(1:XYLEN) = STRING(OFF:OFF+XYLEN-1)
+	   ENDIF
+	   OFF = OFF + XYLEN
+C
+C See if XY_ACQ_METH is on the line and read it ...applies only to CITF93
+C
+	   IF (HAD_CITF93) THEN
+	      IF ((OFF+1).GT.LENGTH-1) THEN             !no space for data
+		 OK = READ_NEXT_CITF_GEOM(CPOS)
+		 IF (.NOT.OK) GOTO 999
+		 OFF = CPOS
+		 NTF$_XY_ACQ = STRING(OFF:OFF)
+	      ELSE
+		 NTF$_XY_ACQ = STRING(OFF:OFF)
+	      ENDIF
+	      OFF = OFF + 1
+	   ENDIF
+C
+C See if QPLAN is on the line and read it ...applies only to CITF93
+C
+	   IF (HAD_CITF93) THEN
+	      IF ((OFF+1).GT.LENGTH-1) THEN             !no space for data
+		 OK = READ_NEXT_CITF_GEOM(CPOS)
+		 IF (.NOT.OK) GOTO 999
+		 OFF = CPOS
+		 NTF$_QPLAN = STRING(OFF:OFF)
+	      ELSE
+		 NTF$_QPLAN = STRING(OFF:OFF)
+	      ENDIF
+	      OFF = OFF + 1
+	   ENDIF
+C
+	  IF (NTF$_REC_DESCR.EQ.REC$_GEOMETRY2) THEN
+C
+C read Z DIFF_HT Z_ACQ_METH QHT QDIFF_HT data strings for GEOMETRY2
+C
+C See if Z coord is on the line and read it
+C
+	     IF ((OFF+ZLEN).GT.LENGTH-1) THEN 		!no space for data
+		OK = READ_NEXT_CITF_GEOM(CPOS)
+		IF (.NOT.OK) GOTO 999
+		OFF = CPOS
+		NTF$_Z_COORD(1:ZLEN) = STRING(OFF:OFF+ZLEN-1)
+	     ELSE
+		NTF$_Z_COORD(1:ZLEN) = STRING(OFF:OFF+ZLEN-1)
+	     ENDIF
+	     OFF = OFF + ZLEN
+C
+C See if DIFF_HT coord is on the line and read it
+C
+	     IF ((OFF+DIFF_HT_LEN).GT.LENGTH-1) THEN	!no space for data
+		OK = READ_NEXT_CITF_GEOM(CPOS)
+		IF (.NOT.OK) GOTO 999
+		OFF = CPOS
+		NTF$_DIFF_HT(1:DIFF_HT_LEN) = STRING(OFF:OFF+DIFF_HT_LEN-1)
+	     ELSE
+		NTF$_DIFF_HT(1:DIFF_HT_LEN) = STRING(OFF:OFF+DIFF_HT_LEN-1)
+	     ENDIF
+	     OFF = OFF + DIFF_HT_LEN
+C
+C See if Z_ACQ_METH is on the line and read it ...applies only to CITF93
+C
+	     IF (HAD_CITF93) THEN
+		IF ((OFF+1).GT.LENGTH-1) THEN           !no space for data
+		   OK = READ_NEXT_CITF_GEOM(CPOS)
+		   IF (.NOT.OK) GOTO 999
+		   OFF = CPOS
+		   NTF$_Z_ACQ = STRING(OFF:OFF)
+		ELSE
+		   NTF$_Z_ACQ = STRING(OFF:OFF)
+		ENDIF
+		OFF = OFF + 1
+	     ENDIF
+C
+C See if QHT is on the line and read it ...applies only to CITF93
+C
+	     IF (HAD_CITF93) THEN
+		IF ((OFF+1).GT.LENGTH-1) THEN           !no space for data
+		   OK = READ_NEXT_CITF_GEOM(CPOS)
+		   IF (.NOT.OK) GOTO 999
+		   OFF = CPOS
+		   NTF$_QHT = STRING(OFF:OFF)
+		ELSE
+		   NTF$_QHT = STRING(OFF:OFF)
+		ENDIF
+		OFF = OFF + 1
+	     ENDIF
+C
+C See if QDIFF_HT is on the line and read it ...applies only to CITF93
+C
+	     IF (HAD_CITF93) THEN
+		IF ((OFF+1).GT.LENGTH-1) THEN           !no space for data
+		   OK = READ_NEXT_CITF_GEOM(CPOS)
+		   IF (.NOT.OK) GOTO 999
+		   OFF = CPOS
+		   NTF$_QDIFF_HT = STRING(OFF:OFF)
+		ELSE
+		   NTF$_QDIFF_HT = STRING(OFF:OFF)
+		ENDIF
+		OFF = OFF + 1
+	     ENDIF
+	  ENDIF
+C
+	  CPOS = OFF
+C
+C	  ...................................................................
+C	  read the data from the fields that we have cut out from the strings
+C
+	  CALL SETAUX(%REF(NTF$_X_COORD),XYLEN)
+	  OK = .NOT.RDLONG(X_COORD)
+	  IF (.NOT.OK) THEN
+	     CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+	     CALL LSL_ADDMSG(NTF2I__ERRORRD,'X_COORD')
+	     CALL LSL_ADDSTR(NTF$_X_COORD(1:XYLEN))
+	     GOTO 800
+	  ENDIF
+C
+	  CALL SETAUX(%REF(NTF$_Y_COORD),XYLEN)
+	  OK = .NOT.RDLONG(Y_COORD)
+	  IF (.NOT.OK) THEN
+	     CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+	     CALL LSL_ADDMSG(NTF2I__ERRORRD,'Y_COORD')
+	     CALL LSL_ADDSTR(NTF$_Y_COORD(1:XYLEN))
+	     GOTO 800
+	  ENDIF
+C ..............................................................
+C read the coordinates successfully, store them
+C
+	  PT = PT+1
+	  REALINT = XCONVERT(X_COORD)
+	  OUTBUF(1,PT) = ANINT
+	  REALINT = YCONVERT(Y_COORD)
+	  OUTBUF(2,PT) = ANINT
+C
+	  IF (CITF_POINT_ACD_DEF(POINT_XY_ACQ_METH)) THEN
+	     IF ((NTF$_XY_ACQ.EQ.' ').OR.(ICHAR(NTF$_XY_ACQ).EQ.0))THEN
+		OUTBUF(COLS(POINT_XY_ACQ_METH),PT) = IFF_ABSENT
+	     ELSE
+		CHARINT = NTF$_XY_ACQ//'   '
+		OUTBUF(COLS(POINT_XY_ACQ_METH),PT) = ANINT
+	     ENDIF
+	  ENDIF
+	  IF (CITF_POINT_ACD_DEF(POINT_QPLAN)) THEN
+	     IF ((NTF$_QPLAN.EQ.' ').OR.(ICHAR(NTF$_QPLAN).EQ.0))THEN
+		OUTBUF(COLS(POINT_QPLAN),PT) = IFF_ABSENT
+	     ELSE
+		CHARINT = NTF$_QPLAN//'   '
+		OUTBUF(COLS(POINT_QPLAN),PT) = ANINT
+	     ENDIF
+	  ENDIF
+C
+C ..............................................................
+C Get GEOMETRY2 fields
+C
+	  IF (NTF$_REC_DESCR.EQ.REC$_GEOMETRY2) THEN
+C
+C ..............................................................
+C Get Z_COORD
+C
+	     IF (NTF$_Z_COORD(1:ZLEN).EQ.'          ') THEN
+		OUTBUF(COLS(POINT_Z),PT) = IFF_ABSENT
+	     ELSE
+		CALL SETAUX(%REF(NTF$_Z_COORD),ZLEN)
+		OK = .NOT.RDLONG(Z_COORD)
+		IF (.NOT.OK) THEN
+		   CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+		   CALL LSL_ADDMSG(NTF2I__ERRORRD,'Z_COORD')
+		   CALL LSL_ADDSTR(NTF$_Z_COORD(1:ZLEN))
+		   GOTO 800
+		ENDIF
+		REALINT = ZCONVERT(Z_COORD)
+		OUTBUF(COLS(POINT_Z),PT) = ANINT
+	     ENDIF
+C
+C ..............................................................
+C Get DIFF_HT
+C
+	     CALL SETAUX(%REF(NTF$_DIFF_HT),DIFF_HT_LEN)
+	     IF (NTF$_DIFF_HT(1:DIFF_HT_LEN).EQ.'          ') THEN
+		IF (CITF_POINT_ACD_DEF(POINT_DIFF_HT)) THEN
+		   OUTBUF(COLS(POINT_DIFF_HT),PT) = IFF_ABSENT
+		ENDIF
+	     ELSE
+		OK = .NOT.RDLONG(DIFF_HT)
+		IF (.NOT.OK) THEN
+		   CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+		   CALL LSL_ADDMSG(NTF2I__ERRORRD,'DIFF_HT')
+		   CALL LSL_ADDSTR(NTF$_DIFF_HT(1:DIFF_HT_LEN))
+		   GOTO 800
+		ENDIF
+		IF (CITF_POINT_ACD_DEF(POINT_DIFF_HT)) THEN
+		   REALINT = HTCONVERT(DIFF_HT)
+		   OUTBUF(COLS(POINT_DIFF_HT),PT) = ANINT
+		ENDIF
+	     ENDIF
+C
+C Write remaining GEOMETRY2 character attributes.
+C
+	     IF (CITF_POINT_ACD_DEF(POINT_Z_ACQ_METH)) THEN
+		IF ((NTF$_Z_ACQ.EQ.' ').OR.(ICHAR(NTF$_Z_ACQ).EQ.0))THEN
+		   OUTBUF(COLS(POINT_Z_ACQ_METH),PT) = IFF_ABSENT
+		ELSE
+		   CHARINT = NTF$_Z_ACQ//'   '
+		   OUTBUF(COLS(POINT_Z_ACQ_METH),PT) = ANINT
+		ENDIF
+	     ENDIF
+	     IF (CITF_POINT_ACD_DEF(POINT_QHT)) THEN
+		IF ((NTF$_QHT.EQ.' ').OR.(ICHAR(NTF$_QHT).EQ.0))THEN
+		   OUTBUF(COLS(POINT_QHT),PT) = IFF_ABSENT
+		ELSE
+		   CHARINT = NTF$_QHT//'   '
+		   OUTBUF(COLS(POINT_QHT),PT) = ANINT
+		ENDIF
+	     ENDIF
+	     IF (CITF_POINT_ACD_DEF(POINT_QDIFF_HT)) THEN
+		IF ((NTF$_QDIFF_HT.EQ.' ').OR.(ICHAR(NTF$_QDIFF_HT).EQ.0))THEN
+		   OUTBUF(COLS(POINT_QDIFF_HT),PT) = IFF_ABSENT
+		ELSE
+		   CHARINT = NTF$_QDIFF_HT//'   '
+		   OUTBUF(COLS(POINT_QDIFF_HT),PT) = ANINT
+		ENDIF
+	     ENDIF
+C
+800	     CONTINUE
+C
+	  ENDIF
+	END DO
+C
+C-----------------------------------------------------------------------------
+C ignore any other continuation records
+C
+	DO WHILE ( IS_CONTINUATION(STRING,LENGTH) )
+	  OK = READ_CONTINUE('GEOMETRY')
+	END DO
+C	
+C----------------------------------------------------------------------------
+C get back to the original record if we jumped
+C
+999	IF(JUMPED) THEN
+	  SEC_REC = INITIAL_REC -1			!go back whence we came
+	  CALL READ_RECORD()
+	ENDIF
+C
+	REC_IN_HAND = .FALSE.
+	READ_CITF_GEOMETRY=OK
+	RETURN
+	END

@@ -1,0 +1,271 @@
+	SUBROUTINE CLASS_PROCESS(TO_INCLUDE)
+C
+***	IDENT	20AG91
+***	MODULE	CLASS_PROCESS
+C
+C	Copyright (C), Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Create					JHR	19-Sep-1988
+C
+C Process all the includes/excludes required for classification.
+C
+CMOD	class_process always set the second coordinate of the range to be 
+C	positive. it forgot to multiply it by the sign. corrected
+C	surprised it was never noticed before	SG	09-Aug-1991
+C
+CMOD	express -2:+3 was evaluated as -2:-3 because the + was no correctly
+C	parsed, fixed				SG	09-Aug-1991
+CMOD	express -2:3 was evaluated as -2:-3 because the sign is not initialised 
+C	to + after the ':'			SG	20-Aug-1991
+C
+C.......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE	'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'($SSDEF)/NOLIST'
+C
+C Common:
+	INCLUDE 'LSL$CMNDTICOMBINE:CLASS_SEL.CMN'
+	INCLUDE 'LSL$CMNDTICOMBINE:CLASS_PARSE.CMN'
+	INCLUDE	'LSL$CMNLSL:TXTC.CMN'
+C
+C Arguments:
+	LOGICAL*1	TO_INCLUDE		! TRUE if to include;
+						! FALSE if to exclude.
+C
+C Functions:
+	LOGICAL		RDCHS	  		! read char. skipping spaces
+	LOGICAL		RDREAL			! read real
+	INTEGER		FND_CLASS		! find class in list
+C
+C Workspace
+	LOGICAL*1	EOL			! TRUE if end-of-line;
+	BYTE		IN_BYTE			! a character
+	INTEGER*4	I			! DO-loop counter
+	INTEGER*4	STORED_SIGN		! saves the state of any sign
+	CHARACTER*80	STR_PARSED		! parsed expression - for errors
+	INTEGER*4	STR_LEN			!...and it's length.
+	LOGICAL		OK
+C
+C.......................................................................
+C initialise
+C
+	STR_LEN	= 0				! no characters processed
+	STR_PARSED	= ' '
+	STORED_SIGN	= 1			! assume +ve sign
+	CALL CLASS_PARSE_CLEAR			! clear the flags for parsing
+C
+C-------------------------------------------------------------------------------
+C parse the rest of the command-line...
+C
+10	EOL = RDCHS(IN_BYTE)
+	STR_LEN = STR_LEN + 1			! save read char.
+	STR_PARSED(STR_LEN:STR_LEN)= CHAR(IN_BYTE)
+C
+C	.......................................................................
+C
+	IF ( EOL )  THEN			! end-of-line
+	  EXP_COMP = .TRUE.
+	  STR_PARSED(STR_LEN:STR_LEN) = ' '	! MUCKY!!
+	  CALL CLASS_EVAL(TO_INCLUDE)		! evaluate current expression...
+	  GOTO 999				! ...and return
+C
+C	.......................................................................
+C
+	ELSEIF ( IN_BYTE .EQ. ',' )  THEN	!*** EXPRESSION DELIMITER ***
+	  CALL CLASS_EVAL(TO_INCLUDE)		! evaluate current expression.
+	  STR_LEN	= 0
+	  STR_PARSED	= ' '
+	  STORED_SIGN = 1
+	  GOTO 10				! get rest of command.
+C
+C	.......................................................................
+C
+	ELSEIF ( IN_BYTE .EQ. '.' )  THEN	!*** DECIMAL POINT ***
+	  IF ( D_POINT )  THEN
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...multiple decimal-point')
+	    GOTO 999
+	  ELSE
+	    D_POINT = .TRUE.
+	  ENDIF
+C
+C	.......................................................................
+C
+	ELSEIF ((IN_BYTE.EQ.'-') .OR. (IN_BYTE.EQ.'+'))  THEN	!*** SIGN ***
+	  IF ( D_POINT .OR. SIGN )  THEN
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...illegal use of decimal-point/sign')
+	    GOTO 999
+	  ELSE
+	    SIGN = .TRUE.
+	    IF ( IN_BYTE .EQ. '-' ) THEN
+	      STORED_SIGN = -1
+	    ELSE
+	      STORED_SIGN = 1
+	    ENDIF
+	  ENDIF
+C
+C	.......................................................................
+C
+	ELSEIF ((IN_BYTE.GE.48).AND.(IN_BYTE.LE.57)) THEN  !*** A NUMBER ***
+	  IF ( EXP_COMP )  THEN
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...extra characters after valid expression')
+	    GOTO 999
+	  ENDIF
+	  CALL BSCH
+	  IF ( D_POINT) CALL BSCH		! need pen-ultimate char. too
+C
+C	  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+C	  attempt to read the number
+C
+	  OK = .NOT.RDREAL(NUMBER)
+	  IF (.NOT.OK) THEN
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...error reading number')
+	    GOTO 999
+	  ENDIF
+C
+C	  . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+C	  the number was valid, set its correct sign, and process
+C
+	  NUMBER = STORED_SIGN*NUMBER			!set the sign
+
+	  IF ( HAD_NUM )  THEN				!consecutive numbers!
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...number followed by another number')
+	    GOTO 999
+	  ELSEIF ( COLON )  THEN
+	    IF ( RANGE_COORD(1) .LE. NUMBER )  THEN
+	      RANGE_COORD(2) = NUMBER
+	      RANGE = .TRUE.
+	      EXP_COMP = .TRUE.
+	      COLON = .FALSE.
+	    ELSE
+	      CALL WRITEF(ERROR//'%F:%F',RANGE_COORD(1),NUMBER)
+	      CALL WRITEF('...illegal range')    
+	      GOTO 999
+	    ENDIF
+	  ELSEIF ( LESS_THAN .OR. GREATER_THAN )  THEN
+	    RANGE_COORD(1) = NUMBER
+	    EXP_COMP = .TRUE.
+	    HAD_NUM = .TRUE.
+	    SIGN    = .FALSE.
+	    D_POINT = .FALSE.
+	  ELSE
+	    RANGE_COORD(1) = NUMBER
+	    HAD_NUM = .TRUE.
+	    SIGN    = .FALSE.
+	    D_POINT = .FALSE.
+	  ENDIF
+	  GOTO 10					! loop for more
+C
+C	.......................................................................
+C
+	ELSEIF (IN_BYTE .EQ. ':')  THEN			!** A RANGE SEPARATOR **
+	  IF ( HAD_NUM .AND. (.NOT. COLON) .AND.
+     &	       (.NOT. SIGN) .AND. (.NOT. D_POINT) )  THEN
+	    COLON = .TRUE.
+	    HAD_NUM = .FALSE.
+	    STORED_SIGN = 1
+	    GOTO 10					! loop for more
+	  ELSE
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('..illegal colon')
+	    GOTO 999
+	  ENDIF
+C
+C	.......................................................................
+C
+	ELSEIF ( IN_BYTE .EQ. '<' )  THEN		!* STRICTLY LESS-THAN *
+	  IF ( EXP_COMP .OR. LESS_THAN .OR. GREATER_THAN
+     &	   .OR. COLON .OR. HAD_NUM .OR. SIGN .OR. D_POINT )  THEN
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...illegal use of operators')
+	    GOTO 999
+	  ELSE
+	    LESS_THAN = .TRUE.
+	    GOTO 10					! loop for more
+	  ENDIF
+C
+C	.......................................................................
+C
+	ELSEIF ( IN_BYTE .EQ. '=' )  THEN		!*** EQUALITY ***
+	  IF ( EXP_COMP .OR. EQUALS .OR. COLON .OR. HAD_NUM 
+     &	       .OR. SIGN .OR. D_POINT )  THEN
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...illegal use of operators')
+	    GOTO 999
+	  ELSE
+	    EQUALS = .TRUE.
+	    GOTO 10					! loop for more
+	  ENDIF
+C
+C	.......................................................................
+C
+	ELSEIF ( IN_BYTE .EQ. '>' )  THEN		!STRICTLY GREATER-THAN
+	  IF ( EXP_COMP .OR. GREATER_THAN .OR. LESS_THAN
+     &	   .OR. COLON .OR. HAD_NUM .OR. SIGN .OR. D_POINT )  THEN
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...illegal use of operators')
+	    GOTO 999
+	  ELSE
+	    GREATER_THAN = .TRUE.
+	    GOTO 10					! loop for more
+	  ENDIF
+C
+C	.......................................................................
+C
+	ELSEIF ( (IN_BYTE .EQ. 'A') .OR.
+     &	         (IN_BYTE .EQ. 'a') )  THEN		!*** ALL? ***
+	  ALL = .TRUE.
+	  DO 100 I = 1,2
+	    IF ( .NOT. RDCHS(IN_BYTE) )  THEN		! get next 2 chars.
+	      STR_LEN = STR_LEN + 1			! save read char.
+	      STR_PARSED(STR_LEN:STR_LEN)
+     &	       = CHAR(IN_BYTE)
+	      IF ( (IN_BYTE .NE. 'L') .AND.
+     &		   (IN_BYTE .NE. 'l') )  THEN
+	    	CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+		CALL WRITEF('...incomplete "ALL" specified')
+		GOTO 999
+	      ENDIF
+	    ELSE
+	      CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	      CALL WRITEF('...incomplete "ALL" specified')
+	      GOTO 999
+	    ENDIF
+100	  CONTINUE
+	  IF ( TO_INCLUDE )  THEN
+	    ALL = .TRUE.
+	    EXP_COMP = .TRUE.
+	  ELSE
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...illegal to specify "ALL" with EXCLUDE command')
+	    GOTO 999
+	  ENDIF
+	  IF ( HAD_NUM .OR. SIGN .OR. D_POINT .OR. LESS_THAN
+     &	       .OR. GREATER_THAN .OR. COLON )  THEN
+	    CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	    CALL WRITEF('...illegal operators with "ALL" specifier')
+	    GOTO 999
+	  ENDIF
+C
+C	.......................................................................
+C
+	ELSEIF ( IN_BYTE .NE. ' ' )  THEN		!*** SPACE ***
+	  CALL WRITEF(ERROR//'"%S"',STR_PARSED(1:STR_LEN))
+	  CALL WRITEF('...unrecognised qualifiers')
+	  GOTO 999
+
+	ENDIF
+	GOTO 10						! continue parsing line
+C
+C............................................................................
+C
+999	RETURN
+	END

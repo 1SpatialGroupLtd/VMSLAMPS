@@ -1,0 +1,1520 @@
+	LOGICAL FUNCTION CLIP_MAP
+C
+***	IDENT	03OC90
+***	MODULE	CLIP_MAP
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+CMOD892 Create an empty LCM file (if requested with /LITES2) 
+C	when there were no reentrant features, as signalled by 
+C	LSL$EMPTY_LITES2_GUIDANCE = 1.
+C	Remove restriction of /ORIGIN not allowed with /RESET_CP
+C	by allowing /ORIGIN and /RESET_CP to be used with all maps.
+C							JB  04-Jun-1990
+C
+CMOD844 Standardise error returns, and remove program 
+C	exits from STOUT etc.				JB  15-Feb-1990
+C
+CMOD	For use with /RESET_CP qualifier		DRC 23-Jun-1988
+CMOD 2/488
+C	Now accepts all layers in /OS mode, not just
+C	0, 1, 11 and 32					TJH 18-Jun-1987
+C	Created						RJH 22-May-1986
+C
+C	IMP IWINDOW Program - Perform the clipping
+C
+C Description
+C
+C	This routine does the bulk of the work. It is actually a 
+C	converged version of the old ICLIP and OSCLIP main programs, 
+C	adapted to use LSLLIB and with the added functionality required 
+C	for IMP IWINDOW.
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+C
+	INCLUDE '($SSDEF)/NOLIST'
+	INCLUDE '($STSDEF)/NOLIST'
+C
+***	PARAMETER/LSL$CMNIWIN:IWINMSG/	! message definitions
+***	PARAMETER/LSL$CMNIWIN:LUN/	! unit numbers
+***	PARAMETER/LSL$CMNIWIN:MAX/	! maximum things
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/	! LSLLIB message definitions
+C
+C Common Blocks
+C
+***	COMMON/LSL$CMNIWIN:CLIP/	! clipping boundaries
+***	COMMON/LSL$CMNIWIN:COPY/	! transfer for output
+***	COMMON/LSL$CMNIWIN:PARAMS/	! control parameters
+***	COMMON/LSL$CMNIFF:IFFHAN/	! current position in IFF file
+***	COMMON/LSL$CMNIFF:MD2DES/	! type 2 descriptor
+***	COMMON/LSL$CMNFRT:FRTCOM.CMN/	! FRT common block
+***	COMMON/LSL$CMNLSL:STATUS/	! LSLLIB status flag
+C
+C Functions called
+C
+	LOGICAL		STOUT
+	LOGICAL		COPYPT
+	LOGICAL		GET_BOUNDS	! get clipping bounds
+	LOGICAL		OS_PROC_MH	! add offset to origin
+	LOGICAL		CLIP_AREA	! clip area fetaure
+	LOGICAL		READ_POINTS	! read in points
+	LOGICAL		UPDATE_NO	! write NO and update statistics
+	LOGICAL		COPY_TC		! copy TC entries
+	LOGICAL		CLIP		! clips a line to our rectangle
+	LOGICAL		FRTINI		! read FRT file
+	LOGICAL		FRTFND		! find feature code
+	INTEGER*4	LOG_OPEN	! open log file and write header
+	INTEGER*4	LCM_OPEN	! open LCM file and write header
+	INTEGER*4	IFFOPEN		! open existing IFF file
+	INTEGER*4	IFFCREATE	! create new IFF file
+	INTEGER*4	FLWOPN		! opens a file for writing
+	INTEGER*4	FLWCLO		! closes a file for writing
+	INTEGER*4	FLWLIN		! writes a line to file
+C
+C External Declarations
+C
+	EXTERNAL	FLWSTR
+C
+C and variables:
+C
+C things for miscellany
+C
+	LOGICAL		HADIN	! have we had the input file yet
+	LOGICAL		HADHI	! have we had a history record yet
+	INTEGER*4	ENTNUM	! current entry no. (to check HI posn.)
+C
+	LOGICAL		HADNF	! for use in leafing through NF numbers
+C
+	LOGICAL		HADEJ	! had EJ entry ?
+	LOGICAL		HADEM	! had EM entry ?
+	LOGICAL		HADEO	! had EO entry ?
+C
+	INTEGER*4	ERRCOD	! LSLLIB error code
+	INTEGER*4	RETCOD	! system error code
+C
+	INTEGER*4	I,J	! loop variables
+C
+C IFF handling stuff
+C
+	REAL		CPARR(4,4)	! control points
+	INTEGER*2	IELEN	! length of entry in hand
+	INTEGER*2	IECODE	! entry code of entry in hand
+	INTEGER*4	ISQ	! internal sequence number (for NF)
+	INTEGER*2	FC	! feature code
+	INTEGER*4	NFNUM	! NF number holder when reading file
+	INTEGER*4	ISNUM	! internal sequence number
+	INTEGER*4	LPOSRA	! to hold position of RA entry
+	INTEGER*2	ZERO	! for outputting NOs
+C
+C things to hold the point & clipping data
+C
+	REAL		STBUF(2,0:MAXST)! to keep the points
+	REAL		ZBUF(0:MAXST)	! to keep the heights
+	INTEGER		ATTBUF(MAXATT,0:MAXST)	! and other attributes
+	INTEGER		STPTR		! no of points in STBUF/ZSBUF
+	INTEGER		LASTPT		! pts to last pt considered
+	INTEGER		THISPT		! pts to current pt
+C
+	INTEGER		THIS_NATT	  ! current no of attributes
+	INTEGER		THIS_ATTC(MAXATT) ! current attribute codes
+	INTEGER		LAST_NATT	  ! last no of attributes
+	INTEGER		LAST_ATTC(MAXATT) ! last attribute codes
+C
+	REAL		THISX, THISY	! so can clip safely
+	REAL		THISZ		! so can clip safely
+	INTEGER		THISZ_INT	! as an integer
+	EQUIVALENCE	(THISZ,THISZ_INT)
+	REAL		LASTX,LASTY	! last point of current segment
+	REAL		LASTX_SAV,LASTY_SAV,LASTZ_SAV
+	REAL		LASTZ		! after clipping
+	INTEGER		LASTZ_INT	! as an integer
+	EQUIVALENCE	(LASTZ,LASTZ_INT)
+	INTEGER		THISATT(MAXATT)	! current point attributes
+	INTEGER		LASTATT(MAXATT)	! last point attributes
+	INTEGER		THISM, LASTM	! set to 1 if pt clipped
+C
+	LOGICAL		SUPLAY, SUPFT	! suppress clipping for current 
+C					! layer / feature
+	LOGICAL		ALLAREA		! all features areas in layer ?
+	LOGICAL		INVIS		! true if line segment is
+C					! invisible
+	LOGICAL		BREAK		! true if invisible line break
+	LOGICAL		ISTXT		! true if FC=28 (text)
+	LOGICAL		ISGRID		! true if FC=398 or 998
+	LOGICAL		ISAREA		! true if area feature
+	LOGICAL		ISSTRING	! true if symbol string
+	LOGICAL		SINGLE		! potential single point feature
+	LOGICAL		GOTZ		! does segment have z-coords ?
+	LOGICAL		IGNEF		! ignore EF entry
+C
+	LOGICAL		OUTSIDE		! inside or outside window
+	LOGICAL		OLD_OUTSIDE	! was last line segment visible?
+	LOGICAL		FINISHED	! return from GET_BOUNDS
+C
+C ---------------------------------------------------------------------
+C Assume success
+C
+	CLIP_MAP = SS$_NORMAL
+C
+	FINISHED = .FALSE.
+C
+C first open the log file - by default, we will always leave it 
+C selected regardless of whether or not we also have a LITES2 command 
+C file open as well
+C
+	IF (HADLOG) THEN
+	   IF (HADOUT) THEN
+	      IF (.NOT. LOG_OPEN(LOGLUN,LOGFIL(1:LOGLEN),HADLOG)) THEN
+		 CALL LSL_PUTMSG(IWIN__ERROPNLOG,LOGFIL(1:LOGLEN),LOGLUN)
+     	         GOTO 900
+	      ENDIF
+	   ELSE
+	      ERRCOD = FLWOPN(LOGLUN,LOGFIL(1:LOGLEN),RETCOD)
+	      IF (.NOT. ERRCOD) THEN
+		 CALL LSL_PUTMSG(IWIN__ERROPNLOG,LOGFIL(1:LOGLEN),LOGLUN)
+		 CALL LSL_ADDMSG(ERRCOD)
+		 IF (ERRCOD .EQ. LSL__SYSOPEN) CALL LSL_ADDMSG(RETCOD)
+		 GO TO 900
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C and set up things to tell us what has been done so far
+C
+	HADIN = .FALSE.			! not had input file open yet
+	HADRAN = .FALSE.		! is true thing
+	HADHI = .FALSE.			! no HI entry yet
+	ENTNUM = 0			! no entries yet
+C
+C now we are ready to go
+C
+	IF (.NOT. IFFOPEN(INLUN,IFFIN,,HADLOG)) THEN
+	   CALL LSL_PUTMSG(IWIN__IFFOPNERR,IFFIN(1:INLEN))
+	   GOTO 600
+	ENDIF
+C
+	IF (HADOUT) CALL FLWRTF('Input file  : %S',IFFIN(1:INLEN))
+	HADIN = .TRUE.			! got input file now
+C
+C set input revision level to 1
+C
+	CALL IFFIRV(1)
+C
+C now for the FRT if it was requested
+C
+	IF (HADFRT) THEN
+	   IF (FRTINI(FRTFIL(1:FRTLEN))) GOTO 340
+C
+	   IF (HADLOG) CALL LSL_PUTMSG(IWIN__FRTREAD,FRTFIL(1:FRTLEN))
+	   IF (HADOUT) CALL FLWRTF('FRT file    : %S',FRTFIL(1:FRTLEN))
+	ENDIF
+	IF (HADOUT) CALL FLWRTF
+C
+C now get the clipping bounds
+C
+	CLIP_MAP = GET_BOUNDS(FINISHED)
+C
+C GET_BOUNDS reads the translation table LSL$OS_MH_TABLE if the header type is
+C 3 or 4 and uses MH2ARR from common block MHOSGB for the new header
+C
+	IF (.NOT. CLIP_MAP) GOTO 600	! input IFF file closed
+C
+	IF (FINISHED) GOTO 999		! no processing to do
+C
+C and note that does not cope with "inside out" maps.
+C
+	ENCLIP = .TRUE.			! and enable clipping
+	HADNF = .FALSE.			! not had any yet
+C
+C
+C**************** p r o c e s s   t h e    f i l e ******************
+C
+C and so we are ready to process the file - let us rewind it
+C
+	CALL IFFRWD
+C
+C now open the output file
+C
+	IF (.NOT. IFFCREATE(OUTLUN,IFFOUT,'Clip',,HADLOG)) GOTO 310
+	IF (HADOUT) THEN
+	   CALL FLWRTF('Output file : %S',IFFOUT(1:OUTLEN))
+	   CALL FLWRTF
+	ENDIF
+C
+C and reselect the input file
+C
+	CALL IFFSEL(INLUN)
+C
+C and now work through the input file, copying it (clipped) into
+C the output file
+C
+	TOTDEL = 0		! no features deleted yet
+	TOTCLP = 0		! nor any clipped
+	CRECNT = 0		! and none created
+	TEXTS  = 0		! no external features kept
+	GRIDS  = 0		! no grids clipped
+	NONF   = .TRUE.		! no current feature
+	HADST  = .FALSE.	! had no CBs yet
+	HADTC = .FALSE.		! no TC/CH encountered yet
+	LAYSUP = 0		! no layers had clipping suppressed yet
+	DO 65 I=1,NUMFC
+	   FCSUP(I) = 0		! no ft codes had clipping suppressed
+65	CONTINUE
+	LAYIND = 0		! no layers read in yet
+	HADEO = .TRUE.		! pretend for the first one
+	HADEM = .FALSE.		! assume only ever one map
+	HADEJ = .FALSE.		! should only ever be one
+	DONE_AREA = .FALSE.	! not encountered area yet
+C
+C***************** r e a d   n e x t   e n t r y *********************
+C
+70	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 280	! end of the file
+	IF (.NOT. HADHI) ENTNUM = ENTNUM + 1
+	IF (IECODE.EQ.'RA') GOTO 81	! range
+	IF (IECODE.EQ.'HI') GOTO 82	! history
+	IF (IECODE.EQ.'MH') GOTO 83	! map header
+	IF (IECODE.EQ.'MD') GOTO 84	! map descriptor
+	IF (IECODE.EQ.'CP') GOTO 845	! control points
+	IF (IECODE.EQ.'NO') GOTO 85	! got a new overlay
+	IF (IECODE.EQ.'NF') GOTO 90	! go note an NF
+	IF (IECODE.EQ.'FS') GOTO 95	! go look at feature code
+	IF (IECODE.EQ.'CB') GOTO 110	! do things for a CB entry
+80	IF (IECODE.EQ.'EF') GOTO 100	! end the current NF
+	IF (IECODE.EQ.'TC') GOTO 103
+	IF (IECODE.EQ.'CH') GOTO 103
+	IF (IECODE.EQ.'EO') GOTO 105	! end of overlay
+	IF (IECODE.EQ.'EM') GOTO 106	! end of map
+	IF (IECODE.EQ.'EJ') GOTO 109	! end of file
+	IF (.NOT.HADST.AND..NOT.NONF) GOTO 70	! don't copy the thing 
+	CALL EIHCPY(OUTLUN)		! copy entry into IFFOUT
+	GOTO 70				! and get next entry
+C
+C********************** h a d    a   R A *****************************
+C
+C Save a pointer and create the entry with the old values in it for now
+C
+81	CALL IFFSEL(OUTLUN)
+	LPOSRA = LPOSE			! remember posn of RAnge
+	CALL IFFRA(RANGE)
+	CALL IFFSEL(INLUN)
+	GOTO 70
+C
+C********************** h a d    a n   H I **************************
+C
+C history - check this is the only one, and it is the second entry in 
+C the file
+C
+82	IF (HADHI) GO TO 350
+	IF (ENTNUM .NE. 2) GO TO 360
+C
+C print the history information in the log file
+C
+	IF (HADOUT) THEN
+	   CALL FLWRTF('IFF history information:')
+	   CALL FLWRTF
+	   CALL EIHPHI(FLWSTR)
+	   CALL FLWRTF
+	ENDIF
+C
+C now copy the entry over
+C
+	HADHI = .TRUE.
+	CALL EIHCPY(OUTLUN)		! copy entry into IFFOUT
+	GOTO 70				! and get next entry
+
+C********************** h a d    a n   M H **************************
+C
+C map header - if ORIGIN set, add it to 'world co-ords' of SW of map
+C
+83	IF (HAD_OSMH .AND. ORIGIN) THEN
+	   IF ( .NOT.OS_PROC_MH(IELEN) ) GOTO 900
+	ELSEIF (HAD_MCEMH .AND. ORIGIN) THEN
+	   CALL MCE_PROC_MH
+	ELSE
+	   CALL EIHCPY(OUTLUN)
+	ENDIF
+C
+	GOTO 70				! go and get the next thing
+C
+C********************** h a d    a n   M D **************************
+C
+C map descriptor - if type 2 and ORIGIN set, update it
+C
+84	IF (IELEN .EQ. MD2LEN) THEN		! it's a type 2
+C
+	   IF (ORIGIN) THEN			! got new origin,
+	      IF (HAD_OSMH) THEN
+	         CALL OS_PROC_MD2
+	      ELSEIF (HAD_MCEMH) THEN
+	         CALL MCE_PROC_MD2
+	      ELSE
+	         CALL EIHR(MD2ARR,MD2LEN,1)	! read it into MD array
+C
+	         MD2LOC(1) = XORIG
+	         MD2LOC(2) = YORIG
+C
+		 CALL IFFSEL(OUTLUN)
+		 CALL IFFMD(MD2ARR,MD2LEN)	! write out the MD
+		 CALL IFFSEL(INLUN)
+	      ENDIF
+C
+	   ELSE
+	      CALL EIHCPY(OUTLUN)		! so just copy it
+	   ENDIF
+C
+	ELSE				! it's a type 1,
+	   CALL EIHCPY(OUTLUN)		! so just copy it
+	ENDIF
+C
+	GOTO 70				! go and get the next thing
+C
+C********************** h a d    a n   CP  **************************
+C
+C control point entry
+C If /NORESET_CP is specified, the control points are copied
+C unmodified to the output file.
+C If /RESET_CP is specified, the CP values are modified according
+C to the coordinates of the clipping rectangle.
+C
+845	IF (.NOT.RESET_CP)THEN
+	  CALL EIHCPY(OUTLUN)		! copy entry unmod. to IFFOUT
+	ELSE
+C set up the CP values to be equal to clipping bounds
+	  CPARR(1,1)=CLIPLO(W)  	! NW x
+	  CPARR(2,1)=CLIPHI(N)		! NW y
+	  CPARR(1,2)=CLIPLO(W)		! SW x
+	  CPARR(2,2)=CLIPLO(S)		! SW y
+	  CPARR(1,3)=CLIPHI(E)		! SE x
+	  CPARR(2,3)=CLIPLO(S)		! SE y
+	  CPARR(1,4)=CLIPHI(E)		! NE x
+	  CPARR(2,4)=CLIPHI(N)		! NE y
+	  DO 847 I=1,4
+	     DO 846 J=1,2
+	        CPARR(J+2,I) = CPARR(J,I)
+846	     CONTINUE
+847	  CONTINUE
+C
+	  CALL IFFSEL(OUTLUN)		! select output file
+	  CALL IFFCP(CPARR)
+	  CALL IFFSEL(INLUN)		! reselect input file
+	ENDIF
+C
+	GOTO 70				! go and get the next thing
+C
+C********************** h a d    a n   N O **************************
+C
+C we have a new overlay - check the last one was ended
+C
+85	IF (.NOT. HADEO) THEN
+	   CALL LSL_PUTMSG(IWIN__NOEO)
+	   IF (UPDATE_NO(SUPLAY)) GOTO 580
+	ENDIF
+C
+C note & mention the overlay number
+C
+	CALL EIHR(LAYER,1,1)		! get layer number
+	IF (HADLOG) CALL LSL_PUTMSG(IWIN__LAYER,LAYER)
+C
+C initialise things for this layer
+C
+	LAYIND = LAYIND + 1		! got another layer
+	LAYLIST(LAYIND) = LAYER		! set its number in the list
+	MAXNF(LAYIND) = 1		! but a guess for this layer
+	CRENF(LAYIND) = 0		! no CBs created yet
+	DELNF  = 0			! none deleted, either
+	OCLIPD = 0			! nor any clipped at all
+	OTEXTS = 0			! no external texts kept yet
+	OGRIDS = 0			! no grids clipped yet
+	HADEO = .FALSE.			! not had end yet
+C
+C no ft code clipping suppression yet for this layer
+C
+	DO 86 I=1,NUMFC
+	   OFCSUP(I)=0
+86	CONTINUE
+C
+C Is the layer to be clipped or not ?
+C
+	SUPLAY=.FALSE.
+	DO 87 I=1,NUMLAY
+	   IF (LAYER.EQ.LAYTAB(I)) THEN
+	      SUPLAY = .TRUE.
+	      LAYSUP = LAYSUP+1
+	   ENDIF
+87	CONTINUE
+C
+C and are all features in it to be clipped as areas ?
+C
+	ALLAREA=.FALSE.
+	DO 88 I=1,AREA_LAY
+	   IF (LAYER.EQ.AREA_LAYTAB(I)) ALLAREA = .TRUE.
+88	CONTINUE
+C
+C now, we are going to copy the NO over, but we must remember where
+C we are writing it to, so that we can come back later and overwrite
+C the EO pointer with a correct value
+C
+	CALL IFFSEL(OUTLUN)		! select the out file
+	LPOSNO = LPOSE			! remember where NO will go
+C
+C we shall copy the NO by hand, so that we can introduce an NO/EO
+C pointer later, even if there wasn't one (ie the NO is the short form)
+C in the original file
+C
+	ZERO = 0			! just in case
+	CALL IFFNO( LAYER, ZERO, 0 )	! and write the NO, blank ptr
+	CALL IFFSEL(INLUN)		! back to the input file
+	GOTO 70				! go and get the next thing
+C
+C********************** h a d    a n   N F **************************
+C
+C we had an NF - process it & extract relevant information
+C
+90	HADNF  = .TRUE.			! had an NF (in file)
+	NONF   = .FALSE.		! had an NF (=> are in feature)
+	NFPOS  =  LPOSH			! remember where it is
+	HADST  = .FALSE.		! no ST yet
+	DONOUT = .FALSE.		! no CBs output for this NF
+	SPLIT  =  0			! haven't split feature
+	CLIPPD = .FALSE.		! nor clipped it yet
+	SINGLE = .FALSE.		! assume line feature
+C
+C now check the feature number - if it's larger than any before then 
+C update MAXNF for this layer
+C
+	CALL EIHR(NFNUM,1,1)		! get the feature number
+	CALL EIHR(ISNUM,1,2)		! and internal sequence number
+	NFNUM = IAND(NFNUM,65535)	! convert to unsigned longword
+	ISNUM = IAND(ISNUM,65535)
+C
+C Null (empty) feature so get rid of it
+C
+	IF ((NFNUM .EQ. 0) .AND. .NOT. OSMODE) THEN
+	   CALL IFFNXC('EF',IELEN)
+	   IF (IELEN.EQ.-1) GOTO 430		! unexpected end of file
+	   HADNF = .FALSE.
+	   NONF = .TRUE.
+C
+C but keep any TC or CH entries before it 
+C
+	   IF (HADTC) THEN
+	      IF (COPY_TC()) GOTO 580
+	   ENDIF
+C
+C check for the highest feature serial number
+C
+	ELSE
+	   IF (NFNUM.GT.MAXNF(LAYIND)) MAXNF(LAYIND)=NFNUM
+	ENDIF
+	GOTO 70
+C
+C********************** h a d    a n   F S **************************
+C
+C we have had an FS - check for the feature code
+C
+95	CALL EIHR(FC,1,1)		! read the FC
+C
+C set things false to start with
+C
+	SUPFT = .FALSE.
+	ISTXT = .FALSE.			! guess it's not text
+	ISGRID = .FALSE.		! guess it's not a grid
+	ISAREA = .FALSE.		! guess it's not an area
+	ISSTRING = .FALSE.		! guess it's not a symbol string
+	FOUND_FC = .FALSE.		! FC not yet found in FRT
+C
+C check if this feature is suppressed by layer or feature code
+C
+	IF (SUPLAY) SUPFT = .TRUE.
+	DO 96 I=1,NUMFC
+	   IF (FC.EQ.FCTAB(I)) THEN
+	      SUPFT = .TRUE.
+	      FCSUP(I) = FCSUP(I)+1
+	      OFCSUP(I) = OFCSUP(I)+1
+	   ENDIF
+96	CONTINUE
+C
+C and if in OS mode, see if it is a text to keep or a grid line to 
+C remain unclipped
+C
+	IF (OSMODE) THEN
+	   IF (FC.EQ.28) ISTXT=.TRUE.	! but it is text
+	   IF (FC.EQ.398.OR.FC.EQ.998) ISGRID=.TRUE.
+	   IF (.NOT. SUPFT) 
+     &	      SUPFT = ((ISGRID.AND..NOT.CLPGRD) .OR. (ISTXT .AND. HADT))
+	ENDIF
+C
+C now look up the feature code in the FRT, if we have one
+C
+	IF (HADFRT) THEN
+	   IF (FRTFND(FC)) THEN
+	      CALL LSL_PUTMSG(IWIN__FCNOTFND, FC)
+	   ELSE
+	      FOUND_FC = .TRUE.
+	      ISSTRING = (FRTGT .EQ. STRTYP)
+	   ENDIF
+	ENDIF
+C
+C find out if this feature is to be clipped as an area
+C
+	IF (HADAREA) THEN
+	   IF (ALLAREA) THEN
+	      ISAREA = .TRUE.
+	   ELSEIF (AREA_FC .GT. 0) THEN
+	      DO 97 I=1,AREA_FC
+	         IF (FC.EQ.AREA_FCTAB(I)) ISAREA = .TRUE.
+97	      CONTINUE
+	   ELSEIF (FOUND_FC) THEN
+	      ISAREA = (FRTGT .EQ. ARETYP)
+	   ENDIF
+	ENDIF
+	GOTO 70
+C
+C********************** h a d    a n   E F **************************
+C
+C had an EF - output it explicitly to cancel the IFF library's note
+C that we are currently in a feature
+C
+100	IF (.NOT.NONF.AND.DONOUT) THEN	! had an NF, & output points
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFEF
+	   CALL IFFSEL(INLUN)
+	   IF (DEBUG) CALL WRITEF('   just output an EF')
+	ENDIF
+C
+	IF (CLIPPD) OCLIPD = OCLIPD+1
+C
+C now, possibly give some diagnostics...
+C
+	IF (HADLOG) THEN
+	   IF (SPLIT.GT.0) THEN
+	      CALL FLWRTF('Feature %N (%N) split %^W%N time%m',
+     &						NFNUM,ISNUM,SPLIT)
+	   ELSEIF (CLIPPD) THEN
+	      CALL FLWRTF('Feature %N (%N) was clipped',NFNUM,ISNUM)
+	   ELSEIF (SUPFT.AND..NOT.(ISTXT.OR.ISGRID)) THEN
+	      CALL EXPAND('Feature %N (%N), ',NFNUM,ISNUM)
+	      CALL APPEND('feature code %^W%N, ',FC)
+	      CALL FLWAPP('suppressed from clipping')
+	   ENDIF
+	ENDIF
+C
+	IF (ISGRID) THEN
+	   IF (HADLOG.AND..NOT.CLPGRD) THEN
+	      CALL FLWRTF('Feature %N (%N) is a grid - not checked',
+     &							NFNUM,ISNUM)
+	   ENDIF
+	   GRIDS = GRIDS+1		! another grid
+	   OGRIDS= OGRIDS+1		! detected
+	ENDIF
+C
+	NONF  = .TRUE.			! no longer in a feature
+	HADST = .FALSE.			! waiting for next ST
+	HADTC = .FALSE.
+	GOTO 70
+C
+C
+C********************** h a d   a   T C / C H ***********************
+C
+C TC/CH - Have to copy these to the output file unless the following
+C      feature is deleted. New features created (from split fts) also
+C      require them inserted before them.
+C
+103	IF (.NOT.HADTC) TCPOS = LPOSH
+	HADTC = .TRUE.
+	GOTO 70
+C
+C
+C********************** h a d    a n   E O **************************
+C
+C we have found an EO - do the necessary things
+C
+105	IF (UPDATE_NO(SUPLAY)) GOTO 580
+	HADEO = .TRUE.
+	GOTO 70				! and get the next thing
+C
+C
+C********************** h a d    a n   E M **************************
+C
+C we have found an EM - check that an EO preceded it
+C
+106	IF (.NOT. HADEO) THEN
+	   CALL LSL_PUTMSG(IWIN__NOEO)
+	   IF (UPDATE_NO(SUPLAY)) GOTO 580
+	   HADEO = .TRUE.
+	ENDIF
+C
+C and copy over the entry
+C
+	HADEM = .TRUE.
+	CALL EIHCPY(OUTLUN)
+	GOTO 70				! and get the next thing
+C
+C
+C********************** h a d    a n   E J **************************
+C
+C we have found an EJ - go and finish up
+C
+109	HADEJ = .TRUE.
+	GOTO 280
+C
+C
+C********************** h a d    a   C B ****************************
+C
+C and now we have a CB
+C
+110	IF (DEBUG) CALL WRITEF('.CB at start of feature')
+C
+C If it is an area feature, deal with it separately
+C
+	IF (ISAREA) THEN
+	   IF (.NOT. CLIP_AREA(NFNUM,ISNUM,IECODE,IELEN,SUPFT,IGNEF))
+     &	      GOTO 580
+	   IF (IGNEF) GOTO 70
+	   GOTO 80
+	ENDIF
+C
+C**************** r e a d   i n   p o i n t s ***********************
+C
+C read in the first set of points
+C
+	CURRNT = 0		! nothing written to outbuffer yet
+	OUTBUF(X,0) = 0.0	! get rid of the last point for safety
+	OUTBUF(Y,0) = 0.0
+	TENDS  = PENUP		! start feature with pen up
+	LASTPT = 1		! no continuity point, so start at 1
+	THISPT = 2
+	OUTSIDE = .FALSE.	! ???
+C
+	IF (.NOT. READ_POINTS(STBUF(X,1),ZBUF(1),ATTBUF(1,1),
+     &	          THIS_ATTC,THIS_NATT,STPTR,NFNUM,ISNUM)) GOTO 580
+C
+	SINGLE = (STPTR .EQ. 1)		! a potential point feature ?
+C
+C set the output attribute codes
+C
+	OUTNATT = THIS_NATT
+	DO 111 I=1,OUTNATT
+	   OUTATTC(I) = THIS_ATTC(I)
+111	CONTINUE
+C
+C and those for the last point
+C
+	LAST_NATT = THIS_NATT
+	DO 112 I=1,LAST_NATT
+	   LAST_ATTC(I) = THIS_ATTC(I)
+112	CONTINUE
+C
+C does feature start inside window?
+C if start point is on boundary, then look at next point
+C
+	IF (((STBUF(X,1).EQ.CLIPLO(X).OR.STBUF(X,1).EQ.CLIPHI(X)).AND.
+     &	     (STBUF(Y,1).GE.CLIPLO(Y).AND.STBUF(Y,1).LE.CLIPHI(Y))).OR.
+     &	    ((STBUF(Y,1).EQ.CLIPLO(Y).OR.STBUF(Y,1).EQ.CLIPHI(Y)).AND.
+     &	     (STBUF(X,1).GE.CLIPLO(X).AND.STBUF(X,1).LE.CLIPHI(X))))
+     &	THEN
+C
+C find a vector that does not lie along window, and clip it to window
+	   OUTSIDE = .FALSE.			! assume inside
+	   DO 115, I=1,STPTR-1
+	      LASTX = STBUF(X,I)
+	      LASTY = STBUF(Y,I)
+	      THISX = STBUF(X,I+1)
+	      THISY = STBUF(Y,I+1)
+	      IF ((LASTX.EQ.THISX.AND.
+     &	          (LASTX.EQ.CLIPLO(X).OR.LASTX.EQ.CLIPHI(X)).AND.
+     &            (LASTY.GE.CLIPLO(Y).AND.LASTY.LE.CLIPHI(Y))).OR.
+     &	          (LASTY.EQ.THISY.AND.
+     &	          (LASTY.EQ.CLIPLO(Y).OR.LASTY.EQ.CLIPHI(Y)).AND.
+     &            (LASTX.GE.CLIPLO(X).AND.LASTX.LE.CLIPHI(X)))) GOTO 115
+C
+C vector is not along boundary, if it is visible, then feature starts
+C inside
+	      OUTSIDE = CLIP(LASTX,LASTY,LASTZ,LASTM,
+     &	                      THISX,THISY,THISZ,THISM,.FALSE.)
+	      GOTO 116				! we have answer
+115	   CONTINUE
+116	   CONTINUE	   
+C
+C otherwise, are we outside?
+	ELSE
+	   OUTSIDE = STBUF(X,1).LT.CLIPLO(X).OR.
+     &	             STBUF(X,1).GT.CLIPHI(X).OR.
+     &	             STBUF(Y,1).LT.CLIPLO(Y).OR.
+     &	             STBUF(Y,1).GT.CLIPHI(Y)
+	ENDIF
+	GO TO 123
+C
+C read in subsequent sets of points 
+C
+120	STBUF(X,0) = STBUF(X,STPTR)	! set continuity point
+	STBUF(Y,0) = STBUF(Y,STPTR)
+	ZBUF(0) = ZBUF(STPTR)
+	DO 121 I=1,THIS_NATT		! don't forget its attributes
+	   ATTBUF(I,0) = ATTBUF(I,STPTR)
+121	CONTINUE
+	LAST_NATT = THIS_NATT		! the number of them
+	DO 122 I=1,LAST_NATT		! and their codes
+	   LAST_ATTC(I) = THIS_ATTC(I)
+122	CONTINUE
+	LASTPT = 0			! start at continuity point
+	THISPT = 1
+C
+	IF (.NOT. READ_POINTS(STBUF(X,1),ZBUF(1),ATTBUF(1,1),
+     &	          THIS_ATTC,THIS_NATT,STPTR,NFNUM,ISNUM)) GOTO 580
+C
+	SINGLE = .FALSE.		! not a single point feature
+C
+C and maybe put out a message
+C
+123	IF (DEBUG) CALL WRTAPP('CB contains %N point%m, FLAGS=%^W%N',
+     &					 STPTR,	   	   IENDS  )
+C
+C now set the limit on the number of points to output
+C
+	STLIM = OUTLIM			! first approximation to limit
+	IF (STPTR.GT.STLIM) STLIM=STPTR	! max no of pts we'll take in
+C					! OUTBUF before outputting
+C
+C if IENDS = 0, then we have an invisible line leading from the last
+C point of the last CB (which might have been in another feature) to
+C the first point of this CB. We must not lose this invisible line.
+C Thus if we have some points buffered, waiting to be output, then we
+C must flush the CB out, so that we can output an CB starting with
+C PENUP in TENDS.
+C
+	IF ((CURRNT .NE. 0) .AND. (IENDS .EQ. PENUP)) THEN
+	   CLIP_MAP = STOUT()		! force the last CB out
+	   IF (.NOT.CLIP_MAP) GOTO 580
+C
+	   TENDS = PENUP		! want a penup to be set
+	ENDIF
+C
+C check if we have a potential single point feature
+C
+	IF (SINGLE) GO TO 240		! go to check for more ST's
+C
+C if this feature is to be suppressed, just copy the ST over
+C
+	IF (SUPFT) THEN
+	   DO 129 I=1,STPTR
+	      CLIP_MAP = COPYPT(STBUF(X,I),STBUF(Y,I),ZBUF(I),
+     &				ATTBUF(1,I),THIS_ATTC,THIS_NATT)
+	      IF (.NOT.CLIP_MAP) GOTO 580
+129	   CONTINUE
+C
+	   CLIP_MAP = STOUT()
+	   IF (.NOT.CLIP_MAP) GOTO 580
+C
+	   IF (DEBUG) CALL WRITEF('.CB in suppressed feature copied')
+	   GO TO 240
+	ENDIF
+C
+C
+C************ l o o k   a t   e a c h   s e g m e n t ***************
+C
+C start looking at line segments in turn
+C
+130	LASTX = STBUF(X,LASTPT)	! copy of last point
+	LASTY = STBUF(Y,LASTPT)
+	LASTZ = ZBUF(LASTPT)
+	DO 131 I=1,LAST_NATT
+	   LASTATT(I) = ATTBUF(I,LASTPT)
+131	CONTINUE
+	LASTM = 0		! not clipped (yet)
+C
+	THISX = STBUF(X,THISPT)	! copy of this point
+	THISY = STBUF(Y,THISPT)
+	THISZ = ZBUF(THISPT)
+	DO 132 I=1,THIS_NATT
+	   THISATT(I) = ATTBUF(I,THISPT)
+132	CONTINUE
+	THISM = 0
+C
+	IF (DEBUG) CALL EXPAND('.line segment %N: ',LASTPT)
+C
+C is this line segment an invisible line break ?
+C
+	BREAK = ((LASTPT .EQ. 0) .AND. (IENDS .EQ. PENUP))
+C
+C if line lies along window boundary, output the last point, if we are
+C currently outputting points
+	IF (CURRNT.GT.0.AND.
+     &	   ((LASTX.EQ.THISX.AND.
+     &	    (LASTX.EQ.CLIPLO(X).OR.LASTX.EQ.CLIPHI(X)).AND.
+     &      (LASTY.GE.CLIPLO(Y).AND.LASTY.LE.CLIPHI(Y))).OR.
+     &	    (LASTY.EQ.THISY.AND.
+     &	    (LASTY.EQ.CLIPLO(Y).OR.LASTY.EQ.CLIPHI(Y)).AND.
+     &      (LASTX.GE.CLIPLO(X).AND.LASTX.LE.CLIPHI(X))))) THEN
+C
+	   CLIP_MAP = COPYPT(LASTX,LASTY,LASTZ,LASTATT,LAST_ATTC,LAST_NATT)
+	   IF (.NOT.CLIP_MAP) GOTO 580
+C
+	   GOTO 180
+	ENDIF	   
+C
+C we must check whether the line segment is to be clipped
+C
+	GOTZ = ((LASTZ_INT .NE. IFF_ABSENT) .AND. 
+     &	        (THISZ_INT .NE. IFF_ABSENT))
+	LASTX_SAV = LASTX
+	LASTY_SAV = LASTY
+	LASTZ_SAV = LASTZ
+	INVIS = CLIP(LASTX,LASTY,LASTZ,LASTM,
+     &	             THISX,THISY,THISZ,THISM,GOTZ)
+C
+	OLD_OUTSIDE = OUTSIDE
+	OUTSIDE = INVIS
+C
+C if last vector ended on boundary, and this one is outside, then
+C the feature should be clipped. Output the first point of this vector
+C and complete the feature. If creating a void, then the first point
+C should be output if we have just gone from outside to inside
+C
+	IF ((.NOT.VOID.AND..NOT.OLD_OUTSIDE.AND.OUTSIDE).OR.
+     &	    (VOID.AND.OLD_OUTSIDE.AND..NOT.OUTSIDE)) THEN
+	   CLIPPD = .TRUE.
+	   CLIP_MAP = COPYPT(LASTX_SAV,LASTY_SAV,LASTZ_SAV,LASTATT,
+     &						LAST_ATTC, LAST_NATT)
+	   IF (.NOT.CLIP_MAP) GOTO 580
+C
+	   CLIP_MAP = COPYPT(LASTX,LASTY,LASTZ,LASTATT,LAST_ATTC,
+     &	      						LAST_NATT)
+	   IF (.NOT.CLIP_MAP) GOTO 580
+C
+	   GOTO 205
+	ENDIF
+C
+	IF (INVIS) THEN
+C
+C	 here, the segment is invisible, so we can ignore it,
+C	 unless VOID, in which case we simply transmit the
+C	 unclipped values
+C
+	   IF (DEBUG) CALL WRITAP('invisible')
+C
+	   IF (VOID) THEN
+	      CLIP_MAP = COPYPT(STBUF(X,LASTPT), STBUF(Y,LASTPT), 
+     &	                         ZBUF(LASTPT), ATTBUF(1,LASTPT),
+     &	                         LAST_ATTC, LAST_NATT)
+	      IF (.NOT.CLIP_MAP) GOTO 580
+	   ENDIF
+C
+	   GOTO 180			! to do the ignoring
+	ENDIF
+C
+C NOT invisible, do the appropriate debug message
+C
+	IF (DEBUG) THEN
+	   IF (LASTM.EQ.1) CALL APPEND('out ')
+	   IF (LASTM.EQ.0) CALL APPEND('in  ')
+	   IF (THISM.EQ.1) CALL APPEND('out.')
+	   IF (THISM.EQ.0) CALL APPEND('in.')
+	   CALL TTWLIN
+	ENDIF
+C
+C but here we are at least partially inside the boundary.
+C Let us see which ends of the line segment are inside -
+C
+	IF (LASTM.EQ.1) GOTO 210
+C
+C here, we know that LASTPT was inside the frame, since it was not
+C clipped (LASTM=0)
+C
+	IF (THISM.EQ.1) GOTO 190
+C
+C and here, we have THISPT inside the frame too -
+C ie. the line segment is totally inside the frame. Thus we simply
+C transmit the point, unless VOID, when we can totally ignore it
+C
+	IF (VOID) GOTO 180		! ignore it, get the next one
+C
+C copy LASTPT across to OUTBUF, and check the RANGE values
+C
+	CLIP_MAP = COPYPT(LASTX,LASTY,LASTZ,LASTATT,LAST_ATTC,LAST_NATT)
+	IF (.NOT.CLIP_MAP) GOTO 580
+C
+C and now get ready for the next segment to be considered
+C  - increment indices for next segment
+C  - if on last point of CB, go and deal with it
+C  - if on first point of (not the first) CB, set attribute codes
+C
+180	LASTPT = THISPT
+	THISPT = THISPT+1		! next line segment
+	IF (THISPT.GT.STPTR) GOTO 230	! all this CB copied
+	IF (LASTPT .EQ. 1) THEN		! first point in CB
+	   LAST_NATT = THIS_NATT	! no. of attributes
+	   DO 182 I=1,LAST_NATT		! and their codes
+	      LAST_ATTC(I) = THIS_ATTC(I)
+182	   CONTINUE
+	ENDIF
+	GOTO 130			! get next segment
+C
+C
+C here, we still have LASTPT inside, but THISPT is now outside.
+C thus THISX, THISY are clipped values.
+C
+C If we are clipping normally, then we must finish this feature,
+C since we have left the clipping box. If we have VOID, then we have
+C just entered the space where we notice things, so we start taking
+C points again, but not if the segment is an invisible line break or
+C the feature is a symbol string
+C
+190	CLIPPD = .TRUE.			! since the line is truncated
+	IF (VOID) THEN			! 1st point inside (on bound)
+	   IF (.NOT. (BREAK .OR. ISSTRING)) THEN
+	      CALL INIATT(THISATT,THIS_NATT)
+	      CLIP_MAP = COPYPT(THISX,THISY,THISZ,THISATT,
+     &						THIS_ATTC,THIS_NATT)
+	      IF (.NOT.CLIP_MAP) GOTO 580
+	   ENDIF
+	   GOTO 180			! go get next segment
+	ENDIF
+C
+C and here we have normal clipping - copy across point inside bounds
+C
+C note that if this is the continuity point between CB's, it will 
+C already have been copied over - we are attempting to copy it again but
+C this won't actually succeed, as duplicated points are ignored
+C
+	CLIP_MAP = COPYPT(LASTX,LASTY,LASTZ,LASTATT,LAST_ATTC,LAST_NATT)
+	IF (.NOT.CLIP_MAP) GOTO 580
+C
+C and now copy across the truncated value for THISPT
+C Thus here, we have to output a truncated THISPT & close the CB, NF
+C
+200	CONTINUE
+	OUTSIDE = .TRUE.
+C
+C only if not broken and not a symbol string
+	IF (.NOT. (BREAK .OR. ISSTRING)) THEN
+	   CALL INIATT(THISATT,THIS_NATT)
+	   CLIP_MAP = COPYPT(THISX,THISY,THISZ,THISATT,THIS_ATTC,THIS_NATT)
+	   IF (.NOT.CLIP_MAP) GOTO 580
+	ENDIF
+C
+205	IF (DEBUG) CALL WRITEF('.accepted last pt')
+C
+C and now output the CB, and close the feature -
+C we use TENDS to control initial pen position, and set it afterwards
+C to PENUP ready to reenter the box later.
+C
+C if we have done no output for this NF, or have output a complete
+C feature (ie this is a new feature with no points yet), whilst the
+C STBUF had two or more points in it, but we have only kept one of
+C those points, then the feature should be ignored (ie deleted in
+C effect).
+C
+	IF ( (.NOT.NONF.AND.DONOUT) .OR.
+     &			 STPTR.EQ.1 .OR. CURRNT.GT.1 ) THEN
+C
+C	 but here, have a sensible feature, so terminate it
+C
+	   IF (CURRNT .NE. 0) THEN
+	      CLIP_MAP = STOUT() 	! perform the output
+	      IF (.NOT.CLIP_MAP) GOTO 580
+	   ENDIF
+C
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFEF			! end the feature
+	   CALL IFFSEL(INLUN)		! and back to reading
+	   NONF = .TRUE.		! no longer in a feature
+	   TENDS = PENUP		! for coming back into box
+C
+	   IF (DEBUG) CALL WRITEF('.feature closed as leave bounds')
+C
+C	 here we must check to see if we have the second half of a 
+C	 VOID out-out case - the first part enters the rectangle,
+C	 so ends a feature, and the second bit is leaving the
+C	 rectangle, so starting a new feature (if the segment is not an
+C	 invisible line break and the feature is not a symbol string)
+C
+	   IF (VOID.AND.LASTM.EQ.1.AND.THISM.EQ.1.AND.
+     &	       .NOT.(BREAK .OR. ISSTRING)) THEN
+	      CALL INIATT(THISATT,THIS_NATT)
+	      CLIP_MAP = COPYPT(THISX,THISY,THISZ,THISATT,
+     &						THIS_ATTC,THIS_NATT)
+	      IF (.NOT.CLIP_MAP) GOTO 580
+	   ENDIF
+	ENDIF
+	GOTO 180			! go & get set for next segment
+C
+C
+C here, LASTPT was outside the rectangle, and the line must cross
+C the rectangle boundary...
+C
+210	CLIPPD = .TRUE.			! line is truncated
+	OUTSIDE = .FALSE.
+	CALL INIATT(LASTATT,LAST_NATT)
+C
+C here, we have LASTPT outside - for the moment we ignore THISPT.
+C thus for normal clipping we should be starting a new feature,
+C or its an old feature for which we hadn't yet found a point inside.
+C If we have VOID, then we are ending a feature (entering rectangle is
+C leaving region we want to retain). If the segment is not an invisible 
+C line break and the feature is not a symbol string, we end the feature 
+C on the boundary, otherwise at the last point
+C
+	IF (VOID) THEN
+	   CLIP_MAP = COPYPT(STBUF(X,LASTPT),STBUF(Y,LASTPT),
+     &	               ZBUF(LASTPT),ATTBUF(1,LASTPT),
+     &		       LAST_ATTC,LAST_NATT)	! point outside
+	   IF (.NOT.CLIP_MAP) GOTO 580
+C
+	   IF (.NOT. (BREAK .OR. ISSTRING)) THEN! and on boundary
+	      CLIP_MAP = COPYPT(LASTX,LASTY,LASTZ,LASTATT,
+     &						LAST_ATTC,LAST_NATT)
+	      IF (.NOT.CLIP_MAP) GOTO 580
+	   ENDIF
+	   GOTO 205				! to finish off feature
+	ENDIF
+C
+C note that if it was out-out, then the second half of the segment will
+C be dealt with later.
+C
+C here to start a new feature for normal clipping - only if the segment 
+C is not an invisible line break and the feature is not a symbol string
+C
+	IF (.NOT. (BREAK .OR. ISSTRING)) THEN	! copy first point over
+	   CLIP_MAP = COPYPT(LASTX,LASTY,LASTZ,LASTATT,
+     &						LAST_ATTC,LAST_NATT)
+	   IF (.NOT.CLIP_MAP) GOTO 580
+	ENDIF
+	IF (THISM.EQ.1) GOTO 200	! jump if THISPT outside, too
+	GOTO 180			! go get next segment, etc.
+C
+C
+C here, we have exhausted the points in STBUF. Since COPYPT deals
+C with outputting OUTBUF when that becomes full, we must first check
+C if it has indeed done that, and then check to see if there are any
+C more CBs in the feature. If there are, we must read the next in
+C and carry on processing, otherwise we must output things and revert
+C to copying over to the output file.
+C
+C
+C the conditions below are:
+C
+C if we have no pts in the outbuffer, and have done some output,
+C skip copying last pt over, but look for next item
+C
+C if normal clipping and final segment is invisible, skip copying
+C last pt over
+C
+C if VOID and both pts are unclipped and segment not invisible (ie
+C segment inside rectangle) skip copying pt over
+C
+230	IF (CURRNT.EQ.0.AND.DONOUT) GOTO 240
+	IF (.NOT.VOID.AND.INVIS) GOTO 240	! this segment being
+	IF (VOID.AND.THISM.EQ.0
+     &		.AND.LASTM.EQ.0.AND..NOT.INVIS) GOTO 240 ! ignored
+C
+C so here we must flush out the points for this feature, not forgetting
+C the last one
+C
+	IF (VOID) THEN
+C
+C	 VOID - check whether OUT IN. Note, however, that if we are
+C	 invisible then we don't care about the LAST/THISM values.
+C
+	   IF (LASTM.EQ.1.AND.THISM.EQ.0.AND..NOT.INVIS) THEN
+C
+C	    VOID with OUT IN - the last pt we want is that on
+C	    the boundary, which is the value held (clipped) in LASTX,Y
+C
+	      CALL INIATT(LASTATT,LAST_NATT)
+	      CLIP_MAP = COPYPT(LASTX,LASTY,LASTZ,LASTATT,
+     &						LAST_ATTC,LAST_NATT)
+	      IF (.NOT.CLIP_MAP) GOTO 580
+C
+	   ELSE
+C
+C	    normal VOID - copy over unclipped version of last pt
+C	    (remember we incremented LASTPT and THISPT before
+C	    coming here)
+C
+	      CLIP_MAP = COPYPT(STBUF(X,THISPT-1),STBUF(Y,THISPT-1),
+     &			  ZBUF(THISPT-1),ATTBUF(1,THISPT-1),
+     &	                  THIS_ATTC,THIS_NATT)
+	      IF (.NOT.CLIP_MAP) GOTO 580
+	   ENDIF
+C
+	ELSE
+C
+C	 normal clipping, copy over last pt (clipped or not)
+C
+	   IF (THISM .EQ. 1) CALL INIATT(THISATT,THIS_NATT)
+	   CLIP_MAP = COPYPT(THISX,THISY,THISZ,THISATT,THIS_ATTC,THIS_NATT)
+	   IF (.NOT.CLIP_MAP) GOTO 580
+C
+	ENDIF
+C
+	IF (DEBUG) CALL WRITEF('.was last point')
+C
+C and everything joins up again, to find out what to do next -
+C
+240	CONTINUE
+C
+	CALL IFFNXT(IECODE,IELEN)	! get next thing
+	IF (IELEN.EQ.-1) GOTO 430	! unended feature
+C
+C if there is another CB, go and read that in - if the current CB
+C had only one point and it was the first for this feature (i.e. it was 
+C a potential one point feature) and this feature is suppresed, then 
+C just copy the point over and output it
+C
+	IF (IECODE .EQ. 'CB') THEN
+	   IF (SINGLE .AND. SUPFT) THEN	! just copy the point 
+	      CLIP_MAP = COPYPT(STBUF(X,1),STBUF(Y,1),ZBUF(1),
+     &				ATTBUF(1,1),THIS_ATTC,THIS_NATT)
+	      IF (.NOT.CLIP_MAP) GOTO 580
+C
+	      CLIP_MAP = STOUT()
+	      IF (.NOT.CLIP_MAP) GOTO 580
+C
+	      IF (DEBUG) CALL WRITEF('.CB in suppressed feature copied')
+	   ENDIF
+	   GOTO 120			! read it in
+C
+C here we definitely have a single point feature so go and deal with it 
+C separately
+C
+	ELSEIF (SINGLE) THEN
+	   GO TO 260
+	ENDIF
+C
+C the next thing wasn't a CB, so we close the current feature and
+C go to copy things over to output - but note that:
+C if we have done no output for this NF, or have started a second NF
+C which has as yet had no points output in it, whilst the STBUF had
+C two or more points in it, but we have only kept one of those points,
+C then the feature should be ignored (ie deleted in effect)
+C
+	IF ( (.NOT.DONOUT .OR. NONF) .AND.
+     &			  STPTR.GT.1 .AND. CURRNT.LE.1 ) GOTO 245
+C
+	IF (CURRNT.GT.0) GOTO 250
+C
+C thus here we have nothing left in OUTBUF to output.
+C check if there is anything in the feature - if not, delete it
+C
+245	IF (DONOUT) GOTO 80		! just carry on copying
+C
+	IF (HADLOG) CALL FLWRTF('Feature %N (%N) deleted',NFNUM,ISNUM)
+C
+	DELNF = DELNF+1			! another feature deleted
+	NONF = .TRUE.			! no longer in a feature
+	HADST = .FALSE.			! no longer had an ST
+	HADTC = .FALSE.			! no more TC/CHs in this ft
+	IF (IECODE.EQ.'EF') GOTO 70	! got the EF - go ignore it
+	CALL IFFNXC('EF',IELEN)		! find corresponding EF
+	IF (IELEN.EQ.-1) GOTO 430	! unexpected end of file
+	GOTO 70				! go and ignore EF
+C
+C here, CURRNT was greater than 0, so had copied something over
+C into OUTBUF, which must be output before we close the feature, etc.
+C
+250	IF(DEBUG) CALL WRITEF('.%^W%N point%m flushed from buffer',
+     &								CURRNT)
+C
+	CLIP_MAP =  STOUT()		! output CB
+	IF (.NOT.CLIP_MAP) GOTO 580
+C
+	GOTO 80			! to copy things over to output file
+C
+C
+C
+C***************** s i n g l e   p o i n t    S T ********************
+C
+C check if the point is inside our rectangular area
+C
+260	IF (.NOT.(STBUF(X,1).GT.CLIPHI(E).OR.
+     &		  STBUF(X,1).LT.CLIPLO(W).OR.
+     &	    	  STBUF(Y,1).GT.CLIPHI(N).OR.
+     &		  STBUF(Y,1).LT.CLIPLO(S)))  GOTO 265
+C
+C here, we have an invisible single point feature, so note as much
+C and then skip to ignore the rest of it, unless VOID, or it is text
+C and we are retaining text (note this => ~VOID), when we skip to
+C keep the feature
+C
+	IF (ISTXT.AND.HADT) GOTO 264	! retain text
+	IF (SUPFT .OR. VOID) GOTO 267	! suppress clipping or void
+263	IF (HADLOG) THEN
+	   CALL FLWRTF('Single point feature %N (%N) deleted',
+     &							NFNUM,ISNUM)
+	ENDIF
+C
+	DELNF = DELNF+1
+	HADTC = .FALSE.
+	GOTO 80
+C
+C we have an external text feature which we wish to retain - 
+C note as much
+C
+264	OTEXTS = OTEXTS+1		! another text kept
+	IF (HADLOG) THEN
+	   CALL FLWRTF('Feature %N (%N) is external text - kept',
+     &							NFNUM,ISNUM)
+	ENDIF
+	GOTO 267			! go accept it
+C
+C so we have a point within the box we clip to, copy it over, or ignore
+C it if we have VOID and it is not suppressed.
+C
+265	IF (VOID .AND. .NOT. SUPFT) GOTO 263
+267	IF (DEBUG) CALL WRITEF('.accept single point')
+C
+	CLIP_MAP = COPYPT(STBUF(X,1),STBUF(Y,1),ZBUF(1),ATTBUF(1,1),
+     &	            THIS_ATTC,THIS_NATT)	
+	IF (.NOT.CLIP_MAP) GOTO 580 		! copy LASTpt
+	CLIP_MAP = STOUT()			! and output the point
+	IF (.NOT.CLIP_MAP) GOTO 580
+C
+	GOTO 80				! and get next thing to copy
+C
+C*********** e n d   l o o k i n g   a t   s e g m e n t s ***********
+C
+C
+C we have finished the file, no more entries - first check that the 
+C last EO was there
+C
+280	IF (.NOT. HADEO) THEN
+	   CALL LSL_PUTMSG(IWIN__NOEO)
+	   IF (UPDATE_NO(SUPLAY)) GOTO 580
+	   HADEO = .TRUE.
+	ENDIF
+C
+C we don't need the input file any more
+C
+	CALL IFFCLO(INLUN)		! close input file
+	CALL IFFSEL(OUTLUN)		! select output file
+C
+C now check there was an EM
+C
+	IF (.NOT. HADEM) THEN
+	   CALL LSL_PUTMSG(IWIN__NOEM)
+	   CALL IFFEM
+	   HADEM = .TRUE.
+	ENDIF
+C
+C do the same for the EJ
+C
+	IF (.NOT. HADEJ) THEN
+	   CALL LSL_PUTMSG(IWIN__NOEJ)
+	ENDIF
+	CALL IFFEJ
+C
+C now we must go back through the output file, updating all the created 
+C NF numbers, and update the RAnge entry, then close the files
+C
+	CALL IFFPKE(IECODE,IELEN,LPOSRA)! move to RA entry
+	IF (IECODE.NE.'RA') GOTO 400
+C
+C and now overwrite the old value of RAnge with our new, clipped one
+C
+	CALL EIHWR(RANGE,4,1)
+C
+	IF (DEBUG) CALL WRITEF('.RA is %F8.3, %F8.3, %F8.3, %F8.3',
+     &		       RANGE(1,1), RANGE(2,1), RANGE(1,2), RANGE(2,2) )
+C
+C start to output the summary information
+C
+283	IF (HADLOG) CALL FLWRTF(
+     &	'Summary: %N feature%m deleted, %N clipped and %N created',
+     &		  TOTDEL,	        TOTCLP,	       CRECNT	  )
+	IF (CRECNT.EQ.0) GOTO 287
+C
+C should we now go back and update all the split feature serial
+C numbers?
+C
+	IF (.NOT.RETAIN) THEN		! yes
+C
+C if they are unique, find the maximum and fudge it to look as if
+C everything is in layer 1 - note OS maps are a special case
+C
+	   IF (.NOT. BY_LAYER) THEN
+	      IF (OSMODE .AND. (LAYLIST(1) .EQ. 0)) MAXNF(1) = 0
+	      DO 284 I=2, LAYIND
+	         IF (.NOT. OSMODE .OR. (LAYLIST(I) .NE. 0)) THEN
+	            MAXNF(1) = MAX (MAXNF(1),MAXNF(I))
+	            CRENF(1) = CRENF(1) + CRENF(I)
+	         ENDIF
+284	      CONTINUE
+	      LAYIND = 1
+	   ENDIF
+C
+C Deal with each layer in turn - first start the summary information
+C
+	   DO 286 I=1, LAYIND
+	      IF (CRENF(I).GT.1) THEN
+	         CALL EXPAND('         Features %N to ',MAXNF(I)+1)
+	      ELSEIF (CRENF(I).EQ.1) THEN
+	         CALL EXPAND
+     &	            ('         Feature %N was created',MAXNF(I)+1)
+	      ENDIF
+C
+C Now update the features we noted as we created them
+C
+	      DO 285 J = 1,CRECNT
+	         IF ((FEATIND(J) .EQ. I) .OR. .NOT. BY_LAYER) THEN
+	            CALL IFFPKE(IECODE,IELEN,FEATUR(J))
+	            IF (IELEN.EQ.-1) GOTO 440
+	            IF (IECODE.NE.'NF') GOTO 450
+C
+	            MAXNF(I) = MAXNF(I)+1	! next NF number to use
+C
+	            CALL EIHWI(MAXNF(I),1,1)	! overwrite the NF no.
+	         ENDIF
+285	      CONTINUE
+C
+C and continue the summary information for features created (in this 
+C layer only if appropriate)
+C
+	      IF (CRENF(I).GT.1) CALL APPEND('%N were created',MAXNF(I))
+	      IF (BY_LAYER) CALL APPEND(' in layer %^W%N',LAYLIST(I))
+	      IF (HADLOG) THEN
+	         ERRCOD = FLWLIN(,,RETCOD)
+	         IF (.NOT. ERRCOD) GO TO 520
+	      ENDIF
+286	   CONTINUE
+	ENDIF
+C
+C continue with the summary information
+C
+287	IF (HADLOG) THEN
+	   IF (OSMODE) THEN
+	      IF (HADT) CALL FLWRTF('         %N external text%m kept',
+     &								TEXTS)
+	      IF (.NOT.CLPGRD) CALL FLWRTF
+     &		('         %N grid%m not checked',GRIDS)
+	   ENDIF
+	   DO 288 I=1,NUMFC
+	      CALL EXPAND('         %N feature%m ',FCSUP(I))
+	      CALL APPEND('with feature code %^W%N',FCTAB(I))
+	      CALL FLWAPP(' suppressed from clipping')
+288	   CONTINUE
+	   IF (LAYSUP.EQ.0) THEN
+	      CALL FLWRTF
+     &	         ('         No layers suppressed from clipping')
+	   ELSE
+	      CALL FLWRTF(
+     &           '         %N layer%m suppressed from clipping',LAYSUP)
+	   ENDIF
+	ENDIF
+C
+C so that's that, close output file too
+C
+	GOTO 590
+C
+C****************** e r r o r   m e s s a g e s **********************
+C
+C error messages, etc
+C
+310	CALL LSL_PUTMSG(IWIN__IFFCREATERR,IFFOUT(1:OUTLEN))
+	CALL IFFCLO(INLUN)
+	GOTO 600
+C
+C
+340	CALL LSL_PUTMSG(IWIN__FRTFAIL,FRTFIL(1:FRTLEN))
+	CALL IFFCLO(INLUN)
+	GOTO 600
+C
+C
+350	CALL LSL_PUTMSG(IWIN__GOTHI)
+	GOTO 580
+C
+C
+360	CALL LSL_PUTMSG(IWIN__HIWRONG)
+	GOTO 580
+C
+C
+400	CALL LSL_PUTMSG(IWIN__RANOTFND)
+	GOTO 590
+C
+C
+430	CALL LSL_PUTMSG(IWIN__UNEXPEOI)
+	CALL LSL_ADDMSG(IWIN__FEATINCOMP,NFNUM,ISNUM)
+	GOTO 580
+C
+C
+440	CALL LSL_PUTMSG(IWIN__EOFINFTR)
+	GOTO 590
+C
+C
+450	CALL LSL_PUTMSG(IWIN__NOOUTNF)
+	GOTO 590
+C
+C
+520	CALL LSL_PUTMSG(IWIN__ERRWRTLOG)
+	CALL LSL_ADDMSG(ERRCOD)
+	IF (ERRCOD .EQ. LSL__SYSWRITE) CALL LSL_ADDMSG(RETCOD)
+C
+C
+580	CALL IFFCLO(INLUN)
+C
+590	IF (LSL_STATUS) THEN
+	   CALL IFFCLO(OUTLUN,SS$_NORMAL)
+	ELSE
+	   IF (IBITS(LSL_STATUS,0,3) .EQ. STS$K_WARNING) THEN
+	      CALL IFFCLO(OUTLUN,SS$_NORMAL)
+	   ELSE
+	      CALL LSL_ADDMSG(IWIN__DELOUTFIL)
+	      CALL IFFCDL(OUTLUN)
+	   ENDIF
+	ENDIF
+C
+C
+	IF (HADLCM) THEN
+C
+C If there were features to signal, close the LCM file
+C
+	   IF (CRECNT.GT.0 .OR. HAD_LCM_OUT) THEN
+	      CALL LCM_CLOSE
+C
+C If no features to signal, (and therefore no file created), and it is
+C required to always create one (LSL$EMPTY_LITES2_GUIDANCE set), create 
+C one with a suitable message
+C
+	   ELSEIF (KEEP_LCM) THEN
+	      CLIP_MAP = LCM_OPEN(LCMLUN,LCMFIL(1:LCMLEN),RANGE_OUT,
+     &								HADLOG)
+	      IF (.NOT.CLIP_MAP) GOTO 900
+C
+	      CALL FLWRTF('%%MESSAGE')
+	      CALL FLWRTF('%%MESSAGE " No Reentrant features"')
+	      CALL FLWRTF('%%MESSAGE')
+	      CALL LCM_CLOSE
+C
+	   ELSEIF (LSL_STATUS .OR.
+     &	      (IBITS(LSL_STATUS,0,3) .EQ. STS$K_WARNING)) THEN
+	      CALL LSL_PUTMSG(IWIN__NOLCM)
+C
+	   ELSE
+	      CALL LSL_ADDMSG(IWIN__NOLCM)
+	   ENDIF
+	ENDIF
+C
+C
+	GOTO 999
+C
+C Error return
+C
+600	IF (HADLOG) THEN
+	   ERRCOD = FLWCLO(LOGLUN,RETCOD)
+	   IF (.NOT. ERRCOD) THEN
+	      CALL LSL_PUTMSG(IWIN__ERRCLOLOG,LOGLUN)
+	      CALL LSL_ADDMSG(ERRCOD)
+	      IF (ERRCOD .EQ. LSL__SYSCLOSE) CALL LSL_ADDMSG(RETCOD)
+	   ENDIF
+	ENDIF
+C
+900	CLIP_MAP = SS$_ABORT
+C
+C -------------------------------------------------------------
+C
+999	RETURN
+	END
+C

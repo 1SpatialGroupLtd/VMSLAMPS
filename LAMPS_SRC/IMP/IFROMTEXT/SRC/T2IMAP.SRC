@@ -1,0 +1,523 @@
+	SUBROUTINE T2IMAP
+C
+***	IDENT	09AU94
+***	MODULE	T2IMAP
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England.
+C
+CMOD1387Add /ORIGIN					 JB 08-Aug-1994
+CMOD    Extra arguments to T2IREA and T2ILON           MWSR 02-Nov-1987
+CMOD	Now tells user about defaults applied		TJH 06-Nov-1986
+CMOD	Initialise HIGHNF				RJH 24-May-1984
+CMOD	Documentation completed				RJH 15-May-1984
+C
+C	Created						RJH 09-Apr-1984
+C
+C Description
+C
+C This subroutine is designed for use by the IFROMTEXT program, and its
+C purpose is to deal with IFF text entries at the map level.
+C
+C On entry to this subroutine, the next entry code in the text file
+C is expected to have been read in. Junction and void entries are
+C ignored, while entries at lower levels are dealt with by calling the
+C subroutine which deals with section level entries. Map level entries
+C are written to the IFF file before calling the section level
+C subroutine, and also prior to exit from this subroutine. On exit,
+C a new IFF code will normally have been read from the text file, and
+C that entry will be ready for processing at a higher level.
+C
+C Communication with other routines is via the common block T2IPAR 
+C and T2ICOM
+C
+	IMPLICIT NONE
+C
+C Common blocks
+***     COMMON/LSL$CMNIFROMTEXT:IFROMMSG.PAR/
+***	COMMON/LSL$CMNIFROMTEXT:T2IPAR/		! global variables
+***	COMMON/LSL$CMNIFROMTEXT:T2ICOM/		! global variables
+***     COMMON/LSL$CMNIFF:MHMCE/		! IFF MCE map header information
+***     COMMON/LSL$CMNIFF:MAPDES/		! IFF map descriptor information
+***     COMMON/LSL$CMNIFF:MD2DES/		! IFF map descriptor information
+***     COMMON/LSL$CMNIFF:IFFHAN/		! IFF maintenance interface
+***     COMMON/LSL$CMNIFF:MHOSGB/		! Type 3 or 4 map header
+C
+C Functions called
+	LOGICAL		T2IINT		! reads an integer
+	LOGICAL		T2ILON		! reads a long integer
+	LOGICAL		T2IREA		! reads a real
+	LOGICAL		T2IREAL8	! reads a real*8
+	LOGICAL		T2IMDN		! reads map descriptor code
+	LOGICAL		T2IMH3		! read type 3 or 4 map header
+	LOGICAL		T2IMHT		! skips text format map header
+	LOGICAL		RDCHS
+	LOGICAL		RDCH
+C
+C Local variables
+	REAL*8		SAVLO(2)	! temp LO
+	REAL*8		SAVSC		! temp SC
+	INTEGER*4	NUM		! local IFF code sequence no.
+	INTEGER*4	MDNUM		! map descriptor code seq. no.
+	INTEGER*4	HSIZE		! type 3 or 4 header size
+	INTEGER*2	ILENMH		! integer map header length
+	INTEGER*2	ICUSMH		! integer map header customer
+	INTEGER*2	I,J		! counter
+	LOGICAL		HADMH		! had map header entry ?
+	LOGICAL		HADMD		! had map descriptor entry ?
+	LOGICAL         HADMD1          ! had version 1 map descriptor
+	LOGICAL		HADEM		! had end map entry ?
+	LOGICAL		HADLO		! had local origin
+	LOGICAL		HADSC		! had scale factor
+	LOGICAL		FAILMH		! map header read failed ?
+	LOGICAL		FAILMD		! map descriptor read failed ?
+	LOGICAL		FAILLO		! local origin read failed
+	LOGICAL		FAILSC		! scale factor read failed
+	LOGICAL		WRTIFF		! written data to IFF file ?
+	LOGICAL		TEXTMH		! map header in text form ?
+	LOGICAL		END
+	BYTE		BLENMH		! byte map header length
+	BYTE		BCUSMH		! byte map header customer
+	BYTE  		CH		! character
+C
+C Equivalences
+C
+	EQUIVALENCE	(ILENMH,BLENMH)
+	EQUIVALENCE	(ICUSMH,BCUSMH)
+C
+C Main Structure
+C
+C	repeat
+C	   initialisation
+C	   repeat
+C	      if entry is to be ignored then
+C		 ignore entry
+C		 if not done read next IFF entry code from text file
+C	      else if entry is at section level or below then
+C		 write map level entries to IFF file
+C		 deal with entry at section level
+C		 if new entry is at map level, note end of current map
+C	      else if entry is at map level
+C		 case entry of
+C		    MH : read in data
+C	 	    LO : read in data
+C		    SC : read in data
+C		    MD : read in data
+C		    EM : note end of current map
+C		 if not done read next IFF entry code from text file
+C	   until done or end map or entry above map level
+C	   complete writing map level entries to IFF file
+C	until done or entry above map level
+C
+C Initialisation
+C
+100	HIGHNF = 0			! initialise highest serial no.
+C
+	DO 110 I=1,MHLEN
+	   MHARR(I) = 0			! assume type 2 MH empty
+110	CONTINUE
+C
+	DO 114 I=1,4			! clear MH2DESC
+114	   MH2ARR(I) = 0
+C
+	DO 115 I=4,MH2LEN
+115	   MH2ARR(I) = 32		! assume type 3 or 4 MH empty
+C
+	ILENMH = MHI4SZ			! default MH size
+	ICUSMH = 0			! assume MH empty
+	MHDESC(1) = BLENMH		! default MH size
+C
+	MDARR(1) = -1			! MD 1
+	DO 120 I=2,MDLEN
+	   MDARR(I) = 0			! assume MD empty
+120	CONTINUE
+C
+	MD2ARR(1) = 2
+	DO 125 I = 2,MD2LEN
+	   MD2ARR(I) = 0
+125	CONTINUE
+C
+	HADMH  = .FALSE.		! assume not had MH
+	HADMD  = .FALSE.		! assume not had MD
+	HADMD1 = .FALSE.
+	HADLO  = .FALSE.		! assume not had LO
+	HADSC  = .FALSE.		! assume not had SC
+	HADEM  = .FALSE.		! assume not had EM
+	FAILMH = .FALSE.		! assume MH read not failed
+	FAILMD = .FALSE.		! assume MD read not failed
+	FAILSC = .FALSE.		! assume SC read not failed
+	FAILLO = .FALSE.		! assume LO read not failed
+	WRTIFF = .FALSE.		! have not written to IFF file
+	TEXTMH = .FALSE.		! assume MH not in readable form
+C
+C Entry to be ignored
+C
+200	IF (ECDNUM .LE. MAXIGN) THEN
+	   CALL T2IIGN				! deal with entry to be ignored
+	   IF (.NOT. DONE) CALL T2INXT(.TRUE.)	! get next entry
+C
+C Entry at section level or below
+C
+	ELSE IF (ECDNUM .LE. MAXSEC) THEN
+C
+C Write data to IFF file
+C
+	   IF (.NOT.HADMH) THEN
+	      CALL LSL_PUTMSG(IFROM__MHDEFAULT)
+	   ENDIF
+C 
+	   IF (ICUSMH.EQ.3 .OR. ICUSMH.EQ.4) THEN
+	      IF (HSIZE.EQ.0) HSIZE=MH2LEN
+	      CALL IFFMH(MH2ARR,HSIZE)		! write type 3 or 4 MH entry
+	   ELSE
+	     CALL IFFMH(MHARR,MHLEN)		! write type 2 MH entry
+	   ENDIF
+C
+	   IF (HADMD1) THEN
+	      CALL IFFMD(MDARR,MDLEN)		! MD entry
+	   ELSE
+	      IF (.NOT.HADMD) THEN
+	         CALL LSL_PUTMSG(IFROM__MD2DEFAULT)
+	      ENDIF
+C
+	      CALL IFFMD(MD2ARR,MD2LEN)
+	   ENDIF
+C
+	   WRTIFF = .TRUE.			! IFF file now written
+C
+C Process entry at section level
+C
+	   CALL T2ISEC
+C
+C If new entry is at map level, had current end map
+C
+	   IF (ECDNUM .LT. MAXMAP) THEN
+	      HADEM = .TRUE.
+	      CALL LSL_PUTMSG(IFROM__EMDEFAULT)
+	   ENDIF
+C
+C Entry at map level
+C
+	ELSE IF (ECDNUM .LE. MAXMAP) THEN
+	   NUM = ECDNUM-MAXSEC			! calculate local sequence no.
+C
+	   GO TO (300,330,370,400,500), NUM
+C
+C MH entry
+C
+300	   IF (.NOT. HADMH) THEN
+C
+C Read data
+C
+	      FAILMH = T2IMHT(TEXTMH)			! text entry ?
+C
+	      IF (.NOT. (FAILMH .OR. TEXTMH)) THEN
+		 FAILMH = T2IINT(ILENMH)		! read MH length
+C
+		 IF (.NOT. FAILMH) THEN
+		    FAILMH = ((ILENMH .NE. MHI4SZ)	! test it
+     &		       .AND. (ILENMH .NE. 0))
+C
+		    IF (FAILMH) THEN
+		       CALL LSL_PUTMSG(IFROM__ERRINMH,CURLIN)
+		    ELSE
+		       FAILMH = T2IINT(ICUSMH)		! read MH cust.
+C
+		       IF (.NOT. FAILMH) THEN
+			  FAILMH = ((ICUSMH .LT. 0)	! test it
+     &			     .OR. (ICUSMH .GT. 4))
+C
+			  IF (FAILMH) THEN
+			     CALL LSL_PUTMSG(IFROM__UNKNCUST,CURLIN)
+			  ELSE
+			     IF (ICUSMH.EQ.3 .OR. ICUSMH.EQ.4) THEN
+			        MH2DESC(2) = ICUSMH
+			        FAILMH = T2IMH3(HSIZE)	! read type 3 or 4 MH
+C			        IF (FAILMH) THEN
+C				   CALL LSL_PUTMSG(IFROM__ERRINMH,CURLIN)
+C				ENDIF
+			     ELSE
+			        MHDESC(2) = BCUSMH	! enter into MH
+			        I = 0			! init. counter
+310			        I = I+1			! inc. counter
+C
+C read next word
+C
+			        FAILMH = T2ILON(MHINT4(I),.TRUE.)	
+C
+			        IF ((ICUSMH .EQ. 0) .AND.	! check customer
+     &				   (MHINT4(I) .NE. 0)) THEN
+			           CALL LSL_PUTMSG(IFROM__ILLEGCUST,CURLIN)
+				   FAILMH = .TRUE.
+			        ENDIF	! ((ICUSMH .EQ. 0) ...)
+C
+			        IF ((.NOT. FAILMH) .AND. (I .NE. MHI4SZ))
+     &				   GO TO 310		! repeat if can
+			     ENDIF
+			  ENDIF	! (FAILMH)
+		       ENDIF	! (.NOT. FAILMH)
+		    ENDIF	! (FAILMH)
+		 ENDIF	! (.NOT. FAILMH)
+	      ENDIF	! (.NOT. (FAILMH .OR. TEXTMH))
+C
+C If read failed skip to next entry
+C
+	      IF (FAILMH) THEN
+		 CALL LSL_PUTMSG(IFROM__REMMHDEF)
+		 IF (.NOT. (DONE .OR. GOTNXT)) CALL T2ISKP
+	      ENDIF	! (FAILMH)
+C
+C Had MH even if failed
+C
+	      HADMH = .TRUE.
+	   ELSE
+C
+C HADMH = True; Output message and skip to next entry
+C
+	      CALL LSL_PUTMSG(IFROM__REPMHIGN,CURLIN)
+	      CALL T2ISKP
+	   ENDIF
+C
+	   GO TO 1000
+C
+C LO and SC entries 
+C the LO and SC arenot an IFF entries. They are only here to allow the
+C user to set the local origin and scale factor in the type 2 MD 
+C map descriptor.
+C
+C LO
+C
+330	   IF ((.NOT. HADLO).AND.(.NOT. HADMD1)) THEN
+	      DO 335 I =1,2
+		 FAILLO = T2IREAL8(MD2LOC(I),.TRUE.)
+		 SAVLO(I) = MD2LOC(I)		! make a copy
+335	      CONTINUE
+C
+	      IF (FAILLO) THEN
+		 CALL LSL_PUTMSG(IFROM__LODEFAULT)
+		 IF (.NOT. (DONE .OR. GOTNXT)) CALL T2ISKP
+	      ENDIF
+C
+	      HADLO = .TRUE.			! had LO even if failed
+C
+	   ELSE
+	      IF (HADMD1) THEN 
+		 CALL LSL_PUTMSG(IFROM__ILLEGLOMD1IGN)
+	      ELSE
+	         CALL LSL_PUTMSG(IFROM__REPLOIGN,CURLIN)
+	      ENDIF
+	   ENDIF
+C
+	   GOTO 1000
+C	      
+C SC
+C
+370	   IF ((.NOT. HADSC).AND.(.NOT. HADMD1)) THEN
+	      FAILSC = T2IREAL8(MD2SCL,.TRUE.)
+	      SAVSC = MD2SCL			! make a copy
+C
+	      IF (FAILSC) THEN
+		 CALL LSL_PUTMSG(IFROM__SCDEFAULT)
+		 IF (.NOT. (DONE .OR. GOTNXT)) CALL T2ISKP
+	      ENDIF
+C
+	      HADSC = .TRUE.			! had LO even if failed
+C
+	   ELSE
+	      IF (HADMD1) THEN 
+		 CALL LSL_PUTMSG(IFROM__ILLEGSCMD1IGN)
+	      ELSE
+	         CALL LSL_PUTMSG(IFROM__REPSCIGN,CURLIN)
+	      ENDIF
+	   ENDIF
+C
+	   GOTO 1000
+C	      
+C MD entry
+C
+400	   IF (.NOT. HADMD) THEN
+C
+C First test to see which type of map descriptor
+C
+	      END = RDCHS(CH)
+	      CALL BSCH
+	      IF (((CH .GE. 'A') .AND. (CH .LE. 'Z'))
+     &	      .OR. ((CH .GE. 'a') .AND. (CH .LE. 'z'))) GOTO 404	
+C
+C Version 2 MD - read unformatted
+C
+	      IF (END) THEN
+		 CALL BSLN
+		 END = RDCHS(CH)
+		 END = RDCHS(CH)
+	      ELSE
+	         END = RDCH(CH)
+	         IF (CH .NE. ' ') THEN
+	            CALL BSCH
+	            CALL BSCH
+	         ELSE
+	            CALL BSCH
+	         ENDIF
+	      ENDIF
+C
+	      DO 401 I = 1, MD2LEN,2             ! =100
+	         FAILMD = T2ILON(MD2ARR(I),.TRUE.)
+		 IF (FAILMD) THEN
+		   GOTO 402
+		 ENDIF
+401	      CONTINUE
+C
+402	      GOTO 495 
+C
+C Version 1 MD
+C
+C LO and SC not allowed with type 1 MD
+C
+404	      IF (HADLO ) THEN
+		 CALL LSL_PUTMSG(IFROM__ILLEGLOMD1IGN)
+		 HADLO = .FALSE.
+	      ENDIF
+C
+	      IF (HADSC ) THEN
+		 CALL LSL_PUTMSG(IFROM__ILLEGSCMD1IGN)
+		 HADSC = .FALSE.
+	      ENDIF
+C
+	      CALL BSCH
+	      I = 0				! initialise counter
+	      HADMD1 = .TRUE.
+C
+406	      I = I+1				! increment counter
+	      FAILMD = T2IMDN(MDNUM)		! read MD code
+	      IF (.NOT. FAILMD) THEN
+		 IF (MDNUM .NE. I) THEN		! check order
+		    CALL LSL_PUTMSG(IFROM__MDOUTORDER,CURLIN)
+		    FAILMD = .TRUE.
+		 ELSE
+		    GO TO (410,420,430,440,450),MDNUM
+C
+C MA entry
+410		    FAILMD = T2IINT(MAT)
+		    J = 0
+412		    IF (FAILMD .OR. (J .EQ. 4)) GO TO 490
+		    J = J+1
+		    FAILMD = T2IREA(EMLE(J),.TRUE.)
+		    GO TO 412
+C
+C GR entry
+420		    FAILMD = T2IINT(MGT)
+		    J = 0
+422		    IF (FAILMD .OR. (J .EQ. 4)) GO TO 490
+		    J = J+1
+		    FAILMD = T2IREA(EMGO(J),.TRUE.)
+		    GO TO 422
+C
+C SC entry
+430		    FAILMD = T2IREA(EMSC,.TRUE.)
+		    GO TO 490
+C
+C PS entry
+440		    FAILMD = T2IINT(MMP)
+		    IF (FAILMD) GO TO 490
+		    FAILMD = T2IINT(MSCLD)
+		    GO TO 490
+C
+C AG entry
+450		    FAILMD = T2IINT(MAGT)
+		    J = 0
+452		    IF (FAILMD .OR. (J .EQ. 4)) GO TO 490
+		    J = J+1
+		    FAILMD = T2IREA(EMAGO(J),.TRUE.)
+		    GO TO 452
+490		    CONTINUE
+		 ENDIF	! (mdnum .ne. i)
+	      ENDIF	! (.not. failmd)
+C
+C Repeat until failed or all MD entries read
+C
+	      IF ((.NOT. FAILMD) .AND. (I .NE. 5)) GO TO 406
+C
+C If read failed skip to next entry
+C
+C ensure that LO and SC entries are used even if they come before 
+C the MD
+C
+495	      IF (HADLO) THEN
+	         MD2LOC(1) = SAVLO(1)
+		 MD2LOC(2) = SAVLO(2)
+	      ENDIF
+C
+	      IF (HADSC) THEN
+		 MD2SCL = SAVSC
+	      ENDIF
+C
+	      IF (FAILMD) THEN
+	         CALL LSL_PUTMSG(IFROM__REMMDDEF)
+		 IF (.NOT. (DONE .OR. GOTNXT)) CALL T2ISKP
+	      ENDIF	! (failmd)
+C
+C Had MD even if failed
+C
+	      HADMD = .TRUE.
+	   ELSE
+C
+C Output message and skip to next entry
+C
+	      CALL LSL_PUTMSG(IFROM__REPMDIGN,CURLIN)
+	      CALL T2ISKP
+	   ENDIF	! (.not. hadmd)
+C
+	   GO TO 1000
+C
+C EM entry
+C
+500	   HADEM = .TRUE.		! end of map
+C
+C If not done read next IFF entry code from text file
+C
+1000	   IF (.NOT. DONE) CALL T2INXT(.TRUE.)
+	ENDIF	! (ecdnum .le. maxign)
+C
+C Repeat if not done and not had end map and
+C entry at map level or below
+C
+	IF ((.NOT. DONE) .AND. (.NOT. HADEM)
+     &	   .AND. (ECDNUM .LE. MAXMAP)) GO TO 200
+C
+C Complete writing to IFF file
+C
+	IF (WRTIFF .OR. HADMH .OR. HADMD .OR. HADLO .OR.
+     &			HADSC .OR. HADEM) THEN
+	   IF (.NOT. WRTIFF) THEN		! check if not written
+	      IF (.NOT.HADMH) THEN
+	         CALL LSL_PUTMSG(IFROM__MHDEFAULT)
+	      ENDIF
+C
+	      IF (ICUSMH.EQ.3 .OR. ICUSMH.EQ.4) THEN
+	         CALL IFFMH(MH2ARR,HSIZE)	! write type 3 or 4 MH entry
+	      ELSE
+	         CALL IFFMH(MHARR,MHLEN)	! write type 2 MH entry
+	      ENDIF
+C
+	      IF (HADMD1) THEN
+	         CALL IFFMD(MDARR,MDLEN)	! write MD entry
+	      ELSE
+	         IF (.NOT.HADMD) THEN
+	            CALL LSL_PUTMSG(IFROM__MD2DEFAULT)
+	         ENDIF
+		 CALL IFFMD(MD2ARR,MD2LEN)
+	      ENDIF
+C
+	   ENDIF	! (.not. wrtiff)
+C
+	   CALL IFFEM				! write EM entry
+C
+	ENDIF	! (wrtiff ...)
+C
+C Repeat if not done and entry at map level or below
+C
+	IF ((.NOT. DONE) .AND. (ECDNUM .LE. MAXMAP)) GO TO 100
+C
+C Return
+	RETURN
+	END
+C

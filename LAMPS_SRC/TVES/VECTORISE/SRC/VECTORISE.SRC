@@ -1,0 +1,1391 @@
+	PROGRAM VECTORISE
+
+***	IDENT	25AU93
+***	MODULE	VECTORISE
+
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+C	Created   : ACM					Feb 1985
+C
+CMOD1290 Decrease MAXPTS to 200000 			 JB 24-Aug-1993
+C
+CMOD1209 Flag range bounds as 'inclusive' or 'exclusive' for testing
+C	 real height values in module SETAREAS. DELTA set to 0.0.
+C							JMC 19-Mar-1993
+C
+CMOD	Make LNKNDS, SETAREAS functions			 JB 25-Aug-1992
+C
+CMOD1072						 JB 18-Dec-1991
+C	Fit supplied RANGES to the DTI min/max values to avoid
+C	unnecessary error exit
+C
+CMOD1024 Read real ranges				 JB 09-Aug-1991
+C
+CMOD	New command SET SCALE			       MWSR 23-Jan-1989
+CMOD	For indirect command file input         	DRC 11-Jan-1989
+CMOD	To allow UNITS PROJECTION			DRC 23-Nov-1988
+C	and ENABLE ABSOLUTE
+C
+C	Modified  : DRC  19-Aug-1988 to announce date of version
+C	Modified  : DRC  12-May-1988 to allow a range to be specified
+C			 covering a single value eg. 3:3
+C	Modified  : DRC  Filter, Closed and Eliminate functionality
+C			  removed, and converted to use LSLLIB and DTILIB.
+C
+	IMPLICIT NONE
+C
+C-----------------------------------------------------------------------
+C	DTILIB commons and parameter files
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+C
+C Include LSLLIB common blocks
+C
+***	COMMON/LSL$CMNLSL:CMDCOM/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+***	COMMON/HERE:VEC/
+C
+	INCLUDE		'($DCDEF)'
+	INCLUDE 	'($DVIDEF)'
+C
+C Workspace
+	BYTE		CH		! for RDCH
+	REAL		TOL		! lateral tolerance
+	REAL		PCENT,R
+	INTEGER		PTR
+	INTEGER		I,J,K,IPT,INODE,ILINK,N
+	INTEGER		COMLEN		! command line length
+	INTEGER		RESULT		! command read result
+C
+	INTEGER*4	OK		! function error code
+	INTEGER*4	IERR		! error code
+	INTEGER*4	ERROR		! system error code
+	INTEGER*4	RETVAL		! error code
+	INTEGER*4	VAL		! for GETDVI
+C
+	INTEGER*4	LO,HI		! DTI Z range
+	REAL*4		RLO,RHI		! DTI Z range
+	INTEGER*4	MINLO,MAXHI	! DTI Z range limits
+	REAL*4		MINRLO,MAXRHI	! DTI Z range limits
+	INTEGER*4	RNG(2,MAXRANGES+1)	! input area ranges
+	REAL*4		REAL_RNG(2,MAXRANGES+1)	! input area ranges
+C
+	INTEGER*4	NCHS		! no charcters
+	INTEGER*4	ERRCOD
+	LOGICAL		ERR		! error?
+	LOGICAL		EOLN		! end of command line?
+	LOGICAL		WRITE_LOG	! got LOG file?
+	LOGICAL		ONEVAL		! one range delimiter only?
+	LOGICAL		DEFAULT_WINDOW
+	REAL		DELTA		! tolerance
+C
+	CHARACTER*80	LINE		! used by SPAWN
+	CHARACTER*1	TRANSLATION	! translated logical name
+	CHARACTER*128	LOGFILE		! log filename
+	CHARACTER*20	DATIM		! time of file creation
+	LOGICAL		DIRECT		! .f. if from command file
+C
+	CHARACTER*128	ICFNAM		! indirect command file name
+	INTEGER*4	ICFLEN		! command file name length
+
+C Functions
+	INTEGER*4	LNKNDS
+	INTEGER*4	OPEN_DTI_FILE	! to do just that
+	INTEGER*4	GET_IFFNAME	! parse IFF file name
+C
+	INTEGER*4	DTI_UNITS	! test whether units is valid
+	INTEGER*4	DTI_PRINT_HEADER! print DTI header details
+	INTEGER*4	DTI_CLOSE	! close and unmap DTI file
+C
+	INTEGER		TRNALL		! to translate logical name
+	INTEGER		RDCOMM		! read next command
+	INTEGER*4	TTRSTR		! read a command
+	LOGICAL		RDRANG		! read integer range
+	LOGICAL		RDRANG_REAL	! read real range
+	INTEGER*4	LIB$SPAWN	! to SPAWN DCL command
+	INTEGER*4	LIB$GETDVI	! get term characteristics etc.
+	LOGICAL		RDCH		! to read a character
+	LOGICAL		RDCHS	        
+	INTEGER*4	GETFILNAM	! parse filename
+	INTEGER*4	FLRLIN		! read line from command file
+	INTEGER*4 	FLROPN		! to open the command file
+	INTEGER*4 	FLRCLO		! to close the command file
+C
+C Externals
+	INTEGER		VEC_CMD_TABLE	! primary command table
+	EXTERNAL	VEC_CMD_TABLE
+	INTEGER		SHOW_CMD_TABLE
+	EXTERNAL	SHOW_CMD_TABLE
+	INTEGER		SET_CMD_TABLE
+	EXTERNAL	SET_CMD_TABLE
+	INTEGER		ENABLE_CMD_TABLE! secondary command table
+	EXTERNAL	ENABLE_CMD_TABLE
+	INTEGER		UNIT_CMD_TABLE
+	EXTERNAL	UNIT_CMD_TABLE
+C
+C--------------------------------------------------------------------------
+C
+	OK = LSL__NORMAL		! assume success
+C
+C	Initialise libraries
+	CALL LSL_INIT
+	CALL DTI_INIT
+C
+C--------------------------------------------------------------------------
+C	Test whether its the sort of terminal on which we can
+C	print out percentage information (not appropriate for a
+C	hardcopy terminal).
+C
+	IERR=LIB$GETDVI(DVI$_DEVCLASS,,'SYS$OUTPUT',VAL,,)
+	IF (IERR) THEN			! success
+	   IF (VAL.EQ.DC$_TERM)TERM=.TRUE. ! it is a terminal
+	ELSE
+	   CALL LIB$SIGNAL(%VAL(IERR))
+	ENDIF
+C
+	IF(TERM)THEN
+	  IERR=LIB$GETDVI(DVI$_TT_SCOPE,,'SYS$OUTPUT',VAL,,)
+	  IF (IERR) THEN
+	     CRT=VAL.EQ.1
+	  ELSE
+	     CALL LIB$SIGNAL(%VAL(IERR))
+	  ENDIF	
+	ELSE
+	  CRT=.FALSE.
+	ENDIF
+C
+	DIRECT=.TRUE.
+C----------------------------------------------------------------------
+C	Announce the program
+	CALL DTMJPI
+	CALL WRITEF(' ')
+C
+C 	Set defaults
+C
+	DO 9 I = 1,MAXRANGES+1		! set all range bounds flags
+	   RANGE_INC(1,I)  = .TRUE.	! to signal inclusive by default.
+	   RANGE_INC(2,I)  = .TRUE.
+9	CONTINUE
+	BORDER_FC=1		! default FC for border link
+	BOUNDARY_FC=2		! default FC for other links
+	DIAG=.TRUE.		! output diagnostics
+	ABSOLUTE=.TRUE.		! absolute coordinate input
+	N_RANGES = 0		! no ranges yet
+	SMOOTHLNK = .FALSE.	! don't smooth links
+	SMOOTH_TOL = 0.05
+	LAYER = 1		! IFJ layer is 1
+	NOTFIRSTRUN = .FALSE.
+	HAD_IFF = .FALSE.	! no output IFF filename yet
+	IFF_SCALE = 50000	! default scale
+C
+10	IF (NOTFIRSTRUN) THEN	! reset various arrays to 0
+	  DO 2 INODE = 1,N_NODES
+	    NDAT(AM_NDAT,INODE) = NIL
+2	  CONTINUE
+C
+	  DO 3 ILINK = 1,N_LINKS
+	    LINKPOS(1,ILINK) = NIL
+	    LINKPOS(2,ILINK) = NIL
+	    LINKENDS(1,ILINK) = NIL
+	    LINKENDS(2,ILINK) = NIL
+3	  CONTINUE
+C
+	  DO 5 I = 1,MAXNXSECTORS
+	    DO 4 J = 1,MAXNYSECTORS
+	      NODELIST(1,I,J) = NIL
+4	    CONTINUE
+5	  CONTINUE
+	END IF
+	NOTFIRSTRUN = .TRUE.
+C
+	N_PTS = 0		! no link points yet
+	N_LINKS = 0		! no links yet
+	N_NODES = 0		! no nodes yet
+	N_ARMS = 0		! no arms yet
+	TOTJUNCTIONS = 0
+	TOTBORDERNODES = 0
+	TOTENDS = 0
+	TOTANCHR = 0
+	TOTNOISE = 0
+	TOTLINKS = 0
+	TOTARMS = 0
+	TOTAL_BORDER_LINKS=0	! no. of border segments
+	TOTAL_INTERIOR_LINKS=0	! no. of interior segments
+
+	IF (CMDNUM.EQ.1) GOTO 60
+
+C get an input line from the terminal
+20	IF(DIRECT)THEN
+	  IERR = TTRSTR(,NCHS,'VECTORISE> ',ERRCOD)	
+	  IF (IERR.NE.LSL__NORMAL) THEN
+	    IF (IERR.EQ.LSL__SYSERR) CALL LSL_PUTMSG(ERRCOD)
+	    GOTO 210
+	  ENDIF
+	  TXTPTR = NCHS
+	  IF (NCHS.LT.1) GOTO 20
+	ELSE
+C
+C	Read a line from the command file
+	  RETVAL = FLRLIN()
+	  IF(RETVAL.NE.LSL__NORMAL)THEN
+	     IF(RETVAL.NE.LSL__EOF)THEN
+	       CALL WRITEF('%S Reading from command file',ERROR_BELL)
+               CALL WRITEF('Returning to terminal input')
+	     ELSE
+	       CALL WRITEF('%S Reading from command file',ERROR_BELL)
+	       CALL WRITEF('End of command file detected')
+	     ENDIF
+	     GOTO 650		!to close the file 
+	  ELSE
+C
+C	Echo the command on the terminal
+	     CALL BSLN
+	     CALL EXPAND('VECTORISE> ')
+	     CALL APPEND(TXTDSC)
+	     CALL TTWSTR
+	  ENDIF
+	END IF
+C
+C	Check for ! or @ on command line
+	CALL BSLN
+	IF (RDCHS(CH)) GOTO 20	! substantially empty line
+	IF (CH.EQ.'!') GOTO 20	! comment!
+	IF (CH.EQ.'@') GOTO 55	! indirect command file
+C
+	CALL BSLN
+	RESULT = RDCOMM(VEC_CMD_TABLE)
+	IF (RESULT .LE. 0)GOTO 20
+
+C	Branch according to command
+C
+C	     filein,     ranges,   window,
+C	     help,       show,     
+C	     go,         exit,     enable,
+C	     disable,    set,	   spawn,
+C	     wait,       units,	   iff
+C	     return
+C
+50	GOTO ( 60,        90,      100,
+     &	      110,       120,      
+     &	      200,       210,      220,     
+     &        230,       250,      270,
+     &        280,       400,      500,
+     &        600) RESULT
+C
+	GOTO 20
+C
+C-------------------------------------------------------------------------
+C	@ command
+C
+55	IF(.NOT.DIRECT)THEN
+	  CALL WRITEF('%S Specifying command @',ERROR_BELL)
+	  CALL WRITEF('Nested command files not supported')
+	  GOTO 20
+	ENDIF
+C
+	IF(RDCHS(CH))THEN
+	  CALL WRITEF('%S Specifying command @',ERROR_BELL)
+	  CALL WRITEF('Command file specification is missing')
+	  GOTO 20
+	ENDIF
+C
+	CALL BSCH
+C
+C	Parse the filename
+	RETVAL = GETFILNAM(ICFNAM,ICFLEN,'SYS$DISK:[].COM;0',.TRUE.)
+	IF (.NOT.RETVAL) THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  GOTO 20
+	ENDIF
+C
+C 	Open the indirect command file
+	RETVAL = FLROPN(1,ICFNAM,IERR)
+	IF(.NOT. RETVAL)THEN
+	  CALL WRITEF
+     &    ('%S Unable to open indirect command file %S',
+     &    ERROR_BELL,ICFNAM(1:ICFLEN))
+	  CALL LSL_PUTMSG(RETVAL)
+	  GOTO 20		!get next command from terminal
+	ENDIF
+C
+	DIRECT = .FALSE.	!signal that input is from a command file
+	GOTO 20			!get next command from the file
+C
+C-------------------------------------------------------------------------
+C 	FILEIN 
+C	Call Function OPEN_DTI_FILE to read DTI input filename,
+C	and map it into memory.
+C	Input DTI file is opened on DTILUN 1
+C
+60	IF(.NOT.OPEN_DTI_FILE(1))THEN		! Error already output 
+62	  CALL BSLN
+65	  TXTPTR=80
+	  IERR= TTRSTR(,NCHS,'Input DTI filename > ',ERRCOD)
+	  IF (IERR) THEN
+	     IF (NCHS .EQ. 0) GOTO 62		!Blank line
+	  ELSE
+	     IF (IERR .EQ. LSL__EOF) GOTO 20   	! ^Z
+	     CALL LSL_PUTMSG(ERRCOD)
+	     GOTO 20	
+	  ENDIF
+	  GOTO 60
+	ENDIF
+C
+C	Set default area of interest in input DTI file
+C	only if logical name LSL$MATRIX_DEFAULT_WINDOW has a
+C	value of 1
+C	Translate logical
+C
+	IERR = TRNALL('LSL$MATRIX_DEFAULT_WINDOW',TRANSLATION)
+	IF(.NOT.IERR.OR.TRANSLATION.NE.'1')THEN
+	  DEFAULT_WINDOW = .FALSE.
+	ELSE
+	  DEFAULT_WINDOW = .TRUE.
+	ENDIF
+C
+	DTI_WINDOW_SWX(1) = 1
+	DTI_WINDOW_SWY(1) = 1
+	IF(DEFAULT_WINDOW)THEN
+	  DTI_WINDOW_NEX(1) = MIN(200,X_EXTENT(1))
+	  DTI_WINDOW_NEY(1) = MIN(200,Y_EXTENT(1))
+	ELSE
+	  DTI_WINDOW_NEX(1) = X_EXTENT(1)
+	  DTI_WINDOW_NEY(1) = Y_EXTENT(1)
+	ENDIF	
+C
+	IERR=DTI_PRINT_HEADER(1,UNITS,ABSOLUTE)
+	IF(.NOT.IERR)CALL LSL_PUTMSG(IERR)
+	N_RANGES=0
+	GOTO 20
+C
+C------------------------------------------------------------------------
+C RANGES
+C
+C Specifies range(s) which will  be  used  to  partition  the  DTI into
+C separate  areas   for   vectorisation,  according  to  the  following
+C conventions:
+C
+C A single term "n" specifies that  the  entire  DTI  Z  range  will be
+C divided into equal intervals ...,(1:n),(n+1:2n),... clipped to within
+C the DTI Z range.
+C
+C A single term "n:n" specifies a single range of one single value.
+C
+C Otherwise ranges will be as specified explicitly
+C
+90	CONTINUE
+C
+	IF (.NOT.DTILUN_INUSE(1)) THEN
+	  CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	  CALL WRITEF('DTI File must be specified before RANGES')
+	  GOTO 20
+	ENDIF
+
+	REAL = .FALSE.
+
+	IF (DATA_TYPE(1).EQ.DATA_LONG) THEN
+	  MINLO = MAX(-32767, MIN_LVALUE(1))
+	  MAXHI = MIN( 32767, MAX_LVALUE(1))
+C
+	ELSEIF (DATA_TYPE(1).EQ.DATA_REAL) THEN
+	  REAL = .TRUE.
+C
+	  MINRLO = MAX(-32767.0, MIN_RVALUE(1))
+	  MAXRHI = MIN( 32767.0, MAX_RVALUE(1))
+	  DELTA  = 0.0
+C
+	ELSE
+	  MINLO = MIN_WVALUE(1)
+	  MAXHI = MAX_WVALUE(1)
+	ENDIF
+C
+	N_RANGES = 0
+	UNIFORM  = .FALSE.
+	ONEVAL   = .FALSE.
+C
+91	CONTINUE
+C
+	IF (REAL) THEN
+	   ERR = RDRANG_REAL(RLO,RHI,LO,HI)
+	ELSE
+	   ERR = RDRANG(LO,HI)
+	ENDIF
+C
+C Check for error conditions:
+C
+	IF (.NOT.ERR) THEN
+	  CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	  CALL WRITEF('Values are not in required format')
+	  N_RANGES=0
+	  GOTO 20
+	ENDIF
+C
+	IF (LO.EQ.-32768 .AND. HI.EQ.-32768) THEN
+	  IF (N_RANGES.EQ.0) THEN
+	    CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	    CALL WRITEF('Command requires at least 1 integer argument')
+	    GOTO 20
+	  ENDIF
+C
+C N_RANGES valid
+C
+	  IF (REAL) THEN
+	    IF (ABS(REAL_RNG(2,N_RANGES)-MAXRHI) .LE. DELTA) GOTO 2000
+C
+C Make final range equal to top of last range + DELTA to maximum value
+C
+	    N_RANGES = N_RANGES + 1
+C
+	    REAL_RNG(1,N_RANGES) = REAL_RNG(2,N_RANGES-1) + DELTA
+	    REAL_RNG(2,N_RANGES) = MAXRHI
+	    GOTO 2000
+	  ELSE
+	    IF (RNG(2,N_RANGES).EQ.MAXHI) GOTO 2000
+C
+C Make final range equal to top of last range + 1 to maximum value
+C
+	    N_RANGES = N_RANGES + 1
+C
+	    RNG(1,N_RANGES) = RNG(2,N_RANGES-1) + 1
+	    RNG(2,N_RANGES) = MAXHI
+	    GOTO 2000
+	  ENDIF
+	ENDIF
+C
+  	ONEVAL = HI.EQ.-32768
+C
+	IF (.NOT.ONEVAL) THEN
+	  IF (REAL) THEN
+	    IF (RLO.GT.RHI) THEN
+	      CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	      CALL WRITEF('Invalid range %F0 to %F0',RLO,RHI)
+C
+	      N_RANGES = 0
+	      GOTO 20
+	    ENDIF
+C
+	    IF (RLO.LT.MINRLO .OR. RHI.GT.MAXRHI) THEN
+	      CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	      CALL WRITEF('Range is outside DTI data range %F0 to %F0',
+     &						  MINRLO,MAXRHI)
+	      CALL WRITEF('Range will be altered to fit the DTI range')
+C
+	      IF (RLO.LT.MINRLO) RLO = MINRLO
+	      IF (RHI.GT.MAXRHI) RHI = MAXRHI
+	    ENDIF
+	  ELSE
+	    IF (LO.GT.HI) THEN
+	      CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	      CALL WRITEF('Invalid range %N to %N',LO,HI)
+C
+	      N_RANGES = 0
+	      GOTO 20
+	    ENDIF
+C
+	    IF (LO.LT.MINLO .OR. HI.GT.MAXHI) THEN
+	      CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	      CALL WRITEF('Range is outside DTI data range %N to %N',
+     &							MINLO,MAXHI)
+	      CALL WRITEF('Range will be altered to fit the DTI range')
+C
+	      IF (LO.LT.MINLO) LO = MINLO
+	      IF (HI.GT.MAXHI) HI = MAXHI
+	    ENDIF
+	  ENDIF
+	ENDIF
+C
+C Single value signifies uniform step over whole DTI range
+C ********************************************************
+C
+	IF (N_RANGES.EQ.0 .AND. ONEVAL) THEN
+	  UNIFORM = .TRUE.
+C
+	  IF (REAL) THEN
+C
+	    RSTEP = ABS(RLO)
+	    IF (RSTEP.LE.0) THEN
+	      CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	      CALL WRITEF('%F0 is an invalid interval value',RSTEP)
+	      N_RANGES = 0
+	      GOTO 20				! read next command
+	    ENDIF
+C
+	    N_RANGES = (MAXRHI-MINRLO)/RSTEP + 1
+C
+C Find lowest value in lowest range
+C
+	    IF (MINRLO.GT.0) THEN
+	      RMINVAL = (MINRLO-DELTA)/RSTEP*RSTEP + 1
+	    ELSE
+	      RMINVAL = (MINRLO-RSTEP)/RSTEP*RSTEP + 1
+	    ENDIF
+	    IF (RMINVAL.GT.MINRLO) RMINVAL = RMINVAL - RSTEP
+C
+C Check enough steps to cover whole range with steps based at 1
+C
+	    RMAXVAL = RMINVAL + N_RANGES*RSTEP - DELTA
+	    IF (RMAXVAL.LT.MAXRHI) N_RANGES = N_RANGES+1
+C
+C Check not too many steps
+C
+	    IF (N_RANGES.GT.MAXRANGES) THEN
+	      CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	      CALL WRITEF
+     &     ('Maximum number of ranges ( %N ) will be exceeded if
+     & an interval value of %F0 is used',MAXRANGES,RSTEP)
+	      N_RANGES = 0
+	      GOTO 20
+	    ENDIF
+C
+C Set up equally stepped ranges
+C
+	    R = RMINVAL
+	    DO 292 J = 1,N_RANGES
+	      REAL_RNG(1,J) = R
+	      REAL_RNG(2,J) = R + RSTEP - DELTA
+C Set the flag for the upper bound to signal exclusive for testing of height 
+C values in module SETAREAS.
+	      RANGE_INC(2,J) = .FALSE.
+	      R = R + RSTEP
+292	    CONTINUE
+C
+C Clip top and bottom ranges to range limits
+C
+	    REAL_RNG(1,1) = MAX(REAL_RNG(1,1), MINRLO)
+	    REAL_RNG(2,N_RANGES) = MIN(REAL_RNG(2,N_RANGES),MAXRHI)
+C
+	  ELSE
+	    STEP = LO
+	    IF (STEP.LE.0) THEN
+	      CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	      CALL WRITEF('%N is an invalid interval value',STEP)
+	      N_RANGES = 0
+	      GOTO 20				! read next command
+	    ENDIF
+C
+	    N_RANGES = (MAXHI-MINLO)/STEP + 1
+C
+C Find lowest value in lowest range
+C
+	    IF (MINLO.GT.0) THEN
+	      MINVAL = INT((MINLO-1)/STEP)*STEP+1
+	    ELSE
+	      MINVAL = INT((MINLO-STEP)/STEP)*STEP+1
+	    END IF
+	    IF (MINVAL.GT.MINLO) MINVAL = MINVAL-STEP
+C
+C Check enough steps to cover whole range with steps based at 1
+C
+	    MAXVAL = MINVAL + N_RANGES*STEP - 1
+	    IF (MAXVAL.LT.MAXHI) N_RANGES = N_RANGES+1
+C
+C Check not too many steps
+C
+	    IF (N_RANGES.GT.MAXRANGES) THEN
+	      CALL WRITEF('%S Specifying command RANGES',ERROR_BELL)
+	      CALL WRITEF
+     &     ('Maximum number of ranges ( %N ) will be exceeded if
+     & an interval value of %N is used',MAXRANGES,STEP)
+	      N_RANGES=0
+	      GOTO 20
+	    ENDIF
+C
+C Set up equally stepped ranges
+C
+	    I = MINVAL
+	    DO 92 J = 1,N_RANGES
+	      RNG(1,J) = I
+	      RNG(2,J) = I+STEP-1
+	      I = I+STEP
+92	    CONTINUE
+C
+C Clip top and bot ranges to range limits
+C
+	    RNG(1,1) = MAX(RNG(1,1),MINLO)
+	    RNG(2,N_RANGES) = MIN(RNG(2,N_RANGES),MAXHI)
+
+	  ENDIF
+C
+	  GOTO 2000
+	ENDIF
+C
+C ******************************************************
+C N_RANGES.NE.0 .OR. .NOT.ONEVAL
+C
+95	N_RANGES = N_RANGES+1
+C
+	IF (REAL) THEN
+C
+	  IF (N_RANGES.GT.1 .AND. ONEVAL) THEN
+	    REAL_RNG(1,N_RANGES) = REAL_RNG(2,N_RANGES-1) + DELTA
+	    REAL_RNG(2,N_RANGES) = REAL_RNG(1,N_RANGES) + RLO - DELTA
+C
+	    IF (ABS(REAL_RNG(2,N_RANGES)-MAXRHI) .LE. DELTA) GOTO 2000
+	    IF (REAL_RNG(2,N_RANGES).GT.MAXRHI) THEN
+	       REAL_RNG(2,N_RANGES) = MAXRHI
+	       GOTO 2000
+	    ENDIF
+	    GOTO 95
+	  ENDIF
+C
+	  REAL_RNG(1,N_RANGES) = RLO
+	  IF (ONEVAL) THEN
+	    REAL_RNG(2,N_RANGES) = RLO
+	  ELSE
+	    REAL_RNG(2,N_RANGES) = RHI
+	  ENDIF
+	ELSE
+	  IF (N_RANGES.GT.1 .AND. ONEVAL) THEN
+	    RNG(1,N_RANGES) = RNG(2,N_RANGES-1) + 1	 
+	    RNG(2,N_RANGES) = RNG(1,N_RANGES) + LO - 1
+	    IF (RNG(2,N_RANGES).EQ.MAXHI) GOTO 2000
+	    IF (RNG(2,N_RANGES).GT.MAXHI) THEN
+	       RNG(2,N_RANGES) = MAXHI
+	       GOTO 2000
+	    ENDIF
+	    GOTO 95
+	  ENDIF
+C
+	  RNG(1,N_RANGES) = LO
+	  IF (ONEVAL) THEN
+	    RNG(2,N_RANGES) = LO
+	  ELSE
+	    RNG(2,N_RANGES) = HI
+	  END IF
+	ENDIF
+C
+	GOTO 91
+C
+C ******************************************************
+C Ripple sort ranges by range lower limit
+C
+2000	IF (N_RANGES.GT.1 .AND. .NOT.UNIFORM) THEN
+C
+	  DO 800 I = 2,N_RANGES
+	    DO 799 J = I,2,-1
+	      IF (REAL) THEN
+	        IF (REAL_RNG(1,J).GE.REAL_RNG(1,J-1)) GOTO 800
+	        RLO = REAL_RNG(1,J)
+	        RHI = REAL_RNG(2,J)
+	        REAL_RNG(1,J) = REAL_RNG(1,J-1)
+	        REAL_RNG(2,J) = REAL_RNG(2,J-1)
+	        REAL_RNG(1,J-1) = RLO
+	        REAL_RNG(2,J-1) = RHI
+	      ELSE
+	        IF (RNG(1,J).GE.RNG(1,J-1)) GOTO 800
+	        LO = RNG(1,J)
+	        HI = RNG(2,J)
+	        RNG(1,J) = RNG(1,J-1)
+	        RNG(2,J) = RNG(2,J-1)
+	        RNG(1,J-1) = LO
+	        RNG(2,J-1) = HI
+	      ENDIF
+C
+799	    CONTINUE
+800	  CONTINUE
+C
+C Check for overlapping ranges
+C If a range overlaps then set the flag for the upper bound to signal
+C exclusive for testing of height values in module SETAREAS.
+C
+	  DO 801 I = 1,N_RANGES-1
+C
+	    IF (REAL) THEN
+	      IF (REAL_RNG(1,I+1).LE.REAL_RNG(2,I)) THEN
+		RANGE_INC(2,I) = .FALSE.
+	        IF (REAL_RNG(1,I).GT.REAL_RNG(2,I)) THEN
+	          DO 803 J = I,N_RANGES-1		! range disappears
+	            REAL_RNG(1,I) = REAL_RNG(1,I+1)
+	            REAL_RNG(2,I) = REAL_RNG(2,I+1)
+803	          CONTINUE
+C
+	          N_RANGES = N_RANGES - 1
+	        ENDIF
+	      ENDIF
+	    ELSE
+	      IF (RNG(1,I+1).LE.RNG(2,I)) THEN
+	        RNG(2,I) = RNG(1,I+1) - 1	! ranges overlap
+	        IF (RNG(1,I).GT.RNG(2,I)) THEN
+	          DO 802 J = I,N_RANGES-1		! range disappears
+	            RNG(1,I) = RNG(1,I+1)
+	            RNG(2,I) = RNG(2,I+1)
+802	          CONTINUE
+	          N_RANGES = N_RANGES - 1
+	        ENDIF
+	      ENDIF
+	    ENDIF
+C
+801	  CONTINUE
+	ENDIF
+C
+C Set up ranges to cover whole DTI height range
+C
+805	N = 0
+C
+	IF (REAL) THEN
+	  RLO = MINRLO - DELTA
+	  DO 804 I = 1,N_RANGES
+	    RHI = REAL_RNG(1,I)
+	    IF (RHI.GT.RLO+DELTA) THEN		! add fill-in range if necessary
+	      IF (N.EQ.MAXRANGES) GOTO 808
+	      N = N+1
+	      RANGE(1,N) = RLO + DELTA
+	      RANGE(2,N) = RHI - DELTA
+	    ENDIF
+	    N = N + 1			! add user-specified range
+	    RLO = REAL_RNG(2,I)
+	    RANGE(1,N) = RHI
+	    RANGE(2,N) = RLO
+804	  CONTINUE
+C
+808	  RHI = MAXRHI + DELTA
+C
+	  IF (RHI.GT.RLO + DELTA) THEN		! add fill-in range if necessary
+	    N = N+1
+	    RANGE(1,N) = RLO + DELTA
+	    RANGE(2,N) = MAXRHI
+	  ENDIF
+	ELSE
+	  LO = MINLO-1
+	  DO 806 I = 1,N_RANGES
+	    HI = RNG(1,I)
+	    IF (HI.GT.LO+1) THEN		! add fill-in range if necessary
+	      IF (N.EQ.MAXRANGES) GOTO 807
+	      N = N+1
+	      RANGE(1,N) = LO + 1
+	      RANGE(2,N) = HI - 1
+	    ENDIF
+C
+	    N = N+1			! add user-specified range
+	    LO = RNG(2,I)
+	    RANGE(1,N) = HI
+	    RANGE(2,N) = LO
+806	  CONTINUE
+C
+807	  HI = MAXHI + 1
+C
+	  IF (HI.GT.LO+1) THEN		! add fill-in range if necessary
+	    N = N+1
+	    RANGE(1,N) = LO + 1
+	    RANGE(2,N) = MAXHI
+	  END IF
+	ENDIF
+C
+	N_RANGES = N
+C
+	CALL WRITEF
+	GOTO 1000
+C
+C------------------------------------------------------------------------
+C WINDOW
+C
+100	CALL VEC_SET_WINDOW(1)
+	GOTO 20				! read next command
+
+C-----------------------------------------------------------------------
+C 	HELP
+C
+110	CALL HELP()
+	GOTO 20				! read next command
+
+C-----------------------------------------------------------------------
+C 	SHOW
+C
+C	Which Option
+120	RESULT=RDCOMM(SHOW_CMD_TABLE)
+C
+C 	SHOW FILE
+125	IF(RESULT.EQ.1)THEN
+	  IF (.NOT.DTILUN_INUSE(1)) THEN
+	     CALL WRITEF(' ')
+	     CALL WRITEF
+     &       ('*** WARNING *** The input DTI file is undefined')
+	     CALL WRITEF(' ')
+	  ELSE
+	     IERR=DTI_PRINT_HEADER(1,UNITS,ABSOLUTE)
+	  ENDIF
+	  GOTO 20
+	ENDIF
+C
+C SHOW RANGE
+C
+1000	IF (RESULT.EQ.2)THEN		! called from RANGES
+	  IF (N_RANGES.LT.1) THEN
+	     CALL WRITEF(' ')
+	     CALL WRITEF('*** WARNING *** No ranges have been defined')
+	     CALL WRITEF(' ')
+	     GOTO 20
+	  ELSE
+	     CALL WRITEF
+     &	     ('No. of Ranges   : %I',N_RANGES)
+	  ENDIF
+C
+	  DO 1001 I = 1,N_RANGES
+	    IF (REAL) THEN
+	      RLO = RANGE(1,I)
+	      RHI = RANGE(2,I)
+	      IF (ABS(RLO-RHI).LE.DELTA) THEN
+	         CALL WRITEF('Range %I3       : %F0   ',I,RHI)
+	      ELSE
+	         CALL WRITEF
+     &		       ('Range %I3       : %F0   to %F0    ',I,RLO,RHI)
+	      ENDIF
+	    ELSE
+	      LO = RANGE(1,I)
+	      HI = RANGE(2,I)
+	      IF (LO.EQ.HI) THEN
+	         CALL WRITEF('Range %I3       : %I   ',I,LO)
+	      ELSE
+	         CALL WRITEF
+     &		       ('Range %I3       : %I   to %I    ',I,LO,HI)
+	      ENDIF
+	    ENDIF
+C
+1001      CONTINUE
+C
+	  CALL WRITEF(' ')
+	  GOTO 20
+	ENDIF
+C
+C SHOW ENABLE
+	IF(RESULT.EQ.3)THEN
+	  CALL WRITEF(' ')
+	  CALL WRITEF('Current status:')
+	  CALL WRITEF(' ')
+	  CALL EXPAND('ABSOLUTE     ')
+	  IF(ABSOLUTE)THEN
+	    CALL APPEND('   On       ')
+	  ELSE
+	    CALL APPEND('  Off       ')
+	  ENDIF
+	  CALL APPEND('DIAGNOSTICS  ')
+	  IF(DIAG)THEN
+	    CALL APPEND('   On       ')
+	  ELSE
+	    CALL APPEND('  Off       ')
+	  ENDIF
+	  CALL APPEND('LOG_FILE     ')
+	  IF(WRITE_LOG)THEN
+	    CALL APPEND('   On       ')
+	  ELSE
+	    CALL APPEND('  Off       ')
+	  ENDIF
+	  CALL TTWLIN
+	  CALL WRITEF(' ')
+	  CALL EXPAND('SMOOTH       ')
+	  IF(SMOOTHLNK)THEN
+	    CALL APPEND('   On       ')
+	  ELSE
+	    CALL APPEND('  Off       ')
+	  ENDIF
+	  CALL TTWLIN
+	  CALL WRITEF(' ')
+	  GOTO 20
+	ENDIF
+C
+	IF(RESULT.EQ.4)THEN
+	  CALL WRITEF(' ')
+	  CALL WRITEF('Current Settings:')
+	  CALL WRITEF(' ')
+	  CALL EXPAND('BORDER_FC    ')
+	  CALL APPEND('%^W%I5       ',BORDER_FC)
+	  CALL APPEND('INTERIOR_FC  ')
+	  CALL APPEND('%^W%I5       ',BOUNDARY_FC)
+	  CALL APPEND('LAYER        ')
+	  CALL APPEND('%^W%I5',LAYER)
+	  CALL TTWLIN
+	  CALL EXPAND('SCALE      ')
+	  CALL APPEND('%F10.2    ',IFF_SCALE)
+	  CALL TTWLIN
+	  CALL WRITEF(' ')
+	  GOTO 20
+	ENDIF
+C
+	CALL WRITEF('%S Specifying command SHOW',ERROR_BELL)
+	CALL WRITEF
+     &  ('Command qualifiers are ENABLE, FILEIN, RANGES or SETTINGS')
+	GOTO 20
+C
+C------------------------------------------------------------------------
+C 	GO
+C
+C Check input DTI file is set up ok
+C
+200	IF (.NOT.DTILUN_INUSE(1)) THEN
+	  CALL WRITEF('%S Specifying command GO',ERROR_BELL)	  
+	  CALL WRITEF('The input DTI file is undefined')
+	  GOTO 20
+	END IF
+C
+	IF (.NOT.HAD_IFF)THEN
+	  CALL WRITEF('%S Specifying command GO',ERROR_BELL)	  
+	  CALL WRITEF('The output IFF file must be specified before GO')
+	  GOTO 10
+	ENDIF
+C
+C Check some RANGE(s) have been specified
+C
+	IF (N_RANGES.LT.1) THEN
+	  CALL WRITEF('%S Specifying command GO',ERROR_BELL)	  
+	  CALL WRITEF('No ranges have been defined')
+	  GOTO 20
+	END IF
+C
+	RXMAX = DTI_WINDOW_NEX(1)
+	RYMAX = DTI_WINDOW_NEY(1)
+C
+	RXMIN = DTI_WINDOW_SWX(1)-1
+	RYMIN = DTI_WINDOW_SWY(1)-1
+C
+C Open and initialise log file if necessary
+C
+	IF (WRITE_LOG) THEN
+C Make up log filename using IFJ filename
+	  I = INDEX(IFJ_NAME,']')
+	  IF (I.EQ.0) I = INDEX(IFJ_NAME,':')
+	  J = INDEX(IFJ_NAME(I+1:),'.')
+	  IF (J.EQ.0) J = INDEX(IFJ_NAME(I+1:),' ')
+	  LOGFILE = 'LSL$IF:'//IFJ_NAME(I+1:I+J-1)//'.LOG'
+C
+	  CALL FLWOPN(LOGLUN,LOGFILE)
+C
+	  CALL FLWRTF('---------------------------------------------------
+     &-----------------------')
+C
+C Log date of output file creation
+	  CALL DATE(DATIM)		! note date
+	  CALL TIME(DATIM(13:20))		! and time
+	  CALL FLWRTF
+     &	  ('VECTORISE LOG file Created on                 : %S',DATIM)
+C
+	  CALL FLWRTF('---------------------------------------------------
+     &-----------------------')
+C
+C Log input filename
+C
+	  CALL FLWRTF('Input from file     :  %S',
+     &               DTI_NAME(1)(1:DTI_NAME_LENGTH(1)))
+C
+	  CALL FLWRTF(' ')
+	  CALL FLWRTF('Matrix Coverage   SW:     1     1  NE: %I5 %I5',
+     &    X_EXTENT(1),Y_EXTENT(1))
+C
+     	  CALL FLWRTF('Matrix Window     SW: %I5 %I5  NE: %I5 %I5',
+     &    DTI_WINDOW_SWX(1),
+     &    DTI_WINDOW_SWY(1),
+     &    DTI_WINDOW_NEX(1),
+     &    DTI_WINDOW_NEY(1))
+C
+          CALL FLWRTF('Matrix Interval    E:     1         N:     1')
+C
+	  IF (REAL) THEN
+	    CALL FLWRTF
+     &		('Value Range         :%F6.2   to %F6.2',MINRLO,MAXRHI)
+	  ELSE
+	    CALL FLWRTF
+     &		('Value Range         :%^W%I6   to %^W%I6',MINLO,MAXHI)
+	  ENDIF
+C
+	  CALL FLWRTF(' ')
+	  CALL FLWRTF('Output to file      :  %S',
+     &                IFJ_NAME(1:IFJ_NAME_LENGTH))
+	  CALL FLWRTF('---------------------------------------------------
+     &-----------------------')
+C
+C Log ranges
+C
+	  CALL FLWRTF('Range Values        :')
+	  CALL FLWRTF(' ')
+C
+	  DO 555 I = 1,N_RANGES
+	    IF (REAL) THEN
+	      RLO = RANGE(1,I)
+	      RHI = RANGE(2,I)
+	      IF (RLO.EQ.RHI) THEN
+	        CALL FLWRTF('Range %I4          : %I6    ',I,RLO)
+	      ELSE
+	        CALL FLWRTF
+     &	      	  ('Range %I4          : %F6.2   to %F6.2   ',I,RLO,RHI)
+	      ENDIF
+	    ELSE
+	      LO = RANGE(1,I)
+	      HI = RANGE(2,I)
+	      IF (LO.EQ.HI) THEN
+	        CALL FLWRTF('Range %I4          : %I6    ',I,LO)
+	      ELSE
+	        CALL FLWRTF
+     &	      	  ('Range %I4          : %I6   to %I6   ',I,LO,HI)
+	      ENDIF
+	    ENDIF
+555	  CONTINUE
+C
+	  CALL FLWRTF(' ')
+C
+	  CALL FLWRTF('---------------------------------------------------
+     &-----------------------')
+C
+	  CALL FLWRTF(' ')
+	  CALL FLWRTF('Output is to layer %^W%N',LAYER)
+	  CALL FLWRTF('Border links are feature code %^W%N',BORDER_FC)
+	  CALL FLWRTF('Interior links are feature code %^W%N',BOUNDARY_FC)
+	  IF(SMOOTHLNK)THEN
+	    CALL FLWRTF('Option to smooth links is selected')
+	  ELSE
+	    CALL FLWRTF('Option to smooth links is NOT selected')
+	  ENDIF
+	  CALL FLWRTF(' ')
+C
+	  CALL FLWRTF('---------------------------------------------------
+     &-----------------------')
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C	Initiate vectorisation
+C
+	OK = LNKNDS()
+	IF (.NOT.OK) GOTO 999
+C
+C-----------------------------------------------------------------------
+C Before going any further, PT must be set up as a linked list, two-arm
+C nodes must be eliminated wherever possible and links must each be
+C classified as border or non-border links...
+C
+	CALL TIDYLNKNDS
+C
+C-----------------------------------------------------------------------
+C 	IFJ file creation
+C
+	CALL IFFMAP(.TRUE.)		! use "mapped" iff files
+C
+	CALL WRTIFJ			! write .IFJ file
+C
+	CALL IFFCLO(1)
+	HAD_IFF = .FALSE.
+C
+C---------------------------------------------------------------------------
+C	Write segment and node details to LOG file 
+C
+	IF(WRITE_LOG)THEN
+	  CALL FLWRTF('Vectorisation summary             :')
+	  CALL FLWRTF
+	  CALL FLWRTF('Total number of segments output   : %I',
+     &               TOTLINKS)
+C
+	  CALL FLWRTF('Border segments                   : %I',
+     &               TOTAL_BORDER_LINKS)
+C
+	  CALL FLWRTF('Interior segments                 : %I',
+     &               TOTAL_INTERIOR_LINKS)
+C
+	  CALL FLWRTF
+C
+	  CALL FLWRTF('Total number of nodes output      : %I',
+     &               TOTBORDERNODES+TOTJUNCTIONS+TOTANCHR)
+C
+	  CALL FLWRTF('Border nodes                      : %I',
+     &               TOTBORDERNODES)
+C
+	  CALL FLWRTF('Junction nodes                    : %I',
+     &               TOTJUNCTIONS)
+C
+	  CALL FLWRTF('Loop nodes                        : %I',
+     &               TOTANCHR)
+C
+	  CALL FLWRTF
+C
+C 	Show proportion of storage used in various arrays (useful
+C	for debugging, but not of much interest to the user)
+C
+	  PCENT = 100*N_PTS/FLOAT(MAXPTS)
+	  CALL FLWRTF
+     &    ('Link point storage used           : %P %F6.2%%',
+     &               PCENT)
+C
+	  PCENT = 100*N_LINKS/FLOAT(MAXLINKS)
+	  CALL FLWRTF
+     &    ('Link ends storage used            : %P %F6.2%%',
+     &               PCENT)
+C
+	  PCENT = 100*N_NODES/FLOAT(MAXNODES)
+	  CALL FLWRTF
+     &    ('Node point storage used           : %P %F6.2%%',
+     &               PCENT)
+C
+	  PCENT = 100*N_ARMS/FLOAT(MAXARMS)
+	  CALL FLWRTF
+     &    ('Node arm storage used             : %P %F6.2%%',
+     &               PCENT)
+C
+	  CALL FLWRTF('------------------------------------------------
+     &--------------------------')
+C
+	  IF(WRITE_LOG)CALL FLWCLO(LOGLUN)
+	ENDIF
+C
+	GOTO 10	
+C
+C-----------------------------------------------------------------------
+C ENABLE SMOOTH
+C
+220	RESULT = RDCOMM(ENABLE_CMD_TABLE)
+C
+	IF(RESULT.EQ.1)THEN
+	   SMOOTHLNK = .TRUE.
+	   GOTO 20
+	ENDIF
+C
+	IF(RESULT.EQ.2)THEN
+	   WRITE_LOG=.TRUE.
+	   GOTO 20
+	ENDIF
+C
+	IF(RESULT.EQ.3)THEN
+	   DIAG=.TRUE.
+	   GOTO 20
+	ENDIF
+C
+	IF(RESULT.EQ.4)THEN
+	   ABSOLUTE=.TRUE.
+	   GOTO 20
+	ENDIF
+C
+	CALL WRITEF('%S Specifying command ENABLE',ERROR_BELL)
+	CALL WRITEF('Command qualifiers are 
+     &ABSOLUTE, DIAGNOSTICS, LOG_FILE or SMOOTH')
+	GOTO 20
+C
+C----------------------------------------------------------------------- 
+C 	DISABLE SMOOTH
+C
+230	RESULT = RDCOMM(ENABLE_CMD_TABLE)
+C
+	IF(RESULT.EQ.1)THEN
+	   SMOOTHLNK = .FALSE.
+	   GOTO 20
+	ENDIF
+C
+	IF(RESULT.EQ.2)THEN
+	   WRITE_LOG=.FALSE.
+	   GOTO 20
+	ENDIF
+C
+	IF(RESULT.EQ.3)THEN
+	   DIAG=.FALSE.
+	   GOTO 20
+	ENDIF
+C
+	IF(RESULT.EQ.4)THEN
+	   ABSOLUTE=.FALSE.
+	   GOTO 20
+	ENDIF
+C
+	CALL WRITEF('%S Specifying command DISABLE',ERROR_BELL)
+	CALL WRITEF('Command qualifiers are 
+     &ABSOLUTE, DIAGNOSTICS, LOG_FILE or SMOOTH')
+	GOTO 20
+C
+C------------------------------------------------------------------------
+C	SET
+C
+250	RESULT=RDCOMM(SET_CMD_TABLE)
+C
+C	Set border fc
+	IF (RESULT.EQ.1)THEN
+	  IF(CMDICT.NE.1)THEN
+	    CALL WRITEF('%S Specifying command SET BORDER_FC',ERROR_BELL)
+	    CALL WRITEF('Command requires an integer argument')
+	    GOTO 20
+	  ENDIF
+C
+	  IF(INTARG(1).LT.0.OR.INTARG(1).GT.32767)THEN	    
+	    CALL WRITEF('%S Specifying command SET BORDER_FC',ERROR_BELL)
+	    CALL WRITEF
+     & ('Command requires a feature code value in the range 0 to 32767')
+	    GOTO 20
+	  ENDIF
+C
+	  BORDER_FC=INTARG(1)
+	  GOTO 20
+	ENDIF
+C
+	IF(RESULT.EQ.2)THEN
+	  IF(CMDICT.NE.1)THEN
+	    CALL WRITEF('%S Specifying command SET INTERIOR_FC',ERROR_BELL)
+	    CALL WRITEF('Command requires an integer argument')
+	    GOTO 20
+	  ENDIF
+C
+	  IF(INTARG(1).LT.0.OR.INTARG(1).GT.32767)THEN	    
+	    CALL WRITEF('%S Specifying command SET INTERIOR_FC',ERROR_BELL)
+	    CALL WRITEF
+     & ('Command requires a feature code value in the range 0 to 32767')
+	    GOTO 20
+	  ENDIF
+C
+	  BOUNDARY_FC=INTARG(1)
+	  GOTO 20
+	ENDIF
+C
+ 	IF(RESULT.EQ.3)THEN
+	  IF(CMDICT.NE.1)THEN
+	    CALL WRITEF('%S Specifying command LAYER',ERROR_BELL)	  
+	    CALL WRITEF('Command requires an integer argument')
+	    GOTO 20
+	  ENDIF
+C
+	  IF(INTARG(1).LT.1.OR.INTARG(1).GT.32767)THEN
+	    CALL WRITEF('%S Specifying command LAYER',ERROR_BELL)	  
+	    CALL WRITEF
+     &      ('Command requires a layer number  in the range 1 to 32767')
+	    GOTO 20
+	  ENDIF
+C
+	  LAYER = INTARG(1)
+	  GOTO 20				! read next command
+	ENDIF
+C
+	IF (RESULT .EQ. 4) THEN
+	   IF(CMDRCT.NE.1)THEN
+	      CALL WRITEF('%S Specifying command SET SCALE',
+     &        ERROR_BELL)	  
+	      CALL WRITEF('Command requires a real argument')
+	      GOTO 20
+	   ENDIF
+C
+	   IF(REALAR(1) .LT. 0) THEN
+	      CALL WRITEF('%S Specifying command SET SCALE',
+     &        ERROR_BELL)	  
+	      CALL WRITEF('Command requires a positive real number')
+	      GOTO 20
+	   ENDIF
+	   IFF_SCALE = REALAR(1)
+C
+	   GOTO 20
+	ENDIF
+
+C
+	CALL WRITEF('%S Specifying command SET',ERROR_BELL)
+	CALL WRITEF
+     &  ('Command qualifiers are BORDER_FC, INTERIOR_FC, LAYER, or'//
+     &  ' SCALE')
+	GOTO 20
+C
+C---------------------------------------------------------------------------
+C	SPAWN DCL process - primarily designed for file management
+C
+270	I=0
+275	IF(RDCH(CH))THEN
+	  GOTO 277
+	ELSE	
+	  I=I+1
+	  LINE(I:I)=CHAR(CH)
+	  GOTO 275
+	ENDIF
+C
+277	IF(I.EQ.0)THEN
+	  CALL WRITEF('%S Specifying command SPAWN',ERROR_BELL)
+	  CALL WRITEF('Command requires a valid DCL command')
+	  GOTO 20
+	ENDIF
+C
+	IERR= LIB$SPAWN ( LINE(1:MIN(I,80)))
+	IF(.NOT.IERR)THEN
+          CALL LIB$SIGNAL(%VAL(IERR)) !error
+	  CALL WRITEF('%S Unable to spawn command, returning to VECTORISE',
+     &              ERROR_BELL)
+	ENDIF
+C
+	GOTO 20
+C
+C----------------------------------------------------------------------------
+C	Hibernate for specified number of seconds
+C
+280	IF(CMDRCT.NE.1)THEN
+	  CALL WRITEF('%S Specifying command WAIT',ERROR_BELL)
+	  CALL WRITEF('Command requires a real argument')
+	  GOTO 20
+	ENDIF
+C
+	CALL LIB$WAIT (REALAR(1))
+	GOTO 20
+C
+C----------------------------------------------------------------------------
+C	Units
+C
+400	RESULT=RDCOMM(UNIT_CMD_TABLE)	
+	IF(RESULT.LE.0) THEN! unrecognised command
+	  CALL WRITEF('%S Specifying command UNITS',ERROR_BELL)
+	  CALL WRITEF('Command qualifiers are: 
+     &MATRIX, METRES, PROJECTION, SECONDS or LATLONG ')
+	  GOTO 20
+	ENDIF
+C
+C	Test whether units is valid
+	IERR = DTI_UNITS(1,RESULT)
+	IF(.NOT.IERR)THEN
+	  IF(IERR.EQ.DTI__INVUNITS)THEN
+	    CALL WRITEF('%S Specifying command UNITS',ERROR_BELL)
+	    CALL WRITEF
+     &      ('Command qualifier is invalid for the input file')
+	  ELSE
+	    CALL LSL_PUTMSG(IERR)
+	  ENDIF
+	  GOTO 20
+	ENDIF
+C
+	UNITS=RESULT
+	GOTO 20
+C---------------------------------------------------------------------------
+C	Parse the IFF filename
+C
+500	IF(.NOT.GET_IFFNAME())THEN
+510	  TXTPTR=80
+	  IERR= TTRSTR(,NCHS,'Output IFF filename > ',ERRCOD)
+	  IF (IERR) THEN
+	     IF (NCHS .EQ. 0) GOTO 510		!Blank line
+	  ELSE
+	     IF (IERR .EQ. LSL__EOF) GOTO 10	! ^Z
+	     CALL LSL_PUTMSG(ERRCOD)
+	     GOTO 10
+	  ENDIF
+	  GOTO 500
+	ENDIF
+C
+	GOTO 10
+C
+C--------------------------------------------------------------------------
+C-----------------------------------------------------------------------
+C RETURN
+C
+600	IF(DIRECT)THEN
+	  CALL WRITEF('%S Specifying command RETURN',ERROR_BELL)
+	  CALL WRITEF
+     &    ('The RETURN command is only valid in a command file')
+	  GOTO 20
+	ENDIF
+C
+	CALL WRITEF('Returning to terminal input')
+C
+650	RETVAL=FLRCLO(1)
+	IF (.NOT.RETVAL) CALL LSL_PUTMSG(RETVAL)
+	DIRECT=.TRUE.
+	GOTO 20
+C
+C------------------------------------------------------------------------
+C Close input file
+210	IF (DTILUN_INUSE(1)) THEN
+	   IERR= DTI_CLOSE(1,.FALSE.,.TRUE.,ERROR)
+	   IF(.NOT.IERR)THEN
+	     CALL LSL_PUTMSG(IERR)
+	     IF(IERR.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   ENDIF
+	ENDIF
+C
+999	IF (OK) OK = LSL__NORMAL
+	CALL LSL_EXIT(OK)
+	END
+C

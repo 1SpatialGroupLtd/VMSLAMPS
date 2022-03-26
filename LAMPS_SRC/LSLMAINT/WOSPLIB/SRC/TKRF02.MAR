@@ -1,0 +1,619 @@
+	.TITLE	TKRF
+	.IDENT	/23OC85/
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+; Author Susan Manning      date as .IDENT
+ 
+; T e k t r o n i x   d i s p l a y   l i b r a r y   r e f r e s h   m o d e
+ 
+	CODE_PSECT	TKW
+ 
+; Basic refresh mode control subroutine
+ 
+; R6 holds digit value to be transmitted in <esc>= sequence
+ 
+$ESCE0:: CLRW	R6		; switch refresh off (equivalent to $ESCEQ of 0)
+$ESCEQ:: BSBW	$CHKBF		; check space in buffer for <esc= > seq
+	.BYTE	3
+2$:	JSB	$TKW2C		; transmit arming sequence
+	.BYTE	AS.ESC,^A/=/
+	MOVZBW	#^A/0/,R10
+	BISW2	R6,R10		; no check on range of digit proffered
+	MOVB	R10,TKOSEL	; o/p mode sel for benefit of $FLUSH
+	JSB	$TKWCH		; transmit appropriate digit
+	TSTW	R6		; switching off?
+	BNEQ	1$		; no
+	CLRW	$REFNG		; for we aren't, now
+	MOVW	TKCCHS,R1	; what size ought chars to be?
+	BLSS	1$		; he doesn't care
+	CLRW	TKCCHS		; (clear refresh sets size 0)
+	JSB	$TKCS1	; restore size
+1$:	RSB
+ 
+ 
+; R e f r e s h - b u f f e r i n g   e n t r i e s
+ 
+; refresh 'by'
+ 
+$RFBY:: MOVAB	RMOVBY,R1
+	BRB	BUFMOV
+ 
+; refresh 'to'
+ 
+$RFTO:: MOVAB	RMOVTO,R1
+BUFMOV:	MOVL	RFBUFP,R2	; recover buffer pointer
+	MOVL	R1,(R2)+	; entry jump
+BUFSCR:	MOVL	R10,(R2)+	; visibility ( or entry jump for scrub)
+	MOVF	R7,(R2)+	; x component ( scrub pattern length)
+	MOVF	R9,(R2)+	; y (scrub amplitude)
+ 
+; check not overfilled buffer
+ 
+CHKBUF:	PUSHAB	RFBLIM		; address of buffer limit
+	CMPL	R2,(SP)+	; reached end?
+	BLEQU	1$		; not yet
+	MOVL	RFBUFP,R2	; recover status pointer quo ante this entry
+	BRB	2$
+1$:	MOVL	R2,RFBUFP	; restore pointer
+	MOVL	R1,RFLAST	; preserve 'last code'
+	BISB2	#1,TKRPCC	; mark picture changed
+2$:	MOVAB	RBUFND,(R2)	; end marker
+RFRTS:	RSB
+ 
+; refreshed character
+ 
+$RFCH::	CMPB	R6,#AS.CR	; is it carriage return?
+	BEQL	RFRTS		; if so, it can't be allowed in
+	MOVZBW	R6,R10		; standard position
+	MOVAB	RPRCH,R1	; process routine
+	BSBB	BUFSMP
+	RSB
+ 
+; move to cursor
+ 
+ .ENTRY		MOVTOC,^M<R2,R10>
+	CLRW	R10		; not visible
+	BSBB	MLTOC
+	RET
+ 
+; line to cursor
+ 
+ .ENTRY		LINTOC,^M<R2,R10>
+	MOVW	#1,R10		; visible
+	BSBB	MLTOC
+	RET
+ 
+MLTOC:	MOVAB	RMTOC,R1
+BUFSMP:	MOVL	RFBUFP,R2	; buffer simple code
+	MOVL	R1,(R2)+	; buffer code
+	MOVW	R10,(R2)+	; and data
+	BSBB	CHKBUF
+	RSB
+ 
+; the cursor itself ( not Tektronix' one)
+ 
+ .ENTRY		CURSOR,^M<R2,R10>
+	MOVAB	RMTOC,R1	; address of move to cursor routine
+	CMPL	RFLAST,R1	; last took us to cursor?
+	BEQL	1$		; yes - fine
+	CALLS	#0,MOVTOC	; otherwise get there
+1$:	MOVAB	RCURS,R1
+	MOVL	RFBUFP,R2
+	MOVL	R1,(R2)+	; buffer very simple code indeed
+	BSBW	CHKBUF
+	RET
+ 
+ 
+; select cursor size
+; call CURSEL(n)  	n = 0 => small (initial condition)
+;			n = 1 => large
+ 
+ .ENTRY		CURSEL,^M<>
+	TSTW	@4(AP)
+	BEQL	CURSML
+	BISL2	#FLAG_M_LRGCUR,FLAGW
+	RET
+ 
+CURSML:	BICL2	#FLAG_M_LRGCUR,FLAGW
+	RET
+ 
+ 
+; start a blinked section
+ 
+ .ENTRY		RFBLNK,^M<R2,R10>
+	MOVAB	RBLNK,R10
+	MOVL	RFBUFP,R2
+	MOVL	R10,(R2)+		; entry jump
+	MOVW	@4(AP),(R2)+		; blink pattern
+	BSBW	CHKBUF
+	RET
+ 
+ 
+; end a blinked section
+ .ENTRY		RFBEND,^M<R2,R10>
+	MOVL	RFBUFP,R2		; recover buffer pointer
+	MOVAB	RBEND,R10
+	MOVL	R10,(R2)+		; entry jump
+	BSBW	CHKBUF
+	RET
+ 
+ 
+; display buffer
+ 
+ .ENTRY		REFRSH,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	DECW	$DIVRF		; unset diversion, that our efforts should
+				; not merely boomerang
+	BGEQ	RFSWB
+	BRW	RFDUN		; we were already in stored mode
+;RFSWB:	BBCS	#FLAG_V_RFOLO,FLAGW,NOCSAJ  ; br NOCSAJ after a call to RFAJST
+;	BSBW	CSFOLO		; follow the cursor
+RFSWB:	CLRB	TKGRAF		; force full position output at start of buffer
+	CLRW	TKLNCH		; force move before any characters
+	CLRB	TKRCMV		; cursor not yet moved
+	TSTB	TKRPCC		; picture changed?
+	BNEQ	2$
+	BRW	RFDUN		; no - then no need to refresh
+2$:	CLRB	TKRPCC		; won't be changed after this exercise anyway
+1$:	MOVW	#1,R6
+	BSBW	$ESCEQ		; and set up buffering anew
+	PUSHAB	RFBUFF		; point at start of buffer
+ 
+; refresh picture generation loop
+RFLOOP:	MOVL	(SP)+,R2	; extract pointer
+RFLOP2:	JMP	@(R2)+		; next entry
+ 
+; refresh buffer entries
+ 
+ 
+; GENSEG will generate a new refresh segment if 'op' is different from
+; the current segment type or if a new blinked segment has been requested
+ 
+; call  BSBW	GENSEG
+;		.BYTE	op
+ 
+;	op = 0  don't care where i am (move by)
+;	op = 1	got to be in untracked segment (move to)
+;	op = 2	got to be in tracked segment (move to cursor,cursor)
+ 
+; output from call sets NEWSEG (in FLAGW) to true if new segment generated
+; else to false
+ 
+GENSEG:	BICL2	#FLAG_M_NEWSEG,FLAGW		; newseg <- false
+	MOVZBW	@(SP),R0		; get op
+	BNEQ	30$			; branch on op ne 0
+	MOVB	SEGTYP,R0		; don't care what segtype so use current
+	BGTR	40$			; segtyp>0 => must test SETBNK
+	MOVB	#1,R0			; 1st segment , assume untracked
+	BRB	50$			; segtyp<0 => newseg <- true
+30$:	CMPB	R0,SEGTYP		; op ne segtyp => newseg <- true
+	BNEQ	50$
+40$:	TSTB	SETBNK			; test setbnk if failed other test
+	BNEQ	50$			;  new segment if ne 0
+	BRW	100$			; don't generate new segment
+; start new segment
+50$:	PUSHR	#^M<R0,R2>		; save op and pointer into RFBUFF
+	BISL2	#FLAG_M_NEWSEG,FLAGW		; newseg <- true
+	JSB	T.FLSH			; get last seg's moves up to date
+	BISL2	#FLAG_M_TRANSPAR,FLAGW	; force o/p of all Tek bytes for
+					; next coordinate pair
+	BBCC	#FLAG_V_FIRSTSEG,FLAGW,55$	; branch unless 1st segment
+	BISL2	#FLAG_M_TUPTD,FLAGW	; gen. uptodate move for 1st segment
+	MOVF	TKSAVX,RFSAVX		; save position before
+	MOVF	TKSAVY,RFSAVY		; drawing refresh picture
+	MOVF	TKRUX,RFRUX
+	MOVF	TKRUY,RFRUY
+55$:	TSTB	SETBNK			; generate move at start of first
+	BEQL	57$			; blinked segment or any segment
+	BISL2	#FLAG_M_TUPTD,FLAGW	; following a blinked segment
+57$:	INCW	CURSEG			; get new segment no
+	JSB	$CHKBF			; check space in buffer
+	.BYTE	4
+	MOVZWL	CURSEG,R6		; ready for transmission
+	CMPB	(SP),#2			; test if tracked? (old R0)
+	BNEQ	60$
+; now starting tracked segment
+	MOVZBW	#^A/E/,R0
+	JSB	$ESCSQ4			; <escape = E <segno>> sequence
+; send coords of Tek centre
+	CVTFW	TKCENX,R7		; get centre of screen
+	XORW2	#^X8000,R7		; convert to unsigned
+	CVTFW	TKCENY,R9
+	XORW2	#^X8000,R9
+	JSB 	$TKCOD
+	CLRL	R9			; as ESTAB would if we called it
+	JSB	TRNSMT			; transmit bytes
+	BRB	65$
+ 
+; starting untracked segment
+60$:	MOVZBW	#^A/A/,R0
+	JSB	$ESCSQ4			; <escape = A <segno>>
+ 
+; test for blinked segment start
+65$:	TSTB	CURBNK			; see if in blink segment
+	BEQL	90$
+	JSB	$CHKBF
+	.BYTE	7
+	MOVZBL	#^A/B/,R0		
+	MOVZWL	CURSEG,R6
+	JSB	$ESCSQ4			; <escape = B <segno>>
+	MOVL	#3,R11
+	MOVAB	BLPAT,R0		; address of blink pattern
+70$:	MOVZBW	(R0)+,R10		; output the 3 bytes
+	JSB	$TKWBN
+	SOBGTR	R11,70$			; back for next?
+90$:	CLRB	SETBNK			; have started new blinked segment
+	POPR	#^M<R0,R2>		; recover op and pointer into RFBUFF
+	MOVB	R0,SEGTYP		; store type of current segment
+100$:	INCL	(SP)			; step pc over op
+	RSB
+ 
+ 
+; cursor
+ 
+RCURS:	PUSHL	R2			; save RFBUFF pointer
+	BSBW	GENSEG		; see if new tracked seg necess.
+	.BYTE	2
+	BBC	#FLAG_V_NEWSEG,FLAGW,10$ ; if new seg then call RMTC
+	CLRL	R10		; set visibility for call to RMTOC
+	BSBB	RMTC
+10$:	JSB	T.FLSH		; flush out invisible moves
+	JSB	$CHKBF		; ensure seq contig
+	.BYTE	3
+	MOVZBW	#^A/C/,R0
+	BBC	#FLAG_V_LRGCUR,FLAGW,15$ ; leave as small cursor if clr
+	MOVZBW	#^A/G/,R0	; send <escape = G> seq for large cursor
+15$:	JSB	$ESCSQ3		; <escape = C> sequence
+	BRW	RFLOOP
+ 
+; move/line to cursor
+ 
+RMTOC:	MOVZWL	(R2)+,R10	; get visibility
+	PUSHL	R2		; preserve pointer into RFBUFF
+	BSBB	RMTC		; to enable calling from elsewhere
+	BRW	RFLOOP
+ 
+RMTC:	PUSHL	R10		; visibility saved until needed
+	BSBW	GENSEG		; open new tracked segment unless in one
+	.BYTE	2
+	MOVL	(SP)+,R10			; recover visibility
+	MNEGF	TKRUOX,R7			; tek centre in user units
+	MNEGF	TKRUOY,R9
+	JSB	LTGEN			; generate move/line to centre
+	RSB
+ 
+ 
+; move/line to ( , )
+ 
+RMOVTO: BSBW	GENSEG		; open new untracked seg unless in one
+	.BYTE	1
+	MOVAB	LTGEN,R1	; generating routine
+RMOV:	MOVL	(R2)+,R10	; visibility
+	MOVF	(R2)+,R7	; x
+	MOVF	(R2)+,R9	; y
+	PUSHL	R2		; preserve pointer
+	JSB	(R1)		; generate
+	BRW	RFLOOP
+ 
+; move/line by ( , )
+ 
+RMOVBY:	BSBW	GENSEG		; call in case 1st segment
+	.BYTE	0
+	MOVAB	LBGEN,R1	; generating routine
+	BRB	RMOV
+ 
+ 
+; character
+ 
+RPRCH:	BSBW	GENSEG
+	.BYTE	0
+	MOVW	(R2)+,R6	; character
+	PUSHL	R2		; preserve pointer
+	JSB	CHGEN		; generate character
+	BRW	RFLOOP
+ 
+; end of buffer - set refresh going
+RBUFND:	CMPW	CURSEG,#9	; any segments to delete
+	BGEQ	20$		; no
+	INCW	CURSEG		; get 1st unused segment number
+	MOVZWL	CURSEG,R6
+	MOVZBW	#^A/D/,R0
+10$:	JSB	$CHKBF
+	.BYTE	4
+	JSB	$ESCSQ4		; <escape = D <segno>>
+	AOBLEQ	#9,R6,10$	; repeat for all unused segments
+20$:	MOVW	#-1,CURSEG	; no current segment =>
+	MOVB	#-1,SEGTYP	; no current segment type
+	BISL2	#FLAG_M_FIRSTSEG,FLAGW	; => next must be first
+	MOVF	RFSAVX,TKSAVX		; restore saved position
+	MOVF	RFSAVY,TKSAVY	; before finishing refresh loop
+	MOVF	RFRUX,TKRUX
+	MOVF	RFRUY,TKRUY
+	TSTW	TKLNCH		; drawing characters?
+	BEQL	2$		; no - simply close buffer
+	MOVB	#AS.GS, R10	; get rid of alpha-mode cursor
+	JSB	$TKWCH		; before closing buffer
+2$:	JSB	$FLUSH		; ensure transmitted
+				; (for then we can sit back)
+	INCW	$REFNG		; mark now refreshing
+RFDUN:	INCW	$DIVRF		; restore refresh diversion
+RFGIN:	RET			; back to user
+ 
+ 
+; start blinked section - store blink pattern for GENSEG
+RBLNK:	MOVZWL	(R2)+,R7		; get blink pattern
+	PUSHL	R2			; save pointer
+	MOVAB	BLPAT,R8		; get save add of blink pattern
+	EXTZV	#12,#4,R7,R9		; store most sig 4 bits of pattern
+	MOVB	R9,(R8)+
+	EXTZV	#6,#6,R7,R9		; store next 6 bits
+	MOVB	R9,(R8)+
+	EXTZV	#0,#6,R7,R9		; and next 6
+	MOVB	R9,(R8)+
+	MOVB	#1,SETBNK		; force GENSEG to create new blinked seg
+	INCB	CURBNK			; remember currently blinking
+	BRW	RFLOOP
+ 
+; end blinked section
+RBEND:	MOVB	#-1,SETBNK		; forces GENSEG to end a blinked section
+	CLRB	CURBNK			; remember not now currently blinking
+	BRW	RFLOP2			; not preserved R2
+ 
+; DISMOD - change state of display
+ 
+; call is DISMOD(N)
+; N=0 => get to stored mode, stop refresh
+; N=1 => ensure in refresh mode, clear refresh buffer
+;	 reinitialise SEGTYP,CURSEG, delete all refresh segments
+ 
+ .ENTRY		DISMOD,^M<R2,R5,R6,R7,R10,R11>
+	TSTW	@4(AP)		; look at argument
+	BEQL	DSTORE
+ 
+; set refresh mode
+ 
+	TSTW	$DIVRF
+	BNEQ	1$
+	BBCC	#FLAG_V_IFTHK,FLAGW,1$
+	BISL2	#FLAG_M_THKSAV,FLAGW
+1$:	MOVAB	RFBUFF,R2	; get address of buffer
+	MOVL	R2,RFBUFP	; clear buffer
+	MOVAB	RBUFND,(R2)	; mark end of buffer
+	BISB2	#1,TKRPCC	; mark picture changed (cleared)
+	CLRL	RFLAST		; no code in buffer
+	MOVW	#1,$DIVRF	; set up refresh diversion
+	MOVW	#-1,CURSEG	; reinitialise current segment number
+	MOVB	#-1,SEGTYP	; reinitialise current segment type
+	BISL2	#FLAG_M_FIRSTSEG,FLAGW	; next seg will be first
+	MOVW	#1,R6
+	BSBW	$ESCEQ
+	JSB	$CHKBF		; ensure space for <esc = > sequence
+	.BYTE	4
+	MOVZBW	#^A/D/,R0
+	MOVL	#63,R6
+	JSB	$ESCSQ4		; <escape = D <63>> to delete all refresh segs
+	RET
+ 
+; set store mode
+ 
+DSTORE:	TSTW	$DIVRF		; in refresh?
+	BEQL	2$		; no - nothing to do
+	CALLS	#0,RFSTOP	; stop refreshing
+	BBCC	#FLAG_V_THKSAV,FLAGW,1$	; if BC, wasn't thick at entry to refresh
+	BISL2	#FLAG_M_IFTHK,FLAGW	; restore thick state
+1$:	CLRW	$DIVRF		; unset diversion
+	CLRW	TKLNCH		; in case last thing refreshed was a character
+	CLRB	TKGRAF		; position saved not reliable
+	BISL2	#FLAG_M_TUPTD, FLAGW	; mark not up to date
+2$:	RET
+ 
+ 
+; stop refresh picture cycling
+ 
+ .ENTRY		RFSTOP,^M<R2,R5,R6,R10,R11>
+	BSBW	$ESCE0		; simply by <esc>=0
+	JSB	$FLUSH		; ensure it's on its way
+	BISB2	#1,TKRPCC	; picture needs regenerating
+	RET
+ 
+ 
+; CSRD(X,Y) returns the cursor position of the tablet cuurently tracking
+;					in user units
+ 
+; if no cursor moves since last CSWT, returns the values last written by CSWT
+ 
+CSAJST::
+ .ENTRY		CSRD,^M<R2,R6,R7,R8,R9,R10>
+ 
+10$:	TSTB	TKENBL			; is device enabled?
+	BEQLW	40$			; if EQL, not - simply return last posn
+	CLRW	CSLENG			; clear length
+	PUSHAL	CSEFN			; EFN
+	PUSHAW	CSLENG			; LENRD
+	PUSHAW	CSMAX			; MXLEN
+	PUSHAW	CSLINE			; BUFFER
+	PUSHAW	CSCHAN			; CHAN
+	CALLS	#5,TKREAD		; read current cursor position
+ 
+	CLRW	CSBUTT			; if no reply then use saved coords
+	MOVZBW	#^A/Z/,R0
+	JSB	$ESCSQ3			; <escape = Z <line>>
+	JSB	$FLUSH
+ 
+	TSTW	CSLENG			; has read completed already?
+	BNEQ	20$			; yes
+
+; put limit on time we'll wait for cursor position
+	$SETIMR_S	EFN=CSEFN,     -; set limit on wait
+			DAYTIM=TENSEC,-
+			REQIDT=CSEFN	; use EFN as timer ID
+
+	TSTW	CSLENG			; had read completed now?
+	BNEQ	15$			; yes
+
+	$WAITFR_S	EFN=CSEFN	; wait for efn to be set - somehow
+15$:	$CANTIM_S	REQIDT=CSEFN	; cancel timer in case outstanding
+ 
+; examine button number - if 0 return saved coords
+; (will also be 0 if no reply to read in specified time)
+20$:	TSTW	CSBUTT			; button number = 0 ?
+	BEQL	40$
+ 
+; moved since last time -  store current cursor position
+
+	MULF3	TKFACT,CSTABX,R7	; scale up to 16 bit
+	MULF3	TKFACT,CSTABY,R9
+	MOVF	R7, TBFLCX		; save for future CSRD's
+	MOVF	R9, TBFLCY
+	INCB	TKRCMV			; mark cursor moved
+	BRB	50$
+ 
+; pick up current cursor position if no moves since last CSWT (button = 0)
+; any change to units or scale since current cursor position stored ?
+40$:	TSTB TKSCUN		; non-zero if changed
+	BNEQ	45$
+	MOVF	TBUSCX,@4(AP)	; no change, return stored values
+	MOVF	TBUSCY,@8(AP)
+	RET
+ 
+45$:	MOVF	TBFLCX,R7	; pick up non-scaled, non-origined stored vals
+	MOVF	TBFLCY,R9
+ 
+; complete conversion to user units
+50$:	JSB	TKUSER			; results in R6,R8
+	MOVF	R6,@4(AP)		; results to caller
+	MOVF	R8,@8(AP)
+	MOVF	R6,TBUSCX		; save position in user units
+	MOVF	R8,TBUSCY
+	CLRB	TKSCUN			; mark no change in units or scaling
+	RET
+ 
+ 
+ 
+; CSWT(X,Y) writes the specified cursor position
+ 
+ .ENTRY		CSWT,^M<R2,R5,R6,R7,R8,R9,R10>
+
+; transmit <escape = Y> part of sequence
+	JSB	$CHKBF
+	.BYTE	7
+	MOVZBW	#^A/Y/,R0
+	JSB	$ESCSQ3
+
+	INCB	TKRCMV			; cursor moved
+	MOVF	@4(AP),R7
+	MOVF	@8(AP),R9		; get cursor pos in user units
+	MOVF	R7,TBUSCX		; and store
+	MOVF	R9,TBUSCY
+	CLRB	TKSCUN			; mark no changes in scaling or origin
+ 
+; convert user units to integer counts
+	JSB	TKTRMT			; transform into R6,R8
+	ADDF2	OFSETX,R6
+	ADDF2	OFSETY,R8
+; force into range
+ 	CMPF	R6,MINX
+	BGEQ	2$
+	MOVF	MINX,R6
+2$:	CMPF	R6,MAXX
+	BLEQ	4$
+	MOVF	MAXX,R6
+4$:	MOVF	R6,TBFLCX		; store
+	BSBB	$TMIT2			; transmit R6
+	CMPF	R8,MINY
+	BGEQ	6$
+	MOVF	MINY,R8
+6$:	CMPF	R8,MAXY
+	BLEQ	8$
+	MOVF	MAXY,R8
+8$:	MOVF	R8,TBFLCY		; store
+	MOVF	R8,R6			; and fall through to transmit
+	BSBB	$TMIT2			; transmit
+	RET
+ 
+; transmit signed floating R6 as two biased numbers (6,6 bit)
+$TMIT2:	MOVL	#10,R9			; start pos of bit field
+	MOVL	#6,R7			; size of bit field
+	BRB	$TXMIT
+
+; transmit signed floating R6 as 3 biased numbers (4,6,6 bit)
+$TMIT3:	MOVL	#4,R7			; size of bit field
+	MOVL	#12,R9			; start pos of bit field
+
+$TXMIT:	CVTFW	R6,R6			; to integer
+	XORW2	#^X8000,R6		; convert to unsigned
+
+20$:	EXTZV	R9,R7,R6,R10		; extract bits
+	JSB	$TKWBN			; transmit as biased
+	MOVL	#6,R7			; size of bit field
+	SUBL2	R7,R9			; adjust start position
+	BGEQ	20$			; repeat
+	RSB 
+
+
+
+; TKTWIN(XMIN,XMAX,YMIN,YMAX)
+; set tracking window. All args optional, defaulting to screen extents
+
+ .ENTRY		TKTWIN,^M<R2,R5,R6,R7,R8,R9,R10,R11>
+	JSB	$CHKBF			; check space in buffer
+	.BYTE	15
+
+; transmit <escape = L> part of sequence
+	MOVZBW	#^A/L/,R0
+	JSB	$ESCSQ3
+
+	JSB	G^VIO$1ST
+10$:	JSB	G^VIO$GNA
+	BCS	30$			; missing
+	CMPL	R11,#2			; is arg an x or y
+	BGTR	50$			; y
+
+; x argument
+	MULF3	TKTR,(R0),R6		; convert to TEK counts
+	ADDF2	OFSETX,R6
+	CMPF	R6,MINX
+	BGEQ	12$
+	MOVF	MINX,R6
+12$:	CMPF	R6,MAXX
+	BLEQ	14$
+	MOVF	MAXX,R6
+14$:	BRB	60$
+
+; arg missing - supply default
+30$:	CASE	R11,<31$,32$,33$>,LIMIT=#1
+	MOVF	MAXY,R6
+	BRB	60$
+31$:	MOVF	MINX,R6
+	BRB	60$
+32$:	MOVF	MAXX,R6
+	BRB	60$
+33$:	MOVF	MINY,R6
+	BRB	60$
+
+; y argument
+50$:	MULF3	TKTR+12,(R0),R6		; convert to TEK counts
+	ADDF2	OFSETY,R6
+	CMPF	R6,MINY
+	BGEQ	52$
+	MOVF	MINY,R6
+52$:	CMPF	R6,MAXY
+	BLEQ	60$
+	MOVF	MAXY,R6
+
+; transmit
+60$:	BSBW	$TMIT3
+	CMPL	R11,#4			; done 4 args yet?
+	BGTR	70$			; yes
+	BRW	10$
+70$:	RET
+
+
+;GETPCC - get picture change control to arg
+ 
+ .ENTRY		GETPCC,^M<>
+	MOVZBW	TKRCMV,@4(AP)	; had cursor moved at last call to CSRD
+	RET
+ 
+	.PSECT
+	.END
+ 

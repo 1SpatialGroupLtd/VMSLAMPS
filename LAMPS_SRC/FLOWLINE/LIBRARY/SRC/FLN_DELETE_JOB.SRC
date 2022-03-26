@@ -1,0 +1,179 @@
+	INTEGER*4 FUNCTION FLN_DELETE_JOB(JOB_ID)
+C
+***	MODULE	FLN_DELETE_JOB
+***	IDENT	06OC88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    13-May-1988
+C
+C 
+C also deletes the specified job - ie archives it
+C fails if the job doesn't exist or if it contains any active 
+C tasks 
+C deletes any inactive tasks in it
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$CMNFLOWLINE:FLOW.PAR'
+	INCLUDE	'LSL$CMNFLOWLINE:FLOWLINEMSG.PAR'
+C
+C Arguments
+	INTEGER*4	JOB_ID	! job id
+C
+C RDB return codes
+	INTEGER*4	RDB$_DEADLOCK
+	EXTERNAL	RDB$_DEADLOCK
+C
+C functions
+	INTEGER*4	FLN_ARCHIVE_JOB
+	INTEGER*4	FLN_ARCHIVE_TASK
+	INTEGER*4	FLN_END_SUB_JOB
+	INTEGER*4	FLN_COMPLETE_TASK
+C
+C Local Variables
+	INTEGER*4	NUM_TASK
+	INTEGER*4	TASK(FLN_MAX_TASK)
+	INTEGER*4	NUM_ERR
+	INTEGER*4	NUM_JOB
+	INTEGER*4	I
+	INTEGER*4	OUTER_TASK
+	CHARACTER*255	DUMPAR(1),DUMGLOB(1),DUMEXT(1)
+	LOGICAL		OUTER_TASK_END
+C
+&RDB&	DATABASE FILENAME 'LSL$FLN_DATABASE:FLOWLINE'
+C
+C check to see if this is the last sub-job in a task. If it is then
+C we need to complete the task aswell, OUTER_TASK_END IS true if it is
+	FLN_DELETE_JOB = FLN_END_SUB_JOB(JOB_ID,OUTER_TASK,
+     &                                   OUTER_TASK_END)
+	IF (.NOT. FLN_DELETE_JOB ) GOTO 999
+C
+	NUM_ERR = 0
+20	CONTINUE
+	NUM_JOB = 0
+&RDB&   START_TRANSACTION READ_WRITE WAIT RESERVING JOB,JOB_HISTORY,
+&RDB&   WORKSTATION_AUTHORISATION, OPERATOR_AUTHORISATION, 
+&RDB&   TASK, TASK_HISTORY, SESSION_HISTORY,SESSION,WIRE_ACTIVE,
+&RDB&   GLOBAL_PARAMETER FOR 
+&RDB&   PROTECTED WRITE
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_DELETE_JOB = RDB$STATUS
+		 GOTO 999
+	      ENDIF
+C
+C only possible error is deadlock 
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+C
+&RDB&   GET
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_DELETE_JOB = RDB$STATUS
+&RDB&	         ROLLBACK
+		 GOTO 999
+	      ENDIF
+&RDB&	      ROLLBACK
+C
+C only possible error is deadlock 
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+&RDB&      NUM_TASK = COUNT OF T IN TASK WITH T.JOB_ID = JOB_ID AND
+&RDB&      T.TASK_STATUS = 'Active'
+&RDB&   END_GET
+C
+	IF (NUM_TASK.GT. 0) THEN
+	   FLN_DELETE_JOB= FLN__TASKACTIVE
+&RDB&      ROLLBACK
+	   GOTO 999
+	ENDIF
+C
+C do the deletion
+	FLN_DELETE_JOB = FLN_ARCHIVE_JOB(JOB_ID)
+	IF (.NOT. FLN_DELETE_JOB) THEN
+	   NUM_ERR = NUM_ERR+1
+	   IF(FLN_DELETE_JOB .EQ. %LOC(RDB$_DEADLOCK)
+     &	      .AND. NUM_ERR .LT. 10)THEN
+	      CALL LIB$WAIT(FLN_PSE)
+&RDB&	      ROLLBACK
+	      GOTO 20
+	   ELSE
+&RDB&	      ROLLBACK
+	      GOTO 999
+	    ENDIF
+	ENDIF
+C
+C retrieve tasks 
+C no active tasks in job 
+	NUM_TASK = 0
+&RDB&   FOR T IN TASK WITH T.JOB_ID = JOB_ID
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_DELETE_JOB = RDB$STATUS
+&RDB&	         ROLLBACK
+		 GOTO 999
+	      ENDIF
+&RDB&	      ROLLBACK
+C
+C only possible error is deadlock 
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+	   NUM_TASK = NUM_TASK+1
+&RDB&      GET
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_DELETE_JOB = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C only possible error is deadlock 
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+&RDB&         TASK(NUM_TASK) = T.TASK_ID
+&RDB&      END_GET
+&RDB&   END_FOR
+C
+C archive all the tasks 
+	DO 30 I = 1,NUM_TASK
+C
+	   FLN_DELETE_JOB = FLN_ARCHIVE_TASK(TASK(I),1,'Void')
+	   IF (.NOT. FLN_DELETE_JOB) THEN
+	      NUM_ERR = NUM_ERR+1
+	      IF(FLN_DELETE_JOB .EQ. %LOC(RDB$_DEADLOCK)
+     &	         .AND. NUM_ERR .LT. 10)THEN
+	         CALL LIB$WAIT(FLN_PSE)
+&RDB&	         ROLLBACK
+	         GOTO 20
+	       ELSE
+&RDB&	          ROLLBACK
+	          GOTO 999
+	       ENDIF
+	   ENDIF
+30	CONTINUE	
+C
+&RDB&   COMMIT
+C
+	IF (OUTER_TASK .NE. 0 .AND. OUTER_TASK_END) THEN 
+C
+C now complete the outer task
+C outcome 1, CPU 0, no parameters, session_id = 0 ie no session
+	   FLN_DELETE_JOB = FLN_COMPLETE_TASK(OUTER_TASK,0,1,
+     &				-1,0,DUMPAR,0,DUMGLOB,0,DUMEXT)
+	ENDIF
+C
+999	RETURN
+	END

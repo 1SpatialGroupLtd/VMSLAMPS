@@ -1,0 +1,177 @@
+	.TITLE	VSVG
+ 
+	.IDENT	/26JN87/
+ 
+	CODE_PSECT	VS
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+ 
+; Author:			Susan Manning
+;
+; CMPL Rn,VSEXT (coord may be well out of range) DM	05-Apr-1984
+; Amended for Sigma ARGS:	Tony J Ibbs, Sept/Oct 1982
+ 
+; VSLIB  'Vector Generator'
+ 
+
+; Flush moves
+V.FLSH::BBCC	#VFLG_V_VUPTD,VSFLAG,VFLRTS	; branch if already up to date
+VFLSH:	MOVF	VSSAVX,R6
+	CLRW	R10
+	MOVF	VSSAVY,R8
+	BSBB	VSMVGN				; generate the move
+VFLRTS:	RSB
+ 
+ 
+; Generate a move
+$VSMOV::TSTW	R10			; branch if bright
+	BNEQ	VSUPTD
+	MOVF	R6,VSSAVX		; preserve endpoints
+	BISL2	#VFLG_M_VUPTD,VSFLAG	; remember not up to date
+	MOVF	R8,VSSAVY
+	RSB				; nothing generated in this case
+ 
+ 
+; Visible move - any moves not up to date ?
+VSUPTD:	BBCC	#VFLG_V_VUPTD,VSFLAG,VSMVGN	; branch if already are
+	PUSHR	#^M<R6,R8,R10>		; preserve move-in-hand
+	BSBB	VFLSH			; flush out buffered invisible
+	POPR	#^M<R6,R8,R10>		; restore move-in-hand
+
+; Fall through to generate move-in-hand
+; converts R6,R8 => R7,R9 (VS11 pixels)
+ 
+VSMVGN:	ADDF2	VSCEN,R6		; convert to pixels relative to
+	ADDF2	VSCEN,R8		; 	bottom left hand corner
+	CVTFL	R6,R7			; to integer pixels
+	BGEQ	30$
+	CLRL	R7			; force in range at bottom
+30$:	CMPL	R7,VSEXT
+	BLEQ	40$
+	MOVW	VSEXT,R7		; force in range at top
+40$:	CVTFL	R8,R9			; now same for Y
+	BGEQ	50$
+	CLRL	R9
+50$:	CMPL	R9,VSEXT
+	BLEQ	SIGMOV
+	MOVW	VSEXT,R9
+
+; Sigma ARGS specific vector generation...
+SIGMOV:	MOVL	#2,R0				; no. of words to be buffered
+	BSBW	$VSCHKBF			; check we have enough room to
+						; output the full draw together
+	BBCC	#VFLG_V_FRCABS,VSFLAG,120$	; branch if not forced absolute
+						; mode
+ 
+; so we are performing a Sigma absolute move/draw (the first line of a string
+; is always absolute)
+	MOVL	#SIGXMA,R4		; set the X move opcode up in R4
+	INSV	R7,#SGMPOS,#SGMSIZ,R4	; move the X posn into the instn
+	BSBW	$VSBFW			; buffer the instruction
+	TSTW	R10
+	BEQL	10$			; branch if invisible
+	MOVL	#SIGYDA,R4		; Draw Y absolute
+	BRB	20$			; and get where to
+10$:	MOVL	#SIGYMA,R4		; Move Y absolute
+20$:	INSV	R9,#SGMPOS,#SGMSIZ,R4	; build the instn with the destination
+	BSBW	$VSBFW			; buffer it
+	BRB	PRESRV			; and save the current position
+ 
+; and here we have a Sigma relative move/draw
+120$:	SUBW3	VSRHXC,R7,R6		; work out the displacement in X
+	SUBW3	VSRHYC,R9,R8		; and also in Y
+	BISW3	R6,R8,R4		; test for 0,0 move
+	BEQL	PRESRV
+	MOVL	#SIGXMR,R4		; get the opcode
+	INSV	R6,#SGMPOS,#SGMSIZ,R4	; and add the length to go
+	BSBW	$VSBFW			; and buffer the instruction
+	TSTW	R10
+	BEQL	130$			; branch if invisible
+	MOVL	#SIGYDR,R4		; the relative opcode for Y Draw
+	BRB	140$
+130$:	MOVL	#SIGYMR,R4		; and that for Y Move
+140$:	INSV	R8,#SGMPOS,#SGMSIZ,R4	; create the instruction
+	BSBW	$VSBFW			; buffer it
+ 
+
+; Common exit, preserving new current position
+PRESRV:	MOVW	R7,VSRHXC
+	MOVW	R9,VSRHYC
+	RSB
+ 
+ 
+; Buffer the word in R4 into the main display file
+$VSCBFW::MOVL 	#2,R0			; checked entry point
+	BSBB	$VSCHKBF
+$VSBFW::MOVAL	VSBPTR,R1		; unchecked entry point
+	MOVL	(R1),R5			; word pointer
+	MOVW	R4,(R5)+		; put word into buffer
+	MOVL	R5,(R1)			; restore pointer
+	RSB
+ 
+ 
+; Check that there are R0 free words in the main display file (plus 1 for stop)
+$VSCHKBF::INCL	R0			; include stop word
+	ASHL	#1,R0,R0		; convert to bytes
+	SUBL3	VSBPTR,VSBFLIM,R1	; calc. no. of bytes free
+	CMPL	R0,R1
+	BLEQ	10$			; branch if enough free words
+	BSBB	$VFLUSH			; flush out the buffer
+10$:	RSB
+ 
+ 
+ 
+; Flush the Sigma buffer, wait for completion then continue
+$VFLUSH::
+	MOVAB	SGBUF1,R0		; address of buffer
+	SUBL3	R0,VSBPTR,R0		; buffer length
+	BEQL	$VSSET			; nowt to do if nowt to output
+	BBS	#VFLG_V_XA,VSFLAG,1$
+	ASHL	#-1, R0, VO.LEN2	; convert to word-count
+	BRB	2$
+
+1$:	MOVL	R0,VO.LEN		; byte count for XA device
+
+2$:	TSTB	VSENBL			; enabled ?
+	BEQL	$VSSET			; no - don't output
+$VSSEND::$QIOW_G	VO.DPB			; send data buffer
+	BBS	#VFLG_V_XA,VSFLAG,1$
+	CMPV	#SGERRPS,#SGERRSZ,VSSTATUS+4,#SGERR
+	BEQL	ERRVS			; report (unspecified) error
+	BRB	$VSSET
+1$: 	BLBC	VSSTATUS,ERRVS		; test IOSB for XA device
+$VSSET::MOVAL	SGBUF1,VSBPTR			; start of buffer for Sigma
+	RSB					; continue
+ 
+ 
+; flush the VS11 buffer - this is used for the Sigma - it flushs the
+; buffer SGBUF1, with a read request command at its tag end. Information
+; is then returned in the secondary buffer. Used for VSPXRD.
+$VSSGRD::
+	BBC	#VFLG_V_XA,VSFLAG,5$
+	BSBB	$VFLUSH				; flush for XA device
+	BRB	10$
+
+5$:	MOVAB	VSBUF,R0			; address of buffer
+	SUBL2	VSBPTR,R0			; (negative) buffer length
+	BEQL	$VSSET				; nowt to do if nowt to output
+	MNEGL	R0,R0				; make positive
+	ASHL	#-1,R0,VI.LEN1			; convert to word count
+
+10$:	TSTB	VSENBL			; enabled ?
+	BEQL	$VSSET			; no - don't output
+	$QIOW_G	VI.DPB			; send data buffer
+	BBS	#VFLG_V_XA,VSFLAG,20$
+	CMPV	#SGERRPS,#SGERRSZ,VSSTATUS+4,#SGERR
+	BEQL	ERRVS			; report (unspecified) error
+	BRB	$VSSET
+20$: 	BLBC	VSSTATUS,ERRVS		; test IOSB for XA device
+ 
+ERRVS::	EXTZV	#12,#4,VSSTATUS+4,VSERR
+	MOVL	#SS$_DEVREQERR,R0
+ 
+VSERRSIG::PUSHL	R0
+	CALLS	#1,G^LIB$SIGNAL
+	RSB
+ 
+	.END

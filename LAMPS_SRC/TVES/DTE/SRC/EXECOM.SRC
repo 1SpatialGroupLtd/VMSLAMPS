@@ -1,0 +1,763 @@
+	SUBROUTINE EXECOM(CMD,FROM)
+C
+***	IDENT	17FE87
+***	MODULE	EXECOM
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C
+C	Author	  : Andrew Morris
+C	Created   : Nov 1984
+C
+CMOD	Change col tab logical to LSL$LOOKUP   MWSR 17-Feb-1987
+CMOD	Reset colour table before LIMITS	ATT  7-Oct-1986
+CMOD	Bug in VT command fixed			ATT 14-Aug-1986
+CMOD	Trackerball and Function button command input added
+C	with FLOOD, LUT and VT commands.	ATT July-1986
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/HERE:DTEPAR/
+C
+***	COMMON/LSL$CMNVIO:TXTC/		! command line decoding
+***	COMMON/LSL$CMNVIO:EXPC/		! has EXPDSC
+***	COMMON/HERE:DTECMN/		! has FIRST_HGT, etc.
+***	COMMON/LSL$CMNVIO:CMDCOM/	! CMDICT etc
+***	COMMON/HERE:TAB/		! has ERR
+***	COMMON/HERE:TRANS/		! has TAB_TO_DTI
+C
+C parameters in
+	INTEGER		CMD		! command number
+	INTEGER		FROM		! command source number
+C
+C workspace
+	INTEGER		X_DTI,Y_DTI	! DTI element coords
+	INTEGER		HGT,HGT1,HGT2	! DTI height
+	INTEGER		PTR		! TXTBUF pointer
+	INTEGER		POLY(2,MAXPTS)	! a polygon
+	INTEGER		PATH1(2,MAXPTS)	! a path
+	INTEGER		PATH2(2,MAXPTS)	! another path
+	INTEGER		NPTS		! No. of pnts in polygon
+	INTEGER		NPTS1,NPTS2	! No. of pnts in path
+	INTEGER		NSTEPS		! No. of vizible hgt steps
+	INTEGER		DTI_STEP	! arg for CONTOR subr.
+	INTEGER		HGT_STEP	! arg for CONTOR subr.
+	INTEGER		I,I1,I2,I3,I4	! working integers
+	INTEGER		PIX(2,MAXPTS)	! to pass to PATH_EDIT
+	INTEGER		N_EDITS		! to pass to PATH_EDIT
+	INTEGER		IWAIT		! wait interval for flooding
+C
+	REAL		R1,R2,R3,R4	! working reals
+	REAL		WAIT_TIM	! wait interval for flooding
+C
+	LOGICAL		EOLN		! end of line?
+	LOGICAL		RESET		! Reset LUT ?
+	LOGICAL		GOT1,GOT2	! got 1 or 2 arguments?
+	LOGICAL		NEWHGT1,NEWHGT2	! give interp paths new height?
+	LOGICAL		EDGE(NX_PIXELS)	! array for POLY_EDIT
+	LOGICAL		ONN(NX_PIXELS)	! "
+	LOGICAL		OFF(NX_PIXELS)	! "
+	LOGICAL		FLOOD_INI	! is it the first time 
+C					! round for flooding ?
+C
+	CHARACTER*80	LUTNAM		! LUT filename
+C
+	BYTE		CH		! a character
+C
+C functions
+	INTEGER		GET_DTI_COORDS	! get DTI point
+	INTEGER		READ_DTI_COORDS	! read DTI point
+	INTEGER		GET_INT		! get integer
+C
+	LOGICAL		RDCHS		! not end of command line?
+	LOGICAL 	GET_POLY	! get area to edit
+	LOGICAL		FIND_HGT_RANGE
+C
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C Obtains any arguments for and executes command number CMD from input
+C source FROM (keyboard,menu,trackerball,function  or cursor buttons), 
+C if possible. 
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C
+C HELP
+	IF (CMD.EQ.CMD_HELP) THEN
+	  CALL HELP
+C FILE
+	ELSE IF (CMD.EQ.CMD_FILE) THEN
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('FILE',BOT_LIN,6,0)
+	  IF (FILE_SET) CALL DTE_EXIT(.FALSE.)
+	  CALL FILE
+C MENUSET
+	ELSE IF (CMD.EQ.CMD_MENU) THEN
+	  IF (.NOT.HAD_TABLE) THEN
+	    CALL EXPAND
+     +	    ('%SCommand invalid no table available',BELL)
+	    CALL DTEMSG(EXPDSC)
+	    GOTO 140
+	  ENDIF
+C
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	  ('MENUSET',BOT_LIN,6,0)
+	  CALL SET_MENU
+C MAPSET
+	ELSE IF (CMD.EQ.CMD_MAP) THEN
+	  IF (.NOT.HAD_TABLE) THEN
+	    CALL EXPAND
+     +	    ('%SCommand invalid no table available',BELL)
+	    CALL DTEMSG(EXPDSC)
+	    GOTO 140
+	  ENDIF
+C
+	  IF (.NOT.FILE_SET) GOTO 120		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	  ('MAPSET',BOT_LIN,6,0)
+	  CALL SET_MAP
+C ENLARGE
+	ELSE IF (CMD.EQ.CMD_ENLARGE) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	  ('ENLARGE',BOT_LIN,6,0)
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  CALL MAGNIFY(.TRUE.,.FALSE.)
+C REDUCE
+	ELSE IF (CMD.EQ.CMD_REDUCE) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	  ('REDUCE',BOT_LIN,6,0)
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  CALL MAGNIFY(.FALSE.,.FALSE.)
+C END
+	ELSE IF (CMD.EQ.CMD_END) THEN
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('END',BOT_LIN,6,0)
+C BARCHART
+	ELSE IF (CMD.EQ.CMD_BAR_CHART) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.EQ.KEYBOARD) THEN
+29	    IF (CMDNEG) THEN
+	      CALL SETPIX(%VAL(FIRST_HGT))	 ! clear bar-chart
+	    ELSE
+	      CALL FIND_HGT_RANGE(%VAL(FIRST_HGT),.FALSE.)
+	      CALL BARCHART(%VAL(FIRST_HGT))
+	    END IF
+	  ELSE					!FROM.NE.KEYBOARD
+	    IF (BAR_CHART) THEN
+	      CALL LIB$PUT_SCREEN('-BARCHART',BOT_LIN,6,0)
+	    ELSE
+	      CALL LIB$PUT_SCREEN('BARCHART',BOT_LIN,6,0)
+	    END IF
+	    CMDNEG = BAR_CHART			! flip/flop
+	    GOTO 29				! as from keyboard
+	  END IF
+	  CALL VSGEN
+C VT100
+	ELSE IF (CMD.EQ.CMD_VT) THEN
+C
+	  IF (.NOT.HAD_ALPHA) THEN		    ! Invalid command if
+	    CALL WRITEF('%S Invalid command ',BELL) ! LSL$VSALPHA isn't
+	    GOTO 140				    ! set up.
+	  ENDIF
+C
+	  IF (CMDNEG) THEN
+	    CALL SIGINIT		! initialise SIGMA alpha plane
+	    VT = .FALSE.
+	  ELSE
+	    CALL SIGCLO			! close SIGMA alpha plane
+	    VT = .TRUE.
+	  ENDIF
+C LUT
+	ELSE IF (CMD.EQ.CMD_LUT) THEN
+	  RESET = .FALSE.
+	  CALL LUTSET(LUTNAM,RESET)
+C ABANDON
+	ELSE IF (CMD.EQ.CMD_ABANDON) THEN
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	    ('ABANDON command ignored',BOT_LIN,6,0)
+C EXIT
+	ELSE IF (CMD.EQ.CMD_EXIT) THEN
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('EXIT',BOT_LIN,6,0)
+	  CALL DTE_EXIT(.TRUE.)
+C STEP
+	ELSE IF (CMD.EQ.CMD_STEP) THEN
+	  IF (.NOT.FILE_SET) GOTO 120		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('STEP',BOT_LIN,6,0)
+	  IF (FROM.EQ.KEYBOARD.AND.CMDICT.GE.1) THEN
+	    HGT = INTARG(1)
+	    GOTO 60
+	  END IF
+50	  IERR = GET_INT(HGT,'Step height')
+	  IF (IERR.EQ.1) GOTO 140	! abandon?
+	  IF (IERR.LT.0) GOTO 50
+60	  IF (HGT.LE.0) THEN
+	    CALL EXPAND('%SStep <= 0 illegal',BELL)
+	    CALL DTEMSG(EXPDSC)
+	    GOTO 50
+	  END IF
+	  STEP_HGT = HGT
+	  CALL WRTINT(STEP_HGT,9,COL4)	! show on VDU
+	  CALL REDRAW
+C COLOURS
+	ELSE IF (CMD.EQ.CMD_COLS) THEN
+	  IF (.NOT.FILE_SET) GOTO 120		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	  ('COLOURS',BOT_LIN,6,0)
+	  IF (FROM.EQ.KEYBOARD.AND.CMDICT.GE.1) THEN
+	    NSTEPS = INTARG(1)
+	    GOTO 65
+	  END IF
+55	  IERR = GET_INT(NSTEPS,'Number of colours')
+	  IF (IERR.LT.0) GOTO 55
+	  IF (IERR.EQ.1) GOTO 140	! abandon?
+65	  IF (NSTEPS.LE.0.OR.NSTEPS.GT.NCOLS-1-ICOL_SEA) THEN
+	    CALL EXPAND('%SNumber must be > 0 and <= %N',
+     +	      BELL,NCOLS-1-ICOL_SEA)
+	    CALL DTEMSG(EXPDSC)
+	    GOTO 55
+	  END IF
+	  STEP_HGT = (TOP_VIZ-MAX0(0,BOT_VIZ)-1)/NSTEPS+1
+	  IF (STEP_HGT.LT.1) STEP_HGT = 1
+	  CALL WRTINT(STEP_HGT,9,COL4)	! show on VDU
+	  CALL REDRAW
+C MODTEN
+	ELSE IF (CMD.EQ.CMD_MODTEN) THEN
+	  IF (.NOT.FILE_SET) GOTO 120		! complain
+	  IF (FROM.EQ.KEYBOARD) THEN
+	    GOT_MODTEN = .NOT.CMDNEG
+	  ELSE
+	    GOT_MODTEN = .NOT.GOT_MODTEN
+	    IF (GOT_MODTEN) THEN
+	      CALL LIB$PUT_SCREEN('MODTEN',BOT_LIN,6,0)
+	    ELSE
+	      CALL LIB$PUT_SCREEN('-MODTEN',BOT_LIN,6,0)
+	    END IF
+	  END IF
+	  IF (GOT_MODTEN) THEN
+	    CALL VSRDSC('LSL$LOOKUP:DTESHADES.DAT')
+	    CALL SETPIXMOD(%VAL(FIRST_HGT))
+	  ELSE
+	    CALL VSRDSC('LSL$LOOKUP:DTECOL.DAT')
+	    CALL REDRAW
+	  END IF
+C MOVE
+	ELSE IF (CMD.EQ.CMD_MOVE) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.EQ.MENU) CALL LIB$PUT_SCREEN('MOVE',BOT_LIN,6,0)
+C
+	  IF (FROM.EQ.KEYBOARD) THEN
+	    IF (CMDICT.GE.2) THEN
+	      X_DTI = INTARG(1)
+	      Y_DTI = INTARG(2)
+	      IERR = 0
+	    ELSE
+	      IERR = -1
+	    END IF
+	  ELSE IF (FROM.EQ.MENU) THEN
+	    IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'Move to',.FALSE.)
+C
+	  ELSE IF (FROM.EQ.CURSOR_BUT) THEN
+	    IF (MAP_SET) THEN
+	      R1 = X_TAB
+	      R2 = Y_TAB
+	      CALL TRANSF(TAB_TO_DTI,R1,R2,R3,R4)
+	      X_DTI = R3
+	      Y_DTI = R4
+	      IERR = 0
+	      CALL EXPAND('MOVE %N %N',X_DTI,Y_DTI)
+	      CALL LIB$PUT_SCREEN(EXPDSC,BOT_LIN,6,0)
+	    ELSE	! map not setup so point must come from keyboard
+	      IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'Move to',.FALSE.)
+	    END IF
+	  ELSE IF (FROM.EQ.TRACKERBALL) THEN
+	    X_DTI = XCUR
+	    Y_DTI = YCUR
+	    IERR = 0
+	    CALL EXPAND('MOVE %N %N',X_DTI,Y_DTI)
+	    CALL LIB$PUT_SCREEN(EXPDSC,BOT_LIN,6,0)
+	  END IF
+C
+80	  IF (IERR.EQ.1) GOTO 140		! abandon?
+	  IF (IERR.LT.0) THEN
+	    IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'Move to',.FALSE.)
+	    GOTO 80
+	  END IF
+C
+	  IF (X_DTI.LT.XMIN_DTI.OR.X_DTI.GT.XMAX_DTI.OR.
+     +	      Y_DTI.LT.YMIN_DTI.OR.Y_DTI.GT.YMAX_DTI) THEN
+	    CALL EXPAND('%SDTI coord(s) out of range (%N:%N,%N:%N)',
+     +	      BELL,XMIN_DTI,XMAX_DTI,YMIN_DTI,YMAX_DTI)
+	    CALL DTEMSG(EXPDSC)
+	  ELSE
+	    IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clr bar-chart
+	    CALL SIGCSWT(X_DTI,Y_DTI,.FALSE.)
+	  END IF
+C
+C CENTRE
+	ELSE IF (CMD.EQ.CMD_CENTRE) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.EQ.MENU) CALL LIB$PUT_SCREEN('CENTRE',BOT_LIN,6,0)
+	  IF (FROM.EQ.KEYBOARD) THEN
+	    IF (CMDICT.GE.2) THEN
+	      X_DTI = INTARG(1)
+	      Y_DTI = INTARG(2)
+	      IERR = 0
+	    ELSE
+	      IERR = -1
+	    END IF
+	  ELSE IF (FROM.EQ.MENU) THEN
+	    IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'Centre at',.FALSE.)
+	  ELSE IF (FROM.EQ.CURSOR_BUT) THEN
+	    IF (MAP_SET) THEN
+	      R1 = X_TAB
+	      R2 = Y_TAB
+	      CALL TRANSF(TAB_TO_DTI,R1,R2,R3,R4)
+	      X_DTI = R3
+	      Y_DTI = R4
+	      IERR = 0
+	      CALL EXPAND('CENTRE %N %N',X_DTI,Y_DTI)
+	      CALL LIB$PUT_SCREEN(EXPDSC,BOT_LIN,6,0)
+	    ELSE	! map not setup so point must come from keyboard
+	      IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'Centre at',.FALSE.)
+	    END IF
+	  ELSE IF (FROM.EQ.FUNCTION_BUT) THEN	! command from FB
+	    X_DTI = XCUR
+	    Y_DTI = YCUR
+	    IERR = 0
+	    CALL EXPAND('CENTRE %N %N',X_DTI,Y_DTI)
+	    CALL LIB$PUT_SCREEN(EXPDSC,BOT_LIN,6,0)
+	  END IF
+C
+82	  IF (IERR.EQ.1) GOTO 140		! abandon?
+	  IF (IERR.LT.0) THEN
+	    IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'Centre at',.FALSE.)
+	    GOTO 82
+	  END IF
+C
+	  IF (X_DTI.LT.XMIN_DTI.OR.X_DTI.GT.XMAX_DTI.OR.
+     +	      Y_DTI.LT.YMIN_DTI.OR.Y_DTI.GT.YMAX_DTI) THEN
+	    CALL EXPAND('%SDTI coord(s) out of range (%N:%N,%N:%N)',
+     +	      BELL,XMIN_DTI,XMAX_DTI,YMIN_DTI,YMAX_DTI)
+	    CALL DTEMSG(EXPDSC)
+	  ELSE
+	    IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT))! clear bar-chart
+	    CALL SIGCSWT(X_DTI,Y_DTI,.TRUE.)
+	  END IF
+C RIGHT
+	ELSE IF (CMD.EQ.CMD_RIGHT) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('RIGHT',BOT_LIN,6,0)
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  IF (XCUR.LT.XMAX_DTI) THEN
+	    CALL SIGCSWT(XCUR+1,YCUR,.FALSE.)
+	  ELSE
+	    CALL EXPAND('%SCan''t step off DTI limits',BELL)
+	    CALL DTEMSG(EXPDSC)
+	  END IF
+C LEFT
+	ELSE IF (CMD.EQ.CMD_LEFT) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('LEFT',BOT_LIN,6,0)
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  IF (XCUR.GT.XMIN_DTI) THEN
+	    CALL SIGCSWT(XCUR-1,YCUR,.FALSE.)
+	  ELSE
+	    CALL EXPAND('%SCan''t step off DTI limits',BELL)
+	    CALL DTEMSG(EXPDSC)
+	  END IF
+C UP
+	ELSE IF (CMD.EQ.CMD_UP) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('UP',BOT_LIN,6,0)
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  IF (YCUR.LT.YMAX_DTI) THEN
+	    CALL SIGCSWT(XCUR,YCUR+1,.FALSE.)
+	  ELSE
+	    CALL EXPAND('%SCan''t step off DTI limits',BELL)
+	    CALL DTEMSG(EXPDSC)
+	  END IF
+C DOWN
+	ELSE IF (CMD.EQ.CMD_DOWN) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('DOWN',BOT_LIN,6,0)
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  IF (YCUR.GT.YMIN_DTI) THEN
+	    CALL SIGCSWT(XCUR,YCUR-1,.FALSE.)
+	  ELSE
+	    CALL EXPAND('%SCan''t step off DTI limits',BELL)
+	    CALL DTEMSG(EXPDSC)
+	  END IF
+C LIMITS
+	ELSE IF (CMD.EQ.CMD_LIMITS) THEN
+	  IF (.NOT.FILE_SET) GOTO 120		! complain
+C
+	  IF (GOT_FLOOD) THEN
+	    LUTNAM = 'LSL$LOOKUP:DTECOL.DAT'	! reset LUT
+	    RESET = .TRUE.
+	    CALL LUTSET(LUTNAM,RESET)		! after flooding ?
+	    GOT_FLOOD = .FALSE.
+	  ENDIF
+C
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	  ('LIMITS',BOT_LIN,6,0)
+	  IF (FROM.EQ.KEYBOARD.AND.CMDICT.GE.1) THEN
+	    I1 = INTARG(1)
+	    IF (CMDICT.LT.2) GOTO 100
+	    I2 = INTARG(2)
+	    GOTO 110
+	  END IF
+C
+90	  IERR = GET_INT(I1,'Lower visible height limit')
+	  IF (IERR.LT.0) GOTO 90		! error?
+	  IF (IERR.GE.1) GOTO 140		! abandon?
+100	  IERR = GET_INT(I2,'Upper visible height limit')
+	  IF (IERR.LT.0) GOTO 90		! error?
+	  IF (IERR.GE.1) GOTO 140		! abandon?
+C
+110	  BOT_VIZ = MAX0(MIN_HGT,I1)
+	  TOP_VIZ = MIN0(MAX_HGT,I2)
+	  STEP_HGT = (TOP_VIZ-MAX0(0,BOT_VIZ)-1)/(NCOLS-1-ICOL_SEA)+1
+	  IF (STEP_HGT.LT.1) STEP_HGT = 1
+	  CALL WRTINT(STEP_HGT,9,COL4)		! show on VDU
+	  CALL WRTINT(BOT_VIZ,8,COL4)
+	  CALL WRTINT(TOP_VIZ,8,COL5)
+	  CALL REDRAW
+C FLOOD
+	ELSE IF (CMD.EQ.CMD_FLOOD) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  FLOOD_INI = .FALSE.			! first time or not ?
+C
+	  IF (FROM.EQ.MENU) THEN
+	    GOT_FLOOD = .NOT.GOT_FLOOD
+	    IF (GOT_FLOOD) THEN
+	      CALL LIB$PUT_SCREEN('FLOOD',BOT_LIN,6,0)
+	      FLOOD_INI = .TRUE.		! must be first time
+	    ELSE
+	      CALL LIB$PUT_SCREEN('-FLOOD',BOT_LIN,6,0)
+	    END IF
+C
+	  ELSE IF (FROM.EQ.KEYBOARD) THEN	! keyboard
+	    GOT_FLOOD = .NOT.CMDNEG
+	    IF (GOT_FLOOD) FLOOD_INI = .TRUE.	! must be first time
+C
+	    IF (CMDRCT.GE.1) THEN 
+	      WAIT_TIM = REALAR(1)	! find how long to wait
+	      GOTO 830
+	    ENDIF
+C
+	    IF (CMDRCT.EQ.0) THEN 	! no argument so assume zero
+	      WAIT_TIM = 0.0		! find how long to wait
+	      GOTO 840				
+	    ENDIF
+	  ELSE IF (FROM.EQ.TRACKERBALL.OR.FROM.EQ.CURSOR_BUT) THEN
+	      GOTO 840				
+	  ENDIF
+C
+	  IF (.NOT.GOT_FLOOD) GOTO 840	! Don't bother with arguments
+C
+820	  IERR = GET_INT(IWAIT,'Wait interval for flooding')
+	  IF (IERR.LT.0) GOTO 820
+	  IF (IERR.EQ.1) GOTO 140	! abandon?
+C
+	  WAIT_TIM = FLOAT(IWAIT)
+830	  IF (WAIT_TIM.LT.0.OR.WAIT_TIM.GT.10) THEN
+	    CALL EXPAND('%SNumber must be between 0 and 10',
+     +	      BELL)
+	    CALL DTEMSG(EXPDSC)
+	    GOTO 820
+	  END IF
+C
+C call the FLOOD subroutine passing where we got the command from
+C whether it's the first time and time to wait.
+840	  CALL FLOOD(FROM,FLOOD_INI,WAIT_TIM)
+C
+C RANGE
+	ELSE IF (CMD.EQ.CMD_RANGE) THEN
+	  IF (.NOT.FILE_SET) GOTO 120		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('RANGE',BOT_LIN,6,0)
+	  IF(FIND_HGT_RANGE(%VAL(FIRST_HGT),.TRUE.)) CALL REDRAW
+C EDIT
+	ELSE IF (CMD.EQ.CMD_EDIT) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN('EDIT',BOT_LIN,6,0)
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  IF (FROM.EQ.KEYBOARD) THEN
+	    IF (CMDICT.GE.2) THEN
+	      X_DTI = INTARG(1)
+	      Y_DTI = INTARG(2)
+	      IERR = 0
+	    ELSE
+	      IERR = -1
+	    END IF
+	  ELSE IF (FROM.EQ.MENU) THEN
+	    IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'DTI coords',.FALSE.)
+	  ELSE IF (FROM.EQ.CURSOR_BUT) THEN
+	    IF (MAP_SET) THEN
+	      R1 = X_TAB
+	      R2 = Y_TAB
+	      CALL TRANSF(TAB_TO_DTI,R1,R2,R3,R4)
+	      X_DTI = R3
+	      Y_DTI = R4
+	      IERR = 0
+C echo DTI coords from table
+	      WRITE(*,FMT='(1H+,A)')CHAR(7) ! aknowledge point accepted
+	      CALL EXPAND('EDIT %N %N',X_DTI,Y_DTI)
+	      CALL LIB$PUT_SCREEN(EXPDSC,BOT_LIN,6,0)
+C
+	    ELSE	! map not setup so point must come from keyboard
+	      IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'DTI coords',.FALSE.)
+	    END IF
+	  ELSE IF (FROM.EQ.FUNCTION_BUT) THEN	! command from FB
+	    X_DTI = XCUR			! assume we edit the
+	    Y_DTI = YCUR			! current cursor pos.
+	    IERR = 0
+	    CALL EXPAND('EDIT %N %N',X_DTI,Y_DTI)	! Say what we're
+	    CALL LIB$PUT_SCREEN(EXPDSC,BOT_LIN,6,0)	! doing
+C
+	  END IF
+C
+87	  IF (IERR.GT.0) GOTO 140	! abandon?
+	  IF (IERR.LT.0) THEN
+	    IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'DTI coords',.FALSE.)
+	    GOTO 87
+	  END IF
+C
+	  IF (X_DTI.LT.XMIN_DTI.OR.X_DTI.GT.XMAX_DTI.OR.
+     +	      Y_DTI.LT.YMIN_DTI.OR.Y_DTI.GT.YMAX_DTI) THEN
+	    CALL EXPAND
+     +	      ('%SDTI coord(s) out of range (%N:%N,%N:%N)',
+     +	      BELL,XMIN_DTI,XMAX_DTI,YMIN_DTI,YMAX_DTI)
+	    CALL DTEMSG(EXPDSC)
+	    GOTO 140				! abandon
+	  END IF
+C
+	  CALL SIGCSWT(X_DTI,Y_DTI,.FALSE.)	! move cursor to pt
+C
+	  IF (FROM.EQ.KEYBOARD.AND.CMDICT.GE.3) THEN
+	    HGT = INTARG(3)
+	    IF (IABS(HGT).GT.32767) THEN
+	      CALL EXPAND('%SAbs value must be <= 32767',BELL)
+	      CALL DTEMSG(EXPDSC)
+	    ELSE
+	      GOTO 88
+	    END IF
+	  END IF
+C
+85	  IERR = GET_INT(HGT,'DTI height')
+	  IF (IERR.LT.0) GOTO 85
+	  IF (IERR.GT.0) GOTO 140		! abandon?
+C
+88	  CALL EDIT_CELL(X_DTI,Y_DTI,HGT,%VAL(FIRST_HGT))
+	  CALL WRTINT(HGT,8,COL1) ! show new height
+	  CALL SHOW_HGT_RANGE()	! show possibly updated height limits
+C
+C POLYEDIT
+	ELSE IF (CMD.EQ.CMD_POLYEDIT) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  CALL VSTBOF
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	  ('POLYEDIT',BOT_LIN,6,0)
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  ERR = .NOT.GET_POLY(POLY,NPTS,FROM,.TRUE.)
+	  IF (.NOT.ERR) THEN
+	    IERR = GET_INT(HGT,'Height')
+	    IF (IERR.GT.0) THEN			! abandon?
+	      CALL VSDEF(2,1,6)			! scrub polygon outline
+	      CALL VSPIC(2)
+	      CALL VSCLR(2)
+	      CALL VSPIC(1)
+	      CALL VSTBON
+	      GOTO 140				! abandon
+	    END IF
+	    CALL POLY_EDIT(POLY,NPTS,HGT,.FALSE.,EDGE,ONN,OFF)
+	  END IF
+	  CALL VSCLR(2)				! clear polygon outline
+	  CALL SIGCSWT(XCUR,YCUR,.FALSE.)
+	  CALL SHOW_HGT_RANGE()	! show possibly updated height limits
+	  CALL VSTBON
+C PATHEDIT
+	ELSE IF (CMD.EQ.CMD_PATHEDIT) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  CALL VSTBOF
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	  ('PATHEDIT',BOT_LIN,6,0)
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  ERR = .NOT.GET_POLY(PATH1,NPTS,FROM,.FALSE.)
+	  IF (.NOT.ERR) THEN
+	    IERR = GET_INT(HGT,'Height')
+	    IF (IERR.GT.0) THEN			! abandon?
+	      CALL VSDEF(2,1,6)			! scrub path
+	      CALL VSPIC(2)
+	      CALL VSCLR(2)
+	      CALL VSPIC(1)
+	      CALL VSTBON
+	      GOTO 140				! abandon
+	    END IF
+	    CALL PATH_EDIT(PATH1,NPTS,HGT,.TRUE.,PIX,N_EDITS)
+	  END IF
+	  CALL VSCLR(2)				! clear path outline
+	  CALL SIGCSWT(XCUR,YCUR,.FALSE.)
+	  CALL SHOW_HGT_RANGE()	! show possibly updated height limits
+	  CALL VSTBON
+C INTERPEDIT
+	ELSE IF (CMD.EQ.CMD_INTERPEDIT) THEN
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  CALL VSTBOF
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	  ('INTERPEDIT',BOT_LIN,6,0)
+C
+C get first path and height
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  ERR = .NOT.GET_POLY(PATH1,NPTS1,FROM,.FALSE.)
+	  IF (ERR) GOTO 99
+96	  IERR = GET_INT(HGT1,'Height')
+	  IF (IERR.EQ.-1) GOTO 96
+	  NEWHGT1 = IERR.EQ.0
+	  IF (IERR.EQ.1) GOTO 98		! abandon?
+C
+C get second path and height
+	  IF (BAR_CHART) CALL SETPIX(%VAL(FIRST_HGT)) ! clear bar-chart
+	  ERR = .NOT.GET_POLY(PATH2,NPTS2,FROM,.FALSE.)
+	  IF (ERR) GOTO 99
+97	  IERR = GET_INT(HGT2,'Height')
+	  IF (IERR.EQ.-1) GOTO 97
+	  NEWHGT2 = IERR.EQ.0
+	  IF (IERR.EQ.1) GOTO 98		! abandon?
+C
+C do the edit
+	  CALL INTERP_EDIT(PATH1,NPTS1,HGT1,NEWHGT1,
+     +	                   PATH2,NPTS2,HGT2,NEWHGT2)
+	  GOTO 99
+C
+C clear outline and abandon
+98	  CALL VSDEF(2,1,6)
+	  CALL VSPIC(2)
+	  CALL VSCLR(2)
+	  CALL VSPIC(1)
+	  CALL VSTBON
+	  GOTO 140
+C
+99	  CALL VSCLR(2)				! clear polygon outline
+	  CALL SIGCSWT(XCUR,YCUR,.FALSE.)
+	  CALL SHOW_HGT_RANGE()	! show possibly updated height limits
+	  CALL VSTBON
+C TEKTRONIX
+	ELSE IF (CMD.EQ.CMD_TEK) THEN
+	  IF (FROM.EQ.KEYBOARD) THEN
+	    GOT_TEK = .NOT.CMDNEG
+	  ELSE
+	    GOT_TEK = .NOT.GOT_TEK
+	    IF (GOT_TEK) THEN
+	      CALL LIB$PUT_SCREEN('TEKTRONIX',BOT_LIN,6,0)
+	    ELSE
+	      CALL LIB$PUT_SCREEN('-TEKTRONIX',BOT_LIN,6,0)
+	    END IF
+	  END IF
+	  IF (GOT_TEK.AND..NOT.GOT_BORDER) CALL BORDER
+C CONTOURWINDOW
+	ELSE IF (CMD.EQ.CMD_CONWIN) THEN
+	  IF (.NOT.FILE_SET) GOTO 120		! complain
+	  IF (.NOT.WINDOW_SET) GOTO 125		! complain
+	  CALL VSTBOF
+	  LIM_CON = .TRUE.
+	  IF (FROM.NE.KEYBOARD)
+     +	    CALL LIB$PUT_SCREEN('CONTOURWINDOW',BOT_LIN,6,0)
+	  GOTO 114
+C CONTOURMAP
+	ELSE IF (CMD.EQ.CMD_CONMAP) THEN
+	  IF (.NOT.FILE_SET) GOTO 120		! complain
+	  CALL VSTBOF
+	  LIM_CON = .FALSE.
+	  IF (FROM.NE.KEYBOARD)
+     +	    CALL LIB$PUT_SCREEN('CONTOURMAP',BOT_LIN,6,0)
+C
+114	  IF (.NOT.GOT_TEK) THEN
+	    CALL EXPAND('%STektronix not availaible',BELL)
+	    CALL DTEMSG(EXPDSC)
+	    CALL VSTBON
+	    GOTO 140				! return
+	  END IF
+C
+	  GOT1 = .FALSE.
+	  GOT2 = .FALSE.
+	  IF (FROM.EQ.KEYBOARD) THEN
+	    IF (CMDICT.GE.1) THEN
+	      DTI_STEP = INTARG(1)
+	      GOT1 = .TRUE.
+	      IF (CMDICT.GE.2) THEN
+	        HGT_STEP = INTARG(2)
+	        GOT2 = .TRUE.
+	      END IF
+	    END IF
+	  END IF
+C
+	  IF (.NOT.GOT1) THEN
+115	    IERR = GET_INT(DTI_STEP,'DTI step')
+	    IF (IERR.LT.0) GOTO 115		! error?
+	    IF (IERR.EQ.1) THEN
+	      CALL VSTBON
+	      GOTO 140		! abandon?
+	    END IF
+	  END IF
+C
+	  IF (.NOT.GOT2) THEN
+116	    IERR = GET_INT(HGT_STEP,'Height step')
+	    IF (IERR.LT.0) GOTO 116		! error?
+	    IF (IERR.EQ.1) THEN
+	      CALL VSTBON
+	      GOTO 140		! abandon?
+	    END IF
+	  END IF
+C
+	  CALL CONTOR(DTI_STEP,HGT_STEP,%VAL(FIRST_HGT))
+	  CALL VSTBON
+C WINDOW
+	ELSE IF (CMD.EQ.CMD_WINDOW) THEN
+	  IF (FROM.NE.KEYBOARD) CALL LIB$PUT_SCREEN
+     +	    ('WINDOW',BOT_LIN,6,0)
+	  IF (.NOT.FILE_SET) GOTO 120		! complain
+	  IF (GOT_FLOOD) GOT_FLOOD = .FALSE.
+C
+	  ERR = .TRUE.
+	  IF (FROM.EQ.KEYBOARD.AND.CMDICT.GE.4) THEN
+	    I1 = INTARG(1)
+	    I2 = INTARG(2)
+	    I3 = INTARG(3)
+	    I4 = INTARG(4)
+	    ERR = I1.LT.1.OR.I2.LT.1
+	    IF (.NOT.ERR) ERR = I3.GT.NX_DTI.OR.I4.GT.NY_DTI
+	    IF (.NOT.ERR) THEN
+	      XMIN_DTI = I1
+	      YMIN_DTI = I2
+	      XMAX_DTI = I3
+	      YMAX_DTI = I4
+	    ELSE
+	      CALL EXPAND('%SDTI coord(s) out of range (1:%N,1:%N)',
+     +	       BELL, NX_DTI,NY_DTI)
+	      CALL DTEMSG(EXPDSC)
+	    END IF	      
+	  END IF
+C
+	  CALL SET_WINDOW(.NOT.ERR)
+C
+	END IF
+	GOTO 130
+C
+120	CALL EXPAND
+     +	 ('%SThis command is invalid before DTI file is defined',BELL)
+	CALL DTEMSG(EXPDSC)
+	GOTO 130
+C
+125	CALL EXPAND
+     +	 ('%SThis command is invalid before map window is defined',BELL)
+	CALL DTEMSG(EXPDSC)
+C
+C if from keyboard, warn about any chacters beyond end of command line
+130	IF (CMD.EQ.CMD_FILE) GOTO 140
+	IF (FROM.EQ.KEYBOARD) THEN
+	  CALL DCPSAV(PTR)
+	  EOLN = RDCHS(CH)
+	  IF (.NOT.EOLN.AND.CH.NE.13) THEN
+	    IF (TXTPTR.LT.80) TXTBUF(TXTPTR+1) = 0
+	    CALL EXPAND('%SUnexpected ''%A''',BELL,TXTBUF(PTR))
+	    CALL DTEMSG(EXPDSC)
+	  END IF
+	END IF
+C 
+140	END

@@ -1,0 +1,115 @@
+	.TITLE GETCML
+	.IDENT /26SP79/
+	.ENABL LC
+
+;
+; Written by Martin Fulford, adapted by Paul Hardy
+;
+; Fortran interface to GCML$ mechanism.
+;
+; mcr = GETCML (BUF, IDS, [PROMPT], [LUN] )
+;
+;	BUF	byte array of length at least 82. bytes.
+;	IDS	directive status:
+;		    +n -- successful transfer of n bytes.
+;		     0 -- blank line
+;		    <0 -- error code (n.b. EOF is -10.)
+;	PROMPT	prompt string in .ASCIZ format
+;		If PROMPT is ommitted, then a prompt is constructed
+;		from the task's name.
+;	LUN	unit number to use, defaults to 5
+;
+; 	result	is negative if the line returned was the MCR line
+
+; library macros
+	.MCALL	GCML$, GCMLB$, GTSK$S
+
+; offset in GCL block
+G.CDEP=G.ERR+12
+
+; data
+	.EVEN
+CC:	.BYTE	15,12		; carriage return line feed
+PROMPT:	.BLKB	80.		; space for prompt string
+BUFFER:	.BLKW  41.		; storage for returned string
+IDS:	.WORD	-1		; argument address
+FIVE:	.WORD	5		; default LUN
+
+GCLBLK:	GCMLB$  2,,BUFFER,5
+
+; we use LUN 5 & allow 1 level of indirection.
+
+GETCML::MOV	#GCLBLK,R0
+	MOV	#"TI,F.FNB+N.DVNM(R0) ; force FNB to TI:
+	MOV	F.DFNB(R0),R1
+	MOV	#"TI,N.DVNM(R1)	; also default FNB
+	MOVB	G.MODE(R0),-(SP) ; save "GE.MCR" status
+	MOV  #-1, R3
+	MOV  #FIVE, R4
+	CALL LI$ARG
+	MOV  R2, IDS
+	MOV  @R4, GCLBLK+F.LUN
+	CMP  R3, #-1			; PROMPT given ?
+	BEQ  20$			; j if null 3rd. arg
+	MOV	#1,R1			; length of string
+	MOV	#PROMPT,R2		; destination of prompt string
+1$:	INC	R1			; count the chars
+	MOVB	(R3)+,(R2)+		; copy a char
+	BNE	1$			; stop on null
+	GCML$	#GCLBLK,#CC,R1		; get a line
+	BR	27$			; see what we got
+
+; No prompt given - make one up
+20$:	GTSK$S #BUFFER
+	MOV  BUFFER+G.TSTN+2, R0	; use 2nd. half
+	BNE  22$			; ... unless it is null ...
+	MOV  BUFFER+G.TSTN  , R0	; ... when we use 1st half
+22$:	MOV  #3, R2
+	MOV  R2, R4
+	MOV  #BUFFER+G.TSTN+10, R3	; spare space
+	CLRB @R3
+23$:	MOV  R0, R1			; generate ASCII from RAD50
+	CLR  R0
+	DIV  #50, R0
+	TST  R1
+	BEQ  25$			; skip spaces
+	CMP  R1, #33
+	BLT  24$
+	ADD  #'0-36-'@, R1
+24$:	ADD  #'@, R1
+	MOVB R1, -(R3)
+25$:	SOB  R4, 23$
+5$:	MOV  #GCLBLK+G.DPRM+2, R1	; fill in prompt string
+7$:	TSTB @R3
+	BEQ  10$			; j if end of string
+	MOVB (R3)+, (R1)+
+	BR   15$
+10$:	MOVB #' , (R1)+			; pad with spaces
+15$:	SOB  R2, 7$
+; get the line
+	GCML$ #GCLBLK
+; see what happened
+27$:	BCC  30$			; GCML$ sets C-bit if error
+; some sort of error
+	MOVB G.ERR(R0), R1
+	BR   40$
+; transfer line
+30$:	MOV  G.CMLD  (R0), R1		; length
+	BEQ  40$			; j if null line
+	MOV  G.CMLD+2(R0), R2		; address
+	MOV  R1, R3
+	MOV  2(R5), R4
+35$:	MOVB (R2)+, (R4)+
+	SOB  R3, 35$
+; deal with GCML nastiness at end-of-file
+40$:	TSTB	(SP)+
+	BPL	45$		; j if not "GE.MCR"
+	CMP	R1,#GE.EOF
+	BNE	45$		; or if not EOF
+	INCB	G.CDEP(R0)	; pretend top level is the terminal
+45$:	MOV  R1, @IDS			; byte count or error code
+	MOVB G.MODE(R0),R0		; negative if from MCR
+	RTS  PC
+
+
+	.END

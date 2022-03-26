@@ -1,0 +1,692 @@
+	SUBROUTINE	DISP_RAS_WARP(WKID,OW)
+C
+***	MODULE	DISP_RAS_WARP
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	October-1994
+C
+C To draw warped raster backdrop
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:STDBFC/
+C
+C arguments
+	INTEGER	WKID,OW
+C
+C This is a jacket routine, that calls the routine that does the work
+C passing it some working space
+C
+	CALL DISP_RAS_WARP_SUB(WKID,OW,DTI_BMAX,%VAL(DTIB_ADDR))
+C
+	RETURN
+	END
+C
+C
+	SUBROUTINE	DISP_RAS_WARP_SUB(WKID,OW,DTI_BMAX,DTIB)
+C
+***	MODULE	DISP_RAS_WARP_SUB
+***	IDENT	24OC94
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	October-1994
+C
+C To draw a warped raster backdrop
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:TRNTYP/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:LSRLIB/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:PLOT/
+***	COMMON/CMN:SETUP/
+***	COMMON/CMN:WORKS/
+C
+C arguments
+	INTEGER	WKID,OW		! draw on WKID, use overlays of OW
+	INTEGER	        DTI_BMAX
+	BYTE		DTIB(DTI_BMAX)
+C
+C functions
+	LOGICAL	HADBREAK
+	INTEGER	DISP_RAS_WARP_PAR
+	INTEGER	CALLR
+C
+C workspace
+	REAL	FAC
+	REAL	PSIZX,PSIZY
+	INTEGER	IPX,IPY
+	REAL	WX,WY,PX,PY,X,Y
+	REAL	DELTAX,DELTAY
+	INTEGER	DTYPE
+	INTEGER	NX,NY
+	INTEGER	LPIX(2)
+	INTEGER	XSIGN,DIR
+	REAL	STEP(2),INC(2)
+	INTEGER	NSCAN,NPIX,SCANS,NBYTE
+	INTEGER	ISCAN
+	INTEGER	OFF(2)
+	INTEGER	P_OFFSET
+	INTEGER	P_STEP(2)
+	INTEGER	DATA_ADDR
+	INTEGER	I,TEMP
+	INTEGER	IM,OV
+	INTEGER*4 IBITL,IDIVL,MASKL
+	INTEGER		RET,ERR
+	REAL		ORIGIN(2)
+	INTEGER*4	TRAC,PREG
+	REAL*8		DX(2),DY(2)
+	INTEGER*4	BLOC
+	INTEGER		NUMPIX(2)
+	REAL*8		POINT_TOL,MBR_TOL
+	REAL*8		A(2),D(2)
+C
+C mapping WINDOW onto workstation viewport i.e.
+C either VIEW(1) = WKVSWX(OW)*SCRSZX(OW) etc. or PLOT_VIEW,
+C so bottom left pixel of screen is at b/l of WINDOW.
+C
+C conversion factor - device metres to world (beware WKID if plotting)
+	FAC = MAX( (WINDOW(2)-WINDOW(1))/SCRNSX(WKID),
+     &		   (WINDOW(4)-WINDOW(3))/SCRNSY(WKID) )
+C
+C get device pixel sizes
+	PSIZX = SCRSZX(WKID)/RASTSX(WKID)
+	PSIZY = SCRSZY(WKID)/RASTSY(WKID)
+C
+C get pixel number at b/l of viewport (0 is bl of screen)
+	IPX = RASTSX(WKID)*WKVSWX(WKID)
+	IPY = RASTSY(WKID)*WKVSWY(WKID)
+C
+C world position of this pixel (centre)
+	WX = ((IPX+0.5)*PSIZX-WKVSWX(WKID)*SCRSZX(WKID))*FAC + WINDOW(1)
+	WY = ((IPY+0.5)*PSIZY-WKVSWY(WKID)*SCRSZY(WKID))*FAC + WINDOW(3)
+C
+C convert pixel sizes to world
+	PSIZX = PSIZX*FAC
+	PSIZY = PSIZY*FAC
+C
+C number of pixels we are plotting in each direction
+	NX = (WINDOW(2)-WINDOW(1))/PSIZX + 1
+	NY = (WINDOW(4)-WINDOW(3))/PSIZY + 1
+C
+C Work out which image we are interested in
+C Can only do one - lowest number in lowest overlay for now
+	DO 10 OV=1,MAXOVER
+	 DO 10 IM=1,MAXIMAGE
+	   IF (IMAGE_TYPE(IM).EQ.0) GOTO 1000	! doesn't exist
+	   IF (.NOT.O_IMSEL(IM,OV)) GOTO 1000	! not selected
+	   IF (IMAGE_NUMBER(IM).EQ.0) GOTO 1000	! no bits
+	   GOTO 20
+10	CONTINUE
+	GOTO 1000
+C
+20	CONTINUE
+C
+C save pixel size of image for use elsewhere
+	PIXELSIZE(1) = IMAGE_PIXELSIZE(1,IM)
+	PIXELSIZE(2) = IMAGE_PIXELSIZE(2,IM)
+C
+	MASKL = 0
+	CALL LIB$INSV(-1,
+     &		OVERLAY_OFFSET(OV,OW),
+     &		MIN(OVERLAY_PLANES(OV,OW),IMAGE_NUMBER(IM)),
+     &		MASKL)
+	CALL LSG_PLANE_SELECT(WKID,MASKL)
+	CALL LSG_PLANE_OFFSET(WKID,
+     &		OVERLAY_OFFSET(OV,OW)-IMAGE_BASE(IM))
+C
+C NB not cleared area as we do in DISP_RAS - maybe don't need as long
+C as draw into all planes of overlay. Check DISP_RAS
+C NB CLASSIFY not supported either (would make too slow)
+C
+	IF (IMAGE_TYPE(IM).EQ.TYPE_LSI) GOTO 1000	! can't do LSI
+	IF (IMAGE_TYPE(IM).EQ.TYPE_LSR) GOTO 700	! deal with LSR
+C
+C deal with DTI file - projective not supported at present because
+C it cannot be done by the optimised macro routine - would have to
+C call the transform function for every point.
+	IF (SET_TRANSFORM.EQ.TRNTYP_PROJECTIVE) THEN
+	   CALL MOAN(MSG_STRING,
+     &		'Projective transformation of DTI image not supported')
+	   GOTO 1000
+	ENDIF
+C
+C Set up drawing direction
+	DIR = 1
+	IF (IMAGE_DIRECTION(IM).EQ.DTI_ORDER_CLOCKWISE) DIR = -1
+	INC(1) = 0.0
+	INC(2) = 0.0
+	STEP(1) = 0.0
+	STEP(2) = 0.0
+	OFF(1) = 0
+	OFF(2) = 0
+	GOTO (300,320,340,360),IMAGE_CORNER(IM)+1	! SW,NW,NW,SE
+C
+C Get a pixel offset of BL corner relative to start of data (P_OFFSET)
+C OFF(2) are primary and secondary offset multipliers used to
+C compute P_OFFSET.
+C P_STEP(2) are pixel steps in image for a one pixel move in X/Y
+C INC(2) is world movement along scanline
+C STEP(2) is world movement between scanlines
+C
+C First pixel in SW corner
+300	XSIGN = 1
+	IF (DIR.GT.0) THEN
+	   INC(1) = PSIZX
+	   STEP(2) = PSIZY
+	ELSE
+	   INC(2) = PSIZY
+	   STEP(1) = PSIZX
+	ENDIF
+	IF (DIR.GT.0) GOTO 370
+	GOTO 350
+C
+C First pixel in NW corner
+320	WY = WY + NY*PSIZY
+	IF (DIR.GT.0) THEN
+	   OFF(2) = 1
+	   INC(2) = -PSIZY
+	   STEP(1) = PSIZX
+	   XSIGN = -1
+	ELSE
+	   OFF(1) = 1
+	   INC(1) = PSIZX
+	   STEP(2) = -PSIZY
+	   XSIGN = 1
+	ENDIF
+	IF (DIR.GT.0) GOTO 350
+	GOTO 370
+C
+C First pixel in NE corner
+340	WX = WX + NX*PSIZX
+	WY = WY + NY*PSIZY
+	OFF(1) = 1
+	OFF(2) = 1
+	XSIGN = -1
+	IF (DIR.GT.0) THEN
+	   INC(1) = -PSIZX
+	   STEP(2) = -PSIZY
+	ELSE
+	   INC(2) = -PSIZY
+	   STEP(1) = -PSIZX
+	ENDIF
+	IF (DIR.GT.0) GOTO 370
+350	NSCAN = NX
+	NPIX = NY
+	CALL LSG_ROTATION_MODE(WKID,.TRUE.)! S,N rotated
+	GOTO 380
+C
+C First pixel in SE corner
+360	WX = WX + NX*PSIZX
+	IF (DIR.GT.0) THEN
+	   OFF(1) = 1
+	   INC(2) = PSIZY
+	   STEP(1) = -PSIZX
+	   XSIGN = 1
+	ELSE
+	   OFF(2) = 1
+	   INC(1) = -PSIZX
+	   STEP(2) = PSIZY
+	   XSIGN = -1
+	ENDIF
+	IF (DIR.GT.0) GOTO 350
+370	NSCAN = NY
+	NPIX = NX
+	CALL LSG_ROTATION_MODE(WKID,.FALSE.)! W,E not rot
+	GOTO 380
+C
+380	P_OFFSET =
+     & OFF(1)*((X_EXTENT(IMAGE_LUN(IM))-1)*Y_EXTENT(IMAGE_LUN(IM))) +
+     & OFF(2)*(Y_EXTENT(IMAGE_LUN(IM))-1)
+	DATA_ADDR = SEC_ADDR(IMAGE_LUN(IM))+DATA_OFFSET(IMAGE_LUN(IM))
+C
+	P_STEP(1) = Y_EXTENT(IMAGE_LUN(IM))
+	P_STEP(2) = 1
+	IF (DIR.GT.0) THEN
+	   P_STEP(2) = P_STEP(1)
+	   P_STEP(1) = 1
+	ENDIF
+	DO 382 I=1,IMAGE_CORNER(IM)
+	   TEMP = P_STEP(1)
+	   P_STEP(1) = P_STEP(2)
+	   P_STEP(2) = -TEMP
+382	CONTINUE
+C
+	IBITL = 0
+	CALL LIB$INSV(-1,0,IMAGE_NUMBER(IM),IBITL)
+	IBITL = .NOT.IBITL
+	IDIVL = 2**IMAGE_BASE(IM)
+	IF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_BIT) THEN
+	   CALL LSG_PACKING_MODE(WKID,1)
+	ELSE
+	   CALL LSG_PACKING_MODE(WKID,8)
+	ENDIF
+C
+C BIT and BYTE are shifted into position using LSG_PLANE_OFFSET
+C above, but graphics library cannot do this for data types with
+C more than 8 bits, so set LSG_PLANE_OFFSET back to normal and
+C use our own divide and mask.
+	IF (DATA_TYPE(IMAGE_LUN(IM)) .NE. DATA_BIT .AND.
+     &      DATA_TYPE(IMAGE_LUN(IM)) .NE. DATA_BYTE
+     &		) CALL LSG_PLANE_OFFSET(WKID,OVERLAY_OFFSET(OV,OW))
+C
+	NBYTE = NPIX
+	IF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_BIT) THEN
+	   DTYPE = 0
+	   NBYTE = (NPIX-1)/8+1	! number of byte
+	   NPIX = NBYTE*8	! rounded up number of pixels
+	ELSEIF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_BYTE) THEN
+	   DTYPE = 1
+	ELSEIF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_WORD) THEN
+	   DTYPE = 2
+	ELSEIF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_LONG .OR.
+     &		DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_REAL) THEN
+	   DTYPE = 3
+	ELSE
+	   GOTO 1000		! eh?
+	ENDIF
+C
+C compute these outside loop as R*4
+	ORIGIN(1) = LITES2ORG(1)-IMAGE_ORIGIN(1,IM)
+	ORIGIN(2) = LITES2ORG(2)-IMAGE_ORIGIN(2,IM)
+	LPIX(1) = -1
+	LPIX(2) = -1
+C
+	SCANS = 0
+	PX = WX
+	PY = WY
+C	
+	DO 200 ISCAN=1,NSCAN
+CCC
+CCC use macro routine to optimise then next bit
+	   X = WX
+	   Y = WY
+C get increments along scanline of transformed position
+	   DELTAX = (SETCOF(2,1)+SETCOF(4,1)*Y) * INC(1) +
+     &		    (SETCOF(3,1)+SETCOF(4,1)*X) * INC(2)
+	   DELTAY = (SETCOF(2,2)+SETCOF(4,2)*Y) * INC(1) +
+     &		    (SETCOF(3,2)+SETCOF(4,2)*X) * INC(2)
+C transform first point
+	   CALL TRNUSE(X,Y,SETCOF,SET_TRANSFORM)
+C convert to pixel units outside the loop
+	   X = (X+ORIGIN(1))/IMAGE_PIXELSIZE(1,IM)
+	   Y = (Y+ORIGIN(2))/IMAGE_PIXELSIZE(2,IM)
+	   DELTAX = DELTAX/IMAGE_PIXELSIZE(1,IM)
+	   DELTAY = DELTAY/IMAGE_PIXELSIZE(2,IM)
+C
+	   CALL LDTI_WARP_DATA(
+     &		DTIB(SCANS*NBYTE+1),NPIX,X,Y,DELTAX,DELTAY,
+     &		IMAGE_COLUMNS(IM),IMAGE_ROWS(IM),-IMAGE_BASE(IM),IBITL,
+     &		DATA_ADDR,P_OFFSET,P_STEP(1),P_STEP(2),DTYPE)
+CCC
+CCC the follwing is what we need to do for WORD data,
+CCC but use macro instead to avoid the EXTZV call. For
+CCC all except projective transform, we can avoid call
+CCC to TRNUSE by using derivative of function along scan line
+CCC	   CALL VIOCLR(DTIB,NPIX) ! or move 0's int the loop below
+CCC	   XX = WX
+CCC	   YY = WX
+CCC	   DO 100 IPIX=1,NPIX
+CCC	      X = XX
+CCC	      Y = YY
+CCC	      CALL TRNUSE(X,Y,SETCOF,SET_TRANSFORM)
+CCC	      PIX(1) = NINT((X+ORIGIN(1))/IMAGE_PIXELSIZE(1,IM))
+CCC	      PIX(2) = NINT((Y+ORIGIN(2))/IMAGE_PIXELSIZE(2,IM))
+CCCC
+CCCC check if within image
+CCC	      IF (PIX(1).LT.0.OR.PIX(1).GE.IMAGE_COLUMNS(IM)) GOTO 90
+CCC	      IF (PIX(2).LT.0.OR.PIX(2).GE.IMAGE_ROWS(IM)) GOTO 90
+CCCC
+CCCC read the pixel
+CCC	      IF (PIX(1).NE.LPIX(1).OR.PIX(2).NE.LPIX(2)) THEN
+CCC	         LPIX(1) = PIX(1)
+CCC	         LPIX(2) = PIX(2)
+CCCC change the 16 and the *2 for other data sizes
+CCC	         L = LIB$EXTZV(0,16,
+CCC     & %VAL(DATA_ADDR+
+CCC     & (P_OFFSET+PIX(1)*P_STEP(1)+PIX(2)*P_STEP(2))*2) )
+CCCC don't do next line for byte or bit, modify it for long
+CCC	         MASKW = (W/IDIVW).AND..NOT.IBITW
+CCC	      ENDIF
+CCC	      DTIB(IPIX) = MASKB
+CCCC
+CCC90	      XX = XX+INC(1)
+CCC	      YY = YY+INC(2)
+CCC100	   CONTINUE
+C
+	   WX = WX+STEP(1)
+	   WY = WY+STEP(2)
+	   SCANS = SCANS+1
+C
+C flush out if no more room in DTIB array, or finished
+	   IF (DTI_BMAX-SCANS*NBYTE.LT.NBYTE .OR. ISCAN.EQ.NSCAN) THEN
+	      CALL LSG_PIXEL_ARRAY(
+     &		PX,PY,
+     &		XSIGN*NPIX,DIR*XSIGN*SCANS,
+     &		1,NPIX,1,SCANS,
+     &		1,1,
+     &		DTIB)
+	      PX = WX
+	      PY = WY
+	      SCANS = 0
+	   ENDIF
+C
+	   IF (HADBREAK()) GOTO 1000
+200	CONTINUE
+	GOTO 1000
+C
+C deal with LSR file
+C set packing mode
+700	IF (IMAGE_LEVELS(IM).EQ.1) THEN
+	   CALL LSG_PACKING_MODE(WKID,1)! bit image
+	ELSE
+	   CALL LSG_PACKING_MODE(WKID,8)! otherwise byte
+	ENDIF
+	CALL LSG_ROTATION_MODE(WKID,.FALSE.)	! never rotated
+C
+C create transform RAC
+	PREG = 0
+	TRAC = CALLR(%VAL(LSR_ADDRESSES(XLSR_ALLOC_RAC)))
+	IF (TRAC.EQ.0) GOTO 721
+C
+	RET = CALLR(
+     &		%VAL(TRAC),
+     &		%VAL(IMAGE_RAC(IM)),
+     &		%VAL(RAST_READ_ONLY),
+     &		%VAL(LSR_ADDRESSES(XLSR_CREATE_TRANSFORM_RAC)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C Initialise cache
+	RET = CALLR(
+     &		%VAL(TRAC),%VAL(RAST_CACHE_ONE_TILE),
+     &		%VAL(LSR_ADDRESSES(XLSR_INIT_CACHE)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C set window in the transform RAC (anything larger then area we want)
+C Try WINDOW for now
+C Can't pass a REAL*8 by value, so pass zero as second half
+	RET = CALLR(
+     &		%VAL(TRAC),
+     &		%VAL(WINDOW(1)),%VAL(0),
+     &		%VAL(WINDOW(3)),%VAL(0),
+     &		%VAL(WINDOW(2)),%VAL(0),
+     &		%VAL(WINDOW(4)),%VAL(0),
+     &		%VAL(0),%VAL(0),		! R*8 tolerance
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_RAC_DATA_WINDOW)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C set rac tile origin
+	RET = CALLR(
+     &		%VAL(TRAC),
+     &		%VAL(WINDOW(1)),%VAL(0),
+     &		%VAL(WINDOW(3)),%VAL(0),
+     &		%VAL(0),%VAL(0),		! R*8 tolerance
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_RAC_TILE_ORIGIN)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C set the size of pixels we want
+	RET = CALLR(
+     &		%VAL(TRAC),
+     &		%VAL(PSIZX),%VAL(0),
+     &		%VAL(PSIZY),%VAL(0),
+     &		%VAL(0),%VAL(0),		! R*8 tolerance
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_RAC_PIXEL_SCALE)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C Set up arrays of parameters for transformation
+C These are arrays of GOTH_VALUE, whose length is 12 on VAX and 16 on AXP,
+C so allow for the difference
+	POINT_TOL = 0.5D0*MIN(
+     &		IMAGE_OPIXELSIZE(1,IM),IMAGE_OPIXELSIZE(2,IM))
+	MBR_TOL = 2*MAX(
+     &		IMAGE_OPIXELSIZE(1,IM),IMAGE_OPIXELSIZE(2,IM))
+C
+C Coeffs to transform from IFF to source LSR space. These are used to
+C modify our coefficients to work in LSR space.
+C X' = A(1)*x + D(1) etc.
+C Add LITES2ORG (now abs)
+C Subtract IMAGE_UORIGIN (now rel to image origin)
+C Multiple by original pixel size / user pixel size (now in LSR's units)
+C Add IMAGE_OORIGIN (now absolute LSR units)
+	A(1) = IMAGE_OPIXELSIZE(1,IM)/IMAGE_PIXELSIZE(1,IM)
+	A(2) = IMAGE_OPIXELSIZE(2,IM)/IMAGE_PIXELSIZE(2,IM)
+	D(1) = (LITES2ORG(1)-IMAGE_UORIGIN(1,IM))*A(1) + IMAGE_OORIGIN(1,IM)
+	D(2) = (LITES2ORG(2)-IMAGE_UORIGIN(2,IM))*A(2) + IMAGE_OORIGIN(2,IM)
+C
+	RET = DISP_RAS_WARP_PAR(TRAC,POINT_TOL,MBR_TOL,
+     &		SET_TRANSFORM,SETCOF,A,D,
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_RAC_SPATIAL_CONV)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C Allocate and create pointer type REGION, and attach RAC to it
+	PREG = CALLR(%VAL(LSR_ADDRESSES(XLSR_ALLOC_REG)))
+	IF (PREG.EQ.0) GOTO 721
+	RET = CALLR(
+     &		%VAL(PREG),
+     &		%VAL(REGION_PTR),%VAL(REGION_TILE_EXTENDED),
+     &		%VAL(0),%VAL(0),%VAL(.TRUE.),
+     &		%VAL(LSR_ADDRESSES(XLSR_CREATE_REG)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+	RET = CALLR(
+     &		%VAL(PREG),%VAL(TRAC),
+     &		%VAL(LSR_ADDRESSES(XLSR_ATTACH_RAC_TO_REG)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C set up required area
+	RET = CALLR(
+     &		%VAL(PREG),
+     &		%VAL(LSR_ADDRESSES(XLSR_RESET_PTR_REG)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C Can't pass a REAL*8 by value, so pass zero as second half
+	RET = CALLR(
+     &		%VAL(PREG),
+     &		%VAL(WINDOW(1)),%VAL(0),
+     &		%VAL(WINDOW(3)),%VAL(0),
+     &		%VAL(WINDOW(2)),%VAL(0),
+     &		%VAL(WINDOW(4)),%VAL(0),
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_REG_EXT_IN)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C access area until no more
+710	RET = CALLR(
+     &		%VAL(PREG),
+     &		BLOC,DX(1),DY(1),DX(2),DY(2),
+     &		I,NUMPIX(1),NUMPIX(2),TEMP, ! dummy I (BPP), TEMP (pixel order)
+     &		%VAL(LSR_ADDRESSES(XLSR_GET_REG_PTR)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+	IF (BLOC.EQ.0) GOTO 722
+C
+	CALL LSG_PIXEL_ARRAY(
+     &		DX(1)+0.5*PSIZX,DY(1)+(NUMPIX(2)-0.5)*PSIZY,
+     &		NUMPIX(1),-NUMPIX(2),1,NUMPIX(1),1,NUMPIX(2),
+     &		1,
+     &		1,
+     &		%VAL(BLOC))
+C
+C has CTRL/C been pressed
+	IF (HADBREAK()) GOTO 722
+	GOTO 710
+C
+720	CALL NASTY(MSG_ERRDIMG,IM,'LSR')
+	RET = CALLR(%VAL(RET),%VAL(LSR_ADDRESSES(XLSR_PRINT_MESSAGE)))
+	CALL WRITEF
+	GOTO 722
+C
+721	CALL MOAN(MSG_STRING,'Error allocating memory for LSR file')
+	GOTO 722
+C
+722	ERR = .FALSE.
+	IF (PREG.NE.0) THEN
+	   RET = CALLR(
+     &		%VAL(PREG),%VAL(.TRUE.),
+     &		%VAL(LSR_ADDRESSES(XLSR_R_DELETE_REG)))
+	   IF (RET.NE.GOTH__NORMAL) ERR = .TRUE.
+	   TRAC = 0
+	   RET = CALLR(
+     &		%VAL(PREG),
+     &		%VAL(LSR_ADDRESSES(XLSR_FREE_REG)))
+	   IF (RET.NE.GOTH__NORMAL) ERR = .TRUE.
+	ENDIF
+	IF (TRAC.NE.0) THEN
+	   RET = CALLR(
+     &		%VAL(TRAC),%VAL(.TRUE.),
+     &		%VAL(LSR_ADDRESSES(XLSR_R_DELETE_RAC)))
+	   IF (RET.NE.GOTH__NORMAL) ERR = .TRUE.
+	   RET = CALLR(
+     &		%VAL(TRAC),
+     &		%VAL(LSR_ADDRESSES(XLSR_FREE_RAC)))
+	   IF (RET.NE.GOTH__NORMAL) ERR = .TRUE.
+	ENDIF
+	IF (ERR) THEN
+	   CALL NASTY(MSG_ERRCLOSIMG,'LSR')
+	   RET = CALLR(%VAL(RET),%VAL(LSR_ADDRESSES(XLSR_PRINT_MESSAGE)))
+	   CALL WRITEF
+	ENDIF
+	GOTO 1000
+C
+C
+C
+1000	RETURN
+	END
+C
+	INTEGER FUNCTION DISP_RAS_WARP_PAR(TRAC,POINT_TOL,MBR_TOL,
+     &		TYP,COF,A,D,GFUNC)
+C
+***	MODULE	DISP_RAS_WARP_PAR
+***	IDENT	24OC94
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	September-1994
+C
+C To set up coefficients and call LSR function
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:TRNTYP/
+***	COMMON/LSL$CMNLSL:EXPC/
+C
+C arguments
+	INTEGER	TRAC
+	REAL*8	POINT_TOL
+	REAL*8	MBR_TOL
+	INTEGER	TYP
+	REAL*8	COF(4,2)
+	REAL*8	A(2),D(2)
+	INTEGER		GFUNC
+	EXTERNAL	GFUNC
+C
+C functions
+	LOGICAL	GET_MEM
+ 	INTEGER*4	LIB$GETSYI
+C
+C workspace
+	INTEGER	NPARAM
+	CHARACTER*(22)	MBRS,TS
+	INTEGER	RAST_P,MBR_P,T
+	INTEGER	L
+C
+C check for ALPHA AXP (code stolen from FPP - use proper subroutine
+C if ever needed elsewhere)
+ !!!	INCLUDE		'($SYIDEF)'	! not in our FORSYSDEF yet
+ 	INTEGER		SYI$_ARCH_TYPE
+ 	PARAMETER	(SYI$_ARCH_TYPE=4453)
+	LOGICAL		IS_ALPHA_AXP,CHECKED_AXP
+	DATA		CHECKED_AXP/.FALSE./
+	SAVE		IS_ALPHA_AXP,CHECKED_AXP
+C
+	IF (.NOT.CHECKED_AXP) THEN
+	   CHECKED_AXP = .TRUE.
+	   IS_ALPHA_AXP = .FALSE.
+	   IF (LIB$GETSYI(SYI$_ARCH_TYPE,L,,)
+     &			) IS_ALPHA_AXP = (L.EQ.2)
+	ENDIF
+C
+	DISP_RAS_WARP_PAR = 0
+	RAST_P = 0
+	MBR_P = 0
+	T = 0
+	L = 12		! length of a GOTH_VAL
+	IF (IS_ALPHA_AXP) L = 16
+C
+	IF (GET_MEM(0,RAST_P,3*L)) GOTO 999
+	IF (GET_MEM(0,MBR_P,L)) GOTO 999
+	IF (GET_MEM(0,T,8*L)) GOTO 999
+C
+	CALL CPYPAK(2,POINT_TOL,%VAL(RAST_P))	! 'closest' tol
+	CALL PUTLNG(0,%VAL(RAST_P+L))	! grid
+	CALL PUTLNG(1,%VAL(RAST_P+2*L))	! unused
+C
+	CALL CPYPAK(2,MBR_TOL,%VAL(MBR_P))	! MBR tol
+C
+C if 'scaling coefficients' are unequal (i.e. pixel sizes have
+C been scaled non-uniformly) then linear and orthogonal become
+C affine
+C NB bacause 'affine' MBR function checks for 6 args, we cannot use
+C it with the 'orthogonal' point function. So use 'affine' for these
+C cases always.
+	IF (TYP.EQ.TRNTYP_LINEAR.OR.TYP.EQ.TRNTYP_ORTHOG.OR.
+     &	    TYP.EQ.TRNTYP_AFFINE) THEN
+	   CALL CPYPAK(2,COF(3,1)*A(1),%VAL(T))		! X y coeff
+	   CALL CPYPAK(2,COF(2,1)*A(1),%VAL(T+L))	! X x coeff
+	   CALL CPYPAK(2,COF(1,1)*A(1)+D(1),%VAL(T+2*L))! X const
+	   CALL CPYPAK(2,COF(3,2)*A(2),%VAL(T+3*L))	! Y y coeff
+	   CALL CPYPAK(2,COF(2,2)*A(2),%VAL(T+4*L))	! Y x coeff
+	   CALL CPYPAK(2,COF(1,2)*A(2)+D(2),%VAL(T+5*L))! Y const
+	   NPARAM = 6
+	   MBRS = 'affine'//CHAR(0)
+	   TS = MBRS
+	ELSEIF (TYP.EQ.TRNTYP_LASERAID) THEN
+	   CALL CPYPAK(2,COF(4,1)*A(1),%VAL(T))		! X xy coeff
+	   CALL CPYPAK(2,COF(3,1)*A(1),%VAL(T+L))	! X y coeff
+	   CALL CPYPAK(2,COF(2,1)*A(1),%VAL(T+2*L))	! X x coeff
+	   CALL CPYPAK(2,COF(1,1)*A(1)+D(1),%VAL(T+3*L))! X const
+	   CALL CPYPAK(2,COF(4,2)*A(2),%VAL(T+4*L))	! Y xy coeff
+	   CALL CPYPAK(2,COF(3,2)*A(2),%VAL(T+5*L))	! Y y coeff
+	   CALL CPYPAK(2,COF(2,2)*A(2),%VAL(T+6*L))	! Y x coeff
+	   CALL CPYPAK(2,COF(1,2)*A(2)+D(2),%VAL(T+7*L))! Y const
+	   NPARAM = 8
+	   MBRS = 'bilinear'//CHAR(0)
+	   TS = MBRS
+	ELSEIF (TYP.EQ.TRNTYP_PROJECTIVE) THEN
+	   CALL CPYPAK(2,COF(2,1)*A(1)+COF(4,2)*D(1),%VAL(T))	! X y coeff
+	   CALL CPYPAK(2,COF(1,1)*A(1)+COF(3,2)*D(1),%VAL(T+L))	! X x coeff
+	   CALL CPYPAK(2,COF(3,1)*A(1)+D(1),%VAL(T+2*L))	! X const
+	   CALL CPYPAK(2,COF(1,2)*A(2)+COF(4,2)*D(2),%VAL(T+3*L))! Y y coeff
+	   CALL CPYPAK(2,COF(4,1)*A(2)+COF(3,2)*D(2),%VAL(T+4*L))! Y x coeff
+	   CALL CPYPAK(2,COF(2,2)*A(2)+D(2),%VAL(T+5*L))	! Y const
+	   CALL CPYPAK(2,COF(4,2),%VAL(T+6*L))		! denom y coeff
+	   CALL CPYPAK(2,COF(3,2),%VAL(T+7*L))		! denom x const
+	   NPARAM = 8
+	   MBRS = 'projective-four-point'//CHAR(0)
+	   TS = MBRS
+	ELSE
+	   GOTO 999
+	ENDIF
+C
+C set the spatial transformation
+	DISP_RAS_WARP_PAR = GFUNC(
+     &		%VAL(TRAC),%VAL(1),		! RAC, true (=forward)
+     &		%REF('closest'//CHAR(0)),	! resamp
+     &		%REF(MBRS),			! mbr
+     &		%REF(TS),			! point
+     &		%VAL(3),%VAL(RAST_P),		! resamp args
+     &		%VAL(1),%VAL(MBR_P),		! mbr args
+     &		%VAL(NPARAM),%VAL(T),		! point args
+     &		%VAL(0),%VAL(0),		! space params
+     &		%VAL(0),%VAL(0))		! space params
+C
+999	IF (RAST_P.NE.0) CALL FREE_MEM(0,RAST_P,3*L)
+	IF (MBR_P.NE.0) CALL FREE_MEM(0,MBR_P,L)
+	IF (T.NE.0) CALL FREE_MEM(0,T,8*L)
+C
+	RETURN
+	END

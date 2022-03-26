@@ -1,0 +1,784 @@
+	LOGICAL FUNCTION PROCESS_FILE()
+C
+***	MODULE	PROCESS_FILE
+***	IDENT	17SE92
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD	Add clearer message output if tape name not given, on request
+C	or by logical name				 JB 17-Sep-1992
+C
+CMOD	To define filename by logical name LSL$DTED_TAPE_FILENAME,
+C	and output nulls -> spaces and some spaces -> 0 in header
+C	blocks.						FJB 29-Sep-1988
+C
+CMOD	To handle new LSLA style DTI files        	DRC 24-Aug-1988
+C
+C Include MESPAR.PAR from 'LSL$DTMCONVERTSYS' now.	FJB 21-Jun-1988
+C
+C Included as a function in DTI2DTED.    	       	FJB 26-Feb-1988
+C
+C Author		 				CCB 05-Oct-1983
+C
+C Function to read a DTI file on disc and copy the
+C information to a DMA DLMS DTED (Defense Mapping Agency Digital
+C Land Mass Simulation Digital Terrain Elevation Data) mag tape 
+C
+C A DMA type DTI file will be written as a change 2 DTED file on tape.
+C PAN (MIKE) and ALVY types will be written as a change 2 DTED files
+C with the required additional information prompted for.
+C A TED4 type will be written as a change 3/4 file with separate
+C DSI and ACC blocks.
+C
+C If GRID is enabled zero filled DSI and ACC blocks will be written
+C
+	IMPLICIT NONE
+C
+C parameter file
+C
+	INCLUDE 'LSL$CMNDLMS:FORMAT.PAR'	! for angle formats
+	INCLUDE 'LSL$CMNDTI:DTIDEF.PAR'         ! DTI file layout
+	INCLUDE 'LSL$CMNDTI:DTILIBMSG.PAR'      ! DTI messages
+C
+C For messages:
+	INCLUDE 'LSL$CMNDTI2DTED:DTI2DTEDMSG.PAR' !specific error message
+ 	INCLUDE 'LSL$DTMCONVERTSYS:MESPAR.PAR'  ! ERROR/WARNING messages
+     	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'      ! LSL messages
+ 	INCLUDE	'LSL$CMNLSL:TXTC.CMN'           ! text buffer
+	INCLUDE	'LSL$CMNLSL:EXPC.CMN'           ! text buffer
+C
+C common blocks
+	INCLUDE 'LSL$DTMCONVERTSYS:BLOCKY.CMN'	! block types
+C	INCLUDE 'LSL$DTMCONVERTSYS:DTEDBUF.CMN'	! Tape input buffer, UHL buffer
+	INCLUDE 'LSL$DTMCONVERTSYS:DTIFILE.CMN'	! DTI file maintenance
+	INCLUDE 'LSL$CMNDTI2DTED:OPTIONS.CMN'	! requested details
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIPROJ.CMN'
+	INCLUDE 'LSL$CMNLSL:MTOVCM.CMN'
+C
+	INCLUDE '($SSDEF)/NOLIST'
+C
+	PARAMETER	MAXBUF=14414
+C
+C workspace
+	BYTE		UHL_BUF(0:79)      ! for assembling UHL block into
+	BYTE		SAVE_UHL_BUF(0:79) ! for UHL block
+C
+	BYTE		BBLOCK(MAXBUF)   ! data block buffer as bytes
+	INTEGER*2 	WBLOCK(MAXBUF/2) ! data block buffer as words
+	EQUIVALENCE 	(BBLOCK,WBLOCK)
+C
+	BYTE		ICH		! character from RDCH
+	INTEGER		YEAR,MONTH,DAY	! guess what ?
+	INTEGER		III, JJJ, N,J,K	! do loops
+	INTEGER*2	COLCNT		! percentage of columns written
+	INTEGER*4	OK              ! error flag
+	INTEGER*4	IERR		! error flag
+	INTEGER*4	LATOFF,LONOFF	! offsets of SW corner
+	REAL		EINT		! East  interval (from DTI header)
+	INTEGER		IEINT		! integer version
+	REAL		NOINT		! North interval (from DTI header)
+	INTEGER		INOINT		! integer version
+	INTEGER*2	N1,N2,NUMCOO 	! byte counters
+	INTEGER*4	BLKNO		! magtape data block no
+	INTEGER*4	BLKLEN		! magtape data block size in bytes
+	INTEGER*4	BLKCHK		! magtape data block checksum
+	INTEGER*4	DATA_ADR  	! data address of string
+	BYTE		BLKBCH(4) 	! same as bytes
+	EQUIVALENCE 	(BLKCHK,BLKBCH)
+C
+	CHARACTER*2	PROD		! first two chars of producer code
+	CHARACTER*17	NAME    	! file ident written to HDR and EOF blks
+	CHARACTER*17	DEFAULT_NAME 	! default file ident
+	CHARACTER*6	REEL		! reel 'number' for VOL
+	CHARACTER*17	STRNONE 	! null name string
+	CHARACTER*35	TEMP_NAME 	! Temporary string
+C
+	LOGICAL		MIKE		! is it a MIKE type DTI
+	LOGICAL		UHL1		! is it a UHL1 type DTI
+	LOGICAL		TED4		! is it a TED4 type DTI
+	LOGICAL		ALVY		! is it a ALVY type DTI
+	LOGICAL		LSLA    	! is it a LSLA type DTI
+	LOGICAL		HADLONG		! had a longitude?
+ 	LOGICAL		DTIOPEN		! DTI file opened?
+C
+C functions:
+	LOGICAL		RDCHS
+	INTEGER		RDFILT
+	INTEGER*4	MTOWRB
+	INTEGER*4	MTOEOF
+	INTEGER*4	TTRSTR
+	LOGICAL		DEVMNT_OUT_OK	! check tape mounted ok
+	LOGICAL		TRNALL
+C
+C DTI related functions:
+	INTEGER*4	DTI_OPEN
+	INTEGER*4	DTI_COPY_DATA
+	INTEGER*4	DTI_COPY_BYTE_HEADER
+	INTEGER*4	DTI_PRINT_HEADER
+	INTEGER*4	DTI_CLOSE
+C                                      
+C presets
+	INTEGER		DAYMON(12)
+	DATA		DAYMON/31,28,31,30,31,30,31,31,30,31,30,31/
+C
+	MIKE = .FALSE.
+  	UHL1 = .FALSE.
+	TED4 = .FALSE.
+	ALVY = .FALSE.
+	LSLA = .FALSE.
+	LATOFF = 0			! zero latitude offset
+	LONOFF = 0			! and longitude
+C
+	PROCESS_FILE = .FALSE.		! assume failure
+	DTIOPEN = .FALSE.     		! no DTI file open yet
+C
+C-----------------------------------------------------------------------
+C Initialise default tape MTA0: if DEVICE and/or APPEND commands 
+C have not been given
+C
+	IF(.NOT. DTEDOPN)THEN
+	   OK=DEVMNT_OUT_OK()
+	   IF(.NOT. OK)THEN
+	      PROCESS_FILE=SS$_ABORT
+	      GOTO 999
+	   ENDIF
+	   DTEDOPN = .TRUE.
+ 	ENDIF
+C
+C Open DTI file
+C
+	OK = DTI_OPEN(DTILUN,DTINAM,DTILEN,.FALSE.,IERR,.TRUE.)
+ 	IF (DEBUG) CALL WRITEF('DEBUG--- X_EXTENT=%I',X_EXTENT(DTILUN))
+	IF (.NOT.OK)THEN
+	   CALL LSL_PUTMSG(OK)           
+	   IF(OK .EQ. DTI__SYSERR)CALL LSL_ADDMSG(IERR)
+	   PROCESS_FILE = SS$_ABORT
+	   GOTO 999
+   	ENDIF
+	DTIOPEN = .TRUE.
+C
+C and tell user about the DTI file 
+C
+	OK = DTI_PRINT_HEADER(DTILUN,4)
+	IF(.NOT. OK)THEN
+	   CALL LSL_PUTMSG(OK)
+           GOTO 999
+	ENDIF           
+C
+C What type of DTI file is it?
+C
+	GOTO(31,32,33,34,35),HEADER_TYPE(DTILUN)
+C
+C Unknown type
+	CALL WRITEF('%S Unknown DTI file type',ERROR)
+	GOTO 999
+C
+31	MIKE = .TRUE.           ! MIKE (PAN) type
+	GOTO 36
+32	UHL1 = .TRUE.		! UHL1 (Change 2 DTED) type
+	GOTO 36
+33	TED4 = .TRUE.		! TED4 (Change 3/4 DTED) type
+	GOTO 36                                   
+34	ALVY = .TRUE.		! ALVEY type
+	GOTO 36
+35	LSLA = .TRUE.		! LSLA type
+	GOTO 36
+C
+C*******************************************************************VOL
+C Assemble and write VOL block to magtape
+C
+36	IF(.NOT. APPEND_FILE)THEN      ! if not already at end-of-volume
+C
+C Prompt for reel 'number'
+C
+150	   OK = TTRSTR(,III,'Reel number (6 characters): ',IERR)
+	   IF(.NOT. OK)THEN
+	      CALL LSL_PUTMSG(OK)
+	      IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(IERR)
+	      GOTO 999
+	   ENDIF
+C                
+	   IF(III .LT. 1)GOTO 150
+C
+	   IF (III.GT.6) THEN
+	      CALL WRITEF('%S Too many characters',WARNING)
+	      GOTO 150
+	   ENDIF
+C
+C Convert lower case to upper case
+	   DO 175 JJJ=1,III
+	     IF(TXTBUF(JJJ).GE.65.AND.TXTBUF(JJJ).LT.90)GOTO 175
+	     IF(TXTBUF(JJJ).GE.97.AND.TXTBUF(JJJ).LT.122)THEN
+	       TXTBUF(JJJ)=TXTBUF(JJJ)-32
+	       GOTO 175
+	     ENDIF
+175	   CONTINUE
+C
+	   IF (III.LT.6) THEN		! pad with spaces
+	      DO 180 JJJ=III+1,6
+	         TXTBUF(JJJ)=32
+180	      CONTINUE
+	   ENDIF
+C
+	   CALL EXPAND('%WVOL1%A6%I70',BBLOCK,TXTBUF,1)
+C
+C and write it to tape
+ 	   IF(DEBUG)CALL WRITEF('%A80',BBLOCK)
+	   OK = MTOWRB(BBLOCK,80)
+	   IF(.NOT. OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	      GO TO 999
+	   ENDIF
+	ENDIF
+C
+C and start new file
+C
+	IF (TED4) THEN
+	   CALL TTWSTR('Producing a change 4 DTED tape file')
+	ELSEIF (GRID) THEN
+	   CALL TTWSTR('Producing a GRID DTED tape file')
+	ELSE
+	   CALL TTWSTR('Producing a change 2 DTED tape file')
+	ENDIF
+C
+C*******************************************************************HDR
+C Assemble and write HDR label to magtape
+C
+C increment the sequence number
+C
+	FILSEQ = FILSEQ + 1
+C
+C Derive date in DTED form 'YYDDD'
+C
+	CALL IDATE(MONTH,DAY,YEAR)
+	DO 10 III=1,MONTH-1
+	   DAY = DAY + DAYMON(III)
+10	CONTINUE
+C
+	IF (MOD(YEAR,  4).EQ.0.AND.MONTH.GT.2) DAY = DAY + 1  	! leap years
+	IF (MOD(YEAR,100).EQ.0.AND.MONTH.GT.2) DAY = DAY - 1
+	IF (MOD(YEAR,400).EQ.0.AND.MONTH.GT.2) DAY = DAY + 1
+C
+C Try for the logical name (as given in DTMCONVERTINI.COM) to get
+C the default filename.
+	STRNONE      = 'NONE             '
+	DEFAULT_NAME = STRNONE
+C
+182	IF (TRNALL('LSL$DTED_TAPE_FILENAME',TEMP_NAME)) THEN
+	   IF (DEBUG) CALL WRITEF('LSL$DTED_TAPE_FILENAME: %S',TEMP_NAME)
+C
+C Truncate and force uppercase
+	   CALL STR$UPCASE(DEFAULT_NAME,TEMP_NAME)
+C
+C Extend to 17 chars.
+ 	   TEMP_NAME = DEFAULT_NAME//'                 '
+	   CALL STR$POS_EXTR(DEFAULT_NAME,TEMP_NAME,%REF(1),%REF(17))
+	ENDIF
+C
+C prompt for file identifier
+C
+	CALL EXPAND('File ident (def:%S): ',DEFAULT_NAME)
+	OK = TTRSTR(,III,EXPDSC,IERR)
+  	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   IF (OK.EQ.LSL__SYSERR) CALL LSL_ADDMSG(IERR)
+	   GOTO 999
+	ENDIF
+C
+	IF (III.EQ.0) THEN
+	   NAME=DEFAULT_NAME
+	   IF (NAME.EQ.STRNONE) THEN
+	      CALL WRITEF('%S No default defined',WARNING)
+	      CALL WRITEF('%S Give the File Ident here, or set up the ',
+     &						  	WARNING)
+	      CALL WRITEF('logical name LSL$DTED_TAPE_FILENAME'
+     &			//' before running DTI2DTED')
+	      GOTO 182
+	   ENDIF
+C
+	   GOTO 191            
+	ENDIF
+C
+	IF (III.GT.17) THEN
+	   CALL WRITEF('%S Too many characters',WARNING)
+	   GOTO 182
+	ENDIF
+C
+C Check for alpha characters
+C Convert lower case to upper case
+C
+	DO 189 JJJ=1,III
+	  IF(TXTBUF(JJJ).GE.65.AND.TXTBUF(JJJ).LT.90)GOTO 189
+	  IF(TXTBUF(JJJ).GE.97.AND.TXTBUF(JJJ).LT.122)THEN
+	     TXTBUF(JJJ)=TXTBUF(JJJ)-32
+	     GOTO 189
+	  ENDIF
+	  CALL WRITEF('%S Invalid file identifier',WARNING)
+	  GOTO 182
+189	CONTINUE
+C
+C Pad with spaces
+	IF (III.LT.17) THEN
+	   DO 190 JJJ=III+1,17
+              TXTBUF(JJJ)=32
+190        CONTINUE
+	ENDIF
+C
+C Transfer from TXTBUF to name
+	CALL EXPAND('%WS%S',NAME,TXTDSC)
+	IF (DEBUG) CALL WRITEF('File ident: %S',NAME)
+C
+191	CALL EXPAND(
+     & '%WHDR1%SUNIVAC%P0%I4%I4%I4%I2 %I2%I3 00000 000000%(20 %)',
+     &    BBLOCK,NAME,1,FILSEQ,1,0,YEAR,DAY)
+C
+C Force nulls to be spaces
+	DO 2000,N=1,80
+	   IF(BBLOCK(N) .EQ. 0) CALL EXPAND('%W%S',BBLOCK(N),' ')
+2000	CONTINUE
+C
+ 	IF (DEBUG) CALL WRITEF('%A80',BBLOCK)
+C
+C and write it to tape
+C
+ 	OK = MTOWRB(BBLOCK,80)
+	IF(.NOT. OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	   GO TO 999
+	ENDIF 
+C
+C********************************************************************UHL
+C Assemble and write UHL block                                      
+C
+C Now get the intervals
+C Hope the interval is already in 0.1 arc second units
+C for a MIKE file unless /GRID. (This field is metres for other types)
+C These only affect the output tape for a MIKE type
+C	
+	EINT=X_GRID(DTILUN)
+	NOINT=Y_GRID(DTILUN)
+	IF (GRID) THEN
+	   IEINT = EINT*10.0 + 0.5
+	   INOINT = NOINT*10.0 + 0.5
+	ELSE
+	   IEINT = EINT
+	   INOINT = NOINT
+	ENDIF
+C
+C
+	IF(UHL1)THEN
+ 	   OK=DTI_COPY_BYTE_HEADER(		! UHL record
+     &	       DTILUN,UHL_BUF(0),.FALSE.,80,DTI_DMA_TYPE,IERR)
+	   IF(.NOT. OK)GOTO 300
+	ENDIF
+C
+	IF (TED4) THEN
+	   CALL EXPAND('%W%S',UHL_BUF(DTI_TED_TYPE),'UHL1')
+C
+ 	   OK=DTI_COPY_BYTE_HEADER(	    ! longitude of data origin
+     &	       DTILUN,UHL_BUF(4),.FALSE.,7,DTI_TED_DSI+194,IERR)
+	   IF(.NOT. OK)GOTO 300
+	   OK=DTI_COPY_BYTE_HEADER(		! longitude hemisphere
+     &	       DTILUN,UHL_BUF(11),.FALSE.,1,DTI_TED_DSI+203,IERR)
+	   IF(.NOT. OK)GOTO 300
+C
+	   CALL EXPAND('%W%S',UHL_BUF(12),'0')
+	   OK=DTI_COPY_BYTE_HEADER(	     ! latitude of data origin
+     &	       DTILUN,UHL_BUF(13),.FALSE.,6,DTI_TED_DSI+185,IERR)
+	   IF(.NOT. OK)GOTO 300
+	   OK=DTI_COPY_BYTE_HEADER(		! latitude hemisphere
+     &	       DTILUN,UHL_BUF(19),.FALSE.,1,DTI_TED_DSI+193,IERR)
+	   IF(.NOT. OK)GOTO 300
+C
+	   OK=DTI_COPY_BYTE_HEADER(		! longitude grid interval
+     &	       DTILUN,UHL_BUF(20),.FALSE.,4,DTI_TED_DSI+277,IERR)
+	   IF(.NOT. OK)GOTO 300
+C
+	   OK=DTI_COPY_BYTE_HEADER(		! latitude grid interval
+     &	       DTILUN,UHL_BUF(24),.FALSE.,4,DTI_TED_DSI+273,IERR)
+	   IF(.NOT. OK)GOTO 300
+C
+ 	   OK=DTI_COPY_BYTE_HEADER(		! absolute vertical accuracy
+     &	       DTILUN,UHL_BUF(28),.FALSE.,4,DTI_TED_ACC+7,IERR)
+	   IF(.NOT. OK)GOTO 300
+C
+	   OK=DTI_COPY_BYTE_HEADER(		! security code 
+     &	       DTILUN,UHL_BUF(32),.FALSE.,3,DTI_TED_DSI+3,IERR)
+	   IF(.NOT. OK)GOTO 300
+C
+C file reference number
+	   CALL EXPAND('%W%S',UHL_BUF(35),'            ')
+C
+	   OK=DTI_COPY_BYTE_HEADER(		! number of longitude points
+     &	       DTILUN,UHL_BUF(47),.FALSE.,4,DTI_TED_DSI+285,IERR)
+	   IF(.NOT. OK)GOTO 300
+C
+	   OK=DTI_COPY_BYTE_HEADER(		! number of latitude points
+     &	       DTILUN,UHL_BUF(51),.FALSE.,4,DTI_TED_DSI+281,IERR)
+	   IF(.NOT. OK)GOTO 300
+C
+C multiple accuracy
+	   CALL EXPAND('%W%S',UHL_BUF(55),'0')
+C
+	   CALL EXPAND('%W%S',UHL_BUF(56),'                        ')
+C	            
+C Calculate offsets
+	   LATOFF = (LATREC(1,DTILUN)-LATORI(DTILUN))/LATINT(DTILUN)
+	   LONOFF = (LONREC(1,DTILUN)-LONORI(DTILUN))/LONINT(DTILUN)
+	ENDIF
+C                         
+	IF (MIKE .OR. ALVY .OR. LSLA) THEN
+C
+	   CALL EXPAND('%W%S',UHL_BUF(DTI_PAN_TYPE),'UHL1')
+C                                        
+	   CALL EXPAND( '%W%P0%^L%I4%I4    U  %(12 %)'
+     &		,UHL_BUF(20), IEINT, INOINT )
+C
+C Get lat. and long. of SW corner from user
+C
+	   HADLONG = .FALSE.             
+	   DO 110 JJJ=1,2
+60	      IF (HADLONG) THEN
+	         CALL EXPAND('Input lat')                           
+	      ELSE
+	         CALL EXPAND('Input long')             
+	      ENDIF
+	      CALL APPEND('itude of SW corner (DDDMMSSH): ')
+	      IF (HADLONG) CALL APPEND(' ')
+	      OK = TTRSTR(,III,EXPDSC,IERR)
+	      IF(.NOT. OK)THEN
+		 CALL LSL_PUTMSG(OK)
+		 IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(IERR)
+		 GOTO 999
+	      ENDIF
+C
+80	      IF (III.NE.8) THEN
+	        CALL TTWSTR('%S Incorrect number of characters',WARNING)
+	        GOTO 60
+	      ENDIF
+C
+	      CALL BSLN
+	      DO 90 III=1,7
+	         CALL RDCH( ICH )
+	         IF (ICH.LT.'0'.OR.ICH.GT.'9') THEN          ! numbers?
+	            CALL WRITEF( '%S Unexpected "%A1"',WARNING, ICH )
+	            GOTO 60
+	         ENDIF
+90	      CONTINUE
+	      CALL RDCH( ICH )
+	      IF (ICH.GE.'a'.AND.ICH.LE.'z') ICH = ICH-32
+	      IF (HADLONG) THEN
+	         IF (ICH.EQ.'N'.OR.ICH.EQ.'S') GOTO 100
+	      ELSE
+	         IF (ICH.EQ.'E'.OR.ICH.EQ.'W') GOTO 100
+	      ENDIF
+	      CALL WRITEF(
+     & 		 '%S Unexpected hemisphere letter "%A1"',WARNING,ICH)
+	      GOTO 60
+C
+C and put them into the UHL buffer
+C
+100	      IF (HADLONG) THEN
+	         CALL EXPAND( '%W%A7%A1', UHL_BUF(12), TXTBUF, ICH )
+	      ELSE
+	         CALL EXPAND( '%W%A7%A1', UHL_BUF(4), TXTBUF, ICH )
+	      ENDIF
+	      HADLONG = .TRUE.                  
+110	   CONTINUE
+C
+C Finish UHL block
+C
+	   CALL EXPAND( '%W%P0%^L%I4%I4'
+     &		,UHL_BUF(47) ,X_EXTENT(DTILUN),Y_EXTENT(DTILUN))
+C multiple accuracy
+	   CALL EXPAND('%W%S',UHL_BUF(55),'0')
+C
+	   CALL EXPAND('%W%S',UHL_BUF(56),'                        ')
+C	
+	   CALL VIOCLR( UHL_BUF(56), 24, 32 )
+	ENDIF
+C
+C Force nulls to be spaces
+	DO 2100,N=0,79,1
+	   IF(UHL_BUF(N) .EQ. 0) CALL EXPAND('%W%S',UHL_BUF(N),' ')
+2100	CONTINUE
+C
+C Force spaces within geographicals to be zeros
+        DO 2110,N=4,31,1
+	   IF(UHL_BUF(N) .EQ. 32) CALL EXPAND('%W%S',UHL_BUF(N),'0')
+2110	CONTINUE
+C
+C and write UHL block to tape
+C
+	IF(DIAG .OR. DEBUG)CALL WRITEF('%A80',UHL_BUF ) ! UHL
+	OK = MTOWRB(UHL_BUF,80)
+	IF(.NOT. OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	   GO TO 999
+	ENDIF
+C       
+C Save it for use in UTL block later
+C
+ 	CALL VIOMV3( UHL_BUF, 80, SAVE_UHL_BUF )
+C
+C**************************************************************TAPEMARK
+C and the following tapemark
+C
+        IF(DEBUG)CALL WRITEF('Tapemark')
+	OK = MTOEOF()
+   	IF(.NOT. OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	   GO TO 999
+	ENDIF
+C
+C********************************************************************DSI
+C DSI record                                                            
+C
+ 	IF (TED4) THEN
+	   OK = DTI_COPY_BYTE_HEADER(
+     &		DTILUN,BBLOCK,.FALSE.,DTI_TED_DSISZ,DTI_TED_DSI)
+	   IF(.NOT. OK)GOTO 300
+	ENDIF
+C
+	IF (GRID) THEN
+	   DO 195 III=2,DTI_TED_ACCSZ/2	 	! prepare for ACC too
+	      WBLOCK(III)='00'
+195	   CONTINUE
+	   BBLOCK(1)='D'
+	   BBLOCK(2)='S'
+	   BBLOCK(3)='I'
+	ENDIF
+C
+C Complete and write DSI block to tape
+C
+	IF(TED4 .OR. GRID)THEN       
+C
+C Force nulls to be spaces
+	   DO 2200,N=1,648
+	      IF(BBLOCK(N) .EQ. 0) CALL EXPAND('%W%S',BBLOCK(N),' ')
+2200	   CONTINUE
+C
+C Force spaces to be zeros
+           DO 2210,N=88,102,1
+	      IF(BBLOCK(N) .EQ. 32) CALL EXPAND('%W%S',BBLOCK(N),'0')
+2210	   CONTINUE
+C
+C Force spaces to be zeros
+           DO 2220,N=136,141,1
+	      IF(BBLOCK(N) .EQ. 32) CALL EXPAND('%W%S',BBLOCK(N),'0')
+2220	   CONTINUE
+C
+C Force spaces to be zeros
+           DO 2230,N=160,163,1
+	      IF(BBLOCK(N) .EQ. 32) CALL EXPAND('%W%S',BBLOCK(N),'0')
+2230	   CONTINUE
+C
+C Force spaces within geographicals to be zeros
+           DO 2240,N=186,291,1
+	      IF(BBLOCK(N) .EQ. 32) CALL EXPAND('%W%S',BBLOCK(N),'0')
+2240	   CONTINUE              
+C
+	   IF(DEBUG)CALL WRITEF('DSI block - first 80 chars only:')
+	   IF(DEBUG)CALL WRITEF('%A80',BBLOCK)
+ 	   OK = MTOWRB(BBLOCK,DTI_TED_DSISZ)
+	   IF(.NOT. OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	      GO TO 999
+	   ENDIF 
+	ENDIF
+C
+C
+C********************************************************************ACC
+C ACC record
+	IF (TED4) THEN
+	   OK = DTI_COPY_BYTE_HEADER(
+     &		DTILUN,BBLOCK,.FALSE.,DTI_TED_ACCSZ,DTI_TED_ACC)
+	   IF(.NOT. OK)GOTO 300
+	ENDIF
+C
+	IF (GRID) THEN
+	   BBLOCK(1)='A'
+	   BBLOCK(2)='C'
+	   BBLOCK(3)='C'
+	ENDIF
+C
+C and write ACC block to tape
+C       
+	IF(TED4 .OR. GRID)THEN
+C
+C Force nulls to be spaces
+	   DO 2300,N=1,2700
+	      IF(BBLOCK(N) .EQ. 0) CALL EXPAND('%W%S',BBLOCK(N),' ')
+2300	   CONTINUE
+C
+C Loop to look at each accuracy sub-region  (upto 9 allowed)
+C
+	   DO 2320, J=74,2346,284
+C               
+C Calculate extent of geographical coordinates by extracting number of
+C coordinates from buffer and multiplying by 19.
+C
+	      N1 = BBLOCK(J)
+	      N2 = BBLOCK(J+1)
+       	      NUMCOO = 19*(10*(N1-48) + (N2-48))
+	      IF(NUMCOO .LT. 19) GOTO 2320
+C
+C Force spaces within geographicals to be zeros
+C
+              DO 2310,K=J,J+1+NUMCOO,1
+	         IF(BBLOCK(K) .EQ. 32) THEN
+			 CALL EXPAND('%W%S',BBLOCK(K),'0')
+		 ENDIF
+2310	      CONTINUE
+C
+2320	CONTINUE
+C
+	   IF(DEBUG)CALL WRITEF('ACC block - first 80 chars only:')
+	   IF(DEBUG)CALL WRITEF('%A80',BBLOCK)
+	   OK = MTOWRB(BBLOCK,DTI_TED_ACCSZ)
+	   IF(.NOT. OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	      GO TO 999
+	   ENDIF 
+	ENDIF
+C
+C******************************************************************DATA
+C loop putting together data blocks
+C
+	DO 210 III=1,X_EXTENT(DTILUN)
+	   BLKNO = III-1
+	   BBLOCK(1)='252'O	! marker byte 
+	   BLKCHK=0		! clear checksum
+	   BLKBCH(1)=BBLOCK(1)	! start off the checksum
+	   BBLOCK(2)=0		! high order block no
+	   WBLOCK(2)=BLKNO	! block number
+	   WBLOCK(3)=BLKNO+LONOFF	! longitude count
+	   WBLOCK(4)=LATOFF		! latitude count
+	   CALL CPYSWP(WBLOCK(2),WBLOCK(2),3,BLKCHK)
+C
+C Extract a column of data from the DTI file
+C
+	   OK = DTI_COPY_DATA(
+     &	      DTILUN,WBLOCK(5),.FALSE.,III,1,1,Y_EXTENT(DTILUN),IERR)
+	   IF(.NOT. OK)THEN
+	      CALL LSL_PUTMSG(OK)           
+	      IF(OK .EQ. DTI__SYSERR)CALL LSL_ADDMSG(IERR)
+	      PROCESS_FILE = SS$_ABORT
+	      GOTO 999
+   	   ENDIF
+C
+C and compute the checksum
+C
+	   CALL CPYSWP(WBLOCK(5),WBLOCK(5),Y_EXTENT(DTILUN),BLKCHK)
+	   BLKLEN = Y_EXTENT(DTILUN)*2+12
+C
+C set up checksum and write block
+C
+	   DO 200 JJJ=1,4
+	      BBLOCK(BLKLEN+1-JJJ)=BLKBCH(JJJ)
+200	   CONTINUE
+C
+C and write a data block to tape
+C
+           IF(DEBUG)CALL WRITEF('Data block %N',III)
+	   OK = MTOWRB(BBLOCK,BLKLEN)
+	   IF(.NOT. OK) THEN
+	      CALL LSL_PUTMSG(OK)                                    
+	      IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	      GO TO 999
+	   ENDIF
+C
+C Report progress to user
+C
+           IF(DIAG)THEN
+      	      COLCNT=JNINT((FLOAT(III)/FLOAT(X_EXTENT(DTILUN)))*100.0)
+	      IF(IMOD(COLCNT,10) .LE. 1)CALL WRITEF(
+     &	      '%N %% complete',COLCNT)
+	   ENDIF
+210	CONTINUE
+C
+C***************************************************************TAPEMARK
+C
+        IF(DEBUG)CALL WRITEF('Tapemark')
+	OK = MTOEOF()
+	IF(.NOT. OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	   GO TO 999
+	ENDIF 
+C
+C********************************************************************EOF
+C output trailer labels to magtape
+C
+C EOF label
+	CALL EXPAND(
+     & '%WEOF1%S%(5 %)UNIVAC%P0%I4%I4%I4%I2 %I2%I3 00000 000000%(20 %)',
+     &    BBLOCK,NAME,1,FILSEQ,1,0,YEAR,DAY)
+	IF(DEBUG)CALL WRITEF('%A80',BBLOCK)
+	OK = MTOWRB(BBLOCK,80)
+	IF(.NOT. OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	   GO TO 999
+	ENDIF 
+C
+C********************************************************************UTL
+C UTL label
+  	SAVE_UHL_BUF(1) = 'T'   
+	IF(DEBUG)CALL WRITEF('%A80',SAVE_UHL_BUF)
+	OK = MTOWRB(SAVE_UHL_BUF,80)
+	IF(.NOT. OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	   GO TO 999
+	ENDIF 
+C
+C***************************************************************TAPEMARK
+C and a tape mark
+        IF(DEBUG)CALL WRITEF('Tapemark')
+	OK = MTOEOF()
+   	IF(.NOT. OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	   GO TO 999
+	ENDIF
+C
+C***********************************************************************
+C
+	PROCESS_FILE = .TRUE.
+	GOTO 999
+C
+C Error reading DTI file
+C
+300	CALL LSL_PUTMSG(OK)
+	IF(OK .EQ. DTI__SYSERR)CALL LSL_ADDMSG(IERR)
+C
+C Close DTI file 
+C
+999	IF(DTIOPEN)THEN
+	   OK=DTI_CLOSE(DTILUN,.FALSE.,.TRUE.,IERR)
+	   IF(.NOT. OK)THEN
+	      CALL LSL_PUTMSG(DTI2DTE__CLDTI,DTINAM(:DTILEN))
+	      IF(OK .EQ. DTI__SYSERR)CALL LSL_ADDMSG(IERR)
+	      PROCESS_FILE = .FALSE.
+     	   ENDIF                                           
+	   DTIOPEN = .FALSE.
+	   HADDTI  = .FALSE.
+     	ENDIF
+C
+C If this file written OK then continue by appending files.
+C                                                          
+	IF(PROCESS_FILE)APPEND_FILE = .TRUE.
+C
+C Go back for next command
+C
+	RETURN
+	END
+C

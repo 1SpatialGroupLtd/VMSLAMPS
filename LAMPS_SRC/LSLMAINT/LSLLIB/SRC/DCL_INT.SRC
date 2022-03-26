@@ -1,0 +1,224 @@
+	INTEGER*4 FUNCTION DCL_INT(CLD_LABEL,WHINGE)
+C
+***	MODULE	DCL_INT
+***	IDENT	10SE87
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Array overflow test now uses /DCL_CLD/MAX_LONG
+C	not /DCL_CLD/MAX_ARR				TJH  06-Oct-1986
+CMOD	Bug fix. Now traps a '+' or '-' in middle of a
+C       number, using DCL_SIGN.				TJH  16-Sep-1986
+CMOD	LSL__RESPARSOVR now LSL__RESPARSOVF		RJH  29-Jan-1985
+CMOD	/LSL_STATUS/ added				TJH  21-Nov-1985
+C	Author 						TJH     Sep-1985
+C
+C Function gets any integer arguments associated with the DCL qualifier 
+C CLD_LABEL and puts them into IARRAY(). Ranges of integers are decoded,
+C and the results placed in IARRAY(). eg /THING=(22:25,6) would result
+C IARRAY(1)=22, IARRAY(2)=23, IARRAY(3)=24 IARRAY(4)=25, IARRAY(5)=6
+C Up to MAX_LONG arguments can be decoded and stored. Function returns 
+C set to  SS$_NORMAL if all is well. Local error reporting 
+C (via condition handler) may be invoked by setting WHINGE .true..
+C
+	IMPLICIT NONE
+C
+	INTEGER*4 	CLI$_ABSENT, CLI$GET_VALUE
+	EXTERNAL 	CLI$_ABSENT
+C
+	CHARACTER*16	CHAR_ARRAY	! found argument
+	INTEGER*2	CHAR_LEN        ! length of found argument
+	CHARACTER*(*)	CLD_LABEL	! the CLD label for qualifier
+
+	INTEGER*4	COLPOS		! position of colon in range
+	INTEGER*4	I		! loop var.
+	INTEGER*4	IERR		! for error return
+	INTEGER*4	ISTART		! defines start of number range
+	INTEGER*4	ISTOP		! defines end of number range
+	LOGICAL*4	REPORT		! condition handler error report
+	LOGICAL*4	WHINGE		! .T. = report errors locally
+C
+	INCLUDE		'($SSDEF)'
+	INCLUDE 	'($STSDEF)'
+	INCLUDE 	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 	'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 	'LSL$CMNLSL:STATUS.CMN'
+C
+C Condition handler
+	EXTERNAL	DCL_ERRET
+C
+C Function
+	INTEGER		DCL_SIGN	! tests for bad sign positioning
+C
+C Common block to control error reporting in condition handler
+	COMMON /LSL_REPORT/ REPORT	
+C
+C ......................................................................
+C
+	REPORT=WHINGE		! is condition handler to scream?
+	NUMINT=0		! initialise number of args. counter
+C
+C Establish condition handler
+	CALL LIB$ESTABLISH( DCL_ERRET )
+C
+C Get first value for our label
+	DCL_INT= CLI$GET_VALUE (CLD_LABEL,
+     &				CHAR_ARRAY,
+     &				CHAR_LEN)
+C
+C ......................................................................
+C
+C Repeat until the list is depleted
+C
+	DO WHILE (DCL_INT)
+	    NUMINT=NUMINT+1
+C
+C
+C Trap the potential IARRAY() overflow and issue the LSLLIB 
+C error "result parse buffer overflow"
+C
+	    IF (NUMINT.EQ.MAX_LONG) THEN
+	        DCL_INT=LSL__RESPARSOVF
+		CALL LIB$SIGNAL
+     &			( %VAL(DCL_INT) ) ! signal error
+	        IF (WHINGE)
+     &		           CALL WRITEF(' \%S\',CHAR_ARRAY(:CHAR_LEN))
+C
+C Revert to normal error processing
+	        CALL LIB$REVERT
+	        LSL_STATUS=DCL_INT.OR.LSL_QUIET	! set status 
+	        RETURN
+	    ENDIF
+C
+C
+C As we have had to use a CLD $QUOTED_STRING type qualifier to get the 
+C arguments in, the CLI will not have trapped any non numeric characters
+C in what we are assuming will be integer numbers
+C
+	    DO 10 I=1,CHAR_LEN
+	      IF ((CHAR_ARRAY(I:I).LT.'0'
+     &		  	.OR.CHAR_ARRAY(I:I).GT.'9')
+     &	  	  	.AND.CHAR_ARRAY(I:I).NE.'+'
+     &	  	  	.AND.CHAR_ARRAY(I:I).NE.'-'
+     &	  	  	.AND.CHAR_ARRAY(I:I).NE.':') 
+     &						THEN
+
+C Since the CLI$NUMBER value type wasn't used (as we want to be able
+C to specify numeric ranges with a ':') we will have to issue a LSLLIB
+C fraudulent message: "invalid syntax for value specification" here.
+C
+	        DCL_INT=LSL__INVALSPEC
+	        IF (WHINGE) THEN
+	           CALL LSL_PUTMSG(DCL_INT) 	! sets status for you
+		   CALL WRITEF(' \%S\',CHAR_ARRAY(:CHAR_LEN))
+		ELSE
+	           LSL_STATUS=DCL_INT.OR.LSL_QUIET	! set status 
+		ENDIF
+C
+C Revert to normal error processing
+	        CALL LIB$REVERT
+	        RETURN
+	     ENDIF
+10	   CONTINUE
+C
+C Finally read the actual number!
+C
+	   COLPOS=INDEX(CHAR_ARRAY,':')		
+C
+	   IF (COLPOS.EQ.CHAR_LEN) THEN 	! user said ,n:, or ,:,
+C
+C  Return with "invalid syntax for value specification"
+	        DCL_INT=LSL__INVALSPEC
+	        IF (WHINGE) THEN
+	           CALL LSL_PUTMSG(DCL_INT) 	! sets status for you
+		   CALL WRITEF(' \%S\',CHAR_ARRAY(:CHAR_LEN))
+		ELSE
+	           LSL_STATUS=DCL_INT.OR.LSL_QUIET	! set status 
+		ENDIF
+C
+C Revert to normal error processing
+	        CALL LIB$REVERT
+	        RETURN
+	   ENDIF
+C
+	   IF (COLPOS.EQ.0) THEN	! no colon... single number
+C
+C Check that the user didn't specify (n-n) or (n+n) instead of -nn or
+C +nn or n:n
+	       DCL_INT=DCL_SIGN(CHAR_ARRAY,CHAR_LEN,WHINGE)
+	       IF (.NOT.DCL_INT) GOTO 40
+	       READ(CHAR_ARRAY(:CHAR_LEN),*,ERR=30) IARRAY(NUMINT)
+	   ELSE				! read range start/stop numbers
+	       IF (COLPOS.EQ.1) THEN	! user said ,:N, or ,:,
+		  ISTART=0
+	       ELSE
+C
+C Check that the user didn't specify (n-n) or (n+n) instead of -nn or
+C +nn or n:n
+	          DCL_INT=DCL_SIGN(CHAR_ARRAY,COLPOS-1,WHINGE)
+	          IF (.NOT.DCL_INT) GOTO 40
+		  READ(CHAR_ARRAY(:COLPOS-1),*,ERR=30) ISTART
+	       ENDIF
+C
+C Check that the user didn't specify (n-n) or (n+n) instead of -nn or
+C +nn or n:n
+	       DCL_INT=DCL_SIGN(CHAR_ARRAY(COLPOS+1:CHAR_LEN),
+     &                                      CHAR_LEN-COLPOS+1,WHINGE)
+	       IF (.NOT.DCL_INT) GOTO 40
+	       READ(CHAR_ARRAY(COLPOS+1:CHAR_LEN),*,ERR=30) ISTOP
+C
+C Expand the implied range
+	       IARRAY(NUMINT)=ISTART
+	       DO 15 I=1,ISTOP-ISTART
+	          NUMINT=NUMINT+1
+C
+C Trap the potential IARRAY() overflow and issue the LSLLIB 
+C error "result parse buffer overflow"
+C
+	          IF (NUMINT.EQ.MAX_LONG) THEN
+	             DCL_INT=LSL__RESPARSOVF
+	             IF (WHINGE) THEN
+	   	        CALL LSL_PUTMSG(DCL_INT)
+		        CALL WRITEF(' \%S\',CHAR_ARRAY(:CHAR_LEN))
+		     ELSE
+	                LSL_STATUS=DCL_INT.OR.LSL_QUIET	! set status 
+		     ENDIF
+C
+C Revert to normal error processing
+	             CALL LIB$REVERT
+	             RETURN
+	          ENDIF
+	          IARRAY(NUMINT)=ISTART+I
+15	       CONTINUE
+	   ENDIF
+C
+C Get next argument
+C
+	   DCL_INT= CLI$GET_VALUE (CLD_LABEL,
+     &				   CHAR_ARRAY,
+     &				   CHAR_LEN)
+	END DO
+C
+C ......................................................................
+C
+C Make sure termination status was correct
+C
+	IF (DCL_INT .OR. DCL_INT .EQ. %LOC( CLI$_ABSENT)) THEN
+     	   DCL_INT=SS$_NORMAL
+	ELSE IF (IBITS(DCL_INT,0,3).NE.STS$K_WARNING) THEN
+	   CALL LIB$SIGNAL( %VAL(DCL_INT) ) ! report error locally?
+	ENDIF
+	GOTO 40
+C
+C ......................................................................
+C
+C Error on internal read, set DCL_INT to error code,
+C
+30	CALL ERRSNS(,,,,DCL_INT)
+	CALL LIB$SIGNAL (%VAL (DCL_INT))	! signal error
+C
+C Revert to normal error processing
+40	CALL LIB$REVERT
+	LSL_STATUS=DCL_INT.OR.LSL_QUIET		! set status 
+	RETURN	
+	END

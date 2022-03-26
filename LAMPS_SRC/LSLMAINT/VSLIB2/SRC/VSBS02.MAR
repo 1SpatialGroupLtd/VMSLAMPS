@@ -1,0 +1,168 @@
+	.TITLE	VSBS
+
+	.IDENT	/07MY87/
+
+	CODE_PSECT	VS
+
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+
+; Author:			Susan Manning
+; Amended for Sigma ARGS:	Tony J Ibbs	Sept/Oct 1982
+
+
+; BASIC VS11/SIGMA ARGS GRAPHIC LIBRARY SUPPORT
+
+; Primitive line drawing entries
+
+
+; Relative
+
+; Move by
+
+.ENTRY	VSMBY,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R7
+	MOVF	@8(AP),R9
+	BSBB	VS$MBY
+	RET
+
+
+; Line by
+
+.ENTRY	VSLBY,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R7
+	MOVF	@8(AP),R9
+	MOVW	#1,R10
+	BSBB	VS$MLBY
+	RET
+
+
+; Absolute
+
+; Move to
+
+.ENTRY	VSMTO,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R7
+	MOVF	@8(AP),R9
+	BSBB	VS$MTO
+	RET
+
+
+; Line to
+
+.ENTRY	VSLTO,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R7
+	MOVF	@8(AP),R9
+	BSBB	VS$LTO
+	RET
+
+
+VS$LTO::MOVW	#1,R10		; so VSFILL will work
+	BSBB	VS$MLTO
+	RSB
+
+
+; Move by zero
+$VSMB0::CLRF	R7
+	CLRF	R9
+
+VS$MBY:	CLRW	R10
+VS$MLBY:BSBB	VSLBGEN
+	RSB
+
+VS$MTO::CLRW	R10
+VS$MLTO:BSBB	VSLTGEN
+	RSB
+
+; form endpoint in user space
+VSLBGEN:ADDF2	VSRUX,R7
+	ADDF2	VSRUY,R9
+
+; establish endpoint in user space
+VSLTGEN:BBCC	#VFLG_V_CHAR,VSFLAG,10$	; been drawing characters ?
+	PUSHR	#^M<R7,R9,R10>		; save endpoint
+	BSBB	$VSMB0			; move back to last line-drawing posn.
+	POPR	#^M<R7,R9,R10>		; recover
+; and check if we need to go off on the patterned line diversion
+10$:	BBS	#VFLG_V_IFPAT,VSFLAG,VS$DOPAT	; branch for pattern diversion
+	MOVF	R7,VSRUX
+	MOVF	R9,VSRUY
+	ADDF2	VSRUOX,R7
+	ADDF2	VSRUOY,R9
+	MULF3	VSTRX,R7,R6		; transform endpoint to pixels
+	MULF3	VSTRY,R9,R8
+	JSB	$VSMOV
+	RSB
+
+
+; and we have the pattern diversion...
+VS$DOPAT:JMP	VS.DDC			; jump to VS Dot Dash Chain
+					; which does it's own RSB
+
+
+; Character Drawing Entries -
+; for Sigma ARGS uses the ARGS character font directly (both cases)
+
+; String of characters passed by descriptor
+
+.ENTRY	VSCHRS,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVAQ	@4(AP),R2		; descriptor address
+	MOVZWL	(R2),R3			; length of string
+	BEQLW	VSCH2			; if zero, none to output
+	MOVAB	@4(R2),R2		; address of string
+
+; common code for string and byte array...
+VSCH1:	JSB	V.FLSH			; flush out buffered moves
+	INCL	R3
+	ASHL	#-1,R3,R0		; determine no. of data words required
+	DECL	R3
+	ADDL2	#3,R0			; add in character control words
+	JSB	$VSCHKBF		; ensure space in buffer
+; introduce string...
+	BISL2	#VFLG_M_CHAR!VFLG_M_FRCABS,VSFLAG ; note we're doing characters
+					; and force abs move next line move
+	MOVW	#SIGTXT,R4		; get text instn
+	INSV	R3,#SGBYT1,#SGWOSZ,R4	; how many bytes
+	JSB	$VSBFW			; buffer it
+	MOVW	SGCHSZ,R4		; size-1, direction
+	JSB	$VSBFW			; buffer it
+
+; and common output string code...
+14$:	CMPL	R3,#1
+	BEQL	20$			; br round loop if only 1 char to o/p
+15$:	MOVW	(R2)+,R4
+	JSB	$VSBFW			; write data word
+	ACBL	#2,#-2,R3,15$		; repeat until <= 1 character left
+20$:	DECL	R3			; odd character left to output ?
+	BLSS	VSCH2			; br if not
+	MOVZBW	(R2),R4
+	JSB	$VSBFW			; output it
+VSCH2:	RET
+
+
+; String of characters, zero terminated
+
+.ENTRY	VSCHRZ,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVAB	@4(AP),R2		; get address of string
+	MOVL	R2,R0			; save a copy
+	CLRL	R3			; init character count
+10$:	TSTB	(R2)+			; look for null byte
+	BEQL	20$			; branch if found
+	INCL	R3			; update count
+	BRB	10$
+20$:	TSTL	R3			; any characters ?
+	BEQL	VSCH2			; no
+	MOVL	R0,R2			; address of string
+	BRW	VSCH1			; join common code
+
+; Set character size and direction for Sigma
+; CALL VSCHSZ(SIZE,DIR)
+; SIZE (0-15) is scale factor-1
+; DIR (0-3) is direction (0 - right,1 - up etc.)
+
+.ENTRY	VSCHSZ,^M<>
+	EXTZV	#0,#2,@8(AP),R0		; 2 bits of DIR
+	INSV	@4(AP),#8,#4,R0		; 4 bits of SIZE
+	MOVW	R0,SGCHSZ		; save for TXT instruction
+	RET
+
+	.END

@@ -1,0 +1,150 @@
+	LOGICAL FUNCTION ACEDT
+C
+***     IDENT   18AP91
+***     MODULE  ACEDT
+C
+C       Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C       Written                                 CCB	 18-DEC-1984
+C
+C	LITES2 cartographic editor AC edit routine
+C	Replaces edited ACs and TCs into the found object
+C	Returns FALSE if successful
+C
+        IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:EFNLUN/
+***     PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:ACS/
+***	COMMON/CMN:CSTRCT/
+***	COMMON/CMN:DEFINE/
+***	COMMON/LSL$CMNFRT:FRTCOM//
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MODIFY/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:STATE/
+***	COMMON/CMN:STRIKE/
+***	COMMON/CMN:OPTION/
+C
+C local
+	INTEGER*2	ISTAT(4)	! FS words
+	INTEGER*2	IECODE,IELEN
+C function called
+	LOGICAL	STRTFT,COIDLE,NDSTCN
+C
+	ACEDT = .TRUE.			! assume failure
+C
+	IF (.NOT.(TCEDIT.OR.ACEDIT)) THEN
+	   CALL INFORM(MSG_NOACEDT)	! no edits made
+	   GOTO 998			! but success
+	ENDIF
+C
+	IF (MAPRO(FOPAK(PAKMAP))) THEN
+	   CALL MOAN(MSG_MAPREADONLY,FOPAK(PAKMAP)+1)
+	   GOTO 999
+	ENDIF
+C
+C this is a code change
+	FLG_CODECHANGE = .TRUE.
+C
+C do we need to copy the feature?
+C Yes if TCs/ACs have been edited, some remain, and the space
+C is insufficient for them, or the space is too bit to void.
+	IF (TCEDIT .AND.			! TCs changed
+     &	    FTRACD(ACD_TCWORD).GT.0 .AND.	! some TCs to do
+     &	    (FOTC.EQ.0.OR.FTRACD(ACD_TCWORD).GT.FOTCND-FOTC.OR.
+     &				FOTCND-FOTC.GT.65535) ) GOTO 200
+	IF (ACEDIT .AND.			! ACs changed
+     &	    FTRACD(ACD_ACWORD).GT.0 .AND.	! some ACs to do
+     &	    (FOAC.EQ.0.OR.FTRACD(ACD_ACWORD).GT.FOACND-FOAC.OR.
+     &				FOACND-FOAC.GT.65535) ) GOTO 200
+C
+C in-situ edit
+C NB The -2 for COPYAC is an invalid IFF address, to cause a collapse
+C if the ACs are not in memory.
+	CALL SELIF(FOPAK(PAKMAP))
+C
+C If we're flagging edited features then must get back to the FS
+	IF (EDTOPT) THEN
+	   CALL IFFPKE(IECODE,IELEN,FOPAK(PAKPNF))   !find NF or equiv
+	   IF (IECODE.NE.'TC'.AND.IECODE.NE.'CH'.AND.
+     &	   IECODE.NE.'VO'.AND. IECODE .NE. 'NF') THEN
+	      CALL NASTY(MSG_BADPNF)
+	      CALL COLAPS(MSG_BADPNF)
+	      GOTO 999
+	   ENDIF
+	   CALL IFFNXC('FS',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      CALL NASTY(MSG_NOFSENT)
+	      CALL COLAPS(MSG_NOFSENT)
+	      GOTO 999
+	   ENDIF
+	   IF (IELEN.GT.4) IELEN=4
+	   CALL EIHRI(ISTAT,MIN0(IELEN,4),1)
+    	   ISTAT(4) = IOR(ISTAT(4),1)		! set edited bit
+	   CALL EIHW( ISTAT, IELEN, 1)		! put it back
+	ENDIF
+C
+C update os map header?
+	IF (OS_MH_EDIT) CALL OS_MH_UPDATE(FOPAK,FOFS)
+C
+	IF (.NOT.TCEDIT) GOTO 100
+	CALL IFFUPP(LPOSF,FOTC,FOTCND)
+	CALL IFFVOM			! void old TCs
+	CALL COPYAC(-2,.FALSE.)	! insert new TCs
+	CALL EIHMK(0)			! remove mark
+C
+100	IF (.NOT.ACEDIT) GOTO 998	! finished
+	CALL IFFUPP(LPOSF,FOAC,FOACND)
+	CALL IFFVOM			! void old ACs
+	CALL COPYAC(-2,.TRUE.)	! insert new ACs
+	CALL EIHMK(0)			! remove mark
+	GOTO 998			! that's all
+C
+C Not in-situ
+C Start off the new feature
+C Take symbols and texts through their own editing route
+200	IF (FOPAK(PAKGT).GE.UNOTYP.AND.FOPAK(PAKGT).LE.TEXTYP) THEN
+	   IF (COIDLE(.TRUE.)) GOTO 999
+C
+C call MODCHK to do a GENAUX for us. MODCHK believes that it can only
+C work in modify state, so pretend that we are
+	   SINDEX = STATE_MODIFY
+	   MODMOD = .TRUE.	! pretend something changed
+	   CALL MODCHK
+	   SINDEX = STATE_AC
+	   CONTC = -2		! cause collapse in COPYAC if ACs not
+	   CONAC = -2		! in memory
+	   IF (NDSTCN(.TRUE.)) GOTO 999
+	ELSE
+C
+C take copies of pack (and auxiliary array, in case it's a circle)
+	   CALL CPYPAK(PAKLEN,FOPAK,COIPAK)
+	   CALL CPYPAK(AUXLEN,FOAUX,COIAUX)
+	   COIPAK(PAKFLG) = 0		! not deleted
+	   IF (STRTFT(FOPAK,-2,FOFS,-2,FOTH)) GOTO 999
+C
+C Delete old segment (remove from screen)
+	   CALL LDSG(FOPAK,.TRUE.)
+C
+C Output points
+	   CALL ADDVRT(FOPAK,1,FOLST,.FALSE.)
+C
+C Terminate feature
+	   CALL ENDFT
+C
+C Remove the old object in hand completely
+	   CALL DELFT(FOPAK,FOEF)
+	ENDIF
+C
+998	ACEDT = .FALSE.			! success
+C
+999	RETURN
+        END

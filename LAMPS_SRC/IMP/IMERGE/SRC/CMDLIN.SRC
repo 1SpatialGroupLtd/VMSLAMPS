@@ -1,0 +1,391 @@
+	LOGICAL*4 FUNCTION CMDLIN(CMDSTR,LINLEN,USRSTR,USRLEN)
+C
+***	MODULE	CMDLIN
+***	IDENT	18NO86
+C
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	Author						TJH  13-Jan-1986
+C
+C
+C CMDLIN takes IMERGE input file specs and their associated qualifiers
+C and creates from them a composite input 'parameter' to fool the parser
+C into believing that only one input and one output file is required. 
+C The reason for this complexity is that DEC do not support required
+C parameters which follow optional ones. By doing a 2 stage parse IMERGE
+C can offer apparently relevant prompts to the user and pass the results
+C into a second stage of parse which assumes all parameters are
+C optional. The second stage of parsing is done by the PARSE2 routine.
+C
+C CMDLIN will handle a command line of the form:
+C
+C $ IMERGE/LOG/SPLIT=restfile/REST_LAYER=int/OUTPUT=listfile -
+C	_infile1/LAYER=(int,...),infile2/LAYER=(int,...), -
+C 	_infileN/LAYER=(int,...) outfile/SINGLE_LAYER=int
+C
+C Where specific layer number selections may be made for each individual
+C infile.
+C
+C Or, alternatively:
+C
+C $ IMERGE/LOG/SPLIT=restfile/REST_LAYER=int/LAYER=(int,...) -
+C	_infile1,infile2,infile3,infile4 outfile/SINGLE_LAYER=int
+C
+C Where the layer selections made with /LAYER are applied globally to
+C all the input files. 
+C
+C Or, alternatively:
+C
+C $ IMERGE
+C _From: /LOG/SPLIT=restfile/REST_LAYER=int infile1/layer=(1,2,6,7), -
+C _$ infile2/LAYER,1,2,3,6,7), - 
+C _$ infile3/LAYER,1,2,3,6,7), - 
+C _$ infile4/LAYER,1,2,3,6,7), - 
+C _$ infile5/LAYER,1,2,3,6,7), - 
+C _$ infile6/LAYER,1,2,3,6,7), - 
+C _$ infile7/LAYER,1,2,3,6,7) outfile/SINGLE_LAYER
+C
+C Up to seven input files may be specified.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	CHARACTER*256	CMDSTR	! the cmd. string for parsing
+	CHARACTER*256	USRSTR	! the cmd. string as typed
+	INTEGER		LINLEN	! length of cmd. line
+	INTEGER		USRLEN	! length of cmd. line as typed
+C
+	INCLUDE 	'($RMSDEF)'
+	INCLUDE 	'($SSDEF)'
+	INCLUDE 	'($STSDEF)'
+	INCLUDE		'LSL$CMNIMERGE:COMMAND.CMN'
+	INCLUDE 	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 	'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 	'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 	'LSL$CMNLSL:EXCEPTION.CMN'
+	INCLUDE 	'LSL$CMNLSL:STATUS.CMN'
+C
+C Common block to control error reporting in condition handler
+	COMMON /REPORT/ REPORT	
+C
+C Condition handler
+	EXTERNAL	CML_ERRET
+C
+	INTEGER 	CLI$DCL_PARSE,  LIB$GET_FOREIGN, LIB$GET_INPUT
+	EXTERNAL	LIB$GET_INPUT
+C
+C
+C Command Language Definitions
+	EXTERNAL        IMERGE_CLD
+C W/S
+	INTEGER*2	ACCLEN		! accum. length of command line
+	INTEGER*2	PROLEN		! length of prompt
+	INTEGER*2	STARTP		! start of first parameter
+C
+	INTEGER*4	I,J		! tmp. vars.
+	INTEGER*4	PROMPT		! LIB$GET_FOREIGN control
+C
+	BYTE		CH		! one byte of TXTBUF
+C
+	CHARACTER*7	PROTXT		! prompt for LIB$GET_FOREIGN
+	CHARACTER*256	CHARS
+C
+	LOGICAL*4	EOL		! .T. end of line detected
+	LOGICAL*4	HAD_VRB		! .T.  verb appended to USRSTR
+	LOGICAL*4	INBRAC		! .T. if inside qual. arg. list
+	LOGICAL*4	REPORT		! .T. if local error reporting
+C
+C Functions called
+	INTEGER*4	DCL_CML		! gets parsed command line
+	LOGICAL		RDCH
+	LOGICAL		RDCHS
+C
+C ......................................................................
+C
+C Initialise things.
+C
+	REPORT	= 	.TRUE.	! LSLDCL local error reporting
+	HAD_VRB = 	.FALSE.	! set .TRUE. when verb appended
+C
+C ......................................................................
+C
+C Establish condition handler as we don't want CLI$DCL_PARSE whinging
+C directly as the FAO stuff will look really weird to the user because
+C of the doctored first parameter.
+C
+	CALL LIB$ESTABLISH( CML_ERRET )
+	PROMPT=0		! initilly prompt if nowt from CLI
+	PROTXT='_From: '	! prompt 
+	PROLEN=7		! length of prompt
+	ACCLEN=0		! init length of cmd line 
+C
+C ......................................................................
+C
+C Get command line for our command verb IMERGE. 
+C
+10	CMDLIN=
+     &	 LIB$GET_FOREIGN(CHARS(ACCLEN+1:),PROTXT(:PROLEN),TXTPTR,PROMPT)
+	PROMPT=1		! make LIB$GET_FOREIGN prompt every time
+C
+C Nothing found?
+	IF (TXTPTR.EQ.0.AND.CMDLIN.NE.RMS$_EOF.AND.PROLEN.NE.3) GOTO 10
+	ACCLEN=ACCLEN+TXTPTR
+	TXTPTR=ACCLEN
+C
+C ......................................................................
+C
+C Analyse what we have got. We MUST ALWAYS have the 1st parameter which 
+C is really a string containing ALL the input file_specs and their 
+C intervening qualifiers. We can then doctor this before the parser 
+C gets sight of it.
+	IF (CMDLIN) THEN
+20	    IF (CHARS(ACCLEN:ACCLEN).EQ.' '
+     &		.OR.ICHAR(CHARS(ACCLEN:ACCLEN)).EQ.12) THEN
+	       ACCLEN=ACCLEN-1
+	       GOTO 20
+	    ENDIF
+C
+C Do we have a continuation line?
+	    IF (CHARS(ACCLEN:ACCLEN).EQ.'-') THEN	
+	       ACCLEN=ACCLEN-1		! ignore '-' 
+	       PROTXT='_$ '		! prompt for continuation line
+	       PROLEN=3			! length of prompt
+	       GOTO 10			! get the continuation line
+	    ENDIF
+C
+C No (more) continuation lines copy cmd. line to TXTBUF for decoding
+	    DO 30 I=1,ACCLEN
+	       TXTBUF(I)=ICHAR(CHARS(I:I))
+30	    CONTINUE
+C
+C Reset decode pointer
+	    CALL BSLN
+C
+C Check if only spaces on line? Use PROLEN to ensure that we are not 
+C on a continuation line.
+	    EOL=RDCHS(CH)
+	    IF (EOL.AND.PROLEN.NE.3) GOTO 10
+C
+C ......................................................................
+C
+C Command line decoding for the first 'parameter' starts here.
+C
+C Is the 1st character a '/'? If so this is a qualifier and we must look
+C for the next space followed by a non '/' or qualifier arg. for the 
+C start of the first 'parameter'
+	    IF (CH.EQ.'/') THEN			
+	       INBRAC=.FALSE.			! not inside brackets
+40	       IF (RDCH(CH)) GOTO 50		! read qual. char. 
+C
+C Beware of brackets while looking for spaces
+	       IF (CH.EQ.'(') INBRAC=.TRUE.
+	       IF (CH.EQ.')') INBRAC=.FALSE.
+C
+C We have had a comma, we are within a list form of the first parameter
+C or within the argument list of a qualifier eg /LAYER=(n,n,n,n).
+	       IF (CH.EQ.',') THEN		
+	         IF (RDCHS(CH)) GOTO 50
+		 CALL BSCH
+		 GOTO 40
+	       ENDIF
+	       IF (CH.NE.' ') GOTO 40		! looking for space
+C
+C Found space, but ignore spaces within brackets
+	       IF (INBRAC) GOTO 40
+C
+C The space is outside brackets. Now look for next non-space character.
+	       IF (RDCHS(CH)) GOTO 50
+C
+C Are we still within the parameter list?
+	       IF (CH.EQ.',') GOTO 40
+C
+C Even more plausible now. But maybe the space was put around a '='
+	       IF (CH.EQ.'=') THEN
+C
+C Use up all the spaces around the '=' then return to the usual route
+	          IF (RDCHS(CH)) GOTO 50
+		  CALL BSCH
+		  GOTO 40
+	       ENDIF
+C
+C Finally, we check that the space is not followed by '(' or '/' 
+	       IF (CH.EQ.'('.OR.CH.EQ.'/') THEN
+		  CALL BSCH
+		  GOTO 40 ! qualifier or qual. arg.?
+	       ENDIF
+	    ENDIF
+C
+C When we get here we are at the start of the 1st 'parameter'
+	    GOTO 70
+C
+C ......................................................................
+C
+C We come here if we have started off with qualifiers, followed by a 
+C carriage return. Store these then go and prompt for the 
+C first 'parameter'.
+50	    IF (.NOT.HAD_VRB) THEN
+	       USRSTR='IMERGE '//USRSTR
+	       USRLEN=7
+	       HAD_VRB=.TRUE.		! we appended the verb
+	    ELSE
+	       USRLEN=USRLEN+1
+	       USRSTR(USRLEN:USRLEN)=' '
+	    ENDIF
+	    DO 60 I=1,ACCLEN
+	       USRLEN=USRLEN+1
+	       USRSTR(USRLEN:USRLEN)=CHAR(TXTBUF(I))
+60	    CONTINUE
+	    ACCLEN=0			! reset cmd line length
+	    GOTO 10
+C
+C ......................................................................
+C
+C We have determined the start of the first 'parameter'. Now determine 
+C the end of the first 'parameter'. The word parameter is used here
+C enclosed in quotes as this is not a true DCL parameter as it will 
+C have qualifiers embedded within it (and it may even be a parameter 
+C list).
+70	     IF (HAD_VRB) THEN
+	        USRLEN=USRLEN+1
+	        USRSTR(USRLEN:USRLEN)=' '
+	     ELSE
+	        USRSTR='IMERGE '
+	        USRLEN=USRLEN+7
+	     ENDIF
+C
+C Backspace decode pointer 1 character, remember the posn. of the start 
+C of the first 'parameter', and set INBRAC to we're "outside brackets"
+	     CALL BSCH
+	     STARTP=DCPTR
+	     INBRAC=.FALSE.
+C
+C Loop to detect end of 1st parameter starts here
+80	     IF (RDCH(CH)) GOTO 90 		! end 'parameter'?
+C
+C Beware of brackets while looking for spaces
+	       IF (CH.EQ.'(') INBRAC=.TRUE.
+	       IF (CH.EQ.')') INBRAC=.FALSE.
+C
+C If we have had a comma, we are within a list form of the first 
+C 'parameter'.
+	       IF (CH.EQ.',') THEN		
+	         IF (RDCHS(CH)) GOTO 90
+		 CALL BSCH
+		 GOTO 80
+	       ENDIF
+	       IF (CH.NE.' ') GOTO 80		! looking for space
+C
+C Found space, but ignore spaces within brackets
+	       IF (INBRAC) GOTO 80
+C
+C We have had a space, but is this preceded or followed by a comma? 
+	       IF (RDCHS(CH)) GOTO 90		! end 'parameter'?
+	       IF (CH.EQ.',') THEN		! no, its a list
+	         IF (RDCHS(CH)) GOTO 90
+		 CALL BSCH
+		 GOTO 80
+	       ENDIF
+	       IF (CH.EQ.'=') THEN
+	          IF (RDCHS(CH)) GOTO 90
+		  CALL BSCH
+		  GOTO 80
+	       ENDIF
+	       IF (CH.EQ.'('.OR.CH.EQ.'/') THEN
+		  CALL BSCH
+		  GOTO 80 
+	       ENDIF
+C
+C Now we have both ends of the 1st 'parameter'.
+		CALL BSCH     
+C
+C ......................................................................
+C
+C Copy any qualifiers etc on line that come before STARTP
+C
+90	        IF (STARTP.GT.1) THEN
+	           DO 100 I=1,STARTP-1
+		     USRLEN=USRLEN+1
+		     USRSTR(USRLEN:USRLEN)=CHAR(TXTBUF(I))
+100		   CONTINUE
+	        ENDIF
+C
+C Keep the raw cmd. string as typed by the user for use in the optional
+C /OUTPUT file as a record of the session. Transfer USRSTR's contents
+C to CMDSTR for modification for the second stage of parse.
+	        LINLEN=USRLEN
+	        CMDSTR=USRSTR(:USRLEN)
+C
+C ......................................................................
+C
+C Now deal with the first 'parameter' itself, by changing all solidi
+C within this 'parameter' to '|', replace commas with '&', remove all 
+C pre-comma spaces, change '['and ']' to '{' and '}' and 
+C change '=' to '~'
+C
+		DO 110 I=STARTP,DCPTR-1
+		USRLEN=USRLEN+1
+		LINLEN=LINLEN+1
+	        IF (TXTBUF(I).EQ.'/') THEN
+		   CMDSTR(LINLEN:LINLEN)='|'
+	        ELSEIF (TXTBUF(I).EQ.',') THEN
+		   CMDSTR(LINLEN:LINLEN)='&'
+	        ELSEIF (TXTBUF(I).EQ.'=') THEN
+		   CMDSTR(LINLEN:LINLEN)='~'
+	        ELSEIF (TXTBUF(I).EQ.'(') THEN
+		   CMDSTR(LINLEN:LINLEN)='{'
+	        ELSEIF (TXTBUF(I).EQ.')') THEN
+		   CMDSTR(LINLEN:LINLEN)='}'
+	        ELSEIF (TXTBUF(I).EQ.' ') THEN
+	           LINLEN=LINLEN-1
+		ELSE
+	           CMDSTR(LINLEN:LINLEN)=CHAR(TXTBUF(I))
+		ENDIF
+	        USRSTR(USRLEN:USRLEN)=CHAR(TXTBUF(I))
+110	     CONTINUE	    
+	     LINLEN=LINLEN+1
+	     USRLEN=USRLEN+1
+	     CMDSTR(LINLEN:LINLEN)=' '
+	     USRSTR(USRLEN:USRLEN)=' '
+C
+C Now append the remainder of the command line (if any) to CMDSTR
+	     DO 120 I=DCPTR,ACCLEN
+	        LINLEN=LINLEN+1
+		CMDSTR(LINLEN:LINLEN)=CHAR(TXTBUF(I))
+	        USRLEN=USRLEN+1
+		USRSTR(USRLEN:USRLEN)=CHAR(TXTBUF(I))
+120	     CONTINUE
+C
+C ......................................................................
+C
+C Parse command line against IMERGE_CLD. This will require only 2 
+C parameters; our composite first 'parameter' containing ampersands etc
+C and the output parameter. If the output parameter is missing 
+C CLI$_PARSE will prompt for it. If the parser groans we give up on
+C return to the main program. If all is well we can go on to try 2nd
+C parsing of the command line.
+C
+	    CMDLIN=
+     &		CLI$DCL_PARSE(CMDSTR,IMERGE_CLD,LIB$GET_INPUT,%VAL(0))
+C
+C Get the command line if it has survived the 1st stage of parse
+	   IF (CMDLIN) THEN
+	      I=LINLEN
+	      CMDLIN=DCL_CML(CMDSTR,LINLEN,.TRUE.)
+	      IF (LINLEN-I.GT.0) THEN
+		 USRSTR=USRSTR(:USRLEN)//' '//CMDSTR(I:LINLEN)
+		 USRLEN=USRLEN+1+(LINLEN-I)
+	      ENDIF
+	   ENDIF
+C
+C ......................................................................
+C
+	ENDIF			! end "LIB$GET_FOREIGN ok?" block
+C
+C Revert to normal error processing
+	CALL LIB$REVERT
+C
+	RETURN
+	END

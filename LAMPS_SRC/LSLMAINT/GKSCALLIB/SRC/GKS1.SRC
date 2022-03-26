@@ -1,0 +1,1842 @@
+C 	CONTROL FUNCTIONS
+C	=================
+C
+	SUBROUTINE	GOPKS(ERRFIL)
+C
+**	MODULE	GOPKS
+**	IDENT	19DE94
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+	IMPLICIT NONE
+C
+	EXTERNAL GKSBLK		! ensure that block data is linked in
+C
+C OPEN GKS	- includes initialising of data structures and variables
+C
+C Arguments:
+	INTEGER	ERRFIL			! error message file
+C
+C
+***	COMMON/GKSDAT1/			! GKS data structures
+***	COMMON/GKSESL/			! GKS error state list
+C
+C Set up initial indices and  default modes
+	GKSERR 	= 0		! no errors yet
+	TRNCUR	= 1		! use normalisation transformation 0
+	PLIND	= 1		! use polyline bundle table 1
+	ENCLIP	= .TRUE.	! enable clipping
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GCLKS
+C
+**	MODULE	GCLKS
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C CLOSE GKS	
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSESL/
+C
+	GKSERR	= 0				! no errors
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GOPWK(WKID,CONID,WTYPE)
+C
+**	MODULE	GOPWK
+**	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-Jul-1983
+C Add initialise fill area update		TJI	27-Nov-1984
+C
+C OPEN WORKSTATION   - sets up World Coordinates and Normalised Device
+C			  Coordinates to be 1 metre on the film with the
+C			  origin at the bottom left hand corner
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CONID			! connection-identifier
+	INTEGER	WTYPE			! workstation type
+C
+***	COMMON/GFADAT1/
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Functions called
+	INTEGER	TRNALL		! LSLLIB, translate logical name
+	LOGICAL	RDREAL		! LSLLIB, read real number
+	LOGICAL	RDLONG		! LSLLIB, read long integer
+C
+C Local variables
+	CHARACTER*10	TRAN
+	REAL	RX,RY,DX,DY
+	REAL	MITER_LIMIT
+	INTEGER	ZEROS(4)/4*0/
+	REAL	DPI
+	INTEGER	STEPS,SCALE
+C
+	GKSERR	= 0			! no errors
+C
+	WKIDS = WKID
+	WTYPES = WTYPE
+	DEFER = GASTI	! deferral mode is At Some TIme
+	REGEN = GSUPPD	! implicit regeneration suppressed
+	UPTRN = .TRUE.	! update transformation
+	UPLIN = .TRUE.	! update polyline attributes
+	UPFA  = .TRUE.	! update fill area attributes
+C
+C zero out pen array (INTEGER*2 16 by 256 elements
+	CALL VIOCLR(PEN,16*256*2)
+C
+C decide whether overlays are wanted opaque or transparent
+	OPAQUE = .TRUE.
+	IF (TRNALL('LSL$CALCOMP_TRANSPARENT',TRAN)) OPAQUE = .FALSE.
+C
+C decide at what thickness software thick lines are wanted
+	HWTHK = 16		! assume hardware up to 16 pixels
+	IF (TRNALL('LSL$CALCOMP_HWTHK',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),10)
+	   IF (RDLONG(HWTHK)) HWTHK = 16
+	ENDIF
+C
+C try for an expand factor from LSL$CALCOMP_EXPAND (default 1.0)
+	RASEXP = 1.0
+	IF (TRNALL('LSL$CALCOMP_EXPAND',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),10)
+	   IF (RDREAL(RASEXP)) RASEXP = 1.0
+	ENDIF
+C
+C try for a dot size from LSL$CALCOMP_DOTSIZE (default 4)
+	DOTSIZE = 4
+	IF (TRNALL('LSL$CALCOMP_DOTSIZE',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),10)
+	   IF (RDLONG(DOTSIZE)) DOTSIZE = 4
+	ENDIF
+C
+C try for a STEPS/inch number from LSL$CALCOMP_STEPS (default 2032)
+C If e.g. 400 is used, then FACTOR is called to make the plot smaller
+C by 400/2032, so that it will plot the correct size on a plotter
+C with STEPS set to 400. The plot file may then be smaller.
+	STEPS = 2032
+	IF (TRNALL('LSL$CALCOMP_STEPS',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),10)
+	   IF (RDLONG(STEPS)) STEPS = 2032
+	ENDIF
+C
+C try for a scale factor from LSL$CALCOMP_SCALE (default 0)
+C This number (1-32, passed as first argument to PLOTS) causes the plot
+C data to be scaled down by this number in the host, but instructs the
+C plotter to scale it up again. Again a smaller plot file may result, but
+C the resolution of the plot may be slightly degraded.
+	SCALE = 0
+	IF (TRNALL('LSL$CALCOMP_SCALE',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),10)
+	   IF (RDLONG(SCALE)) SCALE = 0
+	ENDIF
+C
+C set size, and number of pixels
+	CALL LSG_SIZE('LSL$CALCOMP_SIZE:')
+C
+C miter limit (as in PostScript) is the maximum ratio of the width
+C across a miter join to the line thickness (>=1).
+C It is related to the maximum angle between successive line segments (A)
+C by 1/MITER_LIMIT = COS (A/2).
+C Squaring this, and using COS(A/2) ** 2 = (1 + COS(A))/2, we arrive at a value
+C (MITER_TEST) to compare with COS(A) which we know.
+	MITER_LIMIT = 10.0
+	MITER_TEST = 2/MITER_LIMIT**2 - 1
+C
+	MAXCOL = 255			! allow 0-255 (8 planes)
+C
+C try for a dpi from LSL$CALCOMP_DPI (default 400)
+	DPI = 400.0
+	IF (TRNALL('LSL$CALCOMP_DPI',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),10)
+	   IF (RDREAL(DPI)) DPI = 400.0
+	ENDIF
+C
+	GNOMLW = 25.4/DPI/1000.0	! width 1/400 inch
+C
+	CALL PLOTS(-SCALE,0,1)
+	CALL FACTOR(100.0*STEPS/2032)	! change from cm. to m.
+	CALL SETLVL(1,2)		! define level 1 for 'overlay'
+C
+C define a white pen for circles in sw thick lines
+	LSTPEN = 1			! one pen defined
+	CALL XSETPN(1,0,ZEROS,ZEROS,ZEROS,LSTPEN)
+C
+	CALL LSG_SET_LUT(WKID,'LSL$CALCOMP_COLOUR:') ! load colour table
+C
+C determine whether to use hardware fill from LSL$CALCOMP_HW_FILL
+C Define as 0 for no, 1 (anything) for yes.
+	MAX_HATCH = 1
+	IF (TRNALL('LSL$CALCOMP_HW_FILL',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),10)
+	   IF (RDLONG(MAX_HATCH)) MAX_HATCH = 1
+	ENDIF
+	IF (MAX_HATCH.NE.0) MAX_HATCH = 4095	! max points for HATCH
+C
+	CCOLI = -1	! ensure colour set first time round
+	CLWID = 0.0	! and linewidth
+	TXCOLI = 1
+	CPATT = -1
+	LSTLEV = 0
+	CLEV = 0
+	CPEN = 0
+	HADESC = .FALSE.	! not had opaque/trans escape
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GCLWK(WKID)
+C
+**	MODULE	GCLWK
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C CLOSE WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+C
+	CALL GKS_END_LINE
+	CALL PLOT(0.0,0.0,999)		! terminate plot
+C
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GACWK(WKID)
+C
+**	MODULE	GACWK
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C ACTIVATE WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+	WSACT = .TRUE.
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GDAWK(WKID)
+C
+**	MODULE	GDAWK
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C DEACTIVATE WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+	WSACT = .FALSE.
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GCLRWK(WKID,COFL)
+C
+**	MODULE	GCLRWK
+**	IDENT	29FE84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					RD	14-Nov-1983
+C
+C CLEAR WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER COFL			! control flag
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+	CALL GKS_END_LINE
+	CALL PLOT(0.0,0.0,3)		! return to origin
+	CALL NEWPLT			! and advance to new paper
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GUWK(WKID,REGFL)
+C
+**	MODULE	GUWK
+**	IDENT	16MY84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	16-May-1984
+C
+C UPDATE WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	REGFL			! regeneration flag
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+C
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSDS(WKID,DEFMOD,REGMOD)
+C
+**	MODULE	GSDS
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C SET DEFERRAL STATE
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	DEFMOD			! deferral mode
+	INTEGER	REGMOD			! implicit regeneration mode
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+	IF (DEFMOD .LT. GASAP .OR. DEFMOD .GT. GASTI) GOTO 10
+	DEFER = DEFMOD
+C
+C nasty call to GUWK (second argument ignored)
+	IF (DEFER.EQ.GASAP.AND.WSACT) CALL GUWK(WKID,0)
+10	IF (REGMOD .LT. GSUPPD .OR. REGMOD .GT. GALLOW) GOTO 9999
+	REGEN= REGMOD
+C
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+C	OUTPUT FUNCTIONS
+C	================
+C
+	SUBROUTINE	GPL(N,PX,PY)
+C
+**	MODULE	GPL
+**	IDENT	28OC83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C POLYLINE
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER N			! number of points
+	REAL	PX(N)			! X coords of points in WC
+	REAL	PY(N)			! Y coords of points in WC
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Functions:
+	LOGICAL	GKCLIP			! clips a straight line to
+					! rectangular boundaries
+C
+C Internal variables:
+	INTEGER	I			! loop variable
+	REAL	PX1,PX2,PY1,PY2		! X and Y coordinates
+	REAL	CURX,CURY		! current position
+	LOGICAL	CLOSED
+C
+	GKSERR	= 0
+C
+	IF (N.LT.2) THEN
+	   GKSERR = 100
+	   GOTO 9999
+	ENDIF
+C
+C Is this workstation active?
+	IF (.NOT.WSACT) GOTO 100
+C
+C Make sure transformation is up to date
+	IF (UPTRN) CALL GUPTRN
+C
+C Is everything clipped ?
+	IF (CLPALL) GOTO 100
+C
+C Make sure polyline attributes are up to date
+	IF (UPLIN) CALL GUPLIN
+C
+	IF (NINT(CLWID).GT.HWTHK) THEN
+	   CLOSED = PX(1).EQ.PX(N) .AND. PY(1).EQ.PY(N)
+	   CALL GKS_BEGIN_LINE(CLOSED,CLWID*GNOMLW/SCALEX,CCAP,CJOIN,
+     &				PX(1),PY(1))
+	   DO 80 I=2,N
+	      CALL GKS_ADD_POINT(PX(I),PY(I))
+80	   CONTINUE
+	   IF (CLOSED) CALL GKS_END_LINE
+	ELSE
+C
+C unset current position to force move
+	   CURX = 1E38
+	   CURY = 1E38
+C
+C Loop for each segment of this polyline.
+	   DO 90 I = 1, N-1
+	      PX1 = PX(I)
+	      PY1 = PY(I)
+	      PX2 = PX(I+1)
+	      PY2 = PY(I+1)
+	      IF (ENCLIP) THEN
+	         IF (GKCLIP(PX1,PY1,PX2,PY2)) GOTO 90
+	      ENDIF
+C transform World Coordinates to Workstation Device Coordinates
+	      PX1 = PX1*SCALEX + OFFX
+	      PX2 = PX2*SCALEX + OFFX
+	      PY1 = PY1*SCALEY + OFFY
+	      PY2 = PY2*SCALEY + OFFY
+	      IF (PX1.NE.CURX.OR.PY1.NE.CURY) THEN
+	         CALL PLOT(PX1,PY1,3)	! move pen up
+	      ENDIF
+	      CALL PLOT(PX2,PY2,2)		! draw pen down
+	      CURX = PX2			! update current position
+	      CURY = PY2
+90	   CONTINUE
+	ENDIF
+C
+100	CONTINUE
+C
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+C	OUTPUT ATTRIBUTES (Workstation independent primitive attributes)
+C	=================
+C
+C
+	SUBROUTINE	GSPLI(INDEX)
+C
+**	MODULE	GSPLI
+**	IDENT	29FE84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C SET POLYLINE INDEX
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	INDEX			! polyline index
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR	= 0			! no errors yet
+	IF (INDEX .LT. 1 .OR. INDEX .GT. PLMAX) GOTO 10
+	IF (INDEX .EQ.PLIND) GOTO 20	! if current already, ignore
+	PLIND = INDEX			! set it to current index
+	UPLIN = .TRUE.		! attributes need updating
+	GOTO 20
+C
+10	GKSERR = 60			! polyline index is invalid
+C
+20	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSLN(LTYPE)
+C
+**	MODULE	GSLN
+**	IDENT	26AP84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	26-April-1984
+C
+C SET LINETYPE
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	LTYPE			! linetype
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+	IF (LTYPE.LE.0) GOTO 10
+	ILTYPE = LTYPE
+	UPLIN = .TRUE.		! attributes need updating
+	GOTO 20
+10	GKSERR = 62			! linetype .LE. 0
+20	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSLWSC(LWIDTH)
+C
+**	MODULE	GSLWSC
+**	IDENT	26AP84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	26-April-1984
+C
+C SET LINEWIDTH SCALE FACTOR
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	REAL	LWIDTH			! linewidth scale factor
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+C
+	IF (LWIDTH.LE.0.0) GOTO 10
+	ILWID = LWIDTH
+	UPLIN = .TRUE.		! attributes need updating
+	GOTO 20
+10	GKSERR = 90			! linewidth scale factor .LE. 0
+20	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSPLCI(COLI)
+C
+**	MODULE	GSPLCI
+**	IDENT	26AP84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	26-April-1984
+C
+C SET POLYLINE COLOUR INDEX
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	COLI			! polyline colour index
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+	IF (COLI.LT.0) GOTO 10
+	ICOLI = COLI
+	UPLIN = .TRUE.		! attributes need updating
+	GOTO 20
+10	GKSERR = 85			! colour index .LT. 0
+20	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSASF(LASF)
+C
+**	MODULE	GSASF
+**	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	26-April-1984
+C Update of fill area required, too	Tony J Ibbs	27-Nov-1984
+C
+C SET ASPECT SOURCE FLAGS
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Arguments:
+	INTEGER	LASF(ASFMAX)			! list of flags
+C
+	INTEGER	I				! loop counter
+C
+	GKSERR = 0
+	DO 11 I=1,ASFMAX
+	   GASF(I) = LASF(I)
+11	CONTINUE
+	UPLIN = .TRUE.		! polyline attributes need updating
+	UPFA  = .TRUE.		! also fill area attributes
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+C	WORKSTATION ATTRIBUTES (Representations)
+C	========================================
+C
+C
+	SUBROUTINE	GSPLR(WKID,PLI,LTYPE,LWIDTH,COLI)
+C
+**	MODULE	GSPLR
+**	IDENT	29FE84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-Jul-1983
+C Colour added					PGH	29-Feb-1984
+C
+C SET POLYLINE REPRESENTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	PLI			! polyline index
+	INTEGER	LTYPE			! linetype
+	REAL	LWIDTH			! line width scale factor
+	INTEGER	COLI			! colour index
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+	IF (PLI .LT. 1 .OR. PLI .GT. PLMAX ) GOTO 10
+	IF (LTYPE .LE. 0) GOTO 20
+	IF (LWIDTH .LE. 0) GOTO 30
+	IF (COLI .LT. 0 ) GOTO 40
+	PLTYPE(PLI) = LTYPE		! store values in bundle table
+	PLWDTH(PLI) = LWIDTH
+	PLCOL(PLI)  = COLI
+	IF (PLI .NE. PLIND) GOTO 9999	! apply if current index
+	UPLIN = .TRUE.		! attributes need updating
+	GOTO 9999
+C
+10	GKSERR	= 60			! polyine index is invalid
+	GOTO 9999
+20	GKSERR	= 62			! linetype is invalid
+	GOTO 9999
+30	GKSERR	= 90			! linewidth scale factor invalid
+	GOTO 9999
+40	GKSERR	= 86			! colour index is invalid
+C
+9999	RETURN
+C
+	END
+C
+	SUBROUTINE	GSCR(WKID,CI,RED,GREEN,BLUE)
+C
+**	MODULE	GSCR
+**	IDENT	26AU86
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	25-Jul-1985
+C
+C SET COLOUR REPRESENTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CI			! colour index
+	REAL	RED,GREEN,BLUE		! colour values
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C workspace
+	INTEGER	WID
+	REAL	YELLOW,MAGENTA,CYAN
+C
+	GKSERR = 0
+C
+	IF (CI.LT.0.OR.CI.GT.MAXCOL)THEN
+	   GKSERR	= 93		! colour index is invalid
+	ELSEIF (RED.LT.0.0.OR.RED.GT.1.0.OR.
+     &		GREEN.LT.0.0.OR.GREEN.GT.1.0.OR.
+     &		BLUE.LT.0.0.OR.BLUE.GT.1.0) THEN
+	   GKSERR	= 96		! colour out of range
+	ELSE
+C
+C set the colour (just for solid areas here - lines set as needed)
+	   RGB(CI,1) = RED
+	   RGB(CI,2) = GREEN
+	   RGB(CI,3) = BLUE
+C
+	   CALL GKS_END_LINE
+C
+	   YELLOW = 1.0-BLUE
+	   MAGENTA = 1.0-GREEN
+	   CYAN = 1.0-RED
+C
+C Set the colour for solid areas (offset by 1 to avoid index 0)
+	   CALL COLRGN(1,YELLOW,MAGENTA,CYAN,CI+1,DOTSIZE)
+C
+C If this new colour is defined at any widths, then re-define
+	   DO 10 WID=1,16
+	      IF (PEN(WID,CI).NE.0) CALL GSETPN(PEN(WID,CI),WID,CI)
+10	   CONTINUE
+	ENDIF
+C
+	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+C	TRANSFORMATION FUNCTIONS
+C	========================
+C
+C
+	SUBROUTINE	GSWN(TRN,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSWN
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C SET WINDOW 
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	TRN			! window number
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	INTEGER TRNTMP			! temporary copy of TRN so as
+C					! not to pass back new value.
+C
+	GKSERR	= 0			! no errors yet
+	TRNTMP=TRN+1			! convert to Fortran index
+	IF (TRNTMP .LT. 1 .OR. TRNTMP .GT. TRNMAX) GOTO 10
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	WINDOW(1,TRNTMP) = XMIN
+	WINDOW(2,TRNTMP) = XMAX
+	WINDOW(3,TRNTMP) = YMIN
+	WINDOW(4,TRNTMP) = YMAX
+	UPTRN = .TRUE.		! transformation needs updating
+	GOTO 30
+C
+10	GKSERR	= 50			! transformation invalid
+	GOTO 30
+20	GKSERR	= 51			! rectangle definition invalid
+C
+30	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSVP(TRN,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSVP
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C SET VIEWPORT
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	TRN			! viewport number
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	INTEGER TRNTMP			! temporary copy of TRN so as
+C					! not to pass back new value.
+C
+	GKSERR	= 0			! no errors yet
+	TRNTMP = TRN+1			! convert to Fortran index
+	IF (TRNTMP .LT. 1 .OR. TRNTMP .GT. TRNMAX) GOTO 10
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	IF (XMIN .LT. 0.0 .OR. XMAX .GT. 1.0 .OR.
+     &	    YMIN .LT. 0.0 .OR. YMAX .GT. 1.0) GOTO 30
+	VIEWPT(1,TRNTMP) = XMIN
+	VIEWPT(2,TRNTMP) = XMAX
+	VIEWPT(3,TRNTMP) = YMIN
+	VIEWPT(4,TRNTMP) = YMAX
+	UPTRN = .TRUE.		! transformation needs updating
+	GOTO 40
+C
+10	GKSERR	= 50		! transformation number invalid
+	GOTO 40
+20	GKSERR	= 51		! rectangle definition is invalid
+	GOTO 40
+30	GKSERR	= 53		! viewport not within NDC unit square
+C
+40	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSWKWN(WKID,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSWKWN
+**	IDENT	27OC83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					RD	27-Oct-1983
+C
+C SET WORKSTATION WINDOW
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	IF (XMIN .LT. 0.0 .OR. XMAX .GT. 1.0 .OR.
+     &	    YMIN .LT. 0.0 .OR. YMAX .GT. 1.0) GOTO 30
+	WSWIN(1) = XMIN
+	WSWIN(2) = XMAX
+	WSWIN(3) = YMIN
+	WSWIN(4) = YMAX
+	UPTRN = .TRUE.
+	GOTO 9999
+C
+20	GKSERR	= 51	! rectangle definition is invalid
+	GOTO 9999
+30	GKSERR	= 53	! workstation window not within NDC unit square
+C
+9999	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSWKVP(WKID,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSWKVP
+**	IDENT	27OC83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					RD	27-Oct-1983
+C
+C SET WORKSTATION VIEWPORT
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR = 0
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	IF (((XMAX-XMIN) .GT. DCMAXX) .OR.
+     &	    ((YMAX-YMIN) .GT. DCMAXY)) GOTO 30
+	WSVIEW(1) = XMIN
+	WSVIEW(2) = XMAX
+	WSVIEW(3) = YMIN
+	WSVIEW(4) = YMAX
+	UPTRN = .TRUE.
+	GOTO 9999
+C
+20	GKSERR = 51	! rectangle definition invalid
+	GOTO 9999
+30	GKSERR = 54	! workstation viewport not within display space
+C
+9999	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSELNT(TRN)
+C
+**	MODULE	GSELNT
+**	IDENT	27OC83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C SELECT NORMALISATION TRANSFORMATION
+C and set clipping limits to viewport
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	TRN			! transformation number
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	INTEGER TRNTMP		! temporary copy of TRN so as not to
+C				! pass back new value
+	GKSERR	= 0			! no errors yet
+	TRNTMP=TRN+1			! convert to Fortran index
+	IF (TRNTMP .LT. 1 .OR. TRNTMP .GT.TRNMAX) GOTO 10
+	TRNCUR	= TRNTMP		! set currently selected
+C					! normalisation transformation
+	UPTRN = .TRUE.			! transformation needs updating
+	GOTO 20
+C
+10	GKSERR	= 50			! transformation number invalid
+C
+20	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSCLIP(CLSW)
+C
+**	MODULE	GSCLIP
+**	IDENT	31JL84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	31-July-1984
+C
+C SET CLIPPING INDICATOR
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	CLSW			! clipping indicator
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	IF (ENCLIP.NEQV.(CLSW.EQ.GCLIP)) THEN
+	   CALL GKS_END_LINE
+	   ENCLIP = .NOT.ENCLIP
+	ENDIF
+	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+C	INQUIRY FUNCTIONS
+C	=================
+C
+	SUBROUTINE GQASF(ERRIND,LASF)
+C
+***	MODULE	GQASF
+***	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	 1-May-1984
+C Allow up to ASFMAX returns now		TJI	17-Nov-1984
+C
+C INQUIRE ASPECT SOURCE FLAGS
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+***	COMMON/GKSESL/
+C
+C Arguments:
+	INTEGER	ERRIND		! Error indicator
+	INTEGER	LASF(ASFMAX)	! Aspect source flags
+C
+	INTEGER	I
+C
+	GKSERR = 0		! inquiry functions can't gen errors
+	ERRIND = 0		! only give indications of them !!
+C
+	DO 11 I=1,ASFMAX
+	   LASF(I) = GASF(I)
+11	CONTINUE
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GQMDS(WTYPE,ERRIND,COOUNI,RX,RY,LX,LY)
+C
+***	MODULE	GQMDS
+***	IDENT	14SE83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	14-Sept-1983
+C
+C INQUIRE MAXIMUM DISPLAY SURFACE SIZE
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WTYPE		! Workstation type
+	INTEGER	ERRIND		! Error indicator
+	INTEGER	COOUNI		! Device Coordinate Units
+	REAL	RX,RY		! Max. display surface size in DC
+	INTEGER	LX,LY		! no. of device units in X and Y
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+***	COMMON/GKSESL/
+C
+	GKSERR = 0		! inquiry functions can't gen errors
+	ERRIND = 0		! only give indications of them !!
+C
+	COOUNI = GMETRE		! units are in metres
+	RX = DCMAXX		! film size in metres
+	RY = DCMAXY
+	LX  = NINT(RASTX)	! and in pixels
+	LY  = NINT(RASTY)
+C
+999	RETURN
+	END
+C
+C
+C***********************************************************************
+C
+	SUBROUTINE GQPLF(
+     &		WTYPE,N,ERRIND,NLT,LT,NLW,NOMLW,RLWMIN,RLWMAX,NPPLI)
+C
+***	MODULE	GQPLF
+***	IDENT	16MY84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	16-May-1984
+C
+C INQUIRE POLYLINE FACILITIES
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WTYPE		! Workstation type
+	INTEGER	N		! list element requested
+	INTEGER	ERRIND		! Error indicator
+	INTEGER NLT		! number of available linetypes
+	INTEGER	LT		! N'th element of available linetypes
+	INTEGER NLW		! number of available linewidths
+	REAL	NOMLW		! nominal linewidth (DC)
+	REAL	RLWMIN,RLWMAX	! range of linewidths
+	INTEGER	NPPLI		! number of predefined polyline indices
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+***	COMMON/GKSESL/
+C
+	GKSERR = 0		! inquiry functions can't gen errors
+	ERRIND = 0		! only give indications of them !!
+C
+	NLT = 4			! number of linetypes
+	LT = N			! just return N as N'th type
+	NLW = 0			! continuous range of linewidths
+	NOMLW = GNOMLW		! nominal linewidth in DC
+	RLWMIN = NOMLW		! also the minimum
+	RLWMAX = 16.0*NOMLW	! rather arbitrary maximum
+	NPPLI = PLMAX
+C
+999	RETURN
+	END
+C
+C
+C***********************************************************************
+C
+	SUBROUTINE GQLN(ERRIND,LTYPE)
+C
+***	MODULE	GQLN
+***	IDENT	01MA84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	1-May-1984
+C
+C INQUIRE LINETYPE
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	ERRIND		! Error indicator
+	INTEGER	LTYPE		! line type
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+***	COMMON/GKSESL/
+C
+	GKSERR = 0		! inquiry functions can't gen errors
+	ERRIND = 0		! only give indications of them !!
+C
+	LTYPE = ILTYPE
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GQLWSC(ERRIND,LWIDTH)
+C
+***	MODULE	GQLWSC
+***	IDENT	01MA84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	1-May-1984
+C
+C INQUIRE LINE WIDTH SCALE FACTOR
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	ERRIND		! Error indicator
+	REAL	LWIDTH		! line width scale factor
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+***	COMMON/GKSESL/
+C
+	GKSERR = 0		! inquiry functions can't gen errors
+	ERRIND = 0		! only give indications of them !!
+C
+	LWIDTH = ILWID
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GQPLCI(ERRIND,COLI)
+C
+***	MODULE	GQPLCI
+***	IDENT	01MA84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	1-May-1984
+C
+C INQUIRE POLYLINE COLOUR INDEX
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	ERRIND		! Error indicator
+	INTEGER	COLI		! polyline colour index
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+***	COMMON/GKSESL/
+C
+	GKSERR = 0		! inquiry functions can't gen errors
+	ERRIND = 0		! only give indications of them !!
+C
+	COLI = ICOLI
+C
+	RETURN
+	END
+C
+	SUBROUTINE	GQCR(WKID,CI,TYPE,ERRIND,RED,GREEN,BLUE)
+C
+**	MODULE	GQCR
+**	IDENT	26AU86
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	25-Jul-1985
+C
+C INQUIRE COLOUR REPRESENTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CI			! colour index
+	INTEGER	TYPE			! type of values (unused)
+	INTEGER	ERRIND			! error indicator
+	REAL	RED,GREEN,BLUE		! colour values
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	ERRIND = 0
+C
+	IF (CI.LT.0.OR.CI.GT.MAXCOL)THEN
+	   ERRIND	= 86		! colour index is invalid
+	ELSE
+	   RED = RGB(CI,1)
+	   GREEN = RGB(CI,2)
+	   BLUE = RGB(CI,3)
+	ENDIF
+C
+	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+C	GKSLDLIB UTILITIES
+C	==================
+C
+	SUBROUTINE GUPTRN
+C
+***	MODULE	GUPTRN
+***	IDENT	19SE84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	19-Sep-1984
+C
+C Update the tranformation
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+C w/s
+	REAL	NDCSCX,NDCSCY	! scaling part of WC to NDC transform
+	REAL	NDCOFX,NDCOFY	! offset  part of WC to NDC transform
+	REAL	DCSC		! scaling part of NDC to DC transform
+	REAL	DCOFX, DCOFY	! offset  part of NDC to DC transform
+C
+C Work out the scaling factor and offset for WC to NDC transformation.
+C Effective formula for transforming a coord is:-
+C	XN = XVMIN + (XW-XWMIN) * ((XVMAX-XVMIN)/(XWMAX-XWMIN))
+C	YN = YVMIN + (YW-YWMIN) * ((YVMAX-YVMIN)/(YWMAX-YWMIN))
+C
+C This formula needs to be put into the form:-
+C	XN = (XW*NDCSCX) + NDCOFX
+C	YN = (YW*NDCSCY) + NDCOFY
+C
+	CALL GKS_END_LINE
+C
+	NDCSCX = (VIEWPT(2,TRNCUR)-VIEWPT(1,TRNCUR))
+     &		/(WINDOW(2,TRNCUR)-WINDOW(1,TRNCUR))
+	NDCSCY = (VIEWPT(4,TRNCUR)-VIEWPT(3,TRNCUR))
+     &		/(WINDOW(4,TRNCUR)-WINDOW(3,TRNCUR))
+	NDCOFX = VIEWPT(1,TRNCUR) - (WINDOW(1,TRNCUR)*NDCSCX)
+	NDCOFY = VIEWPT(3,TRNCUR) - (WINDOW(3,TRNCUR)*NDCSCY)
+C
+C A similar formula has to be used to transform NDC to DC with the
+C difference that the shape of the workstation window has to be
+C preserved within the workstation viewport (bottom left corner
+C is fixed).
+	DCSC = MIN(((WSVIEW(2)-WSVIEW(1))
+     &		   /(WSWIN (2)-WSWIN (1)))
+     &		  ,((WSVIEW(4)-WSVIEW(3))
+     &		   /(WSWIN (4)-WSWIN (3))))
+	DCOFX = WSVIEW(1) - (WSWIN(1)*DCSC)
+	DCOFY = WSVIEW(3) - (WSWIN(3)*DCSC)
+C
+C Both transformations have to be combined in the form:-
+C	XD = (((XW*NDCSCX*DCSC) + (NDCOFX*DCSC)+DCOFX
+C	YD = (((YW*NDCSCY*DCSC) + (NDCOFY*DCSC)+DCOFY
+C
+	SCALEX = NDCSCX * DCSC
+	SCALEY = NDCSCY * DCSC
+C
+	OFFX = (NDCOFX*DCSC) + DCOFX
+	OFFY = (NDCOFY*DCSC) + DCOFY
+C
+C Work out the clipping limits.
+C These correspond to the area of overlap in NDC space between
+C the viewport and the workstation window transformations.
+C Logical variable CLPALL is set if there is no overlap.
+	CLPALL = .FALSE.
+C Is there any overlap at all?
+	IF ((VIEWPT(1,TRNCUR).GT.WSWIN(2))
+     &  .OR.(VIEWPT(2,TRNCUR).LE.WSWIN(1))
+     &  .OR.(VIEWPT(3,TRNCUR).GT.WSWIN(4))
+     &  .OR.(VIEWPT(4,TRNCUR).LE.WSWIN(3))) GOTO 5
+C
+C Define the clipping limits to be the overlapping rectangle.
+	CLIPLO(1) = MAX(VIEWPT(1,TRNCUR),WSWIN(1))	! W
+	CLIPHI(1) = MIN(VIEWPT(2,TRNCUR),WSWIN(2))	! E
+	CLIPLO(2) = MAX(VIEWPT(3,TRNCUR),WSWIN(3))	! S
+	CLIPHI(2) = MIN(VIEWPT(4,TRNCUR),WSWIN(4))	! N
+C
+C Transform the clipping limits into WC space so that clipping can
+C be done before transforming coordinates. This is not GKS standard.
+C To do this we use the formulas:-
+C	XW = (XN-NDCOFX) / NDCSCX
+C	YW = (YN-NDCOFY) / NDCSCY
+C
+	CLIPLO(1) = (CLIPLO(1)-NDCOFX) / NDCSCX
+	CLIPHI(1) = (CLIPHI(1)-NDCOFX) / NDCSCX
+	CLIPLO(2) = (CLIPLO(2)-NDCOFY) / NDCSCY
+	CLIPHI(2) = (CLIPHI(2)-NDCOFY) / NDCSCY
+	GOTO 20
+C
+C No overlap
+5	CLPALL = .TRUE.
+C
+C the transformation is now up to date
+20	UPTRN = .FALSE.
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GUPLIN
+C
+***	MODULE	GUPLIN
+***	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	26-April-1984
+C Take account of need to set UPFA	Tony J Ibbs	27-Nov-1984
+C
+C Update the polyline attributes
+C
+	IMPLICIT NONE
+C
+C local variables
+	INTEGER	NLTYPE,NCOLI,NPEN,WID
+	REAL	NLWID
+	INTEGER	NSYM,NCAP,NJOIN
+	LOGICAL	FST
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+	IF (GASF(1).EQ.GBUNDL) THEN
+	   NLTYPE = PLTYPE(PLIND)
+	ELSE
+	   NLTYPE = ILTYPE
+	ENDIF
+C
+	IF (GASF(2).EQ.GBUNDL) THEN
+	   NLWID = PLWDTH(PLIND)
+	ELSE
+	   NLWID = ILWID
+	ENDIF
+C
+	IF (GASF(3).EQ.GBUNDL) THEN
+	   NCOLI = PLCOL(PLIND)
+	ELSE
+	   NCOLI = ICOLI
+	ENDIF
+C
+	IF (NCOLI.NE.0) THEN
+	   FST = .FALSE.
+10	   FST = .NOT.FST
+	   IF (POFF.NE.0) NCOLI = ISHFT(NCOLI,POFF)! apply offset
+	   NCOLI = NCOLI.AND.PSEL.AND.'FF'X	! apply mask
+	   IF (NCOLI.GT.MAXCOL.OR.NCOLI.EQ.0) THEN
+C
+C First attempt, try again with colour 1, otherwise just use 1
+	      NCOLI = 1
+	      IF (FST) GOTO 10
+	   ENDIF
+	   IF (NCOLI.EQ.0) NCOLI = 1
+	ENDIF
+C
+	NSYM = ISYM-1
+	NJOIN = NSYM/10
+	NCAP = NSYM - NJOIN*10
+C
+	IF (NJOIN.GT.2) NJOIN = 0
+	IF (NCAP.GT.2) NCAP = 0
+C
+	IF (NLTYPE.NE.CLTYPE) THEN
+	   CLTYPE = NLTYPE
+	ENDIF
+C
+	IF (MAX(1,NINT(NLWID)).GT.HWTHK) THEN	! use software thick
+	   IF (NLWID.NE.CLWID) THEN
+	      CLWID = MAX(1.0,NLWID)
+	      IF (NLWID.NE.FALWID) UPFA = .TRUE.	! check fill area
+	   ENDIF
+	   IF (NCOLI.NE.CPATT) THEN
+	      CALL GKS_END_LINE
+	      CALL PATTRN(NCOLI+1)
+	      CPATT = NCOLI
+	      UPFA = .TRUE.
+	   ENDIF
+	   CJOIN = NJOIN
+	   CCAP = NCAP
+C
+C if circles (caps or joins) are required, the select white pen 1
+	   IF (CJOIN.EQ.1.OR.CCAP.EQ.1) THEN
+	      IF (CPEN.NE.1) THEN
+	         CPEN = 1
+	         CCOLI = -1
+	         UPFA = .TRUE.
+	         CALL NEWPEN(1)
+	      ENDIF
+	   ENDIF
+	ELSE
+	   IF (NLWID.NE.CLWID .OR. NCOLI.NE.CCOLI) THEN
+	      CALL GKS_END_LINE
+	      IF (NLWID.NE.CLWID) THEN
+	         CLWID = MAX(1.0,NLWID)
+	         IF (NLWID.NE.FALWID) UPFA = .TRUE.	! check fill area
+	      ENDIF
+C
+	      IF (NCOLI.NE.CCOLI) THEN
+	         CCOLI = NCOLI
+	         UPFA  = .TRUE.			! and fill area update
+	      ENDIF
+C
+	      WID = MIN(16,NINT(CLWID))
+	      NPEN = PEN(WID,CCOLI)
+	      IF (NPEN.EQ.0) THEN
+	         LSTPEN = LSTPEN+1
+	         NPEN = LSTPEN
+	         PEN(WID,CCOLI) = LSTPEN
+	         CALL GSETPN(LSTPEN,WID,CCOLI)
+	      ENDIF
+C
+	      IF (NPEN.NE.CPEN) THEN
+	         CPEN = NPEN
+	         CALL NEWPEN(CPEN)
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+900	UPLIN = .FALSE.		! polyline now up to date
+	RETURN
+	END
+C
+	SUBROUTINE	GSETPN(P,WID,CI)
+C
+***	MODULE	GSETPN
+***	IDENT	18NO87
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+	IMPLICIT NONE
+C
+C arguments
+	INTEGER	P		! pen number (1-1024)
+	INTEGER	WID		! line width (1-16)
+	INTEGER	CI		! colour index (0-255)
+C
+***	COMMON/GKSDAT1/		! contains boundaries
+C
+C workspace
+	REAL	YELLOW,MAGENTA,CYAN,BLACK
+	INTEGER	ISTRT(4),LINEON(4),LINELN(4)
+	DATA	ISTRT/4*1/,LINELN/4*4/
+C
+	YELLOW = 1.0-RGB(CI,3)
+	MAGENTA = 1.0-RGB(CI,2)
+	CYAN = 1.0-RGB(CI,1)
+C
+C square intensities, because that's what Calcomp HCBS does in COLRGN
+	YELLOW = YELLOW**2
+	MAGENTA = MAGENTA**2
+	CYAN = CYAN**2
+C
+	BLACK = MIN(YELLOW,MAGENTA,CYAN)
+	YELLOW = YELLOW-BLACK
+	MAGENTA = MAGENTA-BLACK
+	CYAN = CYAN-BLACK
+C
+	LINEON(1) = BLACK*4.9999
+	LINEON(2) = YELLOW*4.9999
+	LINEON(3) = MAGENTA*4.9999
+	LINEON(4) = CYAN*4.9999
+C
+C avoid unintentional white
+	IF (LINEON(1)+LINEON(2)+LINEON(3)+LINEON(4).EQ.0) THEN
+	   IF (BLACK.GT.0.05) LINEON(1) = 1
+	   IF (YELLOW.GT.0.05) LINEON(2) = 1
+	   IF (MAGENTA.GT.0.05) LINEON(3) = 1
+	   IF (CYAN.GT.0.05) LINEON(4) = 1
+	ENDIF
+C
+	CALL XSETPN(WID,0,ISTRT,LINEON,LINELN,P)
+C
+	RETURN
+	END
+
+C
+C***********************************************************************
+C
+	LOGICAL FUNCTION GKCLIP(X1,Y1,X2,Y2)
+C
+***	MODULE	GKCLIP
+***	IDENT	23JL80
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Authors many and varied but mainly Paul Hardy based on algorithms
+C by P. Woodsford and P.Cross, with tidies by R.Fairbairns
+C
+C Created July 1980
+C
+C to clip a straight line to rectangular boundaries.
+C function value is TRUE if no visible result.
+C
+	IMPLICIT NONE
+C
+	REAL X1,Y1,X2,Y2	! coords of ends of line
+C
+***	COMMON/GKSDAT1/		! contains boundaries
+C
+	PARAMETER X=1,Y=2	! for clarity
+C w/s
+	REAL P(2,2)		! our copies of the points
+	REAL D(2)		! DX,DY is line vector
+	REAL R			! temp variable
+	INTEGER DEP,INDEP	! X or Y depending which axis considered
+	INTEGER HIGH,LOW	! 1 or 2 to indicate ends of line
+C
+C set everything up
+	GKCLIP=.FALSE.			! assume visible result
+	P(X,1)=X1			! take copy of args
+	P(Y,1)=Y1
+	P(X,2)=X2
+	P(Y,2)=Y2
+	D(X)=X2-X1			! calculate vector
+	D(Y)=Y2-Y1
+C
+C now loop for both axes
+	DO 30 DEP=X,Y
+	   INDEP=3-DEP			! independent axis
+	   LOW=1			! guess which end lowest
+	   IF(D(INDEP).LT.0.0) LOW=2	! upside down
+	   HIGH=3-LOW			! the other end
+	   IF(P(INDEP,HIGH).LT.CLIPLO(INDEP)) GOTO 50 ! out bottom
+	   IF(P(INDEP,LOW ).GT.CLIPHI(INDEP)) GOTO 50 ! out top
+	   IF(D(INDEP).EQ.0.0) GOTO 30	! parallel to frame this axis
+C
+C here to consider low end
+	   R=P(INDEP,LOW)-CLIPLO(INDEP) ! distance from frame
+	   IF(R.GE.0.0) GOTO 20		! inside frame
+C
+C clip low end
+	   P(DEP,LOW)=P(DEP,LOW)-R*D(DEP)/D(INDEP) ! similar triangles
+	   P(INDEP,LOW)=CLIPLO(INDEP) ! push onto frame
+C
+C now lets consider the high end
+20	   R=CLIPHI(INDEP)-P(INDEP,HIGH) ! distance from frame
+	   IF(R.GE.0.0) GOTO 30		! inside frame
+C
+C clip high end
+	   P(DEP,HIGH)=P(DEP,HIGH)+R*D(DEP)/D(INDEP) ! similar triangles
+	   P(INDEP,HIGH)=CLIPHI(INDEP) ! push onto frame
+C
+30	   CONTINUE			! loop for both axes
+C
+C copy args back
+	X1=P(X,1)
+	Y1=P(Y,1)
+	X2=P(X,2)
+	Y2=P(Y,2)
+40	RETURN
+C
+C here with all invisible
+50	GKCLIP=.TRUE.
+	GOTO 40
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GKSW2D(WKID,WX,WY,DX,DY)
+C
+***	MODULE	GKSW2D
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created August 1984
+C
+C To convert world coordinate WX,WY to device coordinate DX,DY
+C on workstation WKID
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C arguments
+	INTEGER	WKID		! worstation identifier
+	REAL	WX,WY		! input world coordinate
+	REAL	DX,DY		! output device coordinate
+C
+	GKSERR = 0
+C
+C Make sure transformation is up to date
+	IF (UPTRN) CALL GUPTRN
+	DX = (WX*SCALEX)+OFFX
+	DY = (WY*SCALEY)+OFFY
+C
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GKSD2W(WKID,DX,DY,WX,WY)
+C
+***	MODULE	GKSD2W
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created February 1985
+C
+C To convert device coordinate DX,DY to world coordinate WX,WY
+C on workstation WKID
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C arguments
+	INTEGER	WKID		! worstation identifier
+	REAL	DX,DY		! input device coordinate
+	REAL	WX,WY		! output world coordinate
+C
+	GKSERR = 0
+C
+C Make sure transformation is up to date
+	IF (UPTRN) CALL GUPTRN
+C
+	WX = (DX-OFFX)/SCALEX
+	WY = (DY-OFFY)/SCALEY
+C
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GD2W(WKID,DX,DY,WX,WY)
+C
+***	MODULE	GD2W
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created August 1984
+C
+C To scale device coordinate lengths DX,DY to world coordinate WX,WY
+C on workstation WKID (only one in any case)
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C arguments
+	INTEGER WKID		! for compatibility with 2 workstation
+	REAL	DX,DY		! input device coordinate
+	REAL	WX,WY		! output world coordinate
+C
+C Make sure transformation is up to date
+	IF (UPTRN) CALL GUPTRN
+C
+	WX = DX / SCALEX
+	WY = DY / SCALEY
+C
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GW2D(WKID,WX,WY,DX,DY)
+C
+***	MODULE	GW2D
+***	IDENT	14MY84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created May 1985
+C
+C To scale world coordinate lengths WX,WY to device coordinate DX,DY
+C on workstation WKID (only one in any case)
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C arguments
+	INTEGER WKID		! for compatibility with 2 workstation
+	REAL	WX,WY		! input world coordinate
+	REAL	DX,DY		! output device coordinate
+C
+C Make sure transformation is up to date
+	IF (UPTRN) CALL GUPTRN
+C
+	DX = WX*SCALEX
+	DY = WY*SCALEY
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	GESC(ESCID,DATA)
+C
+**	MODULE	GESC
+**	IDENT	29MY86
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	9-May-1986
+C
+C ESCAPE
+C
+	IMPLICIT NONE
+C
+***	COMMON/GFADAT1/
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Arguments
+	INTEGER ESCID			! escape identifier
+	INTEGER	DATA(2)			! other data
+C
+C Workspace
+	INTEGER		LVLTYP
+	INTEGER		IDATA
+	REAL		RDATA
+	LOGICAL*4	LDATA
+	EQUIVALENCE	(IDATA,RDATA,LDATA)
+C
+	IDATA = DATA(1)	! copy into integer version
+C
+C Despatch on escape type
+	GKSERR = 0
+	GOTO (100,99999,300),ESCID
+	GOTO (1000,99999,3000),ESCID-100
+	GOTO (10010,10020,10030),ESCID-1000
+	GKSERR = 180			! function not supported
+	GOTO 99999
+C
+C Set 'marker type' for lines (as for GSMK)
+100	ISYM = IDATA
+	UPLIN = .TRUE.		! attributes need updating
+	UPFA = .TRUE.		! attributes need updating
+	GOTO 99999
+C
+C Set fill area line width and spacing
+300	CONTINUE
+C
+C Zero width will cause the nominal width to be used
+C If spacing is less than width, then set a sensible value
+C
+	IF (RDATA.GE.0.0) GFAWID = RDATA
+	IDATA = DATA(2)
+	GFAGAP = RDATA
+	IF (GFAGAP.LT.GFAWID) GFAGAP = 2.0*GFAWID
+	GOTO 99999
+C
+C Inquire 'marker type' for lines (as for GSMK)
+1000	IDATA = ISYM
+	GOTO 9000
+C
+C Inquire fill area line width and spacing
+3000	RDATA = GFAGAP
+	DATA(2) = IDATA
+	RDATA = GFAWID
+	GOTO 9000
+C
+C Set opaque drawing mode i.e. use next level and set overlay mode
+10010	LVLTYP = 2
+10011	IF (LSTLEV.EQ.255) THEN
+	   CALL WRITEF('Too many plot levels defined')
+	ELSE
+	   LSTLEV = LSTLEV+1
+	ENDIF
+	CALL GKS_END_LINE
+	CLEV = LSTLEV
+	CALL SETLVL(CLEV,LVLTYP)	! 0 - merge, 2 - overlay
+	CALL NEWLVL(CLEV)
+	HADESC = .TRUE.
+	GOTO 99999
+C
+C Set merge drawing mode i.e. use level 0
+10020	CALL GKS_END_LINE
+	CLEV = 0
+	CALL NEWLVL(CLEV)
+	HADESC = .TRUE.
+	GOTO 99999
+C
+C Set merge drawing mode in new topmost level
+10030	LVLTYP = 0
+	GOTO 10011
+C
+C Replace argument for inquiries
+9000	DATA(1) = IDATA
+C
+99999	RETURN
+	END

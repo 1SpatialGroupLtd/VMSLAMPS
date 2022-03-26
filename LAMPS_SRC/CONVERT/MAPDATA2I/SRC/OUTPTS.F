@@ -1,10 +1,12 @@
 	LOGICAL FUNCTION OUTPTS
 C
-CDEC$	IDENT	'23SE94'
+CDEC$	IDENT	'31OC94'
 C
 C	Copyright (C)			Laser-Scan Ltd., Cambridge
 C
 C       Author				Steve Townrow	26-Jul-1994
+C
+C       Mod 1415. Calls SHUFFLE_POINTS		31-Oct-1994	Steve Townrow
 C
 C Description:
 C       This routine is called from PROCESS_LINE and uses the points in
@@ -37,7 +39,8 @@ C
 C
 C workspace
 C
-	INTEGER*4	J,START_POS_IN_LIST
+	INTEGER*4	J
+	INTEGER*4	START_POS_IN_LIST
 	LOGICAL		LOOP
 C
 C------------------------------------------------------------------------------
@@ -57,6 +60,12 @@ C
 	   OUTPTS = .NOT.OVER_LIMIT(NUM_OUT)
 	   IF (.NOT.OUTPTS) GOTO 999	   
 C
+C Move the points around so that the first of the output is the same as
+C the first of the input. This applies to looped features only since the
+C output points start with the third input point
+C
+	   IF (LOOP) CALL SHUFFLE_POINTS()
+C
 C Give the flags to the right points
 C
 	   CALL RETAIN_FLAGS(START_POS_IN_LIST)
@@ -64,7 +73,7 @@ C
 C
 C Otherwise, copy them over unaltered
 C
-	   DO 10 J = 1,NUM_IN
+	   DO 100 J = 1,NUM_IN
 	      NUM_OUT = NUM_OUT + 1
 C
 C Check for overflow
@@ -75,7 +84,7 @@ C
 	      LINE_OUT(2,NUM_OUT) = LINE_IN(2,J)
 	      LINE_OUT_Z(NUM_OUT) = LINE_IN_Z(J)
 	      LINE_OUT_FLAGS(NUM_OUT) = LINE_IN_FLAGS(J)
-10	   CONTINUE
+100	   CONTINUE
 	ENDIF
 C
 C and that's it

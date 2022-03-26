@@ -1,0 +1,8 @@
+$! Build FPP help library
+$	set ver
+$	LIBR/CREATE/HELP HLP:FPP HLP:FPP
+$	LIBR/COMP/HELP HLP:FPP/OUTPUT=HLP:
+$	SET FILE/TRUNC HLP:FPP.HLB
+$	PURGE/LOG HLP:
+$	set nover
+$!

@@ -1,0 +1,408 @@
+	PROGRAM FPP
+C
+***	MODULE	FPP
+***	IDENT	08DE94
+C
+C Copyright Laser Scan Laboratories Limited, Cambridge, England
+C Author R.Daly
+C
+C Created (based loosely on SPM).		RD	07-Jun-1983
+C
+Cmod	Altered to use the lsllib library	JPW	07-Jan-87
+C
+C This program (Fast Plotter Program) plots Laserscan IFF files
+C (internal feature format). It produces GKS (Graphical Kernel
+C System) calls which are interpreted by a device-specific GKS-
+C lookalike plotting library.
+C Feature code interpretation is done using an FRT (feature
+C representation table) which in turn references SRI and TRI files
+C (symbol/text representation IFF files) for symbol and character
+C definitions.
+C
+C Commands can either be given explicitly on the command line or
+C they can be given using indirect command files which are invoked
+C by, for example, @FRED.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:GKSPAR/
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+C
+	INCLUDE		'($SSDEF)'
+C
+***	COMMON/LSL$CMNLSL:CMDCOM/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/LSL$CMNLSL:FILENAME/
+***	COMMON/CMN:FPPDAT/
+***	COMMON/LSL$CMNFRT:FRTACD/
+***	COMMON/LSL$CMNFRT:FRTPRIO/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/CMN:LABEL/
+***	COMMON/CMN:SELECT/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C W/s.
+	INTEGER STATUS		! Return status will contain code
+	INTEGER	ERRFIL		! GKS stuff
+	INTEGER	GASF(13)	! aspect source flags
+	INTEGER	DEFMOD		! GKS deferral mode.
+	INTEGER	REGMOD		! GKS implicit regeneration mode.
+	INTEGER*4 IERR		! error code
+	INTEGER   POSN		! temporary position in string.
+	INTEGER   DOTPOS	! position of last '.' in string.
+	INTEGER*2 NCHS		! number of chars on command line.
+	INTEGER	  CMD		! command number returned by RDCOMM.
+	INTEGER*4 ERRCOD	! error code.
+	LOGICAL	  FINISH	! indicates no more data in IFF file.
+	LOGICAL	  RESET		! Reset bitmap arg to PROSEL
+	BYTE CHAR		! last-read character.
+	INTEGER*2 TMPPTR,PT2	! save of TXTPTR
+	INTEGER*2 TDCPTR	! save of DCPTR
+	BYTE TMPBUF(80)		! save of TXTBUF
+	INTEGER	DEFAULT_LEN	! length of default file name
+	CHARACTER*255	DEFAULT_NAME	! default file name
+	LOGICAL   READ_HEADER	! have we read the header yet?
+C
+	LOGICAL	  TRYCML,HADCML	! tried for/got DCL command line
+	DATA	  TRYCML,HADCML/2*.FALSE./
+C
+	BYTE AT
+	PARAMETER (AT=64)	! '@'
+	BYTE COMMA
+	PARAMETER (COMMA=44)
+C
+C Functions
+	INTEGER*4 RDCOMM,SIGCHS,LIB$GET_FOREIGN
+	INTEGER*2 LIB$LOCC
+	INTEGER*4 TTRSTR,FLRSTR
+	LOGICAL*4 RDCHS,FLROPN,GETFILNAM,TRNALL,PARFILN
+	LOGICAL	  INIDRAW
+C
+	LOGICAL	  FRTINI,SRIINI,TRIINI
+	LOGICAL	  PROSEL,OBEY
+C
+	EXTERNAL FPP_CMD_TABLE
+	EXTERNAL EXCP_HANDLER
+	EXTERNAL CTRLCAST
+C
+C Presets
+	DATA ERRFIL/6/
+	DATA GASF/13*GINDIV/
+C
+C Set up exception handler
+	CALL LIB$ESTABLISH(EXCP_HANDLER)
+C
+C Initialise the lsllib
+	CALL LSL_INIT(.FALSE.)
+C
+C Initialise FRTLIB graphics
+	CALL FRT_GRAPH_INIT
+C
+C Announce version number
+	CALL GETVERSION(DEFAULT_LEN,DEFAULT_NAME)
+	POSN = INDEX(PNAM,'$$$$')
+	IF (POSN.NE.0) PNAM = PNAM(:POSN-1)
+	IF (PNAM(:4).EQ.'HCBS'.AND.POSN.EQ.0) PNAM = PNAM(6:)
+	CALL WRITEF
+	CALL VERSION(
+     &	 'FPP ('//PNAM(:SIGCHS(PNAM))//') '//DEFAULT_NAME(:DEFAULT_LEN))
+	CALL WRITEF
+C
+C Load special text drawing routine on LSL$TEXT_ROUTINE
+C (primarily for Hydro soundings)
+	CALL GETTXT
+C
+C Load special symbol drawing routine
+	CALL GETSYM
+C
+C get memory for drawing buffers
+	IF (INIDRAW()) GOTO 9999
+C
+C Initialise GKS
+	CALL GOPKS(ERRFIL)		! Open GKS
+	CALL GSASF(GASF)		! Set aspect source flags
+	CALL GSLN(1)			! Set linetype solid
+	CALL GSCLIP(GNCLIP)		! Turn clipping off
+	FRMFIL = .FALSE.		! not reading from file
+C
+C does plotter have hardware lines patterns and hardware symbols?
+	HWLIN = HWLNS.GT.0
+	HWSYM = HWSYS.GT.0
+C
+C save block data-ed values of hatching values
+	SAVHWD = HATWID
+	SAVHSP = HATSEP
+C
+C turn on priority drawing by default
+	PRIOPT = .TRUE.
+C
+C is this an interactive session (SYS$COMMAND a terminal)?
+	INTERACTIVE = .FALSE.
+	CALL TEST_TERM('SYS$COMMAND:',STATUS,IERR)
+	IF (STATUS) INTERACTIVE = .TRUE.
+C
+C Set up CTRL/C handler
+	IF (INTERACTIVE) CALL SET_OUTBAND_AST(CTRLCAST,8,,'SYS$COMMAND:')
+C
+C Obey initialisation command file (if any)
+	CMDTIT = 'LSL$FPPINI:'
+	CMDLEN =  11
+	GOTO 22
+C
+C Read in the command line, and if one is reading from a file 
+C set the file lun to be the current lun to ensure reading from it.
+10	IF (FRMFIL) THEN
+	   CALL FLRSEL(CMDLUN)		
+	   STATUS = FLRSTR(,,IERR)
+	ELSE
+	   IF (HADCML) THEN		! had a DCL command line
+	      STATUS = LSL__EOF		! so simulate EOF
+	   ELSEIF (.NOT.TRYCML) THEN	! not tried for command line yet
+	      TXTPTR = 80
+	      STATUS = LIB$GET_FOREIGN(TXTDSC,,NCHS)
+	      IERR = 0
+	      TXTPTR = NCHS
+	      IF (TXTPTR.NE.0) HADCML = .TRUE.	! and got something?
+	      TRYCML = .TRUE.		! now tried for command line
+	   ELSE
+	      STATUS = TTRSTR(,,'FPP> ',IERR)
+	   ENDIF
+	ENDIF
+	CALL BSLN			! position to start of line
+	IF (.NOT.STATUS) THEN
+	   IF (STATUS .EQ. LSL__EOF) THEN! control-Z (eof)
+	      IF (.NOT.FRMFIL) GOTO 1000	! exit
+	      CALL FLRCLO(CMDLUN,IERR)
+	      FRMFIL = .FALSE.
+C
+C restore command line
+	      PT2 = TMPPTR
+	      CALL RESTORE_TXTC(TMPBUF,TMPPTR,80)
+	      CALL DCPSET(TDCPTR)
+	      INICMD = .FALSE.
+	   ELSE
+	      CALL LSL_PUTMSG(STATUS)
+	      CALL LSL_ADDMSG(IERR)
+	      GOTO 10
+	   ENDIF
+	ENDIF
+C
+C Ignore anything after "!", by discarding rest of line
+	NCHS = LIB$LOCC('!',TXTDSC)
+	IF (NCHS.GT.0) TXTPTR = NCHS-1
+C
+C Decode command line
+20	IF (RDCHS(CHAR)) GOTO 10		! no more commands
+C
+C If it is an indirect command file call then decode the whole thing.
+	IF (CHAR.NE.AT) GOTO 25
+	IF (FRMFIL) THEN
+	   CALL WRITEF('Illegal nesting of command files')
+	   GOTO 10
+	ENDIF
+C
+C translate logical name LSL$FPP recursively, to get default filename
+	STATUS = TRNALL('LSL$FPP',DEFAULT_NAME)
+C
+C if LSL$FPP is not set up, use current directory and FPP as default
+	IF (.NOT.STATUS) THEN
+	   IF (STATUS.NE.SS$_NOLOGNAM) CALL LSL_PUTMSG(STATUS)
+	   DEFAULT_NAME = 'FPP'
+	ENDIF
+C
+C parse default filename against FPP.COM;0, to get valid file spec 
+	STATUS = PARFILN(DEFAULT_NAME,DEFAULT_LEN,DEFAULT_NAME,
+     &	               'FPP.COM;0',.TRUE.)
+	IF (.NOT.STATUS) CALL LSL_PUTMSG(STATUS)
+C
+C and get filename that was input, and parse it against default
+	STATUS = GETFILNAM(CMDTIT,CMDLEN,
+     &	                   DEFAULT_NAME(1:DEFAULT_LEN),.TRUE.)
+	IF (.NOT.STATUS.OR.CMDLEN.EQ.0) THEN
+	   CALL WRITEF('Error in command file name')
+	   IF (.NOT.STATUS) CALL LSL_PUTMSG(STATUS)
+	   GOTO 10
+	ENDIF
+C
+C Open and select the command file.
+22	STATUS = FLROPN(CMDLUN,CMDTIT(1:CMDLEN),IERR)
+	IF (.NOT.STATUS) THEN
+	   IF (.NOT.INICMD) THEN
+	      CALL LSL_PUTMSG(STATUS)
+	      IF (STATUS.EQ.LSL__SYSOPEN) CALL LSL_ADDMSG(IERR)
+	   ENDIF
+	   INICMD = .FALSE.
+	   GOTO 10
+	ENDIF
+C
+C Have to use same buffer for command line and command file so
+C must save state of command line decoding.
+	TMPPTR=MIN(TXTPTR,80)
+	CALL DCPSAV(TDCPTR)
+	CALL SAVE_TXTC(TMPBUF,TMPPTR,80)
+	FRMFIL = .TRUE.			! now reading from file
+	GOTO 10
+C
+C Decode command
+25	CALL BSCH
+30	CMD=RDCOMM(FPP_CMD_TABLE)
+	IF (CMD.EQ.0) GOTO 10		! error in command
+	IF (OBEY(CMD)) GOTO 10		! error interpreting command
+C
+	IF (HADEXI) GOTO 1000		! was it exit
+	IF (.NOT.RDCHS(CHAR)) THEN	! more on line?
+	   IF (CHAR.NE.COMMA) CALL BSCH	! skip comma
+	   GOTO 20
+	ENDIF
+C
+C Are we ready to start plotting? If it's an interactive session
+C then only start plotting if we have had a GO command.
+50	IF (.NOT.HADIFF) GOTO 10	! no IFF yet
+	IF (HADINT.AND..NOT.HADGO) GOTO 10
+C
+C if stopped because of PAUSE, command, wait for GO
+	IF (PAUSE_NOW.AND..NOT.HADGO) GOTO 10
+	PAUSE_NOW = .FALSE.
+C
+C Open GKS workstation (if not already open)
+	IF (.NOT.OPWK) CALL FPOPWK
+C
+C Open the IFF, FRT, SRI and TRI files (if not already open)
+C and read the FRT file into memory.
+C Open IFF.
+	IF (.NOT.OPNIFF) THEN
+	   CALL IFFTDY
+	   CALL IFFOPN(IFFLUN,IFFTIT,0,0)
+	   IF (IERCD.NE.0) THEN
+	      CALL WRITEF('Error opening IFF file %S',IFFTIT)
+	      HADIFF=.FALSE.
+	      GOTO 50
+	   ENDIF
+	   READ_HEADER = .FALSE.
+	   CALL IFFIRV(1)		! rev level 1 for CBs
+	   HADRA = .FALSE.		! not had a RA in this IFF
+	   SCALED = .FALSE.		! not worked out scale yet
+	   OPNIFF=.TRUE.
+	ENDIF
+C
+C Open FRT.
+C An FRT file must be opened before plotting even though there may
+C not have been any command given (default name LSL$FRT:FRT.FRT;0).
+C
+	IF (.NOT.INIFRT) THEN
+	   IF (INTERACTIVE) CALL WRITEF('Reading default FRT file "%S"',
+     &	                  'LSL$FRT:FRT.FRT;0')
+	   IF (FRTINI('LSL$FRT:FRT.FRT;0')) GOTO 180
+	   INIFRT=.TRUE.		! indicate now got an FRT.
+	   HADFNT=.FALSE.		! not got font for labels
+	ENDIF
+C
+C Extract the main part of the FRT filename in case the SRI or TRI
+C default to the same name.
+	DOTPOS=0
+140	POSN=INDEX(FRTTIT(DOTPOS+1:),'.')	! find the last dot in
+	IF (POSN.NE.0) THEN			! the FRT filename.
+	   DOTPOS = DOTPOS+POSN
+	   GOTO 140
+	ENDIF
+C
+C Open SRI.
+C If no SRI command has been given then the SRI filename is derived
+C from the FRT filename. An SRI file must be opened before plotting.
+C If the FRT name changes and the SRI name was derived from it then
+C the SRI name must also change.
+120	IF (.NOT.HADSRI) THEN		! not had explicit command
+	   IF (.NOT.(HADFRT.AND.SRIDEP)) THEN	! no need to change
+	      IF (INISRI) GOTO 160	! retain SRI
+	      GOTO 150
+	   ENDIF
+C
+C Derive the SRI filename from the FRT filename.
+	   SRITIT(:DOTPOS)=FRTTIT(:DOTPOS)
+	   SRITIT(DOTPOS+1:)='SRI;0'
+	ENDIF
+150	IF (INTERACTIVE) CALL WRITEF('Reading SRI file "%S"',
+     &	                     SRITIT(1:SIGCHS(SRITIT)))
+	IF (SRIINI(SRITIT,HWSYM,HWCIR,HWPAT,HWLNS,HWCUR)) GOTO 180
+	INISRI=.TRUE.
+C
+C Open TRI.
+C If no TRI command has been given then the TRI filename is derived
+C from the FRT filename. A TRI file must be opened before plotting.
+C If the FRT name changes and the TRI name was derived from it then
+C the TRI name must also change.
+160	IF (.NOT.HADTRI) THEN		! not had explicit command
+	   IF (.NOT.(HADFRT.AND.TRIDEP)) THEN	! no need to change
+	      IF (INITRI) GOTO 170	! retain TRI
+	      GOTO 162
+	   ENDIF
+C
+C Derive the TRI filename from the FRT filename
+	   TRITIT(:DOTPOS)=FRTTIT(:DOTPOS)
+	   TRITIT(DOTPOS+1:)='TRI;0'
+	ENDIF
+162	IF (INTERACTIVE) CALL WRITEF('Reading TRI file "%S"',
+     &	                  TRITIT(1:SIGCHS(TRITIT)))
+	IF (TRIINI(TRITIT)) GOTO 180
+	INITRI=.TRUE.
+C
+C Reset command variables.
+170	RESET=HADFRT		! reset bitmap if had new FRT
+	HADFRT=.FALSE.
+	HADSRI=.FALSE.
+	HADTRI=.FALSE.
+C	
+C Process any stored up SEL/DES commands
+	IF (SELPTR.GT.0) THEN
+	   IF (PROSEL(RESET)) GOTO 180
+	ENDIF
+C
+C initialise for interpolation
+	CALL INTRPL_INIT(INTCT,1.0,.TRUE.)
+C
+C Now proceed with the main part of the program which reads in 
+C and plots the IFF file.
+	STRTED=.TRUE.
+	CALL IFFSEL(IFFLUN)
+C
+C Get header entries over and done with
+C
+	IF (.NOT.READ_HEADER) THEN
+	   CALL IFFHDR(FINISH)
+	   READ_HEADER = .TRUE.
+	   IF (FINISH) GOTO 175
+	ENDIF
+C
+C Process prioritised or normal
+C 
+	IF (PRIOCNT.GT.0 .AND. PRIOPT) THEN
+	   CALL PRIOBDY(FINISH)
+	ELSE
+	   CALL IFFBDY(FINISH)
+	ENDIF
+C
+175	HADGO=.FALSE.
+	PAUSE=.FALSE.			! need to give PAUSE again
+	IF (.NOT.FINISH) GOTO 50	! file not finished.
+	STRTED=.FALSE.
+	HADINT=.FALSE.
+C
+180	CALL IFFCLO(IFFLUN)
+	OPNIFF=.FALSE.
+	HADIFF=.FALSE.
+	GOTO 10				! loop for next plot.
+C
+C Close everything
+1000	IF (FRMFIL) CALL FLRCLO(CMDLUN,IERR)
+	IF (OPNIFF) CALL IFFCLO(IFFLUN)
+	IF (OPWK) THEN
+	   CALL GDAWK(WKID)		! Deactivate workstation
+	   CALL GCLWK(WKID)		! Close workstation
+	ENDIF
+	CALL GCLKS			! Close GKS
+C
+9999	STATUS = SS$_NORMAL
+	CALL LSL_EXIT(STATUS)
+C
+	END

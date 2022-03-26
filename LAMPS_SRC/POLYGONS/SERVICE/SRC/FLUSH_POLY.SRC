@@ -1,0 +1,270 @@
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL*4 FUNCTION FLUSH_POLY(
+     &		LAST_SEG_INDEX,MINSEG,MAXSEG,HAD_PERIM,ONE_USE,TREE_FLAG)
+C
+C
+***	MODULE	FLUSH_POLY
+***	IDENT	30AP92
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+	INTEGER		LAST_SEG_INDEX
+	INTEGER		MINSEG
+	INTEGER		MAXSEG
+	LOGICAL		HAD_PERIM
+	LOGICAL		ONE_USE ! linework terminating at one-arm junctions 
+C				! to be used
+	LOGICAL		TREE_FLAG ! polygon boundary round isolated linework
+C				! - a tree
+C
+	LOGICAL*4	ACTUAL_FLUSH_POLY
+C
+C	........................................................................
+C
+	FLUSH_POLY = ACTUAL_FLUSH_POLY(
+     &		   LAST_SEG_INDEX,MINSEG,MAXSEG,HAD_PERIM,ONE_USE,TREE_FLAG,
+     &			POLMAX,PARTS_MAX,TABMAX,
+     &			%VAL(PTR$_POLY_AREA),
+     &			%VAL(PTR$_POLY_PARTS),
+     &			%VAL(PTR$_POLY_PERIM),
+     &			%VAL(PTR$_POLY_RANGE),
+     &			%VAL(PTR$_POLY_STACK),
+     &			%VAL(PTR$_POLY_START),
+     &			%VAL(PTR$_SEGTAB),
+     &			%VAL(PTR$_TMP_POLY_STACK),
+     &			%VAL(PTR$_TMP_SIDE_STACK),
+     &			%VAL(PTR$_TREE_IN_POLY)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL*4 FUNCTION ACTUAL_FLUSH_POLY(
+     &		LAST_SEG_INDEX,MINSEG,MAXSEG,HAD_PERIM,ONE_USE,TREE_FLAG,
+     &     	POLMAX,PARTS_MAX,TABMAX,
+     &		POLY_AREA, POLY_PARTS, POLY_PERIM, POLY_RANGE, POLY_STACK,
+     &		POLY_START, SEGTAB, TMP_POLY_STACK, TMP_SIDE_STACK, 
+     &		TREE_IN_POLY)
+
+C
+***	MODULE	ACTUAL_FLUSH_POLY
+***	IDENT	30OC91
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Altered to deal with TMP_POLY_STACK and detect possible
+C	double digitising - detected via zero-area polygon. 
+C	Also used to store trees.			AC   08-Jul-1988
+C	Author						TJH  03-Sep-1987
+C
+C Function to flush the contents of the polygon segment stack TMP_POLY_STACK
+C into /POLYGONS/POLY_PARTS
+C
+C Function returns SS$_NORMAL if all is well or one of a variety of
+C IPOLYGON error codes on failure.
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNPOLYGONS:POLYGONSMSG.PAR'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+	INTEGER		SS$_ABORT
+	EXTERNAL	SS$_ABORT	! normal successful completion
+C
+C Arguments:
+	INTEGER		LAST_SEG_INDEX
+	INTEGER		MINSEG
+	INTEGER		MAXSEG
+	LOGICAL		HAD_PERIM
+	LOGICAL		ONE_USE ! linework terminating at one-arm junctions 
+C				! to be used
+	LOGICAL		TREE_FLAG ! polygon boundary round isolated linework
+C
+C	Arguments
+		INTEGER*4	POLMAX
+		INTEGER*4	PARTS_MAX
+		INTEGER*4	TABMAX
+C
+		REAL		POLY_AREA(POLMAX)
+		INTEGER		POLY_PARTS(2,PARTS_MAX)
+		REAL		POLY_PERIM(POLMAX)
+		REAL		POLY_RANGE(4,POLMAX)
+		INTEGER		POLY_STACK(TABMAX)
+		INTEGER		POLY_START(3,POLMAX)
+		INTEGER*4	SEGTAB(2,TABMAX)
+		INTEGER		TMP_POLY_STACK(TABMAX)
+		BYTE		TMP_SIDE_STACK(TABMAX)
+		INTEGER		TREE_IN_POLY(POLMAX)
+C
+C				! - a tree
+C
+C Common:
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TREES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:STACKS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+C
+C W/s:
+	REAL		CALC_AREA ! calculated area of polygon
+	INTEGER		I	! loop variable
+	LOGICAL		OK	! status var.
+	INTEGER		FSN1,FSN2 ! FSNs of segments involved in dble digit
+	CHARACTER*256 	MESTXT	! error message text
+	INTEGER*2 	MESLEN	! length of MESTXT
+C
+C Functions:
+	INTEGER BBSC		! clear one bit
+	REAL	AREA		! calculate area
+	REAL	LENGTH		! calculate length
+	LOGICAL	GET_STACK_POLY	! put polygon boundary coord into buffer
+	INTEGER	EXPAND		! generate message text 
+	LOGICAL	EXT1V		! check on 1-bit
+C
+C ......................................................................
+C
+	ACTUAL_FLUSH_POLY=%LOC(SS$_NORMAL)
+C
+C Get the coordinates of the polygon described by TMP_POLY_STACK
+	POLY_PTS=0			! init point counter
+	ACTUAL_FLUSH_POLY=GET_STACK_POLY()
+	IF (.NOT.ACTUAL_FLUSH_POLY) GOTO 10
+C
+C If we have a tree - ie the boundary round some isolated linework;
+C store it as a polygon in POLY_PARTS but only reference it as a tree thru
+C TREE_START
+	IF (TREE_FLAG) THEN
+C
+C Check that we have room for a new tree
+	   IF (NUM_TREE.EQ.TREEMAX) THEN
+	      ACTUAL_FLUSH_POLY=POLY__TOOMNYTREE
+	      CALL LSL_PUTMSG(ACTUAL_FLUSH_POLY,TREEMAX)
+	      ACTUAL_FLUSH_POLY=%LOC(SS$_ABORT)
+	      GOTO 10
+	   ENDIF
+C
+C Store it
+ 	   NUM_TREE=NUM_TREE+1
+	   TREE_START(1,NUM_TREE)=LAST_SEG_INDEX+1
+	   GOTO 30
+	ENDIF
+C
+C Use AREA() to get signed area of polygon. (Area uses the contents
+C of /POLYGONS/POLY_BUF and POLY_PTS)
+	CALC_AREA=AREA()
+C
+C Test for zero area polygons (i.e. probable double digitising) and abort them
+	IF (ABS(CALC_AREA).LT.1.0E-8) THEN
+C
+C The only way we can get a zero area is if we are using segments connected to
+C one-arm junctions - indicates possible double digitising.
+	   ACTUAL_FLUSH_POLY=POLY__DBLDIG
+C
+C Find the FSN of one of the segments involved
+	   FSN1=SEGTAB(1,IABS(TMP_POLY_STACK(1)))
+C
+C If the other direction of this segment has already been implicated then do 
+C nothing....
+	   IF (ISIGN(1,TMP_POLY_STACK(1)).EQ.-1) THEN
+	      IF (EXT1V(FSN1,LRUSED(1,1))) GOTO 10
+	   ELSE
+	      IF (EXT1V(FSN1,LRUSED(1,2))) GOTO 10
+      	   ENDIF
+C
+	   IF (TMP_STACK_PTR.GT.1) THEN
+		FSN2=SEGTAB(1,IABS(TMP_POLY_STACK(2)))
+		MESLEN=EXPAND(
+     &	'%WSSuspected coincident segments near features with '//
+     &	'FSN %N and %N',MESTXT,FSN1,FSN2)
+	   ELSE
+		MESLEN=EXPAND(
+     &	'%WSSuspected double digitising near feature with FSN %N',
+     &	MESTXT,FSN1)
+	   ENDIF
+C
+C Now output error messages...
+	   IF (HAD_LITES) THEN
+	      CALL FLWSEL(LITESLUN)
+	      CALL FLWRTF('%%MESSAGE Double Digitising error:')
+	   ENDIF
+
+	   CALL MES_OUT(POLY_BUF(1,1),MESTXT,MESLEN)
+	   GOTO 10
+	ENDIF
+C
+C We have a finite area polygon - store it as a polygon in POLY_PARTS and 
+C reference it as a poly thru POLY_START
+C
+C Check that we have room for a new polygon
+	IF (NUM_POLY.EQ.POLMAX) THEN
+	   ACTUAL_FLUSH_POLY=POLY__TOOMNYPOL
+	   CALL LSL_PUTMSG(ACTUAL_FLUSH_POLY,POLMAX)
+	   ACTUAL_FLUSH_POLY=%LOC(SS$_ABORT)
+	   GOTO 10
+	ENDIF
+C
+C Note that we have a new polygon and point into POLY_PARTS
+	NUM_POLY=NUM_POLY+1
+	POLY_START(1,NUM_POLY)=LAST_SEG_INDEX+1
+C
+C Store the signed polygon area for use later
+	POLY_AREA(NUM_POLY)=CALC_AREA
+C
+C Calculate the range of the polygon
+	CALL CALC_RANGE(POLY_BUF,POLY_PTS,
+     &				POLY_RANGE(1,NUM_POLY),.TRUE.)
+C
+C Calc the perimeter of the polygon (if necessary)
+	IF (HAD_PERIM) POLY_PERIM(NUM_POLY) = 
+     &				LENGTH(POLY_PTS,POLY_BUF)
+C
+C Update MINSEG and MAXSEG
+30	IF (HAD_LOG) THEN
+	   MINSEG=MIN(MINSEG,TMP_STACK_PTR)
+	   MAXSEG=MAX(MAXSEG,TMP_STACK_PTR)
+	ENDIF
+C
+C Now store the segments that make up this polygon with links to connect them
+	DO 20 I=1,TMP_STACK_PTR
+	   LAST_SEG_INDEX=LAST_SEG_INDEX+1
+	   IF (LAST_SEG_INDEX.GT.PARTS_MAX) THEN
+	      ACTUAL_FLUSH_POLY=POLY__TOOMNYPS
+	      CALL LSL_PUTMSG(ACTUAL_FLUSH_POLY,PARTS_MAX)
+	      GOTO 10
+	   ENDIF	   
+	   POLY_PARTS(1,LAST_SEG_INDEX)=TMP_POLY_STACK(I)
+C
+C Set up the pointers for chaining through POLY_PARTS
+	   IF (I.GT.1) THEN
+	      POLY_PARTS(2,LAST_SEG_INDEX-1)=LAST_SEG_INDEX
+	   ENDIF
+C
+C Store the polygon ident that lies on each side of the segment
+	   LR_SEGMENT(TMP_SIDE_STACK(I),
+     &			SEGTAB(1,IABS(TMP_POLY_STACK(I)))) = NUM_POLY
+20	CONTINUE
+C
+10	RETURN
+	END

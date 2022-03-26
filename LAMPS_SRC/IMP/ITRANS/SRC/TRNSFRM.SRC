@@ -1,0 +1,417 @@
+        LOGICAL FUNCTION TRNSFRM()
+C
+***	MODULE TRNSFRM
+***	IDENT 12FE97
+C
+C Copyright Laser-Scan Laboratories Ltd.,Cambridge,England
+C 
+C 	Author    Ron Russell			     09-Dec-1985
+CMOD	Allows a control file to be used	CAB  23-Aug-1990
+CMOD	IFFOPN replaced by LSLLIB IFFCREATE	TJH  06-Nov-1986
+CMOD	CB entries				RWR  23-Nov-1987
+CMOD	Do not transform CP entries if
+C	RETAIN_CP qualifier given		RWR   1-Mar-1989
+CMOD	WI/CC 1570 SPR 3640			RWR/
+C	Fix arithmetic trap failure		MJGW 12-Feb-1997
+C
+C       This subroutine transforms IFF files
+C
+	IMPLICIT NONE
+C
+C common blocks
+C
+***	PARAMETER/HERE:ITRANSMSG/
+***	PARAMETER/LSL$CMNIFF:CB.STR/	! CB structure definitions
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/	! IFF library interface
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/HERE:DESCRIPT/
+***	COMMON/HERE:GENERAL/
+C
+C w/s
+C
+	INTEGER*2	IECODE
+	INTEGER*2	IELEN
+	INTEGER*4	OUT		! number of points output
+	INTEGER*2	IENDS
+	INTEGER*2	FSN,ISQ
+	INTEGER*4	I,J		! loop counter
+	INTEGER*2	LAYNO
+	INTEGER*4	LPOSNO,LPOSRA
+	LOGICAL		HADMD
+	REAL*8		TEMP
+	REAL*8		COORD(3)	! R*8 coord pair to transform
+	REAL*4		RAXY(4)
+	REAL*4		CPXY(2,8)	! corner points
+	RECORD		/IFF_CBH/CBH	! CB header
+	RECORD		/IFF_CBD/CBD	! CB data
+	CHARACTER*12	HIFUNC		! text for HI entry
+	INTEGER*4	HIFUNCL		! its length
+	INTEGER		XYCOL(2)	! for extracting X and Y from CBD
+	REAL		XY(2)		! R*4 XY
+	INTEGER		ZCOL(1)		! for extracting Z from CBD
+	REAL		Z		! R*4 Z
+	INTEGER*4	BUF(IFF_MAXCBCOL) ! a row of a CB
+	LOGICAL		Z_PRESENT
+C
+C functions
+C
+	INTEGER*4	TRANS
+	INTEGER		EXPAND
+	INTEGER		IFFCREATE	! create/open IFF file for write
+C
+C initialise
+C
+	TRNSFRM=ITRANS__NORMAL	! assume success
+C
+C fill array of column headers
+C
+	XYCOL(1) = IFF_C_X
+	XYCOL(2) = IFF_C_Y
+	ZCOL(1)  = IFF_C_Z
+C
+C get string for HI entry
+C
+	IF (HAD_DESCR) THEN
+	   HIFUNC = 'MD_updated'
+	   HIFUNCL = 10
+	ELSE
+	   HIFUNCL = EXPAND ('%WSPj%^L%N->Pj%N',HIFUNC,CURRPRJ,TARGPRJ)
+	ENDIF
+C
+	HADMD=.FALSE.
+	LPOSRA=0
+	RANGE(1) = 1.0E38	! zero range entry (in GENERAL.CMN)
+	RANGE(3) = RANGE(1)
+	RANGE(2) = -RANGE(1)
+	RANGE(4) = RANGE(2)
+C
+C write input file name to output file
+C
+	IF (HAD_OUT) THEN
+	   CALL FLWSEL(OUTLUN)
+	   CALL FLWRTF
+	   CALL FLWRTF
+	   CALL FLWRTF('Input file : %S',SRCE_FILE(1:SRCE_LEN))
+	   CALL FLWRTF
+	ENDIF
+C
+C open iff file for write
+C
+	TRNSFRM=IFFCREATE(DESTLUN,		! LUN
+     &			DEST_FILE(1:DEST_LEN),	! file-spec
+     &			HIFUNC(1:HIFUNCL),	! history "function"
+     &			,			! size (omitted)
+     &			HAD_LOG)		! report success
+	IF (.NOT.TRNSFRM) THEN
+	   GOTO 900
+	ELSE
+	   DESTOPN=.TRUE.
+	   DEST_LEN=0				! zero top word
+	   CALL IFFINQ(DEST_FILE,DEST_LEN)	! expects I*2
+	   IF (HAD_OUT) THEN
+	      CALL FLWRTF('Output file: %S',DEST_FILE(1:DEST_LEN))
+	      CALL FLWRTF
+	   ENDIF
+	ENDIF
+C
+C Select input file and rewind it
+C
+	CALL IFFSEL(SRCELUN)
+	CALL IFFRWD
+C
+C loop to read entries and copy them to output file (transforming where
+C necessary)
+C
+   10	CONTINUE
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 900
+C
+C deal separately with the entries we are interested in, and copy
+C everthing else.
+C
+C note: this is not a IFF checking program. It is assumed that files
+C are valid IFF files
+C
+	IF (IECODE.EQ.'RA'.AND.(.NOT.HAD_DESCR.OR.FLIP)) GOTO 100
+	IF (IECODE.EQ.'MD') GOTO 150
+	IF (IECODE.EQ.'NS') GOTO 200
+	IF (IECODE.EQ.'CP'.AND.(.NOT.HAD_DESCR.OR.FLIP)) GOTO 250
+	IF (IECODE.EQ.'NF') GOTO 300
+	IF (IECODE.EQ.'NO') GOTO 500
+	IF (IECODE.EQ.'EO') GOTO 550
+	IF (IECODE.EQ.'EJ') GOTO 600
+C
+	CALL EIHCPY(DESTLUN)
+	GOTO 10
+C
+C*************************************************************
+C
+C RA entry
+C
+  100	CONTINUE
+	CALL EIHRR(RAXY,4,1)		! read this entry
+	CALL IFFSEL(DESTLUN)		! remember position in
+	LPOSRA = LPOSE			! output file
+	CALL IFFRA(RAXY)		! write out again
+	CALL IFFSEL(SRCELUN)
+	GOTO 10				! get next entry
+C
+C *************************************************************
+C
+C MD entry - use the target MD (and only put in one)
+C
+  150	CONTINUE
+	IF (.NOT.HADMD) THEN
+	   CALL IFFSEL(DESTLUN)
+	   CALL IFFMD(TARGMD,MD2LEN)	
+	   CALL IFFSEL(SRCELUN)
+	   HADMD=.TRUE.
+	ENDIF
+	GOTO 10
+C
+C *************************************************************
+C
+C NS entry - if no MD entry yet, put one in now
+C
+  200	CONTINUE
+	IF (.NOT.HADMD) THEN
+	   CALL IFFSEL(DESTLUN)
+	   CALL IFFMD(TARGMD,MD2LEN)
+	   CALL IFFSEL(SRCELUN)
+	   HADMD=.TRUE.
+	ENDIF
+	CALL EIHCPY(DESTLUN)		! and copy NS entry
+	GOTO 10
+C
+C ************************************************************
+C
+C CP entry - transform each coordinate pair in turn, if doing 4pt
+C            transformation then we have corner points, otherwise
+C	     get them from file
+C
+  250	CONTINUE
+	IF (.NOT.DO4PT) THEN	
+	   CALL EIHRR(CPXY,16,1)
+	ENDIF
+C
+	IF (HAD_CONT) THEN
+	   DO 257, I=1,4
+	      DO 254, J=1,4
+		 CPTS(J,I) = ORGCPTS(J,I)
+254	      CONTINUE
+	      CALL TRNUSER(CPTS(1,I),CPTS(2,I),COEF)
+	      CPTS(3,I)=CPTS(1,I)
+	      CPTS(4,I)=CPTS(2,I)
+257	   CONTINUE
+	ENDIF
+
+C
+	DO 260, I=1,8
+	   IF (DO4PT) THEN			! use transformed points
+	      IF (I) THEN			! I is odd
+	         J=I/2+1			! j=1,2,3,4
+	         COORD(1)=CPTS(1,J)
+	         COORD(2)=CPTS(2,J)
+	      ELSE				! I is even
+	         J=I/2				! j=1,2,3,4
+	         COORD(1)=CPTS(3,J)
+	         COORD(2)=CPTS(4,J)
+	      ENDIF
+	   ELSE					! use points from file
+	      IF (FLIP) THEN			! can only flip geogs
+						! so no 4pt transform
+	         COORD(2)=CPXY(1,I)	
+	         COORD(1)=CPXY(2,I)
+	      ELSE
+	         COORD(1)=CPXY(1,I)	
+	         COORD(2)=CPXY(2,I)
+	      ENDIF
+	   ENDIF
+C
+C don't transform corner points if wanting to retain old values!
+	   IF (.NOT.HAD_RETAIN_CP) THEN
+	      IF (HAD_DATUM) COORD(3) = 0.0
+	      TRNSFRM=TRANS(COORD,.FALSE.)   	! don't include in RANGE
+	      IF (.NOT.TRNSFRM) GOTO 270
+	   ENDIF
+	   CPXY(1,I)=COORD(1)			! R*8 -> R*4
+	   CPXY(2,I)=COORD(2)
+  260	CONTINUE
+	GOTO 290
+C
+C error in transforming CPS
+C
+  270	CONTINUE
+	DO 280, I=1,8		! make all corner points 0.0
+	   CPXY(1,I) = 0.0
+	   CPXY(2,I) = 0.0
+  280	CONTINUE
+	CALL LSL_PUTMSG(ITRANS__CPSERR)
+	CLOSE_STATUS = ITRANS__CPSERR
+C
+C
+  290	CONTINUE
+	CALL IFFSEL(DESTLUN)
+	CALL IFFCP(CPXY)
+	CALL IFFSEL(SRCELUN)
+	GOTO 10
+C
+C ***********************************************************
+C
+C NF entry - read and write the NF
+C
+  300	CONTINUE
+	CALL EIHRI(FSN,1,1)
+	CALL IFFSEL(DESTLUN)
+	ISQ=0
+	CALL IFFNF(FSN,ISQ)
+	CALL IFFSEL(SRCELUN)
+C
+C now loop round all entries within the feature, copying all that
+C is not to be transformed
+C
+  310	CONTINUE
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 900
+C
+	IF (IECODE.EQ.'CB'.AND.(.NOT.HAD_DESCR.OR.FLIP)) GOTO 350
+	IF (IECODE.EQ.'EF') GOTO 450
+C
+	CALL EIHCPY(DESTLUN)
+	GOTO 310
+C
+C --------------------------------------------------------------
+C
+C CB entry - transform each pair of coords
+C
+  350	CONTINUE
+	CALL EIHRCB_HEAD(CBH)
+	CALL EIHRCB_DATA(CBD)
+	OUT = 0			! initalise count for output
+	DO 360, I=1,CBH.NROW
+C
+C read an XY pair from data, and convert to R*8
+	   CALL IFS_CB_READ(CBH,CBD,XY,2,XYCOL,I,I)
+	   IF (FLIP) THEN
+	      COORD(2) = XY(1)
+	      COORD(1) = XY(2)
+	   ELSE
+	      COORD(1) = XY(1)
+	      COORD(2) = XY(2)
+	   ENDIF
+C
+C if doing accurate datum shift, then get height of point as well
+C
+	   IF (HAD_HEIGHT) THEN
+	      CALL IFS_CB_READ(CBH,CBD,XY,1,ZCOL,I,I)
+	      Z_PRESENT = Z.NE.IFF_ABSENT
+	      IF (Z_PRESENT) THEN
+	         COORD(3) = Z
+	      ELSE
+	         COORD(3) = 0.0
+	      ENDIF
+	   ELSE
+	      COORD(3) = 0.0
+	   ENDIF
+C
+C do 4 point transformation if necessary
+C
+	   IF (DO4PT) CALL TRNUSE(COORD(1),COORD(2),COEF)
+C
+C and transform point
+C
+	   TRNSFRM=TRANS(COORD,.TRUE.)
+C
+	   IF (.NOT.TRNSFRM) THEN		! error transforming pt
+	      CALL LSL_PUTMSG(ITRANS__PTIGNORED,XY(1),XY(2))
+	      CLOSE_STATUS = ITRANS__PTIGNORED
+	      GOTO 360
+	   ENDIF
+C
+C write it back to CD
+C
+	   XY(1) = COORD(1)
+	   XY(2) = COORD(2)
+	   CALL IFS_CB_WRITE(CBH,CBD,XY,2,XYCOL,I,I)
+C
+C write back new Z if doing accurate datum shift
+C
+	   IF (HAD_HEIGHT.AND.Z_PRESENT) THEN
+	      Z = COORD(3)
+	      CALL IFS_CB_WRITE(CBH,CBD,Z,1,ZCOL,I,I)
+	   ENDIF
+C
+	   OUT = OUT+1
+C
+C if input and output are no longer in step, move this row
+C back to current output position
+C
+	   IF (I.NE.OUT) THEN
+	      CALL IFS_CB_READ(CBH,CBD,BUF,CBH.NCOL,CBH.COLH,I,I)
+	      CALL IFS_CB_WRITE(CBH,CBD,BUF,CBH.NCOL,CBH.COLH,OUT,OUT)
+	   ENDIF
+  360	CONTINUE
+C
+C write it to output file
+C
+	IF (OUT.GT.0) THEN
+	   CALL IFFSEL(DESTLUN)
+	   CBH.NROW = OUT
+	   CALL IFFCB(CBH,CBD)
+	   CALL IFFSEL(SRCELUN)
+	ENDIF
+	GOTO 310
+C
+C ---------------------------------------------------------------
+C EF entry
+C
+  450	CONTINUE
+	CALL IFFSEL(DESTLUN)
+	CALL IFFEF
+	CALL IFFSEL(SRCELUN)
+	GOTO 10				! end of feature and inner loop
+C
+C-------------------------------------------------------------
+C
+C NO entry
+C
+  500	CONTINUE
+	CALL EIHRI(LAYNO,1,1)
+	CALL IFFSEL(DESTLUN)
+	LPOSNO=LPOSE
+	CALL IFFNO(LAYNO,0,0)
+	CALL IFFSEL(SRCELUN)
+	GOTO 10
+C
+C------------------------------------------------------------------
+C
+C EO entry
+C
+  550	CONTINUE
+	CALL IFFSEL(DESTLUN)
+	CALL IFFUNO(LPOSNO)
+	CALL IFFEO
+	CALL IFFSEL(SRCELUN)
+	GOTO 10
+C
+C --------------------------------------------------------------
+C	
+C EJ entry
+C
+  600	CONTINUE
+	CALL IFFSEL(DESTLUN)
+	CALL IFFEJ
+	IF (LPOSRA.NE.0) THEN			! overwrite RA values
+	  CALL IFFPKE(IECODE,IELEN,LPOSRA)
+	  CALL EIHWR(RANGE,4,1)
+	ENDIF
+	CALL IFFSEL(SRCELUN)
+	GOTO 10					! I hope not!
+C
+C --------------------------------------------------------------
+C
+  900	CONTINUE
+	RETURN
+   	END
+

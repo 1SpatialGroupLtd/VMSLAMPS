@@ -1,0 +1,518 @@
+	LOGICAL FUNCTION CHECK3
+C
+***	MODULE CHECK3
+***	IDENT 17FE93
+C
+C	Copyright: Laser-Scan, Cambridge, England
+C	Author   : D Catlow
+C	Created  : 02OC84
+C
+CMOD	XYDRIFT array redimensioned from 18000 to 50000
+C	and placed into (equivalenced) common		TJH 09-Jan-1989
+C
+CMOD1120 Use QUICK_SORT					 JB 01-Jun-1992
+CMOD1120 Set HAD_COINC at end of 'Solid' loop.		JMC 12-FEB-1993
+C
+C Modified from CHECK3 in module TCHECK			ALB 29-Feb-1988
+C
+C	Subroutine for TCHECK to check for:
+C	1. Touching or crossing contours
+C	2. and consequently duplicate contours
+C
+C	N.B. Uses sorted TENTRY
+C
+	IMPLICIT NONE
+C
+C parameters
+C
+	INCLUDE 'LSL$CMNITCHECK:CONSTANTS.PAR'
+C
+C common blocks
+C	
+        INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNITCHECK:ATTRIB.CMN'
+	INCLUDE 'LSL$CMNITCHECK:CONTROL.CMN'
+	INCLUDE 'LSL$CMNITCHECK:ERROR.CMN'
+	INCLUDE 'LSL$CMNITCHECK:GROUP.CMN'
+	INCLUDE 'LSL$CMNITCHECK:SHEET.CMN'
+C
+C structures
+C
+	INCLUDE 'LSL$CMNIFF:CB.STR'	!required for parameter IFF_MAXCBROW
+C
+C w/s
+	REAL		DATA_BUFF(2,IFF_MAXCBROW) ! buffer x y values from CB
+	INTEGER		IHEAD_BUFF(2)	! buffer for CB headers
+	INTEGER		NUM_XY		! number of xy pair in current CB
+C
+	REAL		XMAX(2,100)	!CB rect x maximum
+	REAL		YMAX(2,100)	!CB rect y maximum
+	REAL		XMIN(2,100)	!CB rect x minimum
+	REAL		YMIN(2,100)	!CB rect y minimum
+C	!i.e. a maximum of 100 CBs is permitted
+C
+	REAL		R3(4)		!overlap rectangle
+	REAL		XY1(2)
+	REAL		XY2(2)
+	REAL		XY3(2)
+	REAL		XY4(2)
+	REAL		XYSECT(2)	!xy intersection coord.
+	REAL		LASTX
+	REAL		LASTY
+	REAL		MIN_X(NUMCON)	!temp min x array used for sorting
+C
+	INTEGER*4	STOT1,STOT2
+	INTEGER*4	PTS1		!point count line 1
+	INTEGER*4	TOT1		!current CB total pt count line 1
+	INTEGER*4	PREV_TOT1	!previous CB total pt count line 1
+	INTEGER*4	PTS2		!point count line 2
+	INTEGER*4	TOT2		!current total pt count line 2
+	INTEGER*4	PREV_TOT2	!previous CB total pt count line 2
+	INTEGER*4	NPTS		!Number of pts in CB entry
+	INTEGER*4	NPTS1(100)
+	INTEGER*4	NPTS2(100)
+	INTEGER*4	NCB1		!number of CB entries for solid
+	INTEGER*4	NCB2		!number of CB entries for drift
+	INTEGER*4	I,C,J		!Counter
+	INTEGER*4	II,JJ		!Counter
+	INTEGER*4	K,L,N		!Counter
+	INTEGER*4	RIVER_SECTS	!number of intersects with river
+	INTEGER*4	HAD_RIVER	!testing river features
+	INTEGER*2	IELEN
+	INTEGER*2	IECODE
+	INTEGER*2	IENDS
+C
+	INTEGER*2	LUN		!input IFF file LUN
+	INTEGER*4	IFFIN_NUM	!input IFF file number
+	INTEGER*4	FC_PTR		!element in GPRFCT
+	INTEGER*4	FC_OFFSET	!offset in GRTFCT element
+C
+	LOGICAL		OK		!return code
+	LOGICAL		IN_SPOT		!TRUE if bit set for spot heights
+	LOGICAL		IN_RIDGE	!TRUE if bit set for ridges
+	LOGICAL		IN_RIVER	!TRUE if bit set for rivers
+C
+C externals
+	LOGICAL		CRT		!TRUE if terminal and is a CRT
+	INTEGER*4	COMPARE	
+	EXTERNAL	COMPARE		!compare function
+	EXTERNAL	SWAP		!swap routine
+C
+C Functions called
+C
+	LOGICAL		OUTPUT_CRT	!TRUE if SYS$OUTPUT is CRT
+	LOGICAL 	CROSS		!do the vectors cross?
+	LOGICAL		LIB$EXTZV	!function to extract bit
+	LOGICAL		IFFOPEN		!open IFF file
+	LOGICAL		ERRCOP		!copy errorous feature to output IFF
+	LOGICAL		ERRPTS		!move near't pts to error 2 temp array
+	LOGICAL		ERRTAB		!put error message into error text file
+C
+C****************************************************************************
+C
+	CHECK3 = .TRUE.			! assume success
+	LUN = IFFIN_LUN
+	CRT = OUTPUT_CRT()
+C
+C****************************************************************************
+C	Sort on minimum x
+C
+	IF (.NOT.HAD_XSORT) THEN
+C
+C run quicksort after loading temporary array with min x
+C
+	   DO 100 I = 1,NUM_FC
+	      MIN_X(I) = ATTRIB_TABLE(I,10)	!put min x into temp sort array
+100	   CONTINUE
+
+	   CALL QUICK_SORT(MIN_X(1),NUM_FC,COMPARE,SWAP,SORT_WS)
+C
+	   HAD_XSORT=.TRUE.			
+	ENDIF
+C
+C****************************************************************************
+C	First line
+C
+	DO 600 I=1,NUM_FC
+	  IF (CRT) CALL PERCENT(' <PROCESSING CHECK 3> ',
+     &						22,NUM_FC,I)	!write % done
+C
+	  HAD_RIVER=0
+C
+C get feature group type
+C
+	  FC_PTR = IATTRIB_TABLE(TENTRY(I),1)/32 + 1
+	  FC_OFFSET = MOD(IATTRIB_TABLE(TENTRY(I),1),32)
+	  IN_SPOT = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,SPOT))
+	  IN_RIDGE = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,RIDGE))
+	  IN_RIVER = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,RIVER))
+C
+	  IF (IN_SPOT) GOTO 600		! bypass if shot heights
+	  IF (IN_RIDGE) GOTO 600	! bypass if ridgelines
+C
+	  IF (IN_RIVER) HAD_RIVER = 1
+C
+C leaving just contours, lakes and coastline (and now rivers)
+C
+	  IFFIN_NUM = IATTRIB_TABLE(TENTRY(I),14)
+	  IF (IFFIN_NUM.NE.LAST_IFFIN) THEN
+	    IF(OPEN_IFFIN) THEN
+	      CALL IFFCLO(LUN)
+	      OPEN_IFFIN = .FALSE.
+	    ENDIF
+C
+C re-open IFF file
+C
+	    OK = IFFOPEN(LUN,IFFIN_FNAME(IFFIN_NUM),
+     &				IFFIN_FID(1,IFFIN_NUM),,1)
+	    IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(OK,
+     &			IFFIN_FNAME(IFFIN_NUM)(1:IFFIN_LEN(IFFIN_NUM)))
+	      CHECK3 = .FALSE.
+	      GOTO 999
+	    ENDIF
+	    OPEN_IFFIN = .TRUE.
+	    LAST_IFFIN = IFFIN_NUM
+	  ENDIF
+C
+	  CALL IFFSEL(LUN)
+	  CALL IFFPKE(IECODE,IELEN,IATTRIB_TABLE(TENTRY(I),12))
+	  PREV_TOT1 = 0				!Previous total point counter
+	  TOT1=0				!Total point counter
+	  NCB1=1				!First CB
+	  CALL IFFNXC('CB',IELEN)
+C
+250	  CONTINUE
+C
+	  CALL CBINOUT(XY(1,TOT1+1),.FALSE.,NUM_XY)
+C
+	  NPTS1(NCB1)=NUM_XY
+C
+   	  TOT1=TOT1+NUM_XY
+C
+C	Calculate CB point bounding rectangles
+C
+	  DO 300 II = PREV_TOT1+1,TOT1
+	    IF(II.EQ.1)THEN			!First point of first CB
+	      XMAX(1,NCB1)=XY(1,II)		!so set up initial
+	      YMAX(1,NCB1)=XY(2,II)		!min / max values
+	      XMIN(1,NCB1)=XY(1,II)		!
+	      YMIN(1,NCB1)=XY(2,II)		!
+	    ELSE
+C
+	      XMAX(1,NCB1)=MAX(XY(1,II),XMAX(1,NCB1))	!update min/max
+	      YMAX(1,NCB1)=MAX(XY(2,II),YMAX(1,NCB1))	!values for
+	      XMIN(1,NCB1)=MIN(XY(1,II),XMIN(1,NCB1))	!current CB
+	      YMIN(1,NCB1)=MIN(XY(2,II),YMIN(1,NCB1))	!
+	    ENDIF
+C
+300	  CONTINUE
+C
+	  CALL IFFNXT(IECODE,IELEN)
+	  IF (IECODE.EQ.'CB') THEN	!Another CB entry?
+	    NCB1=NCB1+1			!increment CB counter
+	    XMAX(1,NCB1)=XY(1,TOT1)	!Set up initial max/min values
+	    YMAX(1,NCB1)=XY(2,TOT1)	!for the new CB
+	    XMIN(1,NCB1)=XY(1,TOT1)	!
+	    YMIN(1,NCB1)=XY(2,TOT1)	!
+	    PREV_TOT1 = TOT1
+	    GOTO 250
+	  ENDIF
+C
+	  STOT1=TOT1
+C
+C*****************************************************************************
+C	First rejection process
+C
+	  DO 500 J=I+1,NUM_FC
+C
+C get feature group type
+C
+	    FC_PTR = IATTRIB_TABLE(TENTRY(J),1)/32 + 1
+	    FC_OFFSET = MOD(IATTRIB_TABLE(TENTRY(J),1),32)
+	    IN_SPOT = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,SPOT))
+	    IN_RIDGE = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,RIDGE))
+	    IN_RIVER = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,RIVER))
+C
+	    IF (IN_SPOT) GOTO 500		! bypass if shot heights
+C
+	    IF (IN_RIDGE) GOTO 500		! bypass if ridgelines
+C	  
+	    IF(IN_RIVER) HAD_RIVER=HAD_RIVER+1
+C
+	    IF (ATTRIB_TABLE(TENTRY(J),10).GE.ATTRIB_TABLE(TENTRY(I), 8))
+     &								GOTO 600
+C
+C	!min x of J is greater than max x of I, and since all items are
+C	!sorted on min x, we can reject all other items in the file
+C
+	    IF (ATTRIB_TABLE(TENTRY(J),11).GE.ATTRIB_TABLE(TENTRY(I), 9))
+     &								GOTO 500
+C
+	    IF (ATTRIB_TABLE(TENTRY(J), 9).LE.ATTRIB_TABLE(TENTRY(I),11))
+     &	   							GOTO 500
+C
+C	!if either of the above are true we can reject item J, since it does
+C	!not intersect with item I
+C
+C******************************************************************************
+C	Bounding rectangles overlap
+C	Calculate overlap rectangle
+C
+	    R3(1)=MIN(ATTRIB_TABLE(TENTRY(I), 8),ATTRIB_TABLE(TENTRY(J), 8))
+	    R3(2)=MIN(ATTRIB_TABLE(TENTRY(I), 9),ATTRIB_TABLE(TENTRY(J), 9))
+	    R3(3)=MAX(ATTRIB_TABLE(TENTRY(I),10),ATTRIB_TABLE(TENTRY(J),10))
+	    R3(4)=MAX(ATTRIB_TABLE(TENTRY(I),11),ATTRIB_TABLE(TENTRY(J),11))
+C	!this enables us to limit the search just to those vectors within
+C	!the overlap area
+C
+C*****************************************************************************
+C
+	    RIVER_SECTS=0
+C Second item (J)   This is the 'drift' item.
+C
+	    IFFIN_NUM = IATTRIB_TABLE(TENTRY(J),14)
+	    IF (IFFIN_NUM.NE.LAST_IFFIN) THEN
+C
+C close file if open
+C
+	      IF (OPEN_IFFIN) THEN
+	        CALL IFFCLO(LUN)
+	        OPEN_IFFIN = .FALSE.
+	      ENDIF
+C
+C re-open IFF file
+C
+	      OK=IFFOPEN(LUN,IFFIN_FNAME(IFFIN_NUM),
+     &					IFFIN_FID(1,IFFIN_NUM),,1)
+	      IF(.NOT.OK) THEN
+	        CHECK3 = OK
+	        GOTO 999
+	      ENDIF
+	      OPEN_IFFIN = .TRUE.
+	      LAST_IFFIN = IFFIN_NUM
+	    ENDIF
+C
+	    CALL IFFSEL(LUN)
+	    CALL IFFPKE(IECODE,IELEN,IATTRIB_TABLE(TENTRY(J),12))
+C
+C Set to NF entry of item J in IFF file
+C
+	    PREV_TOT2=0				!Previous total point counter
+	    TOT2=0				!initialise point counter
+	    NCB2=1				!First CB entry
+	    CALL IFFNXC('CB',IELEN)
+C
+350	    CONTINUE
+C
+	    CALL CBINOUT(XYDRIFT(1,TOT2+1),.FALSE.,NUM_XY)
+C
+	    NPTS2(NCB2)=NUM_XY
+C
+	    TOT2=TOT2+NUM_XY
+C
+C Calculate CB point bounding rectangles
+C
+	    DO 400 JJ = PREV_TOT2+1,TOT2
+	      IF(JJ.EQ.1)THEN			!First point of first CB
+	        XMAX(2,NCB2)=XYDRIFT(1,JJ)	!so set up initial
+	        YMAX(2,NCB2)=XYDRIFT(2,JJ)	!min / max values
+	        XMIN(2,NCB2)=XYDRIFT(1,JJ)
+	        YMIN(2,NCB2)=XYDRIFT(2,JJ)
+	      ELSE
+C
+	        XMAX(2,NCB2)=MAX(XYDRIFT(1,JJ),XMAX(2,NCB2))	!update min/max
+	        YMAX(2,NCB2)=MAX(XYDRIFT(2,JJ),YMAX(2,NCB2))	!values for
+	        XMIN(2,NCB2)=MIN(XYDRIFT(1,JJ),XMIN(2,NCB2))	!current CB
+	        YMIN(2,NCB2)=MIN(XYDRIFT(2,JJ),YMIN(2,NCB2))
+	      ENDIF
+C
+400	    CONTINUE
+C
+	    CALL IFFNXT(IECODE,IELEN)
+	    IF (IECODE.EQ.'CB') THEN		!Another CB entry?
+ 	      NCB2=NCB2+1			!increment CB counter
+	      XMAX(2,NCB2)=XYDRIFT(1,TOT2)	!Set up initial max/min values
+	      YMAX(2,NCB2)=XYDRIFT(2,TOT2)	!for the new CB
+	      XMIN(2,NCB2)=XYDRIFT(1,TOT2)
+	      YMIN(2,NCB2)=XYDRIFT(2,TOT2)
+	      PREV_TOT2 = TOT2
+	      GOTO 350
+	    ENDIF
+C
+	    STOT2=TOT2
+C
+C	Solid and drift lines now read in, so compare and search for
+C	possible overlap
+C****************************************************************************
+C	Test if CB bounding rectangles of I coincides with overlap rect.
+C	If it doesn't, we can go on to the next CB.
+C
+	    TOT1=0			!reuse this variable, increment
+C					!as data points are considered
+	    DO 480 N=1,NCB1
+	      PTS1=NPTS1(N)
+C
+	      IF (XMAX(1,N).LE.R3(3))GOTO 480
+	      IF (XMIN(1,N).GE.R3(1))GOTO 480
+	      IF (YMAX(1,N).LE.R3(4))GOTO 480
+	      IF (YMIN(1,N).GE.R3(2))GOTO 480
+C
+C*****************************************************************************
+C	Test CB bounding rectangles of second item against overlap rectangle.
+C
+	      TOT2=0		!number of data points considered
+C
+	      DO 470 C=1,NCB2
+		PTS2=NPTS2(C)
+C
+		IF(XMAX(2,C).LE.R3(3))GOTO 470
+		IF(XMIN(2,C).GE.R3(1))GOTO 470
+		IF(YMAX(2,C).LE.R3(4))GOTO 470
+		IF(YMIN(2,C).GE.R3(2))GOTO 470
+C
+C******************************************************************************
+C	The CB bounding rectangles of both items intersect with overlap rect. 
+C	therefore, test verts of CB of I against verts of CB of J
+C
+		DO 460 K=TOT1,(TOT1+PTS1)-1	!retrieve points of 'solid' line
+		  IF (K.EQ.0) GOTO 460
+C
+		  XY1(1)=XY(1,K)		!first vector
+		  XY1(2)=XY(2,K)
+	 	  XY2(1)=XY(1,K+1)
+		  XY2(2)=XY(2,K+1)
+C
+		  IF (XY1(1).EQ.XY2(1).AND.XY1(2).EQ.XY2(2)) GOTO 460 
+C						!skip any dup points
+C
+C*****************************************************************************
+C
+		  DO 450 L=TOT2,(TOT2+PTS2)-1	!retrieve points of 'drift' line
+	    	    IF (L.EQ.0)GOTO 450
+C
+		    XY3(1)=XYDRIFT(1,L)			!second vector
+		    XY3(2)=XYDRIFT(2,L)
+	    	    XY4(1)=XYDRIFT(1,L+1)
+		    XY4(2)=XYDRIFT(2,L+1)
+C
+		    IF (XY3(1).EQ.XY4(1).AND.XY3(2).EQ.XY4(2)) GOTO 450 
+C						!skip this dup point
+C
+C*****************************************************************************
+C	Compare vectors XY1 - XY2 and XY3 - XY4
+C
+	 	    IF (CROSS(XY1,XY2,XY3,XY4,XYSECT)) THEN
+C
+		      IF (HAD_RIVER.GT.0)THEN
+C
+			IF (.NOT.IN_RIDGE) THEN
+C
+C	A river must cross another river or contour
+C	more than once to be recorded as in error
+C
+			  IF (RIVER_SECTS.EQ.0)THEN
+			    RIVER_SECTS=L
+			    LASTX=XYSECT(1)
+			    LASTY=XYSECT(2)
+			    GOTO 450
+		          ENDIF
+C
+			  IF (L.EQ.RIVER_SECTS+1)THEN	!ie next vert	    
+			    IF(LASTX.EQ.XYSECT(1) .AND. LASTY.EQ.XYSECT(2))
+     &								 GOTO 450
+		    	  ENDIF
+C
+			  IF (HAD_RIVER.EQ.2)HAD_RIVER=1
+			  NUMERR=19			  !error number
+			  GOTO 440
+		        ENDIF
+	              ENDIF
+C
+		      NUMERR=9				  !error number
+C
+440		      ITEM1=IATTRIB_TABLE(TENTRY(I),2)	  !solid FSN
+		      ITEM2=IATTRIB_TABLE(TENTRY(J),2)	  !drift FSN
+		      CODE1=IATTRIB_TABLE(TENTRY(I),1)
+		      CODE2=IATTRIB_TABLE(TENTRY(J),1)
+		      HEIGHT1=ATTRIB_TABLE(TENTRY(I),3)
+		      HEIGHT2=ATTRIB_TABLE(TENTRY(J),3)
+		      FILE1=IATTRIB_TABLE(TENTRY(I),14)
+		      FILE2=IATTRIB_TABLE(TENTRY(J),14)
+		      VECERR1=K
+		      VECERR2=L
+		      XERR1=XYSECT(1)
+		      YERR1=XYSECT(2)	  
+C
+		      IF (HAD_OUTPUT)THEN		  	!copy ?
+C
+			RDPOS=IATTRIB_TABLE(TENTRY(I),12) 	!position to NF
+		        VECERR=VECERR1
+		        FILE = FILE1
+		        OK = ERRPTS()
+		        IF(.NOT.OK) THEN
+			  CHECK3 = .FALSE.
+			  GOTO 999
+		        ENDIF
+C
+			OK = ERRCOP()
+			IF(.NOT.OK) THEN
+			  CHECK3 = .FALSE.
+			  GOTO 999
+			ENDIF
+C
+			RDPOS=IATTRIB_TABLE(TENTRY(J),12)	 !position to NF
+			VECERR=VECERR2
+	      	     	FILE = FILE2
+		     	OK = ERRPTS()
+		     	IF (.NOT.OK) THEN
+			  CHECK3 = .FALSE.
+			  GOTO 999
+		     	ENDIF
+C
+			OK = ERRCOP()
+		        IF (.NOT.OK) THEN
+	 		  CHECK3 = .FALSE.
+			  GOTO 999
+		        ENDIF
+		      ENDIF
+C
+445		      OK = ERRTAB()
+		      IF (.NOT.OK) THEN
+	  	        CHECK3 = .FALSE.
+		        GOTO 999
+		      ENDIF
+		    ENDIF
+C
+C*****************************************************************************
+C
+450		  CONTINUE
+C
+460		CONTINUE
+C
+C*****************************************************************************
+C
+		HAD_COINC = .FALSE.
+470	      CONTINUE
+C
+	      TOT2=TOT2+PTS2		!number of points so far considered and
+C	 				!rejected in J
+C
+480	    CONTINUE
+C
+	    TOT1=TOT1+PTS1		!number of points so far considered in I
+C
+C*****************************************************************************
+C
+500	  CONTINUE
+C
+CCC	HAD_COINC = .FALSE.
+600	CONTINUE
+C
+C*****************************************************************************
+C
+999	CONTINUE
+C
+	RETURN
+	END
+C

@@ -1,0 +1,1250 @@
+	.TITLE	$IFFOC
+	.IDENT	'05OC93'
+;
+; Copyright Laser-Scan Laboratories Ltd, Cambridge, England.
+;
+; Author: Paul Hardy after PDP11 version by P. Cross
+;
+;Mod	Make B.VBNx long not word to allow big IFF files	PGH  23-Jul-1992
+
+; IFF file open, close and select routines
+;
+; Register usage
+;	R0 - Temporary workspace
+;	R1 - ditto
+;	R2 - address of RAB (record access block)
+;	R3 - word number or block number in file
+;	R4 - byte offset within block in file
+;	R9 - address of current IFCB (IFF control block)
+;	R10 - address of FAB (File Access Block) within current IFCB
+;	R11 - number of arguments left
+;
+	.EXTERNAL	IF$TB
+
+	.LIBRARY/SYS$LIBRARY:LIB/
+
+	$ATRDEF
+	$FATDEF
+	$FIBDEF
+	$FSCNDEF
+	$IODEF
+	$JPIDEF
+	$LNMDEF
+	$SECDEF
+	$SSDEF
+
+	DATA_PSECT	IFF
+
+IO_STATUS:	.BLKQ	1		; IOSB for general use
+DELTA:		.BLKQ	1		; workspace
+
+IMAGBUF:
+FIB_BLOCK:
+	.BLKB	FIB$K_LENGTH
+
+FIB_DESCR:
+	.LONG	FIB$K_LENGTH
+	.ADDRESS FIB_BLOCK
+
+ATR_ADDRESS:
+	.ADDRESS ATR_BLOCK
+
+ATR_BLOCK:
+	.WORD	ATR$S_RECATTR
+	.WORD	ATR$C_RECATTR
+	.ADDRESS RECATTR
+	.LONG	0
+
+RECATTR:
+	.BLKB	ATR$S_RECATTR
+
+; item list for $GETJPI
+JPILST:	.WORD	FIB$K_LENGTH,JPI$_IMAGNAME
+	.ADDRESS	IMAGBUF
+	.ADDRESS	IMAGLEN
+	.WORD	HUSRLEN,JPI$_USERNAME
+USRADR:	.BLKL		1		; address for username
+	.ADDRESS	DELTA+4		; dummy length
+CPULST:	.WORD	4,	JPI$_CPUTIM
+CPUADR:	.BLKL		1		; address for CPU
+	.ADDRESS	DELTA+4		; dummy length
+	.LONG		0		; terminator
+
+IMAGDESC:				; descriptor for image name
+IMAGLEN:.BLKW		1
+	.BLKW		1
+	.ADDRESS	IMAGBUF
+
+; item list for $FILESCAN
+FSCNLST:
+NAMDESC:.BLKW		1
+	.WORD		FSCN$_NAME
+	.BLKL		1
+FSCNTRM:.LONG		0
+
+; skeleton multi-purpose descriptor
+DESC:
+DESCLEN:.BLKW		1
+	.BLKW		1
+DESCADR:.BLKL		1
+
+RDDESC:	.ASCID		/Read/
+CRDESC:	.ASCID		/Create/
+UPDESC:	.ASCID		/Update/
+FAOSTR:	.ASCID		/!XL/
+
+TRNARG:	$TRNLNM	TABNAM=TABDSC,LOGNAM=LOGDSC,ITMLST=LOGITM
+TABDSC:	.ASCID	/LNM$DCL_LOGICAL/
+LOGDSC:	.ASCID	/LSL$IFF_OUTPUT_REVISION/
+LOGITM:	.WORD	1,LNM$_STRING
+	.ADDRESS	IMAGBUF
+	.ADDRESS	IMAGLEN
+	.LONG		0
+
+LOCFLG:	.BLKL		1		; local copy of IFFLG
+
+	CODE_PSECT	IFF
+
+; Local constants
+IFF:	RAD50	<IFF>			; IFF nameplate
+JFF:	RAD50	<JFF>			; Junction IFF nameplate
+HIS:	RAD50	<HIS>			; HIStory nameplate
+INADR:	.LONG	^X200,^X200		; only to say P0 space
+
+; various flags set in R5 to indicate 'open options'
+	_VIELD	FLOP,0,<-		; of the form FLOP_M_OPN
+		<OPN,,M>,-		; was IFFOPN (not IFFOPI)
+		<FNC,,M>,-		; 'function' string supplied
+		<CRT,,M>,-		; create file
+		<USR,,M>,-		; 'user routine' call before open
+		>
+; and close options
+	_VIELD	FLCL,0,<-		; of the form FLCL_M_DEL
+		<DEL,,M>,-		; was IFFCDL (not IFFCLO)
+		>
+
+; ************************** IFFOPI **********************************
+
+; CALL IFFOPI(LUN,FILENAME,FILEID,[ALQ],[DEQ],[FNC])
+; as for IFFOPN except that FILEID (obtained from a
+; previous call to IFFID) is used to open the file by
+; file identification. Opened for updating unless
+; ALQ is explicitly zero. FILENAME should have been obtained from
+; a previous IFFINQ, and is used to fill in the RSA and ESA in the
+; NAM for the benefit of future IFFINQs or IFFCRN.
+
+	.ENTRY	IFFOPI,^M<R2,R3,R4,R5,R9,R10,R11>
+	CLRL	R5			; mark as IFFOPI
+	BRB	IF$OPN			; and join IFFOPN
+
+; ************************** IFFOPN **********************************
+
+; CALL IFFOPN(LUN,FILENAME,[ALQ],[DEQ],[FNC],[USR])
+
+	.ENTRY	IFFOPN,^M<R2,R3,R4,R5,R9,R10,R11>
+	ASSUME	FLOP_V_OPN,EQ,0		; make sure BLB's will work
+	MOVL	#FLOP_M_OPN,R5		; mark as IFFOPN
+IF$OPN:	TSTL	IFFEF			; got event flag yet?
+	BNEQ	2$			; yes
+	PUSHAL	IFFEF
+	CALLS	#1,G^LIB$GET_EF		; get flag
+	BLBC	R0,SLOT			; failed
+2$:	MOVL	IFFLG,LOCFLG		; copy IFFLG (output revision)
+	BICL2	#FLG_M_ORVG,IFFLG	; clear 'IFFORV given' bit
+	JSB	IF$1ST			; basic initialisation
+	JSB	IF$GNA			; get next arg (LUN)
+	BCS	NOLUN			; error if missing
+; check no files active already on this LUN
+	MOVAL	IFCHD,R9		; IFCB chain head
+10$:	MOVL	(R9),R9			; next IFCB
+	BEQL	20$			; none
+	TSTW	I.STS(R9)		; in use ?
+	BEQL	10$			; no
+	CMPB	I.LUN(R9),(R0)		; same LUN?
+	BNEQ	10$
+	MOVL	#^A'LUNI',IERCD		; LUN in use
+	BRB	IERR
+20$:	BSBW	IF$GTC			; get next IFCB control block
+; IF$GTC sets up R9, R10 pointing to IFCB, IFAB
+	BCC	GOTIFC			; ok
+SLOT:	MOVL	#^A'SLOT',IERCD		; no slots left
+	BRB	IERR1			; R0 contains LIB$GET_VM status
+NOLUN:	MOVL	#^A'ARGS',IERCD		; bad arguments
+IERR:	MOVL	#1,R0			; internal error so no VMS code
+IERR1:	MOVL	R0,IERNM		; VMS error code
+	JSB	IF$ERR			; moan
+	RET
+	
+ARGERR:	MOVL	#^A'ARGS',IERCD		; bad arguments
+	BRW	INTERR
+
+; now set up fields in FAB etc
+GOTIFC:	MOVB	(R0),I.LUN(R9)		; mark with unit number
+	JSB	IF$GNA			; get next arg (filename)
+	BCS	ARGERR
+	MOVL	(R0)+,R2		; string length + crud
+	MOVL	(R0),R3			; pointer to address of buffer
+	MOVL	R3,FAB$L_FNA(R10)	; store address of string
+	LOCC	#^A/ /,R2,(R3)		; find first space
+	SUBW2	R0,R2			; corrected length
+	MOVB	R2,FAB$B_FNS(R10)	; store corrected length
+	BICL2	#FAB$M_NAM,FAB$L_FOP(R10); assume not open by NAM block
+	BLBS	R5,50$			; its IFFOPN
+
+; here with IFFOPI
+	BISL2	#FAB$M_NAM,FAB$L_FOP(R10); want open by NAM block
+	CMPB	R2,I.NAM+NAM$B_RSS(R9)	; compare with space in RSA
+	BLEQU	10$
+	MOVZBW	I.NAM+NAM$B_RSS(R9),R2	; truncate??
+10$:	MOVB	R2,I.NAM+NAM$B_RSL(R9)	; RSA length
+	MOVC3	R2,(R3),@I.NAM+NAM$L_RSA(R9)
+; NB R5 left zero, as required for IFFOPI
+	JSB	IF$GNA			; next arg (FILEID)
+	BCS	ARGERR			; missing
+	MOVAL	I.NAM+NAM$T_DVI(R9),R1	; DVI address in NAM
+	MOVL	(R0)+,(R1)+		; copy DVI
+	MOVL	(R0)+,(R1)+
+	MOVL	(R0)+,(R1)+
+	MOVL	(R0)+,(R1)+
+	MOVAL	I.NAM+NAM$W_FID(R9),R1	; FID address in NAM
+	MOVW	(R0)+,(R1)+
+	MOVW	(R0)+,(R1)+
+	MOVW	(R0)+,(R1)+
+	MOVAL	I.NAM+NAM$W_DID(R9),R1	; DID address in NAM
+	MOVW	(R0)+,(R1)+
+	MOVW	(R0)+,(R1)+
+	MOVW	(R0)+,(R1)+
+
+; now reset FAB fields which may have been changed by previous OPEN
+50$:	MOVL	#100,FAB$L_ALQ(R10)	; allocation quantity=100
+	MOVW	#50,FAB$W_DEQ(R10)	; default extension=50
+	BISB2	#FAB$M_PUT,FAB$B_FAC(R10); set PUT bit in access field
+
+; and similar with XAB
+	CLRQ	I.XAB+XAB$Q_CDT(R9)	; creation date
+	CLRQ	I.XAB+XAB$Q_RDT(R9)	; revision date
+	CLRQ	I.XAB+XAB$Q_EDT(R9)	; expiry date
+	CLRW	I.XAB+XAB$W_RVN(R9)	; revision number
+
+; and for CRMPSC flags - write access, demand zero, expand region
+	MOVL	#SEC$M_WRT!SEC$M_DZRO!SEC$M_EXPREG,I.FLG(R9)
+
+; check whether we want a memory mapped file
+	ASSUME	FLG_V_MAP,EQ,0		; make sure BLB's will work
+	BLBC	IFFLG,54$		; not mapped
+	BISW2	#IFC_M_MAP,I.STS(R9)	; mark as mapped internally
+	BISL2	#FAB$M_UFO,FAB$L_FOP(R10); set UFO bit in option field
+	BRB	58$
+54$:	BICL2	#FAB$M_UFO,FAB$L_FOP(R10); clear UFO bit in option field
+	
+; now look for optional args
+58$:	JSB	IF$GNA			; get next arg
+	BCS	70$			; not there
+	MOVL	(R0),R3			; explicit allocation in words
+	BEQL	60$			; if =0 then readonly
+	JSB	IF$CWB			; convert words to blocks/bytes
+	CVTWL	IFOREL,R0		; header size
+	ADDL2	R0,R3			; add length of forepart
+60$:	MOVL	R3,FAB$L_ALQ(R10)	; size of allocation in blocks
+70$:	JSB	IF$GNA			; get next arg (DEQ)
+	BCS	80$			; missing
+	MOVL	(R0),R3			; default extension in words
+	JSB	IF$CWB			; to blocks/bytes
+	MOVW	R3,FAB$W_DEQ(R10)	; store in FAB (limited to 65535)
+80$:	JSB	IF$GNA			; 'function' string
+	BCS	GOTALL			; missing
+	MOVQ	(R0),DESC		; save descriptor
+	BISL2	#FLOP_M_FNC,R5		; remember
+
+; here with all args - lets see what we have
+; must test if readonly (implied old).
+GOTALL:	TSTL	FAB$L_ALQ(R10)		; allocation of zero blocks ?
+	BEQL	20$			; yes - so force readonly
+	BLBC	R5,OLDIFF		; its IFFOPI
+;
+; check for explicit version number using $FILESCAN
+	$FILESCAN_S	SRCSTR=@8(AP),VALUELST=FSCNTRM,FLDFLAGS=DELTA
+	BLBCW	R0,OPENERR		; scan error (should not happen)
+	BBS	#FSCN$V_VERSION,DELTA,OLDIFF ; explicit version
+	BRW	NEWIFF			; create new file
+
+20$:	BICL2	#SEC$M_WRT,I.FLG(R9)	; clear section write enable bit
+	BICB2	#FAB$M_PUT,FAB$B_FAC(R10) ; clear write enable bit in FAB
+	BISW2	#IFC_M_RO,I.STS(R9)	; and mark as readonly internally
+; here to open an existing IFF file
+OLDIFF:	BICL2	#SEC$M_DZRO,I.FLG(R9)	; clear section demand zero flag
+	BLBC	R5,10$			; its IFFOPI
+	JSB	IF$GNA			; get next arg (user routine)
+	BCS	10$			; missing
+	BISL2	#FLOP_M_USR,R5		; remember had user routine
+	TSTL	(R0)			; explicit zero?
+	BEQL	10$			; yes, so don't call
+	PUSHL	R10			; FAB address
+	CALLS	#1,(R0)			; call routine, FAB as argument
+	BLBCW	R0,USRERR		; failed
+10$:	$OPEN	FAB=R10			; open the file
+	BLBC	R0,OPENERR		; failed
+	BLBS	IFFLG,15$		; want mapped file
+
+; connect and read forepart for non-mapped file
+	MOVAL	I.RAB(R9),R2		; address of record access block
+	BICL2	#RAB$M_ASY,RAB$L_ROP(R2); clear asynchronous bit
+	$CONNECT RAB=R2			; connect FAB to record access block
+	BLBCW	R0,CONNERR		; failed
+; now read the forepart
+	MOVW	#I.LGFO,RAB$W_USZ(R2)	; length of forepart in bytes
+	MOVAL	I.FORE(R9),RAB$L_UBF(R2); address of forepart (in core)
+	MOVL	#1,RAB$L_BKT(R2)	; forepart is block 1
+	$READ	RAB=R2
+	BISL2	#RAB$M_ASY,RAB$L_ROP(R2); set asynchronous bit again
+	CLRL	RAB$L_RBF(R2)		; mark idle
+	BLBC	R0,READERR		; read failed
+	BRW	CHKIFF			; check it is an IFF file
+
+; map and read forepart for mapped file
+15$:	BSBW	IF$MAP			; map it
+	BLBC	R0,CONNERR		; failed
+; now read the forepart
+	PUSHL	R5
+	MOVC3	#I.LGFO,@I.ADR(R9),I.FORE(R9)
+	POPL	R5
+	BRW	CHKIFF			; check it is an IFF file
+
+; error returns
+
+OPENERR:MOVL	#^A'OPEN',IERCD		; open error
+	BRB	ERRXT
+
+USRERR:	MOVL	#^A'USER',IERCD		; open error
+	BRB	ERRXT
+
+CONNERR:MOVL	#^A'CONN',IERCD		; connect error
+	BRB	ERRXT
+
+READERR:MOVL	#^A'READ',IERCD		; read error
+
+; general error moan, attempt to close, and return
+ERRXT:	MOVL	R0,IERNM		; VMS error code
+	JSB	IF$ERR			; moan
+	BBS	#IFC_V_MAP,I.STS(R9),10$; mapped file
+
+	BICL2	#FAB$M_TEF,FAB$L_FOP(R10) ; don't truncate
+	$CLOSE	FAB=R10			; ignore any errors
+	BISL2	#FAB$M_TEF,FAB$L_FOP(R10) ; reset the FAB
+	BRB	20$
+
+10$:	$DELTVA_S	INADR=I.ADR(R9)
+	$DASSGN_S	CHAN=FAB$L_STV(R10)
+	
+20$:	BSBW	IF$RLC			; release control block
+	CLRL	I.STS(R9)		; clear status and LUN
+	BRW	EXIT			; and return
+
+HISTERR:MOVL	#^A'HIST',IERCD		; history fouled up
+	BRB	ERRXT
+
+WRITERR:MOVL	#^A'WRIT',IERCD		; write error
+	BRB	ERRXT
+
+NIFERR:	MOVL	#^A'NIFF',IERCD		; "not an IFF file" error
+INTERR:	MOVL	#1,R0
+	BRB	ERRXT
+
+MENDERR:MOVL	#^A'MEND',IERCD		; needs mending
+	BRB	INTERR
+
+; check IFF/JFF here
+CHKIFF:	CMPW	I.FORE(R9),IFF		; is it an IFF file ?
+	BEQL	10$			; yes - ok
+	CMPW	I.FORE(R9),JFF		; if not then maybe JFF ?
+	BNEQ	NIFERR			; no - so give up now
+10$:	CMPW	I.HIS(R9),HIS		; history in forepart?
+	BNEQ	20$			; no - so don't check
+	BBSC	#HIS_V_CL,I.HFLG(R9),SELIT ; closed OK last time
+	BBC	#FLOP_V_USR,R5,MENDERR	; not closed, no user routine
+	BRB	SELIT
+20$:	MOVAL	I.HIS(R9),R10		; aim at history stuff
+	BSBW	CLRHIS			; join IF$GTC to clear it
+
+; set up ready for use
+SELIT:	BSBW	IF$START		; get start info
+	BLBC	R0,HISTERR		; failed
+	BSBW	IF$WRF			; write forepart with history
+	BLBC	R0,WRITERR		; failed
+	MOVZBL	I.LUN(R9),R1		; unit number
+	BSBW	IF$SEL			; select it
+	BSBW	IF$UPH			; update HI entry
+	CALLS	#0,G^IFFRWD		; close the heffalump trap
+	MOVL	FAB$L_ALQ(R10),R0	; return allocation
+EXIT:	RET				; and return
+
+CREAERR:MOVL	#^A'CREA',IERCD		; create error
+	BRW	ERRXT
+
+; here to create new IFF file
+NEWIFF:	$CREATE	FAB=R10
+	BLBC	R0,CREAERR		; create failed
+	BLBS	IFFLG,10$		; want mapped file
+
+; connect for non-mapped file
+	BICL2	#RAB$M_ASY,I.RAB+RAB$L_ROP(R9)	; clear asynchronous bit
+	$CONNECT RAB=I.RAB(R9)		; connect FAB to record access block
+	BLBCW	R0,CONNERR		; failed
+	BRB	20$
+
+; map mapped file
+10$:	BSBW	IF$MAP			; map it
+	BLBCW	R0,CONNERR		; failed
+	BICL2	#SEC$M_DZRO,I.FLG(R9)	; not demand zero for extend
+
+20$:	BISL2	#FLOP_M_CRT,R5		; mark as create
+
+; set output revision level for the new file
+	BBC	#FLG_V_ORVG,LOCFLG,30$	; no IFFORV call
+	EXTZV	#FLG_V_ORV,#FLG_S_ORV,LOCFLG,R0	; get level from IFFORV
+	BRB	40$
+
+; try looking at LSL$IFF_OUTPUT_REVISION
+30$:	$TRNLNM_G	TRNARG
+	CMPL	R0,#SS$_NOLOGNAM	; no logical name - assume 0
+	BEQL	35$
+	CMPL	R0,#SS$_BUFFEROVF	; string too long - error
+	BEQL	32$
+	BLBC	R0,CREAERR		; other error
+	SUBB3	#^A'0',IMAGBUF,R0	; convert ASCII to number
+	BEQL	40$			; level 0
+	CMPB	R0,#1
+	BEQL	40$			; level 1	
+32$:	MOVL	#SS$_IVLOGNAM,R0	; error
+	BRW	CREAERR
+
+35$:	CLRL	R0
+40$:	INSV	R0,#HIS_V_ORV,#HIS_S_ORV,I.HFLG(R9)
+	BRW	SELIT			; select it for use
+
+; ************************** IF$WRF **********************************
+; routine to write the forepart of an IFF file
+; assumes IFCB address in R9, FAB address in R10
+IF$WRF:	BBS	#IFC_V_RO,I.STS(R9),20$	; read only
+	MOVW	FAB$W_DEQ(R10),I.FEXT(R9); keep default extension
+	BBS	#IFC_V_MAP,I.STS(R9),10$; mapped file
+
+; write forepart of non-mapped file
+	MOVAL	I.RAB(R9),R2		; address of RAB
+	MOVW	#I.LGFO,RAB$W_RSZ(R2)	; length of forepart in bytes
+	MOVAL	I.FORE(R9),RAB$L_RBF(R2); start of forepart
+	MOVL	#1,RAB$L_BKT(R2)	; starting at block 1
+	BICL2	#RAB$M_ASY,RAB$L_ROP(R2); clear asynchronous bit
+	$WRITE	RAB=R2
+	BISL2	#RAB$M_ASY,RAB$L_ROP(R2); set asynchronous state again
+	CLRL	RAB$L_RBF(R2)		; mark idle
+	RSB
+
+; write forepart of mapped file
+10$:	PUSHL	R5
+	MOVC3	#I.LGFO,I.FORE(R9),@I.ADR(R9)
+	POPL	R5
+20$:	MOVL	#1,R0			; success
+	RSB
+
+; ************************** IF$START **********************************
+; routine to get starting info for history
+IF$START:
+; clear out the old record up to function string
+	PUSHL	R5
+	MOVC5	#0,IF$START,#^A/ /,#I.HFNC-I.HDAT,I.HDAT(R9)
+	POPL	R5
+
+; get time now
+	$GETTIM_S	TIMADR=I.ELAO(R9)
+	BLBCW	R0,99$
+
+; get user, image name, and CPU now
+	MOVAB	I.HUSR(R9),USRADR		; for username
+	MOVAL	I.CPUO(R9),CPUADR		; for CPU now
+	$GETJPIW_S	ITMLST=JPILST,IOSB=IO_STATUS
+	BLBCW	R0,99$
+	MOVZWL	IO_STATUS,R0
+	BLBCW	R0,99$
+
+; extract name part of image filename
+	$FILESCAN_S	SRCSTR=IMAGDESC,VALUELST=FSCNLST
+	BLBCW	R0,99$
+
+; put 'function' and image name into record
+	PUSHL	R5				; save R5 through MOVCs
+	BBS	#FLOP_V_FNC,R5,30$		; 'function' supplied
+	BLBC	R5,40$				; IFFOPI (leave function)
+	BBC	#IFC_V_RO,I.STS(R9),10$		; not readonly
+	MOVQ	RDDESC,DESC
+	BRB	30$
+10$:	BBC	#FLOP_V_CRT,R5,20$		; not create
+	MOVQ	CRDESC,DESC
+	BRB	30$
+20$:	MOVQ	UPDESC,DESC
+30$:	MOVC5	DESCLEN,@DESCADR,#^A/ /,#HFNCLEN,I.HFNC(R9)
+40$:	MOVC5	NAMDESC,@NAMDESC+4,#^A/ /,#HIMGLEN,I.HIMG(R9)
+
+; put time now into record
+; previous times are only preserved by an IFFOPI with no 'function' arg
+	POPL	R5				; restore R5
+	BLBS	R5,50$				; it's IFFOPN
+	BBS	#FLOP_V_FNC,R5,50$		; 'function' given
+	BISW2	#IFC_M_HOV,I.STS(R9)		; 'history overwrite'
+	BRB	60$
+50$:	MOVQ	I.ELAO(R9),I.ELAI(R9)		; time now is 'initial'
+	CLRL	I.CPUT(R9)			; total CPU
+	CLRQ	I.ELAT(R9)			; total elapsed
+; clear elapsed and CPU in record
+	PUSHL	R5
+	MOVC5	#0,IF$START,#^A/ /,#I.HSTS-I.HELA+1,I.HELA-1(R9)
+	POPL	R5
+60$:	MOVW	#HDATLEN,DESCLEN
+	MOVAB	I.HDAT(R9),DESCADR
+	$ASCTIM_S	TIMBUF=DESC,TIMADR=I.ELAI(R9)
+	BLBC	R0,99$
+
+; set status field to zero
+	CLRL	R1
+	BSBB	IF$STS
+99$:	RSB
+
+; ************************** IF$STS **********************************
+; routine to set status field in history record to contents of R1
+IF$STS:	MOVW	#HSTSLEN,DESC
+	MOVAB	I.HSTS(R9),DESCADR
+	$FAO_S	CTRSTR=FAOSTR,OUTBUF=DESC,P1=R1
+	RSB
+
+; ************************** IF$FINISH **********************************
+; routine to get finish info for history
+IF$FINISH:
+; set status field (to value in R1)
+	BSBB	IF$STS
+
+; get CPU now
+	MOVAL	DELTA,CPUADR
+	$GETJPIW_S	ITMLST=CPULST,IOSB=IO_STATUS
+	BLBCW	R0,99$
+	MOVZWL	IO_STATUS,R0
+	BLBCW	R0,99$
+
+; calculate CPU used
+	SUBL3	I.CPUO(R9),DELTA,R0		; 0.01 secs this run
+	ADDL2	R0,I.CPUT(R9)			; add to previous
+	EMUL	I.CPUT(R9),#-100000,#0,DELTA	; delta time
+	MOVW	#HCPULEN,DESCLEN
+	MOVAB	I.HCPU(R9),DESCADR
+	$ASCTIM_S	TIMBUF=DESC,TIMADR=DELTA,CVTFLG=#1
+	BLBC	R0,99$
+
+; get time now
+	$GETTIM_S	TIMADR=DELTA
+	BLBC	R0,99$
+
+; calculate elapsed used
+	SUBL2	I.ELAO(R9),DELTA		; positive 'ticks'
+	SBWC	I.ELAO+4(R9),DELTA+4
+	SUBL2	DELTA,I.ELAT(R9)		; subtract from previous
+	SBWC	DELTA+4,I.ELAT+4(R9)		; delta time
+	MOVW	#HELALEN,DESCLEN
+	MOVAB	I.HELA(R9),DESCADR
+	$ASCTIM_S	TIMBUF=DESC,TIMADR=I.ELAT(R9),CVTFLG=#1
+99$:	RSB
+
+; ************************** IFFUPH **********************************
+; update HIstory entry in file from forepart
+; Fortran entry (called from IFFHI or EIHCPY of an HI)
+; Argument absent, then IFFHI - want single new record
+; Argument (LUN) present, then EIHCPY. Update history on that LUN
+; overwriting topmost record if source writeable and has no recorded
+; elapsed time, then reselect original LUN
+
+	.ENTRY	IFFUPH,^M<R2,R9,R10,R11>
+	JSB	IF$INI
+	BCS	99$
+	MOVZBL	I.LUN(R9),DELTA		; save old LUN (DELTA workspace)
+	JSB	IF$GNA			; get next arg
+	BCS	10$			; missing
+	PUSHL	#0			; assume don't overwrite
+	BBS	#IFC_V_RO,I.STS(R9),5$	; read only, so don't
+	MOVQ	I.ELAT(R9),I.ELAT(R9)	; i.e. TSTQ (doesn't exist)
+	BNEQ	5$			; a time recorded, so don't
+	DECL	(SP)			; overwrite
+5$:	MOVZBL	(R0),R1			; unit number (LUN)
+	BSBW	IF$SEL			; select it
+	POPL	R0			; overwrite or not?
+	BRB	20$
+10$:	CLRL	R0			; don't overwrite HI
+20$:	BISB2	#HIS_M_HI,I.HFLG(R9)	; HI now present
+	BSBB	IF$UPH2			; common up to macro
+	CMPB	I.LUN(R9),DELTA		; still same LUN
+	BEQL	99$			; yes
+	MOVL	DELTA,R1		; old LUN
+	BSBW	IF$SEL			; re-select
+99$:	RET
+
+IF$UPH:	BBS	#IFC_V_RO,I.STS(R9),HRSB	; read only so can't
+	BBC	#HIS_V_HI,I.HFLG(R9),HRSB	; no HI entry to write
+	EXTV	#IFC_V_HOV,#1,I.STS(R9),R0	; overwrite bit
+IF$UPH2:PUSHL	R0
+	PUSHAL	(SP)				; is second arg
+	PUSHAB	I.HDAT(R9)			; history record
+	CALLS	#2,G^IFFWHI			; call FORTRAN to do it
+	TSTL	(SP)+				; ditch argument
+	BISW2	#IFC_M_HOV,I.STS(R9)		; overwrite at close
+HRSB:	RSB
+	
+	
+; ************************** IFFSEL **********************************
+
+; IFFSEL(LUN) - select one of several IFF files currently open
+
+	.ENTRY	IFFSEL,^M<R2,R9,R10,R11>	; FORTRAN entry
+	JSB	IF$1ST			; basic init
+	CLRL	R1			; assume LUN=0
+	JSB	IF$GNA			; get next arg
+	BCS	10$			; missing
+	MOVZBL	(R0),R1			; unit number (LUN)
+10$:	BSBB	IF$SEL			; common up with macro entry
+	RET
+
+; MACRO entry - LUN in R1
+
+IF$SEL::MOVAL	IFCHD,R9		; IFCB chain head
+10$:	MOVL	(R9),R9			; next IFCB
+	BEQL	20$			; none
+	TSTW	I.STS(R9)		; in use ?
+	BEQL	10$			; no
+	CMPB	I.LUN(R9),R1		; right one ?
+	BNEQ	10$			; no - keep looking
+	MOVL	R9,IFFPT		; record selection
+	MOVAL	I.FAB(R9),R10		; address of FAB
+	MOVW	#.TRUE.,WATEOF		; write at end of file
+	JMP	IF$UPC			; exit, updating public positions
+
+; error - no IFF on this LUN
+20$:	MOVL	#^A'NOIF',IERCD
+	MOVL	#1,IERNM		; no VMS code
+	JSB	IF$ERR			; moan
+	RSB
+
+; ************************** IFFCLO **********************************
+
+; IFFCLO(LUN,[STATUS],[HISTORY]) closes given IFF file
+
+	.ENTRY	IFFCLO,^M<R2,R3,R4,R5,R9,R10,R11>	; FORTRAN entry
+	JSB	IF$1ST			; basic init
+	CLRL	R1			; assume LUN=0
+	JSB	IF$GNA			; next (only) arg is LUN
+	BCS	10$			; missing
+	MOVZBL	(R0),R1			; unit number (LUN)
+10$:	CLRL	R5			; mark as IFFCLO
+	BSBB	IF$CLO			; common up to MACRO
+	RET
+
+; MACRO entry
+
+IF$CLO:	BSBW	IF$SEL			; ensure its there
+	BCC	IF$CL2			; OK
+	RSB				; do nothing if not
+
+IF$CL2:	MOVL	#1,R1			; default status 1 (success)
+	JSB	IF$GNA
+	BCS	5$
+	MOVL	(R0),R1			; use supplied status
+5$:	BSBW	IF$FINISH		; get finishing history
+	BSBW	IF$UPH			; update history entry
+	BSBW	IF$RLC			; release control block
+	BISB2	#HIS_M_CL,I.HFLG(R9)	; set 'closed OK' flag
+	BSBW	IF$WRF			; rewrite the forepart
+	BLBCW	R0,WRITERR		; forepart write failed
+
+	BBS	#IFC_V_MAP,I.STS(R9),15$; mapped file
+
+; close down non-mapped file
+	BBS	#IFC_V_RO,I.STS(R9),10$	; read only
+	ASSUME	FLCL_V_DEL,EQ,0
+	BLBC	R5,10$			; not deleting
+	BISL2	#FAB$M_DLT,FAB$L_FOP(R10); set DELETE bit in options
+10$:	$CLOSE	FAB=R10			; actually close the file
+	BICL2	#FAB$M_DLT,FAB$L_FOP(R10); reset for next user
+	BLBC	R0,CLOSERR		; failed
+	BRB	22$
+
+; close down mapped file
+15$:	BSBW	IF$UNMAP		; unmap it
+	BLBC	R0,CLOSERR		; failed
+	BBS	#IFC_V_RO,I.STS(R9),20$	; skip if was readonly
+	BSBW	IF$TRUNC		; truncate
+	BLBC	R0,CLOSERR
+20$:	$DASSGN_S	CHAN=FAB$L_STV(R10)
+	BBS	#IFC_V_RO,I.STS(R9),22$	; read only
+	ASSUME	FLCL_V_DEL,EQ,0
+	BLBC	R5,22$			; not deleting
+	PUSHL	I.NAM+NAM$L_RSA(R9)		; name address
+	MOVZBL	I.NAM+NAM$B_RSL(R9),-(SP)	; length
+	PUSHL	SP			; old name descriptor
+	CALLS	#1,G^LIB$DELETE_FILE
+	ADDL	#8,SP
+	BLBC	R0,CLOSERR
+
+22$:	JSB	IF$GNA			; history string
+	BCS	23$			; missing
+	MOVC3	#I.LGHIS,I.HDAT(R9),(R0); return history to user
+;
+; check whether to produce an 'attributes lost' whinge
+23$:	BBC	#IFC_V_LOST,I.STS(R9),24$	; no, all OK
+	MOVL	#^A'LOST',IERCD		; attribute lost message
+	MOVL	#1,IERNM		; no VMS code
+	JSB	IF$ERR
+
+24$:	CLRL	I.STS(R9)		; clear status and LUN
+	RSB
+
+CLOSERR:MOVL	#^A'CLOS',IERCD		; error in close
+	BRW	ERRXT			; go moan
+
+; ************************** IFFCDL **********************************
+
+; IFFCDL(LUN,[STATUS],[HISTORY]) closes given IFF file and deletes it
+
+	.ENTRY	IFFCDL,^M<R2,R3,R4,R5,R9,R10,R11>	; FORTRAN entry
+	JSB	IF$1ST			; basic init
+	CLRL	R1			; assume LUN=0
+	JSB	IF$GNA			; next (only) arg is LUN
+	BCS	10$			; missing
+	MOVZBL	(R0),R1			; unit number (LUN)
+10$:	MOVL	#FLCL_M_DEL,R5		; mark as IFFCDL
+	BSBW	IF$CLO			; common up to MACRO
+	RET
+
+; ************************** IFFCRN **********************************
+
+; IFFCRN(LUN,FILENAME,[STATUS],[HISTORY])
+; closes given IFF file and renames it to FILENAME
+
+	.ENTRY	IFFCRN,^M<R2,R3,R4,R5,R9,R10,R11>; FORTRAN entry
+	CLRL	R5			; not deleting
+	BSBB	IF$CRN			; common up to MACRO
+	RET
+
+RARGERR:MOVL	#^A/ARGS/,IERCD
+	MOVL	#1,R0
+REXT:	MOVL	R0,IERNM
+	JSB	IF$ERR
+RRSB:	RSB
+
+; MACRO entry
+
+IF$CRN:	JSB	IF$1ST			; basic init
+	JSB	IF$GNA			; first arg is LUN
+	BCS	RARGERR			; missing
+	MOVZBL	(R0),R1			; unit number (LUN)
+	BSBW	IF$SEL			; ensure its there
+	BCS	RRSB			; just return if not
+	JSB	IF$GNA			; get next arg (filename)
+	BCS	RARGERR			; missing
+	BBC	#IFC_V_RO,I.STS(R9),10$	; writeable
+	BRW	IF$CL2			; just close if read only
+
+10$:	PUSHL	R0			; save filename argument
+	BSBW	IF$CL2			; normal close
+	POPL	R0			; recover filename argument
+
+; create descriptor for old filename on stack
+	PUSHL	I.NAM+NAM$L_RSA(R9)		; name address
+	MOVZBL	I.NAM+NAM$B_RSL(R9),-(SP)	; length
+
+	PUSHL	R0			; new name descriptor
+	PUSHAL	4(SP)			; old name descriptor
+	CALLS	#2,G^LIB$RENAME_FILE
+	ADDL2	#8,SP
+	BLBC	R0,RENAERR
+	RSB
+
+RENAERR:MOVL	#^A/RENA/,IERCD
+	BRW	REXT
+
+; ************************** IFFINQ **********************************
+
+; IFFINQ inquires about the currently selected IFF
+; eg CALL IFFINQ(FILENAME,FLEN,CREATED,REVISED,NREV)
+
+	.ENTRY	IFFINQ,^M<R2,R3,R4,R5,R6,R9,R10,R11> ; FORTRAN entry
+	JSB	IF$INI			; basic init
+	JSB	IF$GNA			; first arg is filename string
+	BCS	10$			; missing
+	MOVL	R0,R2			; save output string address
+	MOVL	I.NAM+NAM$L_RSA(R9),R1	; input string address
+	MOVZBL	I.NAM+NAM$B_RSL(R9),R0	; input length
+	JSB	G^OTS$SCOPY_R_DX6	; copy to output string
+10$:	JSB	IF$GNA			; next arg is string length
+	BCS	20$			; missing
+	MOVZBW	I.NAM+NAM$B_RSL(R9),(R0); return it if required
+20$:	JSB	IF$GNA			; next arg is creation date
+	BCS	30$			; missing
+	MOVQ	I.XAB+XAB$Q_CDT(R9),(R0); return it to caller
+30$:	JSB	IF$GNA			; next arg is revision date
+	BCS	40$			; missing
+	MOVQ	I.XAB+XAB$Q_RDT(R9),(R0); return it to caller
+40$:	JSB	IF$GNA			; last arg is revision no
+	BCS	90$			; missing
+	MOVW	I.XAB+XAB$W_RVN(R9),(R0); return it to caller
+90$:	RET
+
+
+; ************************** IFFID **********************************
+
+; IFFID obtains the device and file identification of
+; the currently selected IFF
+; eg CALL IFFID(FILEID)
+; FILEID is an array of 28 bytes (preferably longword aligned)
+
+	.ENTRY	IFFID,^M<R9,R10,R11> ; FORTRAN entry
+	JSB	IF$INI			; basic init
+	JSB	IF$GNA			; first arg is FILEID array
+	BCS	20$			; missing
+	MOVAL	I.NAM+NAM$T_DVI(R9),R1	; DVI address in NAM
+	MOVL	(R1)+,(R0)+
+	MOVL	(R1)+,(R0)+
+	MOVL	(R1)+,(R0)+
+	MOVL	(R1)+,(R0)+
+	MOVAL	I.NAM+NAM$W_FID(R9),R1	; FID address in NAM
+	MOVW	(R1)+,(R0)+
+	MOVW	(R1)+,(R0)+
+	MOVW	(R1)+,(R0)+
+	MOVAL	I.NAM+NAM$W_DID(R9),R1	; DID address in NAM
+	MOVW	(R1)+,(R0)+
+	MOVW	(R1)+,(R0)+
+	MOVW	(R1)+,(R0)+
+20$:	RET
+
+
+; ************************** IFFLUN **********************************
+
+; IFFLUN obtains the currently selected LUN
+; eg CALL IFFLUN(LUN)
+
+	.ENTRY	IFFLUN,^M<R9,R10,R11>	; FORTRAN entry
+	JSB	IF$INI			; basic init
+	BCS	20$
+	JSB	IF$GNA			; first arg is LUN
+	BCS	20$			; missing
+	MOVB	I.LUN(R9),(R0)		; return LUN
+20$:	RET
+
+
+; ************************** IFFRLA ************************************
+
+; Set or cancel read look-ahead on currently selected IFF
+; eg CALL IFFRLA(.TRUE.)   set look-ahead
+
+	.ENTRY	IFFRLA,^M<R9,R10,R11>
+	JSB	IF$INI
+	BCS	10$			; no current selection
+	JSB	IF$GNA
+	BCS	10$			; missing - do nothing
+	INSV	(R0),#IFC_V_RLA,#1,I.STS(R9)	; transfer low bit
+10$:	RET
+
+
+; ************************** IFFMAP ************************************
+
+; Set or cancel mapped file usage for files yet to be opened
+; eg CALL IFFMAP(.TRUE.)   set mapped files
+
+	.ENTRY	IFFMAP,^M<R11>
+	JSB	IF$1ST			; init arg handling
+	JSB	IF$GNA			; get first arg
+	BCS	10$			; missing
+	INSV	(R0),#FLG_V_MAP,#1,IFFLG; transfer low bit
+10$:	RET				; all done
+
+
+; ************************** IFFIRV ************************************
+
+; Set input revision level on currently selected file
+; eg CALL IFFIRV(LEVEL)	Level must be -1,0,1
+
+	.ENTRY	IFFIRV,^M<R2,R9,R10,R11>
+	JSB	IF$INI
+	BCS	30$			; no current selection
+	JSB	IF$GNA
+	BCS	LARGERR			; missing
+	MOVL	(R0),R0			; actual value
+	CMPL	R0,#-1
+	BLSS	LARGERR
+	BGTR	10$
+	BISW2	#IFC_M_IRVT,I.STS(R9)	; level -1 (transparent)
+	BRB	20$
+10$:	CMPL	R0,#1
+	BGTR	LARGERR
+	BICW2	#IFC_M_IRVT,I.STS(R9)	; (not transparent)
+	INSV	R0,#IFC_V_IRV,#IFC_S_IRV,I.STS(R9)	; level
+20$:	JSB	IF$UPC			; update IFFHAN
+30$:	RET
+
+LARGERR:MOVL	#^A/ARGS/,IERCD
+	MOVL	#1,R0
+	MOVL	R0,IERNM
+	JSB	IF$ERR
+	RET
+
+; ************************** IFFORV ************************************
+
+; Set output revision level for next file to be opened
+; eg CALL IFFORV(LEVEL)	Level must be 0,1
+
+	.ENTRY	IFFORV,^M<R11>
+	JSB	IF$1ST
+	JSB	IF$GNA
+	BCS	LARGERR			; missing
+	MOVL	(R0),R0			; actual value
+	BLSS	LARGERR
+	CMPL	R0,#1
+	BGTR	LARGERR
+	BISL2	#FLG_M_ORVG,IFFLG		; set 'value given' flag
+	INSV	R0,#FLG_V_ORV,#FLG_S_ORV,IFFLG	; and level itself
+	RET
+
+
+; ************************** IFFLSH **********************************
+
+; IFFLSH flushes buffers to ensure all is written back up to date.
+
+	.ENTRY	IFFLSH,^M<R2,R3,R4,R9,R10,R11>	; FORTRAN entry
+	JSB	IF$INI			; set up selected file
+	BCS	99$			; no current selection
+	BBC	#IFC_V_MAP,I.STS(R9),5$	; non-mapped file
+
+; flush mapped file
+	$UPDSECW_S	INADR=I.ADR(R9)
+	BRB	99$
+
+; flush non-mapped file
+5$:	$CLREF_S	EFN=IFFEF	; for wait
+	MOVAL	IFBHD,R4		; buffer chain head
+10$:	MOVL	(R4),R4			; next buffer
+	BEQL	99$			; no more
+	CMPL	R9,B.IFCB(R4)		; is it ours ?
+	BNEQ	10$			; no - keep looking
+12$:	CLRL	B.1ST(R4)		; clear it
+	BLBS	B.WTR(R4),13$
+	BLBS	B.RDR(R4),13$
+	BLBS	B.WTG(R4),13$
+	BLBS	B.RDG(R4),13$
+	BRB	10$			; doesnt need flushing
+13$:	JSB	IF$TRF			; flush it
+	$WAITFR_S	EFN=IFFEF	; and wait for completion
+	$CLREF_S	EFN=IFFEF	; for wait
+	BRB	12$			; back to check again
+
+99$:	RET
+
+
+; ************************** IFFLOST ************************************
+
+; Set 'attributes lost' bit for currently selected file.
+; This routine is used internally when converting CB to ST/ZS
+
+	.ENTRY	IFFLOST,^M<R9,R10,R11>
+	JSB	IF$INI
+	BCS	10$			; no current selection
+	BISW2	#IFC_M_LOST,I.STS(R9)	; set 'lost' bit
+10$:	RET
+
+; ************************** IFCB bits *********************************
+; IF$GTC - get an IFCB and init it for a new file.
+; sets up R9,R10 pointing at IFCB and IFAB
+
+IF$GTC:	MOVL	IFCHD,R9		; IFCB chain head
+10$:	BEQL	20$			; no more - need new one
+	TSTW	I.STS(R9)		; in use ?
+	BEQL	30$			; this one is free
+	ASSUMEQ	I.FCBL,0		; check no one has changed things
+	MOVL	(R9),R9			; try next one
+	BRB	10$
+
+; obtain new IFCB - return address in R9
+20$:	PUSHR	#^M<R0,R5>
+	BSBW	GETIFCB
+	POPR	#^M<R0,R5>
+	BCC	30$			; worked OK
+	RSB				; return with carry set
+
+; found a free IFCB
+30$:	BISW2	#IFC_M_BSY,I.STS(R9)	; mark as in use
+	MNEGL	#1,I.ADR(R9)		; invalidate mapped file address
+	MNEGL	#1,I.ADR+4(R9)
+	MOVAL	I.FORE(R9),R10		; address of forepart
+; init forepart
+	MOVL	#1,R1			; useful constant
+	MOVW	IFF,(R10)+		; IFF nameplate
+	CLRW	(R10)+			; default extension
+	MOVW	R1,(R10)+		; internal sequence no
+	MOVL	R1,(R10)+		; POSE
+	MOVL	R1,(R10)+		; POSR
+	MOVL	R1,(R10)+		; POSW
+	MOVAL	I.HIS(R9),R1		; end of stuff to clear
+40$:	CLRB	(R10)
+	AOBLSS	R1,R10,40$		; clear
+CLRHIS:	MOVW	HIS,(R10)+		; HIStory nameplate
+	MOVAL	I.HDAT(R9),R1		; end of stuff to clear
+50$:	CLRB	(R10)
+	AOBLSS	R1,R10,50$		; clear
+	MOVAL	I.FAB(R9),R10		; R10 points to FAB
+	CLC				; success exit
+	RSB
+
+; get memory for IFCB and buffers, and initialise it
+
+; default filename string
+DEFNAM:	.ASCII	/LSL$IF:IFF.IFF/
+DEFLEN=.-DEFNAM
+
+GETIFCB:MOVL	#I.LGTH,DELTA	; put length of IFCB in workspace
+	PUSHAL	-(SP)
+	PUSHAL	DELTA
+	CALLS	#2,G^LIB$GET_VM
+	MOVL	(SP)+,R9
+	BLBS	R0,10$
+	SEC				; failed - so report it
+	RSB
+10$:	MOVC5	#0,(R9),#0,#I.LGTH,(R9)	; clear it
+	MOVL	IFCHD,(R9)		; chain at start of list
+	MOVL	R9,IFCHD	
+
+	MOVB	#FAB$C_BID,I.FAB+FAB$B_BID(R9)	; initialise FAB
+	MOVB	#FAB$C_BLN,I.FAB+FAB$B_BLN(R9)
+	$FAB_STORE -
+		FAB=I.FAB(R9),-		; FAB itself
+		DNA=DEFNAM,-		; default filename
+		DNS=#DEFLEN,-		; length
+		ALQ=#100,-		; initial allocation
+		DEQ=#50,-		; default extension
+		FAC=<BIO,GET,PUT>,-	; block I/O Read/Write
+		FOP=<CBT,TEF>,-		; contig best try
+-					; trunc at EOF
+		NAM=I.NAM(R9),-		; address of NAM block
+		XAB=I.XAB(R9),-		; address of XAB block
+		RFM=FIX,-		; fixed length records
+		MRS=#512		; 512 byte records
+
+	MOVB	#NAM$C_BID,I.NAM+NAM$B_BID(R9)	; initialise NAM
+	MOVB	#NAM$C_BLN,I.NAM+NAM$B_BLN(R9)
+	$NAM_STORE -
+		NAM=I.NAM(R9),-		; NAM itself
+		RSA=I.RSA(R9),-		; address of resultant string buffer
+		RSS=#NAM$C_MAXRSS	; size of said buffer
+
+	MOVB	#XAB$C_DAT,I.XAB+XAB$B_COD(R9)	; initialise XAB
+	MOVB	#XAB$C_DATLEN,I.XAB+XAB$B_BLN(R9)
+
+	MOVB	#RAB$C_BID,I.RAB+RAB$B_BID(R9)	; initialise RAB
+	MOVB	#RAB$C_BLN,I.RAB+RAB$B_BLN(R9)
+	$RAB_STORE -
+		RAB=I.RAB(R9),-		; RAB itself
+		FAB=I.FAB(R9),-		; address of FAB
+		ROP=<BIO,ASY>,-		; asynchronous block I/O
+		RSZ=#512,-		; block size
+		USZ=#512		; buffer size
+
+.IIF NDF BUF_INITIAL,	BUF_INITIAL = 4
+.IIF LT BUF_INITIAL,	.ERROR  ; NOT ENOUGH INITIAL BUFFERS
+.IIF NDF BUF_PER_FILE,	BUF_PER_FILE = 2
+.IIF LE BUF_PER_FILE,	.ERROR  ; NOT ENOUGH BUFFERS PER FILE
+
+; get buffers and add to chain
+	MOVL	#BUF_PER_FILE,R2	; buffers per file
+	TSTL	IFBHD			; if no buffers yet...
+	BNEQ	20$
+	ADDL2	#BUF_INITIAL,R2		; then get initial allocation
+
+20$:	MOVL	#B.LGTH,DELTA
+	PUSHAL	-(SP)
+	PUSHAL	DELTA
+	CALLS	#2,G^LIB$GET_VM
+	MOVL	(SP)+,R10
+	BLBS	R0,30$
+	SEC				; failed - so report it
+	RSB
+30$:	$SETAST_S	#0		; disable AST recognition
+	MOVL	IFBHD,(R10)		; chain head after buffer
+	CLRL	B.WTR(R10)		; mark buffer inactive
+	CLRL	B.RDR(R10)
+	CLRL	B.WTG(R10)
+	CLRL	B.RDG(R10)
+	CLRL	B.1ST(R10)
+	CLRL	B.IFCB(R10)		; and not owned by any file
+	MOVL	R10,IFBHD		; point head to buffer
+	$SETAST_S	#1		; allow ASTs again
+
+	SOBGTR	R2,20$			; for each buffer
+
+	CLC				; success
+	RSB
+
+
+; IF$RLC - release IFCB and buffer(s)
+IF$RLC:	BBS	#IFC_V_MAP,I.STS(R9),20$; mapped file
+
+	$CLREF_S	EFN=IFFEF	; for wait
+	MOVAL	IFBHD,R4		; buffer chain head
+10$:	MOVL	(R4),R4			; next buffer
+	BEQL	20$			; no more
+	CMPL	R9,B.IFCB(R4)		; is it ours ?
+	BNEQ	10$			; no - keep looking
+12$:	CLRL	B.1ST(R4)		; clear it
+	BLBS	B.WTR(R4),13$
+	BLBS	B.RDR(R4),13$
+	BLBS	B.WTG(R4),13$
+	BLBS	B.RDG(R4),13$
+	BRB	15$			; doesnt need flushing
+13$:	JSB	IF$TRF			; flush it
+	$WAITFR_S	EFN=IFFEF	; and wait for completion
+	$CLREF_S	EFN=IFFEF	; for wait
+	BRB	12$			; back to check again
+
+15$:	CLRL	B.IFCB(R4)		; give away
+	BRB	10$			; keep looking
+
+20$:	CMPL	IFFPT,LSTPT		; being used by fast reading
+	BNEQ	21$
+	CLRL	LSTPT			; yes, so zap it
+21$:	CLRL	IFFPT			; null selection
+	RSB
+
+
+; IF$MAP - map the file
+IF$MAP:	$CRMPSC_S	INADR=INADR,-
+			RETADR=I.ADR(R9),-
+			FLAGS=I.FLG(R9),-
+			CHAN=FAB$L_STV(R10),-
+			PAGCNT=FAB$L_ALQ(R10)
+	RSB
+
+; IF$UNMAP - unmap the file and read attributes
+IF$UNMAP:
+	PUSHR	#^M<R1,R2,R3,R4,R5>
+
+; clear out the FIB
+	MOVC5	#0,IF$UNMAP,#0,#FIB$K_LENGTH,FIB_BLOCK
+
+; Zap the fast reading mechanism memory of where it is, in case it points
+; somewhere in the address space of this file.
+; We could check whether it does, but for a mapped file, the pointer is
+; restored very efficiently in any case, so don't bother
+	CLRL	LSTPT			; zap pointer
+
+; get rid of existing address space
+	$DELTVA_S	INADR=I.ADR(R9)
+	MNEGL	#1,I.ADR(R9)		; invalidate address
+	MNEGL	#1,I.ADR+4(R9)
+	BLBC	R0,99$
+
+; move file id. to FIB
+	MOVAL	I.NAM+NAM$W_FID(R9),R1	; FID address in NAM
+	MOVW	(R1)+,FIB_BLOCK+FIB$W_FID
+	MOVW	(R1)+,FIB_BLOCK+FIB$W_FID+2
+	MOVW	(R1)+,FIB_BLOCK+FIB$W_FID+4
+
+; get existing attributes
+	$QIOW_S	CHAN=FAB$L_STV(R10),-
+		FUNC=#IO$_ACCESS,-
+		IOSB=IO_STATUS,-
+		P1=FIB_DESCR,-
+		P5=ATR_ADDRESS
+	BLBC	R0,99$
+	MOVZWL	IO_STATUS,R0
+99$:	POPR	#^M<R1,R2,R3,R4,R5>
+	RSB
+
+; IF$EXT - extend the file, either by the default extension, or by
+; enough to include VBN R3
+IF$EXT::
+
+; unmap file and read attributes
+	BSBW	IF$UNMAP
+	BLBCW	R0,99$
+
+; write file header immediately
+	MOVL	#FIB$M_WRITETHRU,FIB_BLOCK+FIB$L_ACCTL
+
+; amount to extend by
+	MOVZWL	FAB$W_DEQ(R10),R0		; default extend
+	ADDL2	R3,R0				; plus required block
+	DECL	R0				; start at zero
+	SUBL3	FAB$L_ALQ(R10),R0,FIB_BLOCK+FIB$L_EXSZ	; extend amount
+	BGTR	10$				; needs extend
+	CLRL	FIB_BLOCK+FIB$L_EXSZ		; doesn't
+	BRB	20$
+
+; extend, contiguous best try
+10$:	MOVW	#FIB$M_EXTEND!FIB$M_ALCONB,FIB_BLOCK+FIB$W_EXCTL
+
+; set new EOF block
+20$:	INCL	R0
+	MOVW	R0,RECATTR+FAT$W_EFBLKL
+	ASHL	#-16,R0,R0
+	MOVW	R0,RECATTR+FAT$W_EFBLKH
+
+	$QIOW_S	CHAN=FAB$L_STV(R10),-
+		FUNC=#IO$_MODIFY,-
+		IOSB=IO_STATUS,-
+		P1=FIB_DESCR,-
+		P5=ATR_ADDRESS
+	BLBC	R0,99$
+	MOVZWL	IO_STATUS,R0
+	BLBC	R0,99$
+
+; map the thing again
+	ADDL2	FIB_BLOCK+FIB$L_EXSZ,FAB$L_ALQ(R10)	; new size
+	BSBW	IF$MAP
+
+99$:	RSB
+
+; IF$TRUNC truncate the file to the block containing LPOSE
+
+IF$TRUNC:
+	PUSHR	#^M<R1,R2,R3,R4,R5>
+
+; clear out the FIB
+	MOVC5	#0,IF$TRUNC,#0,#FIB$K_LENGTH,FIB_BLOCK
+
+; move file id. to FIB
+	MOVAL	I.NAM+NAM$W_FID(R9),R1	; FID address in NAM
+	MOVW	(R1)+,FIB_BLOCK+FIB$W_FID
+	MOVW	(R1)+,FIB_BLOCK+FIB$W_FID+2
+	MOVW	(R1)+,FIB_BLOCK+FIB$W_FID+4
+
+; truncate
+	MOVW	#FIB$M_TRUNC,FIB_BLOCK+FIB$W_EXCTL
+
+; block to truncate to
+	MOVL	I.POSE(R9),R3			; end of file (words)
+	JSB	IF$CWB				; convert to block/byte
+	CVTWL	IFOREL,R0			; header size
+	ADDL2	R0,R3				; add length of forepart
+	INCL	R3				; first unwanted
+	MOVL	R3,FIB_BLOCK+FIB$L_EXVBN	; truncate from here
+
+; set new EOF block
+	MOVW	R3,RECATTR+FAT$W_EFBLKL
+	ASHL	#-16,R3,R3
+	MOVW	R3,RECATTR+FAT$W_EFBLKH
+	CLRW	RECATTR+FAT$W_FFBYTE
+
+	$QIOW_S	CHAN=FAB$L_STV(R10),-
+		FUNC=#IO$_DEACCESS,-
+		IOSB=IO_STATUS,-
+		P1=FIB_DESCR,-
+		P5=ATR_ADDRESS
+	BLBC	R0,99$
+	MOVZWL	IO_STATUS,R0
+
+99$:	POPR	#^M<R1,R2,R3,R4,R5>
+	RSB
+
+	.PSECT
+	.END

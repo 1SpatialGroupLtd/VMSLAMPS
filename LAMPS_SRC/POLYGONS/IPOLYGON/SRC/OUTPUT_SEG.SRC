@@ -1,0 +1,487 @@
+	LOGICAL*4 FUNCTION OUTPUT_SEG()
+C
+***	MODULE	OUTPUT_SEG
+***	IDENT	04NO91
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Unused declaration of GET_POLY_LABEL removed	TJH  29-Mar-1989
+CMOD	Modified to deal with more complex AC writing -
+C	most functionality moved into OUTPUT_ACS and 
+C	better symbol handling				AC   20-Jul-1988
+CMOD 	modified call to IFF_HEADER and new calls to
+C	CLOSE_IFF_OUT 					AC   19-May-1988
+CMOD	Now reselects segments file before reading
+C	seed text when separate seed file not supplied.
+C	No longer uses junction position for "segment
+C	has same polygon on both sides" message, as if
+C	OPT_JUN is .F. will always be (0.0,0.0)!	TJH  02-Dec-1987
+CMOD	JBPOSN declared as INTEGER*4			DRC  04-Nov-1987
+CMOD	Outputs IFF junction structure			TJH  25-Aug-1987
+CMOD	Only output summary if /LOG set (MOD 2/470)	TJH  22-May-1987
+C	Author						TJH  18-Mar-1987
+C
+C
+C Function outputs left/right coded segment information to an IFF file.
+C
+C Function returns SS$_NORMAL if all is well or one of a variety of
+C IPOLYGON error codes on failure.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNIPOLYGON:IPOLYGONMSG.PAR'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+	INTEGER		SS$_ABORT
+	EXTERNAL	SS$_ABORT	! failure
+	INTEGER		STS$K_WARNING
+	EXTERNAL	STS$K_WARNING
+	BYTE		FCSIZ		! size of bit field for FC selection
+	PARAMETER	(FCSIZ=1)
+C
+C Common:
+	INCLUDE		'LSL$CMNIPOLYGON:COMMAND.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:HIT.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:SECTOR.CMN'
+	INCLUDE         'LSL$CMNIFF:IFFJUN.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE		'LSL$CMNLSL:STATUS.CMN'
+	INCLUDE		'LSL$CMNLSL:TXTC.CMN'
+C
+C W/s:
+	INTEGER*2	ACTYPE		! type of AC
+	INTEGER		BADSEG		! count of bad segments
+	LOGICAL		DOAC		! transfer seed pt ACs?
+	INTEGER		FSN		! FSN of seed point (longword)
+	INTEGER*2	UFSN,ISQ	! feature serial no. (as word)
+	INTEGER*2	FSARR(4)	! feature status
+	INTEGER*2	FC		! just the feature code
+	INTEGER*4	LFC		! FC as a longword
+	LOGICAL		FC_SELECTED	! is this FC required?
+	INTEGER		I		! tmp var
+	INTEGER*2 	IECODE,IELEN	! IFF entry code and length
+	INTEGER*2	IENDS		! line state (coded bitwise)
+	INTEGER*4	JBPOSN		! address of input file JB
+	INTEGER*4 	JPPOSF,JPPOSL	! pos of 1st,last JP in feature
+C					! i/p file
+C					! ft in output file.
+	INTEGER		FSPOSN		! address of FS entry
+	REAL 		COORD(2)	! position of 1st point in ST
+	REAL 		JCPOSF(2)	! position of 1st,
+	REAL		JCPOSL(2)	! 2nd jncs in ftr
+	INTEGER		JPK		! counter for JPs in ftr.
+	INTEGER*4	JPPOSN		! address of input file JP
+	INTEGER*2 	LAYER		! layer number
+	INTEGER*2 	LENGTH		! length of TEXT
+	INTEGER*4	LPOSNO		! address of NO
+	INTEGER*4 	LPOSST		! pos of ST BEFORE 1 pnt ST in
+	INTEGER*2	MXARMF,MXARML	! arms in 1st & last ftr. junct.
+	INTEGER	  	NNEST		! number of nested polygons
+	INTEGER*2 	NPTS		! number of coord pairs 
+	INTEGER*2 	OFFSET		! offset of jnct. in i/p JB
+	INTEGER	  	OVNXT		! address of next layer
+	REAL 		OLDPSF(2)	! position of 1st,
+	REAL		OLDPSL(2) 	! last pts in ftr
+	INTEGER*4 	OUTPOS		! output file end position.
+	INTEGER	  	POLY_INDX	! current polygon
+	INTEGER*4 	STPOS1		! positions of 1st, and 
+	INTEGER*4	STPOS2		! last ST entries in
+	LOGICAL		UNDEF		! .T. if undefined polygon
+C
+	CHARACTER*256	TEXT		! polygon label text (LHS)
+	LOGICAL		SYMBOL		! is the current feature a symbol
+	REAL		APOINT(2)	! posn of current feature
+C
+C Functions:
+	INTEGER*2 	EXPAND		! expand text string
+	INTEGER		IFF_HEADER	! outputs IFF header entries
+	INTEGER		IFFMODIFY	! outputs IFF header entries
+	INTEGER		SIDE_TAB	! gets side of line info
+	INTEGER		OUTPUT_ACS	! write new AC s to output segment
+	INTEGER		CHECK_FOR_SYMBOL! determine if the current feature is
+C					! a symbol (ie single point ST - no
+C					! JPs)
+	INTEGER		LIB$EXTV	! extract a bit
+C
+C ......................................................................
+C
+	OUTPUT_SEG=%LOC(SS$_NORMAL)
+C
+C ......................................................................
+C
+	CALL FRAMED_MES('Writing Coded Segments File',27)
+C
+	OUTPUT_SEG=IFFMODIFY(SEGLUN,SEG_FILE(:SEG_LEN),,SEG_FILE_ID,.FALSE.)
+	IF (.NOT.OUTPUT_SEG) THEN
+	   OUTPUT_SEG=%LOC(SS$_ABORT)
+	   DELETE=.TRUE.
+	   GOTO 190
+	ENDIF
+C
+C Get the polygon index for polygons on both side of the feature
+	OUTPUT_SEG=SIDE_TAB()
+	IF (.NOT.OUTPUT_SEG) GOTO 190
+C
+C We now know the polygon index for all polygon labels to be written
+C into type 4 and type 5 ACs in each segment file feature - LR_SEGMENT.
+C The next step is to copy from the input segment file, feature by
+C feature adding the appropriate length ACs as we go
+C
+C We won't transfer any ACs from the seed point
+	DOAC=.FALSE.
+C
+C Make all the header entries (including layer 0)
+	OUTPUT_SEG=IFF_HEADER(SEGLUN,.FALSE.,.TRUE.,.FALSE.)
+	IF (.NOT.OUTPUT_SEG) GOTO 190
+C
+C Rewind the segment file and then reposition on the first NO
+	CALL IFFSEL(INLUN)
+	CALL IFFRWD
+	CALL IFFNXC('NO',IELEN)
+	IF (IELEN.LT.0) THEN		! found it ok?
+	   OUTPUT_SEG=IPOL__UNEXPEOF
+	   CALL LSL_PUTMSG(OUTPUT_SEG,IN_FILE(:IN_LEN))
+	   GOTO 190
+	ENDIF
+	GOTO 90				! analyse the layer
+C
+C ......................................................................
+C
+C Now step, entry by entry, taking care not to copy any features which
+C lie within layers used for seed point features
+10	CALL IFFSEL(INLUN)
+20	CALL IFFNXT(IECODE,IELEN)
+30	IF (IELEN.EQ.-1) GOTO 180	! eof
+	IF (IECODE.EQ.'NF') GOTO 120
+	IF (IECODE.EQ.'AC') GOTO 80
+	IF (IECODE.EQ.'EF') GOTO 150
+	IF (IECODE.EQ.'FS') GOTO 130
+	IF (IECODE.EQ.'ST'.AND.HAD_JUN) GOTO 50
+	IF (IECODE.EQ.'NO') GOTO 90
+	IF (IECODE.EQ.'EO') GOTO 110
+	IF (IECODE.EQ.'EJ') GOTO 160
+C
+	IF (IECODE.EQ.'JB') GOTO 20	! ignore existing JB
+	IF (IECODE.EQ.'SH') GOTO 20	! and SH, but
+C					! use JP to determine no. arms
+	IF (IECODE.EQ.'JP') GOTO 40
+C
+	CALL EIHCPY(SEGLUN)
+	GOTO 10
+C
+C ......................................................................
+C
+C JP - Junction pointer - only fiddle about if /OPTIONS=JUNCTIONS.
+C Read the position and offset of the JB containing this junction,
+C jump to it and extract the junction (X,Y) position and the number
+C of arms. We may as well use this input file information rather than
+C keep jumping about and having to guess the possible number of arms
+C in the junction!
+40	IF (HAD_JUN) THEN
+	   JPK=JPK+1
+	   JPPOSN=LPOSH			! remember where we are
+	   CALL EIHRL(JBPOSN,1,1)	! read JB position
+	   CALL EIHRI(OFFSET,1,3)	! read junction offset
+	   IF (JPK.EQ.1) THEN		! first JB in ftr?
+   	      CALL IFJPKJ(JCPOSF(1),JCPOSF(2),MXARMF,JBPOSN,OFFSET)
+	   ELSE				! no - second
+	      CALL IFJPKJ(JCPOSL(1),JCPOSL(2),MXARML,JBPOSN,OFFSET)
+	   ENDIF
+	   CALL IFFPKE(IECODE,IELEN,JPPOSN)! back to remembered JP posn.
+	   IF (IECODE.NE.'JP'.OR.IELEN.LT.0) GOTO 170
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C ST - output the ST with a JP and set up the junction entries for
+C the 2 end points. The JP entry has to be output empty initially
+C and set up later. This is because it has to point to the JB entry
+C which points back to the corresponding ST. Consequently the ST
+C has to be output before anything else can be done.
+50	CALL IFFSEL(SEGLUN)
+	JPPOSF=LPOSE			! remember position of 1st JP
+	CALL IFFJP(HTPOSH,HTPOSJ)	! create empty JP entry
+	STPOS1=LPOSE			! remember position of 1st ST
+C
+C Loop through all STs in this feature until the 2nd end point is known.
+C First read the last point in the 1st ST.
+60	CALL IFFSEL(SEGLUN)
+	STPOS2=LPOSE			! position of latest ST
+	CALL IFFSEL(INLUN)
+	CALL EIHRS(NPTS,IENDS)
+	CALL EIHCPY(SEGLUN)		! copy the ST entry
+	LPOSST=LPOSH			! remember pos of ST in i/p file
+	CALL IFFNXT(IECODE,IELEN)	! get next IFF entry
+	IF (IELEN.EQ.-1) GOTO 180	! end of file ?
+	IF (IECODE.NE.'ST') GOTO 70	
+	GOTO 60
+C
+C Found last ST in feature - output a JP now.
+70	CALL IFFSEL(SEGLUN)
+	JPPOSL=LPOSE			! remember position of 2nd JP
+	CALL IFFJP(HTPOSH,HTPOSJ)	! create empty JP entry
+	CALL IFFSEL(INLUN)
+	GOTO 30				! back to main loop (no IFFNXT)
+C
+C ......................................................................
+C
+C AC - Ancillary Code
+80	CALL EIHRI(ACTYPE,1,1)
+C
+C Don't copy any ACs used to hold label information if new labels are being 
+C written
+	IF (SEG_LABEL) THEN
+		IF ((ACTYPE.EQ.LFT_LABEL_AC).OR.(ACTYPE.EQ.RGT_LABEL_AC))
+     &				GOTO 10
+		IF (ONE_CTN.AND.(ACTYPE.EQ.CTN_LABEL_AC)) GOTO 10
+	ENDIF
+C
+C Don't copy any ACs used to hold ident information if new idents are being 
+C written
+	IF (SEG_IDENT) THEN
+		IF ((ACTYPE.EQ.LFT_IDENT_AC).OR.(ACTYPE.EQ.RGT_IDENT_AC))
+     &				GOTO 10
+		IF (ONE_CTN.AND.(ACTYPE.EQ.CTN_IDENT_AC)) GOTO 10
+	ENDIF
+C
+C Copy AC...
+	CALL EIHCPY(SEGLUN)
+	GOTO 10
+C
+C ......................................................................
+C
+C NO - New layer
+90	CALL EIHRI(LAYER,1,1)
+C
+C Test for and skip layer 0 as already done layer 0
+	IF (LAYER.EQ.0) THEN
+	   CALL IFFNXC('EO',IELEN)
+	   IF (IELEN.LT.0) THEN		! found it ok?
+	      OUTPUT_SEG=IPOL__BADEO
+	      CALL LSL_PUTMSG(OUTPUT_SEG,IN_FILE(:IN_LEN))
+	      GOTO 190
+	   ENDIF
+	   GOTO 20
+	ENDIF
+C
+C If necessary, skip all entries in seed point layers
+	IF (.NOT.HAD_SEED_FILE) THEN
+	   IF (HAD_SEED_LAY) THEN
+	      DO 100 I=1,NUM_LAY_SEED
+	         IF (LAYER.EQ.LAY_SEED(I)) THEN
+	            IF (IELEN.EQ.4) THEN		! EO address available?
+	               CALL EIHRL(OVNXT,1,3)		! yes, read it
+	               CALL IFFPKE(IECODE,IELEN,OVNXT) 	! and jump to EO
+	            ELSE
+	               CALL IFFNXC('EO',IELEN)		! crank through slowly!
+	            ENDIF
+	            IF (IELEN.LT.0) THEN			! found it ok?
+	               OUTPUT_SEG=IPOL__BADEO
+	               CALL LSL_PUTMSG(OUTPUT_SEG,IN_FILE(:IN_LEN))
+	               GOTO 190
+	            ENDIF
+	            GOTO 20
+	         ENDIF
+100	      CONTINUE
+	   ENDIF
+	ENDIF
+
+	CALL IFFSEL(SEGLUN)
+	LPOSNO=LPOSE
+	CALL IFFNO(LAYER,0,0)
+	GOTO 10
+C
+C ......................................................................
+C
+C EO  - end overlay 
+110	CALL IFFSEL(SEGLUN)
+	CALL IFFUNO(LPOSNO)
+	CALL IFFEO
+	GOTO 10
+C
+C ......................................................................
+C
+C NF - New Feature
+120	JPK=0				! reset JP counter for feature
+	CALL EIHRI(FSN,1,1)
+C
+C Check to see what sort of feature this is, and get its FC
+	OUTPUT_SEG=CHECK_FOR_SYMBOL(SYMBOL,APOINT,FC)
+	IF (.NOT.OUTPUT_SEG) GOTO 190	
+C
+C if selecting by FC, see if it is required
+	IF(HAD_SELECT)THEN
+	   LFC=FC
+	   FC_SELECTED=LIB$EXTV(LFC,FCSIZ,FCMAP)
+	   IF(.NOT.FC_SELECTED)THEN
+C
+C Read rest of feature and ignore it
+810	      CALL IFFNXT(IECODE,IELEN)
+	      IF (IELEN.EQ.-1) GOTO 180	! eof
+	      IF (IECODE.NE.'EF') GOTO 810		
+	      GOTO 10
+	   ENDIF
+	ENDIF
+C
+C If segment does not form part of a boundary and segments ending in one arm 
+C junctions are to be deleted and we are not outputting junction structure...
+	IF ((LR_SEGMENT(1,FSN).EQ.0).AND.(LR_SEGMENT(2,FSN).EQ.0)
+     &		.AND..NOT.HAD_JUN.AND.ONE_DEL) THEN
+C
+C Read rest of feature and ignore it
+820		CALL IFFNXT(IECODE,IELEN)
+		IF (IELEN.EQ.-1) GOTO 180	! eof
+		IF (IECODE.NE.'EF') GOTO 820		
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C FS - feature status. Check that we don't have a seed point feature in
+C hand 
+130	CALL EIHRI(FSARR,4,1)
+	IF (.NOT.HAD_SEED_FILE.AND.HAD_SEED_FC) THEN
+	   DO 140 I=1,NUM_FC_SEED
+	      IF (FSARR(1).EQ.FC_SEED(I)) THEN
+	         CALL IFFNXC('EF',IELEN)
+	         IF (IELEN.LT.0) THEN
+	            OUTPUT_SEG=IPOL__LOST
+	            CALL LSL_PUTMSG(OUTPUT_SEG)
+	            GOTO 190
+	         ENDIF
+	         GOTO 20
+	      ENDIF
+140	   CONTINUE
+	ENDIF	
+C
+C Convert FSN to unsigned word
+	FSN=ABS(FSN)
+	IF (FSN.GT.32767) FSN=FSN-65536
+	UFSN = FSN
+	ISQ=0
+	CALL IFFSEL(SEGLUN)
+	CALL IFFNF(UFSN,ISQ)
+	CALL IFFFS(FSARR)
+C
+C Write ACs to output segment - these are derived from labels and idents.
+C Note whether consistent labelling and identifiers can be found for this 
+C segment
+	OUTPUT_SEG = OUTPUT_ACS(SYMBOL,APOINT,FSN,UNDEF)	
+	IF (.NOT.OUTPUT_SEG) THEN
+	   CALL LSL_PUTMSG(OUTPUT_SEG)
+	   GOTO 190
+	ENDIF
+C
+C NOTE the number of segments which cannot be easily accounted for
+	IF (UNDEF) BADSEG = BADSEG+1
+	GOTO 10
+C
+C ......................................................................
+C
+C EF - End Feature
+150	CALL IFFSEL(SEGLUN)
+	CALL IFFEF
+C
+C Outputting junction structure?
+	IF (HAD_JUN.AND..NOT.SYMBOL) THEN
+C
+C Set up the junction structure.
+	   OLDPSF(1)=JCPOSF(1)		! save current values
+	   OLDPSF(2)=JCPOSF(2)
+	   CALL ADDNOD(JCPOSF(1),JCPOSF(2),STPOS1,1,MXARMF)
+C
+C Now that the position of the junction entry is known we can enter
+C it into the JP entry.
+	   CALL IFFPKE(IECODE,IELEN,JPPOSF)
+	   IF (IECODE.NE.'JP') GOTO 170
+	   CALL EIHWI(HTPOSH,2,1)
+	   CALL EIHWI(HTPOSJ,1,3)
+C
+C Repeat for the 2nd end point.
+	   OLDPSL(1)=JCPOSL(1)
+	   OLDPSL(2)=JCPOSL(2)
+	   CALL ADDNOD(JCPOSL(1),JCPOSL(2),STPOS2,NPTS,MXARML)
+	   CALL IFFPKE(IECODE,IELEN,JPPOSL)
+	   IF (IECODE.NE.'JP') GOTO 170
+	   CALL EIHWI(HTPOSH,2,1)
+	   CALL EIHWI(HTPOSJ,1,3)
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C		N O R M A L   C O M P L E T I O N
+C
+C EJ - end job
+160	CALL IFFSEL(SEGLUN)
+	CALL IFFEJ	
+	GOTO 190
+C
+C ......................................................................
+C		U N E X P E C T E D    J U N C T I O N   P O I N T E R
+C
+170	OUTPUT_SEG=IPOL__UNEXPENTJP
+	CALL LSL_PUTMSG(OUTPUT_SEG,IECODE,FSN)
+	GOTO 190
+C
+C ......................................................................
+C		U N E X P E C T E D   E N D   O F   F I L E
+C 
+180	OUTPUT_SEG=IPOL__UNEXPEOF
+	CALL LSL_PUTMSG(OUTPUT_SEG,IN_FILE(:IN_LEN))
+	GOTO 190
+C
+C ......................................................................
+C		C L O S E   I F F   F I L E
+C
+190	IF (DELETE.OR..NOT.OUTPUT_SEG.OR.
+     &	      (IBITS(LSL_STATUS,0,3).EQ.%LOC(STS$K_WARNING))) THEN
+	   CALL IFFCLO(SEGLUN,%LOC(SS$_ABORT)) ! close output file
+	ELSE
+	   CALL IFFCLO(SEGLUN,%LOC(SS$_NORMAL))! close output file
+	ENDIF
+
+	IF (IERCD.NE.0) THEN			! error?
+	   OUTPUT_SEG=IPOL__CLSEGIFF		! error closing file
+	   CALL LSL_PUTMSG(OUTPUT_SEG,SEG_FILE(:SEG_LEN))!tell user
+	ENDIF
+C
+C ......................................................................
+C
+C Output statistics if completing successfully
+	IF (.NOT.OUTPUT_SEG) THEN
+	   OUTPUT_SEG=%LOC(SS$_ABORT)
+	ELSE
+	   IF (HAD_LOG) THEN
+	      CALL EXPAND(
+     &	      'Number of segments output to /SEGMENTS file ........ %N',
+     &								NUM_SEG)
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+	      IF (BADSEG.GT.0) THEN
+	         CALL EXPAND(
+     &	      'Number of segments forming undefined polygons ...... %N',
+     &								BADSEG)
+	         IF (HAD_LIS) THEN
+	            CALL FLWLIN
+	         ELSE
+	            CALL TTWLIN
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C Finished....
+	RETURN
+	END
+

@@ -1,0 +1,323 @@
+	LOGICAL FUNCTION READ_COLLECT(COLLECT_ID)
+C
+***	MODULE READ_COLLECT
+***	IDENT	18NO96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C	Author	SG 30-July-1991
+CMOD	Prevent int overflow when assigning the result	ST  27-Apr-1994
+C       of ICHAR to a byte by first assigning it to an
+C	int equivalenced onto a byte. (Mod 1359).
+C
+C Description
+C
+C	  generates a text feature in layer 2 which contains the feature serial
+C	numbers of features in layer1.
+C	  Note that a collect record has a name pointed at by NAME_ID, but that
+C	the text would allready have been written out with the processing of the
+C	appropriate NAMPOSTN record. by setting the feature code to be text,
+C	with the text taken from the NAME_ID and an AC1 specifying that it is a
+C	COLLECTION, a point within the range of the IFF file can be used. since 
+C	will have two text features with the same name, it would be trivial for
+C	a post-processing to match the two.
+C	  This function assumes that the calling function has got the collect 
+C	record
+C	  also note that unlike other records for features, the attribute 
+C	records are at the end of the references to the various IDs. thus
+C	since IFF needs to know the featre code first we shall have to process
+C	as follows
+C
+C	.------------{  PSEUDO CODE }-----------.
+C	|					|
+C	| remember the starting record		|
+C	| read the number of parts		|
+C	| skip over the parts			|
+C	| read feature code			|
+C	| start a feature			|
+C	| go back to start of record		|
+C	| process the parts			|
+C	| end feature				|
+C	|					|
+C	`---------------------------------------'
+C
+	IMPLICIT NONE
+C
+	INTEGER		COLLECT_ID
+C
+	INCLUDE 'LUNS.PAR'
+	INCLUDE 'FILE_REC.CMN'
+	INCLUDE 'ID_STORAGE.CMN'
+	INCLUDE 'RECORD.CMN'
+	INCLUDE 'NTFDATA.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE 'LOOKUP.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+	LOGICAL		READ_NAMEREC
+	LOGICAL		GET_FC
+	LOGICAL		IS_CONTINUATION
+	LOGICAL		READ_CONTINUE
+	LOGICAL		RDINT
+	LOGICAL		RDLONG
+	LOGICAL		READ_RECORD
+	INTEGER		GET_ID_LUN
+	REAL		XCONVERT
+	REAL		YCONVERT
+C
+	LOGICAL		OK
+	CHARACTER*4 	NTF$_NUM_PARTS
+	CHARACTER*6	NTF$_ATT_ID
+	CHARACTER*6	NTF$_NAME_ID
+	CHARACTER*8	NTF$_ID
+	CHARACTER*2	COLL$_REC_DESCR
+	CHARACTER*6	COLL$_REC_ID
+C
+	INTEGER		ATT_ID
+	INTEGER		NAME_ID
+	INTEGER		FC_LEN
+	INTEGER		ISTAT(4)
+	BYTE		FC_STR(20)
+C
+	INTEGER		NUMPARTS
+	INTEGER		RECID
+C
+	INTEGER		INITIAL_RECORD
+	INTEGER		LOOP
+	CHARACTER*99	TEXT_STR
+	BYTE		BYTE_STR(99)
+	INTEGER		TEXT_LEN
+	REAL		COLLECT_POS(2,1)
+	INTEGER		INDEX_LUN
+	INTEGER		CPOS
+	INTEGER		IOS
+	INTEGER		CHARINT
+	BYTE		CHARBYTE
+	EQUIVALENCE	(CHARINT,CHARBYTE)
+C
+	INTEGER		FC
+	INTEGER		FC1
+	BYTE		FC2(4)
+	LOGICAL		TMP_BOOL
+C
+C##############################################################################
+C
+	INITIAL_RECORD = SEC_REC		!remember where we started from
+C
+C------------------------------------------------------------------------------
+C read how many features are contained in the collect record
+C
+	NTF$_NUM_PARTS = STRING(9:12)		!get numparts
+	CALL SETAUX (%REF(NTF$_NUM_PARTS),4)
+	OK = .NOT.RDINT(NUMPARTS)
+C
+	IF (.NOT.OK) THEN
+	  CALL WRITEF('%%NTF2I-E-MISC, unable to read NUM_PARTS field')
+	  CALL WRITEF('-NTF2I-I-MISC, in COLLECT record, "%S"',NTF$_NUM_PARTS)
+	  GOTO 999
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C skip over feature details and get the feature code of the collect record
+C
+	CPOS = 13
+C
+	DO 100 LOOP=1,NUMPARTS				! for as many data items
+	  IF (CPOS+7.GE.LENGTH) THEN			! no space for data
+	    OK = IS_CONTINUATION(STRING,LENGTH)		! should be a continua..
+	    IF (OK) OK = READ_CONTINUE('COLLECT')	! get the continuation
+	    IF (OK) THEN			
+	      CPOS =3					! reposition for data
+	    ELSE
+	      CALL WRITEF('%%NTF2I-E-MISC, Incomplete collect record')
+	      GOTO 999
+	    ENDIF
+	  ENDIF
+	  CPOS = CPOS+8					! skip over data
+100	CONTINUE
+C
+C------------------------------------------------------------------------------
+C make sure there is space for the attribute_id and NAME_ID
+C
+	IF (CPOS+11.GE.LENGTH) THEN			! no space for data
+	  OK = IS_CONTINUATION(STRING,LENGTH)		! should be a continua..
+	  IF (OK) OK = READ_CONTINUE('COLLECT')		! get the continuation
+	  IF (OK) THEN			
+	    CPOS =3					! reposition for data
+	  ELSE
+	    CALL WRITEF('%%NTF2I-W-MISC, Incomplete collect record')
+	    CALL WRITEF('-NTF2I-I-MISC, No room for ATT_ID, NAME_ID')
+	    CALL WRITEF('-NTF2I-I-DEF, defaulting to FC 0 "COLLECT"')
+	  ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C get data for locating position of feature code and the text
+C
+	IF (OK) THEN
+	  NTF$_ATT_ID  = STRING(   CPOS:CPOS+5  )
+	  NTF$_NAME_ID = STRING( CPOS+6:CPOS+11 )
+C
+C	  ----------------------------------------------------------------------
+C	  get the feature code which is contained in the ATTRIBUTE_ID
+C
+	  CALL SETAUX( %REF(NTF$_ATT_ID),6)
+	  OK = .NOT.RDLONG(ATT_ID)
+	  IF (OK) OK = GET_FC(ATT_ID,FC,FC_LEN,FC_STR)
+	  IF(.NOT.OK) THEN
+	    CALL WRITEF('%%NTF2I-E-MISC, feature code unobtainable from ATT_ID')
+	    CALL WRITEF('-NTF2I-I-MISC, ATT_ID was "%S"',NTF$_ATT_ID)
+	    GOTO 999
+	  ENDIF
+C
+	  ISTAT(1) = FC					! copy to output
+C
+C	  ----------------------------------------------------------------------
+C 	  get the text associated with the collect record, so that it can be
+C	  matched with a text feature
+C
+	  CALL SETAUX( %REF(NTF$_NAME_ID),6)
+	  OK = .NOT.RDLONG(NAME_ID)
+C
+C	  no name attached to polygon record
+C
+	  IF (NAME_ID.EQ.0) GOTO 999
+C
+	  IF (OK) THEN
+C
+C	    ................................................................
+C	    get record associated with NAME_ID from indexed file
+C
+	    READ(NAME_LUN,KEY=NAME_ID,KEYID=0, IOSTAT=IOS) ID_REC
+	    OK = IOS.EQ.0				!was return status 0
+	    IF (OK) THEN				!yes, then ok
+C
+C	      ...............................................................
+C	      read record-number field and jump on the record
+C
+	      SEC_REC = ID_REC.RECORD_NUM -1		! set record number
+	      OK = READ_RECORD()			! get the record
+	      IF (OK) THEN
+C
+C	        .............................................................
+C	        get text, ignore forms of feature-code that READ_NAMEREC returns
+C
+	        OK = READ_NAMEREC(FC1,TEXT_STR,TEXT_LEN,NAME_ID,FC2,TMP_BOOL)
+	        IF (OK) THEN
+C
+C		  ..............................................................
+C		  convert to a byte array so that IFFAC can deal with it
+C
+		  DO 200 LOOP = 1,TEXT_LEN
+		    CHARINT = ICHAR(TEXT_STR(LOOP:LOOP))
+		    BYTE_STR(LOOP) = CHARBYTE
+200		  CONTINUE		
+	        ENDIF
+	      ELSE
+	        CALL WRITEF('%%NTF2I-E-MISC, unable to get NAMEREC')
+	        CALL WRITEF('-NTF2I-W-MISC, temporary data files corrupt')
+	      ENDIF
+  	    ELSE
+	      CALL WRITEF('%%NTF2I-E-MISC, unable to find record for NAME_ID')
+	      CALL WRITEF('-NTF2I-I-MISC, NAME_ID was "%I"',NAME_ID)
+	    ENDIF
+	  ELSE
+	    CALL WRITEF('%%NTF2I-E-NAMPOS, bad field in record %I',SEC_REC)
+	    CALL WRITEF('-NTF2I-E-MISC, NAME_ID "%S"', NTF$_NAME_ID)
+	  ENDIF
+C
+	  IF (.NOT.OK) GOTO 999
+C
+	  IF (HAD_FC_LOOKUP)					! Translate?
+     &		CALL FC_TRANS(%VAL(LUT_BASE_ADDR), FC, ISTAT(1))
+C
+C------------------------------------------------------------------------------
+C default the FC to 0 with the NAME collect
+C
+	ELSE
+	  ISTAT(1) = 0					!feature code 0
+	  TEXT_LEN = 7
+	  FC_LEN = TEXT_LEN
+	  TEXT_STR = 'COLLECT'				!feature code =COLLECT
+	  DO 300 LOOP = 1,TEXT_LEN			!convert to byte
+	    BYTE_STR(LOOP) = ICHAR(TEXT_STR(LOOP:LOOP))
+	    FC_STR(LOOP) = BYTE_STR(LOOP)
+300	  CONTINUE		
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C now write out the start of a new feature
+C
+	ISTAT(2) = 0
+	ISTAT(3) = '4000'X			!point feature
+	ISTAT(4) = 0
+C
+	FSN = FSN +1
+	CALL IFFNF (FSN,FSN)			! start the feature
+	CALL IFFFS ( ISTAT )			! its feature_code etc
+	CALL IFFAC (1,0,FC_STR,FC_LEN)		! feature code as text
+	CALL IFFAC (6,0,BYTE_STR, TEXT_LEN)	! text associated with it
+C
+C------------------------------------------------------------------------------
+C goto start of the collect record to get ready to process the feature data
+C
+	SEC_REC = INITIAL_RECORD -1
+	CALL READ_RECORD()
+C
+C------------------------------------------------------------------------------
+C process the data, use the FSNs associated with the record IDs (from the 
+C indexed file) to write ACs. Only consider NAMEREC,POINT,LINE,CLINE,POLY,CPOLY
+C any other record types dont generate features and so should be ignored.
+C
+	LOOP =0
+	CPOS = 13
+	OK = .TRUE.
+C
+C	......................................................................
+C	for as many parts in the collect record
+C
+	DO WHILE (OK.AND.(LOOP.LT.NUMPARTS))
+	  LOOP = LOOP+1
+C
+C	  ....................................................................
+C	  check that there is space in this record for data
+C
+	  IF (CPOS+7.GE.LENGTH) THEN
+	    OK = IS_CONTINUATION(STRING,LENGTH)
+	    IF (OK) OK = READ_CONTINUE('COLLECT')
+	    IF (OK) CPOS = 3
+	  ENDIF	  
+C
+C	  ....................................................................
+C	  process the data contained in collect record
+C
+	  IF (OK) THEN
+	    NTF$_ID	   = STRING(CPOS:CPOS+7)	!get the data
+	    COLL$_REC_DESCR= NTF$_ID(1:2)		!get REC_DESCR from data
+	    COLL$_REC_ID   = NTF$_ID(3:8)		!get REC_IDENT from data
+C
+	    INDEX_LUN = GET_ID_LUN(COLL$_REC_DESCR)	!find which indexed file
+	    IF (INDEX_LUN.NE.-1) THEN			!success
+	      CALL SETAUX(%REF(COLL$_REC_ID),6)
+	      IF (.NOT.RDLONG(RECID)) THEN		!read the ID field
+	        READ(INDEX_LUN,KEY=RECID,KEYID=0,IOSTAT=IOS) ID_REC
+	        IF (IOS.EQ.0) CALL IFFAC(9,ID_REC.FSN)	!write out parentage
+	      ENDIF
+	    ENDIF
+	    CPOS = CPOS +8				!get ready for more data
+	  ENDIF
+	END DO
+C
+C------------------------------------------------------------------------------
+C must write ST entry and EF since the feature is open, ignore errors
+C
+	COLLECT_POS(1,1) = XCONVERT(XMAX)
+	COLLECT_POS(2,1) = YCONVERT(YMAX)
+	CALL IFFST(COLLECT_POS,1,0)
+	CALL IFFEF()
+C
+C##############################################################################
+C
+999	READ_COLLECT = OK
+	RETURN
+	END

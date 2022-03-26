@@ -1,0 +1,394 @@
+	LOGICAL FUNCTION CHECK6()
+C
+***	MODULE	CHECK6
+***	IDENT	08JA93
+C	
+C	Copyright Laser-Scan, Cambridge, England.
+C	Author	: D Catlow
+C	Created : 22OC84
+C
+C Modified from CHECK6 in module TCHECK			by ALB 3-MAR-1987
+C
+C Converted to function to enable easier exit if IFF file error in this
+C or called functions
+C
+CMOD1120 Use QUICK_SORT					JB 01-Jun-1992
+C
+CMOD1169 Check for the existence of a contour in loop 700 before 
+C	 accessing array index of 0			JB 08-Jan-1993
+C
+C	Subroutine for ITCHECK to
+C	1. Check on spot height v contour validity
+C
+C	N.B. Uses sorted TENTRY
+C
+	IMPLICIT NONE
+C	
+C parameters
+        INCLUDE 'LSL$CMNITCHECK:CONSTANTS.PAR'
+C
+C common blocks
+        INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNITCHECK:ATTRIB.CMN'
+	INCLUDE 'LSL$CMNITCHECK:CONTROL.CMN'
+	INCLUDE 'LSL$CMNITCHECK:BOUNDS.CMN'
+	INCLUDE 'LSL$CMNITCHECK:ERROR.CMN'
+	INCLUDE 'LSL$CMNITCHECK:GROUP.CMN'
+	INCLUDE 'LSL$CMNITCHECK:SHEET.CMN'
+C
+C w/s
+	LOGICAL		IN_CONTOUR	!TRUE if bit set for contour
+	LOGICAL		IN_INDEX	!TRUE if bit set for index
+	LOGICAL		IN_SPOT		!TRUE if bit set for spot height
+	LOGICAL		IN_SUPPLE	!TRUE if bit set for supplementary
+	INTEGER*4	FC_PTR		!element in GRPFCT
+	INTEGER*4	FC_OFFSET	!offset in GRPFCT element
+C
+	REAL		XY1(2)
+	REAL		XY2(2)
+	REAL		XVAL		!spot height x coord
+	REAL		YVAL		!spot height y coord
+	REAL		YIN		!y intersection
+	REAL		YDIST		!YVAL-YIN
+	REAL		POSDIS(5000)	!smallest + YDIST
+	REAL		NEGDIS(5000)	!smallest - YDIST
+	REAL		SVAL		!spot height value
+	REAL		CVAL		!contour value
+	REAL		MIN_X(NUMCON)	!temp min x array used for sorting
+	INTEGER*4	TOTPTS
+	INTEGER*4	SPOTS(5000,5)   !spot hgt and contour pointers
+	INTEGER*4	RDPNTS(5000,3)	!saved LPOSHs of items in error
+	INTEGER*4	NSPOTS		!number of spot heights	
+	INTEGER*4	I,J,K		!counters
+	INTEGER*2	IECODE		!IFF entry code
+	INTEGER*2	IELEN		!IFF entry length
+        INTEGER*2       IENDS           !additional string variable
+	INTEGER*2	NPTS		!number of points in ST entry 
+	INTEGER*2	LUN		!input IFF file LUN
+	INTEGER*4	IFFIN_NUM	!input IFF file number
+	INTEGER*4	NPT		!no of pts in contour entry
+	INTEGER*4	NUM_XY		!number of xy pairs in CB
+C
+	LOGICAL		CRT		!TRUE if terminal and is a CRT
+	LOGICAL		OK		!return code
+C
+C externals
+	INTEGER*4	COMPARE	
+	EXTERNAL	COMPARE		! compare function
+	EXTERNAL	SWAP		! swap routine
+C
+C Functions
+	LOGICAL		OUTPUT_CRT	! TRUE if SYS$OUTPUT is CRT
+	LOGICAL		LIB$EXTZV	! bit extraction function
+	LOGICAL		IFFOPEN		! open an input IFF 
+	LOGICAL		ERRCOP		! copy part of errorous FC to output IFF
+	LOGICAL		ERRPTS		! move nearest pts to error to tmp array
+	LOGICAL		ERRTAB		! put error message into text error file
+C
+C****************************************************************************
+C
+	CHECK6 = .TRUE.			!assume success
+	LUN = IFFIN_LUN
+	CRT = OUTPUT_CRT()
+C
+C****************************************************************************
+C Sort on minimum x
+C
+	IF (.NOT.HAD_XSORT) THEN
+C
+C run quicksort after loading temp min x array
+C
+	   DO 100 I=1,NUM_FC
+	      MIN_X(I) = ATTRIB_TABLE(I,10)
+100	   CONTINUE
+C
+	   CALL QUICK_SORT(MIN_X(1),NUM_FC,COMPARE,SWAP,SORT_WS)
+C
+	   HAD_XSORT=.TRUE.			
+	ENDIF
+C
+C****************************************************************************
+C First retrieve information on spot heights
+C
+	NSPOTS=0				! number of spot heights
+C
+	DO 250 I=1,NUM_FC	
+C
+	   FC_PTR    = IATTRIB_TABLE(TENTRY(I),1)/32 + 1	! get pointer
+	   FC_OFFSET = MOD(IATTRIB_TABLE(TENTRY(I),1),32)	! get offset
+	   IN_SPOT   = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,SPOT))
+C
+	   IF (IN_SPOT) THEN 			!spot height
+	      NSPOTS=NSPOTS+1
+	      SPOTS (NSPOTS,1)=TENTRY(I)	!save pointer to position
+C						!in attribute table
+	      RDPNTS(NSPOTS,1)=IATTRIB_TABLE(TENTRY(I),12)
+	      POSDIS(NSPOTS)= 99999.0		!give initial large values
+	      NEGDIS(NSPOTS)=-99999.0
+	   ENDIF
+250	CONTINUE
+C
+C****************************************************************************
+C Retrieve contours
+C
+	DO 600 J=1,NUM_FC
+           IF (CRT) CALL PERCENT(' <PROCESSING CHECK 6> ',
+     &						22,NUM_FC,J)	! write % done
+C
+	   FC_PTR    = IATTRIB_TABLE(TENTRY(J),1)/32 + 1	! get pointer
+	   FC_OFFSET = MOD(IATTRIB_TABLE(TENTRY(J),1),32)	! get offset
+	   IN_CONTOUR = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,CONTOUR))
+	   IN_INDEX  = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,INDEX_C))
+	   IN_SUPPLE = LIB$EXTZV(FC_OFFSET,1,GRPFCT(FC_PTR,SUPPLEMENTARY))
+C
+	   IF ( (.NOT.IN_CONTOUR) .AND.			! if not either contour
+     &		(.NOT.IN_INDEX)   .AND.			! index or supplementary
+     &		(.NOT.IN_SUPPLE) ) GOTO 600		! then do not process
+C
+	   IFFIN_NUM = IATTRIB_TABLE(TENTRY(J),14)
+	   IF(IFFIN_NUM.NE.LAST_IFFIN) THEN
+	      IF (OPEN_IFFIN) THEN
+	         CALL IFFCLO(LUN)
+	         OPEN_IFFIN = .FALSE.
+	      ENDIF
+C
+C re-open IFF file
+C
+	      OK = IFFOPEN(LUN,IFFIN_FNAME(IFFIN_NUM),
+     &				IFFIN_FID(1,IFFIN_NUM),,1)
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK,
+     &			IFFIN_FNAME(IFFIN_NUM)(1:IFFIN_LEN(IFFIN_NUM)))
+	         CHECK6 = .FALSE.
+	         GOTO 999
+	      ENDIF
+C
+	      OPEN_IFFIN = .TRUE.
+	      LAST_IFFIN = IFFIN_NUM
+	   ENDIF
+C
+	   CALL IFFSEL(LUN)
+	   CALL IFFPKE(IECODE,IELEN,IATTRIB_TABLE(TENTRY(J),12))
+C
+C set to NF entry
+C
+	   NPT=0
+C
+300	   CALL IFFNXC('CB',IELEN)			!set to CB entry
+320	   CONTINUE
+C
+	   CALL CBINOUT(XY(1,NPT+1),.FALSE.,NUM_XY)
+	   NPT = NPT + NUM_XY
+C
+	   CALL IFFNXT(IECODE,IELEN)	!another CB for this feature?
+	   IF(IECODE.EQ.'CB')GOTO 320	!get more coords.
+C
+C****************************************************************************
+C Compare contour with spot heights
+C
+	   DO 500 K=1,NSPOTS
+	      XVAL=ATTRIB_TABLE(SPOTS(K,1),4)	!start x
+	      YVAL=ATTRIB_TABLE(SPOTS(K,1),5)  	!start y
+C
+C*************************************************************************
+C Test point against contour XMIN and XMAX 
+C
+	      IF (XVAL.LE.ATTRIB_TABLE(TENTRY(J),10))GOTO 500 !next spot height
+	      IF (XVAL.GE.ATTRIB_TABLE(TENTRY(J), 8))GOTO 500	
+C
+C*************************************************************************
+C Test for possible intersection of line XVAL with vert XY1 to XY2
+C
+	      DO 400 I=2,NPT
+	         XY1(1)=XY(1,I-1)
+	         XY2(1)=XY(1,I)
+	         XY1(2)=XY(2,I-1)
+	         XY2(2)=XY(2,I)
+C
+	         IF(XY1(1).EQ.XY2(1))GOTO 400
+	         IF(XY1(1).LT.XVAL.AND.XY2(1).LT.XVAL)GOTO 400
+	         IF(XY1(1).GT.XVAL.AND.XY2(1).GT.XVAL)GOTO 400
+C
+C Calculate Y intersect
+C
+	         YIN=(XY1(2)+(XY2(2)-XY1(2))*
+     &   		(XVAL-XY1(1))/(XY2(1)-XY1(1)))
+C
+	         YDIST=YIN-YVAL
+C
+	         IF (YDIST.GE.0.0 .AND. YDIST.LT.POSDIS(K)) THEN
+	            POSDIS(K) =YDIST
+	            SPOTS(K,2)=TENTRY(J)	!Save contour ATTRIB pointer
+	            SPOTS(K,4)=I
+	            RDPNTS(K,2)=IATTRIB_TABLE(TENTRY(J),12)
+	            GOTO 400
+	         ENDIF
+C
+	         IF (YDIST.LT.0.0 .AND. YDIST.GT.NEGDIS(K))THEN
+                    NEGDIS(K)=YDIST
+                    SPOTS(K,3)=TENTRY(J)	!Save contour ATTRIB pointer
+                    SPOTS(K,5)=I
+                    RDPNTS(K,3)=IATTRIB_TABLE(TENTRY(J),12)
+                    GOTO 400
+	         END IF
+C	  	
+400	      CONTINUE
+C
+C***************************************************************************
+C
+500	   CONTINUE		!next spot height
+C
+C***************************************************************************
+C
+600	CONTINUE		!next contour
+C
+C***************************************************************************
+C Compare spot height and contour heights
+C
+	DO 700 I=1,NSPOTS
+C
+	  IF (SPOTS(I,1).EQ.0) GOTO 700		! Check spot existence
+C
+	  SVAL = ATTRIB_TABLE(SPOTS(I,1),3)	! Save spot height value
+C
+	  IF (SPOTS(I,2).EQ.0) GOTO 700		! Check contour existence
+C
+C Compare with nearest contour above
+C
+	  CVAL = ATTRIB_TABLE(SPOTS(I,2),3)	! Contour height value	
+C
+	  IF (POSDIS(I).EQ.99999.0) GOTO 650	! No contour above to 
+C						! compare with
+C Compare using contour interval value....
+C
+	  IF ( (SVAL.LE.CVAL-CONTOUR_INT) .OR.
+     &	       (SVAL.GE.CVAL+CONTOUR_INT) .OR.
+     &	       (SVAL.EQ.CVAL) ) THEN		! error
+C
+C Transfer spot height details...
+C
+	    ITEM1=IATTRIB_TABLE(SPOTS(I,1),2)	! FSN of spot height
+	    XERR1= ATTRIB_TABLE(SPOTS(I,1),4)	! x and y of
+	    YERR1= ATTRIB_TABLE(SPOTS(I,1),5)	! spot height
+	    CODE1=IATTRIB_TABLE(SPOTS(I,1),1) 	! FC of spot height
+	    FILE1=IATTRIB_TABLE(SPOTS(I,1),14) 	! file no for spot height entry
+	    HEIGHT1=SVAL			! spot height value
+C
+C Transfer contour details...
+C
+	    ITEM2=IATTRIB_TABLE(SPOTS(I,2),2)
+	    CODE2=IATTRIB_TABLE(SPOTS(I,2),1) 	! FC of spot height
+	    FILE2=IATTRIB_TABLE(SPOTS(I,2),14) 	! file no for spot height entry
+	    HEIGHT2=CVAL			! contour value
+C
+	    NUMERR=13
+C
+	    IF (HAD_OUTPUT) THEN
+	      VECERR=1
+	      FILE = FILE1
+	      RDPOS=RDPNTS(I,1)
+	      OK =  ERRCOP()
+	      IF (.NOT.OK) THEN
+		 CHECK6 = .FALSE.
+		 GOTO 999
+	      ENDIF
+C
+	      VECERR=SPOTS(I,4)
+	      RDPOS=RDPNTS(I,2)
+	      FILE = FILE2
+	      TOTPTS=0
+	      OK = ERRPTS()
+	      IF (.NOT.OK) THEN
+		 CHECK6 = .FALSE.
+		 GOTO 999
+	      ENDIF
+C
+	      OK = ERRCOP()
+	      IF (.NOT.OK) THEN
+		 CHECK6 = .FALSE.
+		 GOTO 999
+	      ENDIF
+	    ENDIF
+C
+	    OK = ERRTAB()
+	    IF (.NOT.OK) THEN
+	       CHECK6 = .FALSE.
+	       GOTO 999
+	    ENDIF
+	    GOTO 700
+C
+	  ENDIF
+C
+650	  IF (NEGDIS(I).EQ.-99999.0) GOTO 700	! nothing to compare
+C
+	  IF (SPOTS(I,3).EQ.0) GOTO 700		! Check contour existence
+C
+C Compare with contour below....
+C
+	  CVAL = ATTRIB_TABLE(SPOTS(I,3),3)
+C
+	  IF ( (SVAL.LE.CVAL-CONTOUR_INT) .OR.
+     &	       (SVAL.GE.CVAL+CONTOUR_INT) .OR.
+     &	       (SVAL.EQ.CVAL) ) THEN		! error
+C
+C Transfer spot height details...
+C
+	    ITEM1=IATTRIB_TABLE(SPOTS(I,1),2)	! FSN of spot height
+	    XERR1= ATTRIB_TABLE(SPOTS(I,1),4)	! x and y of
+	    YERR1= ATTRIB_TABLE(SPOTS(I,1),5)	! spot height
+	    CODE1=IATTRIB_TABLE(SPOTS(I,1),1)	! FC of spot height
+	    FILE1=IATTRIB_TABLE(SPOTS(I,1),14) 	! file no for spot height entry
+	    HEIGHT1=SVAL			! spot height value
+C
+C Transfer contour details...
+	    ITEM2=IATTRIB_TABLE(SPOTS(I,3),2)
+	    CODE2=IATTRIB_TABLE(SPOTS(I,3),1)	! FC of contour
+	    FILE2=IATTRIB_TABLE(SPOTS(I,3),14) 	! file no for contour entry
+	    HEIGHT2=CVAL			! contour value
+C
+	    NUMERR=13
+C
+	    IF(HAD_OUTPUT)THEN
+	      VECERR=1
+	      FILE = FILE1
+	      RDPOS=RDPNTS(I,1)
+	      OK = ERRCOP()
+	      IF(.NOT.OK) THEN
+		 CHECK6 = .FALSE.
+		 GOTO 999
+	      ENDIF
+C
+	      VECERR=SPOTS(I,5)
+	      FILE = FILE2
+	      RDPOS=RDPNTS(I,3)
+	      TOTPTS=0
+	      OK = ERRPTS()
+	      IF(.NOT.OK) THEN
+		 CHECK6 = .FALSE.
+		 GOTO 999
+	      ENDIF
+C
+	      OK = ERRCOP()
+	      IF(.NOT.OK) THEN
+		 CHECK6 = .FALSE.
+		 GOTO 999
+	      ENDIF
+	    ENDIF
+C
+	    OK = ERRTAB()
+	    IF(.NOT.OK) THEN
+	       CHECK6 = .FALSE.
+	       GOTO 999
+	    ENDIF
+	    GOTO 700
+	  ENDIF
+C
+700	CONTINUE
+C
+C****************************************************************************
+C
+999	CONTINUE
+C
+	RETURN
+	END
+C

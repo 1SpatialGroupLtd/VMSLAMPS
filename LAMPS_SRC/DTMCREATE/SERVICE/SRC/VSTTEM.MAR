@@ -1,0 +1,144 @@
+	.TITLE	VSTTEM
+
+	.IDENT	/17AU99/
+;
+; Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+;
+; Author: D. Meader
+;
+;MOD	R5 preserved in VSALOF and VSALON	 DM	04-Apr-1986
+;	Created 				 DM	14-May-1984
+;
+; Terminal emulation routine for the Sigma display.
+; Characters typed at the keyboard are reported on the Sigma graphics
+; screen (at the current writing position).
+
+	.LIBRARY/LSL$LIBRARY:LSLMACLIB/
+
+	DATA_PSECT	VS
+
+	$DSCDEF
+
+IPIOSB:	.BLKQ	1		; input i/o status block
+IPBUFF:	.BLKB	1		; input buffer
+IPSAVE:	.BLKB	1		; saved input buffer
+
+OPDESC:	.WORD	1		; descriptor for output to Sigma
+	.BYTE	DSC$K_DTYPE_T	; type TEXT
+	.BYTE	DSC$K_CLASS_S	; class STRING
+	.ADDRESS IPBUFF
+
+TMASK:	.QUAD	0		; terminator bit mask
+TTNAME:	.ASCID	/TT/
+
+	$IODEF
+
+IPQIO:	$QIO	FUNC=IO$_READVBLK!IO$M_NOECHO!IO$M_NOFILTR, -
+		IOSB=IPIOSB, -
+		EFN=1, -
+		P1=IPBUFF, -
+		P2=1, -
+		P3=0, -
+		P4=TMASK
+IPCHAN=IPQIO+QIO$_CHAN
+
+	CODE_PSECT	VS
+
+;
+; status=ASNCHN() - assign a channel for input
+;
+	.ENTRY	ASNCHN,^M<>
+	$ASSIGN_S	DEVNAM=TTNAME, -
+			CHAN=IPCHAN
+	RET
+;
+; status=VSTTEM(BUFFER,NCHARS) - characters are read from the terminal,
+; displayed on the graphics screen and appended to BUFFER. The routine
+; returns when a terminator is read, leaving the number of characters
+; in NCHARS. The Sigma has rather a weird character set, so we do the
+; best we can for DELETE.
+;
+	.ENTRY	VSTTEM,^M<R2,R3,R4,R5>
+	MOVL	4(AP),R2		; remember address of descriptor
+	MOVZWL	DSC$W_LENGTH(R2),R3	; length of BUFFER
+	MOVL	DSC$A_POINTER(R2),R5	; address of actual text
+	CLRL	R2			; pointer into text (char count)
+	CLRL	R4			; 'had delete ?' flag
+
+10$:	$QIOW_G	IPQIO			; queue input (& wait for some)
+	BLBC	R0,15$			; OK ?
+
+	CMPB	IPBUFF,#27		; got <ESC> ?
+	BNEQ	20$
+	MOVB	#36,IPBUFF		; echo it as a dollar sign
+	PUSHAL	OPDESC			; send character to the Sigma
+	CALLS	#1,G^VSCHRS
+	CALLS	#0,G^VSGEN
+15$:					; but treat it as a terminator
+	MOVL	R2,@8(AP)		; return number of chars read
+	RET
+
+20$:	CMPB	IPBUFF,#32		; got a control character ?
+	BLSS	15$			; yes - treat it as a terminator
+
+	CMPB	IPBUFF,#127		; got DELETE ?
+	BNEQ	40$
+	TSTL	R2			; already at start of line ?
+	BEQL	10$			; yes - ignore the DEL
+	TSTL	R4			; no - already deleting ?
+	BLSS	30$
+	MNEGL	#1,R4			; set the flag
+	MOVB	#124,IPBUFF		; output a '|' first time
+	PUSHAL	OPDESC			; send character to the Sigma
+	CALLS	#1,G^VSCHRS		; (relies on VSLIB buffering)
+30$:	MOVB	-(R2)[R5],IPBUFF	; output the deleted character
+	BRB	70$
+
+40$:	INCL	R4			; bump the 'had delete ?' flag
+	BNEQ	50$			; was it set ?
+	MOVB	IPBUFF,IPSAVE		; yes - output trailing '|'
+	MOVB	#124,IPBUFF
+	PUSHAL	OPDESC			; send character to the Sigma
+	CALLS	#1,G^VSCHRS		; (relies on VSLIB buffering)
+	MOVB	IPSAVE,IPBUFF		; restore typed character
+50$:	CMPL	R2,R3			; room in BUFFER for new char ?
+	BLSS	60$
+	MOVB	#127,IPBUFF		; no - output a blob
+	BRB	70$
+60$:	MOVB	IPBUFF,(R2)+[R5]	; put character into BUFFER
+70$:	PUSHAL	OPDESC			; send character to the Sigma
+	CALLS	#1,G^VSCHRS
+	CALLS	#0,G^VSGEN
+	BRW	10$			; go back for next character
+
+;
+; CALL VSALOF - disable the alpha screen (if present).
+;
+	.ENTRY	VSALOF,^M<R4,R5>
+	MOVL	#^X2401,R4		; set up the intruction
+	JSB	$VSCBFW			; buffer the instruction
+	MOVL	#^X01F8,R4		; Video Status Register 1
+	JSB	$VSCBFW
+	CLRL	R4			; Video Status Register 2
+	JSB	$VSCBFW
+	CLRL	R4			; Video Status Register 3
+	JSB	$VSCBFW
+	JSB	$VFLUSH			; flush it all out
+	RET
+
+;
+; CALL VSALON - enable the alpha screen (if present).
+;
+	.ENTRY	VSALON,^M<R4,R5>
+	MOVL	#^X2401,R4		; set up the intruction
+	JSB	$VSCBFW			; buffer the instruction
+	MOVL	#^X01FF,R4		; Video Status Register 1
+	JSB	$VSCBFW
+	CLRL	R4			; Video Status Register 2
+	JSB	$VSCBFW
+	CLRL	R4			; Video Status Register 3
+	JSB	$VSCBFW
+	JSB	$VFLUSH			; flush it all out
+	RET
+
+	.END

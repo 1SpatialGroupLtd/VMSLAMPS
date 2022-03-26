@@ -1,0 +1,362 @@
+	SUBROUTINE STDRAW(
+     &		NCOORD,STXY,STNATT,MATT,STATTC,STATTV,
+     &		AUX,TEXT,FIRST,LAST,ENDS,LOOP,PACK,FS)
+C
+***	MODULE	STDRAW
+***	IDENT	08DE94
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	4-July-1984
+C
+C To draw in stored mode (part of) a feature
+C The appropriate feature code must be loaded into common FRTCOM
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/		! layout of auxiliary array
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:DRAWIN/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:RFCTRL/
+***	COMMON/LSL$CMNFRT:SRISCL/
+***	COMMON/CMN:TIMING/
+***	COMMON/CMN:WORKS/
+***	COMMON/CMN:WORK_DRAW/
+C
+C arguments
+	INTEGER	NCOORD			! number of coordinates
+	REAL	STXY(2,*)		! array of coordinates
+	INTEGER	STNATT			! number of attributes
+	INTEGER	MATT			! max number of attributes
+	INTEGER	STATTC(*)		! column headers
+	INTEGER	STATTV(MATT,*)		! attribute values
+	REAL	AUX(AUXLEN)		! auxiliary array for circles
+					! texts and symbols
+	CHARACTER*(*) TEXT		! text to draw
+	LOGICAL	FIRST			! first bit of feature?
+	LOGICAL LAST			! last bit of feature?
+	INTEGER*2 ENDS			! IFF ST ENDS word
+	LOGICAL LOOP			! true if curve is a closed loop
+	INTEGER	PACK(PAKLEN)		! a pack for the object
+	INTEGER*2 FS(4)			! feature status (only used for texts
+					! and symbols)
+C
+C function called
+	EXTERNAL	TRITXT		! draw text
+	EXTERNAL	SRIPLT		! draw symbol
+	EXTERNAL	TRISCN		! get size of text
+	EXTERNAL	CALLR		! to pass to symbol draw routine
+	REAL		SECNDS		! FORTRAN timer
+	LOGICAL		OVERLAY_PLANE_SELECT
+	LOGICAL		PLANE
+	LOGICAL		LIB$EXTZV
+C
+C w/s
+	INTEGER	I,J			! loops
+	LOGICAL	LINEAR			! true if line or curve
+	LOGICAL	STRING			! true if LINEAR or symbol string
+	REAL	X,Y			! temporary coords
+	REAL	XYTMP(2,200)		! temporary coords
+	LOGICAL	INTFST			! interpolate first bit?
+	REAL	COEFFS(4)		! plane circle lies in
+	LOGICAL	COEFFS_DEF		! if it is set up
+	LOGICAL	GOT_Z			! if Z coordinates exist
+	REAL	XOUT(5),YOUT(5)		! for drawing boxes
+	REAL	ZOUT(5)
+	REAL	SAV_SCLDIS
+	REAL	SAV_PLTSCL		! save of values set by SRIUNI
+	REAL	SAV_SRISCL
+	REAL	SAV_ENLSCL
+	REAL	SAV_SRIROT
+	REAL	SAV_SRIWID
+	LOGICAL	NO_ZOOM
+	LOGICAL	PREV_LOOP		! previous setting of LOOP
+	SAVE	PREV_LOOP
+	LOGICAL	DRAW			! for curves, true if drawing
+	PARAMETER	(DRAW=.TRUE.)
+C
+        NO_ZOOM    = .FALSE.
+C
+C do nothing if no displays
+	IF (NODISP) GOTO 9999
+C
+	TIMING(TIMDRAW) = SECNDS(TIMING(TIMDRAW))
+C
+C Set up displays for stored mode drawing, unless called via RFDRAW
+	IF (.NOT.REFNG) CALL STDINI
+C
+C If overlays are in use, then see which (if any) overlay this feature
+C is in
+	IF (OVERLAYS_INUSE.AND..NOT.FROM_DRWFEAT) THEN
+	   IF (OVERLAY_PLANE_SELECT(PACK)) GOTO 9998	! don't draw
+	ENDIF
+C
+C Set up our own graphical type group logicals
+C
+C Not plotted by FRTLIB and involving several calls to STDRAW
+C (which includes areas)
+	LINEAR = FRTLIN.OR.FRTCUR.OR.FRTARE
+C
+C All types involving several calls to STDRAW
+	STRING = LINEAR.OR.(FRTGT.EQ.STRTYP)
+C
+C reset SCLDIS if we are drawing a non zooming feature code
+C (want thickneses etc to be in screen mm, not zoomed sheet mm)
+	IF (LIB$EXTZV(14,1,FRTFLG)) THEN	! look at bit 14
+   	   SAV_SCLDIS = SCLDIS
+	   SAV_PLTSCL = PLTSCL
+	   SAV_SRISCL = SRISCL
+	   SAV_ENLSCL = ENLSCL
+	   SAV_SRIROT = SRIROT
+	   SAV_SRIWID = SRIWID
+	   SCLDIS = SCLFRT
+	   CALL SRIUNI(1.0/SCLDIS,SRISCL,SRIROT,1.0/SCLDIS)
+	   CALL SRISLW(NOMLW)
+	   NO_ZOOM = .TRUE.
+	ENDIF
+C
+C Do anything needed at the start of EVERY feature
+	IF (FIRST.OR..NOT.STRING) THEN
+	   CALL SETCOL			! set colour
+	ENDIF
+C
+C Do anything needed at start of features not plotted by FRTLIB
+	IF ((FIRST.AND.LINEAR).OR.FRTARC) THEN
+	   CALL SETLIN			! set line pattern and width
+	   CALL STDBFF(0)		! ensure buffers empty
+C
+C check for offset linear feature
+	   OFFSETF = .FALSE.		! no offset feature
+	   IF (FRTLIN.OR.FRTCUR) THEN
+	      STD = .FALSE.		! not started offset yet
+	      IF (FRTSIZ.NE.0.0) THEN	! draw an offset feature
+	         OFFSETF = .TRUE.
+	         OFFDIST = FRTSIZ*SCLFRT
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C get Z values
+	GOT_Z = .FALSE.
+C
+C If interested in drawing Z coordinates, look at column headers for Z
+	IF (KRSINI) THEN
+	   IF (STNATT.GT.0) THEN
+	      DO 20, I = 1,STNATT
+	         IF (STATTC(I).EQ.IFF_C_Z) THEN
+	            GOT_Z = .TRUE.
+C
+C found Z column; so copy into our array (using integer copy)
+	            DO 10, J = 1,NCOORD
+	               ZI(J) = STATTV(I,J)
+10	            CONTINUE
+	            GOTO 30
+	         ENDIF
+20	      CONTINUE
+30	      CONTINUE
+	   ENDIF
+C
+C fill z array with dummy height, if it is not set
+	   IF (.NOT.GOT_Z) THEN
+	      DO 40, I = 1,NCOORD
+	         ZI(I) = 0
+40	      CONTINUE
+	   ENDIF
+	ENDIF
+C
+C Branch according to the graphical type
+	GOTO(100,200,200,200,200,100,700,700,700,1000,1100,100),FRTGT
+C
+C 1 - line
+100	CONTINUE
+	INTFST = FIRST		! copt of FIRST for interpolation
+C
+C does this line segment start invisibly?
+	IF (.NOT.FIRST.AND.(IAND(ENDS,1).EQ.0)) THEN
+C
+C finish off last bit of previous segment
+	   IF (FRTCUR.AND.CUROPT)
+     &			CALL INTERP(0,STXY,INTFST,.TRUE.,PREV_LOOP,
+     &	                        DRAW,Z,.TRUE.)
+	   CALL STDBFF(2)	! flush out last bit of line
+C
+C reset pattern to start at end of gap (unless FRTCLP, which is FRT flag
+C bit 10, and means maintain pattern phase through gaps)
+C this does not fail as pattern is set up already
+	   IF (.NOT.FRTARE.AND..NOT.FRTCLP.AND.
+     &			PATOPT.AND.FRTSC.NE.0) CALL PATSET(FRTSC)
+	   STD = .FALSE.	! no offset feature
+	   INTFST = .TRUE.	! pretend first bit again
+	   INVSEG = .TRUE.	! invisble segment (for STDBFF)
+	ENDIF
+C
+C if drawing offset feature, then we have
+C to "sort" the last point in the drawing buffer, to give continuity with
+C this lot of STs.  It was just perpendicular to the last point before as
+C there was no more information at the time.  This is a bit nasty!
+C
+C simply buffer up the points, offsetting them first if necessary
+	IF (OFFSETF) THEN
+	   CALL SRTOFF(STXY(1,1))
+	   CALL OFF (NCOORD,STXY,XYTMP)
+	   IF (FRTCUR.AND.CUROPT) THEN
+C
+	      CALL INTERP(NCOORD,XYTMP,INTFST,LAST,LOOP,DRAW,Z,.TRUE.)
+	   ELSE
+	      CALL STDBFA(NCOORD,XYTMP,Z)
+	   ENDIF
+	ELSE
+	   IF (FRTCUR.AND.CUROPT) THEN
+C
+	      CALL INTERP(NCOORD,STXY,INTFST,LAST,LOOP,
+     &	               DRAW,Z,.TRUE.)
+	   ELSE
+	      CALL STDBFA(NCOORD,STXY,Z)
+	   ENDIF
+	ENDIF
+	PREV_LOOP = LOOP	! save up for possible use above
+	GOTO 9990
+C
+C 2-5 circles
+200	CONTINUE
+	IF (GOT_Z) THEN
+	   COEFFS_DEF = PLANE(STXY,Z,COEFFS)
+	ELSE
+	   COEFFS_DEF = .FALSE.
+	ENDIF
+	CALL STCIRC( AUX , .TRUE. ,COEFFS_DEF,COEFFS)
+	GOTO 9990
+C
+C 7-9 symbols
+700	CONTINUE
+C
+C pass height to FRTLIB
+	IF (KRSINI) CALL SRI_SET_Z(Z(1))
+C
+C If there is a special symbol drawing routine, then use it
+C NB CALLR in MAR:PACKER.MAR - call routine with address in SYMBAD
+C passing argument list
+	IF (SYMBAD .NE. 0) THEN
+	   CALL CALLR(
+     &     PACK(PAKFC),FRTSC,STNATT,STATTC,STATTV(1,1),STXY(1,1),
+     &     STXY(2,1),AUX,TRITXT,SRIPLT,TRISCN,%VAL(TEXTAD),FS,
+     &	   %VAL(SYMBAD))
+	ELSE
+	   CALL SRIPLT(FRTSC,STXY(1,1),STXY(2,1),AUX(SIZI),AUX(ANGI))
+	ENDIF
+	GOTO 9990
+C
+C 10 - text
+1000	CONTINUE
+C
+C pass height to FRTLIB
+	IF (KRSINI) THEN
+	   CALL SRI_SET_Z(Z(1))
+C
+C set up other Z values, if required
+	   IF (BOXOPT.OR.BLAOPT) THEN
+	      DO 1005, I=2,5
+	         Z(I) = Z(1)
+1005	      CONTINUE
+	   ENDIF
+	ENDIF
+C
+C blank out area behind text
+	IF (BLAOPT) THEN
+	   CALL BOX_AUX(STXY(1,1),STXY(2,1),Z(1),AUX,EXPROP,XOUT,YOUT,ZOUT)
+	   CALL SRIGFA(5,XOUT,YOUT,ZOUT)
+	ENDIF
+C
+C draw text, or a box
+	IF (.NOT.BOXOPT) THEN
+C
+C If there is a special text drawing routine, then use it
+C NB CALLR in MAR:PACKER.MAR - call routine with address in TEXTAD
+C passing argument list
+	   IF (TEXTAD.NE.0) THEN
+	      CALL CALLR(
+     &	            TEXT,PACK(PAKFC),FRTSC,STXY(1,1),STXY(2,1),AUX,
+     &	            TRITXT,SRIPLT,TRISCN,FS,HWTOPT.AND.FRTHWS,
+     &		    %VAL(TEXTAD))
+	   ELSE
+C
+C calculate position of bottom left of text
+	      X = STXY(1,1)+AUX(MINXI)*AUX(COSI)-AUX(MINYI)*AUX(SINI)
+	      Y = STXY(2,1)+AUX(MINXI)*AUX(SINI)+AUX(MINYI)*AUX(COSI)
+	      CALL TRITXT(TEXT,FRTSC,X,Y,AUX(SIZI),AUX(ANGI),
+     &				HWTOPT.AND.FRTHWS)
+	   ENDIF
+	ELSE
+C
+C get box around text and draw it
+	   CALL BOX_AUX(STXY(1,1),STXY(2,1),Z(1),AUX,0.0,XOUT,YOUT,ZOUT)
+	   CALL SRIGPL(5,XOUT,YOUT,ZOUT)
+	ENDIF
+	GOTO 9990
+C
+C 11 - symbol string
+1100	CONTINUE
+1110	DO 1120 I=1,NCOORD
+C
+C pass height to FRTLIB
+	   IF (KRSINI) CALL SRI_SET_Z(Z(I))
+C
+C If there is a special symbol drawing routine, then use it
+C NB CALLR in MAR:PACKER.MAR - call routine with address in SYMBAD
+C passing argument list.
+	   IF (SYMBAD .NE. 0) THEN
+	      CALL CALLR(
+     &        PACK(PAKFC),FRTSC,STNATT,STATTC,STATTV(1,I),STXY(1,I),
+     &        STXY(2,I),AUX,TRITXT,SRIPLT,TRISCN,%VAL(TEXTAD),
+     &        %VAL(SYMBAD))
+	   ELSE
+	      CALL SRIPLT(FRTSC,STXY(1,I),STXY(2,I),
+     &        AUX(SIZI),AUX(ANGI))
+	   ENDIF
+1120	CONTINUE
+C
+C conclusion
+9990	CONTINUE
+C
+C Do anything needed at end of features not plotted by FRTLIB
+	IF ((LAST.AND.LINEAR).OR.FRTARC) THEN
+	   CALL STDBFF(2)			! final flush
+	   IF (FRTARE) THEN
+	      IF (FILOPT.AND.PATOPT.AND.FRTSC.LT.-1) THEN ! patterned fill
+	         CALL FRT_END_FILL
+	      ELSE				! ordinary area
+	         CALL LSG_END_AREA
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C Do anything needed at the end of EVERY feature
+CCCC	IF (LAST.OR..NOT.STRING) THEN
+CCCC nothing to do for now
+CCCC	ENDIF
+C
+C reselect all planes if overlays in use (primary workstation only)
+	IF (OVERLAYS_INUSE.AND..NOT.FROM_DRWFEAT) THEN
+	   CALL LSG_PLANE_SELECT(OVERLAY_WORKSTATION,-1)
+	   CALL LSG_PLANE_OFFSET(OVERLAY_WORKSTATION,0)
+	   IF (OVERLAY_SHARE.AND.WKAC(3-OVERLAY_WORKSTATION)) THEN
+	      CALL LSG_PLANE_SELECT(3-OVERLAY_WORKSTATION,-1)
+	      CALL LSG_PLANE_OFFSET(3-OVERLAY_WORKSTATION,0)
+	   ENDIF
+	ENDIF
+C
+9998	TIMING(TIMDRAW) = SECNDS(TIMING(TIMDRAW))
+9999	IF (NO_ZOOM) THEN		! reset SRISCL common block etc
+	   SCLDIS = SAV_SCLDIS
+	   CALL SRIUNI(SAV_PLTSCL,SAV_SRISCL,SAV_SRIROT,SAV_ENLSCL)
+	   CALL SRISLW(SAV_SRIWID)
+	ENDIF
+	RETURN
+	END

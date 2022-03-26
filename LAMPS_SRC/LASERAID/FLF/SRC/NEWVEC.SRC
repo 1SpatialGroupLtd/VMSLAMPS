@@ -1,0 +1,188 @@
+	LOGICAL*4 FUNCTION NEWVEC(NTYPE,NEWDIR)
+C
+***	MODULE	NEWVEC
+***	IDENT	28MY86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Converged				 DM	28-May-1986
+CMOD	Made a function; fails if bad vector	 DM	20-Mar-1986
+CMOD	Copes with single-point chains; tidied	 DM	11-Mar-1986
+CMOD	Offset the start of the new scan vector
+CMOD	if predicting sideways from edge	 DM	11-Sep-1985
+CMOD	NTYPE=0 (not LOST) ==> straight ahead	 DM	09-Sep-1985
+CMOD	Cope with 'junction scan' connection	 DM	30-Aug-1985
+CMOD	Predict sideways on LSTSEL if wide	WJJ	16-Nov-1982
+CMOD	Ensure we use any connection in the
+CMOD	 correct direction			WJJ	12-Nov-1982
+CMOD	Set NEXT if GTLST2 returns 3		WJJ	07-Oct-1982
+CMOD	Predict on GTLST2 if junc in hand	AJW	23-Jun-1982
+CMOD	skip to end of reverse apex chains	PGH	18-Jun-1982
+CMOD	DR=SQRT(...) now maximised with 0.01	AJW	27-Jan-1982
+CMOD	Tidied					AJW	27-Jan-1981
+C	Created					MCF	28-Apr-1977
+C
+C Decide where to put the next scan vector by looking at the end of the
+C digitised line. However, if there is a segment in hand or if the
+C previous connection was an edge or wide then use it as a guide.
+C Returns .TRUE. if the new vector is unsatisfactory, .FALSE. otherwise.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C parameters:
+***	PARAMETER/PARAMS/
+C
+C arguments:
+	INTEGER NTYPE		! type of prediction required:
+C				  0 - straight ahead
+C				  1 - straight ahead
+C				  2 - twitch about 45 degrees
+C				  3 - look this way
+C				  4 - look that way
+C				  5 - look back
+C If the scan can't be twitched, then NTYPE is incremented and the next
+C option is chosen.
+C
+	INTEGER NEWDIR		! IDIR to be used, -1 => don't care
+C
+C common blocks:
+***	COMMON/LINKS/
+***	COMMON/LKFOLL/
+***	COMMON/LKPARM/
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+C
+C local workspace:
+	INTEGER K,NEND(2)
+	INTEGER N,M,NGT2
+	INTEGER OFFSET		! offset of start of new vec (usu. IPIT)
+	INTEGER THIS(2),THAT(2) ! the 2 points
+	REAL	D(2),DR
+	REAL	NEW(2)		!  the new scan's components
+C
+C ......................................................................
+C
+C get two points to represent the line.
+	NEWVEC=.TRUE.
+	CALL GTLST2(START,10000.0,LIMIT(8),NGT2,THIS,THAT,N)
+10	OFFSET=IPIT
+	IF (CHNSEL.EQ.0) GO TO 70		! connection in hand ?
+	IF (CONNCT(4,CHNSEL).EQ.5) GO TO 100	! junction ?
+	IF (CONNCT(4,CHNSEL).EQ.7) GO TO 100	! junction scan ?
+C
+C use the connection to get new direction.
+	N=CONNCT(2,CHNSEL)
+	K=CONNCT(3,CHNSEL)
+	NEND(K)=NODE(FIRST(N))
+	NEND(3-K)=NODE(LAST(N))
+	D(X)=ENCBUF(X,NEND(2)) - ENCBUF(X,NEND(1))
+	D(Y)=ENCBUF(Y,NEND(2)) - ENCBUF(Y,NEND(1))
+	GO TO (100,20,30,40,50,100,60),CONNCT(4,CHNSEL)+1
+	GO TO 100				! trap odd cases
+C
+C edge - does it have only one point ?
+20	IF (LENGTH(N).EQ.1) GO TO 100		! yes - use local trends
+	GO TO 110				! predict normally
+C
+C wide line - are we near end of scan ?
+30	IF (IABS(ID(IU) - ENCBUF(IU,NEND(2))).LT.LIMIT(1)*IPIT) GO TO 20
+	D(IV)=-CONNCT(1,CHNSEL)			! no - look sideways
+	D(IU)=0
+	GO TO 110
+C
+C apex - look back along it at the two incoming branches.
+40	D(X)=-D(X)
+	D(Y)=-D(Y)
+	GO TO 110
+C
+C prediction (from FUMBLE).
+50	THIS(X)=ENCBUF(X,NEND(1))
+	THIS(Y)=ENCBUF(Y,NEND(1))
+	GO TO 110
+C
+C a reverse apex - leap to end.
+60	IF (.NOT.JNCING) GO TO 100
+	THIS(X)=ENCBUF(X,NEND(2))
+	THIS(Y)=ENCBUF(Y,NEND(2))
+	GO TO 110
+C
+C no connection - is last connection useful ?
+70	IF (LSTSEL.EQ.0.OR.NTYPE.GT.1) GO TO 100
+	GO TO (100,80,90,100,100,100),CONNCT(4,LSTSEL)+1 ! split on type
+	GO TO 100
+C
+C it was an edge - predict sideways.
+80	D(IV)=CONNCT(1,LSTSEL)
+	D(IU)=0
+	OFFSET=ABS(CONNCT(1,LSTSEL)) + IPIT	! try to avoid old line
+	GO TO 110
+C
+C it was a wide line - predict sideways.
+90	D(IV)=-CONNCT(1,LSTSEL)
+	D(IU)=0
+	GO TO 110
+C
+C predict on basis of local trends, deduced from one or two points.
+100	NEW(X)=0			! in case only one point
+	NEW(Y)=0
+	IF (NGT2.LT.3) GO TO 210	! exit if GTLST2 failed
+	IF (NGT2.LT.4) GO TO 200	! points not separate - use THIS
+	D(X)=THIS(X)-THAT(X)
+	D(Y)=THIS(Y)-THAT(Y)
+C
+C all routes join here, having set up D().
+110	DR=SQRT(D(X)*D(X) + D(Y)*D(Y))
+	IF (DR.LT.0.01) GO TO 220	! fail if vector is duff
+	D(X)=D(X)/DR			! normalise
+	D(Y)=D(Y)/DR
+120	NEWDIR=-1
+	GO TO (130,130,130,160,150,180),NTYPE+1
+	NTYPE=1				! illegal code
+	GO TO 10			! start again
+C
+C straight, twitch.
+130	NEW(X)=D(X)
+	NEW(Y)=D(Y)
+	IF (NTYPE.NE.2) GO TO 190 	! straight
+C
+C near 45 degrees ?
+	IF (ABS(ABS(D(X)) - ABS(D(Y))).LE.LIMIT(16)) GO TO 140
+C
+C no - try next.
+	NTYPE=NTYPE + 1
+	GO TO 120
+C
+C yes - so ...
+140	NXTID(X)=NEW(X)*IDSIZE
+	NXTID(Y)=NEW(Y)*IDSIZE
+	CALL SETDIR(NXTID,NEWDIR,N,M)
+	NEWDIR=1 - NEWDIR		! ... twitch
+	GO TO 200
+C
+C look that way.
+150	PREWAY=.NOT.PREWAY		! reset default direction
+C
+C look this way.
+160	IF (PREWAY) GO TO 170		! look right ...
+	NEW(X)=-D(Y)			! or look left
+	NEW(Y)= D(X)
+	GO TO 190
+C
+C look right.
+170	NEW(X)= D(Y)
+	NEW(Y)=-D(X)
+	GO TO 190
+C
+C look back
+180	NEW(X)=-D(X)
+	NEW(Y)=-D(Y)
+C
+190	NXTID(X)=IDSIZE*NEW(X)
+	NXTID(Y)=IDSIZE*NEW(Y)
+200	NEXT(X)=START(X) + THIS(X) + OFFSET*NEW(X)
+	NEXT(Y)=START(Y) + THIS(Y) + OFFSET*NEW(Y)
+210	NEWVEC=.FALSE.			! success
+220	RETURN
+	END

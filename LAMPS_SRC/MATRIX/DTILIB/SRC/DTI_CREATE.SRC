@@ -1,0 +1,276 @@
+ 	INTEGER*4 FUNCTION DTI_CREATE 
+     &            (DTI_LUN, NAME, NAME_LENGTH,
+     &		  HEADER_MAKE, HEADER_SIZE, 
+     &		  DATA_MAKE, XSIZE, YSIZE,
+     &		  RETVAL )
+C
+***	IDENT	20JA89
+***	MODULE	DTI_CREATE
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C
+C	Modified  : DRC 02AP87 To accommodate bit data files
+C	Modified  : DRC 08FE88 To pass lun argument in range 0-8 
+C		    to VIO$OPEN_SEC
+C 	Modified  : DRC 10MR88 To check that the data extent values 
+C		    are valid
+C	Modified  : DRC 01AU88 To handle LSLA type header, and to
+C		    record write access status.  For a LSLA and ALVY
+C		    file, the header length value is now optional.
+C		    If no value is supplied we will use the default.
+C	Modified  : DRC 03AU88 To now create a LSLA type header if an
+C		    ALVY or MIKE file is requested, and to replace
+C		    parameter DTI_DTED with DTI_TED4
+CMOD		    To check that columns and rows do not exceed
+C		    DTI_MAX_COLUMNS or DTI_MAX_ROWS.  DATA_SIZE
+C		    converted to REAL.        DRC 20JA89
+C
+C-------------------------------------------------------------------------
+C	DTILIB Function.   
+C
+C	Creates the file NAME on DTI_LUN.
+C	HEADER_MAKE determines with which type of header the file
+C	is created - for an ALVY or LSLA header the argument 
+C	HEADER_SIZE is also required.
+C	DATA_MAKE determines what sort of data will be stored in
+C	the data area, and XSIZE and YSIZE determine the size of the
+C	data area.
+C
+C	Details on the mapped file, and what we know about the
+C	file header are written to variables in the common block DTIHDR
+C	and to the file header.
+C
+C	The function returns true if successful; in the event of
+C	failure any system routine errors are returned in RETVAL.
+C
+C	The function interfaces directly with the LSLLIB function
+C	VIO$OPEN_SEC to map the file into virtual memory.
+C
+C-------------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters
+	INCLUDE '($SSDEF)'
+C
+***	PARAMETER/LSL$CMNDTI:DTIDEF/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C arguments
+	INTEGER*4		DTI_LUN		!LUN on which to open file
+	INTEGER*4		NAME_LENGTH 	!Length of filename
+	INTEGER*4		HEADER_MAKE	!What type of header 
+C						!should we create?
+	INTEGER*4		HEADER_SIZE	!What size of header. This
+C	is only required for ALVY or LSLA files 
+C	which have a variable length header.
+	INTEGER*4		DATA_MAKE	!What sort of data are
+C	we going to put in the data area?
+	INTEGER*4		XSIZE		!X Extent of data area
+	INTEGER*4		YSIZE		!Y Extent of data area
+	INTEGER*4		RETVAL		!system error code
+	CHARACTER*128		NAME		!DTI filename
+C
+C functions
+	INTEGER*4		VIO$OPEN_SEC	!to map file into virt memory
+	INTEGER*4		DTI_WRITE_HEADER!to write the DTI header
+	LOGICAL			HAVE_I_AN_ARG	!test for presence of argument
+C
+C locals
+	INTEGER*4		VIO_LUN		!Lun passed to VIO$OPEN_SEC
+	INTEGER*4		SECTION_ADDR	!address of mapped file
+	INTEGER*4		SECTION_SIZE	!size of mapped file
+	INTEGER*4		IERR		!function return value
+	REAL*4			DATA_SIZE	!size of data area (bytes)
+	INTEGER*4		SIZE_HEADER	!size of header
+	INTEGER*4		DTISIZ		!size of DTI file (blocks)
+	INTEGER*4		ERROR		!system error code
+C
+C****************************************************************************
+C
+C	Test if the supplied LUN number is valid
+	IF(DTI_LUN.LT.1.OR.DTI_LUN.GT.MAX_DTI)THEN
+	  DTI_CREATE=DTI__BADLUN	! LUN out of range
+	  GOTO 999			! Return
+	ENDIF
+C
+C	Test of the supplied LUN is free
+	IF(DTILUN_INUSE(DTI_LUN))THEN
+	  DTI_CREATE=DTI__LUNINUSE	! LUN in use already
+	  GOTO 999			! Return
+	ENDIF
+C
+C	Test if the header type is valid
+	IF(HEADER_MAKE.NE.DTI_MIKE.AND.
+     &	   HEADER_MAKE.NE.DTI_UHL1.AND.
+     &	   HEADER_MAKE.NE.DTI_TED4.AND.
+     &	   HEADER_MAKE.NE.DTI_ALVY.AND.
+     &     HEADER_MAKE.NE.DTI_LSLA)THEN
+	   DTI_CREATE=DTI__INVHEAD	! invalid header type
+	   GOTO 999
+	ENDIF
+C
+C	Check that the data type is valid
+	IF(DATA_MAKE.NE.DATA_BYTE.AND.
+     &	   DATA_MAKE.NE.DATA_WORD.AND.
+     &     DATA_MAKE.NE.DATA_LONG.AND.
+     &	   DATA_MAKE.NE.DATA_REAL.AND.
+     &     DATA_MAKE.NE.DATA_BIT)THEN
+	   DTI_CREATE=DTI__INVDATA	! unrecognised data type
+	   GOTO 999
+	ENDIF
+C
+C	Check that the data extent values are valid
+	IF(XSIZE.LE.0.OR.YSIZE.LE.0.OR.
+     &     XSIZE.GT.DTI_MAX_COLUMNS.OR.
+     &     YSIZE.GT.DTI_MAX_ROWS)THEN
+	  DTI_CREATE=DTI__BADEXTENT
+	  GOTO 999
+	ENDIF
+C
+C	If the DATA_MAKE is DATA_BIT check that the YSIZE
+C	is valid (ie. a multiple of 8)
+	IF(DATA_MAKE.EQ.DATA_BIT)THEN
+	  IF(MOD(YSIZE,8).NE.0)THEN
+	    DTI_CREATE=DTI__INVYEXTENT
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C	Work out the size of the DTI section in bytes
+C
+C----------------------------------------------------------------------------
+C	First the header area
+C
+C	ALVY files are now treated as LSLA files
+C	If ALVY or LSLA test for an optional header size value 
+C	or use default
+	IF     (HEADER_MAKE.EQ.DTI_ALVY.OR.
+     &          HEADER_MAKE.EQ.DTI_LSLA)THEN
+	  IF(.NOT.HAVE_I_AN_ARG(5))THEN
+C	use the default header size
+            SIZE_HEADER=DEFAULT_LSLA_HEADER
+	  ELSE
+C	Test the header size is valid, and
+C	use the supplied value for HEADER_SIZE
+C	but ensure its at least equal to the default
+	    IF(HEADER_SIZE.GT.MAX_HEADER)THEN
+	      DTI_CREATE=DTI__BADHEADSIZE
+	      GOTO 999
+	    ENDIF
+	    SIZE_HEADER=MAX(HEADER_SIZE,DEFAULT_LSLA_HEADER)
+	  ENDIF
+C
+C	If MIKE...actually create a LSLA file with the default
+C	header length
+	ELSE IF(HEADER_MAKE.EQ.DTI_MIKE)THEN
+	  SIZE_HEADER=DEFAULT_LSLA_HEADER
+C
+C	If UHL1.....
+	ELSE IF(HEADER_MAKE.EQ.DTI_UHL1)THEN
+	  SIZE_HEADER=DTI_DMA_DATA
+C
+C	If TED4.....
+	ELSE IF(HEADER_MAKE.EQ.DTI_TED4)THEN
+	  SIZE_HEADER=DTI_TED_DATA
+	ENDIF
+C
+C----------------------------------------------------------------------
+C	Then the data area (dependent on x and y sizes and data type)
+	IF     (DATA_MAKE.EQ.DATA_BYTE)THEN
+	   DATA_SIZE=XSIZE*YSIZE	
+	ELSE IF(DATA_MAKE.EQ.DATA_WORD)THEN
+	   DATA_SIZE=(XSIZE*YSIZE)*2
+	ELSE IF(DATA_MAKE.EQ.DATA_LONG.OR.DATA_MAKE.EQ.DATA_REAL)THEN
+	   DATA_SIZE=(XSIZE*YSIZE)*4
+	ELSE IF(DATA_MAKE.EQ.DATA_BIT)THEN
+	   DATA_SIZE=(XSIZE*YSIZE)/8
+	ENDIF
+C
+C	Sum header and data sizes and round up to next block
+	DTISIZ=(SIZE_HEADER+DATA_SIZE+511)/512	!in blocks
+C
+C------------------------------------------------------------------------
+C
+C	Now let's try and create the DTI file
+C
+	VIO_LUN=DTI_LUN-1
+	IERR  = VIO$OPEN_SEC
+     &  (NAME(1:NAME_LENGTH),		! Filename
+     &	DTISIZ,				! Size in blocks 
+     &	.TRUE.,				! Allow write access to file?
+     &	.TRUE.,				! Create new file
+     &	SECTION_ADDR,			! Address of mapped file
+     &	SECTION_SIZE,			! Size of mapped file 
+     &	VIO_LUN)			! LUN to open the file on
+C
+	IF (IERR.NE.SS$_CREATED) THEN	! Unsuccessful
+	  DTI_CREATE=DTI__SYSERR
+	  RETVAL=IERR			! Pass back system error
+	  GOTO 999
+	END IF
+C
+C--------------------------------------------------------------------------
+C
+C	Transfer mapped file details into DTIHDR and mark LUN as used
+	DTI_NAME(DTI_LUN)	=NAME			! Filename
+	DTI_NAME_LENGTH(DTI_LUN)=NAME_LENGTH		! Length of file
+	SEC_ADDR(DTI_LUN)	=SECTION_ADDR		! Address of map sec
+	SEC_SIZE(DTI_LUN)	=SECTION_SIZE		! Size of mapped sec
+	DTILUN_INUSE(DTI_LUN)	=.TRUE.			! LUN now in use
+	READ_ONLY(DTI_LUN)      =.FALSE.		! opened for write
+C							! access
+C
+C	Fill out file variables in DTIHDR
+C	and write header identifier to the file
+C
+	IF      (HEADER_MAKE.EQ.DTI_MIKE) THEN	! MIKE type file
+	  HEADER_TYPE(DTI_LUN)=DTI_LSLA		! actually LSLA
+	  DATA_OFFSET(DTI_LUN)=DEFAULT_LSLA_HEADER
+	ELSE IF (HEADER_MAKE.EQ.DTI_UHL1) THEN	! UHL1 type file
+	  HEADER_TYPE(DTI_LUN)=DTI_UHL1
+	  DATA_OFFSET(DTI_LUN)=DTI_DMA_DATA
+	ELSE IF (HEADER_MAKE.EQ.DTI_TED4) THEN	! TED4 type file
+	  HEADER_TYPE(DTI_LUN)=DTI_TED4
+	  DATA_OFFSET(DTI_LUN)=DTI_TED_DATA
+C 	NB. Rather than an ALVY file we now automatically
+C	create a LSLA file.
+	ELSE IF (HEADER_MAKE.EQ.DTI_ALVY.OR.	! ALVY type file
+     &           HEADER_MAKE.EQ.DTI_LSLA) THEN	! LSLA type file	  
+	  HEADER_TYPE(DTI_LUN)=DTI_LSLA
+	  DATA_OFFSET(DTI_LUN)=SIZE_HEADER
+	ENDIF
+C
+	X_EXTENT(DTI_LUN) =XSIZE
+	Y_EXTENT(DTI_LUN) =YSIZE
+C	Set the grid interval in x and y to 1, if the applications
+C	program hasn't already set X_GRID and Y_GRID
+	IF(X_GRID(DTI_LUN).EQ.0.0)X_GRID(DTI_LUN)=1.0
+	IF(Y_GRID(DTI_LUN).EQ.0.0)Y_GRID(DTI_LUN)=1.0
+C
+	DATA_TYPE(DTI_LUN)=DATA_MAKE
+C
+C	Call DTI_WRITE_HEADER to write these values to the header.
+C	Note that the grid interval and min and max values may at
+C	present be unset, and will need to be set by the calling program,
+C	and written specifically.
+C
+	IERR = DTI_WRITE_HEADER ( DTI_LUN, ERROR )
+	IF (IERR.NE.DTI__NORMAL)THEN
+	   DTI_CREATE = IERR
+	   RETVAL=ERROR
+	   GOTO 999
+	ENDIF
+C	   
+C----------------------------------------------------------------------------
+C
+	DTI_CREATE = DTI__NORMAL	!Signal success
+C
+999	RETURN
+C
+	END

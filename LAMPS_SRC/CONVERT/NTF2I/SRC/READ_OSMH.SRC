@@ -1,0 +1,632 @@
+	LOGICAL FUNCTION READ_OSMH
+C
+***     MODULE READ_OSMH
+***     IDENT	18JA94
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+C Author	IM	25-10-87
+C
+C Reads the OS specific data from the SECHREC
+C
+CMOD 								TJI 07-Oct-1987
+CMod	Handle NTF 1.1					  	VLG 31-Oct-1989
+CMod								VLG 30-Jan-1990
+CMOD	source tidied,restructured, added IS_CONTINUATION	SG  26-Jun-1991
+CMOD	Fix bug. SPEC_NUM being read with RDINT not RDLONG	ST  03-Oct-1991
+CMOD	Calculate BGI from SCALE				ST  03-Oct-1991
+CMOD	Don't skip section when Databank date is invlaid	ST  18-Feb-1992
+CMOD	BS7567 (v2.0) support added (W93/13)			ST  02-Jun-1993
+C       (including making SHORTSECH a warning not an error)
+CMOD    No longer attempts to read a month field from the	ST 18-Jan-1994
+C	SECHREC field, SVY_DATES_FIRST_LAST as it is
+C	defined as CCYYCCYY. The month will now default to
+C	Jan ('01'). Mod 1330.
+C
+	IMPLICIT NONE
+C
+C Commons:
+C
+	INCLUDE 'NTF2IMSG.PAR'
+	INCLUDE 'LSL$CMNIFF:MHDMB.CMN'  ! OS map header common
+	INCLUDE	'LSL$CMNIFF:MD2DES.CMN'	! and the map descriptor
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE	'RECORD.CMN'
+C
+C Functions:
+C
+	LOGICAL		RDINT		! read an integer from input buffer
+	LOGICAL		RDLONG		! read a long integer
+	LOGICAL		OSMH_TO_BINDAY	! convert to ICL bindary days
+	LOGICAL		READ_CONTINUE	! read next record
+	LOGICAL		IS_CONTINUATION
+C
+C Workspace:
+C
+	LOGICAL		OK,HAD_ERR	! Success flag2
+	INTEGER		I,J
+C
+	INTEGER		YEAR1,YEAR2	! years only
+	INTEGER		MONTH1,MONTH2	! months only
+	INTEGER		YEAR,MONTH,DAY	! full form of date
+	BYTE		LETTERS(240)	! boundary information
+C
+	CHARACTER*6	NTF$_BOUNDARY_DATE
+	CHARACTER*8	NTF$_CONTENT_INDICATOR
+	CHARACTER*4	NTF$_CONTOUR_VI
+	CHARACTER*8	NTF$_COPYRIGHT
+	CHARACTER*6	NTF$_DIGITAL_UPDATE_COUNT
+	CHARACTER*6	NTF$_DIGITAL_UPDATE_DATE
+	CHARACTER*12	NTF$_EDITION
+	CHARACTER*8	NTF$_EDGE_MATCH_STATUS
+	CHARACTER*4	NTF$_HOUSE_UNIT_COUNT
+	CHARACTER*8	NTF$_INITIAL_DATABANK_DATE
+	CHARACTER*8	NTF$_LAST_AMND
+	CHARACTER*8	NTF$_LATEST_REVISION_DATE
+	CHARACTER*8	NTF$_MULTI_YEAR_HWM_DATE
+	CHARACTER*8	NTF$_MULTI_YEAR_LWM_DATE
+	CHARACTER*8	NTF$_SPECIFICATION_NUMBER
+	CHARACTER*6	NTF$_STORAGE_SCALE
+	CHARACTER*4	NTF$_SURVEY_TYPE
+	CHARACTER*8	NTF$_SURV_DATE
+	CHARACTER*4	NTF$_SVY_DATE_FIRST
+	CHARACTER*4	NTF$_SVY_DATE_LAST
+C
+	CHARACTER*2	NTF$_NORTH, NTF$_SOUTH, NTF$_WEST, NTF$_EAST
+	CHARACTER*4	NTF$_YEAR
+	CHARACTER*2	NTF$_DAY
+	CHARACTER*2	NTF$_MONTH
+
+C
+C--------------------------------------------------------------------------
+C We can start the map header off at once
+C
+	PCSCSC = MD2SCL		! Source scale - already read for MD
+	MHMRCE = MD2LOC(1)	! Sheet origin
+	MHMRCN = MD2LOC(2)
+	PCMRCE = MHMRCE		! In both required places, MH and PC
+	PCMRCN = MHMRCN
+C
+C--------------------------------------------------------------------------
+C already have the 2nd record of the SECHREC entry in hand,
+C
+	NTF$_SURV_DATE = STRING(53:60)			! survey date
+	NTF$_LAST_AMND = STRING(61:68)			! date of last amendment
+	NTF$_COPYRIGHT = STRING(69:76)			! date of copyright
+C
+C--------------------------------------------------------------------------
+C read stuff from SURV_DATE
+C
+	NTF$_YEAR  = NTF$_SURV_DATE(1:4)
+	NTF$_MONTH = NTF$_SURV_DATE(5:6)
+	HAD_ERR = .FALSE.
+C
+C	..................................................................
+C	Read the survey year and month
+C
+	CALL SETAUX(%REF(NTF$_YEAR),4)			! set reading buffer
+	HAD_ERR = RDINT(YEAR)				! Get the year
+	IF (.NOT.HAD_ERR) THEN				! had an error?
+	  CALL SETAUX(%REF(NTF$_MONTH),2)		! set reading buffer
+	  HAD_ERR = RDINT(MONTH)			! Now get the month
+	ENDIF
+C
+C	..................................................................
+C	did we read the month and year ok?
+C
+	IF (HAD_ERR) THEN				! an error occured
+	   CALL LSL_PUTMSG(NTF2I__SECHREC,'SURVEY_DATE',SEC_REC)
+	   CALL LSL_ADDSTR(NTF$_SURV_DATE)
+	   CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	   GOTO 1000
+	ENDIF
+C
+C	..................................................................
+C	Note that this field is now superseded by MHOSUR, but MHOSUR 
+C	gets set by the "SURVEY_DATES_FIRST_LAST" OS extension field
+C
+	CALL OSMH_PUTMY( MHSURD, MONTH,YEAR )		! store it
+C
+C--------------------------------------------------------------------------
+C read LAST_AMND field, could have expressed as nested IFs, but too cryptic
+C
+	NTF$_YEAR  = NTF$_LAST_AMND(1:4)
+	NTF$_MONTH = NTF$_LAST_AMND(5:6)
+	NTF$_DAY   = NTF$_LAST_AMND(7:8)
+	YEAR  = 0
+	MONTH = 0
+	DAY   = 0
+	MHDLA = 0					! default
+C
+C	..................................................................
+C
+	IF (NTF$_DAY.NE.' ') THEN
+	  CALL SETAUX(%REF(NTF$_DAY),2)			! Get the day
+	  OK = .NOT.RDINT(DAY) 
+	ENDIF
+C
+	IF ((OK).AND.(NTF$_MONTH.NE.' ')) THEN		! blank field
+	  CALL SETAUX(%REF(NTF$_MONTH),2)
+	  OK = .NOT.RDINT(MONTH)
+	ENDIF
+C
+	IF ((OK).AND.(NTF$_YEAR.NE.' ')) THEN
+	    CALL SETAUX(%REF(NTF$_YEAR),4)
+	    OK = .NOT.RDINT(YEAR)
+	ENDIF
+C
+C	..................................................................
+C	and convert it to an ICL binary date in the map header (Obsolete)
+C
+	IF (OK.AND.(YEAR.GT.0)) OK = OSMH_TO_BINDAY( MHDLA, DAY,MONTH,YEAR )
+C
+C	..................................................................
+C	cleanup after errors
+C
+	IF (.NOT.OK) THEN
+	  CALL LSL_PUTMSG(NTF2I__SECHREC,'LAST_AMND',SEC_REC)
+	  CALL LSL_ADDSTR(NTF$_LAST_AMND)
+	  CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	  GOTO 1000
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C Copyright date - only interested in the year
+C
+	NTF$_YEAR = NTF$_COPYRIGHT(1:4)
+	MHCPYD = 0
+C
+	IF (NTF$_YEAR.NE.' ') THEN
+	  CALL SETAUX(%REF(NTF$_YEAR),4)
+	  IF (RDINT(MHCPYD)) THEN
+	    CALL LSL_PUTMSG(NTF2I__SECHREC,'COPYRIGHT',SEC_REC)
+	    CALL LSL_ADDSTR(NTF$_COPYRIGHT)
+	    CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	  ENDIF
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C mandatory continuation record
+C
+1000	IF (IS_CONTINUATION(STRING,LENGTH)) THEN
+	  OK = READ_CONTINUE('SECHREC')
+	  IF (.NOT.OK) GOTO 9999
+	ELSE
+	  CALL LSL_PUTMSG( NTF2I__SHORTSECH )			! complain
+	  OK = .TRUE.
+	  GOTO 9999
+	ENDIF
+C
+C-------------------------------------------------------------------------
+C Check if we have a short OS header. A small scale (eg 625000) file has a
+C 3rd header record shorter than a large scale file. Therefore we must skip
+C the remaining fields since they are not present.
+C
+	IF (LENGTH.EQ.32) GOTO 9999
+C
+C--------------------------------------------------------------------------
+C Ignore the SQNAME and SQDATE, as we're not really interested in them.
+C
+	NTF$_STORAGE_SCALE		= STRING(31:36)
+	NTF$_INITIAL_DATABANK_DATE	= STRING(37:44)
+	NTF$_EDITION 			= STRING(45:56)
+	NTF$_SURVEY_TYPE		= STRING(57:60)
+	NTF$_CONTENT_INDICATOR		= STRING(61:68)
+	NTF$_LATEST_REVISION_DATE	= STRING(69:76)
+C
+C	-------------------------------------------------------------------
+C	Storage scale
+C 
+	MHSTSC = 0
+	IF (NTF$_STORAGE_SCALE.NE.' ') THEN
+	  CALL SETAUX(%REF(NTF$_STORAGE_SCALE),6)
+	  IF (RDLONG(MHSTSC)) THEN
+	    CALL LSL_PUTMSG(NTF2I__SECHREC,'STORAGE_SCALE',SEC_REC)
+	    CALL LSL_ADDSTR(NTF$_STORAGE_SCALE)
+	    CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	    GOTO 2000
+	  ENDIF
+	ENDIF
+C	-------------------------------------------------------------------
+C	Use scale to calcluate BGI
+C
+	IF (MHSTSC.GT.0) THEN
+	   MHBGI = INT(0.4 * FLOAT(MHSTSC) / 10.0)
+	ENDIF
+C
+	IF (MD2SCL.EQ.0.0) MD2SCL = MHSTSC
+C
+C	-------------------------------------------------------------------
+C	Initial databank date
+C
+	NTF$_YEAR = NTF$_INITIAL_DATABANK_DATE(1:4)
+	NTF$_MONTH = NTF$_INITIAL_DATABANK_DATE(5:6)
+	NTF$_DAY = NTF$_INITIAL_DATABANK_DATE(7:8)
+C
+	CALL SETAUX(%REF(NTF$_YEAR),4)
+	OK = .NOT.RDINT(YEAR)
+C
+	IF (OK) THEN
+	  CALL SETAUX(%REF(NTF$_MONTH),2)
+	  OK = .NOT.RDINT(MONTH)
+	ENDIF
+C
+	IF (OK) THEN
+	  CALL SETAUX(%REF(NTF$_DAY),2)
+	  OK = .NOT.RDINT(DAY)
+	ENDIF
+C
+	IF (OK)	OK = OSMH_TO_BINDAY( MHDIDB, DAY,MONTH,YEAR )
+C
+C	..................................................................
+C	cleanup after errors
+C
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__SECHREC,'DATABANK',SEC_REC)
+	   CALL LSL_ADDSTR(NTF$_INITIAL_DATABANK_DATE)
+C
+C Don't skip whole section if one date is wrong.
+C
+C	   CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+C	   GOTO 2000
+	ENDIF
+C
+C	-------------------------------------------------------------------
+C
+	CALL OSMH_PUTCHAR( %REF(          NTF$_EDITION),	MHEDTN, 12 )
+	CALL OSMH_PUTCHAR( %REF(      NTF$_SURVEY_TYPE),	MHSURT, 4  )
+	CALL OSMH_PUTCHAR( %REF(NTF$_CONTENT_INDICATOR),	MHCIND, 8  )
+C
+C	-------------------------------------------------------------------
+C
+	NTF$_MONTH = NTF$_LATEST_REVISION_DATE(5:6)
+	NTF$_YEAR = NTF$_LATEST_REVISION_DATE(1:4)
+	OK = .FALSE.
+C
+	CALL SETAUX(%REF(NTF$_MONTH),2)
+	
+	OK = .NOT. RDINT(MONTH)
+	IF (OK) THEN
+	  CALL SETAUX(%REF(NTF$_YEAR),4)
+	  OK = .NOT.RDINT(YEAR)
+	ENDIF
+C
+	IF (OK) THEN
+	  CALL OSMH_PUTMY( MHLFRD, MONTH,YEAR )
+	ELSE
+	  CALL LSL_PUTMSG(NTF2I__SECHREC,'REV_DATE',SEC_REC)
+	  CALL LSL_ADDSTR(NTF$_LATEST_REVISION_DATE)
+	  CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C Mandatory continuation record
+C
+2000	IF (IS_CONTINUATION(STRING,LENGTH)) THEN
+	  OK = READ_CONTINUE('SECHREC')
+	  IF (.NOT.OK) GOTO 9999
+	ELSE
+	  CALL LSL_PUTMSG( NTF2I__SHORTSECH )			! complain
+	  OK = .TRUE.
+	  GOTO 9999
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C ignoring the OS_USE record
+C
+	NTF$_BOUNDARY_DATE = STRING(11:16)
+	NTF$_DIGITAL_UPDATE_DATE = STRING(17:22)
+C
+C	-------------------------------------------------------------------
+C	BOUNDARY DATE
+C
+	NTF$_MONTH = NTF$_BOUNDARY_DATE(5:6)
+	NTF$_YEAR  = NTF$_BOUNDARY_DATE(1:4)
+C
+	OK = .FALSE.						! default
+	CALL SETAUX(%REF(NTF$_MONTH),2)
+	IF ( .NOT.RDINT(MONTH) ) THEN				! read month
+	  CALL SETAUX(%REF(NTF$_YEAR),4)
+	  IF ( .NOT.RDINT(YEAR) ) THEN				! read year
+	    CALL OSMH_PUTMY( MHBOUD, MONTH,YEAR )		! save details
+	    OK = .TRUE.						! set success
+	  ENDIF
+	ENDIF
+C
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__SECHREC,'BDY_DATE',SEC_REC)
+	   CALL LSL_ADDSTR(NTF$_BOUNDARY_DATE)
+	   CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	   GOTO 3000
+	ENDIF
+C
+C	-------------------------------------------------------------------
+C	Digital update date
+C
+	NTF$_MONTH = NTF$_DIGITAL_UPDATE_DATE(5:6)
+	NTF$_YEAR = NTF$_DIGITAL_UPDATE_DATE(1:4)
+	DAY = 0
+	MONTH = 0
+	YEAR = 0
+	MHSDUP = 0
+C	....................................................................
+C
+	IF (NTF$_MONTH.NE.' ') THEN
+	   CALL SETAUX(%REF(NTF$_MONTH),2)	
+	   OK = .NOT.RDINT(MONTH)
+	ENDIF
+C
+	IF ((OK).AND.(NTF$_YEAR.NE.' ')) THEN
+	   CALL SETAUX(%REF(NTF$_YEAR),4)
+	   OK = .NOT. RDINT(YEAR)
+	ENDIF
+C
+	IF (OK.AND.(YEAR.GT.0)) OK = OSMH_TO_BINDAY( MHSDUP,DAY,MONTH,YEAR )
+C
+	IF (.NOT.OK) THEN
+	  CALL LSL_PUTMSG(NTF2I__SECHREC,'DU_DATE',SEC_REC)
+	  CALL LSL_ADDSTR(STRING(17:22))
+	  CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	ENDIF
+C
+C	-------------------------------------------------------------------
+C	Ignore the STRUCTURE DATE, CHECK VALUES, OS USE, STRUCTURE CATEGORY,
+C	BATCH  NUMBER and QC DATE records 
+C
+C--------------------------------------------------------------------------
+C Mandatory continuation record
+C
+3000	IF (IS_CONTINUATION(STRING,LENGTH)) THEN
+	  OK = READ_CONTINUE('SECHREC')
+	  IF (.NOT.OK) GOTO 9999
+	ELSE
+	  CALL LSL_PUTMSG( NTF2I__SHORTSECH )			! complain
+	  OK = .TRUE.
+	  GOTO 9999
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C First and last survey dates
+C
+	NTF$_SVY_DATE_FIRST	= STRING(3:6)
+	NTF$_SVY_DATE_LAST	= STRING(7:10)
+	NTF$_CONTOUR_VI		= STRING(11:14)
+	NTF$_SPECIFICATION_NUMBER= STRING(15:22)
+	NTF$_EDGE_MATCH_STATUS	= STRING(23:30)
+	NTF$_MULTI_YEAR_HWM_DATE	= STRING(31:38)
+	NTF$_MULTI_YEAR_LWM_DATE	= STRING(39:46)
+	NTF$_HOUSE_UNIT_COUNT	= STRING(51:54)
+C
+C	-------------------------------------------------------------------
+C
+	NTF$_YEAR      = NTF$_SVY_DATE_FIRST
+C
+	CALL SETAUX(%REF(NTF$_YEAR),4)
+	OK = .NOT.RDINT(YEAR1)
+C	
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__SECHREC,'SURV_DATE_1',SEC_REC)
+	   CALL LSL_ADDSTR(NTF$_SVY_DATE_FIRST)
+	   CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	   GOTO 4000
+	ENDIF
+C
+C	-------------------------------------------------------------------
+C
+	NTF$_YEAR      = NTF$_SVY_DATE_LAST
+C
+	CALL SETAUX(%REF(NTF$_YEAR),4)
+	OK = .NOT.RDINT(YEAR2)
+C	
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__SECHREC,'SURV_DATE_2',SEC_REC)
+	   CALL LSL_ADDSTR(NTF$_SVY_DATE_LAST)
+	   CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	   GOTO 4000
+	ENDIF
+C
+C	.................................................................
+C
+	CALL OSMH_PUTMY(MHOSUR(1),1,YEAR1)
+	CALL OSMH_PUTMY(MHOSUR(2),1,YEAR2)
+	IF (NTF$_SVY_DATE_FIRST.EQ.'0000') MHOSUR(1) = 0
+	IF (NTF$_SVY_DATE_LAST .EQ.'0000') MHOSUR(2) = 0
+C
+C	-------------------------------------------------------------------
+C	Contour vertical interval
+C
+	CALL SETAUX(%REF(NTF$_CONTOUR_VI),4)
+	IF (RDINT(MHCVI)) THEN
+	   CALL LSL_PUTMSG(NTF2I__SECHREC,'CONT_VI',SEC_REC)
+	   CALL LSL_ADDSTR(NTF$_CONTOUR_VI)
+	   CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	   GOTO 4000
+	ENDIF	
+C
+C	-------------------------------------------------------------------
+C	Specification number
+C
+	MHMSPC =0
+	IF (NTF$_SPECIFICATION_NUMBER.NE.' ') THEN
+	  CALL SETAUX(%REF(NTF$_SPECIFICATION_NUMBER),8)
+C Bug	  IF (RDINT(MHMSPC)) THEN
+ 	  IF (RDLONG(MHMSPC)) THEN
+	    CALL LSL_PUTMSG(NTF2I__SECHREC,'SPEC_NUMBER',SEC_REC)
+	    CALL LSL_ADDSTR(NTF$_SPECIFICATION_NUMBER)
+	    CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	    GOTO 4000
+	  ENDIF
+	ENDIF
+C
+C	-------------------------------------------------------------------
+C	Edge match status
+C
+	NTF$_NORTH = NTF$_EDGE_MATCH_STATUS(1:2)
+	NTF$_EAST  = NTF$_EDGE_MATCH_STATUS(3:4)
+	NTF$_WEST  = NTF$_EDGE_MATCH_STATUS(5:6)
+	NTF$_SOUTH = NTF$_EDGE_MATCH_STATUS(7:8)
+	MHEMSN = 0
+	MHEMSE = 0
+	MHEMSS = 0
+	MHEMSW = 0
+C	.................................................................
+C	
+	IF (NTF$_NORTH.NE.' ') THEN
+	   CALL SETAUX(%REF(NTF$_NORTH),2)
+	   OK = .NOT.RDINT(MHEMSN)
+	ENDIF
+C
+	IF (OK.AND.(NTF$_EAST.NE.' ')) THEN
+	   CALL SETAUX(%REF(NTF$_EAST),2)
+	   OK = .NOT.RDINT(MHEMSE)
+	ENDIF
+C
+	IF (OK.AND.(NTF$_SOUTH.NE.' ')) THEN
+ 	   CALL SETAUX(%REF(NTF$_SOUTH),2)
+	   OK = .NOT.RDINT(MHEMSS)
+	ENDIF
+C
+	IF (OK.AND.(NTF$_WEST.NE.' ')) THEN
+	   CALL SETAUX(%REF(NTF$_WEST),2)
+	   OK = .NOT.RDINT(MHEMSW)
+	ENDIF
+C
+	IF (.NOT.OK) THEN
+	  CALL LSL_PUTMSG(NTF2I__SECHREC,'EDGE_MATCH_STATUS',SEC_REC)
+	  CALL LSL_ADDSTR(NTF$_EDGE_MATCH_STATUS)
+	  CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	  GOTO 4000
+	ENDIF
+C
+C	-------------------------------------------------------------------
+C	Multiple high water mark
+C
+	NTF$_YEAR = NTF$_MULTI_YEAR_HWM_DATE(1:4)
+	CALL SETAUX(%REF(NTF$_YEAR),4)
+	OK = .NOT.RDINT(YEAR1)
+C
+	IF (OK) THEN	
+	  NTF$_YEAR = NTF$_MULTI_YEAR_HWM_DATE(5:8)
+	  CALL SETAUX(%REF(NTF$_YEAR),4)
+	  OK = .NOT.RDINT(YEAR2)
+	ENDIF
+C
+	IF (OK) THEN
+	  CALL OSMH_PUTHALVES( MHMHWM, YEAR1,YEAR2 )
+	ELSE
+	  CALL LSL_PUTMSG(NTF2I__SECHREC,'MY_HWM',SEC_REC)
+	  CALL LSL_ADDSTR(NTF$_MULTI_YEAR_HWM_DATE)
+	  CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	  GOTO 4000
+	ENDIF
+C
+C	-------------------------------------------------------------------
+C	Multiple low water mark
+C
+	NTF$_YEAR = NTF$_MULTI_YEAR_LWM_DATE(1:4)
+	CALL SETAUX(%REF(NTF$_YEAR),4)
+	OK = .NOT.RDINT(YEAR1)
+C
+	IF (OK) THEN	
+	  NTF$_YEAR = NTF$_MULTI_YEAR_LWM_DATE(5:8)
+	  CALL SETAUX(%REF(NTF$_YEAR),4)
+	  OK = .NOT.RDINT(YEAR2)
+	ENDIF
+C
+	IF (OK) THEN
+	  CALL OSMH_PUTHALVES( MHMLWM, YEAR1,YEAR2 )
+	ELSE
+	  CALL LSL_PUTMSG(NTF2I__SECHREC,'MY_LWM',SEC_REC)
+	  CALL LSL_ADDSTR(NTF$_MULTI_YEAR_LWM_DATE)
+	  CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	  GOTO 4000
+	ENDIF
+C
+C	-------------------------------------------------------------------
+C	House unit count   		Ignore the CONTRACTORS ID
+C
+	MHHUC = 0
+	IF (NTF$_HOUSE_UNIT_COUNT.NE.' ') THEN
+	   CALL SETAUX(%REF(NTF$_HOUSE_UNIT_COUNT),4)
+	   IF (RDINT(MHHUC)) THEN
+	      CALL LSL_PUTMSG(NTF2I__SECHREC,'HOUSE_UNIT_CNT',SEC_REC)
+	      CALL LSL_ADDSTR(NTF$_HOUSE_UNIT_COUNT)
+	      CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	      GOTO 4000
+	   ENDIF
+	ENDIF
+
+C
+C--------------------------------------------------------------------------
+C 	Boundary information, Read from this and next 3 records
+C
+	CALL SETAUX(%REF(STRING(55:78)),24)
+	CALL READSTR(LETTERS(1))
+C
+C	....................................................................
+C
+4000	IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) THEN
+	  OK = .FALSE.
+	ELSE
+	  OK = READ_CONTINUE('SECHREC')
+	  CALL SETAUX(%REF(STRING(3:78)),76)
+	  CALL READSTR(LETTERS(25))
+	ENDIF
+C
+C	....................................................................
+C
+	IF (OK.AND.IS_CONTINUATION(STRING,LENGTH)) THEN
+	  OK = READ_CONTINUE('SECHREC')
+	  CALL SETAUX(%REF(STRING(3:78)),76)
+	  CALL READSTR(LETTERS(101))
+	ENDIF
+C
+C	....................................................................
+C
+	IF (OK.AND.IS_CONTINUATION(STRING,LENGTH)) THEN
+	  OK = READ_CONTINUE('SECHREC')
+	  CALL SETAUX(%REF(STRING(3:66)),64)
+	  CALL READSTR(LETTERS(177))
+	ENDIF
+C
+C	....................................................................
+C
+	IF (.NOT.OK) THEN
+	  CALL LSL_PUTMSG( NTF2I__SHORTSECH)
+	  OK = .TRUE.
+	  GOTO 9999
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C	Digital update count
+C
+	NTF$_DIGITAL_UPDATE_COUNT = STRING(67:70)
+	CALL SETAUX(%REF(NTF$_DIGITAL_UPDATE_COUNT),4)
+	IF (RDINT(MHDUPC)) THEN
+	   CALL LSL_PUTMSG(NTF2I__SECHREC,'DU_COUNT',SEC_REC)
+	   CALL LSL_ADDSTR(NTF$_DIGITAL_UPDATE_COUNT)
+	   CALL LSL_ADDMSG(NTF2I__ABASECHREC)
+	   GOTO 9999
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C Put boundary info into the correct variables (ignore OSTF,INDICATOR records)
+C routine drastically reduced in stupidity, made more elegant, but still looks
+C like it could be improved 
+	J = 1
+	DO 6500 I = 1,80,8
+	  CALL OSMH_PUTCHAR(LETTERS(I    ),MHABI1(J  ),4)
+	  CALL OSMH_PUTCHAR(LETTERS(I+80 ),MHABI2(J  ),4)
+	  CALL OSMH_PUTCHAR(LETTERS(I+160),MHABI3(J  ),4)
+C
+	  CALL OSMH_PUTCHAR(LETTERS(I+4  ),MHABI1(J+1),4)
+	  CALL OSMH_PUTCHAR(LETTERS(I+84 ),MHABI2(J+1),4)
+	  CALL OSMH_PUTCHAR(LETTERS(I+164),MHABI3(J+1),4)
+	  J = J + 2
+6500	CONTINUE
+C .......................................................................
+C
+9999	READ_OSMH=OK
+	RETURN
+	END

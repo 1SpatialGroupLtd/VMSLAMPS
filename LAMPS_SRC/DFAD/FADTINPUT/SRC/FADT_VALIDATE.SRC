@@ -1,0 +1,254 @@
+	LOGICAL FUNCTION FADT_VALIDATE(FIELD,LWM,HWM,FADTARR,
+     &				       VALID,MSG_ARG)
+C
+***	MODULE FADT_VALIDATE
+***	IDENT 14JA88
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England.
+C Author: J.M. Billing			14 Jan 1988
+C
+C Function to validate fields in an FADT record according
+C to any rule file in use. The field of particular interest is 
+C identified by number FIELD, which refers to position in the normal
+C FADT record :
+C	1 FAC		2 Height	3 FAT		4 FID
+C	5 Security	6 Releasability	7 SMC		8 Ori/Dir/Den
+C	9 Width/Roof	10 Length/Tree
+C Returns .TRUE. if valid.
+C Returns .FALSE. if invalid.
+C Returns indication in VALID of which fields might have caused failure
+C Any field which did not match a rule will have its VALID(n) flag
+C set to .FALSE.
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$FADTINPUT:FADTINPUT.CMN'
+	INCLUDE 'LSL$FADTCMN:RULE.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+C
+C arguments
+	INTEGER*2	FIELD		! Field of particular interest
+	INTEGER*2	HWM		! Highest field to be tested
+	INTEGER*2	LWM		! Lowest field to be tested
+	INTEGER*2	FADTARR(10)	! FADT field array
+	LOGICAL		MSG_ARG		! Output diagnostics argument
+	LOGICAL		VALID(10)	! flags showing which fields
+					! caused failure of any valid'n
+					! rules overall
+C
+C Field name and name length tables
+	CHARACTER*20	FNAME(10)	! FADT record's fields' names
+	INTEGER*2	FNLEN(10)	! Field name lengths
+C
+C functions
+	LOGICAL		READ_FILE_RULE
+	LOGICAL		READ_DEF_RULE
+	LOGICAL		CHECK_BY_RULE
+C
+C w/s
+	INTEGER*2 	L(4)		! value limits for validation
+	INTEGER*2	ID		! rule interpretation indicator
+	INTEGER*2	FID		! FID of current record
+	INTEGER*2	CURRENT		! field currently being tested
+	INTEGER*2	I		! general temporary
+	INTEGER*2	RULE_NUM	! current rule number
+	LOGICAL		MSG		! alterable diagnostics flag
+	LOGICAL		OK(3)		! phase overall valid/inval flag
+	LOGICAL		PHASE_VALID(10)	! valid/invalid fields in
+					! each phase (default/gen/spec)
+	INTEGER*2	PHASE		! 1=def, 2=gen, 3=spec rules
+C
+C Set up field name and name string length tables
+C
+	DATA (FNAME(I),I=1,10)/	'FAC','Height','Type','FID','Security',
+     &				'Releasability','SMC','Ori/Dir/Den',
+     &				'Width/%-Roof','Length/%-tree'/
+C
+	DATA (FNLEN(I),I=1,10)/   3,     6,      4,    3,      8,
+     &				       13,        3,       11,
+     &				      12,            13/
+C
+C Assume success
+C
+	OK(1) = .TRUE.
+	OK(2) = .TRUE.
+	OK(3) = .TRUE.
+C
+C Init VALID flags
+C
+	DO 10 I = 1,10
+	   VALID(I) = .TRUE.
+10	CONTINUE
+C
+C Set diagnostics flag from diagnostics argument
+C Separate variables for each, since user may specify constant in call
+C
+	MSG = MSG_ARG
+C
+C----------------------------------------------------------------------
+C Start by checking all rules against defaults from DLMS spec
+C
+C Set start field to field of special interest argument
+C
+	CURRENT = FIELD
+C
+C Read defaults for current field
+C
+20	IF (READ_DEF_RULE(FADTARR(3),CURRENT,ID,L)) THEN
+C
+C Check that value obeys rule
+C
+	   IF (.NOT.CHECK_BY_RULE(FADTARR(CURRENT),ID,L)) THEN
+C
+C If invalid, output message if wanted, and reset message flag
+C so no further messages output
+C
+	      IF (MSG) THEN
+	         CALL EXPAND('%S does not obey DLMS specification.',
+     &				   FNAME(CURRENT)(1:FNLEN(CURRENT)))
+	         CALL APPEND(' Please check.')
+	         CALL FORM_MSG(EXPDSC,0)
+	         MSG = .FALSE.
+	      ENDIF
+C
+C and set flag showing this field has caused a rule failure and
+C fail whole validation
+C
+	      VALID(CURRENT) = .FALSE.
+	      OK(1) = .FALSE.
+	   ENDIF ! if .not.check_by_rule
+C
+	ENDIF ! if read_def_rule
+C
+C Move onto next field, if there is one
+C
+	CURRENT = CURRENT+1
+	IF (CURRENT.GT.HWM) CURRENT = LWM
+	IF (CURRENT.NE.FIELD) GOTO 20
+C
+C If there is no rule file, finish here
+C
+	IF (.NOT.RULEOPN) GOTO 900
+C
+C----------------------------------------------------------------------
+C Now deal with general rules  (fid=0) and 
+C specific rules (fid=fadtarr(4))
+C
+C Set up fid to be zero - i.e. do general rules first
+C
+	FID = 0
+C
+C Set phase variable to 1, showing checking general rules
+C
+	PHASE = 2
+C
+C Set start field to field of special interest argument
+C
+25	CURRENT = FIELD
+C
+C Reset field valid flags to true, to avoid confusion with
+C fields which failed previous set of rules even though the
+C overall record passed at least one of them.
+C
+	DO 45 I = 1,10
+	   PHASE_VALID(I) = .TRUE.
+45	CONTINUE
+C
+C Set rule to zero
+C
+	RULE_NUM = 0
+C
+C Read rule for current field
+C
+30	IF (READ_FILE_RULE(	FID,		! fid=0 or fadtarr(4)
+     &				FADTARR(3),	! fat
+     &				LEVEL,		! file level
+     &				RULE_NUM,	! current rule
+     &				CURRENT,	! current field
+     &				ID,		! rule indicator
+     &				L		! rule value ranges
+     &				)) THEN
+C
+C Check that value obeys rule
+C
+	   IF (.NOT.CHECK_BY_RULE(FADTARR(CURRENT),ID,L)) THEN
+C
+C Set flag showing this field has caused a rule failure
+C
+	      PHASE_VALID(CURRENT) = .FALSE.
+C
+C try next rule, if there is one, resetting current field
+C
+	      IF ((RULE.NEXT.GT.0).AND.(RULE.NEXT.LT.9)) THEN
+	         RULE_NUM = RULE.NEXT
+	         CURRENT = FIELD
+	         GOTO 30
+C
+C Otherwise fail whole validation
+C
+	      ELSE
+	         OK(PHASE) = .FALSE.
+C
+C Update overall field valid/invalid flags with flags for this phase
+C
+	         DO 32 I = 1,10
+	            VALID(I) = VALID(I).AND.PHASE_VALID(I)
+32	         CONTINUE
+C
+C and output message if wanted, and reset message flag
+C so no further messages output
+C
+	         IF (MSG) THEN
+C
+C Find the first failing field for this phase
+C
+	            CURRENT = FIELD
+35	            IF (PHASE_VALID(CURRENT)) THEN
+	               CURRENT = CURRENT + 1
+	               IF (CURRENT.GT.HWM) CURRENT = LWM
+	               IF (CURRENT.NE.FIELD) GOTO 35
+	            ENDIF
+C
+C Do the message and output message saying which field failed
+C
+	            CALL EXPAND('%S may not obey validation table',
+     &				FNAME(CURRENT)(1:FNLEN(CURRENT)))
+	            IF (FID.EQ.0) THEN
+	               CALL APPEND(' general rules. Please check.')
+	            ELSE
+	               CALL APPEND(' specific rules. Please check.')
+	            ENDIF
+	            CALL FORM_MSG(EXPDSC,0)
+	            MSG = .FALSE.
+C
+	         ENDIF ! if msg
+C
+	      ENDIF ! if next rule exists
+C
+	   ENDIF ! if .not.check_by_rule
+C
+	ENDIF ! if read_def_rule
+C
+C Move onto next field, if there is one
+C
+	CURRENT = CURRENT+1
+	IF (CURRENT.GT.HWM) CURRENT = LWM
+	IF ((CURRENT.NE.FIELD).AND.OK(PHASE)) GOTO 30
+C
+C Find FID for specific rules if there is one and if
+C have not failed whole validation on general rules
+C
+	IF (	(FID.EQ.0).AND.
+     &		(FADTARR(4).NE.0).AND.
+     &		(FADTARR(4).LE.1600)	) THEN
+	   FID = FADTARR(4)
+	   PHASE = 3		! specific rule phase
+	   GOTO 25
+	ENDIF
+C
+C----------------------------------------------------------------------
+C Exit
+C
+900	FADT_VALIDATE = OK(1).AND.OK(2).AND.OK(3)
+	RETURN
+	END

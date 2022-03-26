@@ -1,0 +1,476 @@
+	INTEGER*4 FUNCTION DTI_WINDOW_MINMAX ( DTI_LUN, 
+     &                     MIN_VALUE, MAX_VALUE )
+C
+***	IDENT	17JL91
+***	MODULE	DTI_WINDOW_MINMAX
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C
+CMOD	To make use of DTI data null parameters.     DRC 06DE88
+C
+C---------------------------------------------------------------------------
+C	DTILIB Function.   
+C
+C	Generic function to calculate the minimum and maximum
+C	data values in the current DTM window.
+C	The window values in the common DTIHDR are used to determine
+C	which DTM nodes are considered.
+C
+C---------------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters
+***	PARAMETER/LSL$CMNDTI:DTIDEF/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C arguments
+	INTEGER*4	DTI_LUN		!LUN on which DTI is opened
+	LOGICAL*4	MIN_VALUE	!minimum value
+	LOGICAL*4	MAX_VALUE	!maximum value
+C
+C local
+	INTEGER*4	ERROR		!error condition
+C
+C****************************************************************************
+C
+C	Test if the supplied LUN number is valid
+	IF(DTI_LUN.LT.1.OR.DTI_LUN.GT.MAX_DTI)THEN
+	  DTI_WINDOW_MINMAX=DTI__BADLUN		!LUN out of range
+	  GOTO 999				!Return
+	ENDIF
+C
+C	Test if the supplied LUN is in use
+	IF(.NOT.DTILUN_INUSE(DTI_LUN))THEN
+	  DTI_WINDOW_MINMAX=DTI__LUNUNUSED	!no file opened on LUN
+	  GOTO 999				!Return
+	ENDIF
+C
+C	Test if the window values in common DTIHDR
+C	have been set up
+	IF(DTI_WINDOW_NEX(DTI_LUN).EQ.0.AND.
+     &     DTI_WINDOW_NEY(DTI_LUN).EQ.0)THEN
+	  DTI_WINDOW_MINMAX=DTI__BADWINDOW 
+	  GOTO 999
+	ENDIF
+C	   
+C	Test if the window values in common DTIHDR are valid
+	IF((DTI_WINDOW_SWX(DTI_LUN).GE.DTI_WINDOW_NEX(DTI_LUN)).OR.
+     &     (DTI_WINDOW_SWY(DTI_LUN).GE.DTI_WINDOW_NEY(DTI_LUN)))THEN
+	  DTI_WINDOW_MINMAX=DTI__BADWINDOW
+	  GOTO 999
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C	Call a minmax routine appropriate to the data type
+	IF	(DATA_TYPE(DTI_LUN).EQ.DATA_BYTE)THEN
+	  CALL DTI_WMINMAX_B(MIN_VALUE,MAX_VALUE,DTI_LUN,ERROR)
+C
+	ELSE IF (DATA_TYPE(DTI_LUN).EQ.DATA_WORD)THEN
+	  CALL DTI_WMINMAX_W(MIN_VALUE,MAX_VALUE,DTI_LUN,ERROR)
+C
+	ELSE IF (DATA_TYPE(DTI_LUN).EQ.DATA_LONG)THEN
+	  CALL DTI_WMINMAX_L(MIN_VALUE,MAX_VALUE,DTI_LUN,ERROR)
+C
+	ELSE IF (DATA_TYPE(DTI_LUN).EQ.DATA_REAL)THEN
+	  CALL DTI_WMINMAX_R(MIN_VALUE,MAX_VALUE,DTI_LUN,ERROR)
+C
+	ELSE IF (DATA_TYPE(DTI_LUN).EQ.DATA_BIT )THEN
+	  CALL DTI_WMINMAX_BIT(
+     &			%VAL(SEC_ADDR(DTI_LUN)+DATA_OFFSET(DTI_LUN))
+     &			,MIN_VALUE,MAX_VALUE,DTI_LUN)
+	ENDIF
+C
+C	Error condition?
+	IF(.NOT.ERROR)THEN
+	  DTI_WINDOW_MINMAX=ERROR
+	ELSE
+	  DTI_WINDOW_MINMAX=DTI__NORMAL
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C		  
+999	RETURN
+C
+	END
+C
+C****************************************************************************
+C
+	SUBROUTINE DTI_WMINMAX_BIT (DATA_ARRAY,MIN_BIT,MAX_BIT,WHICH_DTI) 
+C
+***	IDENT	05MA88
+***	MODULE	DTI_WMINMAX_BIT
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C	Mod	  : PGH/JB	Re-declare DATA_ARRAY
+C
+C	To determine minimum and maximum data values 
+C	in the current window for a DTI
+C	file containing bit data.
+C
+C--------------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C arguments
+	INTEGER*4	WHICH_DTI			   !which DTI file?
+CCC	BYTE		DATA_ARRAY(Y_EXTENT(WHICH_DTI)/8,  !data array
+CCC  &				   X_EXTENT(WHICH_DTI))
+C
+	BYTE		DATA_ARRAY(*)
+C Above declaration used to work, but violates the Fortran standard,
+C in that an array bound expression may not refer to another array!
+C The compiler now objects, so change to assumed size array (*).
+C
+	BYTE		MIN_BIT			!min. bit value as byte
+	BYTE		MAX_BIT			!max. bit value as byte
+C
+C local
+	INTEGER*4	Y,X,N			!counters
+	INTEGER*4	MAX_Y,MAX_X		!2d array limits
+	INTEGER*4	Y_BYTE			!current byte
+	INTEGER*4	BIT_OFFSET		!bit offset in current byte
+	BYTE		BYTE_VALUE		!byte data value
+	INTEGER*2	WORD_VALUE		!word data value
+C
+	EQUIVALENCE	(BYTE_VALUE,WORD_VALUE)	!for BTEST
+C---------------------------------------------------------------------------
+C
+C	Initialise min and max values
+	MIN_BIT   = -1
+	MAX_BIT   = -1
+	MAX_Y = Y_EXTENT(WHICH_DTI)/8
+	MAX_X = X_EXTENT(WHICH_DTI)
+C	
+	DO 200 X=DTI_WINDOW_SWX(WHICH_DTI),DTI_WINDOW_NEX(WHICH_DTI)
+C
+	   DO 100 Y=DTI_WINDOW_SWY(WHICH_DTI),DTI_WINDOW_NEY(WHICH_DTI)
+C
+C	First work out which BYTE we are interested in
+	      Y_BYTE = 1 + (Y-1)/8
+C	      BYTE_VALUE=DATA_ARRAY(Y_BYTE,X)
+C
+C Convert to linear array element number
+	      N = MAX_Y*(Y_BYTE-1) + X
+	      BYTE_VALUE=DATA_ARRAY(N)
+C
+C	and the bit offset in the byte
+	      BIT_OFFSET=MOD(Y,8)
+	      IF(BIT_OFFSET.EQ.0)BIT_OFFSET=8
+C
+C	Test if the appropriate bit is set
+	      IF(BTEST(WORD_VALUE,BIT_OFFSET-1))THEN
+	        MAX_BIT=1
+	      ELSE
+	  	MIN_BIT=0
+	      ENDIF
+C
+C	If both MIN_BIT and MAX_BIT bit have a value other
+C	than -1 we need proceed no further
+	      IF(MAX_BIT.NE.-1.AND.MIN_BIT.NE.-1)GOTO 900
+C	      
+100	   CONTINUE
+C
+200	CONTINUE	  
+C
+C	Test either MIN_BIT or MAX_BIT is still -1
+	IF(MIN_BIT.EQ.-1)MIN_BIT=MAX_BIT
+	IF(MAX_BIT.EQ.-1)MAX_BIT=MIN_BIT
+C
+900	RETURN
+C
+	END
+C
+C****************************************************************************
+C
+	SUBROUTINE DTI_WMINMAX_B (MIN_BYTE,MAX_BYTE,
+     &                            WHICH_DTI,ERROR)
+C
+***	IDENT	09MA88
+***	MODULE	DTI_WMINMAX_B
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C
+C	To determine minimum and maximum data values 
+C	in the current window for a DTI file containing byte data. 
+C	For simplicity the routine calls DTI_READ_BYTE_DATA
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C arguments
+	INTEGER*4	WHICH_DTI		!which DTI file?
+	INTEGER*2	MIN_BYTE		!min. byte value as word
+	INTEGER*2	MAX_BYTE		!max. byte value as word
+	INTEGER*4	ERROR			!error condition
+C
+C local
+	INTEGER*4	X,Y			!counters
+	BYTE		BYTE_VALUE		!byte data value
+	INTEGER*2	WORD_VALUE		!unsigned data value
+C
+C function
+	INTEGER*4	DTI_READ_BYTE_DATA	!read a byte data value
+C
+	EQUIVALENCE (BYTE_VALUE,WORD_VALUE)
+C
+C---------------------------------------------------------------------------
+C
+C	Initialise min and max values
+	ERROR =     DTI_READ_BYTE_DATA
+     &               (WHICH_DTI,
+     &               BYTE_VALUE,
+     &               DTI_WINDOW_SWX(WHICH_DTI),
+     &               DTI_WINDOW_SWY(WHICH_DTI))
+	IF(.NOT.ERROR)GOTO 900
+C
+	MIN_BYTE   = WORD_VALUE
+	MAX_BYTE   = WORD_VALUE
+C	
+C	Retrieve each value in window and test against min and
+C	max values
+	DO 200 X=DTI_WINDOW_SWX(WHICH_DTI),DTI_WINDOW_NEX(WHICH_DTI)
+C
+	   DO 100 Y=DTI_WINDOW_SWY(WHICH_DTI),DTI_WINDOW_NEY(WHICH_DTI)
+C
+	      ERROR =     DTI_READ_BYTE_DATA
+     &                    (WHICH_DTI,
+     &                     BYTE_VALUE,
+     &                     X,
+     &                     Y)
+	      IF(.NOT.ERROR)GOTO 900
+C	      
+	      IF(WORD_VALUE.LT.MIN_BYTE)MIN_BYTE=WORD_VALUE
+	      IF(WORD_VALUE.GT.MAX_BYTE)MAX_BYTE=WORD_VALUE
+C
+100	   CONTINUE
+C
+200	CONTINUE
+C
+C
+900	RETURN
+C
+	END
+C
+C****************************************************************************
+C
+	SUBROUTINE DTI_WMINMAX_W (MIN_WORD,MAX_WORD,
+     &                            WHICH_DTI,ERROR)
+C
+***	IDENT	09MA88
+***	MODULE	DTI_WMINMAX_W
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C
+C	To determine minimum and maximum data values 
+C	in the current window for a DTI file containing word data. 
+C	For simplicity the routine calls DTI_READ_WORD_DATA to
+C	read successive word values.
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+C
+C arguments
+	INTEGER*4	WHICH_DTI		!which DTI file?
+	INTEGER*2	MIN_WORD		!min. byte value as word
+	INTEGER*2	MAX_WORD		!max. byte value as word
+	INTEGER*4	ERROR			!error condition
+C
+C local
+	INTEGER*4	X,Y			!counters
+	INTEGER*2	WORD_VALUE		!unsigned data value
+C
+C function
+	INTEGER*4	DTI_READ_WORD_DATA	!to read single word value
+C---------------------------------------------------------------------------
+C
+C	Initialise min and max values
+	ERROR =     DTI_READ_WORD_DATA
+     &               (WHICH_DTI,
+     &               WORD_VALUE,
+     &               DTI_WINDOW_SWX(WHICH_DTI),
+     &               DTI_WINDOW_SWY(WHICH_DTI))
+	IF(.NOT.ERROR)GOTO 900
+C
+	MIN_WORD   = WORD_VALUE
+	MAX_WORD   = WORD_VALUE
+C	
+C	Retrieve each value in window and test against min and
+C	max values
+	DO 200 X=DTI_WINDOW_SWX(WHICH_DTI),DTI_WINDOW_NEX(WHICH_DTI)
+C
+	   DO 100 Y=DTI_WINDOW_SWY(WHICH_DTI),DTI_WINDOW_NEY(WHICH_DTI)
+C
+	      ERROR =     DTI_READ_WORD_DATA
+     &                    (WHICH_DTI,
+     &                     WORD_VALUE,
+     &                     X,
+     &                     Y)
+	      IF(.NOT.ERROR)GOTO 900
+C	      
+	      IF(WORD_VALUE.EQ.DTI_NULL_WORD)GOTO 100
+	      IF(WORD_VALUE.LT.MIN_WORD)MIN_WORD=WORD_VALUE
+	      IF(WORD_VALUE.GT.MAX_WORD)MAX_WORD=WORD_VALUE
+C
+100	   CONTINUE
+C
+200	CONTINUE
+C
+900	RETURN
+C
+	END
+C
+C****************************************************************************
+C
+	SUBROUTINE DTI_WMINMAX_L (MIN_LONG,MAX_LONG,
+     &                            WHICH_DTI,ERROR)
+C
+***	IDENT	09MA88
+***	MODULE	DTI_WMINMAX_L
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C
+C	To determine minimum and maximum data values 
+C	in the current window for a DTI file containing long data. 
+C	For simplicity the routine calls DTI_READ_LONG_DATA to
+C	read successive word values.
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+C
+C arguments
+	INTEGER*4	WHICH_DTI		!which DTI file?
+	INTEGER*4	MIN_LONG		!min. long value
+	INTEGER*4	MAX_LONG		!max. long value
+	INTEGER*4	ERROR			!error condition
+C
+C local
+	INTEGER*4	X,Y			!counters
+	INTEGER*4	LONG_VALUE		!longword value
+C
+C function
+	INTEGER*4	DTI_READ_LONG_DATA	!to read single word value
+C---------------------------------------------------------------------------
+C
+C	Initialise min and max values
+	ERROR =     DTI_READ_LONG_DATA
+     &               (WHICH_DTI,
+     &               LONG_VALUE,
+     &               DTI_WINDOW_SWX(WHICH_DTI),
+     &               DTI_WINDOW_SWY(WHICH_DTI))
+	IF(.NOT.ERROR)GOTO 900
+C
+	MIN_LONG   = LONG_VALUE
+	MAX_LONG   = LONG_VALUE
+C	
+C	Retrieve each value in window and test against min and
+C	max values
+	DO 200 X=DTI_WINDOW_SWX(WHICH_DTI),DTI_WINDOW_NEX(WHICH_DTI)
+C
+	   DO 100 Y=DTI_WINDOW_SWY(WHICH_DTI),DTI_WINDOW_NEY(WHICH_DTI)
+C
+	      ERROR =     DTI_READ_LONG_DATA
+     &                    (WHICH_DTI,
+     &                     LONG_VALUE,
+     &                     X,
+     &                     Y)
+	      IF(.NOT.ERROR)GOTO 900
+C	      
+	      IF(LONG_VALUE.EQ.DTI_NULL_LONG)GOTO 100
+	      IF(LONG_VALUE.LT.MIN_LONG)MIN_LONG=LONG_VALUE
+	      IF(LONG_VALUE.GT.MAX_LONG)MAX_LONG=LONG_VALUE
+C
+100	   CONTINUE
+C
+200	CONTINUE
+C
+900	RETURN
+C
+	END
+C
+C****************************************************************************
+C
+	SUBROUTINE DTI_WMINMAX_R (MIN_REAL,MAX_REAL,
+     &                            WHICH_DTI,ERROR)
+C
+***	IDENT	09MA88
+***	MODULE	DTI_WMINMAX_R
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C
+C	To determine minimum and maximum data values 
+C	in the current window for a DTI file containing real data. 
+C	For simplicity the routine calls DTI_READ_REAL_DATA to
+C	read successive real values.
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+C
+C arguments
+	INTEGER*4	WHICH_DTI		!which DTI file?
+	REAL		MIN_REAL		!min. real value
+	REAL		MAX_REAL		!max. real value
+	INTEGER*4	ERROR			!error condition
+C
+C local
+	INTEGER*4	X,Y			!counters
+	REAL		REAL_VALUE		!real value
+C
+C function
+	INTEGER*4	DTI_READ_REAL_DATA	!to read single word value
+C---------------------------------------------------------------------------
+C
+C	Initialise min and max values
+	ERROR =     DTI_READ_REAL_DATA
+     &               (WHICH_DTI,
+     &               REAL_VALUE,
+     &               DTI_WINDOW_SWX(WHICH_DTI),
+     &               DTI_WINDOW_SWY(WHICH_DTI))
+	IF(.NOT.ERROR)GOTO 900
+C
+	MIN_REAL   = REAL_VALUE
+	MAX_REAL   = REAL_VALUE
+C	
+C	Retrieve each value in window and test against min and
+C	max values
+	DO 200 X=DTI_WINDOW_SWX(WHICH_DTI),DTI_WINDOW_NEX(WHICH_DTI)
+C
+	   DO 100 Y=DTI_WINDOW_SWY(WHICH_DTI),DTI_WINDOW_NEY(WHICH_DTI)
+C
+	      ERROR =     DTI_READ_REAL_DATA
+     &                    (WHICH_DTI,
+     &                     REAL_VALUE,
+     &                     X,
+     &                     Y)
+	      IF(.NOT.ERROR)GOTO 900
+C	      
+	      IF(REAL_VALUE.EQ.DTI_NULL_REAL)GOTO 100
+	      IF(REAL_VALUE.LT.MIN_REAL)MIN_REAL=REAL_VALUE
+	      IF(REAL_VALUE.GT.MAX_REAL)MAX_REAL=REAL_VALUE
+C
+100	   CONTINUE
+C
+200	CONTINUE
+C
+900	RETURN
+C
+	END
+C

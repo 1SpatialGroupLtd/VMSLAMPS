@@ -1,0 +1,219 @@
+	LOGICAL FUNCTION READ_TEXTPOS(FONT,HEIGHT,DIGPOS,COORDS,ROTATE,
+	1				NUMPOINTS,ACTUAL_HT)
+C
+***     MODULE READ_TEXTPOS
+***     IDENT	07JN93
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author						ST	02-June-1993
+C
+C Reads a level 3 NTF v2.0 TEXTPOS record followed by a TEXTREP record.
+C Based on READ_NAMPOSTN
+C
+	IMPLICIT NONE
+C
+C Messages:
+C
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Commons:
+C
+	INCLUDE 'LUNS.PAR'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'FILE_REC.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+C
+C Arguments:
+C
+	INTEGER*4	NCOORDS	! Max no. coords read by GEOMETRY
+	PARAMETER	(NCOORDS=2)
+	INTEGER		FONT		! The text font
+	INTEGER*2	HEIGHT		! The text height
+	INTEGER		DIGPOS		! Digitised location (0-8)
+	REAL		COORDS(2,NCOORDS) ! Coords read by GEOMETRY
+	REAL		ROTATE		! The angle of the text
+	INTEGER		NUMPOINTS	! Number of points read by GEOMETRY
+	REAL		ACTUAL_HT	! Text height in mm
+C
+C Functions:
+C
+	LOGICAL		READ_GEOMETRY
+	LOGICAL		READ_RECORD
+	INTEGER		RDINT		! read an integer
+	INTEGER		RDLONG		! read a longword
+	REAL		XCONVERT
+	REAL		YCONVERT
+C
+C Workspace:
+C
+	LOGICAL		OK		! Success flag
+	INTEGER		I		! DO loop counter
+	INTEGER		XPOS,YPOS	! Coordinates as read from NTF
+	INTEGER*2	NUM		! Integer thing to read
+	INTEGER		CPOS		! Current position
+	INTEGER		GEOM_ID		! ID of geometry record
+	INTEGER		TEXR_ID
+	INTEGER		IOS
+	LOGICAL		JUMPED
+C
+	REAL		PI
+	REAL		OS_POINT_SIZE(24)
+	REAL		MIN_HEIGHT
+	PARAMETER	(PI=3.1415926)
+C
+C OS_POINT_SIZE data - stolen from I2OSTF (NB heights now in tenths mm)
+C
+	DATA OS_POINT_SIZE /     0.0, 0.0, 8.5, 0.0,
+     &				11.0, 12.5, 14.0, 16.0, 
+     &				17.5, 20.5, 22.0, 24.5,
+     &				0.0, 29.0, 0.0, 32.5,
+     &				0.0, 36.0, 0.0, 39.5, 
+     &				0.0, 44.5, 0.0, 50.0 /
+C
+C ........................................................................
+C Assume success
+C 
+	OK=.TRUE.
+C
+C Get the TEXTREP id
+C
+	CALL SETAUX(%REF(STRING(11:16)),6)
+	IF (RDLONG(TEXR_ID)) THEN
+	   CALL LSL_PUTMSG(NTF2I__TEXTPOS,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'TEXR_ID')
+	   CALL LSL_ADDSTR(STRING(11:16))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C Get the geometry id
+C
+	CALL SETAUX(%REF(STRING(17:22)),6)
+	IF (RDLONG(GEOM_ID)) THEN
+	   CALL LSL_PUTMSG(NTF2I__TEXTPOS,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'GEOM_ID')
+	   CALL LSL_ADDSTR(STRING(17:22))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C Look for the required geometry record
+C
+	REC_IN_HAND = .FALSE.	! Current record has been processed
+	OK = READ_GEOMETRY(COORDS,NUMPOINTS,NCOORDS,GEOM_ID)
+	IF (.NOT.OK) GOTO 999
+C
+C .........................................................................
+C Find the TEXTREP record
+C
+	READ(TEXR_LUN,KEY=TEXR_ID,KEYID=0, IOSTAT=IOS) ID_REC
+	OK = IOS.EQ.0				! was return status 0
+	IF (OK) THEN				! yes, then ok
+C
+C          ...............................................................
+C	   jump to the actual record
+C
+	   SEC_REC = ID_REC.RECORD_NUM -1 	! set record number
+	   OK = READ_RECORD()			! get the record
+	   IF (OK) THEN
+	      JUMPED = .TRUE.
+	      REC_IN_HAND = .TRUE. 		! this is the TEXTREC
+	   ELSE
+	      CALL WRITEF('%%NTF2I-E-MISC, unable to get TEXTREP')
+	      CALL WRITEF('-NTF2I-W-MISC, temporary data files corrupt')
+	      GOTO 999
+	   ENDIF
+	ELSE
+	   CALL WRITEF('%%NTF2I-E-MISC, unable to find record for TEXR_ID')
+	   CALL WRITEF('-NTF2I-I-MISC, TEXR_ID was "%I"',TEXR_ID)
+	   GOTO 999
+	ENDIF
+C
+C Read the font
+C
+	CALL SETAUX(%REF(STRING(9:12)),4)
+	IF (RDINT(FONT)) THEN
+	   CALL LSL_PUTMSG(NTF2I__TEXTREP,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'FONT')
+	   CALL LSL_ADDSTR(STRING(9:12))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C And the text height
+C
+	CALL SETAUX(%REF(STRING(13:15)),3)	! Get the value 
+	IF (RDINT(HEIGHT)) THEN
+	   CALL LSL_PUTMSG(NTF2I__TEXTREP,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'TEXT_HT')
+	   CALL LSL_ADDSTR(STRING(13:15))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C Text heights are stored as mm/10 in NTF - we want them in mm/100
+C if not OS data. If OS data we need point sizes (unless /NOIFF_POINTSIZE
+C was given)
+C
+	IF ((.NOT.OS_DATA) .OR. .NOT.HAD_IFF_POINTSIZE) THEN
+	   ACTUAL_HT = FLOAT(HEIGHT)/10.0
+	   HEIGHT = HEIGHT*10
+	ELSE			! Convert to point size
+	   MIN_HEIGHT = 0.0
+	   DO 100 I= 1,24
+	      IF (OS_POINT_SIZE(I).NE.0.0) THEN
+	         IF (MIN_HEIGHT.EQ.0.0) THEN
+		    MIN_HEIGHT = OS_POINT_SIZE(I)-0.5
+	         ENDIF
+		 IF (FLOAT(HEIGHT).GE.OS_POINT_SIZE(I)-0.5 .AND.
+     & 		     FLOAT(HEIGHT).LE.OS_POINT_SIZE(I)+0.5) THEN	
+		    HEIGHT = I		! Correct height
+	            GOTO 200
+		 ELSEIF ( FLOAT(HEIGHT).GE.MIN_HEIGHT .AND.
+     &		 	  FLOAT(HEIGHT).LT.OS_POINT_SIZE(I)-0.5 ) THEN
+		    HEIGHT = I		! next highest in table
+		    GOTO 200
+		 ENDIF
+	      ENDIF
+100	   CONTINUE
+	   HEIGHT = 24		!Bad height altogether
+200	   CONTINUE
+	   ACTUAL_HT = OS_POINT_SIZE(HEIGHT)/10
+	ENDIF
+C
+C And get the digitised position (a value from 0 to 9)
+C
+	CALL SETAUX(%REF(STRING(16:16)),1)
+	IF ((RDINT(DIGPOS)).OR.(DIGPOS.GT.9)) THEN
+	   CALL LSL_PUTMSG(NTF2I__TEXTREP,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'DIG_POSTN')
+	   CALL LSL_ADDSTR(STRING(16:16))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+	IF (DIGPOS.EQ.9) DIGPOS = 0	! no data - assume position 0
+C
+C Get the text rotation
+C
+	CALL SETAUX(%REF(STRING(17:20)),4)
+	IF (RDINT(NUM)) THEN
+	   CALL LSL_PUTMSG(NTF2I__TEXTREP,FSN,SEC_REC)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'ORIENT')
+	   CALL LSL_ADDSTR(STRING(17:20))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C That's stored in NTF as degrees/10 - needs to be converted to radians
+C
+	ROTATE = (FLOAT(NUM)/10.0) * (PI/180)
+C
+C ........................................................................
+C and that's it
+C
+999	READ_TEXTPOS=OK
+	RETURN
+	END

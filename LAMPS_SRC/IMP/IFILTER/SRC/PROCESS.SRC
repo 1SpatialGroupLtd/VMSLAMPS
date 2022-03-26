@@ -1,0 +1,510 @@
+	LOGICAL FUNCTION PROCESS
+C
+***	IDENT	11OC96
+***	MODULE	PROCESS
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+CMOD	Exclude checking for closed features using IFF FS status bits.
+C						MJGW	11-Oct-1996
+CMOD    Introduce POINTS_IN_FEAT, a count of the number of points in
+C	the current feature. Mod 1472		ST	28-Feb-1995
+CMOD	To preserve pen up/down for features copied but not processed
+C						IMcL	15-May-1989
+CMOD	To limit "non-simple" CB warning messages to one per feature
+C						IMcL	15-May-1989
+CMOD	To produce an informational message when processing is
+C	abandoned to indicate which feature has caused the problem.
+C						DRC     02-Sep-1988
+CMOD	To fix problem where there is a SH entry but no JP's.
+C       set JUNCTION logical to .TRUE. when first JP instead of SH.
+C						ALB	04-Jul-1988
+CMOD	To correctly handle and updata junction pointers and
+C	junction blocks if present in input file.
+C						DRC	03-Nov-1987
+CMOD	Last edited				 DM	04-Dec-1986
+C	Created					RJH	10-Oct-1986
+C
+C	IMP IFILTER Program - Process the input file 
+C
+C Description
+C
+C	Copies all data from the input file into the output file, 
+C	smoothing and/or filtering strings as required.
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+C
+***	PARAMETER/LSL$CMNIFILT:LUN/		! logical unit numbers
+***	PARAMETER/LSL$CMNIFILT:IFILTMSG/	! message definitions
+C
+C Common Blocks
+C
+***	COMMON/LSL$CMNIFILT:CONTROL/	! control variables
+***	COMMON/LSL$CMNIFILT:LINES/	! input and output line strings
+***	COMMON/LSL$CMNIFILT:RANGE/	! range details
+***	COMMON/LSL$CMNIFILT:JUNCTIONS/	! junction structure variables
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/	! current position in IFF file
+***	COMMON/LSL$CMNIFF:IFFJUN/	! for junction structured files
+***	COMMON/LSL$CMNIFF:CB.STR/	! CB structure stuff
+***	COMMON/LSL$CMNFRT:FRTACD/	! ACD stuff
+***	COMMON/LSL$CMNIFF:IFFSTR/	! ACD stuff
+C
+C Functions called
+C
+	LOGICAL		PROCESS_LINE	! process the current line
+	LOGICAL		ST_OUT		! output an ST entry
+C
+C Local Variables
+C
+	INTEGER*4	RAPOSN		! position of RA
+	INTEGER*4	NOPOSN		! position of NO
+	INTEGER*4	I,J		! counters
+	INTEGER*2 	IECODE		! IFF entry code 
+	INTEGER*2 	IELEN		! IFF entry length
+	INTEGER*2	IENDS		! pen/pen-down indicator
+	INTEGER*2 	OVNUM(2)	! NO entry values
+	INTEGER*2	ISTAT(4)	! feature status
+	INTEGER*2 	CURR_LAY	! current layer number
+	INTEGER*2 	CURR_FSN	! current feature serial number
+	INTEGER*2 	CURR_ISQ	! internal sequence number
+	INTEGER*2 	CURR_FC		! current feature code
+	INTEGER         XY_COL(2)       ! to denote X and Y coords in CB
+	INTEGER*2	NUM_PTS		! no. of points in ST
+	LOGICAL		IN_FEAT		! in feature ?
+	LOGICAL		HAD_FS		! had FS entry ?
+	LOGICAL		HAD_ST		! had ST entry ?
+	LOGICAL		HAD_ZS		! had ZS entry ?
+	LOGICAL		HAD_EJ		! had EJ entry ?
+	LOGICAL		HAD_COMP_XY	! had non-simple CB entry ( & moaned)
+	LOGICAL		PROC_LAY	! process this layer ?
+	LOGICAL		PROC_FEAT	! process this feature ?
+	LOGICAL		DONE_LINE	! has line been processed ?
+	LOGICAL		CLOSED		! closed feature ?
+	LOGICAL		ALL_COPIED	! copying successful ?
+C
+C CB entry records
+	RECORD /IFF_CBH/ CBH
+	RECORD /IFF_CBD/ CBD
+C
+C Equivalences
+C
+	EQUIVALENCE	(OVNUM(1),CURR_LAY)
+	EQUIVALENCE	(ISTAT(1),CURR_FC)
+C
+C Initialisation
+C
+	JUNCTIONS=.FALSE.
+	IN_FEAT = .FALSE.
+	HAD_EJ = .FALSE.
+	PROC_LAY = .FALSE.
+	PROC_FEAT = .FALSE.
+	ALL_COPIED = .TRUE.
+C
+C find X and Y codes
+	CALL ACDFND_NAME('X')
+	XY_COL(1) = ACD_CODE
+	CALL ACDFND_NAME('Y')
+	XY_COL(2) = ACD_CODE
+C
+C Select the the input file 
+C
+	CALL IFFSEL(IN_LUN)
+C
+C Read the next entry
+C
+100	CALL IFFNXT(IECODE,IELEN)
+C
+C Check for end of file
+C
+	IF (IELEN.EQ.-1) THEN
+	   CALL LSL_PUTMSG(IFILT__UNEXPEOF)
+	   GO TO 900
+	ENDIF
+C
+C ST's are what we are really interested in
+C
+	IF (IECODE.EQ.'ST'.OR. IECODE .EQ. 'CB') GOTO 150
+C
+C Reset total number of points in feature
+C
+	POINTS_IN_FEAT = 0
+C
+C See if we have a line to process
+C
+	IF (IN_FEAT .AND. HAD_ST .AND. .NOT. DONE_LINE) THEN
+	   IF (NUM_IN .LE. 3) THEN
+	      IF (HAD_LOG)
+     &		 CALL LSL_PUTMSG(IFILT__FEATCOPY,CURR_FSN,CURR_ISQ)
+	      IF (.NOT. ST_OUT(LINE_IN,NUM_IN,0)) GO TO 900
+	   ELSE
+	      CLOSED = ((LINE_IN(1,1) .EQ. LINE_IN(1,NUM_IN)) .AND.
+     &		 (LINE_IN(2,1) .EQ. LINE_IN(2,NUM_IN)))
+	      IF (.NOT.PROCESS_LINE(CURR_FSN,CURR_ISQ,CLOSED)) GO TO 900
+	   ENDIF
+	   DONE_LINE = .TRUE.
+	ENDIF
+C
+C We need to save the range
+C
+	IF (IECODE.EQ.'RA') GOTO 105
+C
+C Deal with NF/EF and NO/EO
+C and junction entries explicitely
+C
+	IF (IECODE.EQ.'NF') GOTO 110
+	IF (IECODE.EQ.'EF') GOTO 120
+	IF (IECODE.EQ.'NO') GOTO 130
+	IF (IECODE.EQ.'EO') GOTO 140
+	IF (IECODE.EQ.'SH') GOTO 180
+	IF (IECODE.EQ.'JP') GOTO 190
+	IF (IECODE.EQ.'JB') GOTO 100	!ignore existing JB entry
+C
+C Copy anything else to the output file
+C
+	CALL EIHCPY(OUT_LUN)
+C
+C Do some more for the following entries
+C
+	IF (IECODE.EQ.'TS') PROC_FEAT=.FALSE.
+	IF (IECODE.EQ.'TX') PROC_FEAT=.FALSE.
+	IF (IECODE.EQ.'ZS') HAD_ZS=.TRUE.
+	IF (IECODE.EQ.'FS') GOTO 160
+	IF (IECODE.EQ.'EJ') GOTO 170
+C
+C Branch back for next entry
+C
+	GOTO 100
+C
+C RA - read it in
+C
+105	CALL EIHRR(RANGE,4,1)
+C
+C Save a pointer and create the entry with the old values in it for now
+C
+	CALL IFFSEL(OUT_LUN)
+	RAPOSN = LPOSE
+	CALL IFFRA(RANGE)
+	CALL IFFSEL(IN_LUN)
+C
+C Now we have the range we can set things up
+C
+	CALL SET_UP
+	GOTO 100
+C
+C NF - initialise for the new feature.
+C
+110	IN_FEAT = .TRUE.
+	HAD_FS = .FALSE.
+	HAD_ST = .FALSE.
+	HAD_ZS = .FALSE.
+	HAD_COMP_XY = .FALSE.
+	DONE_LINE = .FALSE.
+	NUM_IN = 0
+	JPK=0
+C
+C Read the details and create the output file entry
+C
+	CALL EIHRI(CURR_FSN,1,1)
+	CALL EIHRI(CURR_ISQ,1,2)
+	CALL IFFSEL(OUT_LUN)
+	CALL IFFNF(CURR_FSN,CURR_ISQ)
+	CALL IFFSEL(IN_LUN)
+	GOTO 100
+C
+C EF - if feature wasn't empty, create the EF entry.
+C
+C	If we are dealing with junctions that output an empty JP
+120	CALL IFFSEL(OUT_LUN)
+C
+	IF(JUNCTIONS)THEN
+	  JPPOSL=LPOSE			! remember position of 2nd JP
+	  CALL IFFJP(HTPOSH,HTPOSJ)	! create empty JP entry
+	ENDIF
+C
+	IF ((HAD_ST.OR.HAD_ZS) .AND. HAD_FS) THEN
+	   CALL IFFEF
+C
+C Warn them and delete the feature if it was empty
+C
+	ELSE
+	   CALL LSL_PUTMSG(IFILT__FEATINCOMP,CURR_FSN,CURR_ISQ)
+	   CALL IFFDEL
+	ENDIF
+C
+C Set up the junction structure if we have junctions
+	IF(JUNCTIONS)THEN
+	   OLDPSF(1)=JCPOSF(1)		! save current values
+	   OLDPSF(2)=JCPOSF(2)
+	   CALL ADDNOD(JCPOSF(1),JCPOSF(2),STPOS1,1,MXARMF)
+C
+C Now that the position of the junction entry is known we can enter
+C it into the JP entry.
+	   CALL IFFPKE(IECODE,IELEN,JPPOSF)
+	   IF (IECODE.NE.'JP')THEN
+	      CALL LSL_PUTMSG(IFILT__UNEXPECTJP,CURR_FSN)
+	      GOTO 900
+	   ENDIF
+	   CALL EIHWI(HTPOSH,2,1)
+	   CALL EIHWI(HTPOSJ,1,3)
+C
+C Repeat for the 2nd end point.
+	   OLDPSL(1)=JCPOSL(1)
+	   OLDPSL(2)=JCPOSL(2)
+	   CALL ADDNOD(JCPOSL(1),JCPOSL(2),STPOS2,LSTPTS,MXARML)
+	   CALL IFFPKE(IECODE,IELEN,JPPOSL)
+	   IF (IECODE.NE.'JP')THEN
+	      CALL LSL_PUTMSG(IFILT__UNEXPECTJP,CURR_FSN)
+	      GOTO 900
+	   ENDIF
+	   CALL EIHWI(HTPOSH,2,1)
+	   CALL EIHWI(HTPOSJ,1,3)
+	ENDIF
+C
+C Reselect input file and go back for more
+	CALL IFFSEL(IN_LUN)
+	IN_FEAT = .FALSE.
+	GOTO 100
+C
+C NO - first read the details
+C
+130	CALL EIHRI(OVNUM(1),2,1)
+C
+C Find out if this layer is to be processed
+C
+	IF (CURR_LAY .EQ. 0) THEN
+	   PROC_LAY = .FALSE.
+	ELSE IF (NUM_LAY .EQ. 0) THEN
+	   PROC_LAY = .TRUE.
+	ELSE
+	   PROC_LAY = .FALSE.
+	   DO 132 I=1,NUM_LAY
+	      IF (CURR_LAY .EQ. LAY_TAB(I)) PROC_LAY = .TRUE.
+132	   CONTINUE
+	ENDIF
+	IF (HAD_LOG) THEN
+	   IF (PROC_LAY) THEN
+	      CALL LSL_PUTMSG(IFILT__LAYERPROC,CURR_LAY)
+	   ELSE
+	      CALL LSL_PUTMSG(IFILT__LAYERCOPY,CURR_LAY)
+	   ENDIF
+	ENDIF
+C
+C Save a pointer and create the entry
+C
+	CALL IFFSEL(OUT_LUN)
+	NOPOSN = LPOSE
+	CALL IFFNO(OVNUM(1),OVNUM(2),0)
+	CALL IFFSEL(IN_LUN)
+	GOTO 100
+C
+C EO - update the NO and create the EO
+C
+140	CALL IFFSEL(OUT_LUN)
+	CALL IFFUNO(NOPOSN)
+	CALL IFFEO
+	CALL IFFSEL(IN_LUN)
+	GOTO 100
+C
+C ST,CB - first read the string details
+C
+150	IF (IECODE .EQ. 'ST') THEN
+	   CALL EIHRS(NUM_PTS,IENDS)
+	ELSE
+	   CALL EIHRCB_HEAD(CBH)		! read CB header
+	   NUM_PTS = CBH.NROW
+	   IENDS = CBH.FLAGS
+	ENDIF	   
+C
+C Keep running total for this feature
+C
+	POINTS_IN_FEAT = POINTS_IN_FEAT + NUM_PTS
+C
+C Deal with any junction structure, whether we're processing this
+C feature or not.
+C Output JP - initially create an empty entry
+	IF((JUNCTIONS).AND.(.NOT.HAD_ST))THEN
+	  CALL IFFSEL(OUT_LUN)
+	  JPPOSF=LPOSE			! remember position of 1st JP
+	  CALL IFFJP(HTPOSH,HTPOSJ)	! create empty JP entry
+	  STPOS1=LPOSE			! remember position of 1st ST
+	  CALL IFFSEL(IN_LUN)
+	ENDIF
+C
+C If already had some ST's and this string starts invisible, process 
+C what we already have
+C
+	IF (PROC_FEAT) THEN
+	   IF (HAD_ST) THEN
+	      IF ((IENDS .AND. 1) .EQ. 0) THEN
+	         CLOSED = ((LINE_IN(1,1) .EQ. LINE_IN(1,NUM_IN)) .AND.
+     &				(LINE_IN(2,1) .EQ. LINE_IN(2,NUM_IN)))
+	         IF (.NOT.
+     &		     PROCESS_LINE(CURR_FSN,CURR_ISQ,CLOSED)) GO TO 900
+	         CLOSED = .FALSE.
+	         NUM_IN = 0
+	      ENDIF
+	   ELSE
+	      HAD_ST = .TRUE.
+	   ENDIF
+C
+C Check the total no. of points and read in the ST
+C
+	   IF ((NUM_IN + NUM_PTS) .GT. MAXPTS) THEN
+	      CALL LSL_PUTMSG(IFILT__TOOMANYPTS,CURR_FSN,CURR_ISQ)
+	      GO TO 900
+	   ELSE
+	      IF (IECODE .EQ. 'CB') THEN
+	         CALL EIHRCB_DATA(CBD)		! read CB data
+		 IF (.NOT. (SIMPLE_XY .OR. HAD_COMP_XY)) THEN 	 
+		    CALL LSL_PUTMSG(IFILT__EXTCOLIGN,CURR_FSN,CURR_ISQ)
+		    HAD_COMP_XY = .TRUE. 	! So we don't moan again 
+						! in this feature
+		 ENDIF
+C
+C extract X and Y coordinates
+	         CALL IFS_CB_READ
+     &	         (CBH,CBD,LINE_IN(1,NUM_IN+1),2,XY_COL,1,CBH.NROW)
+	      ELSE
+	         CALL EIHRR(LINE_IN(1,NUM_IN+1),NUM_PTS*2,1)
+	      ENDIF
+C
+	      J=MAX(NUM_IN,1)
+	      DO 155 I=J+1,NUM_IN+NUM_PTS
+		 IF ((LINE_IN(1,I).NE.LINE_IN(1,I-1)) .OR.
+     &		     (LINE_IN(2,I).NE.LINE_IN(2,I-1))) THEN
+		    J=J + 1
+		    LINE_IN(1,J)=LINE_IN(1,I)
+		    LINE_IN(2,J)=LINE_IN(2,I)
+		 ELSE
+		    CALL LSL_PUTMSG(IFILT__SUPERIMPPT,CURR_FSN,CURR_ISQ)
+		 ENDIF
+155	      CONTINUE
+	      NUM_IN = J
+	   ENDIF
+C
+C If not processing this feature, just read in the entry and output it
+C
+	ELSE
+	   IF (IECODE .EQ. 'CB') THEN
+	      CALL EIHRCB_DATA(CBD)		! read CB data
+	      IF (CBH.NCOL .GT. 2) THEN
+		  CALL LSL_PUTMSG(IFILT__EXTCOLIGN,CURR_FSN,CURR_ISQ)
+	      ENDIF
+C
+C extract X and Y coordinates
+	      CALL IFS_CB_READ
+     &	         (CBH,CBD,LINE_IN,2,XY_COL,1,NUM_PTS)
+	   ELSE
+	      CALL EIHRR(LINE_IN,NUM_PTS*2,1)
+	   ENDIF
+	   NUM_IN = NUM_PTS
+	   IF (.NOT. ST_OUT(LINE_IN,NUM_IN,IENDS)) GO TO 900
+	   IF (.NOT. HAD_ST) HAD_ST = .TRUE.
+	   DONE_LINE = .TRUE.
+	ENDIF
+	GOTO 100
+C
+C FS - first set the flag and read the details
+C
+160	HAD_FS = .TRUE.
+	CALL EIHRI(ISTAT(1),4,1)	! feature code, etc.
+C
+C Find out if this feature is to be processed
+C
+	PROC_FEAT = .FALSE.
+	IF (PROC_LAY) THEN
+	   IF (NUM_FC .EQ. 0) THEN
+	      PROC_FEAT = .TRUE.
+	   ELSE
+	      DO 162 I=1,NUM_FC
+	         IF (CURR_FC .EQ. FC_TAB(I)) PROC_FEAT = .TRUE.
+162	      CONTINUE
+	   ENDIF
+	ENDIF
+	IF (HAD_LOG .AND. .NOT.PROC_FEAT) THEN
+	   CALL LSL_PUTMSG(IFILT__FEATCOPY,CURR_FSN,CURR_ISQ)
+	ENDIF
+	GOTO 100
+C
+C EJ - assume end of file
+C
+170	HAD_EJ = .TRUE.
+C
+C Check that we are not in a feature
+C
+	IF (IN_FEAT) THEN
+	   CALL LSL_PUTMSG(IFILT__EOIINFEAT)
+	   GO TO 900
+	ENDIF
+C
+C Now update the range entry
+C
+	CALL IFFSEL(OUT_LUN)
+	CALL IFFPKE(IECODE,IELEN,RAPOSN)	! move to it
+	IF (IECODE.NE.'RA') THEN
+	   CALL LSL_PUTMSG(IFILT__RANOTFND)
+	   CALL LSL_ADDMSG(IFILT__OUTFILCLO)
+	   ALL_COPIED = .FALSE.
+	ELSE
+	   CALL EIHWR(RANGE,4,1)
+	ENDIF
+	GO TO 999
+C
+C----------------------------------------------------------------------
+C 	SH entry
+C	Copy sector header values of input file
+180	CONTINUE
+	OUT_RXO(1)=IFSORI(1)
+	OUT_RXO(2)=IFSORI(2)
+	OUT_RXS(1)=IFSSTP(1)
+	OUT_RXS(2)=IFSSTP(2)
+	OUT_NX=IFSNUM(1)
+	OUT_NY=IFSNUM(2)
+C
+C 	Create a SH entry in the output file, 
+C	the same size as the input entry
+	CALL IFFSEL(OUT_LUN)
+	CALL IFFSH(OUT_RXO(1),OUT_RXO(2),
+     &             OUT_RXS(1),OUT_RXS(2),
+     &             OUT_NX,OUT_NY)
+	CALL IFFSEL(IN_LUN)
+	GOTO 100
+C
+C-------------------------------------------------------------------------
+C	JP entry
+C 	Read the position and offset of the JB containing this junction,
+C 	jump to it and extract the junction (X,Y) position and the number
+C 	of arms. 
+190	CONTINUE
+	JUNCTIONS = .TRUE.		
+	JPK=JPK+1
+	JPPOSN=LPOSH			! remember where we are
+	CALL EIHRL(JBPOSN,1,1)		! read JB position
+	CALL EIHRI(OFFSET,1,3)		! read junction offset
+	IF (JPK.EQ.1) THEN		! first JB in ftr?
+   	   CALL IFJPKJ(JCPOSF(1),JCPOSF(2),MXARMF,JBPOSN,OFFSET)
+	ELSE				! no - second
+	   CALL IFJPKJ(JCPOSL(1),JCPOSL(2),MXARML,JBPOSN,OFFSET)
+	ENDIF
+	CALL IFFPKE(IECODE,IELEN,JPPOSN)! back to remembered JP posn.
+	IF (IECODE.NE.'JP'.OR.IELEN.LT.0) THEN
+	   CALL LSL_PUTMSG(IFILT__UNEXPECTJP,CURR_FSN)
+	   GOTO 900
+	ENDIF
+	GOTO 100
+C
+C-------------------------------------------------------------------------
+C Assign function value
+C
+900	ALL_COPIED = .FALSE.
+	CALL LSL_PUTMSG(IFILT__BADFEAT,CURR_FSN,CURR_ISQ)	
+C
+999	PROCESS = ALL_COPIED
+C
+C Return
+C
+	RETURN
+	END

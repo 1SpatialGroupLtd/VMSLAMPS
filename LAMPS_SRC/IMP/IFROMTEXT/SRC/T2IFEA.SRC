@@ -1,0 +1,1017 @@
+	SUBROUTINE T2IFEA
+C
+***	IDENT	16AP97
+***	MODULE	T2IFEA
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England.
+C
+CMOD1575Correct bad cut & paste job after label 102:
+C	LCODE corrected to RCODE		       MJGW 16-Apr-1997
+CMOD1387Add /ORIGIN					 JB 08-Aug-1994
+CMOD	MAXPTS now 32767				 ST 11-Nov-1991
+CMOD    New CB entry				       MWSR 28-Oct-1987
+CMOD	Text strings (AC and TX) now truncated at first
+C	null byte - not 255th byte!			TJH 16-Dec-1986
+CMOD	MAXPTS now 10000 with more explicit messages
+C	when MAXPTS exceeded				TJH 11-Nov-1986
+CMOD	Now tell the user more about defaults applied	TJH 06-Nov-1986
+CMOD	TS entry					RWR 17-Oct-1986
+CMOD	IMP version				       MWSR    Feb-1986
+CMOD	Allow max INF and ISQ Nos up to 65535		ACM 14-Mar-1985
+CMOD	Documentation completed				RJH 15-May-1984
+C
+C	Created						RJH 17-Apr-1984
+C
+C Description
+C
+C This subroutine is designed for use by the IFROMTEXT program, and its
+C purpose is to deal with IFF text entries at the feature level.
+C
+C On entry to this subroutine, the next entry code in the text file
+C is expected to have been read in. Junction and void entries are
+C ignored. Feature level entries are written to the IFF file either when
+C AC and ST entries are processed, or prior to exit from this
+C subroutine. On exit, a new IFF code will normally have been read
+C from the text file, and that entry will be ready for processing at a
+C higher level.
+C
+C Communication with other routines is via the common block T2IPAR.
+C
+	IMPLICIT NONE
+C
+C Local Parameters
+	INTEGER*2	MAXPTS			! maximum points in string entry
+	PARAMETER	(MAXPTS = 32767)
+	INTEGER*2	MAXFS			! feature status elements
+	PARAMETER	(MAXFS = 4)
+C
+C Common blocks
+***     COMMON/LSL$CMNIFROMTEXT:IFROMMSG.PAR/
+***	COMMON/LSL$CMNIFROMTEXT:T2IPAR/		! global variables
+***	COMMON/LSL$CMNIFROMTEXT:T2ICOM/		! global variables
+***     COMMON/LSL$CMNFRT:FRTACD/		! ACD stuff
+***     COMMON/LSL$CMNFRT:FRTCOM/		! FRT stuff
+***     COMMON/LSL$CMNIFF:IFFHAN/		! IFF maintenance interface
+***	COMMON/LSL$CMNLSL:EXPC/
+C
+C Functions called
+	LOGICAL		T2IINT		! reads an integer
+	LOGICAL		T2ILON		! reads a long integer
+	LOGICAL		T2IREA		! reads a real
+	LOGICAL		T2IREAL8	! reads a real*8
+	LOGICAL		T2ISTR		! reads a string
+	LOGICAL		T2IINF		! reads integer on current line
+	LOGICAL		T2ILNF		! reads long integer cur line
+	LOGICAL		T2ICON		! converts IFF code to seq. no.
+	LOGICAL   	T2IDATE		! reads a date
+	LOGICAL   	T2ITIME		! reads a date
+	LOGICAL   	T2ICHAR		! reads a date
+	LOGICAL   	T2IACD		! finds ACD code ,reads AC type 
+	INTEGER*4 	CVT_DAY_STR  	! converts to date string
+	INTEGER*4 	CVT_TIME_STR 	! converts to a time string
+	LOGICAL		FRTFND		! get FC info from FRT
+C
+C Local variables
+	INTEGER*4	NUM		! local IFF code sequence no.
+	INTEGER*4	LCODE		! ancillary code value field
+	INTEGER*4	INF		! external feature number
+	INTEGER*4	ISQ		! internal feat. sequence number
+	INTEGER*2	ISTAT(MAXFS)	! feature status information
+	INTEGER*2	TSTAT(MAXFS)	! text status information
+	INTEGER*2	ACTYPE		! ancillary code type
+	INTEGER*2	ACLEN		! ancillary code text length
+	INTEGER*2	TXLEN		! text length
+	INTEGER*2	ITHK		! line thickness
+	INTEGER*2	NPTS		! number of points in string
+	INTEGER*2	IENDS		! string information
+	INTEGER*4	LACTYPE		! ancillary code type
+	INTEGER*4	I		! counter
+	REAL*4		STBUF(2,MAXPTS)	! points in string
+	REAL*4	        ZSBUF(3,MAXPTS)
+	REAL*8		REAL8		! temp real*8
+	REAL*4		ROT		! text rotation angle
+	REAL*4		RCODE		! ancillary code value field
+	LOGICAL		HADNF		! had new feature entry ?
+	LOGICAL		HADFS		! had feature status entry ?
+	LOGICAL		HADTH		! had line thickness entry ?
+	LOGICAL		HADRO		! had text rotation entry ?
+	LOGICAL		HADTX		! had text entry ?
+	LOGICAL		HADTS		! had TS entry ?
+	LOGICAL		HADCB		! had CB entry ?
+	LOGICAL		HADEF		! end of feature ?
+	LOGICAL		WRTAC		! written ancillary code entry ?
+	LOGICAL		WRTST		! written point string entry ?
+	LOGICAL		WRTNF		! written NF and FS?
+	LOGICAL		FAILNF		! new feature read failed ?
+	LOGICAL		FAILFS		! feature status read failed ?
+	LOGICAL		FAILTS		! text status read failed ?
+	LOGICAL		FAILAC		! ancillary code read failed ?
+	LOGICAL		FAILTH		! line thickness read failed ?
+	LOGICAL		FAILST		! point string read failed ?
+	LOGICAL		FAILRO		! text rotation read failed ?
+	LOGICAL		FAILTX		! text string read failed ?
+	LOGICAL		NOREAD		! integer read error ?
+	LOGICAL		NOINT		! no integer on line ?
+	LOGICAL		NEGFS		! negative FS entry
+	LOGICAL		NEGNF		! negative NF entry
+	LOGICAL		HADST		! ST entry
+	LOGICAL		HADZS		! ZS entry
+	BYTE		ACSTR(STRSZ)	! ancillary code text string
+	BYTE		TXSTR(STRSZ)	! text data
+	CHARACTER*11 	DATE_STR 	! date string
+	CHARACTER*11 	TIME_STR        ! time string
+	CHARACTER*4	ACCHR		! acd character
+	INTEGER*4	ACHRINT		!
+	INTEGER      	LNTH		! length of char string
+	INTEGER	     	RET		! return code
+C
+	EQUIVALENCE	(STBUF,ZSBUF)
+	EQUIVALENCE	(LCODE,ACCHR,ACHRINT,RCODE)
+C
+C Main Structure
+C
+C	repeat
+C	   initialisation
+C	   repeat
+C	      if entry is to be ignored then
+C		 ignore entry
+C		 if not done read next IFF entry code from text file
+C	      else if entry is at feature level then
+C		 case entry of
+C		    NF : read in data
+C		    FS : read in data
+C		    AC : read in data and write all to IFF file
+C		    TS : start of multibanked text
+C		    TH : read in data
+C		    ST : read in data and write all to IFF file
+C		    RO : read in data
+C		    TX : read in data
+C		    EF : end of current feature
+C		 if not done read next IFF entry code from text file
+C	   until done or end feature or entry above feature level
+C	   complete writing to IFF file
+C	until done or entry above feature level
+C
+C Initialisation
+C
+10	INF = 0				! start with zero
+	ISQ = 0				! ISQ always zero now
+C
+	DO 20 I=1,MAXFS
+	   ISTAT(I) = 0			! default to zero
+	   TSTAT(I) = 0
+20	CONTINUE
+C
+	ITHK = 0			! default to zero
+	IENDS = 0			! assume pen up to first ST
+	ROT = 0.0			! default to zero
+C
+	DO 40 I=1,STRSZ
+	   TXSTR(I) = 0
+40	CONTINUE
+C
+	HADNF = .FALSE.			! assume not had NF
+	HADFS = .FALSE.			! assume not had FS
+	HADTH = .FALSE.			! assume not had TH
+	HADRO = .FALSE.			! assume not had RO
+	HADTX = .FALSE.			! assume not had TX
+	HADTS = .FALSE.			! assume not had TS
+	HADCB = .FALSE.			! assume not had CB
+	HADEF = .FALSE.			! assume not had EF
+	WRTAC = .FALSE.			! assume not written A
+	WRTST = .FALSE.			! assume not written ST
+	WRTNF = .FALSE.			! assume not written NF and FS
+	FAILNF = .FALSE.		! assume NF read failed
+	FAILFS = .FALSE.		! assume FS read failed
+	FAILTS = .FALSE.		! assume TS read failed
+	FAILAC = .FALSE.		! assume AC read failed
+	FAILTH = .FALSE.		! assume TH read failed
+	FAILST = .FALSE.		! assume ST read failed
+	FAILRO = .FALSE.		! assume RO read failed
+	FAILTX = .FALSE.		! assume TX read failed
+	HADST  = .FALSE.		! no ST
+	HADZS  = .FALSE.		! no ZS
+	NEGFS  = .FALSE.
+	NEGNF  = .FALSE.
+C
+C Entry to be ignored
+C
+50	IF (ECDNUM .LE. MAXIGN) THEN
+	   CALL T2IIGN
+	   IF (.NOT.DONE) CALL T2INXT(.TRUE.)
+C
+C Entry at feature level
+C
+	ELSEIF (ECDNUM.LE.MAXFEA) THEN
+	   NUM = ECDNUM-MAXIGN			! calculate local sequence no.
+C
+	   GO TO (60,70,90,140,150,210,220,270,240,180,275), NUM
+C
+C NF entry
+C
+60	   INF = 0				! clear longword
+	   FAILNF = T2ILNF(INF,NOREAD)		! read feature number
+	   IF (FAILNF .OR. (INF .LT. 0)) THEN
+	      IF (INF .LT. 0) THEN
+	         CALL LSL_PUTMSG(IFROM__ILLEGNEGNF,CURLIN)
+		 NEGNF = .TRUE.
+	      ENDIF
+C
+	      INF = HIGHNF+1			! def. to next highest
+C	      ISQ = HIGHSQ+1			! def. to next highest
+C
+	      IF (NOREAD .OR. NEGNF) THEN
+	         CALL LSL_PUTMSG(IFROM__NFDEFAULT)
+	         IF (LOG) THEN
+		    CALL EXPAND('NF %^W%N (%N)',INF,ISQ)
+		    CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	         ENDIF
+		 NEGNF = .FALSE.
+	      ENDIF
+	   ENDIF	! (failnf)
+C
+	   IF (INF .GT. HIGHNF) HIGHNF = INF	! reset highest fea. no.
+	   HADNF = .TRUE.			! had NF even if failed
+C
+	   GO TO 280
+C
+C FS entry
+70	   IF (.NOT.HADFS) THEN
+C
+C Reset to default of zero
+C
+	      DO 79 I=1,MAXFS
+	         ISTAT(I) = 0			! default to zero
+79	      CONTINUE
+C
+	      I = 0				! initialise counter
+80	      I = I+1				! increment counter
+C
+	      FAILFS = T2IINF(ISTAT(I),NOREAD)	! read next FS value
+C
+	      IF ( (.NOT.FAILFS .OR. (ISTAT(1).LT.0 ))
+     &	                .AND. (I.NE.MAXFS) ) GO TO 80
+C
+	      IF ( (ISTAT(1) .LT. 0)) THEN
+		ISTAT(1) = 0
+		NEGFS = .TRUE.
+		CALL LSL_PUTMSG(IFROM__ILLEGNEGFS,CURLIN)
+	      ENDIF
+C
+C If GT for the FC represents a symbol feature, then set word 3 if not 
+C already done
+C
+C Read FRT file, if specified, for FC
+C
+	      IF (HAD_FRT) THEN
+	         IF ( FRTFND(ISTAT(1)) ) THEN	! reports itself
+		    NOREAD = .TRUE.
+	         ELSE
+C
+C Found FC, and GT
+	            IF (ISTAT(3).EQ.0 .AND. (FRTGT.EQ.UNOTYP .OR.
+     &	 	        FRTGT.EQ.ORITYP .OR. FRTGT.EQ.SCATYP) ) THEN
+		       ISTAT(3) = 16384
+	            ELSE IF (ISTAT(3).EQ.0 .AND. FRTGT.EQ.TEXTYP) THEN
+		       CALL LIB$INSV(2,14,2,ISTAT(3))
+		    ENDIF
+C
+	         ENDIF
+	      ENDIF
+C
+	      IF (NOREAD .OR. NEGFS ) THEN
+		 CALL LSL_PUTMSG(IFROM__REMFSDEF)
+C
+	         IF (LOG) THEN
+		    CALL EXPAND('FS %^W%N %N %N %N'
+     &				,ISTAT(1),ISTAT(2),ISTAT(3),ISTAT(4))
+		    CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	         ENDIF
+	      ENDIF
+C
+	      HADFS = .TRUE.			! had FS even if failed
+	      NEGFS = .FALSE.
+c
+	   ELSE
+	      CALL LSL_PUTMSG(IFROM__REPFSIGN,CURLIN)
+	   ENDIF	! (.not. hadfs)
+C
+	   GO TO 280
+C
+C AC entry
+C
+90	   IF (.NOT. WRTST) THEN
+	      ACTYPE = 0			! initialise data
+	      LCODE = 0
+	      DO 100 I=1,STRSZ
+	         ACSTR(I) = 0
+100	      CONTINUE
+C
+	      FAILAC = T2IACD(ACTYPE)		! read AC type
+C
+	      IF (.NOT. FAILAC .AND. (ACTYPE .GE. 0) ) THEN
+C
+C read the attribute value depending on the data type
+C which was found in T2IACD
+C
+		 GOTO (101,102,103,104,105) ACD_DATA_TYPE
+C
+C integer
+101		 FAILAC = T2ILON(LCODE,.TRUE.)	
+C
+C check its in range
+		 IF ((LCODE .LT. ACD_MIN_MAX_I(1)).OR.  
+     &	             (LCODE .GT. ACD_MIN_MAX_I(2))) THEN
+	            IF (.NOT. FAILAC) CALL LSL_PUTMSG(
+     &				IFROM__INTOUTRAN,LCODE,CURLIN)
+C
+	   	    LCODE = MAX(ACD_MIN_MAX_I(1),
+     &	                    MIN(LCODE,ACD_MIN_MAX_I(2)))
+	         ENDIF
+C
+	         GOTO 106
+C
+C real
+102		 FAILAC = T2IREA(RCODE,.TRUE.)	
+C
+C check its in range
+		 IF ((RCODE .LT. ACD_MIN_MAX_R(1)).OR.  
+     &	             (RCODE .GT. ACD_MIN_MAX_R(2))) THEN
+		    IF (.NOT. FAILAC) CALL LSL_PUTMSG(
+     &				IFROM__REAOUTRAN,RCODE,CURLIN)
+C
+	            RCODE = MAX(ACD_MIN_MAX_R(1),
+     &	            MIN(RCODE,ACD_MIN_MAX_R(2)))
+	         ENDIF
+		 GOTO 106
+C
+C character
+103		 FAILAC = T2ICHAR(ACCHR,.TRUE.)
+C
+		 IF ((ACHRINT .LT. ACD_MIN_MAX_I(1)).OR.  
+     &	             (ACHRINT .GT. ACD_MIN_MAX_I(2))) THEN
+		    IF (.NOT. FAILAC) CALL LSL_PUTMSG(
+     &				IFROM__CHAROUTRAN,ACCHR,CURLIN)
+C
+	            ACHRINT= MAX(ACD_MIN_MAX_I(1),
+     &	                     MIN(ACHRINT,ACD_MIN_MAX_I(2)))
+		 ENDIF
+		 GOTO 106
+C
+C date
+104		 FAILAC = T2IDATE(LCODE,.FALSE.)
+C
+C check its in range
+		 IF ((LCODE .LT. ACD_MIN_MAX_I(1)).OR.  
+     &	             (LCODE .GT. ACD_MIN_MAX_I(2))) THEN
+	            RET = CVT_DAY_STR(LCODE,LNTH,DATE_STR)
+		    IF (.NOT. FAILAC) CALL LSL_PUTMSG(
+     &	                  IFROM__DATOUTRAN,DATE_STR(:LNTH),CURLIN)
+C
+	            LCODE = MAX(ACD_MIN_MAX_I(1),
+     &	                    MIN(LCODE,ACD_MIN_MAX_I(2)))
+		 ENDIF
+C
+		 GOTO 106
+C
+C time
+105		 FAILAC = T2ITIME(LCODE,.FALSE.)
+C
+C check its in range
+C
+		 IF ((LCODE .LT. ACD_MIN_MAX_I(1)).OR.  
+     &	             (LCODE .GT. ACD_MIN_MAX_I(2))) THEN
+		    IF (.NOT. FAILAC) THEN   
+	               RET = CVT_TIME_STR(LCODE,LNTH,TIME_STR)
+	               CALL LSL_PUTMSG
+     &	                  (IFROM__TIMOUTRAN,TIME_STR(:LNTH),CURLIN)
+	            ENDIF
+	            LCODE = MAX(ACD_MIN_MAX_I(1),
+     &	                    MIN(LCODE,ACD_MIN_MAX_I(2)))
+	         ENDIF
+C
+106		 IF (.NOT. FAILAC) THEN
+		    FAILAC = T2ISTR(ACSTR)	! read string
+C
+		    IF (FAILAC) THEN 
+		       DO 110 I=1,6
+			  ACSTR(I) = 'X'	! default string
+110		       CONTINUE
+C
+		       ACLEN=6
+	               CALL LSL_PUTMSG(IFROM__ACTXTDEF)
+	               IF (LOG) CALL LSL_ADDSTR('"XXXXXX"')
+		    ELSE
+		       DO 120 I=1,STRSZ		! get posn. of 1st null
+		         IF (ACSTR(I).EQ.0) THEN
+			    ACLEN=I-1
+			    GOTO 130
+			 ENDIF
+120		       CONTINUE
+C
+		       ACLEN=255
+		    ENDIF	! (failac)
+		 ENDIF		! (.not. failac)
+	      ENDIF		! (.not. failac)
+C
+130	      IF (FAILAC .OR. ACTYPE .LT. 0) THEN
+		 IF (ACTYPE .LT. 0) THEN
+		     ACTYPE = 0
+		     CALL LSL_PUTMSG(IFROM__ILLEGNEGAC,CURLIN)
+		     CALL LSL_ADDMSG(IFROM__REMACDEF)
+		 ELSE
+	  	    CALL LSL_PUTMSG(IFROM__REMACDEF)
+		 ENDIF
+C
+	         IF (LOG) THEN
+	            IF (ACTYPE.EQ.3
+     &		         .OR.(ACTYPE.GE.80.AND.ACTYPE.LE.99)) THEN
+		       CALL EXPAND('AC %^W%N %F %AZ'
+     &					,ACTYPE,LCODE,ACSTR)
+		    ELSE
+		       CALL EXPAND('AC %^W%N %^L%N %AZ'
+     &					,ACTYPE,LCODE,ACSTR)
+		    ENDIF
+		    CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+		 ENDIF
+	      ENDIF	! (failac)
+C
+	      IF (.NOT. WRTAC) THEN		! not had an AC yet ?
+	         IF (.NOT.WRTNF) THEN
+		    IF (.NOT. HADNF) THEN	! default NF ?
+	   	       INF = HIGHNF+1
+		       HIGHNF = INF
+	      	       ISQ = HIGHSQ+1
+		       HIGHSQ = ISQ
+		       CALL LSL_PUTMSG(IFROM__NFDEFAULT)
+C
+	               IF (LOG) THEN
+		          CALL EXPAND('NF %^W%N (%N)',INF,ISQ)
+		          CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	               ENDIF
+		       HADNF = .TRUE.
+		    ENDIF	! (.not. hadnf)
+C
+		    IF (.NOT. HADFS) THEN
+			HADFS = .TRUE.		! default FS
+		 	CALL LSL_PUTMSG(IFROM__FSDEFAULT)
+C
+	         	IF (LOG) THEN
+		 	   CALL EXPAND('FS %^W%N %N %N %N'
+     &				,ISTAT(1),ISTAT(2),ISTAT(3),ISTAT(4))
+			   CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+			ENDIF
+		    ENDIF
+		    CALL IFFNF(INF,ISQ)		! write NF entry
+		    CALL IFFFS(ISTAT)		! write FS entry
+	            WRTNF = .TRUE.
+	         ENDIF
+	         WRTAC = .TRUE.			! about to write AC
+	      ENDIF	! (.not. wrtac)
+C
+	      IF (ACSTR(1) .EQ. 0) THEN
+		 CALL IFFAC(ACTYPE,LCODE)	! write AC, no string
+	      ELSE
+		 CALL IFFAC(ACTYPE,LCODE,ACSTR,ACLEN) ! write AC string
+	      ENDIF	! (acstr(1) .eq. 0)
+	   ELSE
+	      CALL LSL_PUTMSG(IFROM__ACAFTERSTIGN,CURLIN)
+	      CALL T2ISKP
+	   ENDIF	! (.not. wrtst)
+C
+	   GO TO 280
+C
+C TH entry
+C
+140	   IF ((.NOT. HADTH) .AND. (.NOT. WRTST)) THEN
+	      FAILTH = T2IINT(ITHK)		! read thickness
+	      IF (FAILTH) THEN
+		 CALL LSL_PUTMSG(IFROM__THDEFAULT)
+	         IF (LOG) CALL LSL_ADDSTR('TH 0')
+	      ENDIF	! (failth)
+C
+	      HADTH = .TRUE.			! had TH even if failed
+C
+	   ELSE
+	      IF (WRTST) THEN
+		 CALL LSL_PUTMSG(IFROM__ILLEGTHIGN,CURLIN)
+	      ELSE
+		 CALL LSL_PUTMSG(IFROM__REPTHIGN,CURLIN)
+	      ENDIF	! (wrtst)
+C
+	      CALL T2ISKP
+	   ENDIF	! ((.not. hadth ...))
+C
+	   GO TO 280
+C
+C ST entry
+C Initialise data
+C
+150	   IF (HADZS) THEN
+	      CALL LSL_PUTMSG(IFROM__STAFTERZSIGN,CURLIN)
+	      IF (.NOT. DONE ) CALL T2ISKP
+	      GOTO 280
+	   ENDIF
+C
+	   HADST = .TRUE.			! we've had an st
+	   GOTPTS = .TRUE.			! have at least one ST
+	   NPTS = 0				! no points yet
+	   STBUF(1,1) = 0.0			! fill with zeros
+	   STBUF(2,1) = 0.0
+C
+C Read and check data
+C
+	   NOINT = T2IINF(NPTS,FAILST)		! no. of points
+	   IF ((NPTS .LT. 0) .OR. (NPTS .GT. MAXPTS)) THEN
+	      CALL LSL_PUTMSG(IFROM__NPTSOUTRAN,NPTS,CURLIN)
+	      IF (NPTS .GT. MAXPTS) CALL LSL_ADDMSG(
+     &						IFROM__CONSLSL,MAXPTS)
+	      FAILST = .TRUE.
+	   ENDIF	! ((npts .lt. 0) ...)
+C
+	   IF (.NOT. (NOINT.OR.FAILST)) NOINT = T2IINF(IENDS, FAILST)
+C
+	   IF (FAILST) THEN				! default entry ?
+	      CALL LSL_PUTMSG(IFROM__STDEFAULT)
+	      IF (LOG) CALL LSL_ADDSTR(
+     &				'ST 1 0  - coordinate (0.0, 0.0)')
+C
+	      NPTS = 1
+	      IF (STBUF(1,1) .LT. CURRA(1)) CURRA(1) = STBUF(1,1)
+	      IF (STBUF(1,1) .GT. CURRA(2)) CURRA(2) = STBUF(1,1)
+	      IF (STBUF(2,1) .LT. CURRA(3)) CURRA(3) = STBUF(2,1)
+	      IF (STBUF(2,1) .GT. CURRA(4)) CURRA(4) = STBUF(2,1)
+C
+	   ELSE
+	      I = 0					! initialise counter
+160	      I = I+1					! increment counter
+C
+C Subtract origin if had_origin
+C
+	      IF (HAD_ORIGIN) THEN
+		FAILST = T2IREAL8(REAL8,.TRUE.)		! read point
+		IF (.NOT.FAILST) STBUF(1,I) = REAL8 - ORIGIN(1)
+	      ELSE
+		FAILST = T2IREA(STBUF(1,I), .TRUE.) 	! read point
+	      ENDIF
+C
+	      IF (.NOT.FAILST) THEN
+		IF (HAD_ORIGIN) THEN
+		  FAILST = T2IREAL8(REAL8,.TRUE.)	! read point
+		  IF (.NOT.FAILST) STBUF(2,I) = REAL8 - ORIGIN(2)
+		ELSE
+		  FAILST = T2IREA(STBUF(2,I), .TRUE.) 	! read point
+		ENDIF
+	      ENDIF
+C
+	      IF (.NOT. (DONE .OR. GOTNXT)) THEN
+		 IF (STBUF(1,I) .LT. CURRA(1)) CURRA(1) = STBUF(1,I)
+		 IF (STBUF(1,I) .GT. CURRA(2)) CURRA(2) = STBUF(1,I)
+		 IF (STBUF(2,I) .LT. CURRA(3)) CURRA(3) = STBUF(2,I)
+		 IF (STBUF(2,I) .GT. CURRA(4)) CURRA(4) = STBUF(2,I)
+	      ENDIF	! (.not. (done .or. gotnxt))
+C
+	      IF (I.EQ.MAXPTS .AND. .NOT.FAILST) THEN
+	         CALL LSL_PUTMSG(IFROM__NPTSOUTRAN,NPTS,CURLIN)
+	         CALL LSL_ADDMSG(IFROM__CONSLSL,MAXPTS)
+		 CALL LSL_ADDMSG(IFROM__REMPTSLOST)
+	      ENDIF
+C
+	      IF (.NOT.FAILST .AND. I.LT.MAXPTS) GO TO 160
+C
+C Set number of points
+C
+	      IF (DONE .OR. GOTNXT .OR. I.EQ.MAXPTS) THEN
+		 IF (I.NE.MAXPTS .OR. FAILST) I = I-1
+C
+		 IF (I.NE.NPTS .AND. NPTS.NE.0) THEN
+		    CALL LSL_PUTMSG(IFROM__WRNGNPTS,CURLIN)
+		    CALL LSL_ADDMSG(IFROM__AMENDED)
+		 ENDIF	! ((i .ne. npts) ...)
+C
+		 NPTS = I
+	      ELSE				! read failed
+		 IF (NPTS .LT. I) NPTS = I
+	      ENDIF	! (done .or. gotnxt .or. i.eq.maxpts)
+	   ENDIF	! (failst)
+C
+C If necessary skip to next entry
+C
+	   IF (FAILST .AND. (.NOT. (DONE .OR. GOTNXT))) THEN
+	      CALL LSL_PUTMSG(IFROM__REMSTDEF)
+	      IF (.NOT. DONE) CALL T2ISKP
+	   ENDIF	! (failst ...)
+C
+C Write entry to IFF file
+C
+	   IF (.NOT. WRTST) THEN		! first ST in feature ?
+	      IF (.NOT. WRTAC) THEN		! not had an AC ?
+	         IF (.NOT.WRTNF) THEN
+		    IF (.NOT. HADNF) THEN	! default NF ?
+		       INF = HIGHNF+1
+		       HIGHNF = INF
+		       ISQ = HIGHSQ+1
+		       HIGHSQ = ISQ
+		       CALL LSL_PUTMSG(IFROM__NFDEFAULT)
+C
+	               IF (LOG) THEN
+		          CALL EXPAND('NF %^W%N (%N)',INF,ISQ)
+		          CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	               ENDIF
+		       HADNF = .TRUE.
+		    ENDIF	! (.not. hadnf)
+C
+		    IF (.NOT. HADFS) THEN
+		       HADFS = .TRUE.			! default FS
+		       CALL LSL_PUTMSG(IFROM__FSDEFAULT)
+C
+	               IF (LOG) THEN
+		          CALL EXPAND('FS %^W%N %N %N %N'
+     &				,ISTAT(1),ISTAT(2),ISTAT(3),ISTAT(4))
+			  CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+		       ENDIF
+		    ENDIF
+C
+		    CALL IFFNF(INF,ISQ)			! write NF
+		    CALL IFFFS(ISTAT)			! write FS
+	            WRTNF = .TRUE.
+	         ENDIF
+	      ENDIF	! (.not. wrtac)
+C
+	      IF (HADTS) CALL IFFTS(TSTAT)		! write TS
+	      IF (HADTH) CALL IFFTH(ITHK)		! write TH if had
+	      IF (.NOT.WRTST) WRTST = .TRUE.		! about to write ST
+	   ENDIF	! (.not. wrtst)
+C
+C STs with more than 200 pts split into separate IFF STs
+C
+	   DO 170 I = 1,NPTS,200
+	     IF ((NPTS-I) .GE. 200) THEN
+	        CALL IFFST(STBUF(1,I),200,IENDS)
+	     ELSE
+	        CALL IFFST(STBUF(1,I),NPTS-I+1,IENDS)	! write ST entry
+	     ENDIF
+	     IENDS = 1				  	! assume pen down next
+170	   CONTINUE
+C
+	   GO TO 280
+C
+C ZS entry
+C Initialise data
+C
+180	   IF (HADST) THEN
+	     CALL LSL_PUTMSG(IFROM__ZSAFTERSTIGN,CURLIN)
+	     IF (.NOT. DONE) CALL T2ISKP
+	     GOTO 280
+	   ENDIF
+C
+	   HADZS = .TRUE.			! had a ZS
+	   GOTPTS = .TRUE.			! have at least one ZS
+	   NPTS = 0				! no points yet
+	   ZSBUF(1,1) = 0.0			! fill with zeros
+	   ZSBUF(2,1) = 0.0
+	   ZSBUF(3,1) = 0.0
+C
+C Read and check data
+C
+	   NOINT = T2IINF(NPTS, FAILST)		! no. of points
+C
+	   IF ((NPTS .LT. 0) .OR. (NPTS .GT. MAXPTS)) THEN
+	      CALL LSL_PUTMSG(IFROM__NPTSOUTRAN,NPTS,CURLIN)
+	      IF (NPTS .GT. MAXPTS) CALL LSL_PUTMSG(
+     &					IFROM__CONSLSL,MAXPTS)
+	      FAILST = .TRUE.
+	   ENDIF	! ((npts .lt. 0) ...)
+C
+	   IF (.NOT. (NOINT .OR. FAILST)) NOINT = T2IINF(IENDS,FAILST)
+C
+	   IF (FAILST) THEN			! default entry ?
+	      NPTS = 1
+	      CALL LSL_PUTMSG(IFROM__ZSDEFAULT)
+	      IF (LOG) CALL LSL_ADDSTR(
+     &				'ZS 1 0  - coordinate (0.0, 0.0, 0.0)')
+C
+	      IF (ZSBUF(1,1) .LT. CURRA(1)) CURRA(1) = ZSBUF(1,1)
+	      IF (ZSBUF(1,1) .GT. CURRA(2)) CURRA(2) = ZSBUF(1,1)
+	      IF (ZSBUF(2,1) .LT. CURRA(3)) CURRA(3) = ZSBUF(2,1)
+	      IF (ZSBUF(2,1) .GT. CURRA(4)) CURRA(4) = ZSBUF(2,1)
+C
+	   ELSE
+	      I = 0					! initialise counter
+190	      I = I+1					! increment counter
+C
+C Subtract origin if had_origin
+C
+	      IF (HAD_ORIGIN) THEN
+		FAILST = T2IREAL8(REAL8,.TRUE.)		! read point
+		IF (.NOT.FAILST) ZSBUF(1,I) = REAL8 - ORIGIN(1)
+	      ELSE
+		FAILST = T2IREA(ZSBUF(1,I), .TRUE.) 	! read point
+	      ENDIF
+C
+	      IF (.NOT.FAILST) THEN
+		IF (HAD_ORIGIN) THEN
+		  FAILST = T2IREAL8(REAL8,.TRUE.)	! read point
+		  IF (.NOT.FAILST) ZSBUF(2,I) = REAL8 - ORIGIN(2)
+		ELSE
+		  FAILST = T2IREA(ZSBUF(2,I), .TRUE.) 	! read point
+		ENDIF
+	      ENDIF
+C
+	      IF (.NOT.FAILST) FAILST = T2IREA(ZSBUF(3,I), .TRUE.)
+C
+	      IF (.NOT. (DONE .OR. GOTNXT)) THEN
+		 IF (ZSBUF(1,I) .LT. CURRA(1)) CURRA(1) = ZSBUF(1,I)
+		 IF (ZSBUF(1,I) .GT. CURRA(2)) CURRA(2) = ZSBUF(1,I)
+		 IF (ZSBUF(2,I) .LT. CURRA(3)) CURRA(3) = ZSBUF(2,I)
+		 IF (ZSBUF(2,I) .GT. CURRA(4)) CURRA(4) = ZSBUF(2,I)
+	      ENDIF	! (.not. (done .or. gotnxt))
+C
+	      IF ((I .EQ. MAXPTS).AND. (.NOT. FAILST)) THEN
+	         CALL LSL_PUTMSG(IFROM__NPTSOUTRAN,NPTS,CURLIN)
+		 CALL LSL_ADDMSG(IFROM__CONSLSL,MAXPTS)
+		 CALL LSL_ADDMSG(IFROM__REMPTSLOST)
+	      ENDIF
+C
+	      IF ((.NOT. FAILST) .AND. (I .LT. MAXPTS)) GO TO 190
+C
+C Set number of points
+C
+	      IF (DONE .OR. GOTNXT .OR. (I .EQ. MAXPTS)) THEN
+		 IF ((I .NE. MAXPTS).OR. FAILST) I = I-1
+C
+		 IF ((I .NE. NPTS) .AND. (NPTS .NE. 0)) THEN
+		    CALL LSL_PUTMSG(IFROM__WRNGNPTS,CURLIN)
+		    CALL LSL_ADDMSG(IFROM__AMENDED)
+		 ENDIF	! ((i .ne. npts) ...)
+		 NPTS = I
+C
+	      ELSE				! read failed
+		 IF (NPTS .LT. I) NPTS = I
+	      ENDIF	! (done .or. gotnxt .or. (i .eq. maxpts))
+	   ENDIF	! (failst)
+C
+C If necessary skip to next entry
+C
+	   IF (FAILST .AND. (.NOT. (DONE .OR. GOTNXT))) THEN
+	      CALL LSL_PUTMSG(IFROM__REMZSDEF)
+	      IF (.NOT. DONE) CALL T2ISKP
+	   ENDIF	! (failst ...)
+C
+C Write entry to IFF file
+C
+	   IF (.NOT. WRTST) THEN		! first ZS in feature ?
+	      IF (.NOT. WRTAC) THEN		! not had an AC ?
+	         IF (.NOT.WRTNF) THEN
+		    IF (.NOT. HADNF) THEN	! default NF ?
+		       INF = HIGHNF+1
+		       HIGHNF = INF
+		       ISQ = HIGHSQ+1
+		       HIGHSQ = ISQ
+		       CALL LSL_PUTMSG(IFROM__NFDEFAULT)
+C
+	               IF (LOG) THEN
+		          CALL EXPAND('NF %^W%N (%N)',INF,ISQ)
+		          CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	               ENDIF
+		       HADNF = .TRUE.
+		    ENDIF	! (.not. hadnf)
+C
+		    IF (.NOT. HADFS) THEN
+		       HADFS = .TRUE.			! default FS
+		       CALL LSL_PUTMSG(IFROM__FSDEFAULT)
+C
+	               IF (LOG) THEN
+		          CALL EXPAND('FS %^W%N %N %N %N'
+     &				,ISTAT(1),ISTAT(2),ISTAT(3),ISTAT(4))
+		          CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+		       ENDIF
+		    ENDIF
+		    CALL IFFNF(INF,ISQ)			! write NF
+		    CALL IFFFS(ISTAT)			! write FS
+	            WRTNF = .TRUE.			! written NF
+	         ENDIF
+	      ENDIF	! (.not. wrtac)
+C
+	      IF (HADTS) CALL IFFTS(TSTAT)
+	      IF (HADTH) CALL IFFTH(ITHK)		! write TH if had
+	      IF (.NOT.HADTS) WRTST = .TRUE.		! about to write ZS
+	   ENDIF	! (.not. wrtst)
+C
+C ZSs with more than 200 pts split into separate IFF STs
+C
+	   DO 200 I = 1,NPTS,200
+	     IF ((NPTS-I) .GE. 200) THEN
+	        CALL IFFZS(ZSBUF(1,I),200,IENDS)
+	     ELSE
+	        CALL IFFZS(ZSBUF(1,I),NPTS-I+1,IENDS) 	! write ZS entry
+	     ENDIF
+	     IENDS = 1				  	! assume pen down next
+200	   CONTINUE
+C
+	   GO TO 280
+C
+C RO entry
+210	   IF (.NOT. HADRO) THEN
+	      FAILRO = T2IREA(ROT, .TRUE.)		! read rotation
+	      IF (FAILRO) THEN
+		 CALL LSL_PUTMSG(IFROM__RODEFAULT)
+		 IF (.NOT. (DONE .OR. GOTNXT)) CALL T2ISKP
+	      ENDIF	! (failro)
+	      HADRO = .TRUE.				! had RO even if failed
+	   ELSE
+	      CALL LSL_PUTMSG(IFROM__REPROIGN,CURLIN)
+	      CALL T2ISKP
+	   ENDIF	! ((.not. hadro ...))
+C
+	   GO TO 280
+C
+C TX entry
+C
+220	   IF (.NOT.HADTX) THEN
+	      FAILTX = T2ISTR(TXSTR)		! read TX string
+	      IF (FAILTX) THEN
+	         CALL LSL_PUTMSG(IFROM__TXDEFAULT)
+	         IF (LOG) CALL LSL_ADDSTR('"XXXXXX"')
+C
+	         DO 30 I=1,6
+	           TXSTR(I) = 'X'		! default text string
+30	         CONTINUE
+C
+	         TXLEN=6
+	      ELSE
+		 DO 230 I=1,STRSZ		! get posn. of 1st null
+		    IF (TXSTR(I).EQ.0) THEN
+		      TXLEN=I-1
+		      HADTX=.TRUE.
+		      GOTO 280
+		    ENDIF
+230		 CONTINUE
+C
+	         TXLEN=255
+	      ENDIF
+C
+	      HADTX = .TRUE.			! had TX even if failed
+	   ELSE
+	      CALL LSL_PUTMSG(IFROM__REPTXIGN,CURLIN)
+	   ENDIF	! (.not. hadtx)
+C
+	   GO TO 280
+C
+C TS entry
+C
+240	   CONTINUE
+C
+C if already written out a ST entry, then there is a missing TS
+C
+	   IF (.NOT.HADTS) THEN
+	      IF (WRTST) CALL LSL_PUTMSG(IFROM__MISSTS,CURLIN)
+C
+C if had a TS or a ST entry, then write out feature up to this TS
+C
+	   ELSE
+	      IF (HADRO) CALL IFFRO(ROT)	 ! if had RO, write it
+	      IF (HADTX) CALL IFFTX(TXSTR,TXLEN) ! if had TX, write it
+	   ENDIF	! (hadts)
+C
+C now no STs have been written out, as have TH, RO
+C and TX
+C
+	   HADRO = .FALSE.
+	   HADTH = .FALSE.
+	   HADTX = .FALSE.
+	   WRTST = .FALSE.
+	   HADTS = .TRUE.
+C
+	   DO 250,I=1,4				! default to FS value
+	      TSTAT(I) = ISTAT(I)
+250	   CONTINUE
+C
+	   I = 0				! initialise counter
+260	   I = I+1				! increment counter
+	   FAILTS = T2IINF(TSTAT(I),NOREAD)	! read next FS value
+	   IF ((.NOT. FAILTS) .AND. (I .NE. MAXFS)) GO TO 260
+	   IF (NOREAD) CALL LSL_PUTMSG(IFROM__REMTSDEF)
+C
+	   GO TO 280
+C
+C EF entry
+C
+270	   HADEF = .TRUE.
+	   GOTO 280
+C
+C Write entry to IFF file
+C
+275	   IF (.NOT. WRTST) THEN
+	       IF (.NOT. WRTAC) THEN			! not had an AC ?
+	         IF (.NOT.WRTNF) THEN
+		    IF (.NOT. HADNF) THEN		! default NF ?
+		       INF = HIGHNF+1
+		       HIGHNF = INF
+		       ISQ = HIGHSQ+1
+		       HIGHSQ = ISQ
+		       CALL LSL_PUTMSG(IFROM__NFDEFAULT)
+C
+	               IF (LOG) THEN
+		          CALL EXPAND('NF %^W%N (%N)',INF,ISQ)
+		          CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	               ENDIF
+		       HADNF = .TRUE.
+		    ENDIF	! (.not. hadnf)
+C
+		    IF (.NOT. HADFS) THEN
+		       HADFS = .TRUE.		! default FS
+		       CALL LSL_PUTMSG(IFROM__FSDEFAULT)
+C
+	               IF (LOG) THEN
+		          CALL EXPAND('FS %^W%N %N %N %N'
+     &				,ISTAT(1),ISTAT(2),ISTAT(3),ISTAT(4))
+			  CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+		       ENDIF
+		    ENDIF
+		    CALL IFFNF(INF,ISQ)		! write NF
+		    CALL IFFFS(ISTAT)		! write FS
+	            WRTNF = .TRUE.
+	         ENDIF
+	      ENDIF	! (.NOT. WRTAC)
+C
+	      IF (HADTS) CALL IFFTS(TSTAT)	! write TS
+	      IF (HADTH) CALL IFFTH(ITHK)	! write TH if had
+	      IF (.NOT.HADTS) WRTST = .TRUE.	! about to write ST (CB!
+	   ENDIF
+	   HADCB  = .TRUE.
+	   CALL T2ICB
+C
+C If not done read next IFF entry code from text file
+C
+280	   IF (.NOT. DONE) CALL T2INXT(.FALSE.)
+C
+	ENDIF	! (ecdnum .le. maxign)
+C
+C Repeat if not done and not had end feature and
+C entry at feature level and entry not NF
+C
+	IF ((.NOT. DONE) .AND. (.NOT. HADEF) .AND. (ECDNUM.LE.MAXFEA)
+     &	   .AND. (ECDNUM .NE. T2ICON('NF'))) GO TO 50
+C
+C Complete writing to IFF file
+C
+	IF (.NOT.WRTST .AND. .NOT.HADTS .AND. .NOT.HADCB) THEN	
+	   IF (.NOT. WRTAC) THEN		! not had an AC ?
+	      IF (.NOT.WRTNF) THEN
+	         IF (.NOT. HADNF) THEN		! default NF ?
+		    INF = HIGHNF+1
+		    HIGHNF = INF
+		    ISQ = HIGHSQ+1
+		    HIGHSQ = ISQ
+		    CALL LSL_PUTMSG(IFROM__NFDEFAULT)
+C
+	            IF (LOG) THEN
+		       CALL EXPAND('NF %^W%N (%N)',INF,ISQ)
+		       CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	            ENDIF
+	         ENDIF	! (.not. hadnf)
+C
+	         CALL IFFNF(INF,ISQ)			! write NF entry
+	         IF (INF.NE.0) CALL IFFFS(ISTAT)	! if not dummy NF wrt FS
+	         WRTNF = .TRUE.
+	      ENDIF
+	   ENDIF	! (.not. wrtac)
+C
+	   IF (HADTS) CALL IFFTS(TSTAT)
+	   IF (HADTH) CALL IFFTH(ITHK)		! if had TH, write it
+C
+	   IF (INF .NE. 0) THEN			! not a dummy NF entry ?
+	      NPTS = 1				! default one point
+C
+	      DO 290 I=1,MAXPTS
+		 STBUF(1,I) = 0.0		! all zero
+		 STBUF(2,I) = 0.0
+290	      CONTINUE
+C
+	      IF (STBUF(1,1) .LT. CURRA(1)) CURRA(1) = STBUF(1,1)
+	      IF (STBUF(1,1) .GT. CURRA(2)) CURRA(2) = STBUF(1,1)
+	      IF (STBUF(2,1) .LT. CURRA(3)) CURRA(3) = STBUF(2,1)
+	      IF (STBUF(2,1) .GT. CURRA(4)) CURRA(4) = STBUF(2,1)
+C
+	      CALL IFFST(STBUF,NPTS,IENDS)	! write ST
+	      CALL LSL_PUTMSG(IFROM__MISSSTDEF,CURLIN)
+C
+	      IF (LOG) CALL LSL_ADDSTR(
+     &				'ST 1 0  - coordinate (0.0, 0.0)')
+C
+	   ENDIF	! (inf .ne. 0)
+	ENDIF	! (.not. wrtst)
+C
+	IF (HADRO) CALL IFFRO(ROT)		! if had RO, write it
+	IF (HADTX) CALL IFFTX(TXSTR,TXLEN)	! if had TX, write it
+	CALL IFFEF				! write EF entry
+C
+C Repeat if not done and entry at feature level
+C
+	IF ((.NOT. DONE) .AND. (ECDNUM .LE. MAXFEA)) GO TO 10
+C
+C Return
+	RETURN
+	END
+C

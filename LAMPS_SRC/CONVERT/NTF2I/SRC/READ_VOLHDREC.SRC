@@ -1,0 +1,197 @@
+	LOGICAL FUNCTION READ_VOLHDREC
+C
+***     MODULE READ_VOLHDREC
+***     IDENT	14JN96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author						IM	18-Aug-1987
+C Modified						TJI	05-Oct-1987
+CMOD	Handle NTF level 3				VLG	05-Mar-1990
+CMOD	BS7567 (v2.0) support added (W93/13)		ST	02-Jun-1993
+CMOD    NTF$_NTFOR should be CHAR*1 from STRING(62:62)	ST	20-Jul-1993
+C       (Mod 1256)
+CMOD    Implement CITF96 changes (WI/CC 1545)           TJM     12-Jun-1996
+C
+C Reads the volume header record
+C
+	IMPLICIT NONE
+C
+C Messages:
+C
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Common files:
+C
+	INCLUDE 'CITF.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'		! for STRING
+	INCLUDE	'NTFDATA.CMN'		! for LEVEL,VERSION
+C
+C Functions:
+C
+	LOGICAL		RDINT		! read an integer
+	INTEGER		STR$FIND_FIRST_IN_SET
+C
+C Workspace:
+C
+	INTEGER		OK		! Success flag
+	INTEGER		INTVER		! Integer version of VERSION
+	INTEGER		RESULT		! Function return (character location)
+C
+	CHARACTER*20	NTF$_DONOR
+	CHARACTER*20	NTF$_RECIPIENT
+	CHARACTER*8	NTF$_TRANDATE
+	CHARACTER*5	NTF$_SERIAL
+	CHARACTER*2	NTF$_VOLNUM
+	CHARACTER	NTF$_NTFLEVEL
+	CHARACTER*4	NTF$_NTFVER
+	CHARACTER*1	NTF$_NTFOR
+	CHARACTER	NTF$_EOR
+	CHARACTER	NTF$_DIVIDER
+	CHARACTER	ACTUAL_EOR
+C
+	CHARACTER*2	MONTH,DAY
+	CHARACTER*4	YEAR
+C
+C ........................................................................
+C
+	OK = .TRUE. 		! assume OK
+C
+C
+	NTF$_DONOR	= STRING( 3:22)
+	NTF$_RECIPIENT	= STRING(23:42)
+	NTF$_TRANDATE	= STRING(43:50)
+	NTF$_SERIAL	= STRING(51:54)
+	NTF$_VOLNUM	= STRING(55:56)
+	NTF$_NTFLEVEL	= STRING(57:57)
+	NTF$_NTFVER	= STRING(58:61)
+	NTF$_NTFOR	= STRING(62:62)
+CCC	NTF$_NTFOR	= STRING(61:62) ! Bug
+	NTF$_EOR	= STRING(63:63)
+	NTF$_DIVIDER	= STRING(64:64)
+	ACTUAL_EOR	= STRING(LENGTH:LENGTH)
+C
+C ........................................................................
+C - firstly read the level of the data
+C
+	CALL SETAUX(%REF(NTF$_NTFLEVEL),1)
+	OK = .NOT.RDINT(LEVEL)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__VOLHDREC,'LEVEL')
+	   CALL LSL_ADDSTR(NTF$_NTFLEVEL)
+	   GOTO 999
+	ENDIF
+C
+C is it a level we can cope with (ie 1, 2 or 3) ?
+C
+	IF ((LEVEL.NE.1).AND.(LEVEL.NE.2).AND.(LEVEL.NE.3)) THEN	
+	   IF (.NOT.(HAD_CITF93.OR.HAD_CITF96)) THEN
+	      CALL LSL_PUTMSG(NTF2I__WRONGLEVEL,LEVEL)
+	      OK=.FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C ........................................................................
+C - next the version number of this NTF (as a real number)
+C
+	CALL SETAUX(%REF(NTF$_NTFVER),4)
+	OK = .NOT.RDINT(INTVER)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__VOLHDREC,'NTFVER')
+	   CALL LSL_ADDSTR(NTF$_NTFVER)
+	   GOTO 999
+	ENDIF
+C
+	VERSION = FLOAT(INTVER) / 100.0			!make into real
+C
+	IF (.NOT.(HAD_CITF93.OR.HAD_CITF96)) THEN
+	   IF (VERSION.NE.1.1 .AND. VERSION.NE.2.0) THEN ! can we understand
+	      CALL LSL_PUTMSG(NTF2I__WRONGVERSION,VERSION)
+	      OK=.FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C ........................................................................
+C Fixed or variable length records
+C
+	FIXED = .FALSE.
+	IF ( NTF$_NTFOR.EQ.'F' ) FIXED = .TRUE.
+C
+C ........................................................................
+C End of record marker ( space = default, <CR>  )
+C
+	IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	   EOR_MARKER = '%'
+	   ACTUAL_EOR	= STRING(LENGTH:LENGTH)
+	ELSE
+	   IF (VERSION.EQ.2.0) THEN
+	      EOR_MARKER = '%'
+	      ACTUAL_EOR = STRING(LENGTH:LENGTH)
+	   ELSE
+	      EOR_MARKER = CHAR( 13 )			! default for 1.1
+	   ENDIF
+	ENDIF
+	IF ( NTF$_EOR.NE.' ') EOR_MARKER = NTF$_EOR
+	IF (EOR_MARKER.NE.ACTUAL_EOR) THEN			! does it match
+	  CALL LSL_PUTMSG(NTF2I__EORCONFL)
+	  CALL LSL_ADDMSG(NTF2I__POSERR)
+	ENDIF
+C ........................................................................
+C Field separator, make sure it's sensible - ie not something that is likely
+C to occur in a field or the EOR marker
+C
+	DIVIDER = NTF$_DIVIDER
+	RESULT = STR$FIND_FIRST_IN_SET( DIVIDER,
+     &		  'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789. '//EOR_MARKER )
+	IF ( RESULT.GT.0 ) THEN
+	   CALL LSL_PUTMSG( NTF2I__BADDIVIDER,DIVIDER )
+	   DIVIDER = '\'
+	ENDIF
+C
+C ........................................................................
+C Announce the level and version we are reading
+C
+	IF (LOG) THEN
+	   IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	      CALL LSL_PUTMSG(NTF2I__CITFDATA,LEVEL,VERSION)
+	   ELSE
+	      CALL LSL_PUTMSG(NTF2I__NTFDATA,LEVEL,VERSION)
+	   ENDIF
+	ENDIF
+C
+C If it is level 3 tell the user that output will be unstructured data
+C
+	IF (LEVEL.EQ.3) CALL LSL_PUTMSG(NTF2I__NOSTRUC)
+C
+C ........................................................................
+C If we're producing a log file, write pertinent information to it
+C
+	IF (OUTPUT) THEN
+	   DAY   =  NTF$_TRANDATE(7:8)
+	   MONTH =  NTF$_TRANDATE(5:6)
+	   YEAR  =  NTF$_TRANDATE(1:4)
+C
+	   CALL FLWSTR('Volume header record:')
+	   CALL FLWRTF('%TData sent by  "%S"',  NTF$_DONOR    )
+	   CALL FLWRTF('%TData sent to  "%S"',  NTF$_RECIPIENT)
+	   CALL FLWRTF('%TTransfer date "%S" (ie %S/%S/%S)',
+     &			NTF$_TRANDATE , DAY , MONTH, YEAR)
+	   IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	      CALL FLWRTF('%TCITF at NTF level     %I2',  LEVEL)
+	      CALL FLWRTF('%TCITF at NTF version   %F5.2',VERSION)
+	   ELSE
+	      CALL FLWRTF('%TNTF level      %I2',  LEVEL)
+	      CALL FLWRTF('%TNTF version    %F5.2',VERSION)
+	   ENDIF
+	ENDIF
+C
+C ........................................................................
+C Join errors
+C
+999	READ_VOLHDREC=OK
+	RETURN
+	END

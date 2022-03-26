@@ -1,0 +1,201 @@
+        INTEGER*4 FUNCTION OPEN_INPUT_FILE()
+C
+***	MODULE	OPEN_INPUT_FILE
+***	IDENT	24SE91
+C
+C 	Copyright Laser-Scan Ltd.,Cambridge,England
+C
+C 	Author  : D R Catlow
+C	Created : 25 September 1987
+C	Modified:
+C
+CMOD	Take mod(2*PI) for LATINT etc.
+C
+CMOD	Close DTI file if not correct LSLA header for /DESCR
+C
+CMOD	Optional argument to DTI_OPEN supplied, to ensure warning
+C	is output if data order values are not default id data is
+C	to be transformed
+C
+C	Function for DTITRANS to open the input DTI file.
+C	Depending on the style of DTI header, the routine
+C	either either sets up default projection characteristics,
+C	or searches for a DTI Projection Record.
+C	Projection details are stored in common DTIPROJ
+C
+C----------------------------------------------------------------------
+	IMPLICIT NONE
+C
+C	DTILIB commons
+***	COMMON   /LSL$CMNDTI:DTIHDR/
+***	COMMON	 /LSL$CMNDTI:DTIPROJ/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+C	DTITRANS commons
+***	COMMON   /HERE:DTITRANS/
+***	PARAMETER/HERE:DTITRANSMSG/
+C
+C Functions:
+	INTEGER*4	DTI_OPEN	   !to open and map the DTI
+C
+C Locals:
+	INTEGER*4	IERR		   !function return
+	INTEGER*4	ERROR		   !system error code
+	INTEGER*4	I_MOD
+	LOGICAL		ALLOW_WRITE	   !read and write access?
+	LOGICAL		REPORT		   !report on corner/orient?
+C
+C----------------------------------------------------------------------
+C----------------------------------------------------------------------
+C If /DESCRIPTOR we open for write access
+C otherwise as read only
+C 
+	IF (HAD_DESCRIPTOR)THEN
+	  ALLOW_WRITE=.TRUE.
+	  REPORT = .FALSE.
+	ELSE
+	  ALLOW_WRITE=.FALSE.
+	  REPORT = .TRUE.
+	ENDIF
+C
+C Call DTI_OPEN to open the DTI file and fill DTIHDR (and DTIPROJ 
+C if present)
+C
+	OPEN_INPUT_FILE=DTI_OPEN(
+     &                           IN_LUN,
+     &                           DTI_NAME(IN_LUN),
+     &                           DTI_NAME_LENGTH(IN_LUN),
+     &                           ALLOW_WRITE,
+     &                           ERROR,
+     &                           REPORT)
+C
+	IF (.NOT.OPEN_INPUT_FILE)THEN
+	   CALL LSL_PUTMSG(OPEN_INPUT_FILE)
+	   IF (OPEN_INPUT_FILE.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	   GOTO 999
+	ENDIF
+C
+C----------------------------------------------------------------------
+C If /DESCRIPTOR has been specified,
+C ensure we are dealing with a LSLA type file
+C
+	IF (HAD_DESCRIPTOR)THEN
+           IF (HEADER_TYPE(IN_LUN).NE.DTI_LSLA)THEN
+	      OPEN_INPUT_FILE=DTRANS__NOTLSLAHEAD
+	      CALL LSL_PUTMSG(DTRANS__NOTLSLAHEAD)
+C
+C Close the file
+C
+	      CALL DTI_CLOSE(IN_LUN,.FALSE.,.FALSE.,ERROR)
+	      GOTO 999
+	   ENDIF
+	ELSE
+C
+C If it's a BIT file, give up (at present)
+C
+	   IF (DATA_TYPE(IN_LUN).EQ.DATA_BIT) THEN
+	      CALL LSL_PUTMSG(DTRANS__BITDATA)
+	      OPEN_INPUT_FILE=DTRANS__BITDATA
+C
+C Close the file
+C
+ 	      CALL DTI_CLOSE(IN_LUN,.FALSE.,.FALSE.,ERROR)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C----------------------------------------------------------------------
+C If it's an LSLA/ALVY file check for a DTI Projection Record
+C
+	IF (HEADER_TYPE(IN_LUN).EQ.DTI_LSLA.OR.
+     &      HEADER_TYPE(IN_LUN).EQ.DTI_ALVY)THEN
+C
+	  IF (.NOT.HAD_PROJ_RECORD(IN_LUN))THEN
+C
+C	At least fill in the sample values from the first
+C	part of the header, and set the default units to metres.
+C
+	     DTIPROJ_SAMPLE(1,IN_LUN)=X_GRID(IN_LUN)
+	     DTIPROJ_SAMPLE(2,IN_LUN)=Y_GRID(IN_LUN)
+	     DTIPROJ_ORIGIN(1,IN_LUN)=X_OFFSET(IN_LUN)
+	     DTIPROJ_ORIGIN(2,IN_LUN)=Y_OFFSET(IN_LUN)
+C
+C Set metres if unset
+	     IF (DTIPROJ_UNITS(IN_LUN).EQ.0)DTIPROJ_UNITS(IN_LUN)=2
+	  ENDIF	    	    	  
+	ENDIF
+C
+C Default the unset sample size to 1 
+C
+	IF (DTIPROJ_SAMPLE(1,IN_LUN).EQ.0) 
+     &			DTIPROJ_SAMPLE(1,IN_LUN)= 1
+ 	IF (DTIPROJ_SAMPLE(2,IN_LUN).EQ.0) 
+     &			DTIPROJ_SAMPLE(2,IN_LUN)= 1
+	IF (X_GRID(IN_LUN).EQ.0) X_GRID(IN_LUN) = 1
+	IF (Y_GRID(IN_LUN).EQ.0) Y_GRID(IN_LUN) = 1
+C
+C At this stage we are not interested in whether there is
+C anything sensible in the Projection Record.
+C
+C-----------------------------------------------------------------------
+C If its a TED4 or UHL1 file, then we can set up a number of 
+C variables in DITPROJ using details from the DSI
+C
+	IF (HEADER_TYPE(IN_LUN).EQ.DTI_TED4 .OR.
+     &      HEADER_TYPE(IN_LUN).EQ.DTI_UHL1)THEN
+C
+C	Projection Code is 100 ie. Geographicals
+	   DTIPROJ_PROJECTION(IN_LUN)=100
+C
+C	Spheroid Code is 5 ie. World Geodetic System 72 (WGS 72)
+	   DTIPROJ_SPHEROID(IN_LUN)=5
+C
+C	Projection units are 1/10 seconds of arc ie. 110
+	   DTIPROJ_UNITS(IN_LUN)=110
+C
+	   I_MOD = 360*3600*10
+C
+C	Origin - transferred from DTIHDR.
+	   DTIPROJ_ORIGIN(1,IN_LUN)=MOD(LONREC(1,IN_LUN),I_MOD)
+	   DTIPROJ_ORIGIN(2,IN_LUN)=MOD(LATREC(1,IN_LUN),I_MOD)
+C
+C	Sample (grid intervals) values
+C	Also transferred from DTIHDR
+	   DTIPROJ_SAMPLE(1,IN_LUN)=MOD(LONINT(IN_LUN),I_MOD)
+	   DTIPROJ_SAMPLE(2,IN_LUN)=MOD(LATINT(IN_LUN),I_MOD)
+C
+C-----------------------------------------------------------------------
+C	If its a MIKE style header, then the only thing we
+C	can set up in the projection record is the default
+C	units of metres and the sample values
+C
+	ELSEIF (HEADER_TYPE(IN_LUN).EQ.DTI_MIKE)THEN
+C
+C	Projection units are metres ie. 2
+	   DTIPROJ_UNITS(IN_LUN)=2
+C
+C	Sample values in metres
+	   DTIPROJ_SAMPLE(1,IN_LUN)=X_GRID(IN_LUN)
+	   DTIPROJ_SAMPLE(2,IN_LUN)=Y_GRID(IN_LUN)
+	   DTIPROJ_ORIGIN(1,IN_LUN)=X_OFFSET(IN_LUN)
+	   DTIPROJ_ORIGIN(2,IN_LUN)=Y_OFFSET(IN_LUN)
+	ENDIF
+C
+C---------------------------------------------------------------------
+C Set up absolute window
+C
+	ABSOLUTE_SWX(IN_LUN)=DTIPROJ_ORIGIN(1,IN_LUN)
+	ABSOLUTE_SWY(IN_LUN)=DTIPROJ_ORIGIN(2,IN_LUN)
+	ABSOLUTE_NEX(IN_LUN)=ABSOLUTE_SWX(IN_LUN)+((X_EXTENT(IN_LUN)-1)
+     &                       *DTIPROJ_SAMPLE(1,IN_LUN))
+	ABSOLUTE_NEY(IN_LUN)=ABSOLUTE_SWY(IN_LUN)+((Y_EXTENT(IN_LUN)-1)
+     &                       *DTIPROJ_SAMPLE(2,IN_LUN))
+C
+C----------------------------------------------------------------------
+C Signal success
+	OPEN_INPUT_FILE=DTI__NORMAL
+C
+999	RETURN
+	END
+C

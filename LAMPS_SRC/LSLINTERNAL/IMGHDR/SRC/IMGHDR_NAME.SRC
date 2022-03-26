@@ -1,0 +1,146 @@
+	PROGRAM IMGHDR_PATCH
+C
+***	IDENT	08JN89
+***	MODULE	IMGHDR_PATCH
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C Author Paul Hardy				PGH	13-Oct-1992
+C after IMGHDR_PATCH				PGH	15-May-1989
+C
+C test program to patch name information into image header
+C
+	IMPLICIT NONE
+C
+	BYTE		BUFFER(512)	! block buffer
+	INTEGER		ADDRESS		! address of actual header
+	INTEGER		OFFSET		! offset of ident area
+	CHARACTER	IMG_NAME*40	! program name 
+	INTEGER		IMG_NAMELEN	! length of name
+	CHARACTER	IMG_IDENT*32	! program ident
+	INTEGER		IMG_IDENTLEN	! length of ident
+	CHARACTER	IMG_DATE*23	! program link date
+	CHARACTER	NEW_NAME*40	! new program name
+	INTEGER		NEW_NAMELEN	! new length of name
+	CHARACTER	FILE*80		! filename to patch
+	INTEGER		FILELEN		! filename length
+	CHARACTER	CLINE*255	! command line
+	INTEGER		CLEN		! command line length
+	LOGICAL		WRITE		! true if doing a write operation
+	INTEGER		I		! loop variable
+C
+	INTEGER*4	LIB$EXTZV	! function called
+	INTEGER		ICHAR		! intrinsic
+	INTEGER		IERR		! error code
+	EXTERNAL	SS$_ABORT	! error code
+C
+C init things
+C
+	IERR=%LOC(SS$_ABORT)		! assume failure
+C
+C get command line and parse
+C
+	CALL LIB$GET_FOREIGN(CLINE,'Command: ',CLEN)
+	IF (CLEN.LE.0) THEN
+	   TYPE *,'%IMGHDR-F-INVCMD, Command line invalid, aborting'
+	   GOTO 999
+	ENDIF
+C
+C get filename to patch
+C
+	FILELEN=INDEX(CLINE(1:CLEN),' ')
+	IF (FILELEN.LE.0) THEN
+	   FILELEN=CLEN
+	ENDIF
+	FILE=CLINE(1:FILELEN)
+C
+C get name if present
+C
+	IF (FILELEN.LT.CLEN-1) THEN
+	   NEW_NAME=CLINE(FILELEN+1:CLEN)
+	   NEW_NAMELEN=CLEN-FILELEN
+	   IF (NEW_NAMELEN.GT.15) THEN
+	      TYPE *,'%IMGHDR-W-TOOLONG, name too long (max 40 characters)'
+	      GOTO 999
+	   ENDIF
+	   WRITE=.TRUE.
+	ELSE
+	   WRITE=.FALSE.
+	ENDIF
+C
+C open the image file and read the first block
+C
+	IF (WRITE) THEN
+	   OPEN(UNIT=1,FILE=FILE(1:FILELEN),DEFAULTFILE='.EXE',
+     &     STATUS='OLD',FORM='UNFORMATTED',ACCESS='DIRECT')
+	TYPE *,'%IMGHDR-I-OPENWRITE, image file opened for update'
+	ELSE
+	   OPEN(UNIT=1,FILE=FILE(1:FILELEN),DEFAULTFILE='.EXE',
+     &     STATUS='OLD',FORM='UNFORMATTED',ACCESS='DIRECT',
+     &     READONLY,SHARED)
+	ENDIF
+	READ(1,REC=1)BUFFER
+C
+C check header for consistency
+C
+100	IF (BUFFER(512).NE.-1) THEN
+	   TYPE *,'%IMGHDR-F-INVHDR, image has invalid header, aborting'
+	   GOTO 999
+	ENDIF
+C
+C we are going to work our way round the buffer in terms of addresses
+C
+	ADDRESS=%LOC(BUFFER)
+C
+C now we add on the offset to the start of the identification area,
+C which is kept in the 4th word in.
+C
+	OFFSET=LIB$EXTZV(0,16,%VAL(ADDRESS+6))
+	ADDRESS=ADDRESS+OFFSET
+C
+C having found the identification area, it is made up of:
+C 1) a 40 byte counted string of the program name,
+C
+	IMG_NAMELEN=LIB$EXTZV(0,8,%VAL(ADDRESS))
+	IF (IMG_NAMELEN.LE.0.OR.IMG_NAMELEN.GT.39) THEN
+	   TYPE *,'%IMGHDR-F-BADHDR, bad program name field, aborting'
+	   GOTO 999
+	ENDIF
+	CALL STR$COPY_R(IMG_NAME,IMG_NAMELEN,%VAL(ADDRESS+1))
+C
+C 2) a 16 byte counted string of the program ident,
+C
+	IMG_IDENTLEN=LIB$EXTZV(0,8,%VAL(ADDRESS+40))
+	IF (IMG_IDENTLEN.LE.0.OR.IMG_IDENTLEN.GT.15) THEN
+	   TYPE *,'%IMGHDR-F-BADHDR, bad ident field, aborting'
+	   GOTO 999
+	ENDIF
+	CALL STR$COPY_R(IMG_IDENT,IMG_IDENTLEN,%VAL(ADDRESS+41))
+	CALL LIB$SET_SYMBOL('LSL$IMGHDR_IDENT',IMG_IDENT(1:IMG_IDENTLEN))
+C
+C 3) a  4 byte quadword binary date of linking.
+C
+	CALL SYS$ASCTIM(,IMG_DATE,%VAL(ADDRESS+56),)
+	TYPE *,' Program name "',IMG_NAME(1:IMG_NAMELEN),
+     &       '", version "',IMG_IDENT(1:IMG_IDENTLEN),
+     &       '", of ',IMG_DATE(1:17)
+C
+C now rewrite the name field if needed
+C
+	IF (.NOT.WRITE) GOTO 800
+	CALL LIB$INSV(NEW_NAMELEN,0,8,%VAL(ADDRESS+0))
+	DO 150 I=1,NEW_NAMELEN
+	   CALL LIB$INSV(ICHAR(NEW_NAME(I:I)),0,8,%VAL(ADDRESS+0+I))
+150	CONTINUE
+	REWRITE(1)BUFFER
+	WRITE=.FALSE.
+	GOTO 100		! show it now
+C
+C close up file
+C
+800	CLOSE(UNIT=1)
+	IERR=1			! normal success
+C
+C all done
+C
+999	CALL EXIT(IERR)
+	END

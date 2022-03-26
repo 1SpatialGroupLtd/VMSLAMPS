@@ -1,0 +1,861 @@
+	PROGRAM I2DFAD
+C
+***	IDENT 10DE93
+***	MODULE I2DFAD
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England.
+C Author: M. Dhillon
+C Written: 5 May 1983 
+C Modified: C.C. Brunt
+C
+CMOD: Feature codes no longer checked for values   MD	24-Jan-1985
+C
+CMOD	Modernised to use LSLLIB and other recent developments
+C		 				   JMB 	22-Mar-1988
+C
+CMOD	Remove messages concerning change number   DRC  21-June-1988
+C
+CMOD	Calculate differnce between local origin (from type 2 Map
+C	Descriptor) and manuscript origin. That will then be added to
+C	any points output to the DFAD tape, as well as to the extent
+C 	of the map output to the tape when that extent is calculated
+C	from the RAnge entry in the IFF file, add is not read from
+C	the appropriate fields in the MCE map header entry.
+C	If no type 2 MD entry is present, the local and manuscript
+C	origins are assumed to be the same.
+C						   JMB	14-July-1988
+C
+C
+C This program reads an IFF file on disc and translates the information
+C and outputs it to a DMA DLMS DFAD(Defense Mapping Agency Digital Land
+C Mass Simulation Digital Feature Analysis Data) magtape.
+C
+C ie: it produces a magtape containing culture data
+C
+	IMPLICIT NONE
+C
+	INCLUDE '($SSDEF)'
+	INCLUDE '($MTDEF)'
+C 
+C Common blocks
+C 
+***	COMMON/HERE:SCRIPT/		! for MANNUM
+*** 	COMMON/HERE:IFFILE/		! for IFF file maintenance
+***	COMMON/HERE:AUXIL/		! for little tit-bits
+***	COMMON/HERE:STATE/		! what state we are in
+***	COMMON/HERE:DESCR/		! for feature description
+***	COMMON/HERE:PARAMS/		! control parameters
+***	COMMON/HERE:I2DFADMSG.PAR/	! messages
+***	COMMON/LSL$CMNDLMS:DFAD/	! Univac 1/2 word buffer
+***	COMMON/LSL$CMNLSL:CMDCOM/	  	! for command reading
+***	COMMON/LSL$CMNLSL:MTOVCM/		! for magtape routines
+***	COMMON/LSL$CMNIFF:MHMCE/		! for map header info
+***	COMMON/LSL$CMNIFF:IFFHAN/		! for IFF stuff
+***	COMMON/LSL$CMNLSL:TXTC/		! for decoding AC entries
+C
+C Functions called
+C
+	INTEGER*4	MTONIT		! init magtape for output
+	INTEGER*4	MTORWD		! rewinds magtape
+	INTEGER*4	MTOBCK		! backspace blocks
+	INTEGER*4	MTORDB		! reads a block of the magtape
+	LOGICAL 	GETCMD		! interprets command line
+	LOGICAL		RDMAG		! reads the next block
+	LOGICAL		WTPMKS		! write two tape marks
+	LOGICAL		BLKPOS		! backspaces magtape 3 blocks
+	LOGICAL		OBTNAC		! gets the info for the AC
+	LOGICAL		NEGTIV		! con -ve numbers from 2's comp
+					! to 1's comp
+	LOGICAL		STRTIF		! start IFF file stuff
+	LOGICAL		FIND_LOCAL_ORIGIN!find local origin from MD2
+	LOGICAL		OUTHDR		! output manuscript header
+	LOGICAL		OUTDSI		! output DSI block
+	LOGICAL		OUTACC		! output ACC block
+	INTEGER*4	MTOSNS		! sense tape characteristics
+	INTEGER*4	LIB$EXTZV	! extract zero bit extended
+C
+C Workspace
+C
+	INTEGER		STATUS		! exit status
+	INTEGER*4	ERROR		! for magtape functions
+	INTEGER*4	IERR		! for widening MTOERR into
+	INTEGER*4	LSTFAC		! last feature serial no.
+	INTEGER*4	LSTLEN		! no. of co-ords in last ST 
+	INTEGER*2	NPTS		! total no. of points in ST
+	INTEGER*2	IENDS		! IFF end of ST parameter
+	INTEGER*4	LSTBLK		! type of last data block
+	CHARACTER*60	DEFNAM		! default IFF filename
+	INTEGER		DEFLEN
+	LOGICAL		OVZERO		! true if overlay zero
+	LOGICAL		HADNF1		! true if had NF 1
+	LOGICAL		DONHED		! true if done headers
+	LOGICAL		BKEFNF		! true if going back to last EF
+					! from NF
+	LOGICAL		BKEFEO		! true if going back to last EF
+					! from EO
+	LOGICAL		BKEONO		! true if going back to last EO
+					! from NO
+	LOGICAL		BKEOEM		! true if going back to last EO
+					! from EM
+	LOGICAL		BKEMEJ		! true if going back to EM from
+					! EJ
+	INTEGER*2	I		! loop variable
+	INTEGER*2	OVLNUM		! overlay number
+	INTEGER*2	ACTYPE		! AC type of feature
+	REAL		CONV		! conversion factor
+	REAL		LATO		! latitude of origin
+	REAL		LONGO		! longitude of origin
+	LOGICAL 	MINUS		! true if 36-bit word -ve
+	INTEGER*2	IECODE		! entry in hand code
+	INTEGER*2	IELEN		! length of entry in hand
+	INTEGER*2	FBLNUM		! feature block number
+	LOGICAL		HADRA		! true if had range
+	LOGICAL		HADMH		! true if had map header
+	LOGICAL		HADMD		! true if had map descriptor
+	LOGICAL		HADNS		! true if had new section
+	LOGICAL		HADCC		! true if had cubic coffs
+	LOGICAL		HADCP		! true if had corner points
+	LOGICAL		HADNO		! true if had new overlay
+	LOGICAL		HADNF		! true if had new feature
+	LOGICAL		HADEF		! true if had end feature
+	LOGICAL		HADEO		! true if had end overlay
+	LOGICAL		HADEM		! true if had end of map
+	LOGICAL		HADEJ		! true if had end of job
+	INTEGER*4	TERROR		! error return code
+	CHARACTER*40	TPROMT		! prompt string
+	CHARACTER*20	TSTBUF		! answer string 
+	INTEGER		NBUF		! no. characters in TSTBUF
+	REAL		RABUF(4)	! buffer for range points
+	REAL		CPBUF(16)	! buffer for corner-pts
+	INTEGER*4	MTMODE		! for sensing tape pos.	
+	INTEGER*4	LSTLEV		! last man level type
+	EQUIVALENCE (RABUF,RANGE)
+C
+C Set up exit status
+C
+	STATUS = SS$_NORMAL
+C
+C Initialiase libraries
+C
+	CALL LSL_INIT
+	CALL DLMS_INIT
+C
+C Do not check SEC and REL
+C
+	SECRTY = -1
+	RELEAS = -1
+C
+C Assume that we want to append to the last map but are not sure where 
+C this position is.
+C
+	MANNUM = 0
+	LSTLAT = -1.0E37
+	LSTLON = -1.0E37
+C
+C Set the default IFF filename and the LUN to access it on.
+C
+	DEFNAM = 'LSL$IF:DFAD.IFF;0'
+	DEFLEN = 17
+	IFFLUN = 1
+	CALL IFFTDY			! supress IFF traceback
+C
+C It is time to initialise or reinitialise some of
+C the appropriate variables
+C
+10	HADRA = .FALSE.
+	HADMH = .FALSE.
+	HADMD = .FALSE.
+	HADCC = .FALSE.
+	HADCP = .FALSE.
+	HADNS = .FALSE.
+	HADNF1 = .FALSE.
+	HADEF = .FALSE.
+	HADEO = .FALSE.
+	HADEM = .FALSE.
+	HADEJ = .FALSE.
+	DONHED = .FALSE.
+	REWIND = .FALSE.
+	APP = .FALSE.
+	DIAG = .FALSE.
+	FILNAM = DEFNAM			! use default for starters
+	FILLEN = DEFLEN
+	LSTFAC = 0
+	FBLNUM = 1
+	OVLNUM = -1		! since the first overlay number is 0
+	MANNUM = MANNUM + 1
+C
+C Get command
+C
+	IF (.NOT.GETCMD()) THEN
+	   STATUS = SS$_ABORT
+	   GOTO 5000	! exit from program if error
+	ENDIF
+C
+C ******************************************************************
+C Initialise the magtape for 1600 bpi phase encoded,
+C with or without rewind, whatever the case.
+C
+	IF (REWIND) THEN
+	   ERROR = MTONIT(TAPEDEVICE(1:TAPEDEVLEN), .TRUE. , .FALSE.)
+	ELSE
+	   ERROR = MTONIT(TAPEDEVICE(1:TAPEDEVLEN), .TRUE. , .TRUE.)
+	END IF
+C
+C Put out information on tape device being used
+C
+	CALL LSL_PUTMSG(I2D__WRTDEV,TAPEDEVICE(1:TAPEDEVLEN))
+C
+C Check/report on any errors
+C
+	IF (.NOT.ERROR) THEN
+	   CALL LSL_PUTMSG(ERROR)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C *******************************************************************
+C
+C Check to see if the magtape is already at BOT
+C
+	ERROR = MTOSNS(MTMODE)
+C
+C Check for errors
+C
+	IF (.NOT.ERROR) THEN
+	   CALL LSL_PUTMSG(ERROR)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	END IF
+C
+C If it is at BOT because we just rewound it, then no need to check
+C for the presence of existing manuscripts. If we didn't rewind it
+C then check for existing manuscipts to append to.
+C
+	IF ((MTMODE .AND. MT$M_BOT) .NE. 0)  THEN
+	   IF (REWIND) GOTO 250		! we rewound it
+	   GOTO 48			! search for manuscripts
+	ENDIF
+C
+C ********************************************************************
+C
+C Check if map is to be written at current tape position.
+C If so skip code dealing with finding last manuscript
+C
+	IF (.NOT.APP) GOTO 250
+C
+C Now find position to append to :
+C Start by rewinding the tape to BOT
+C
+	ERROR = MTORWD()
+C
+C Check/report errors
+C
+	IF (.NOT.ERROR) THEN
+	   CALL LSL_PUTMSG(ERROR)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C Read the first block on the tape
+C
+48	IF (RDMAG()) THEN
+	   CALL LSL_PUTMSG(I2D__UNRDBLK,'a')
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C If it is an ICL header block then read the next block
+C
+	IF (BLKTYP .EQ. ICLHED) GOTO 48
+C
+C If it is a header then we have manuscript(s) on the tape so go and
+C find the position to append to
+C
+	IF (BLKTYP .EQ. MANHED) GOTO 50
+C
+C Tell user it is not DFAD format tape and exit
+C
+	CALL LSL_PUTMSG(I2D__NOTDFAD)
+	STATUS = SS$_ABORT
+	GOTO 5000
+C
+C Otherwise there are no manuscripts on the tape so rewind and proceed
+C if requested to else quit.
+C
+C	CALL WRITEF('This is not a DFAD format tape')
+C	TPROMT = 'Do you wish to proceed further? (Y/N) '
+C	CALL TTRSTR(TSTBUF,NBUF,TPROMT,TERROR)
+C	IF (NBUF.GT.0) THEN
+C	   IF (TSTBUF(1:1) .EQ. 'Y' .OR.
+C     &		TSTBUF(1:1) .EQ. 'y') THEN
+C	      ERROR = MTORWD()
+C	      IF (.NOT.ERROR) THEN
+C	         CALL LSL_PUTMSG(ERROR)
+C	         STATUS = SS$_ABORT
+C	         GOTO 5000
+C	      ENDIF
+C	      GOTO 250
+C	   ELSE
+C	      STATUS = SS$_ABORT
+C	      GOTO 5000
+C	   ENDIF
+C	ELSE
+C	   STATUS = SS$_ABORT
+C	   GOTO 5000
+C	ENDIF
+C
+C Now read a block off the tape
+C
+50	IF (RDMAG()) THEN
+	   CALL LSL_PUTMSG(I2D__UNRDBLK,'a')
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C Check if this block was a tapemark (remember two tapemarks signify 
+C current position of end of data)
+C
+	IF (BLKTYP .EQ. TAPEMK) GOTO 100
+	LSTBLK = BLKTYP
+	GOTO 50			! read next block
+C
+C Now check to see if last block read was a trailer block
+C
+100	IF (LSTBLK .NE. TRAILR) THEN
+	   CALL LSL_PUTMSG(I2D__UNRDBLK,'trailer')
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C Now check for second tapemark
+C
+	IF (RDMAG()) THEN
+	   CALL LSL_PUTMSG(I2D__UN2TAPEMK)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+	IF (BLKTYP .NE. TAPEMK) THEN
+	   CALL LSL_PUTMSG(I2D__UN2TAPEMK)   
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C Since we wish to write over the trailer and the two tapemarks, it
+C is necessary to backspace by three blocks.
+C
+	IF (BLKPOS()) THEN
+	   CALL LSL_PUTMSG(I2D__UNBCKSP)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C *******************************************************************
+C Now we are at correct position, compare last map's origin with
+C current map's origin. We start by getting the buffered information
+C from the last manuscript header. First check that the buffer contains
+C a header block.
+C
+	IF (DFALEN .NE. 8) THEN
+	   CALL LSL_PUTMSG(I2D__UNRDBLK,'header')
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ELSE
+C
+C	 we have a new manuscript starting now - read the latitude and
+C	    and longitude of it's origin, and the level type.
+C
+C	we start with the level type
+C
+	   DFAPTR = 1
+	   LSTLEV = LIB$EXTZV(6,3,DFABUF(DFAPTR+1))
+C
+C Convert from 0,7 to 1,2
+C
+	   IF (LSTLEV.EQ.0) THEN
+	      LSTLEV = 1
+	   ELSEIF (LSTLEV.EQ.7) THEN
+	      LSTLEV = 2
+	   ELSE
+	      CALL WRITEF('Unexpected level number %N on tape', LSTLEV )
+	   ENDIF
+C
+C	next the latitude
+C
+	   DFAPTR = DFAPTR+2
+C
+C	 and the next two words are 36 bit quantities - store them
+C	 as real tenths of a second, instead of integer tenths.
+C	 but first - are they negative? If so, then we must convert
+C	 from 1s complement to 2s complement, and must guard against
+C	 negative zero...
+C
+	   CONV  = FLOAT('40000'X)	! to multiply high 1/2 word by
+C
+	   CALL NEGTIV(MINUS)		! call a routine to do it
+C
+	   LATO   = DFABUF(DFAPTR) + DFABUF(DFAPTR+1)*CONV
+	   IF (MINUS) LATO = -LATO
+	   LSTLAT = LATO		! save it
+C
+C	 and next the longitude
+C
+	   DFAPTR = DFAPTR+2
+	   CALL NEGTIV(MINUS)		! check its sign
+C
+	   LONGO  = DFABUF(DFAPTR) + DFABUF(DFAPTR+1)*CONV
+	   IF (MINUS) LONGO = -LONGO
+	   LSTLON = LONGO
+	ENDIF
+C
+250	CALL WRITEF
+	IF (STRTIF()) THEN		! problem opening IFF file ?
+	   CALL LSL_PUTMSG(I2D__UNOPNIFF,ACTNAM(:ACTLEN))
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C Find the map descriptor, to determine local origin
+C
+	IF (.NOT.FIND_LOCAL_ORIGIN()) THEN
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C Say if checking for security/releasability
+C
+	IF (SECRTY.NE.-1) THEN
+	   CALL WRITEF
+	   CALL WRITEF('Checking for SECURITY %N',SECRTY)
+	ENDIF
+C
+	IF (RELEAS.NE.-1) THEN
+	   IF (SECRTY.EQ.-1) CALL WRITEF
+	   CALL WRITEF('Checking for RELEASABILITY %N',RELEAS)
+	ENDIF
+C
+	CALL WRITEF
+C
+C Now read the entries from the IFF file
+C
+300	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN .EQ. -1) GOTO 4000
+	IF (IELEN .LT. 0) THEN
+	   CALL LSL_PUTMSG(I2D__UNRDIFF)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+C
+C .....and take the appropriate action
+C ie: despatch on entry type
+C
+	IF (IECODE .EQ. 'RA') GOTO 400
+	IF (IECODE .EQ. 'MH') GOTO 500
+	IF (IECODE .EQ. 'MD') GOTO 600
+	IF (IECODE .EQ. 'NS') GOTO 700
+	IF (IECODE .EQ. 'CC') GOTO 800
+	IF (IECODE .EQ. 'CP') GOTO 900
+	IF (IECODE .EQ. 'NO') GOTO 1000
+	IF (IECODE .EQ. 'NF') GOTO 1100
+	IF (IECODE .EQ. 'FS') GOTO 300	!fc check now skipped
+	IF (IECODE .EQ. 'AC') GOTO 1300
+	IF (IECODE .EQ. 'TH') GOTO 1400
+	IF (IECODE .EQ. 'RO') GOTO 1500
+	IF (IECODE .EQ. 'TX') GOTO 1600
+	IF (IECODE .EQ. 'ST') GOTO 1700
+	IF (IECODE .EQ. 'EF') GOTO 1800
+	IF (IECODE .EQ. 'EO') GOTO 1900
+	IF (IECODE .EQ. 'EM') GOTO 2000
+	IF (IECODE .EQ. 'EJ') GOTO 2100
+	IF (IECODE .EQ. 'VO') GOTO 300
+C
+C Unknown code - don't produce error for this
+C
+C	CALL WRITEF('Unexpected %C at %^L%O',IECODE,LPOSH)
+	GOTO 300
+C
+C Error message here
+C
+390	CALL WRITEF('Duplicated entry %C at %^L%O - ignored',
+     &							IECODE,LPOSH)
+	GOTO 300
+C 
+C RA - Range entry
+C
+400	IF (HADRA) GOTO 390
+	HADRA = .TRUE.
+	CALL EIHRR(RABUF,4,1)
+	GOTO 300
+C
+C MH - Map header entry
+C 
+500	IF (HADMH) GOTO 390
+	HADMH = .TRUE.
+	IF (IELEN .NE. MHLEN) THEN
+	   CALL WRITEF('Incorrect length for map header %^W%N found
+     &			    where %N expected', IELEN,MHLEN)
+	END IF
+	CALL EIHRI(MHARR,IELEN,1)
+C
+C Now obtain the material for printing out some header information.
+C
+	LAT0 = MHLAMO
+	LONG0 = MHLOMO
+C
+C Now, if no type 2 map descriptor has been found, set the local
+C origin to be the same as the manuscript origin as store in the
+C MCE map header, and set the difference between the local and
+C manuscript origins to be zero
+C
+	IF (.NOT.FOUND_MD2) THEN
+	   LATLOCAL = FLOAT(MHLAMO)
+	   LONLOCAL = FLOAT(MHLOMO)
+	   LAT_ORIGIN_DIFF = 0
+	   LON_ORIGIN_DIFF = 0
+C
+C Otherwise, the type 2 MD has been found, so calculate the difference
+C between the local and manuscript origins, which will be added to the
+C extent and all the co-ordinates before being output to the tape
+C
+	ELSE
+	   LAT_ORIGIN_DIFF = LATLOCAL - FLOAT(MHLAMO)
+	   LON_ORIGIN_DIFF = LONLOCAL - FLOAT(MHLOMO)
+	ENDIF
+C
+C
+C Now either obtain the extent from the map header or evaluate it from
+C the range, rembering to add the difference between the local origin
+C and the manuscript origin
+C
+	IF (MHLAEX .EQ. 0 .OR. MHLOEX .EQ. 0) THEN
+	   LATEX = IFIX(RANGE(4) + LAT_ORIGIN_DIFF)
+	   IF (MOD(LATEX,600) .NE. 0) THEN
+	      LATEX = (LATEX + 600) - MOD(LATEX,600)
+	   END IF
+C
+	   LONGEX = IFIX(RANGE(2) + LON_ORIGIN_DIFF)
+	   IF (MOD(LONGEX,600) .NE. 0) THEN
+	      LONGEX = (LONGEX + 600) - MOD(LONGEX,600)
+	   END IF
+	ELSE
+	   LATEX = MHLAEX + 1200	! + 2 mins
+	   LONGEX = MHLOEX + 1200	! + 2 mins
+	END IF
+C
+C ...and print out the header information
+C
+	CALL PRTHDR
+C
+C ...also the level type of the manuscript
+C
+	CALL WRITEF('Level Type = %^B%I1',MHLEV)
+C
+	CALL WRITEF
+C
+C Now is probably the best time to see if this map is going to be 
+C appended to the correct place on the magtape. Remember the origin of
+C the last manuscript must generally be less North-East than that of 
+C current map.
+C
+	CURLAT = MHLAMO
+	CURLON = MHLOMO
+	IF (CURLAT .LT. LSTLAT) THEN
+	   CALL WRITEF(
+     &'Last manuscript on map more Northerly than current map')
+	   CALL LSL_PUTMSG(I2D__INPOSMAN)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	END IF
+	IF (CURLON .LT. LSTLON) THEN
+	   IF (CURLAT .EQ. LSTLAT) THEN
+	      CALL WRITEF(
+     &'Last manuscript on map more North-Easterly than current map')
+	      CALL LSL_PUTMSG(I2D__INPOSMAN)
+	      STATUS = SS$_ABORT
+	      GOTO 5000
+	   END IF
+	END IF
+	IF (CURLAT .EQ. LSTLAT .AND. CURLON .EQ. LSTLON) THEN
+	   IF (MHLEV .LE. LSTLEV ) THEN
+	      CALL WRITEF(
+     &'Origins the same for last manuscript and current manuscript')
+	      CALL WRITEF(
+     &'but this level not greater than previous level.')
+	      CALL LSL_PUTMSG(I2D__INPOSMAN)
+	      STATUS = SS$_ABORT
+	      GOTO 5000
+	   END IF
+	END IF
+	LSTLAT = CURLAT
+	LSTLON = CURLON
+	LSTLEV = MHLEV
+	GOTO 300
+C 
+C MD - Map descriptor entry
+C
+600	IF (HADMD) GOTO 390
+	HADMD = .TRUE.
+	GOTO 300
+C
+C NS - New section entry
+C
+700	IF (HADNS) GOTO 390
+	HADNS = .TRUE.
+	GOTO 300
+C
+C CC - Cubic Coefficients entry
+C We don't really need this entry - but it may be useful later
+C
+800	IF (HADCC) GOTO 300
+	HADCC = .TRUE.
+	GOTO 300
+C
+C CP - Corner points entry
+C
+900	IF (HADCP) GOTO 300
+	HADCP = .TRUE.
+	CALL EIHRR(CPBUF,16,1)
+	GOTO 300
+C
+C NO - New overlay entry
+C
+1000	CALL EIHRI(OVLNUM,1,1)
+	IF (OVLNUM .EQ. 0) THEN
+	   OVZERO = .TRUE.
+	ELSE
+	   OVZERO = .FALSE.
+	END IF
+	IF (.NOT. DONHED) THEN
+	   DONHED = .TRUE.
+C
+C Now output the manuscript header for this block, if we're not doing
+C change 2
+C
+	   IF (.NOT.CHANGE2) THEN
+	      IF (.NOT. DIAG) GOTO 1005
+	      CALL WRITEF('Outputting manuscript header')
+1005	      IF (OUTHDR()) THEN
+	         CALL LSL_PUTMSG(I2D__UNWRBLK,'header')
+	         STATUS = SS$_ABORT
+	         GOTO 5000
+ 	      END IF
+ 	   END IF
+C
+C Now output the Data Set Identification block
+C
+	   IF (.NOT. DIAG) GOTO 1010
+	   CALL WRITEF('Outputting DSI block')
+1010	   IF (OUTDSI()) THEN
+	      CALL LSL_PUTMSG(I2D__UNWRBLK,'DSI')
+	      STATUS = SS$_ABORT
+	      GOTO 5000
+	   END IF
+C
+C Now output the Accuracy Description Record
+C
+	   IF (.NOT. DIAG) GOTO 1015
+	   CALL WRITEF('Outputting ACC block')
+1015	   IF (OUTACC(OVZERO)) THEN
+	      CALL LSL_PUTMSG(I2D__UNWRBLK,'ACC')
+	      STATUS = SS$_ABORT
+	      GOTO 5000
+	   END IF
+	   HADEO = .TRUE.
+	   IF (OVZERO) GOTO 300
+	END IF
+	IF (.NOT.(OVZERO .OR. HADEO)) THEN
+	   CALL WRITEF('Missing EO entry at %^L%O', LPOSH)
+	   BKEONO = .TRUE.
+	   GOTO 1900
+	END IF
+1020	IF (OVLNUM .EQ. 1) FTYPE = POINT
+	IF (OVLNUM .EQ. 2) FTYPE = LINEAR
+	IF (OVLNUM .EQ. 3) FTYPE = AREAL
+	HADEO = .FALSE.
+	GOTO 300
+C	
+C NF - New feature entry
+C
+1100	FTRONE = .FALSE.
+	IF (HADNF1) GOTO 1110
+	FTRONE = .TRUE.
+	HADNF1 = .TRUE.
+1110	IF (.NOT.(FTRONE .OR. HADEF)) THEN
+	   CALL WRITEF('Missing EF entry at %^L%O', LPOSH)
+	   BKEFNF = .TRUE.
+	   GOTO 1800
+	END IF
+1120	CALL EIHRI(FAC,1,1)
+	IF (FAC .LE. LSTFAC) THEN
+	   CALL WRITEF('Feature Analysis Codes out of order')
+	ENDIF
+	LSTFAC = FAC
+	IF ((FAC .LT. 1) .AND. FTRONE) THEN
+	   CALL WRITEF('First feature missing')
+	ENDIF
+	LSTLEN = 0			! reset total no. of pts in ftr
+	HADEF = .FALSE.
+	GOTO 300
+C
+C AC - Ancilliary code entry
+C
+1300	CALL EIHRI(ACTYPE,1,1)
+	IF (ACTYPE .NE. FADTAC) THEN
+	   CALL WRITEF('ACC - Error in AC type of FSN = %N', FAC)
+	   CALL WRITEF('%^W%N found where %N expected', ACTYPE, FADTAC)
+	END IF
+	CALL EIHR(TXTBUF,IELEN-3,4)
+C set up txtptr
+	TXTPTR = (IELEN-3)*2
+	IF (TXTBUF(TXTPTR).EQ.0) TXTPTR = TXTPTR - 1
+C
+1320	IF (OBTNAC()) THEN
+	   CALL LSL_PUTMSG(I2D__UNRDAC,LPOSH)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	END IF
+	GOTO 300
+C
+C TH - THickness/Text Height entry (empty at present)
+C
+1400	GOTO 300
+C
+C RO - text ROtation entry (empty at present)
+C
+1500	GOTO 300
+C
+C TX - Text string entry (empty at present)
+C
+1600	GOTO 300
+C
+C ST - Co-ordinate STring entry (there may be more than one per ftr)
+C First obtain the no. of points in the entry
+C
+1700	CALL EIHRS(NPTS,IENDS)
+	STLEN = NPTS
+C
+C Now get the co-ordinates
+C
+	CALL EIHRR(STBUF(1,LSTLEN+1),2*STLEN,1)
+	LSTLEN = LSTLEN + STLEN
+	GOTO 300
+C
+C EF - End of feature entry
+C
+1800	HADEF = .TRUE.
+	IF (FTRONE) THEN 
+C
+C Check that the first feature is a grid.
+C
+	IF (STLEN .NE. 5 .OR. STBUF(1,1) .NE. STBUF(1,STLEN) .OR.
+     &	    STBUF(2,1) .NE. STBUF(2,STLEN)) THEN
+	   CALL WRITEF('First feature in overlay one is ')
+	   CALL WRITEF(' not closed as it ought to be')
+	END IF
+C
+C ...and reset for first feature record.
+C
+	DFAPTR = 1
+	END IF
+C
+C ...and STLEN becomes the total number of points in the feature
+C
+	STLEN = LSTLEN
+	CALL OUTFTR(FBLNUM)
+	IF (BKEFNF) THEN
+	   BKEFNF = .FALSE.
+	   GOTO 1120
+	ELSE IF (BKEFEO) THEN
+	   BKEFEO = .FALSE.
+	   GOTO 300
+	END IF
+	GOTO 300
+C
+C EO - End of overlay entry
+C
+1900	HADEO = .TRUE.
+	IF (.NOT.HADEF) THEN
+	   CALL WRITEF('Missing EF entry at %^L%O', LPOSH)
+	   BKEFEO = .TRUE.
+	   GOTO 1800
+	END IF
+	IF (BKEONO) THEN
+	   BKEONO = .FALSE.
+	   GOTO 1020
+	ELSE IF (BKEOEM) THEN
+	   BKEOEM = .FALSE.
+	   GOTO 300
+	END IF
+	GOTO 300
+C
+C EM - End of map
+C
+2000	HADEM = .TRUE.
+C
+C Now it is time to tidy up and close the current writing session. 
+C First pad out the last feature block, then write the trailer block 
+C to magtape, write out two tapemarks and position the tape head just
+C in front of the trailer block so that the next session can begin. Oh
+C and close the IFF file.
+C
+	CALL PADFTR
+C
+C ...and output the trailer block to magtape
+C
+	IF (DIAG) THEN
+	   CALL WRITEF('Outputting trailer block')
+	END IF
+	CALL OUTTLR
+C
+C ... and the two tapemarks
+C
+	IF (WTPMKS()) THEN
+	   CALL LSL_PUTMSG(I2D__UNWRFIN)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	END IF
+C
+C Since we wish to write over the trailer and the two tapemarks, it
+C is necessary to backspace by three blocks, for the correct writing
+C position for the next file.
+C
+	IF (BLKPOS()) THEN
+	   CALL LSL_PUTMSG(I2D__UNBCKSP)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	ENDIF
+	IF (.NOT. HADEO) THEN
+	   CALL WRITEF('Missing EO entry at %^L%O', LPOSH)
+	   BKEOEM = .TRUE.
+	   GOTO 1900
+	END IF
+	IF (BKEMEJ) THEN
+	   BKEMEJ = .FALSE.
+	   GOTO 4000
+	END IF
+	GOTO 300
+C
+C EJ - End of job 
+C	
+2100	HADEJ = .TRUE.
+	IF (.NOT. HADEM) THEN
+	   CALL WRITEF('Missing EM entry at %^L%O', LPOSH)
+	   BKEMEJ = .TRUE.
+	   GOTO 2000
+	END IF
+C
+C Now check to see if everything has been obtained from this IFF file
+C
+4000	IF (.NOT.HADEJ) GOTO 2100
+	IF (.NOT.(HADRA .AND. HADMH .AND. HADMD .AND. HADCC .AND.
+     &	    HADCP .AND. HADEF .AND. HADEO .AND. HADEM .AND. HADEJ))
+     &     THEN
+	   CALL LSL_PUTMSG(I2D__UNEXPEOF)
+	   STATUS = SS$_ABORT
+	   GOTO 5000
+	END IF
+	CALL IFFCLO(IFFLUN)
+C
+C ...and finish here
+C
+5000	CALL LSL_EXIT(STATUS)
+	END

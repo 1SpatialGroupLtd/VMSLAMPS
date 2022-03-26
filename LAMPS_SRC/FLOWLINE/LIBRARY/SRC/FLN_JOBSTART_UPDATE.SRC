@@ -1,0 +1,141 @@
+		INTEGER*4 FUNCTION FLN_JOBSTART_UPDATE 
+     &	                    (ELEMENTS,NUM_ELEMENT,WIRES,NUM_WIRE,
+     &			     JOB_ID,COMMAND_PROC,DAY,TIME)
+C
+***	MODULE	FLN_JOBSTART_UPDATE 
+***	IDENT	17JL91
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    26-Apr-1988
+C
+C  does all the updating necessary for  job start
+C calls routines that use this routines transaction
+C 
+C its not nice doing it this way - but it ensures database consistency
+C if all database updating for one task completeion is done in 
+C a single transaction
+C returns SS$_NORMAL if all is well - otherwise an RDB return code
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$CMNFLOWLINE:FLOW.PAR'
+	INCLUDE	'LSL$CMNFLOWLINE:FLOWLINEMSG.PAR'
+	INTEGER*4	SS$_NORMAL
+	EXTERNAL	SS$_NORMAL
+C
+C Arguments
+	CHARACTER*(*)	ELEMENTS(FLN_MAX_ELEMENT)
+	INTEGER*4	NUM_ELEMENT
+	CHARACTER*(*)	WIRES(FLN_MAXWIRE)
+	INTEGER*4	NUM_WIRE
+	INTEGER*4	JOB_ID
+	CHARACTER*(*)	COMMAND_PROC
+	INTEGER*4	DAY
+	INTEGER*4	TIME
+C
+C RDB return codes
+	INTEGER*4	RDB$_DEADLOCK
+	EXTERNAL	RDB$_DEADLOCK
+C
+C Functions
+	INTEGER*4	FLN_SET_WIRES
+	INTEGER*4	FLN_SETUP_TASKS
+C
+C Local Variables
+	INTEGER*4	NUM_ERR
+	INTEGER*4	I
+	INTEGER*4	DUMMY
+	CHARACTER*255	DUMPAR(1)
+C
+&RDB&   DATABASE FILENAME  'LSL$FLN_DATABASE:FLOWLINE'
+C
+C assume success
+	FLN_JOBSTART_UPDATE = %LOC(SS$_NORMAL)
+C
+C start the giant transaction
+	NUM_ERR = 0
+20	CONTINUE
+C	
+&RDB&   START_TRANSACTION READ_WRITE WAIT RESERVING SESSION,TASK,
+&RDB&   WIRE_ACTIVE,JOB,TASKID FOR 
+&RDB&   PROTECTED WRITE ,WIRE FOR SHARED READ
+C
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_JOBSTART_UPDATE  = RDB$STATUS
+		 GOTO 999
+	      ENDIF
+C
+C try again - probably deadlock
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+C
+&RDB&	   END_ERROR
+C
+C set the wires active
+	FLN_JOBSTART_UPDATE  = FLN_SET_WIRES
+     &		(JOB_ID,WIRES,NUM_WIRE,0,DUMPAR)
+	IF (.NOT. FLN_JOBSTART_UPDATE ) THEN
+	   NUM_ERR = NUM_ERR+1
+	   IF(FLN_JOBSTART_UPDATE  .EQ. %LOC(RDB$_DEADLOCK)
+     &	         .AND. NUM_ERR .LT. 10)THEN
+	         CALL LIB$WAIT(FLN_PSE)
+&RDB&	         ROLLBACK
+	         GOTO 20
+	    ELSE
+&RDB&	       ROLLBACK
+	       GOTO 999
+	    ENDIF
+	ENDIF
+C
+C setup the new tasks
+	FLN_JOBSTART_UPDATE  = 
+     &          FLN_SETUP_TASKS(ELEMENTS,NUM_ELEMENT,JOB_ID)
+	IF (.NOT. FLN_JOBSTART_UPDATE ) THEN
+	   NUM_ERR = NUM_ERR+1
+	   IF(FLN_JOBSTART_UPDATE  .EQ. %LOC(RDB$_DEADLOCK)
+     &	         .AND. NUM_ERR .LT. 10)THEN
+	         CALL LIB$WAIT(FLN_PSE)
+&RDB&	         ROLLBACK
+	         GOTO 20
+	    ELSE
+&RDB&	       ROLLBACK
+	       GOTO 999
+	    ENDIF
+	ENDIF
+C
+C  set the job  active
+&RDB&   FOR J IN JOB WITH J.JOB_ID  = JOB_ID
+&RDB&      MODIFY J USING
+C
+C if its a deadlock then retry after waiting
+&RDB&         ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	         .AND. NUM_ERR .LT. 10)THEN
+	            CALL LIB$WAIT(FLN_PSE)
+&RDB&	            ROLLBACK
+	            GOTO 20
+	          ELSE
+		     FLN_JOBSTART_UPDATE  = RDB$STATUS
+&RDB&	             ROLLBACK
+	             GOTO 999
+	          ENDIF
+&RDB&	         END_ERROR
+&RDB&            J.COMMAND_PROC = COMMAND_PROC;
+&RDB&            J.JOB_STATUS = 'Active';
+&RDB&            J.START_TIME = TIME;
+&RDB&            J.START_DATE= DAY;
+&RDB&         END_MODIFY
+C
+&RDB&   END_FOR
+C
+&RDB&   COMMIT
+C
+999	RETURN
+	END

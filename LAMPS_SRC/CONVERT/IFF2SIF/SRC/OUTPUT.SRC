@@ -1,0 +1,620 @@
+	LOGICAL FUNCTION OUTPUT( IFFNAM, IFFLUN, LOG_OPENING )
+C
+***	IDENT	26MY94
+***	MODULE	OUTPUT
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 25 January 1985
+CMOD1248   Message UNKATT removed. See UPD file for details.  ST 05-Jul-1993
+C
+C This routine opens the IFF file IFFNAM, and reads through it,
+C producing SIF output as it goes, and then closes it at the end
+C
+C It returns TRUE if we fail to output anything (because the file
+C cannot be opened, or the range is unacceptable), and FALSE if we
+C do output something
+C
+	IMPLICIT NONE
+C
+C Parameter files
+C
+	INCLUDE 'LSL$CMNIFF:CB.STR'	! record structure
+C
+C Arguments:
+C
+	CHARACTER*(*)	IFFNAM		! the IFF filename
+	INTEGER		IFFLUN		! the LUN to read on
+	LOGICAL		LOG_OPENING	! do we log the opening?
+C
+C NOTE that we are opening the file read-only, so we assume that
+C the filename we are given has a version number attached
+C
+C common blocks required
+C
+***	COMMON/HERE:SIFMT/
+***	COMMON/HERE:CONTROL/
+***	COMMON/HERE:SIFCOM/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/HERE:SIF/
+	INCLUDE 'HERE:ACD.CMN'
+C
+C useful parameters
+C
+	INTEGER		 X,Y,Z
+	PARAMETER	(X=1,Y=2,Z=3)	! for accessing STBUF, ZSBUF
+C
+	INTEGER		 BUFMAX
+	PARAMETER	(BUFMAX = 80)	! max number of chars in TX
+C
+	INTEGER		 MAX_FCS
+	PARAMETER	(MAX_FCS = 25)	! max number of secondary FCs
+C
+	INTEGER*2	 SEC_FC_AC
+	PARAMETER	(SEC_FC_AC = 1)	! AC type for 2ndary FCs
+C
+	BYTE		BLANK
+	PARAMETER	(BLANK = ' ')
+C
+C workspace
+C
+	LOGICAL*4	NO_ATTR		! attribute found or not
+	INTEGER*4	THIS_ATTR	! current attribute table index
+	INTEGER*2	IECODE		! IFF entry name
+	INTEGER*2	IELEN		! length of that entry (-1=eof)
+	INTEGER*2	NFDATA(2)	! NF entry data
+	INTEGER*2	NPTS		! number of points in ST entry
+	INTEGER*2	OVRLAY		! overlay number (not used)
+C
+	INTEGER*2	FSARR(4)	! feature status entry
+	LOGICAL		IS_LINEAR	! sic
+	CHARACTER*2	STRING_TYPE	! linear feature is open,shape,hole
+C
+	INTEGER*4	EOPOSN		! pointer  to EO
+	INTEGER*4	NOPOSN		! location of NO
+	INTEGER*4	STPOSN		! location of first ST
+C
+	LOGICAL		HAD_ST		! true if had ST/ZS entry
+	REAL		STBUF(2,STMAX)	! points buffer for ST entry
+	REAL		ZSBUF(3,STMAX)	! points buffer for ZS entry
+	INTEGER*2	IENDS		! visibility flag for ST entry
+	LOGICAL		PENUP		! pen up to ST/ZS ?
+C
+	LOGICAL		HAD_RO		! true if had an RO entry
+	REAL		RO		! contents of the RO entry
+	LOGICAL		HAD_TH		! true if had a TH entry
+	INTEGER*2	TH		! contents of the TH entry
+C
+	INTEGER*2	AC_TYPE		! what sort of AC it is
+	INTEGER*2	AC_CODE		! what value it contains
+	REAL		AC_REAL		! and as a real, too
+	EQUIVALENCE	(AC_CODE,AC_REAL)
+	LOGICAL		HAD_FC_AC	! true if had an secondary FC AC
+	INTEGER		NUM_FCS		! number of 2ndary FCs found
+	INTEGER*4	FCS(MAX_FCS)	! list of 2ndary FCs
+	REAL		HEIGHT		! height from AC entry
+	LOGICAL		HAD_HEIGHT	! true if had a height AC
+C
+	LOGICAL		HAD_START	! called START for this feature?
+	LOGICAL		HAD_TS		! had a TS already?
+	LOGICAL		HAD_TX		! what about a TX?
+C
+	BYTE		BUFFER(BUFMAX)	! text buffer
+	INTEGER*4	BUFSTR(2)	! fake string for BUFFER
+	INTEGER*2	BUFLEN		! length field of that
+	INTEGER		I		! for DO loop
+	LOGICAL		ERR		! error?
+	LOGICAL		OK,YES
+C
+	EQUIVALENCE	(BUFLEN,BUFSTR(1))
+C
+C functions used
+C
+	LOGICAL		ACDFND		! find an ACD
+	LOGICAL		READRA		! read & check the range
+	LOGICAL		HADMOAN		! did we MOAN ?
+	LOGICAL		RDYES		! ask a question
+	INTEGER		SIFFND		! find a  SIF feature code
+	INTEGER		FRTFND		! find an FRT feature code
+	LOGICAL		REPEAT		! repeat the ST output
+	LOGICAL		FINDFC		! find ptr to ftr info in SIFINT
+	LOGICAL		COMPLEX_STRING	! is it?
+	LOGICAL		IFFOPEN		! open IFF file for read
+	LOGICAL		CHECK_TEXT	! check text is sensible
+C
+C *********************************************************************
+C
+C assume that we fail to output anything to magtape
+C
+	OUTPUT = .TRUE.
+C
+C define our text buffer's fake string
+C
+	BUFSTR(2) = %LOC(BUFFER)
+C
+C and open the IFF file for read, only
+C
+	OK = IFFOPEN( IFFLUN, IFFNAM,, LOG_OPENING )
+	IF (.NOT.OK) GOTO 9999		! if it fails, we return failure
+C
+C *********************************************************************
+C
+C we have not had the range entry yet
+C
+	HAD_RANGE = .FALSE.
+C
+C if we are meant to get our X,Y offset from the map descriptor, then
+C we must read that in before we tend to the range
+C
+	IF ( OFFSET_FROM_MD ) THEN
+	   CALL IFFNXC( 'MD', IELEN )		! find the entry
+	   IF (IELEN.EQ.-1) THEN		! if it's not there
+	      CALL MOAN(MSG__NOMD)		! complain
+	      GOTO 9000				! and give up
+	   ENDIF
+	   CALL EIHRI( MD2ARR, MD2LEN, 1 )	! read the entry
+	   IF ( MATV2.NE.2 ) THEN
+	      CALL MOAN( MSG__NOTMD2 )		! not type 2
+	      GOTO 9000				! so give up
+	   ENDIF
+	   OFF_X = MD2LOC(1)			! otherwise, we have
+	   OFF_Y = MD2LOC(2)			! the offset we need
+	   HAD_OFFSET = .TRUE.
+	   CALL IFFRWD				! go back to the start again
+	ENDIF
+C
+C and let us now read the range entry
+C
+	IF ( READRA() ) GOTO 9000	! give up if we can't
+C
+C and if we moaned (about the range being outside our limits) then
+C find out if we should continue anyway
+C
+	IF ( HADMOAN() ) THEN
+	   CALL INFORM( MSG__BLANK )
+	   OK = RDYES( 'Output this IFF file anyway', YES )
+	   IF ( .NOT.YES ) GOTO 9000
+	ENDIF
+C
+C and so we have now had the range entry
+C
+	HAD_RANGE = .TRUE.		! got the range now
+C
+C and at this stage, we assume the file is OK, so we will return
+C success
+C
+	OUTPUT = .FALSE.		! about to output to magtape
+C
+C and unset the internal state of START
+C
+	CALL UNSTART
+C
+C *********************************************************************
+C
+C output a drawing identifier
+C
+	CALL DRNAME( IFFNAM )
+	CALL INFORM( MSG__BLANK )
+C
+C *********************************************************************
+C
+C now read through the entries in the IFF file - we have the following
+C requirements within each feature:
+C
+C data type		IFF entries required
+C
+C lines, curves, etc	FS	ST(s)
+C circles, arcs		FS	3 pt ST
+C symbol cells		FS	ST	optional RO
+C text			FS	ST	optional RO	TX	[AC]
+C
+C
+C Note that lines, curves, etc may have multiple STs, and these must
+C be output as they are encountered. For the other data types, we can
+C perform our output on finding the end of feature (EF) entry
+C
+C *********************************************************************
+C
+C Loop, reading through the IFF file
+C
+20	CALL IFFNXT(IECODE, IELEN)	! get next entry from IFF file
+	IF (IELEN .LT. 0) THEN		! end of file
+	   CALL MOAN( MSG__IFFEOF, FSN )! unexpected - no EJ found
+	   GOTO 9000			! finish off file
+	ENDIF
+C
+	IF (IECODE .EQ. 'NF') GOTO 1000	! new feature
+	IF (IECODE .EQ. 'FS') GOTO 1100	! feature status
+	IF (IECODE .EQ. 'AC') GOTO 1200	! AC entry
+	IF (IECODE .EQ. 'TS') GOTO 1250	! text status
+	IF (IECODE .EQ. 'TH') GOTO 1300	! thickness
+	IF (IECODE .EQ. 'ST') GOTO 1400	! coordinate string
+	IF (IECODE .EQ. 'ZS') GOTO 1400	! coordinate string
+	IF (IECODE .EQ. 'RO') GOTO 1500	! text orientation
+	IF (IECODE .EQ. 'TX') GOTO 1600	! text
+	IF (IECODE .EQ. 'EF') GOTO 1700	! end of a feature
+C
+	IF (IECODE .EQ. 'NO') GOTO 2000	! new overlay
+	IF (IECODE .EQ. 'EO') GOTO 2100	! end of overlay
+C
+	IF (IECODE .EQ. 'EJ') GOTO 9000	! end of map/file
+C
+C otherwise, an unknown entry - ignore it
+C
+	CALL DIAGNOS( MSG__IFFWHAT, IECODE, IELEN )
+	GOTO 20				! read next entry
+C
+C *********************************************************************
+C
+C NF - new feature starts
+C
+1000	HAD_AC = .FALSE.
+	NAC = 0			! init. count of AC's
+	CALL EIHRI(NFDATA,2,1)
+	FSN = NFDATA(1)			! feature serial number
+C
+C note what we haven't had yet
+C
+	HAD_TS = .FALSE.		! no TS entry yet
+	HAD_ST = .FALSE.		! no ST entry yet
+	HAD_RO = .FALSE.		! no RO entry yet
+	HAD_TH = .FALSE.		! no TH entry yet
+	HAD_TX = .FALSE.		! no TX entry yet
+	HAD_FC_AC = .FALSE.		! no AC entry yet
+	HAD_HEIGHT = .FALSE.		! so no height from an AC
+	HAD_START  = .FALSE.		! not called START yet	
+C
+	NUM_FCS = 0			! no 2ndary FCs yet
+C
+	CALL DIAGNOS( MSG__IFFNF, FSN )
+C
+	GOTO 20				! get next item
+C
+C *********************************************************************
+C
+C FS - feature status - includes feature code and text positioning
+C
+1100	CALL EIHRI(FSARR, 4, 1)
+C
+	CALL DIAGNOS( MSG__IFFFS, FSARR(1), FSARR(2),
+     &				  FSARR(3), FSARR(4) )
+C
+	CALL USE_FS(FSARR,IS_LINEAR,STRING_TYPE)	! interpret it
+C
+	GOTO 20				! get the next entry
+C
+C *********************************************************************
+C
+C AC - ancillary code
+C ACs are used as follows:
+C
+C	- in a text feature, with the TEXTLEVEL command, the text's
+C	  output level is taken from the AC
+C	- with 3 dimensional output, height ACs are used to determine
+C	  the feature height
+C	- secondary feature code ACs cause the feature to be output
+C	  an additional time for each secondary feature code
+C
+1200	CALL EIHRI( AC_TYPE, 1, 1 )	! get the AC type
+	NAC = NAC + 1			! INCR. AC count.
+	IF ( NAC.GT.MAX_AC_VALUES) THEN
+	   CALL MOAN( MSG__MAXAC,FSN,MAX_AC_VALUES)	! ignore this AC
+	   NAC = NAC - 1
+	   GOTO 20
+	ENDIF
+C
+	NO_ACTEXT(NAC) = .FALSE.
+C
+	IF ( AC_TYPE.EQ.SEC_FC_AC ) THEN
+C
+C	 it is a secondary feature code AC
+C	 - if we are outputting a text, and this is the first
+C	   secondary FC AC, then we will use it to establish
+C	   our level (and that is all)
+C	 - otherwise, it is a repeat count AC
+C
+	   IF ( IS_TEXT .AND. TXTLEV.EQ.USE_AC
+     &		.AND. .NOT.HAD_FC_AC ) THEN
+C
+	      I = SIFIND		! remember current SIFCOM pointer
+C
+	      ERR = FINDFC(AC_CODE)	! look up the feature code
+	      IF (ERR) THEN                         
+ 	         CALL MOAN( MSG__TXTNOFC )      ! if that fails, then
+	         GOTO 20			! get the next entry	
+              ENDIF
+C
+	      SIF_LEVEL = SIFINT(3,SIFIND)	! get the level from that
+	      SIFIND = I			! restore SIFIND
+C
+	      CALL DIAGNOS( MSG__LEVELAC, SEC_FC_AC, SIF_LEVEL )
+	      HAD_FC_AC = .TRUE.
+C
+	   ELSE
+C
+C	 we are required to repeat this feature - this is one of
+C	 the feature codes to repeat the feature with
+C
+	      CALL DIAGNOS( MSG__FCAC, AC_CODE )
+	      IF ( NUM_FCS.GE.MAX_FCS ) THEN
+	         CALL MOAN( MSG__MAXFCS, MAX_FCS )	! ignore this FC
+	      ELSE
+	         NUM_FCS = NUM_FCS + 1
+	         FCS( NUM_FCS ) = AC_CODE
+	      ENDIF
+	   ENDIF
+C
+	ELSEIF ( AC_TYPE.EQ.2 ) THEN
+	CALL EIHRI( AC_CODE, 2, 2 )	! get the code
+C
+C	 it is an integer height
+C
+	   HAD_HEIGHT = .TRUE.
+	   HEIGHT = AC_CODE
+	   CALL DIAGNOS( MSG__ACHEIGHT, AC_TYPE, HEIGHT )
+C
+	ELSEIF ( AC_TYPE.EQ.3 ) THEN
+	CALL EIHRI( AC_CODE, 2, 2 )	! get the code
+C
+C	 it is a real height
+C
+	   HAD_HEIGHT = .TRUE.
+	   HEIGHT = AC_REAL
+	   CALL DIAGNOS( MSG__ACHEIGHT, AC_TYPE, HEIGHT )
+C
+	ELSE
+C
+C	 It is some other sort of AC - see if it is defined.
+C	 Don't do this for SCITEX.
+C
+	   IF (.NOT.HAD_SCITEX) THEN
+	      NO_ATTR = ACDFND(AC_TYPE)
+	      ACD_NAME_LIST(NAC) = ACD_NAME(1:ACD_NAME_LEN)
+	      ACD_NAME_LEN_LIST(NAC) = ACD_NAME_LEN
+C
+C if AC type not defined, output message
+C
+	      IF (NO_ATTR) THEN
+	         CALL MOAN(MSG__IFFINFO,IECODE,FSN,SIF_FC)
+		 NO_ACTEXT(NAC) = .TRUE.	! assume there is no text
+		 ACTLEN(NAC) = 1
+C
+C otherwise find its value
+C
+	      ELSE
+	         CALL EIHRL(AC_VALUE(NAC).I,1,2)
+C
+C initialise the AC text buffer
+C
+	         DO 410 I=1,80
+	            ACTEXT(I,NAC) = BLANK
+410	         CONTINUE
+C
+C and have a first stab at the length
+C
+	         ACTLEN(NAC) = 2*(IELEN-3)
+C
+C read the AC text into the buffer if we have it
+C
+	         IF (ACTLEN(NAC) .GT. 0) THEN
+	            CALL EIHRI(ACTEXT(1,NAC),IELEN-3,4)
+C
+C and adjust the length if we have an odd number of characters
+C
+	            IF (ACTEXT(ACTLEN(NAC),NAC) .EQ. 0) THEN
+	               ACTEXT(ACTLEN(NAC),NAC) = BLANK
+	               ACTLEN(NAC) = ACTLEN(NAC) - 1
+	            ENDIF
+	         ELSE
+		   NO_ACTEXT(NAC) = .TRUE.
+		   ACTLEN(NAC) = 1
+		 ENDIF
+	      ENDIF
+	      HAD_AC = .TRUE.
+	   ENDIF
+	ENDIF
+	GOTO 20
+C
+C *********************************************************************
+C
+C TS - text status - includes feature code and text positioning
+C		   - 1) terminates any previous sub-text
+C		   - 2) overrides the current FS
+C
+1250	CALL EIHRI(FSARR, 4, 1)
+C
+ 	CALL DIAGNOS( MSG__IFFTS, FSARR(1), FSARR(2),
+     &				  FSARR(3), FSARR(4) )
+C
+	IF ( HAD_TS ) THEN
+	   IF ( .NOT.CHECK_TEXT(HAD_FC_AC,HAD_TX,BUFLEN) ) THEN
+	      CALL OUTPUT_EF( HAD_ST, NPTS, STBUF, ZSBUF, IS_LINEAR,
+     &			      HAD_HEIGHT, HEIGHT,
+     &			      HAD_RO, RO, HAD_TH, TH, BUFSTR )
+	   ENDIF
+	ENDIF
+C
+C and start a new 'component text' - effectively a new feature,
+C except that we carry any ACs forwards
+C
+	HAD_TS = .TRUE.			! we've had a TS now
+	HAD_ST = .FALSE.		! no ST entry yet
+	HAD_RO = .FALSE.		! no RO entry yet
+	HAD_TH = .FALSE.		! no TH entry yet
+	HAD_TX = .FALSE.		! no TX entry yet
+C
+C interpret the TS entry
+C
+	CALL USE_FS(FSARR,IS_LINEAR,STRING_TYPE)
+C
+	GOTO 20
+C
+C *********************************************************************
+C
+C TH - thickness/text height - used as text height
+C	EITHER  	text height as point size (looked up in tabel)
+C	OR		text height in hundredths of a mm on the sheet
+C	DEPENDING ON	the value of TXTSIZ
+C
+1300	CALL EIHRI( TH, 1, 1 )
+	HAD_TH = .TRUE.
+C
+	CALL DIAGNOS( MSG__IFFTH, TH )
+	GOTO 20
+C
+C *********************************************************************
+C
+C ST or ZS - point string - deal with according to data type
+C 	   - read in the number of points in the thing
+C
+1400	CALL EIHRS(NPTS, IENDS)
+C
+C work out if the pen should be up or down to the start of this ST/ZS
+C
+	PENUP = (IENDS.AND.1) .EQ. 0	! 0 => pen up, 1 => down
+
+C
+C If we are in a complex string and the pen is up at the start of this ST
+C then end the complex string. A new unconnected string will be started 
+C with the first point of ST
+C
+	IF (PENUP.AND.IN_COMPLEX_STRING) CALL SIFEST
+C
+C and take appropriate action if this is the first ST
+C
+	IF (.NOT.HAD_ST) THEN		! this is the first ST/ZS
+ 	   STPOSN = LPOSH		! address of this entry
+	   PENUP  = .TRUE.		! force a pen up to the start
+	   HAD_ST = .TRUE.		! had the first ST now
+	ENDIF
+C
+C output any debugging information
+C
+	CALL DIAGNOS( MSG__IFFST, IECODE, NPTS, IENDS )
+C
+C and output whatever is necessitated by the ST/ZS
+C
+	CALL OUTPUT_ST( HAD_START, IECODE, NPTS, STBUF, ZSBUF,
+     &			PENUP, HAD_HEIGHT, HEIGHT,
+     &			IS_LINEAR, STRING_TYPE )
+C
+	GOTO 20		  		! next entry
+C
+C *********************************************************************
+C
+C RO - rotation entry - angle in radians for a symbol or text
+C
+1500	CALL EIHRR(RO, 1, 1)
+	CALL DIAGNOS( MSG__IFFRO, RO )
+	HAD_RO = .TRUE.			! had an RO entry this feature
+	GOTO 20
+C
+C *********************************************************************
+C
+C TX - text for a text feature
+C
+1600	CALL EIHRI(BUFFER,IELEN,1)	! read text into EXPBUF
+	BUFLEN = IELEN*2		! 2 chars per word
+	CALL DIAGNOS( MSG__IFFTX, BUFLEN )
+C
+	IF (BUFLEN.GT.BUFMAX) THEN
+	   CALL MOAN( MSG__TXTLEN, BUFLEN, BUFMAX, FSN )
+	   BUFLEN = BUFMAX
+	ENDIF
+C
+C then remove any trailing null we might have from our count,
+C (if the number of characters was odd, then a null would have
+C  been included to even the count up)
+C
+	IF (BUFFER(BUFLEN).EQ.0) BUFLEN=BUFLEN-1
+C
+	HAD_TX = .TRUE.
+C
+	CALL DIAGNOS( MSG__IFFTXDSC, BUFSTR )
+	GOTO 20				! get the next entry
+C
+C *********************************************************************
+C
+C EF - end of a feature - tidy it up, and output anything remaining
+C
+C for line/curve features we have already output everything
+C for all other sorts of data, we output the feature now
+C
+1700	CALL DIAGNOS( MSG__IFFEF )
+C
+	IF ( IS_TEXT ) THEN
+	   IF ( CHECK_TEXT(HAD_FC_AC,HAD_TX,BUFLEN) ) GOTO 20
+	ENDIF
+C
+C and output whatever is necessitated by the EF
+C
+	CALL OUTPUT_EF( HAD_ST, NPTS, STBUF, ZSBUF, IS_LINEAR,
+     &			HAD_HEIGHT, HEIGHT,
+     &			HAD_RO, RO, HAD_TH, TH, BUFSTR )
+C
+C and if we had secondary feature codes, we must output the STs
+C again, for each of those codes
+C
+C NOTE - if REPEAT returns TRUE, then we give up on the rest
+C of the IFF file, as we couldn't position to STPOSN correctly
+C
+	IF ( NUM_FCS.GT.0 ) THEN
+	   DO 1705 I = 1,NUM_FCS
+	      IF ( REPEAT( FCS(I), STPOSN, FSARR,
+     &			   	   HAD_RO, RO,
+     &	   			   HAD_TH, TH,
+     &				   HAD_HEIGHT, HEIGHT,
+     &				   BUFSTR ) ) GOTO 9000
+1705	   CONTINUE
+	ENDIF
+C
+	GOTO 20				! next entry
+C
+C *********************************************************************
+C                                          
+C NO - new overlay - not currently used
+C
+2000	CALL EIHRI( OVRLAY, 1, 1 )
+	CALL DIAGNOS( MSG__IFFNO, OVRLAY )
+C
+C if we should be ignoring this overlay, then find the next EO
+C
+	IF ( OVRLAY.EQ.IGNORE ) THEN
+C
+	   CALL INFORM( MSG__IGNLAYER, IGNORE )
+C
+	   IF (IELEN.EQ.4) THEN
+	      CALL EIHRL(EOPOSN,1,3)		! read EO pointer
+	      NOPOSN = LPOSH
+	      CALL IFFPKE(IECODE,IELEN,EOPOSN)	! get EO entry.
+	      IF (IECODE.NE.'EO') THEN
+	         CALL MOAN( MSG__BADEOPTR, OVRLAY )
+	         CALL INFORM( MSG__TRUDGE )
+	         CALL IFFPKE(IECODE,IELEN,NOPOSN)
+	         CALL IFFNXC('EO',IELEN)
+	      ENDIF
+	   ELSE
+	      CALL IFFNXC('EO',IELEN)
+	   ENDIF
+C
+	ENDIF
+	GOTO 20				! try for next entry
+C
+C *********************************************************************
+C
+C EO - end of overlay - not currently used
+C
+2100	CALL DIAGNOS( MSG__IFFEO )
+	GOTO 20	
+C
+C
+C *********************************************************************
+C
+C and close the file
+C
+9000	CALL IFFCLO( IFFLUN )
+C
+9999	RETURN
+	END

@@ -1,0 +1,193 @@
+	SUBROUTINE OFFSET(SEG,N,D1,D2,XA,YA,XB,YB,XC,YC,XL,YL,ZOFF,NP)
+C
+CDEC$	IDENT	'12SE91'
+C
+	IMPLICIT NONE
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England
+C Author S. Hancock
+C
+C Message parameters
+C
+	INCLUDE	'LSL$ICASE:ICASEMSG.PAR'	! ICASE messages
+C
+C Common blocks
+C
+	INCLUDE 'LSL$ICASE:CMDLIN.CMN'
+	INCLUDE 'LSL$ICASE:IFFVARS.CMN'
+C
+C generate point(s) offset from point B=(XB,YB) at a distance D1 from AB and
+C distance D2 to BC on right of segments AB and AC.
+C
+C the output points are entered in the array ZOFF
+C
+C if possible, last point generated should lie on offset to BC
+C
+C previous point generated is passed to allow checking of reversing direction
+C
+C N is number of points received - 
+C			2 (start of string)
+C			-2 (end of string)
+C			or 3
+C
+C NP is set to number of new points generated - this will normally be 1
+C but could be 0 (e.g. inside tight corners) or >1 (e.g. outside sharp 
+C corners)
+C
+C SEG is the segment to check against the minimum width tolerance
+C
+C
+	INTEGER*4	SEG,N
+	INTEGER*4	NP
+	REAL*4		D1,D2
+	REAL*4		XA,YA
+	REAL*4		XB,YB
+	REAL*4		XC,YC
+	REAL*4		ZOFF(2,*)
+	REAL*4		XL,YL
+C
+	REAL*4		SINE
+	REAL*4		DOT
+	REAL*4		LEN1,LEN2
+	REAL*4		U1,V1		! vector AB
+	REAL*4		U2,V2		! vector BC
+	REAL*4		U3,V3
+	REAL*4		XOFF1,YOFF1
+	REAL*4		XOFF2,YOFF2
+	REAL*4		XCENT,YCENT
+	REAL*4		RADIUS
+	REAL*4		ANGLE1,ANGLE2
+C
+	REAL*4		LINE1(2,2)
+	REAL*4		LINE2(2,2)
+	REAL*4		POINT(2)
+	INTEGER*4	INT
+C
+	REAL*8		A,B,C,D,E,F
+	REAL*8		T,U
+	REAL*8		DET
+	INTEGER		I
+C
+C------------------------------------------------------------------------------
+C
+	IF(N.EQ.2)THEN
+C
+C (ZOFF(1,1),ZOFF(2,1)) is offset on right distance D1 to AB at A
+C
+	   U1=XB-XA
+	   V1=YB-YA
+	   NP=1
+	   LEN1=SQRT(U1*U1+V1*V1)
+C
+C check not too short
+C
+	   IF (SEG.EQ.1) THEN
+	      IF (LEN1.LT.TOL .AND. WARNED_NF.NE.NF) THEN
+		 CALL LSL_PUTMSG(ICASE__SHORTSEG,NF)
+		 WARNED_NF = NF
+	      ENDIF
+	   ENDIF
+C
+	   ZOFF(1,1)=XA+(V1*D1)/LEN1
+	   ZOFF(2,1)=YA-(U1*D1)/LEN1
+	   GOTO 900
+	ELSE IF(N.EQ.-2)THEN
+C
+C (ZOFF(1,1),ZOFF(2,1)) is offset on right distance D1 to AB at B
+C
+	   U1=XB-XA
+	   V1=YB-YA
+	   NP=1
+	   LEN1=SQRT(U1*U1+V1*V1)
+C
+C check not too short
+C
+	   IF (SEG.EQ.1) THEN
+	      IF (LEN1.LT.TOL .AND. WARNED_NF.NE.NF) THEN
+		 CALL LSL_PUTMSG(ICASE__SHORTSEG,NF)
+		 WARNED_NF = NF
+	      ENDIF
+	   ENDIF
+C
+	   ZOFF(1,1)=XB+(V1*D1)/LEN1
+	   ZOFF(2,1)=YB-(U1*D1)/LEN1
+	   GOTO 900
+	ENDIF
+	IF(N.NE.3)THEN
+!	   PRINT*,'Invalid number of points passed to OFFSET routine'
+	   NP=0
+	   GOTO 900
+	ENDIF
+C
+C N=3 (usual case)
+C
+C if offset on both sides is zero, output point is B
+C
+	IF(D1.EQ.0.0.AND.D2.EQ.0.0)THEN
+	   NP=1
+	   ZOFF(1,1)=XB
+	   ZOFF(2,1)=YB
+	   GOTO 900
+	ENDIF
+	U1=XB-XA
+	V1=YB-YA
+	U2=XC-XB
+	V2=YC-YB
+	LEN1=SQRT(U1*U1+V1*V1)
+	LEN2=SQRT(U2*U2+V2*V2)
+C
+C check neither too short
+C
+	IF (SEG.EQ.1) THEN
+	   IF (LEN1.LT.TOL .AND. WARNED_NF.NE.NF) THEN
+	      CALL LSL_PUTMSG(ICASE__SHORTSEG,NF)
+	      WARNED_NF = NF
+	   ENDIF
+	ELSEIF (SEG.EQ.2) THEN
+	   IF (LEN2.LT.TOL .AND. WARNED_NF.NE.NF) THEN
+	      CALL LSL_PUTMSG(ICASE__SHORTSEG,NF)
+	      WARNED_NF = NF
+	   ENDIF
+	ENDIF
+C
+C dot product of AB and BC, and sine of angle between them
+C
+	DOT=U1*U2+V1*V2                   ! calculated but never used
+	SINE=(U1*V2-U2*V1)/(LEN1*LEN2)
+C
+	IF(ABS(SINE).LT.0.01)THEN
+C
+C almost straight - intersection may have problems, so do it here
+C
+	   NP=1
+	   ZOFF(1,1)=XB+(V1*D1)/LEN1
+	   ZOFF(2,1)=YB-(U1*D1)/LEN1
+	   GOTO 900
+	ENDIF
+C
+C get intersection of offset segments
+C
+C intersection point, (XI,YI), should satisfy
+C
+C XI = XL + T*(XB-XA) = XC + (D2/LEN2)*(YC-YB) + U*(XB-XC)
+C YI = YL + T*(YB-YA) = YC + (D2/LEN2)*(XB-XC) + U*(YB-YC)
+C
+C solve these for T and U and consider special cases
+C
+200	A=U1
+	B=U2
+	C=V1
+	D=V2
+	E=XC+V2*(D2/LEN2)-XL
+	F=YC-U2*(D2/LEN2)-YL
+C
+	DET=A*D-B*C
+	T=(D*E-B*F)/DET
+	U=(A*F-C*E)/DET
+C
+	NP=1
+	ZOFF(1,1)=XL+T*(XB-XA)
+	ZOFF(2,1)=YL+T*(YB-YA)
+C
+900	RETURN
+	END

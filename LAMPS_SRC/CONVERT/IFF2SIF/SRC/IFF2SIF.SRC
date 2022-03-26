@@ -1,0 +1,233 @@
+	PROGRAM IFF2SIF
+C
+***	IDENT	11DE89
+***	MODULE	IFF2SIF
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 4 February 1985
+C
+C A program to read IFF files, and produce Intergraph Standard
+C Interchange Format data as output, either on magtape or in a
+C text file
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+C
+C common blocks
+C
+***	COMMON/HERE:SIF/		! error messages & general
+***	COMMON/HERE:SIFMT/		! local mag tape common
+***	COMMON/HERE:SIFFILE/		! file names, etc
+***	COMMON/HERE:SIFCOM/		! SDF details, etc
+***	COMMON/LSL$CMNLSL:MTOVCM/	! mag tape common for MTONBL
+***	COMMON/LSL$CMNLSL:TXTC/		! for TXTPTR
+C
+C workspace
+C
+	LOGICAL		OK
+	INTEGER		IERR
+C
+C functions called
+C
+	LOGICAL		GETCMD		! process command line
+	LOGICAL		GET_NEXT_FILE	! prompt for commands
+	LOGICAL		OPENFILE	! open any text files needed
+	LOGICAL		START_MT	! initialise the magtape
+	LOGICAL		OUTPUT		! output the IFF file
+C
+C *********************************************************************
+C
+C and so set up the initial state
+C
+C initialise the library
+C
+	CALL LSL_INIT
+C
+C Get command line
+C
+	OK = GETCMD()
+	IF (.NOT.OK) THEN
+	   CALL LSL_EXIT
+	   GOTO 999
+	ENDIF
+C
+C - first things that are invariant through the run of the program
+C logical unit numbers and unit numbers for file input/output
+C
+	IFFLUN  = 1
+	SIFUNIT = 2
+	FRTUNIT = 3
+  	OUTUNIT = 4
+	INLUNIT = 5
+C
+C set the MOAN status up
+C
+	CALL DIAGNOSING( .FALSE. )
+C
+C set up the magtape defaults
+C
+	MTNAME = 'MTA0'		! make it explicit
+	MTNAME_LEN = 4
+	DENSE  = 1600		! at 1600 bpi
+	GOT_MT = .FALSE.	! which is not initialised yet
+	USE_MT  = .TRUE.	! output the data to magtape
+	APPEND_MT = .FALSE.	! rewind tape & start output at BOT
+C
+C and the output field length
+C
+	RECSIZ = 72		! 72 bytes per record
+C
+C have we had a sheet scale, etc
+C
+	HAD_FACTOR    = .FALSE.	! no FACTOR yet, because
+	HAD_UORUNIT   = .FALSE.	! no UOR units
+	HAD_SHTSCALE  = .FALSE.	! no sheet scale yet
+	SCALING_Z     = .FALSE.	! not scaling in Z
+	MULTIPLYING_Z = .FALSE.	! nor multiplying it by a constant
+C
+C our sheet offsets will not (by default) be taken from type 2 MD entries
+C
+	OFFSET_FROM_MD     = .FALSE.
+C
+C we have a default IFF scaling of 1:1, and a default Z scale of 1:1
+C (even though we are not using the latter...)
+C
+	IFFSCALE = 1.0
+	ZSCALE   = 1.0
+C
+C and our definition file states
+C
+	READ_SIF = .FALSE.	! not read it yet
+	READ_FRT = .FALSE.	! not read it yet
+	OUTFILE_OPEN = .FALSE.	! text output file not open yet
+C
+C and the layer to be ignored
+C
+	IGNORE = 0		! layer 0 by default
+C
+C and assume two dimensional data
+C
+	DIMENSION = 2
+C
+C and we are not overriding text justification
+C
+	HAD_JUST = .FALSE.
+C
+C our text size is as defined by the SDF definitions
+C
+	TXTSIZ = USE_SDF
+C
+C our text level is as defined by the SDF definitions
+C
+	TXTLEV = USE_SDF
+C
+C and we are not reading IFF filenames from an input list
+C
+	USE_INPUT_LIST = .FALSE.
+C
+C finally, announce who we are
+C
+	CALL VERSION('IFF2SIF')
+	CALL INFORM( MSG__BLANK )
+C
+C *********************************************************************
+C - now reset things that change after each file is read
+C notes of which inputs/outputs we should use, etc
+C
+5	CALL DIAGNOSING(.FALSE.)
+	BYTCNT      = 0		! no data in BYTBUF yet
+C
+	REFLECT     = .FALSE.	! don't reflect the IFF file
+	OUTFILE     = .FALSE.	! not outputting to a file
+	USE_MT      = .TRUE.	! but outputting to magtape
+	HAD_OFFSET  = .FALSE.	! our map data is not offset
+	HAD_ZOFFSET = .FALSE.	! our map heights are not offset
+C
+C *********************************************************************
+C
+C check that we don't still have an output file open
+C
+10	IF ( OUTFILE_OPEN ) THEN
+	   CALL FLWCLO
+	   OUTFILE_OPEN = .FALSE.
+	ENDIF
+C
+C *********************************************************************
+C get the next file to be translated
+C - this routine will prompt the user for commands, until either an
+C   IFF or INPUT_LIST command is given
+C
+C   If the user gives the IFF command, then a file to be translated
+C   has been specified, and the routine returns TRUE
+C
+C   If the user gives the INPUT_LIST command, then a file containing
+C   the names of IFF files to be translated has been specified, and
+C   the routine will read through this file, returning each IFF file
+C   name in turn
+C
+C   If an error occurs, or the user responds to the prompt with <CTRL/Z>,
+C   or the input list file ends, the routine returns FALSE
+C
+	IF ( .NOT.GET_NEXT_FILE() ) GOTO 9999
+C
+C *********************************************************************
+C
+C from here on, if we fail, jump back to 10 to check on whether we
+C have opened a text output file which we must then close...
+C
+C so we have an IFF file
+C - do we have the other things(s) required?
+C
+C before opening and reading an SDF file, we must ensure that we
+C know the sheet scale, in case the SDF refers to sheet millimetres
+C
+	IF ( .NOT.HAD_SHTSCALE ) THEN
+	   CALL MOAN( MSG__NOSHTSCALE )
+	   GOTO 10
+	ENDIF
+C
+C now read the SDF and FRT files, and open any text output file
+C
+	IF ( OPENFILE() ) GOTO 10
+C
+C - do we need to do anything with the magtape?
+C
+	IF ( USE_MT .AND. .NOT.GOT_MT ) THEN
+	    IF ( START_MT() ) GOTO 10
+	ENDIF
+C
+C and work out the current FACTOR value to use - if they haven't
+C specified UOR units, then can't go on
+C
+	CALL SIFMULT
+	IF ( .NOT.HAD_FACTOR ) GOTO 10		! no FACTOR yet
+C
+C and we can now actually process the IFF file
+C - returns TRUE if we couldn't open the file
+C
+C (note that we will log the file's opening if we are reading the names
+C  from an input list)
+C
+	IF ( OUTPUT( FILENAME(1:NAMLEN), IFFLUN, USE_INPUT_LIST ) ) GOTO 10
+C
+	IF ( USE_MT ) THEN
+	   CALL PAD		! pad out the last block
+	   CALL TAPEMK		! write a tapemark
+	ENDIF
+C
+	GOTO 5			! get ready for a new IFF file
+C
+C *********************************************************************
+C
+C
+9999	IF ( USE_MT .AND. GOT_MT ) THEN
+	   CALL TAPEMK		! write a final tapemark
+	   CALL INFORM( MSG__BLANK )
+	   CALL INFORM( MSG__BLOCKS, BLKCNT )
+	   CALL INFORM( MSG__BLANK )
+	ENDIF
+C
+	CALL MOAN_EXIT
+999	END

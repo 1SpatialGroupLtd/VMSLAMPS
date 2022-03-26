@@ -1,0 +1,626 @@
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL FUNCTION TAB_BUILD(
+     &		HAD_SEED,HAD_SEED_FILE,HAD_LRCODE,LEFT_CODE,RIGHT_CODE,ONE_WARN)
+C
+***	MODULE	TAB_BUILD
+***	IDENT	05AP93
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+C	Arguments:
+		LOGICAL	HAD_SEED	! /SEED=('keywords') specified?
+		LOGICAL	HAD_SEED_FILE	! /SEED=(FILE:file-spec) specified?
+		LOGICAL	HAD_LRCODE	! /LRCODE=('keywords') specified ?
+		INTEGER*2 LEFT_CODE	! value of /LRCODE=(LEFT_CODE:
+		INTEGER*2 RIGHT_CODE	! value of /LRCODE=(RIGHT_CODE:
+		LOGICAL ONE_WARN	! /ONEARM=WARN specified?
+C
+	LOGICAL*4	ACTUAL_TAB_BUILD
+C
+C	........................................................................
+C
+	TAB_BUILD = ACTUAL_TAB_BUILD(
+     &		HAD_SEED,HAD_SEED_FILE,HAD_LRCODE,LEFT_CODE,RIGHT_CODE,ONE_WARN,
+     &		POLMAX, TABMAX,
+     &		%VAL(PTR$_JPOFF),
+     &		%VAL(PTR$_JPTAB),
+     &		%VAL(PTR$_SEED_ADDRESS),
+     &		%VAL(PTR$_SEGTAB),
+     &		%VAL(PTR$_STTAB)
+     &	)
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL FUNCTION ACTUAL_TAB_BUILD(
+     &		HAD_SEED,HAD_SEED_FILE,HAD_LRCODE,LEFT_CODE,RIGHT_CODE,ONE_WARN,
+     &		POLMAX, TABMAX,
+     &		JPOFF, JPTAB, SEED_ADDRESS, SEGTAB, STTAB)
+C
+***	MODULE	ACTUAL_TAB_BUILD
+***	IDENT	05NO91
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD    NPTS was I*2, now I*4 since dynamic limits
+C       require points in excess of 32767.		ST    6-Apr-1993
+CMOD1056 Use abs coords if requested			JB   01-Nov-1991
+CMOD	SEED_PT now passed to CHECK_JUNCTION		TJH  04-Apr-1989
+CMOD	Extra arguments added to allow use of more
+C	general left and right AC codes			AC   24-May-1988
+C	Author						TJH  16-Feb-1987
+C
+C Primary chase through the segment file locating all the segment
+C feature ST entries, the seed point features (if not in separate file)
+C and the values of JP entries. Tables of addresses and components are
+C built up for use later.
+C
+C If /SEED is specified and the seed points are in the same file as the 
+C segment data, the true range of the segment data is calculated. 
+C 
+C Checks done:
+C
+C 1) Faults in  the junction structure are reported. If /ONEARM=WARN
+c    is specified all 1 arm junctions will be reported.
+C
+C 2) If /LRCODE is specified (ie polygons are to be labelled from the ACs 
+C    of input left/right coded segments) then all features are checked that 
+C    they have a type LEFT_CODE and a type RIGHT_CODE AC.
+C
+C 3) Checks are performed for duplicate FSNs. (The segment FSN is used 
+C    to index the segments which form a polygon - duplicates will
+C    knobble this a treat).
+C
+C All error message output is done within ACTUAL_TAB_BUILD(). 
+C
+C The segment data range and all address tables are returned
+C in /TABLES/.
+C
+C Function returns SS$_NORMAL if all is well or one of a variety
+C of POLYGONS message codes if things go wrong.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNPOLYGONS:POLYGONSMSG.PAR'
+	INCLUDE		'($STSDEF)'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE		'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE		'LSL$CMNLSL:EXPC.CMN'
+C
+C Arguments:
+	LOGICAL	HAD_SEED	! /SEED=('keywords') specified?
+	LOGICAL	HAD_SEED_FILE	! /SEED=(FILE:file-spec) specified?
+	LOGICAL	HAD_LRCODE	! /LRCODE=('keywords') specified ?
+	INTEGER*2 LEFT_CODE	! value of /LRCODE=(LEFT_CODE:'integer')
+	INTEGER*2 RIGHT_CODE	! value of /LRCODE=(RIGHT_CODE:'integer')
+	LOGICAL ONE_WARN	! /ONEARM=WARN specified?
+C
+C
+	INTEGER*4	POLMAX
+	INTEGER*4	TABMAX
+	INTEGER*2	JPOFF(2,TABMAX)
+	INTEGER*4	JPTAB(2,TABMAX)
+	INTEGER*4	SEED_ADDRESS(TABMAX)
+	INTEGER*4	SEGTAB(2,TABMAX)
+	INTEGER*4	STTAB(2,TABMAX)
+C
+C Workspace:
+	INTEGER*2 ACTYPE	! type of AC 
+	INTEGER*2 I,MESLEN	! temporary variables
+	INTEGER*2 IECODE,IELEN	! IFF entry code and length
+	INTEGER*2 IENDS		! line state (coded bitwise)
+	INTEGER*2 IFC		! feature code
+	INTEGER*4 NPTS		! number of coord pairs to be read
+	INTEGER*2 OFFSET	! junction offset.
+	INTEGER*2 LAYER		! layer number
+C
+	INTEGER	  CURPOS	! current IFF address
+	INTEGER   FRSTJB	! position of 1st JB of polygon
+	INTEGER   FSN,ISQ	! feature serial no./internal seq. no.
+	INTEGER	  HADFSN(FSN_BITMAP_MAX)! bitmap for duplicate FSN check
+	INTEGER   JBPOSN	! position of junction
+	INTEGER   NFPOSN	! position of NF entry
+	INTEGER   NXTJB		! position of next JB of polygon
+	INTEGER   STPOSN	! position of connecting ST in file
+	INTEGER   TOTPTS	! total number of points in ftr
+C
+	LOGICAL	  HAD_LEFT	! found left AC entry
+	LOGICAL	  HAD_RIGHT	! found right Ac entry
+	LOGICAL   HADEJ,INFTR	! checks file termination OK
+	LOGICAL   HADFS		! don't keep features with no FS
+	LOGICAL	  HADJP		! checks for correct number of JPs
+	LOGICAL   HADST		! checks for empty features and JPs
+	LOGICAL   INVMES	! had invalid feature message for feat?
+	LOGICAL   JUNMES	! had missing junction message for feat?
+	LOGICAL   SEED_PT	! seed point feature?
+C
+	CHARACTER*256 MESTXT	! error message text
+
+	REAL      BUF(2,MAXPTS)	! ST coordinates
+C
+C Functions:
+	INTEGER*2 EXPAND	! text expansion
+	LOGICAL	BBCS		! checks/sets bitmap element
+	LOGICAL	CHECK_JUNCTION	! checks junctions for more than 1 arm
+	LOGICAL	IDENTIFY_SEED	! identifies seed point features
+	LOGICAL	SKIP_LAYER	! checks for and skips contents of lyr 0
+C
+C ......................................................................
+C
+C Initialise.
+	ACTUAL_TAB_BUILD=%LOC(SS$_NORMAL)
+	SEED_PT=.FALSE.		! we know nothing yet
+	NUM_SEED_PTS=0		! no seed points yet
+C
+C Read next entry from the input IFF file.
+	CALL IFFSEL(INLUN)
+	CALL IFFRWD
+C
+10	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 110		! eof
+	IF (IECODE.EQ.'NF') GOTO 20
+	IF (IECODE.EQ.'EF') GOTO 30
+	IF (IECODE.EQ.'JP') GOTO 80
+	IF (IECODE.EQ.'AC') GOTO 50
+	IF (IECODE.EQ.'FS') GOTO 40
+	IF (IECODE.EQ.'ST') GOTO 60
+	IF (IECODE.EQ.'NO') GOTO 70
+	IF (IECODE.EQ.'RA') GOTO 90
+	IF (IECODE.EQ.'EJ') GOTO 100
+	GOTO 10
+C
+C ......................................................................
+C
+C NF - initialise for the new feature.
+20	NFPOSN=LPOSH
+	INVMES=.FALSE.
+	JUNMES=.FALSE.
+	TOTPTS= 0
+	INFTR = .TRUE.
+	HADST = .FALSE.
+	HADJP = .FALSE.
+	HADFS = .FALSE.
+	HAD_LEFT = .FALSE.
+	HAD_RIGHT = .FALSE.
+	JBPOSN = 0
+	OFFSET = 0
+	CALL EIHRI(FSN,1,1)
+	CALL EIHRI(ISQ,1,2)
+	GOTO 10
+C
+C ......................................................................
+C
+C EF - check ft wasn't empty and complain it if it was.
+30	INFTR = .FALSE.
+	IF (SEED_PT) GOTO 10		! ignore seed points at present
+	IF (HAD_LRCODE) THEN
+	   IF (.NOT.(HAD_LEFT.AND.HAD_RIGHT)) THEN
+	      ACTUAL_TAB_BUILD=POLY__INVFEAT
+	      IF (HAD_LITES) THEN
+	         CALL FLWSEL(LITESLUN)
+	         CALL FLWRTF('%%MESSAGE Segment AC check error:')
+	      ENDIF
+	      MESLEN=EXPAND(
+     &		'%WSMissing left or right AC in IFF segment '//
+     &		'feature with FSN %N (%N)',MESTXT,FSN,ISQ)
+	      CALL MES_OUT(BUF,MESTXT,MESLEN)
+	   ENDIF
+	ENDIF
+	IF (.NOT.JUNMES) THEN
+	   IF (HADST.AND.(TOTPTS.GT.1).AND.
+     &			(.NOT.HADJP)) THEN	! missing jnc.
+	      ACTUAL_TAB_BUILD=POLY__INVFEAT
+	      IF (HAD_LITES) THEN
+	         CALL FLWSEL(LITESLUN)
+	         CALL FLWRTF('%%MESSAGE Junction check error:')
+	      ENDIF
+	      MESLEN=EXPAND(
+     &		'%WSMissing junction in IFF segment '//
+     &		'feature with FSN %N (%N)',MESTXT,FSN,ISQ)
+	      CALL MES_OUT(BUF,MESTXT,MESLEN)
+	   ENDIF
+	ENDIF
+	IF (HADJP) THEN
+	   STTAB(2,NUM_SEG) = STPOSN	! pos of last ST in feature
+	   JPTAB(2,NUM_SEG) = JBPOSN	! mark posn of 2nd junction.
+	   JPOFF(2,NUM_SEG) = OFFSET	! mark offset of 2nd junction.
+	ELSEIF (TOTPTS.EQ.1) THEN
+C
+C Set LRUSED to say that this is a single point feature
+	   CALL BBCS(FSN,LRUSED(1,1))
+	   CALL BBCS(FSN,LRUSED(1,2))
+	ENDIF
+	IF (.NOT.INVMES) THEN
+	   IF ( (.NOT.HADST).OR.(.NOT.HADFS) ) THEN
+	      ACTUAL_TAB_BUILD=POLY__INVFEAT
+	      IF (HAD_LITES) THEN
+	         CALL FLWSEL(LITESLUN)
+	         CALL FLWRTF('%%MESSAGE Junction check error:')
+	      ENDIF
+	      MESLEN=EXPAND(
+     &	      '%WSInvalid IFF segment feature with FSN %N (%N)'
+     &	      ,MESTXT				      ,FSN ,ISQ)
+	      CURPOS=LPOSH
+	      CALL IFFPKE(IECODE,IELEN,STTAB(1,NUM_SEG))
+	      IF (IELEN.LT.0) THEN
+	         ACTUAL_TAB_BUILD=POLY__LOST
+	         CALL LSL_PUTMSG(ACTUAL_TAB_BUILD)
+	         GOTO 120
+	      ENDIF
+	      CALL EIHRS(NPTS,IENDS)
+	      CALL EIHRR(BUF(1,1),2,1)
+C
+C Go back to where we were before reporting the error
+	      CALL IFFPKE(IECODE,IELEN,CURPOS)
+	      IF (IELEN.LT.0) THEN
+	         ACTUAL_TAB_BUILD=POLY__LOST
+	         CALL LSL_PUTMSG(ACTUAL_TAB_BUILD)
+	         GOTO 120
+	      ENDIF
+	      CALL MES_OUT(BUF,MESTXT,MESLEN)
+	      IF (HADFS) NUM_SEG = NUM_SEG-1
+	   ENDIF
+	ENDIF
+C
+C Store FSN of this segment and check for duplicate segment FSNs.
+C These will ruin everything and so must be reported. Stroppy message to
+C SYS$OUTPUT and to optional list file. 
+	IF (.NOT.(BBCS(FSN,HADFSN(1)))) THEN
+	   ACTUAL_TAB_BUILD=POLY__DUPSEGFSN
+	   IF (HAD_LITES) THEN
+	      CALL FLWSEL(LITESLUN)
+	      CALL FLWRTF('%%MESSAGE Junction check error:')
+	   ENDIF
+	   MESLEN=EXPAND(
+     &	   '%WSDuplicate segment FSN %N found - FSN %N (%N)'
+     &	   ,MESTXT		   ,FSN	          ,FSN,ISQ)
+	   CURPOS=LPOSH
+	   CALL IFFPKE(IECODE,IELEN,STTAB(1,NUM_SEG))
+	   IF (IELEN.LT.0) THEN
+	      ACTUAL_TAB_BUILD=POLY__LOST
+	      CALL LSL_PUTMSG(ACTUAL_TAB_BUILD)
+	      GOTO 120
+	   ENDIF
+	   CALL EIHRS(NPTS,IENDS)
+	   CALL EIHRR(BUF(1,1),2,1)
+	   CALL MES_OUT(BUF,MESTXT,MESLEN)
+C
+C Go back to where we were before reporting the error
+	   CALL IFFPKE(IECODE,IELEN,CURPOS)
+	   IF (IELEN.LT.0) THEN
+	      ACTUAL_TAB_BUILD=POLY__LOST
+	      CALL LSL_PUTMSG(ACTUAL_TAB_BUILD)
+	      GOTO 120
+	   ENDIF
+	ELSE
+C
+C Store FSN of segment.  NB. If memory useage becomes critical,
+C declare SEGTAB as word and convert FSN from long to unsigned word
+C for more compact storage.
+	   SEGTAB(1,NUM_SEG)=FSN
+	   SEGTAB(2,NUM_SEG)=NFPOSN
+	ENDIF	   
+	GOTO 10
+C
+C ......................................................................
+C
+C FS - Feature status. This could be a seed point, if store the address
+C of the start of the seed point feature for use later when we do the
+C seed point checks.
+40	HADFS = .TRUE.
+C
+C If /SEED=FILE was not specified the seed point features are jumbled
+C up in the segments file. We must check whether the current feature has
+C been identified as a seed point feature via its layer or feature code.
+	IF (HAD_SEED) THEN
+	   IF (.NOT.HAD_SEED_FILE) THEN
+	      CALL EIHRI(IFC,1,1)		! read feature code
+	      SEED_PT=.FALSE.			! we know nothing yet
+	      SEED_PT=IDENTIFY_SEED(LAYER,IFC)
+	   ENDIF
+	ENDIF
+C
+C If it is a seed point record the feature's position. Do the checks
+C when the segment file range is available as at present the IFF file
+C range may reflect erroneously placed seed points.
+	IF (SEED_PT) THEN
+C
+C Increment seed point feature counter
+	   IF (NUM_SEED_PTS+1.GE.POLMAX) THEN
+	      ACTUAL_TAB_BUILD=POLY__TOOMNYSEED
+	      CALL LSL_PUTMSG(ACTUAL_TAB_BUILD,POLMAX)
+	      GOTO 120
+	   ELSE
+	      NUM_SEED_PTS=NUM_SEED_PTS+1	! got a seed point!
+	      SEED_ADDRESS(NUM_SEED_PTS)=NFPOSN ! record feat. posn.
+	   ENDIF
+	ELSE					! segment feature
+C
+C Increment segment feature counter
+	   IF (NUM_SEG+1.GE.TABMAX) THEN
+	      ACTUAL_TAB_BUILD=POLY__TOOMNYSEG
+	      CALL LSL_PUTMSG(ACTUAL_TAB_BUILD,TABMAX)
+	      GOTO 120
+	   ELSE
+	      NUM_SEG=NUM_SEG+1
+	   ENDIF
+	ENDIF	   
+	GOTO 10
+C
+C
+C ......................................................................
+C
+C AC - if labelling polygons from left/right coded segments check
+C      that the feature has a type LEFT_CODE and a type RIGHT_CODE AC
+50	IF (HAD_LRCODE) THEN
+	   CALL EIHRI(ACTYPE,1,1)
+	   IF (ACTYPE.EQ.LEFT_CODE) THEN
+	      HAD_LEFT=.TRUE.
+	   ELSEIF (ACTYPE.EQ.RIGHT_CODE) THEN
+	      HAD_RIGHT=.TRUE.
+	   ENDIF
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C ST - check had a junction pointer and then plot it.
+60	IF (SEED_PT) GOTO 10		! ignore seed points at present
+	STPOSN = LPOSH
+	CALL EIHRS(NPTS,IENDS)			! read string header
+	TOTPTS=TOTPTS+1				! tot. no. points in ftr
+	IF (NPTS.GE.1) CALL EIHRR(BUF,2,1)	! read first coordinate
+	IF ( .NOT.HADFS) THEN
+	   INVMES=.TRUE.
+	   ACTUAL_TAB_BUILD=POLY__INVFEAT
+	   IF (HAD_LITES) THEN
+	      CALL FLWSEL(LITESLUN)
+	      CALL FLWRTF('%%MESSAGE Junction check error:')
+	   ENDIF
+	   MESLEN=EXPAND(
+     &	   '%WSInvalid IFF segment feature with FSN %N (%N)',MESTXT
+     &						   ,FSN ,ISQ)
+	   CALL MES_OUT(BUF,MESTXT,MESLEN)
+	   GOTO 10
+	ENDIF
+	IF ((.NOT.HADJP).AND.(.NOT.HADST)) THEN
+	   JUNMES=.TRUE.
+	   ACTUAL_TAB_BUILD=POLY__INVFEAT
+	   IF (HAD_LITES) THEN
+	      CALL FLWSEL(LITESLUN)
+	      CALL FLWRTF('%%MESSAGE Junction check error:')
+	   ENDIF
+	   MESLEN=EXPAND(
+     &		'%WSMissing junction in IFF segment '//
+     &		'feature with FSN %N (%N)',MESTXT,FSN,ISQ)
+	   CALL MES_OUT(BUF,MESTXT,MESLEN)
+	ENDIF
+	HADJP = .FALSE.
+C
+C If this is the 1st ST of this ft then set up the tables.
+	IF (.NOT.HADST) THEN
+	   HADST = .TRUE.
+	   STTAB(1,NUM_SEG) = STPOSN	! mark posn of 1st ST entry.
+	   JPTAB(1,NUM_SEG) = JBPOSN	! mark posn of 1st junction.
+	   JPOFF(1,NUM_SEG) = OFFSET	! mark offset of 1st junction.
+	ENDIF
+C
+C Check to see if we have to calculate the segment range because the
+C seed points are jumbled up within the same file 
+	IF (HAD_SEED) THEN
+	   IF (.NOT.HAD_SEED_FILE.AND..NOT.SEED_PT) THEN
+	      CALL EIHRS(NPTS,IENDS)
+	      IF (NPTS.EQ.0) GOTO 10
+	      CALL EIHRR(BUF,NPTS*2,1)
+	      CALL CALC_RANGE(BUF,NPTS,IN_FIL_RANGE,.FALSE.)
+	   ENDIF
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C NO - New layer
+70	CALL EIHRI(LAYER,1,1)
+C
+C Test for, and if necessary, skip all entries in layer 0. 
+	ACTUAL_TAB_BUILD=SKIP_LAYER(LAYER,IELEN,IN_FILE(:IN_LEN))
+	IF (.NOT.ACTUAL_TAB_BUILD) GOTO 120		! got lost? - return
+	GOTO 10
+C
+C ......................................................................
+C
+C JP - check there are 2/feature, except when it is a single point
+C feature, in which case it will have only 1 JP
+80	HADJP = .TRUE.
+	CALL EIHRL(JBPOSN,1,1)
+	CALL EIHRI(OFFSET,1,3)
+C
+C If /ONEARM=WARN specified then we must actually go to the junction
+C and determine the number of arms. If 0 or 1 arm junction issue warning
+	ACTUAL_TAB_BUILD=CHECK_JUNCTION(JBPOSN,OFFSET,ONE_WARN,SEED_PT)
+	GOTO 10
+C
+C ......................................................................
+C
+C RA - coordinate range. If the seed points are in a separate file then
+C just read the range. If, however, they are jumbled up with the
+C segments we must calculate the segment range explicitly,
+C excluding any seed point features, because the whole file range may
+C reflect erroneously placed seed points. 
+90	IF (.NOT.HAD_SEED.OR.HAD_SEED_FILE) THEN
+	   CALL EIHRR(IN_FIL_RANGE(1),4,1)
+	ELSE
+	   IN_FIL_RANGE(1)= 1.0E36	
+	   IN_FIL_RANGE(2)=-IN_FIL_RANGE(1)
+	   IN_FIL_RANGE(3)= IN_FIL_RANGE(1)
+	   IN_FIL_RANGE(4)=-IN_FIL_RANGE(1)
+	ENDIF
+C
+C Get MD if had /ABSOLUTE
+C
+	IF (HAD_ABS) THEN
+	   CALL IFFNXC('MD',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      ACTUAL_TAB_BUILD = POLY__MDABSENT
+	      CALL LSL_PUTMSG(POLY__MDABSENT)
+	      GOTO 999
+	   ELSEIF (IELEN.NE.MD2LEN) THEN
+	      CALL LSL_PUTMSG(POLY__MDDEFAULT)	  ! no MD2 available
+	      MD2LOC(1) = 0
+	      MD2LOC(2) = 0
+	   ELSE
+	      CALL EIHR(MD2ARR,MD2LEN,1)
+	      IF (MATV2.NE.2) THEN
+		 CALL LSL_PUTMSG(POLY__MDDEFAULT) ! no MD2 available
+		 MD2LOC(1) = 0
+		 MD2LOC(2) = 0
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	GOTO 10
+C
+C ......................................................................
+C
+C EJ - assume end of file
+100	HADEJ = .TRUE.
+C
+C Is it a sensible end of file?
+110	IF (INFTR.OR.(.NOT.HADEJ)) THEN
+	   ACTUAL_TAB_BUILD=POLY__UNEXPEOF
+	   CALL LSL_PUTMSG(ACTUAL_TAB_BUILD,IN_FILE(:IN_LEN))
+	ENDIF
+C
+C ......................................................................
+C
+C If all is well so be it. If we have had to warn the user (but
+C continued processing) upgrade to severity ERROR now to stop further
+C processing.
+120	IF (ACTUAL_TAB_BUILD) THEN
+	   ACTUAL_TAB_BUILD=%LOC(SS$_NORMAL)
+C
+C Tell user what has been done?
+	   IF (HAD_LOG) THEN
+	      CALL EXPAND(
+     &	     'Number of IFF segment feature addresses tabulated ... %N',
+     &								NUM_SEG)
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+	      CALL EXPAND(
+     &	     'Segment coordinate range is:')
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+C
+	      IF (HAD_ABS) THEN
+		CALL EXPAND(
+     &		'X-min ............................................... %F',
+     &					IN_FIL_RANGE(1)+MD2LOC(1))
+	      ELSE
+		CALL EXPAND(
+     &		'X-min ............................................... %F',
+     &					IN_FIL_RANGE(1))
+	      ENDIF
+C
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+C
+	      IF (HAD_ABS) THEN
+	        CALL EXPAND(
+     &		'X-max ............................................... %F',
+     &					IN_FIL_RANGE(2)+MD2LOC(1))
+	      ELSE
+	        CALL EXPAND(
+     &		'X-max ............................................... %F',
+     &					IN_FIL_RANGE(2))
+	      ENDIF
+C
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+C
+	      IF (HAD_ABS) THEN
+	        CALL EXPAND(
+     &		'Y-min ............................................... %F',
+     &					IN_FIL_RANGE(3)+MD2LOC(2))
+	      ELSE
+	        CALL EXPAND(
+     &		'Y-min ............................................... %F',
+     &					IN_FIL_RANGE(3))
+	      ENDIF
+C
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+C
+	      IF (HAD_ABS) THEN
+	        CALL EXPAND(
+     &		'Y-max ............................................... %F',
+     &					IN_FIL_RANGE(4)+MD2LOC(2))
+	      ELSE
+	        CALL EXPAND(
+     &		'Y-max ............................................... %F',
+     &					IN_FIL_RANGE(4))
+	      ENDIF
+C
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+	   ENDIF
+	ELSE
+	   IF (IBITS(ACTUAL_TAB_BUILD,0,3).EQ.STS$K_WARNING) THEN
+	      ACTUAL_TAB_BUILD=POLY__TABBUILD
+	      CALL LSL_PUTMSG(ACTUAL_TAB_BUILD)
+	   ENDIF
+	   DELETE=.TRUE.
+	ENDIF
+C
+999	RETURN
+	END
+C

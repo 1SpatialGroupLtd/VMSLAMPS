@@ -1,8 +1,12 @@
 	.TITLE	VIOSEC
-	.IDENT	/03NO86/
+	.IDENT	/10AP87/
 
 ; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
 
+;MOD	Clear DZRO flag in EXTEND - don't want to clear
+;MOD	all of the data in the file!!!			TJI	10-Apr-1987
+;MOD	Opt. Update flags arg for VIO$UPDATE_SEC	 DM	30-Mar-1987
+;MOD	Opt. Global section GSDNAM arg for VIO$OPEN_SEC	 DM	26-Mar-1987
 ;MOD	Opt. Virtual Block Number arg for VIO$OPEN_SEC	 DM	03-Nov-1986
 ;MOD	Opt. Page Fault Cluster size arg for VIO$OPEN_SEC;
 ;MOD	VIO$UPDATE_SEC added to flush changes;
@@ -15,7 +19,7 @@
 ;MOD	changed for general purpose library routine	AJW	01-Mar-1983
 ;MOD	Author - MCE digitiser table menu stuff		TJI	 6-Nov-1981
 
-; Private section manipulation routines
+; Private/global section manipulation routines
 
 ; get some symbolic definitions
 
@@ -78,6 +82,9 @@ VSEC_WORKSPACE:
 		.IIF EQ I,	VSEC_VBN	=.-VSEC_WORKSPACE
 		.BLKL	1
 
+		.IIF EQ I,	VSEC_GSDNAM	=.-VSEC_WORKSPACE
+		.BLKQ	1
+
 		.IIF EQ I,	VSEC_FID	=.-VSEC_WORKSPACE
 		.BLKW	3
 
@@ -97,7 +104,7 @@ VSEC_WORKSPACE:
 
 ; error_number=VIO$OPEN_SEC(<file_name>, <size_in_blocks>,<write>, -
 ;                           <create>,<address>,<number_of_bytes>[,<channel>]
-;			    [,<cluster>][,<vbn>])
+;			    [,<cluster>][,<vbn>][,<gsdnam>])
 
 ; file_name           - input  - address of descriptor
 ; size_in_blocks      - input  - int*4 - (passed by reference) - page count
@@ -122,6 +129,11 @@ VSEC_WORKSPACE:
 ;			       - set virtual block number in file that marks
 ;			       - the beginning of the section (used in
 ;			       - conjunction with size_in_blocks)
+; gsdnam	      - input  - address of descriptor - name of global section
+;			       - if present then section will be global.
+;			       - N.B. at present if the section is to be
+;			       - EXTENDED then this name will be looked at again
+;			       - hence it should not be in a temporary array.
 
 ; e.g.
 ;	INTEGER ARRAY
@@ -138,14 +150,14 @@ VSEC_WORKSPACE:
 ; R11 is corrupted by VIOARG
 	JSB	VIO$1ST			; init arg reading mechanism
 	JSB	VIO$GNA			; get <file_name>
-	BCC	10$			; branch if got it
+	BCC	1$			; branch if got it
 
 ; put error code "insufficient arguments" in RO
 99$:	MOVL	#SS$_INSFARG,R0
 	RET				; and return to moan about it
 
 ; so we have the name of our file/section
-10$:	MOVAQ	(R0),R2			; remember where it is
+1$:	MOVAQ	(R0),R2			; remember where it is
 
 	JSB	VIO$GNA			; get <size_in_blocks>
 	BCS	99$
@@ -179,12 +191,20 @@ VSEC_WORKSPACE:
 
 85$:	CLRL	R10			; default virtual block number is 0
 	JSB	VIO$GNA			; get vbn
-	BCS	89$			; if none specified
+	BCS	86$			; if none specified
 	MOVL	(R0),R10
-	BEQL	89$
-	BLBC	R5,89$			; "create" flag set ?
+	BEQL	86$
+	BLBC	R5,86$			; "create" flag set ?
 	MOVL	#SS$_BADPARAM,R0	; yes - set up 'invalid argument' error
 	RET				; and return to moan about it
+
+86$:	JSB	VIO$GNA			; global section required ?
+	BCS	87$			; if no name specified
+	MOVAQ	(R0),R11		; remember where it is
+	BRB	89$
+87$:	CLRL	R11			; N.B. R11 is corrupted by VIOARG !!!
+
+; beware of R11 if you need to add another argument !!
 
 89$:
 
@@ -209,39 +229,58 @@ VSEC_WORKSPACE:
 			FNA=@4(R2),-		; name given us
 			FNS=(R2)		; length of name
 
-	BLBC	R5,15$				; if create
+	TSTL	R11				; global section wanted ?
+	BEQL	10$
+	$FAB_STORE	FAB=VSEC_FAB,-
+			SHR=<PUT,GET,UPI>	; yes - multiple write access
+
+10$:	BLBC	R5,15$				; branch if exists already
+
+;...............................................................................
+
 	MOVL	#SEC$M_WRT!-			; write
 	         SEC$M_DZRO!-			; demand zero
 	         SEC$M_EXPREG,VSEC_FLAGS(R8)	; create new address space
+
 	$FAB_STORE	FAB=VSEC_FAB,-
 			FOP=<UFO,CBT,SUP>,-	; supersede
 			ALQ=R3			; initial size wanted
 
 	$CREATE		FAB=VSEC_FAB		; make our file
 	BRB	20$
+
+;...............................................................................
+
 15$:						; and if already exists
 	BLBS	R4,17$				; write enable ?
 	MOVL	#SEC$M_EXPREG,VSEC_FLAGS(R8)	; no
 	BRB	18$
-17$:
-	MOVL	#SEC$M_WRT!-			; yes
+
+17$:	MOVL	#SEC$M_WRT!-			; yes
 		 SEC$M_EXPREG,VSEC_FLAGS(R8)
 	$FAB_STORE	FAB=VSEC_FAB,-
 			FAC=<PUT,GET>
-18$:
-	$OPEN		FAB=VSEC_FAB
+
+18$:	$OPEN		FAB=VSEC_FAB
 	TSTL	R10				; vbn specified ?
 	BNEQ	20$
 	MOVL	VSEC_FAB+FAB$L_ALQ,R3		; get the size of the file
-20$:
-	BLBC	R0,100$				; return with error
 
+;...............................................................................
+
+20$:	BLBC	R0,100$				; return with error
+
+	TSTL	R11				; global section wanted ?
+	BEQL	21$
+	BISL2	#SEC$M_GBL,VSEC_FLAGS(R8)	; yes
+	MOVQ	(R11),VSEC_GSDNAM(R8)		; remember the descriptor
 
 ; file now open - set it up as a private section
 
-	$CRMPSC_S	INADR =VSEC_INADR,-
+21$:	$CRMPSC_S	INADR =VSEC_INADR,-
 			RETADR=VSEC_RETADR(R8),-
 			FLAGS =VSEC_FLAGS(R8),-
+			GSDNAM=VSEC_GSDNAM(R8),-
 			CHAN  =VSEC_FAB+FAB$L_STV,-
 			PAGCNT=R3,-
 			VBN   =R10,-
@@ -409,10 +448,18 @@ VSEC_WORKSPACE:
 	RET
 20$:
 
+; we're going to map it with the same flags that VIO$OPEN_SEC used
+; (ie those in  VSEC_FLAGS). However, if we actually created the
+; file from scratch, then those flags include one requesting "demand-zero"
+; which we must remove if we don't want to zero the data we (presumably)
+; have in our file
+	BICL2	#SEC$M_DZRO,VSEC_FLAGS(R4)	; just in case
+
 ; and map it to virtual memory again
 	$CRMPSC_S	INADR =VSEC_INADR,-
 			RETADR=VSEC_RETADR(R4),-
 			FLAGS =VSEC_FLAGS(R4),-
+			GSDNAM=VSEC_GSDNAM(R4),-
 			CHAN  =VSEC_CHAN(R4),-
 			PAGCNT=VSEC_SIZE(R4),-
 			VBN   =VSEC_VBN(R4),-
@@ -477,7 +524,7 @@ VSEC_WORKSPACE:
 
 ; Update the section by writing all modified pages back to disk.
 
-; error_number=VIO$UPDATE_SEC([channel])
+; error_number=VIO$UPDATE_SEC([<channel>][,<updflg>])
 
 ; R11 is corrupted by VIOARG
 	JSB	VIO$1ST			; init arg reading mechanism
@@ -501,7 +548,13 @@ VSEC_WORKSPACE:
 2$:	MOVL	#SS$_IVCHAN,R0		; produce error moan if it isn't
 	RET
 
-3$:	$UPDSECW_S	INADR=VSEC_RETADR(R2)
+3$:	CLRL	R1			; default update flag is 0
+	JSB	VIO$GNA			; get update flag
+	BCS	4$			; if none specified
+	MOVL	(R0),R1
+
+4$:	$UPDSECW_S	INADR =VSEC_RETADR(R2),-
+			UPDFLG=R1
 
 	RET
 

@@ -1,0 +1,566 @@
+	SUBROUTINE PEER(EC,XS,YS,IDX,IDY,IV)
+C
+***	MODULE	PEER
+***	IDENT	09SE85
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Colour added; prevent wraparound on 4105 DM	09-Sep-1985
+CMOD	IUTB now back in /SCPARM/ !!		 DM	26-Jun-1985
+CMOD	(Effectively) re-enable FB16 in PHA	 DM	06-Jul-1983
+CMOD	Use LIMIT(11) to drop early scanlines	WJJ	14-Feb-1983
+CMOD	  and make focus test work in MOD 0
+CMOD	Width quality does sideways steps	WJJ	10-Feb-1983
+CMOD	Extend MAXPHA to 100 from 60		WJJ	 9-Feb-1983
+CMOD	Remove bug in phase (from 2-Feb-1983)	WJJ	04-Feb-1983
+CMOD	Add a little more printing		WJJ	03-Feb-1983
+CMOD	Add quality checks, and enable		WJJ	02-Feb-1983
+CMOD	 long-lost tests
+CMOD	New phase arithmetic			AJW/WJJ	18-Jan-1982
+CMOD	TCCT made INTEGER			AJW	 4-Jun-1981
+CMOD	Tidied, and duff CRX/Y not allowed	AJW	27-May-1981
+CMOD	MOVETO changed to MOVTO			AJW	20-May-1981
+C	Author					MCF
+C
+C to be called from SCHECK, to give an idea of the
+C digitiser's performance.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C parameters:
+***	PARAMETER/PARAMS/
+	PARAMETER MAXPHA=100
+C
+C arguments:
+	INTEGER EC	! info required
+C			  1 - H/W phase
+C			  2 - OF() & CR()
+C			  3 - threshold - lines
+C			  4 - focus
+C			  5 - threshold - area
+C			  6 - scanning rate v IWID
+C			  7 - S/W phase
+C			  8 - quality check on line position
+C			  9 - quality check on line width
+C
+	REAL    XS,YS		! start of scan vector
+	INTEGER IDX,IDY		! scan vector
+	INTEGER IV		! returned scan direction
+C
+C common blocks:
+***	COMMON/SCCORR/
+***	COMMON/SCPARM/
+***	COMMON/RSE/
+***	COMMON/MASTER/
+***	COMMON/LKPARM/		! for LIMITs
+C
+C function:
+	INTEGER NEGET
+C
+C workspace:
+	INTEGER   I
+	INTEGER   M
+	INTEGER   IWIDSV
+	INTEGER   IPITSV
+	INTEGER   IXYCH(2)
+	INTEGER   TCBUF(3,21)
+	INTEGER   TCCT
+	INTEGER   IU,IW
+	INTEGER   ID
+	INTEGER   ID1,ID2
+	INTEGER   IB
+	INTEGER   IT
+	INTEGER   IFL
+	INTEGER   IFB
+	INTEGER   ICH
+	INTEGER   IMODSV
+	INTEGER   IPHASE
+	INTEGER   ISCCT
+	INTEGER   NPTS
+	INTEGER   NWAY
+	INTEGER   NPOL
+	INTEGER   NTIM
+	INTEGER   NMINUS
+	INTEGER   NSCAN
+	INTEGER   NLINES
+	INTEGER   NEDGES
+	INTEGER   NPHERR
+	INTEGER   LSTWAY
+	INTEGER   LSTPOL
+	INTEGER   LAST1
+	INTEGER   LAST2
+	INTEGER   LASTV
+	INTEGER   MULLIN
+	INTEGER   MULEDG
+	INTEGER	  CX, CY	! Tek cursor posn.
+C
+	INTEGER*4 NWHITE
+C
+	REAL      PHERR		! phase error
+	REAL      PHA(2)
+	REAL      OFF(2)
+	REAL      SEPL(2)
+	REAL      TC
+	REAL      TM
+	REAL      DPHA
+	REAL      TIME
+	REAL      A
+	REAL	  RES(2)	! Residuals from LINFIT
+	REAL	  TCRES(4)	! Stored residuals
+	REAL	  TCMIN, TCMAX	! Min and max of fitted positions
+C
+	LOGICAL*1 GOTLST
+	LOGICAL*1 GOTPHR	! if last scan had valid PHERR
+C
+	EQUIVALENCE (PHX,PHA(1)),(OFX,OFF(1))
+C
+	DATA IXYCH/'X ','Y '/
+C
+C ......................................................................
+C
+	IDIR = 0
+	IF (IABS(IDY) .LT. IABS(IDX)) IDIR = 1
+	IV = 1+IDIR
+	IU = 3-IV
+	IMODSV = IMOD
+	IWIDSV = IWID
+	CALL DISMOD(0)
+	CALL RDABO
+	GOTO (10,70,20,40,20,290,60,70,70),EC
+C
+C set up for H/W phase
+C
+10	IMOD = 0
+	PHA(IV) = 1.1		! to ensure correct rounding
+	DPHA = 3.0		! speed it up
+	GOTPHR = .FALSE.
+	TCCT = 0
+	NMINUS = 0
+	CALL TXORGN(0,350)
+	CALL TXSCLE(1.0)
+	CALL TXMTO(0,0)
+	CALL TXLTO(MAXPHA*10,0)
+	CALL TXCOL(3)
+	GOTO 30
+C
+C set up for threshold
+C
+20	CALL TXORGN(0,0)
+	CALL TXSCLE(4.0)
+	ITLO = 0
+C
+30	CALL TXMTO(0,0)
+	GOTO 60
+C
+C set up for focus
+C
+40	IFL = 0
+	CALL TXORGN(0,0)
+	CALL TXSCLE(5.0)
+	CALL TXMTO(0,0)
+50	CALL FLEVEL(IFL)
+	GOTO 60
+C
+C head of scan loop
+C
+60	CALL MOVTO(XS,YS)
+C
+C See if the operator's fed up
+	CALL FBWT16(TOPBIT)
+	CALL FBRD(IFB)
+	IF (IFB .EQ. 16)
+     &     GOTO (260,510,430,450,430,510,510,510,510),EC
+C
+C do the scan and then go and look at data
+	CALL SCANBY(IDX,IDY,1)
+	CALL SCSET(0)
+	GOTO (160,330,330,330,330,510,460,510,510),EC
+C
+C here for transverse scan--set up OFF() and CR()
+C
+70	IMOD = 1
+	SEPL(IU) = 0.0
+	SEPL(IV) = IWID*CR(IV)*WAR/25.0
+	TCCT = 0
+	TCRES(1) = 0		! Zero residual accumulations
+	TCRES(2) = 0
+	TCMIN =  1.0E06
+	TCMAX = -1.0E06
+C
+C scan separation set up
+C
+	CALL TXORGN(500,350)
+	CALL TXSCLE(1.0)
+C
+C get alpha cursor posn
+	CALL TXWT(27,1)		! Send 'ESC, ENQ'
+	CALL TXWT(5,1)
+	CALL TXLOC(ICH, CX, CY)	! Read cursor posn
+	CALL TXMTO(-250, 250)
+	CALL TXLTO(-250,-250)
+	CALL TXLTO( 250, 250)
+	CALL TXLTO( 250,-250)
+	CALL TXMTO( 250,   0)
+	CALL TXLTO(-250,   0)
+	CALL TXCOL(3)
+C
+C TEK set up
+C
+	I = 0
+	DO 120 ISCCT = -10,10
+	  IF (EC.NE.8) I = ISCCT	! Move if OCR or QUW, not QUL
+	  CALL MOVTO(XS+I*SEPL(X),YS+I*SEPL(Y))
+	  CALL SCANBY(IDX,IDY,1)
+	  CALL SCSET(0)
+C
+C in loop now, scan done
+	  NPTS = 0
+	  INE = NEGET(NEBUF,-NESIZE)
+	  IF (INE .LE. 0) GOTO 120
+	  IB = 1
+C
+C some encounters to process
+80	  IW = NEBUF(1,IB)
+	    NEBUF(1,IB) = -1
+	    IF (IW .GE. NEGNEG) GOTO 90
+C
+C skip first few scan lines if wanted
+	    IF (ABS(NEBUF(IU+1,IB)).LT.LIMIT(11)*IPIT) GOTO 90
+	    IF (EC .EQ. 9) NEBUF(IV+1,IB) = IW	! Plot width if EC is 9
+	    NPTS = NPTS+1
+	    NEBUF(1,IB) = 1
+C
+C NEBUF(1,IB) marked +1 if good line encounter
+90	    IB = IB+1
+	  IF (IB .LE. INE) GOTO 80
+C
+C scan processed
+	  IF (NPTS .LT. 4) GOTO 120
+	  CALL LINFIT(NEBUF,1,INE,1,IU+1,IV+1,1.0,TC,TM,RES)
+	  TC = -TC
+	  IF (ISCCT.NE.-10) GO TO 100
+	  CALL TXMTO(-250,IFIX(25*TC/SEPL(IV)))
+	  GO TO 110
+100	  CALL TXLTO(ISCCT*25,IFIX(25*TC/SEPL(IV)))
+C
+C offset of fitted line saved for later
+110	  TCCT = TCCT+1
+	  TCBUF(1,TCCT) = 1
+	  TCBUF(2,TCCT) = ISCCT*SEPL(IV)
+	  TCBUF(3,TCCT) = TC
+	  TCRES(1) = MAX(TCRES(1),RES(1))	! save max RMS residual
+	  TCRES(2) = MAX(TCRES(2),RES(2))	! and max MAX residual
+	  TCMIN = MIN(TCMIN, TC)		! keep track of range
+	  TCMAX = MAX(TCMAX, TC)
+120	CONTINUE
+C
+	IF (TCCT .LT. 6) GOTO 150
+	CALL LINFIT(TCBUF,1,TCCT,1,2,3,1.0,TC,TM,TCRES(3)) ! fit offsets
+	IF (EC.NE.2) GOTO 130	! skip offset drawing unless OFF/CRA
+	CALL LINFIT(TCBUF,1,TCCT,1,3,2,1.0,TC,TM,RES) ! fit offsets
+	CALL TXMTO(IFIX(25*TC/SEPL(IV)),50)
+	CALL TXLBY(   0,-100)
+130	CALL TXMTO(CX, CY)	! restore cursor position
+	CALL TXCOL(1)
+	CALL TXEND
+	CALL WRITEF('Errors - Encs : %F6.2(%F6.2)  Fit : %F6.2(%F6.2)',
+     &			        TCRES(1),TCRES(2),TCRES(3),TCRES(4))
+	IF (EC.EQ.2) GOTO 140	! Skip if OFF/CRA
+	CALL WRITEF('Offset = %F6.2 (%F6.2 to %F6.2), Drift = %F6.2',
+     &				TC,TCMIN,TCMAX,TM*SEPL(IV)*20)
+	GOTO 510
+C
+C calculate new OFF and CR
+140	OFF(IV) = OFF(IV)+TC
+	A = CR(IV)*TM
+	IF (A.LT.0.2 .OR. A.GT.0.45) A=0.33
+	CR(IV) = A
+	CALL WRITEF('OF%C = %F6.1,  CR%C = %F6.3',IXYCH(IV),OFF(IV),
+     &						  IXYCH(IV),CR(IV))
+	GOTO 510
+C
+150	CALL TXMTO(CX,CY)
+	CALL TXCOL(1)
+	CALL TXEND
+	CALL WRITEF('Can''t see enough')
+	GOTO 510
+C
+C investigate effects of phase correction
+C
+160	INE = NEGET(NEBUF,-NESIZE)
+	PHERR = 0.0
+	NPTS = 0
+	IF (INE .LE. 0) GOTO 250
+C
+C look at edges and get sideways wobble
+	GOTLST = .FALSE.
+	IB = 1
+C
+C next scan line
+170	IT = IB
+C
+C next point on scan line
+180	IF (IT .EQ. INE) GOTO 190
+	IW = NEBUF(1,IT+1)
+	IF (IAND(IW,NEGMUL) .EQ. 0) GOTO 190
+C
+C another point for this scan line
+	IT = IT+1
+	NEBUF(1,IT) = IAND(IW,NEGWID)
+	GOTO 180
+C
+C here with complete scan line
+C see if we can compare it with the last one
+C first, does it have two, and only two, edges ?
+190	IF (IT .NE. IB+1) GOTO 210
+C
+C get the direction of the scan line
+	NWAY = 0
+	IF (NEBUF(IV+1,IB) .GT. NEBUF(IV+1,IT)) NWAY = 1
+C
+C and the polarity of the line (white or black)
+	NPOL = -1
+	IF (NEBUF(1,IB+NWAY) .EQ. NEGNEG) NPOL = 0
+	IF (NEBUF(1,IB+NWAY) .EQ. NEGPOS) NPOL = 1
+	IF (NPOL .LT. 0) GOTO 200
+C
+C is there a last scan to compare with ?
+	IF (.NOT. GOTLST) GOTO 200
+C
+C opposite direction to last scan ?
+	IF (NWAY .EQ. LSTWAY) GOTO 200
+C
+C same polarity line ?
+	IF (NPOL .NE. LSTPOL) GOTO 200
+C
+C we can actually compare the two scans !!!
+	ID1 = (LAST1-NEBUF(IV+1,IB+1-NWAY))*(NWAY+NWAY-1)
+	ID2 = (LAST2-NEBUF(IV+1,IB+NWAY))*(NWAY+NWAY-1)
+	PHERR = PHERR+ID1+ID2
+	NPTS = NPTS+2
+C
+C set this as last
+200	GOTLST = .TRUE.
+	LAST1 = NEBUF(IV+1,IB+1-NWAY)
+	LAST2 = NEBUF(IV+1,IB+NWAY)
+	LSTWAY = NWAY
+	LSTPOL = NPOL
+	GOTO 220
+C
+C bad scan line
+210	GOTLST = .FALSE.
+C
+220	IB = IT+1
+	IF (IB .LE. INE) GOTO 170
+	IF (NPTS .LE. 0) GOTO 250
+	PHERR = PHERR/NPTS
+	IPHASE = PHA(IV)
+	NPHERR = PHERR+SIGN(0.5, PHERR)
+	IF (ABS(NPHERR).GT.350) GOTPHR=.FALSE.
+	IF (     GOTPHR) CALL TXLTO(IPHASE*10, NPHERR)
+	IF (.NOT.GOTPHR) CALL TXMTO(IPHASE*10, NPHERR)
+C
+C add point to buffer
+	IF (NMINUS.GE.10 .AND. TCCT.EQ.21) GOTO 250
+	IF (TCCT.LE.20) GOTO 240
+	DO 230 I = 1,20
+	  TCBUF(2,I) = TCBUF(2,I+1)
+	  TCBUF(3,I) = TCBUF(3,I+1)
+230	CONTINUE
+	TCCT = TCCT-1
+240	TCCT = TCCT+1
+	TCBUF(1,TCCT) = 1
+	TCBUF(2,TCCT) = IPHASE
+	TCBUF(3,TCCT) = NPHERR
+	IF (NPHERR .LE. 0) NMINUS = NMINUS+1
+250	GOTPHR = NPTS.GT.0
+	PHA(IV) = PHA(IV)+DPHA
+	IF (PHA(IV) .LT. MAXPHA) GOTO 60
+C
+C choose automatically
+260	IF (TCCT .LT. 8) GOTO 270	! can't
+	CALL LINFIT(TCBUF,1,TCCT,1,2,3,1.0,TC,TM,RES)
+	PHA(IV) = -TC/TM
+	IPHASE=PHA(IV)*10.0+0.5
+	GOTO 280
+C
+C let operator choose
+270	CALL TXCUR
+	CALL TXLOC(M,IPHASE,IW)
+	PHA(IV) = IPHASE/10.0
+C
+C display chosen result
+280	PHA(IV) = PHA(IV)+0.5		! modify cos LDLIB truncates it
+	CALL TXMTO(IPHASE,0)
+	CALL TXMBY(0,  30)
+	CALL TXLBY(0, -60)
+	CALL TXMTO(0, 300)
+	CALL TXCOL(1)
+	CALL TXEND
+	GOTO 510
+C
+C time scans for varying IWID (for new SSG)
+C
+290	IWID = 1
+	CALL TXORGN(0,0)
+	CALL TXSCLE(1.0)
+	CALL TXMTO(0,0)
+300	TIME = SECNDS(0.0)
+	DO 320 I = 1,5
+	  CALL MOVTO(XS,YS)
+	  CALL SCANBY(IDX,IDY,1)
+	  CALL SCSET(0)
+310	  INE = NEGET(NEBUF,-NESIZE)
+	  IF (INE .GT. 0) GOTO 310
+320	CONTINUE
+	TIME = SECNDS(TIME)
+	NTIM = TIME*2000.0
+	CALL TXLTO(IWID*16,NTIM)
+	IWID = IWID+3
+	IF (IWID .LE. 63) GOTO 300
+	CALL TXMTO(IWIDSV*16,0)
+	CALL TXLBY(0,700)
+	CALL TXCUR
+	CALL TXLOC(ICH,IWID,M)
+	IWID = IWID/16.0+0.5
+	GOTO 510
+C
+C derive some useful info from the scan
+C
+330	NSCAN = 0
+	NLINES = 0
+	NEDGES = 0
+	MULLIN = 0
+	MULEDG = 0
+	NWHITE = 0
+C
+C read in batches of points
+340	INE = NEGET(NEBUF,-NESIZE)
+	  IF (INE .LE. 0) GOTO 390
+C
+C process each batch
+	  DO 380 I=1,INE
+	    IW = NEBUF(1,I)
+	    M = 0
+	    IF (IW .LT. NEGMUL) GOTO 350
+C
+C subsequent hit on a scan line
+	    M = 1
+	    IW = IW-NEGMUL
+	    GOTO 360
+C
+C 1st hit therefore another non-empty scan line
+350	    NSCAN = NSCAN+1
+C
+C decide on type of encounter
+360	    IF (IW.EQ.NEGNEG .OR. IW.EQ.NEGPOS) GOTO 370
+C
+C line encounter
+	    NLINES = NLINES+1
+	    MULLIN = MULLIN+M
+	    NWHITE = NWHITE+IW
+	    GOTO 380
+C
+C edge encounter
+370	    NEDGES = NEDGES+1
+	    MULEDG = MULEDG+M
+380	  CONTINUE
+	GOTO 340
+C
+C get expected number of scan lines
+390	M = IDX
+	IF (IDIR .EQ. 0) M = IDY
+	M = IABS(M)/IPIT + 1
+	GOTO (510,510,410,440,400),EC
+C
+C white area
+400	M = (NWHITE)/M
+	GOTO 420
+C
+410	IF (IMOD .EQ. 1) M = (NLINES*100.0)/M
+	IF (IMOD .EQ. 0) M = (NEDGES* 50.0)/M
+C
+C draw graph on Tek
+420	CALL TXLTO(ITLO,M)
+	ITLO = ITLO+10
+	IF (ITLO .LT. 255) GOTO 60
+C
+C get value for ITLO
+430	CALL TXCUR
+	CALL TXLOC(M,ITLO,IW)
+	CALL TXEND
+	GOTO 510
+C
+440	IF (IMOD.EQ.1) M = (NLINES*50.0)/M
+	IF (IMOD.EQ.0) M = (NEDGES*50.0)/M
+	CALL TXLTO(IFL*12,M)
+	IFL = IFL+1
+	IF (IFL .LE. 15) GOTO 50
+450	CALL TXCUR
+	CALL TXLOC(M,IFL,IW)
+	REDFOC = IFL/12
+	CALL FLEVEL(REDFOC)
+	CALL TXEND
+	GOTO 510
+C
+C calculate software phase correction
+C top bit of width word used for direction info
+C only of use with new SSG
+C
+460	PHERR = 0.0
+	NPTS  = 0
+	IUTB  = 1	! enable direction
+	GOTLST = .FALSE.
+C
+C extract points singly
+470	INE = NEGET(ENCBUF,1)
+	IF (INE .LE. 0) GOTO 500
+	IW = ENCBUF(W,1).AND.NEGWID
+C
+C 1st encounter of line ?
+	IF ((ENCBUF(W,1).AND.NEGMUL).NE.0) GOTO 490
+	NWAY = 0
+	IF ((ENCBUF(W,1).AND.TOPBIT).NE.0) NWAY = 1
+	NPOL = 0
+	IF (IW .EQ. NEGNEG) NPOL = -1
+	IF (IW .EQ. NEGPOS) NPOL =  1
+	IF (.NOT.GOTLST) GOTO 480
+C
+C opposite direction ?
+	IF (NWAY .EQ. LSTWAY) GOTO 490
+C
+C line in line mode or edge in edge mode ?
+	IF ((IMOD.EQ.0) .XOR. (NPOL.NE.0)) GOTO 490
+C
+C same polarity ?
+	IF (NPOL .NE. LSTPOL) GOTO 490
+C
+C all present and correct - get offset error
+	ID1 = ENCBUF(IV,1) - LASTV
+	IF (NWAY .NE. 0) ID1 = -ID1
+	PHERR = PHERR+ID1
+	NPTS = NPTS+1
+C
+C record as previous encounter
+480	GOTLST = .TRUE.
+	LSTWAY = NWAY
+	LSTPOL = NPOL
+	LASTV  = ENCBUF(IV,1)
+	GOTO 470
+C
+C bum encounter
+490	GOTLST = .FALSE.
+	GOTO 470
+C
+C processed scan - output results
+500	IF (NPTS.GT.0) PHERR = PHERR/NPTS
+	CALL WRITEF ('Phase error %F0.2',PHERR)
+	GOTO 510
+C
+C way out
+510	IMOD = IMODSV		! restore status quo
+	IUTB = 0
+	RETURN
+	END

@@ -1,0 +1,257 @@
+	SUBROUTINE FIDFND(EXP,FD,FOUND,INFO)
+C
+***	MODULE	FIDFND
+***	IDENT	02JN86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Only call DISMOD if HADLDI		 DM	02-Jun-1986
+CMOD	FOUND, INFO now LOGICAL*1; tidied	 DM	04-Dec-1985
+CMOD	Add residual argument to call to LINFIT WJJ	02-Feb-1983
+CMOD	GRDOUT removed				AJW	02-Nov-1982
+CMOD	Tidied					AJW	28-May-1981
+CMOD	Created					MCF
+C
+C Fiducial finding routine.
+C Modified to deal with T-junctions and corners.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C parameters:
+***	PARAMETER/PARAMS/
+C
+C arguments:
+	REAL	  EXP(2)		! expected position
+	REAL	  FD(2)			! actual position (if found)
+	LOGICAL*1 FOUND			! did we find one
+	LOGICAL*1 INFO			! do we type debugging info
+C
+C common blocks:
+***	COMMON/GRPARM/
+***	COMMON/MASTER/
+***	COMMON/RSE/
+***	COMMON/SCCORR/
+***	COMMON/SCPARM/
+C
+C work-space:
+	INTEGER   ID(2)
+	INTEGER   ITHING
+	INTEGER   IAXIS	
+	INTEGER   IOFF
+	INTEGER   ISRCH
+	INTEGER   IPASS
+	INTEGER   I,J
+	INTEGER   IU,IV,IW
+	INTEGER   KWIDTH
+	INTEGER   MAGIC1,MAGIC2,MAGIC4
+	INTEGER   NFD
+	INTEGER   NHITS
+	INTEGER   NBUM
+	INTEGER   NGOOD
+	INTEGER   NLAST
+	INTEGER   NSCANS
+	REAL	  C0(2),C1(2)
+	REAL	  SRCH(2)
+	REAL	  EXPHIT
+	REAL	  GOFF(2)
+	REAL	  FDLIST(2,20)
+	REAL	  QUAL
+	REAL	  RMS
+	REAL	  RMAX
+	REAL	  D
+	REAL	  U,V
+	REAL	  R
+	REAL	  A0,A1
+	REAL	  GU
+	REAL	  RES(2)	! residuals from LINFIT
+	LOGICAL*1 MUL
+C
+C functions:
+	LOGICAL	  LINFIT
+	INTEGER	  NEGET
+C
+	DATA	  NSCANS/50/	! number of scans in each vector
+C
+C ......................................................................
+C
+	IF (HADLDI) CALL DISMOD(0)
+	GOFF(X)=0.0
+	GOFF(Y)=0.0
+	FD(X)=EXP(X)
+	FD(Y)=EXP(Y)
+	MAGIC4=ISCAT
+	NFD=0
+C
+C repeat whole process several times.
+C (IWID & IPIT should really be inverse functions of ITHING).
+	DO 130 ITHING=1,IGREP+IGRAVE
+C
+C search for lines in both axes.
+	  DO 120 IAXIS=1,2
+C
+C set up scan vector.
+	    MAGIC1=IMIN0(NESIZE,NSCANS)
+	    EXPHIT=MAGIC1
+	    MAGIC1=MAGIC1*IPIT
+	    ID(IAXIS)=MAGIC1
+	    ID(3-IAXIS)=0
+	    CALL SETDIR(ID,IDIR,IU,IV)
+	    KWIDTH=IWID*WAR*CR(IV)*0.75
+	    MAGIC2=(MAGIC1*1.0)/KWIDTH + 1.0
+C
+C actual search loop.
+	    DO 50 ISRCH=1,MAGIC2
+	      IOFF=ISRCH/2
+	      IOFF=IOFF*KWIDTH
+	      IF (MOD(ISRCH,2).EQ.0) IOFF=-IOFF
+C
+C move start point about.
+	      SRCH(X)=FD(X) - ID(X)/2
+	      SRCH(Y)=FD(Y) - ID(Y)/2
+	      SRCH(IAXIS)  =SRCH(IAXIS) + GOFF(IAXIS)
+	      SRCH(3-IAXIS)=SRCH(3-IAXIS) + IOFF
+	      CALL MOVTO(SRCH(X),SRCH(Y))
+	      CALL SCANBY(ID(X),ID(Y),1)
+	      CALL SCSET(0)
+C
+C see what was there.
+	      INE=NEGET(NEBUF,-NESIZE)
+	      IF (INE.LE.0) GO TO 50
+C
+C assuming that we are satisfied with one NEBUF full
+C of data, select our feature hits.
+C these are all the single encounters.
+	      NHITS=0
+	      NLAST=0
+	      DO 40 I=1,INE
+	        IW=NEBUF(1,I)
+C
+C see if multiple hit.
+	        MUL=.FALSE.
+	        IF (IW.LT.NEGMUL) GO TO 10
+C
+C yes.
+	        IW=IW - NEGMUL
+	        MUL=.TRUE.
+C
+C see if edge or line.
+10	        IF (IW.EQ.NEGNEG .OR. IW.EQ.NEGPOS) GO TO 40
+C
+C ignore edges completely.
+C is this line a multiple hit?
+	        IF (MUL) GO TO 30
+C
+C no - store it (if room).
+	        IF (NHITS.GE.NESIZE) GO TO 40
+	        NLAST=NHITS
+	        NHITS=NHITS + 1
+	        NEBUF(1,NHITS)=OFFNSS + 0.5
+	        DO 20 J=2,3
+		  NEBUF(J,NHITS)=NEBUF(J,I)
+20		CONTINUE
+	        GO TO 40
+C
+C more than one hit on scan - ignore all of them.
+30	        NHITS=NLAST
+40	      CONTINUE
+C
+C having sorted out the data, have we seen a line ?
+	      QUAL=FLOAT(NHITS)/EXPHIT
+	      IF (ITHING.EQ.1) QUAL=QUAL + QUAL
+	      IF (QUAL.GE.FQUAL) GO TO 70
+	      IF (INFO) CALL WRITEF('Quality only %E',QUAL)
+C
+C no line seen, carry on searching.
+50	    CONTINUE
+C
+C search failed to find anything.
+60	    FOUND=.FALSE.
+	    GO TO 150
+C
+C fit a line to what we saw.
+C first time round get rough line,
+C then suppress wild points and fit a second time.
+70	    RMS=0.0
+	    RMAX=0.0
+	    NBUM=0
+	    NGOOD=0.0
+	    GU=0.0
+	    DO 110 IPASS=1,2
+	      IF (.NOT.LINFIT(NEBUF,1,NHITS,1,IU+1,IV+1,
+     &			      OFFNSS,A0,A1,RES)) GO TO 60
+C
+C get residual at each point.
+	      DO 100 I=1,NHITS
+	        IF (NEBUF(1,I).LT.0) GO TO 100
+	        U=NEBUF(IU+1,I)
+	        V=NEBUF(IV+1,I)
+	        D=ABS(V - (A0+A1*U))
+	        GO TO (80,90),IPASS
+C
+C pass one - set weights & suppress bad 'uns.
+80	        NEBUF(1,I)=D + 0.5
+	        IF (D.LT.MAGIC4) GO TO 100
+C
+C bad one.
+	        NBUM=NBUM+1
+C
+C abandon if > 1/2 are bad.
+	        IF (NBUM.GE.NHITS/2) GO TO 60
+	        NEBUF(1,I)=-1
+	        GO TO 100
+C
+C pass two - get residual totals & centre of line.
+90	        RMS=RMS + D*D
+	        IF (D.GT.RMAX) RMAX=D
+	        GU=GU + NEBUF(IU+1,I)
+	        NGOOD=NGOOD + 1
+100	      CONTINUE
+110	    CONTINUE
+C
+C fitting done,inform operator of quality.
+	    RMS=SQRT(RMS/NGOOD)
+	    NBUM=(NBUM*100.0)/NHITS
+	    IF (INFO) CALL WRITEF(
+     &         'A0 %E	A1 %E	RMS %N	MAX %N  %N%% BAD',
+     &		   A0,     A1,IFIX(RMS),IFIX(RMAX),NBUM)
+C
+C record the line for this axis expressed in absolute coords.
+	    C0(IAXIS)=A0 + SRCH(IV) - SRCH(IU)*A1
+	    C1(IAXIS)=A1
+	    GOFF(IAXIS)=GOFF(IAXIS) + GU/NGOOD - ID(IU)/2
+C
+C repeat for other axis.
+120	  CONTINUE
+C
+C come here if lines found in both axes.
+C compute their intersection.
+	  R=1.0 - C1(1)*C1(2)
+	  FD(X)=(C0(2) + C1(2)*C0(1))/R
+	  FD(Y)=(C0(1) + C1(1)*C0(2))/R
+C
+C settling ?
+	  IF (ITHING.LE.IGREP) GO TO 130
+C
+C no - add point to list.
+	  IF (NFD.LT.20) NFD=NFD + 1
+	  FDLIST(X,NFD)=FD(X)
+	  FDLIST(Y,NFD)=FD(Y)
+C
+C now measure the fid again about the new centre.
+130	CONTINUE
+C
+C we have now measured the fid several times.
+	FOUND=.TRUE.
+C
+C compute average of measurements.
+	FD(X)=0.0
+	FD(Y)=0.0
+	DO 140 I=1,NFD
+	  FD(X)=FD(X) + FDLIST(X,I)/NFD
+	  FD(Y)=FD(Y) + FDLIST(Y,I)/NFD
+140	CONTINUE
+C
+150	RETURN
+	END

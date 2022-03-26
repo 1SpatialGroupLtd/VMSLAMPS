@@ -1,0 +1,630 @@
+        LOGICAL FUNCTION GEOM_FROM_IFF(GEOM,DIMENSION,GT)
+C
+***     IDENT	10MY96
+***     MODULE  GEOM_FROM_IFF
+C
+C       Copyright Laser-Scan Ltd., Cambridge, England.
+C
+C       Written                                 RWR 	8-Oct-1993
+C
+C	create a geometry from data in an IFF file. Must be pointing
+C       somewhere at or before first CB entry.
+C
+C	returns FALSE for success
+C
+        IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CTXS.PAR/
+***	PARAMETER/CMN:CONSTS/
+***     PARAMETER/CMN:MOANMESS/         ! moan constants
+***     PARAMETER/CMN:PACK/
+C
+***	COMMON/CMN:CB/
+***     COMMON/CMN:DRAWIN/
+***     COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/CMN:GEOM/
+***     COMMON/CMN:MAPS/
+***	COMMON/CMN:STRIKE/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C arguments
+	INTEGER*4	GEOM		! geometry (NOTE: Not geometry num)
+	INTEGER*4	DIMENSION
+	INTEGER*4	GT
+C
+C Functions called
+	LOGICAL		GEOG_TRANS_ARRAY
+	LOGICAL		GEOM_BOX
+	LOGICAL		GENCIR
+C
+C Local Variables
+	INTEGER*4	TEMP_GEOM
+	INTEGER*2	IECODE, IELEN	! for IFF reading
+	INTEGER*2	ISTAT(4)	! feature status words
+	INTEGER*2	TSTAT(4)	! text status words
+	INTEGER		TXSIZE		! text size from TH entry
+	REAL		RIANG
+	LOGICAL		HADTS,HADST
+	INTEGER		PTS,ENDS
+	INTEGER		RET_CODE
+	INTEGER		I,COUNT
+	LOGICAL		CHECK
+	REAL		ERROR_XY(2)
+	REAL		AUX(AUXLEN)
+	LOGICAL		READ_FC
+C
+C for generating circle arcs
+	REAL*8 RTEMP		! temporary real
+	REAL*8 SINANG,COSANG	! sin/cos of angle of current point
+	REAL*8 SININC,COSINC	! sin/cos of the angular increment
+	INTEGER NUMSEG		! no. of segments actually required
+	REAL FIRSTXY(2)		! first point (saved for full circles)
+C
+C assume failure
+	GEOM_FROM_IFF = .TRUE.
+C
+C for now
+	CHECK = .TRUE.
+C
+	GEOM = 0
+C
+C fill in flags array - all set
+	DO 10, I = 1,RIFULL
+	   RIFLG(I) = 1
+ 10	CONTINUE
+C
+C do we want to read FS and other entries?
+	READ_FC = GT .EQ. TEXTYP .OR.
+     &	          (DIMENSION .NE. 0 .AND. 
+     &	     	   GT .GE. UNOTYP .AND. GT .LE. SCATYP)
+C
+C initialise
+	RIANG = 0.0
+	ISTAT(3) = 0
+	TSTAT(3) = 0
+	TXSIZE   = 0
+	HADTS = .FALSE.
+	HADST = .FALSE.
+	TXTPTR = 0			! in case text has no TX entry
+	CALL IFFPKE(IECODE,IELEN,LPOSH)
+	GOTO 25			! first time through, we have an entry in hand
+C
+C read until CB or EF
+ 20	CONTINUE
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999		! exit
+	ENDIF
+C       
+ 25	CONTINUE
+	IF (READ_FC .AND. IECODE .EQ. 'FS') 
+     &	     CALL  EIHRI(ISTAT,MIN(IELEN,4),1)
+C
+	IF (READ_FC .AND. IECODE .EQ. 'RO') 
+     &	     CALL EIHRR(RIANG,1,1)
+C
+	IF (READ_FC .AND. IECODE .EQ. 'TS') THEN
+	   CALL EIHRI(TSTAT,MIN(IELEN,4),1)
+	   HADTS = .TRUE.
+	ENDIF
+C
+	IF (READ_FC .AND. IECODE .EQ. 'TH') 
+     &		CALL EIHRI(TXSIZE,1,1) 		! read word into bottom
+C
+	IF (READ_FC .AND. IECODE .EQ. 'TX') THEN
+	   IF (IELEN.EQ.0) GOTO 999 ! null???
+	   IELEN = MIN(IELEN,(CTXMAX+1)/2)
+	   CALL EIHR(TXTBUF,IELEN,1)
+	   TXTPTR = IELEN*2
+C
+C       Remove any trailing null
+	   IF (TXTBUF(TXTPTR).EQ.0) TXTPTR = TXTPTR-1
+	   TXTPTR = MIN(TXTPTR,CTXMAX)
+	ENDIF
+C
+	IF (IECODE.EQ.'EF') THEN
+	   IF (HADST) GOTO 900
+	   CALL MOAN(MSG_NOMOREST)
+	   GOTO 999
+	ENDIF
+C       
+	IF (IECODE.NE.'CB')
+     &	     GOTO 20		! ignore all but CBs
+C
+C so read the CB
+	CALL EIHRCB_HEAD(CBH)
+	PTS = CBH.NROW
+	ENDS = CBH.FLAGS
+	
+	IF (SIMPLE_XY) THEN		! simple ST format
+	   CALL EIHRCB_DATA(RIXY)	! read direct to RIXY
+	ELSE
+	   CALL EIHRCB_DATA(CBD)	! read to scratch
+	   CALL IFS_CB_READ(CBH,CBD,RIXY,2,COLHXY,1,CBH.NROW)
+	ENDIF
+C       
+C       add origin of map, or transform into LITES2 space, if required
+	IF (DO_FLY_TRANS) THEN
+	   IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &		CURR_UNIT,CURR_ORG,
+     &		LITES2SYS,LITES2ZONE,LITES2PAR,
+     &		LITES2UNIT,LITES2ORG,
+     &		PTS,RIXY)) GOTO 999
+	ELSEIF (USE_ORG) THEN
+	   CALL ADDORG(ORGXY,RIXY,PTS)
+	ENDIF
+C       
+C create the geometry, if first time through
+	IF (.NOT. HADST .AND. .NOT.HADTS) THEN
+	   CALL CALLR(GEOM,
+     &		%VAL(DIMENSION),
+     &		RET_CODE,
+     &		%VAL(GEOM_ADDRESSES(XST_GEOM)))
+C
+	   IF (RET_CODE .NE. 0) THEN
+	      IF (RET_CODE .EQ. -1) THEN
+		 CALL MOAN(MSG_INSVIRMEM)
+	      ELSEIF (RET_CODE .EQ. -2) THEN
+		 CALL MOAN(MSG_INVALGEOMDIM,DIMENSION,0,2)
+	      ELSE
+		 CALL CALLR(%VAL(RET_CODE),
+     &		      RET_CODE,
+     &		      %VAL(GEOM_ADDRESSES(XPR_MESS)))
+		 CALL WRITEF
+	      ENDIF
+	      GOTO 999
+	   ENDIF
+	   HADST = .TRUE.
+	ENDIF
+C
+C switch on graphical type
+C
+	GOTO (100,200,200,200,200,100,300,300,300,400,100,100),GT
+C
+C linear features
+ 100	CONTINUE
+C
+C set the first byte of the flags array
+C and add points to the geometry
+	RIFLG(1) = ENDS
+	CALL CALLR(%VAL(GEOM),
+     &	     %VAL(PTS),
+     &	     RIXY,
+     &	     RIFLG,
+     &	     RET_CODE,
+     &	     %VAL(GEOM_ADDRESSES(XADD_PTS)))
+C
+	IF (RET_CODE .NE. 0) THEN
+	   IF (RET_CODE .EQ. -1) THEN
+	      CALL MOAN(MSG_INSVIRMEM)
+	   ELSE
+	      CALL CALLR(%VAL(RET_CODE),
+     &		   RET_CODE,
+     &		   %VAL(GEOM_ADDRESSES(XPR_MESS)))
+	      CALL WRITEF
+	   ENDIF
+	   CALL GEOM_DESTROY(GEOM)
+	   GOTO 999
+	ENDIF
+C
+C get next entry in the file - only interested in CB and EF
+	GOTO 20
+C
+C circle arcs
+ 200	CONTINUE
+C
+	IF (PTS .LT. 3) THEN
+	   CALL GEOM_DESTROY(GEOM)
+	   CALL MOAN(MSG_NEEDMOREPTS)
+	   GOTO 900
+	ENDIF
+C
+C generate auxiliary array
+	IF (GENCIR(GT,RIXY,AUX)) THEN
+	   CALL GEOM_DESTROY(GEOM)
+	   GOTO 999
+	ENDIF
+C
+C calculate number of segments
+	RTEMP=CIGIFF(1)
+	IF (CIGIFF(2).NE.0.0) RTEMP=RTEMP+CIGIFF(2)*SQRT(AUX(RADI))
+	IF (CIGIFF(3).NE.0.0) RTEMP=RTEMP+CIGIFF(3)*AUX(RADI)
+	NUMSEG=INT(ABS(AUX(RADI)*AUX(TOTI))/RTEMP)+1
+C 
+C Work out the angle subtended at the centre by a single segment
+	RTEMP=DBLE(AUX(TOTI))/DBLE(NUMSEG)
+C
+C Initialise variables used in the main loop.
+	SININC=SIN(RTEMP)	! for the angular increment
+	COSINC=COS(RTEMP)
+	SINANG=SIN(DBLE(AUX(STAI))) ! for the angle of the current (1st) pt
+	COSANG=COS(DBLE(AUX(STAI)))
+C
+	COUNT = 0
+C
+C Main loop (for generating position of each point)
+	DO 210 I=1,NUMSEG
+	   COUNT = COUNT + 1
+C
+C Work out the position of the next point
+	   GEOM_XY(1,COUNT) = AUX(XCENI)+AUX(RADI)*COSANG
+	   GEOM_XY(2,COUNT) = AUX(YCENI)+AUX(RADI)*SINANG 
+C
+C save first point
+	   IF (I.EQ.1) THEN
+	      GEOM_FLAGS(COUNT) = 0
+	      FIRSTXY(1) = GEOM_XY(1,COUNT)
+	      FIRSTXY(2) = GEOM_XY(2,COUNT)
+	   ELSE
+	      GEOM_FLAGS(COUNT) = 1
+	   ENDIF
+C
+C Work out the angle (at the centre) of the next point
+	   RTEMP=SINANG
+	   SINANG=SINANG*COSINC+COSANG*SININC
+	   COSANG=COSANG*COSINC- RTEMP*SININC
+C
+C flush out points if necessary
+	   IF (COUNT .GE. GEOM_MAX_PTS) THEN
+	      CALL CALLR(%VAL(GEOM),
+     &		   %VAL(COUNT),
+     &		   GEOM_XY,
+     &		   GEOM_FLAGS,
+     &		   RET_CODE,
+     &		   %VAL(GEOM_ADDRESSES(XADD_PTS)))
+C
+	      IF (RET_CODE .NE. 0) THEN
+		 IF (RET_CODE .EQ. -1) THEN
+		    CALL MOAN(MSG_INSVIRMEM)
+		 ELSE
+		    CALL CALLR(%VAL(RET_CODE),
+     &			 RET_CODE,
+     &			 %VAL(GEOM_ADDRESSES(XPR_MESS)))
+		    CALL WRITEF
+		 ENDIF
+		 CALL GEOM_DESTROY(GEOM)
+		 GOTO 999
+	      ENDIF
+	      COUNT = 0
+	   ENDIF
+ 210	CONTINUE
+C
+C output last point, making sure closed features are closed
+	COUNT = COUNT + 1
+	IF (ABS(AUX(TOTI)).EQ.SNGL(TWOPI)) THEN
+	   GEOM_XY(1,COUNT) = FIRSTXY(1)
+	   GEOM_XY(2,COUNT) = FIRSTXY(2)
+	ELSE
+	   GEOM_XY(1,COUNT) = AUX(XCENI)+AUX(RADI)*COSANG
+	   GEOM_XY(2,COUNT) = AUX(YCENI)+AUX(RADI)*SINANG 
+	ENDIF
+	GEOM_FLAGS(COUNT) = 1
+C
+C and flush out buffers
+	CALL CALLR(%VAL(GEOM),
+     &	     %VAL(COUNT),
+     &	     GEOM_XY,
+     &	     GEOM_FLAGS,
+     &	     RET_CODE,
+     &	     %VAL(GEOM_ADDRESSES(XADD_PTS)))
+C       
+	IF (RET_CODE .NE. 0) THEN
+	   IF (RET_CODE .EQ. -1) THEN
+	      CALL MOAN(MSG_INSVIRMEM)
+	   ELSE
+	      CALL CALLR(%VAL(RET_CODE),
+     &		   RET_CODE,
+     &		   %VAL(GEOM_ADDRESSES(XPR_MESS)))
+	      CALL WRITEF
+	   ENDIF
+	   CALL GEOM_DESTROY(GEOM)
+	   GOTO 999
+	ENDIF
+C	
+	GOTO 900
+C
+C symbols
+ 300	CONTINUE
+C
+C read rest of data
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999		! exit
+	ENDIF
+C
+C we only require a 'RO' entry
+	IF (READ_FC .AND. IECODE .EQ. 'RO') 
+     &	     CALL EIHRR(RIANG,1,1)
+C
+	IF (IECODE .NE. 'EF') GOTO 300
+C
+C if only storing point, store it now
+	IF (DIMENSION .EQ. 0) THEN
+	   RIFLG(1) = 0
+	   CALL CALLR(%VAL(GEOM),
+     &		%VAL(1),
+     &		RIXY,
+     &		RIFLG,
+     &		RET_CODE,
+     &		%VAL(GEOM_ADDRESSES(XADD_PTS)))
+	ELSE
+C
+C otherwise, need to generate a box around the symbol (5 points) and
+C store these coordinates
+C
+	   IF (GEOM_BOX(ISTAT,PTS,RIXY,TXTDSC,TXSIZE,RIANG,GEOM_XY)) THEN
+	      CALL GEOM_DESTROY(GEOM)
+	      GOTO 999
+	   ENDIF
+C
+	   GEOM_FLAGS(1) = 0
+	   DO 310 , I = 2,5
+	      GEOM_FLAGS(I) = 1
+ 310	   CONTINUE
+C
+	   CALL CALLR(%VAL(GEOM),
+     &		%VAL(5),
+     &		GEOM_XY,
+     &		GEOM_FLAGS,
+     &		RET_CODE,
+     &		%VAL(GEOM_ADDRESSES(XADD_PTS)))
+C       
+	   IF (RET_CODE .NE. 0) THEN
+	      IF (RET_CODE .EQ. -1) THEN
+		 CALL MOAN(MSG_INSVIRMEM)
+	      ELSE
+		 CALL CALLR(%VAL(RET_CODE),
+     &		      RET_CODE,
+     &		      %VAL(GEOM_ADDRESSES(XPR_MESS)))
+		 CALL WRITEF
+	      ENDIF
+	      CALL GEOM_DESTROY(GEOM)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+	GOTO 900			! don't bother about any other entries
+C
+C texts
+ 400	CONTINUE
+C
+C read rest of data
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999		! exit
+	ENDIF
+C
+	IF (READ_FC .AND. IECODE .EQ. 'RO') 
+     &	     CALL EIHRR(RIANG,1,1)
+C
+	IF (READ_FC .AND. IECODE .EQ. 'TH') 
+     &		CALL EIHRI(TXSIZE,1,1) 		! read word into bottom
+C
+	IF (READ_FC .AND. IECODE .EQ. 'TX') THEN
+	   IF (IELEN.EQ.0) GOTO 999 ! null???
+	   IELEN = MIN(IELEN,(CTXMAX+1)/2)
+	   CALL EIHR(TXTBUF,IELEN,1)
+	   TXTPTR = IELEN*2
+C
+C       Remove any trailing null
+	   IF (TXTBUF(TXTPTR).EQ.0) TXTPTR = TXTPTR-1
+	   TXTPTR = MIN(TXTPTR,CTXMAX)
+	ENDIF
+C
+	IF (IECODE .NE. 'EF' .AND. IECODE .NE. 'TS') GOTO 400
+C
+	GEOM_FLAGS(1) = 0
+	DO 410 , I = 2,5
+	   GEOM_FLAGS(I) = 1
+ 410	CONTINUE
+C
+	IF (.NOT. HADTS) GOTO 450
+C
+C if reading a composite text, create the temporary geometry for this
+C sub text
+	CALL CALLR(TEMP_GEOM,
+     &	     %VAL(DIMENSION),
+     &	     RET_CODE,
+     &	     %VAL(GEOM_ADDRESSES(XST_GEOM)))
+C       
+	IF (RET_CODE .NE. 0) THEN
+	   IF (RET_CODE .EQ. -1) THEN
+	      CALL MOAN(MSG_INSVIRMEM)
+	   ELSEIF (RET_CODE .EQ. -2) THEN
+	      CALL MOAN(MSG_INVALGEOMDIM,DIMENSION,0,2)
+	   ELSE
+	      CALL CALLR(%VAL(RET_CODE),
+     &		   RET_CODE,
+     &		   %VAL(GEOM_ADDRESSES(XPR_MESS)))
+	      CALL WRITEF
+	   ENDIF
+	   GOTO 999
+	ENDIF
+C
+C if only storing point, store it now
+	IF (DIMENSION .EQ. 0) THEN
+	   RIFLG(1) = 0
+	   CALL CALLR(%VAL(TEMP_GEOM),
+     &		%VAL(1),
+     &		RIXY,
+     &		RIFLG,
+     &		RET_CODE,
+     &		%VAL(GEOM_ADDRESSES(XADD_PTS)))
+	ELSE
+C       
+C       otherwise, need to generate a box around the text (5 points) and
+C       store these coordinates
+C       
+	   IF (GEOM_BOX(TSTAT,PTS,RIXY,TXTDSC,TXSIZE,RIANG,GEOM_XY)) THEN
+	      CALL GEOM_DESTROY(TEMP_GEOM)
+	      CALL GEOM_DESTROY(GEOM)
+	      GOTO 999
+	   ENDIF
+C       
+	   CALL CALLR(%VAL(TEMP_GEOM),
+     &		%VAL(5),
+     &		GEOM_XY,
+     &		GEOM_FLAGS,
+     &		RET_CODE,
+     &		%VAL(GEOM_ADDRESSES(XADD_PTS)))
+C       
+	ENDIF
+	IF (RET_CODE .NE. 0) THEN
+	   IF (RET_CODE .EQ. -1) THEN
+	      CALL MOAN(MSG_INSVIRMEM)
+	   ELSE
+	      CALL CALLR(%VAL(RET_CODE),
+     &		   RET_CODE,
+     &		   %VAL(GEOM_ADDRESSES(XPR_MESS)))
+	      CALL WRITEF
+	   ENDIF
+	   CALL GEOM_DESTROY(GEOM)
+	   CALL GEOM_DESTROY(TEMP_GEOM)
+	   GOTO 999
+	ENDIF
+C
+C complete this temporary geometry and add it to complex geometry
+	CALL CALLR(%VAL(TEMP_GEOM),
+     &	     %VAL(CHECK),
+     &	     ERROR_XY,
+     &	     RET_CODE,
+     &	     %VAL(GEOM_ADDRESSES(XCOM_GEOM)))
+C
+	IF (RET_CODE .NE. 0) THEN
+	   IF (RET_CODE .GT. 0) THEN
+	      CALL MOAN(MSG_GEOMERROR)
+	      CALL CALLR(%VAL(RET_CODE),
+     &		   RET_CODE,
+     &		   %VAL(GEOM_ADDRESSES(XPR_MESS)))
+	      CALL WRITEF
+	   ELSEIF (RET_CODE .EQ. -3) THEN
+	      CALL MOAN(MSG_CROSSBOUNDARY,'Inner',ERROR_XY(1),ERROR_XY(2))
+	   ELSEIF (RET_CODE .EQ. -4) THEN
+	      CALL MOAN(MSG_CROSSBOUNDARY,'Outer',ERROR_XY(1),ERROR_XY(2))
+	   ELSEIF (RET_CODE .EQ. -5) THEN
+	      CALL MOAN(MSG_INTERSECTRING)
+	   ELSEIF (RET_CODE .EQ. -6) THEN
+	      CALL MOAN(MSG_WRNGINCLUSION)
+	   ELSE
+	      CALL MOAN(MSG_GEOMERROR)
+	   ENDIF
+	   CALL GEOM_DESTROY(TEMP_GEOM)
+	   CALL GEOM_DESTROY(GEOM)
+	   GOTO 999
+	ENDIF
+C
+	CALL CALLR(%VAL(TEMP_GEOM),
+     &	     GEOM,
+     &	     %VAL(.TRUE.),
+     &	     RET_CODE,
+     &	     %VAL(GEOM_ADDRESSES(XGEOM_ADD)))
+	IF (RET_CODE .NE. 0) THEN
+	   CALL MOAN(MSG_GEOMERROR)
+	   IF (RET_CODE .EQ.-2) THEN
+	      CALL MOAN(MSG_DIFFGEOMTYPES)
+	   ELSE
+	      CALL CALLR(%VAL(RET_CODE),
+     &		   RET_CODE,
+     &		   %VAL(GEOM_ADDRESSES(XPR_MESS)))
+	      CALL WRITEF
+	   ENDIF
+	   CALL GEOM_DESTROY(TEMP_GEOM)
+	   CALL GEOM_DESTROY(GEOM)
+	   GOTO 999
+	ENDIF
+C       
+C       delete temporary geometry
+	CALL GEOM_DESTROY(TEMP_GEOM)
+	IF (IECODE .NE. 'EF')
+     &	     GOTO 25
+	GOTO 998	! completed composite text (don't complete GEOM)
+C       
+C       simple one component text
+ 450	CONTINUE
+C
+C       if only storing point, store it now
+	IF (DIMENSION .EQ. 0) THEN
+	   RIFLG(1) = 0
+	   CALL CALLR(%VAL(GEOM),
+     &		%VAL(1),
+     &		RIXY,
+     &		RIFLG,
+     &		RET_CODE,
+     &		%VAL(GEOM_ADDRESSES(XADD_PTS)))
+	ELSE
+C       
+C       otherwise, need to generate a box around the text (5 points) and
+C       store these coordinates
+C       
+	   IF (GEOM_BOX(ISTAT,PTS,RIXY,TXTDSC,TXSIZE,RIANG,GEOM_XY)) THEN
+	      CALL GEOM_DESTROY(GEOM)
+	      GOTO 999
+	   ENDIF
+C       
+	   CALL CALLR(%VAL(GEOM),
+     &		%VAL(5),
+     &		GEOM_XY,
+     &		GEOM_FLAGS,
+     &		RET_CODE,
+     &		%VAL(GEOM_ADDRESSES(XADD_PTS)))
+C       
+	ENDIF
+	IF (RET_CODE .NE. 0) THEN
+	   IF (RET_CODE .EQ. -1) THEN
+	      CALL MOAN(MSG_INSVIRMEM)
+	   ELSE
+	      CALL CALLR(%VAL(RET_CODE),
+     &		   RET_CODE,
+     &		   %VAL(GEOM_ADDRESSES(XPR_MESS)))
+	      CALL WRITEF
+	   ENDIF
+	   CALL GEOM_DESTROY(GEOM)
+	   GOTO 999
+	ENDIF
+	GOTO 900		! ignore any other IFF entries
+C       
+C geometry is complete
+ 900	CONTINUE
+	CALL CALLR(%VAL(GEOM),
+     &	     %VAL(CHECK),
+     &	     ERROR_XY,
+     &	     RET_CODE,
+     &	     %VAL(GEOM_ADDRESSES(XCOM_GEOM)))
+C
+	IF (RET_CODE .NE. 0) THEN
+	   IF (RET_CODE .GT. 0) THEN
+	      CALL MOAN(MSG_GEOMERROR)
+	      CALL CALLR(%VAL(RET_CODE),
+     &		   RET_CODE,
+     &		   %VAL(GEOM_ADDRESSES(XPR_MESS)))
+	      CALL WRITEF
+	   ELSEIF (RET_CODE .EQ. -3) THEN
+	      CALL MOAN(MSG_CROSSBOUNDARY,'Inner',ERROR_XY(1),ERROR_XY(2))
+	   ELSEIF (RET_CODE .EQ. -4) THEN
+	      CALL MOAN(MSG_CROSSBOUNDARY,'Outer',ERROR_XY(1),ERROR_XY(2))
+	   ELSEIF (RET_CODE .EQ. -5) THEN
+	      CALL MOAN(MSG_INTERSECTRING)
+	   ELSEIF (RET_CODE .EQ. -6) THEN
+	      CALL MOAN(MSG_WRNGINCLUSION)
+	   ELSE
+	      CALL MOAN(MSG_GEOMERROR)
+	   ENDIF
+	   CALL GEOM_DESTROY(GEOM)
+	   GOTO 999
+	ENDIF
+C       
+C geometry succesfully created
+ 998	GEOM_FROM_IFF = .FALSE.
+
+ 999	CONTINUE
+	RETURN
+	END

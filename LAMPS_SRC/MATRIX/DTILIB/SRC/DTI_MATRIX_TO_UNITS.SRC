@@ -1,0 +1,280 @@
+	INTEGER*4 FUNCTION DTI_MATRIX_TO_UNITS(DTI_LUN, X_MATRIX, 
+     &  	Y_MATRIX, UNITS, ROTATION, ABSOLUTE, X_OUT, Y_OUT)
+C
+***	MODULE	DTI_MATRIX_TO_UNITS
+***	IDENT	04MY94
+C
+C Copyright Laser-Scan Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    01-Feb-1989
+C
+CMOD1045					  JB	17-Sep-1991
+C	Take mod(2*PI) for geographic data to avoid overflows
+C
+CMOD1066					  JB	26-Nov-1991
+C	Calculate position using a real LAT/LONINT calculated from 
+C	LAT/LONREC and X/Y_EXTENT rather than using a rounded down value
+C
+CMOD1361					  JB	29-Apr-1994
+C	Fix mod (2pi) calculations
+C
+C Converts DTI matrix units to required units taking into account whether
+C supplied values are absolute or relative or whether the file is rotated.
+C Note that the routine does no checking for validity of units against the
+C type of DTI file.
+C
+C----------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters
+***	PARAMETER/LSL$CMNDTI:DTIDEF/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	COMMON/LSL$CMNDTI:DTIPROJ/
+C
+C arguments
+	INTEGER*4	DTI_LUN	    	! IN - LUN on which DTI is open
+	REAL*4		X_MATRIX	! IN - x matrix coordinate
+	REAL*4		Y_MATRIX	! IN - y matrix coordinate
+	INTEGER*4	UNITS		! IN - What type of UNITS
+	INTEGER*4	ROTATION	! IN - position of origin
+	LOGICAL		ABSOLUTE	! IN - relative or absolute 
+	REAL*8		X_OUT		! OUT - x coordinate
+	REAL*8		Y_OUT		! OUT - y coordinate
+C
+C function
+	INTEGER*4	DTI_UNITS	! tests valid units
+	LOGICAL		HAVE_I_AN_ARG
+C
+C local Variables
+	REAL*8		TEMP
+	REAL*8		D_MOD
+	REAL*8		DLATINT,DLONINT
+	INTEGER*4	I,I_MOD
+	REAL		X_RELATIVE		! relative coords
+	REAL		Y_RELATIVE
+	LOGICAL		HAD_ABSOLUTE
+	INTEGER*4	ROTATE
+C
+C ***************************************************************
+C test if the supplied LUN number is valid
+	IF (DTI_LUN.LT.1.OR.DTI_LUN.GT.MAX_DTI) THEN
+	  DTI_MATRIX_TO_UNITS = DTI__BADLUN	! LUN out of range
+	  GOTO 999				! return
+ 	ENDIF
+C
+C test of the supplied LUN is in use
+	IF(.NOT.DTILUN_INUSE(DTI_LUN))THEN
+	  DTI_MATRIX_TO_UNITS=DTI__LUNUNUSED 	! no file opened on LUN
+	  GOTO 999				! return
+	ENDIF
+C
+C test if UNITS is valid
+	IF (UNITS.NE.0 .AND.
+     &      UNITS.NE.UNITS_DTI .AND.
+     &      UNITS.NE.UNITS_MET .AND.
+     &	    UNITS.NE.UNITS_SEC .AND.
+     &	    UNITS.NE.UNITS_DEG .AND.
+     &      UNITS.NE.UNITS_PROJ) THEN
+	   DTI_MATRIX_TO_UNITS = DTI__BADUNITS	! unrecognised 
+	   GOTO 999
+	ENDIF
+C
+C test units against file
+	DTI_MATRIX_TO_UNITS = DTI_UNITS(DTI_LUN,UNITS)
+	IF (.NOT.DTI_MATRIX_TO_UNITS) GOTO 999	
+C
+	IF(HAVE_I_AN_ARG(6))THEN
+	  HAD_ABSOLUTE = ABSOLUTE
+	ELSE
+	  HAD_ABSOLUTE = .TRUE.		! by default add offset values
+	ENDIF
+C
+	IF(.NOT.HAVE_I_AN_ARG(5))THEN
+	  ROTATE = 0			! default no ROTATION
+	ELSE
+	  ROTATE = ROTATION
+	ENDIF
+C
+C check ROTATION argument
+	IF (ROTATE .NE. DTI_ORDER_SW .AND.
+     &      ROTATE .NE. DTI_ORDER_NW .AND.
+     &      ROTATE .NE. DTI_ORDER_NE .AND.	
+     &      ROTATE .NE. DTI_ORDER_SE) THEN
+	   DTI_MATRIX_TO_UNITS = DTI__BADROTATION	!unrecognised 
+	   GOTO 999
+	ENDIF
+C
+C start real work here
+C branch according to units
+	GOTO (100,200,300,300,500) UNITS
+C
+C-----------------------------------------------------------------------
+C matrix units - stupid so do very little
+100	X_OUT = X_MATRIX
+	Y_OUT = Y_MATRIX
+	DTI_MATRIX_TO_UNITS = DTI__NORMAL
+	GOTO 999
+C
+C-----------------------------------------------------------------------
+C metres
+200	CONTINUE
+C
+C branch according to ROTATION
+	GOTO (210,220,230,240) ROTATE+1 
+C
+C south west
+210	X_RELATIVE = X_GRID(DTI_LUN) * (X_MATRIX-1)
+	Y_RELATIVE = Y_GRID(DTI_LUN) * (Y_MATRIX-1)
+	GOTO 600
+C
+C north west
+220	X_RELATIVE = Y_GRID(DTI_LUN) * (Y_MATRIX-1)
+	Y_RELATIVE = X_GRID(DTI_LUN) * (X_EXTENT(DTI_LUN)-X_MATRIX)	
+	GOTO 600
+C
+C north east
+230	X_RELATIVE = X_GRID(DTI_LUN) * (X_EXTENT(DTI_LUN)-X_MATRIX)
+	Y_RELATIVE = Y_GRID(DTI_LUN) * (Y_EXTENT(DTI_LUN)-Y_MATRIX)	
+	GOTO 600
+C
+C south east
+240	X_RELATIVE = Y_GRID(DTI_LUN) * (Y_EXTENT(DTI_LUN)-Y_MATRIX)
+	Y_RELATIVE = X_GRID(DTI_LUN) * (X_MATRIX-1)
+	GOTO 600
+C 
+C-----------------------------------------------------------------------
+C seconds (or deg min sec)
+300	CONTINUE
+C
+C always absolute
+	HAD_ABSOLUTE = .TRUE.
+C
+C Check LONINT etc. (in 0.1 secs) are mod (2*PI)
+C
+	I_MOD = 360*3600*10		! max no. of 0.1 seconds
+	D_MOD = I_MOD
+	LONINT(DTI_LUN)   = MOD(LONINT(DTI_LUN),I_MOD)
+	LATINT(DTI_LUN)   = MOD(LATINT(DTI_LUN),I_MOD)
+	LONORI(DTI_LUN)   = MOD(LONORI(DTI_LUN),I_MOD)
+	LATORI(DTI_LUN)   = MOD(LATORI(DTI_LUN),I_MOD)
+C
+	DO 5 I = 1,4
+	  LONREC(I,DTI_LUN) = MOD(LONREC(I,DTI_LUN),I_MOD)
+	  LATREC(I,DTI_LUN) = MOD(LATREC(I,DTI_LUN),I_MOD)
+5	CONTINUE
+C
+C Get real interval values
+Cmod	DLATINT = DBLE(LATREC(3,DTI_LUN)-LATORI(DTI_LUN)) /
+C     &					DBLE(Y_EXTENT(DTI_LUN)-1)
+Cmod	DLATINT = DMOD(DLATINT,D_MOD)
+C
+Cmod	DLONINT = DBLE(LONREC(3,DTI_LUN)-LONORI(DTI_LUN)) /
+C     &					DBLE(X_EXTENT(DTI_LUN)-1)
+Cmod	DLONINT = DMOD(DLONINT,D_MOD)
+C
+C branch according to ROTATION
+	GOTO (310,320,330,340) ROTATE+1 
+C
+C south west
+310	TEMP = DBLE(LONINT(DTI_LUN)) * DBLE(X_MATRIX-1)
+	X_RELATIVE = DMOD(TEMP,D_MOD)
+C
+	TEMP = DBLE(LATINT(DTI_LUN)) * DBLE(Y_MATRIX-1)
+	Y_RELATIVE = DMOD(TEMP,D_MOD)
+	GOTO 600
+C
+C north west
+320	TEMP = DBLE(LATINT(DTI_LUN)) * DBLE(Y_MATRIX-1)
+	X_RELATIVE = DMOD(TEMP,D_MOD)
+C
+	TEMP = DBLE(LONINT(DTI_LUN)) * DBLE(X_EXTENT(DTI_LUN)-X_MATRIX)
+	Y_RELATIVE = DMOD(TEMP,D_MOD)
+	GOTO 600
+C 
+C north east
+330	TEMP = DBLE(LONINT(DTI_LUN)) * DBLE(X_EXTENT(DTI_LUN)-X_MATRIX)
+	X_RELATIVE = DMOD(TEMP,D_MOD)
+C
+	TEMP = DBLE(LATINT(DTI_LUN)) * DBLE(Y_EXTENT(DTI_LUN)-Y_MATRIX)
+	Y_RELATIVE = DMOD(TEMP,D_MOD)
+	GOTO 600
+C
+C south east
+340	TEMP = DBLE(LATINT(DTI_LUN)) * DBLE(Y_EXTENT(DTI_LUN)-Y_MATRIX)
+	X_RELATIVE = DMOD(TEMP,D_MOD)
+C
+	TEMP = DBLE(LONINT(DTI_LUN)) * DBLE(X_MATRIX-1)
+	Y_RELATIVE = DMOD(TEMP,D_MOD)
+	GOTO 600
+C 
+C-----------------------------------------------------------------------
+C projection units
+500	CONTINUE
+C
+C branch according to ROTATION
+	GOTO (510,520,530,540) ROTATE+1
+C
+C south west
+510	X_RELATIVE = DTIPROJ_SAMPLE(1,DTI_LUN)*(X_MATRIX-1)
+	Y_RELATIVE = DTIPROJ_SAMPLE(2,DTI_LUN)*(Y_MATRIX-1)
+	GOTO 600
+C
+C north west
+520	X_RELATIVE = DTIPROJ_SAMPLE(2,DTI_LUN)*(Y_MATRIX-1)
+	Y_RELATIVE = DTIPROJ_SAMPLE(1,DTI_LUN)*
+     &  		(X_EXTENT(DTI_LUN)-X_MATRIX)
+	GOTO 600
+C
+C north east
+530	X_RELATIVE = DTIPROJ_SAMPLE(1,DTI_LUN)*
+     &  		(X_EXTENT(DTI_LUN)-X_MATRIX)
+C
+	Y_RELATIVE = DTIPROJ_SAMPLE(2,DTI_LUN)*
+     &  		(Y_EXTENT(DTI_LUN)-Y_MATRIX)
+	GOTO 600
+C
+C south east
+540	X_RELATIVE = DTIPROJ_SAMPLE(2,DTI_LUN)*
+     &			(Y_EXTENT(DTI_LUN)-Y_MATRIX)
+	Y_RELATIVE = DTIPROJ_SAMPLE(1,DTI_LUN)*(X_MATRIX-1)
+	GOTO 600
+C
+C-----------------------------------------------------------------------
+C
+600	IF (.NOT. HAD_ABSOLUTE) THEN
+	   X_OUT = X_RELATIVE
+	   Y_OUT = Y_RELATIVE
+	   GOTO 999			! finished if relative
+	ENDIF
+C
+C got the relative coordinates - work out absolute if necessary
+C
+	IF (UNITS .EQ. UNITS_MET) THEN
+	    X_OUT = X_RELATIVE + X_OFFSET(DTI_LUN)
+	    Y_OUT = Y_RELATIVE + Y_OFFSET(DTI_LUN)
+C
+	ELSEIF (UNITS .EQ. UNITS_PROJ) THEN
+	    X_OUT = X_RELATIVE + DTIPROJ_ORIGIN(1,DTI_LUN)
+	    Y_OUT = Y_RELATIVE + DTIPROJ_ORIGIN(2,DTI_LUN)
+C
+	ELSEIF (UNITS.EQ.UNITS_SEC .OR. UNITS.EQ.UNITS_DEG) THEN
+	    D_MOD = 360*3600*10
+C
+	    TEMP = X_RELATIVE + LONREC(1,DTI_LUN)
+	    X_OUT = DMOD(TEMP,D_MOD)
+C
+	    TEMP = Y_RELATIVE + LATREC(1,DTI_LUN)
+	    Y_OUT = DMOD(TEMP,D_MOD)
+	ENDIF
+C
+	DTI_MATRIX_TO_UNITS = DTI__NORMAL
+C
+999	RETURN
+	END
+C

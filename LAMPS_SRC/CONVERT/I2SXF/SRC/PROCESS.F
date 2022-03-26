@@ -1,6 +1,6 @@
-	SUBROUTINE PROCESS
+	INTEGER*4 FUNCTION PROCESS
 C
-CDEC$	IDENT	'09MY90'
+CDEC$	IDENT	'11JN91'
 C
 C	Copyright Laser-Scan Ltd., Cambridge, England.
 C
@@ -21,8 +21,12 @@ C
 C
 C Common Blocks
 C
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'	! lib. messages def.
 	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTCOM.CMN'         ! FRT common
+	INCLUDE	'LSL$CMNIFF:CB.STR'		! record structure definition
 	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'	! LSLLIB filename parse
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN' 		! LSLLIB output buffer common
 	INCLUDE 'LSL$CMNI2SXF:COMMANDS.CMN'	! command line things
 C
 C Functions called
@@ -30,11 +34,15 @@ C
 	LOGICAL		GET_COMMAND	! get and decode command line
 	LOGICAL		RDPAR		! read parameter file
 	LOGICAL		FRTINI		! read FRT file
-	INTEGER*4	IFFOPEN		! open IFF file
+	LOGICAL		FRTFND		! find FRT valus for current FC
+	INTEGER*4	FLWSEL		! select SXF file
+	INTEGER*4	FLWLIN		! write to SXF file
 	LOGICAL		CLOSE_IFF	! close IFF file
   	LOGICAL		USE_LAYER	! check if layer selected
 	LOGICAL		USE_FC		! check if feature selected
 	INTEGER*4	GET_SXF_CODE	! translation code lookup routine
+	INTEGER*4	SXF_HEADING	! build heading part of SXF file
+	INTEGER*2	EXPAND		! build output buffer
 C
 C
 C Local variables
@@ -46,43 +54,90 @@ C
 	INTEGER*2	LAYER			! layer at hand
 	INTEGER*2	IECODE			! entry type at hand
 	INTEGER*2	IELEN			! length of entry at hand
-	INTEGER*2	FSN			! feature serial number
+C
+	INTEGER*2	NFNUM			! feature serial number
+	INTEGER*4	FSN			! and as longword
+	EQUIVALENCE	(FSN,NFNUM)
+C
 	INTEGER*2	ISTAT(4)		! feature status words
 	INTEGER*2	ITYPE			! temprary feature type word
+	INTEGER*4	STPTR			! number of coordinates in CB
+
+	INTEGER*2	ITEXTH			! integer form of text hight
+	INTEGER*2	ACTYPE			! AC record type
+	INTEGER*2	LENGTH			! output string length
+	INTEGER*2	NUMB_CHR		! number of characters in text
+	INTEGER*2	NUMB_TS			! number of text status entrys
 C
 	INTEGER*4	SXF_CODE		! SXF transfer code
+	INTEGER*4	N_COLUMNS		! number of columns in CB
+	INTEGER*4	LOOP			! local loop counter
 C
 	LOGICAL*4	LINE			! flag this is a line
 	LOGICAL*4	TEXT			! flag this is a text
 	LOGICAL*4	SYMBOL			! flag this is a symbol
 	LOGICAL*4	NEW_FEATURE		! flag this is a new feature
+	LOGICAL*4	HAD_AC_Z		! flag we have Z in AC
+	LOGICAL*4	PLUS 			! more data in CB
+	LOGICAL*4	LINE_START 		! flag first part of line
+	LOGICAL*4	HAD_TEXTSTATUS		! flag TS in file
 C
 	REAL*4		ROTATION		! text or symbol rotation
+	REAL*4		TEXT_HIGHT		! text or symbol hight
+	REAL*4		SAV_X			! save first X coordinate
+	REAL*4		SAV_Y			! save first Y coordinate
+	REAL*4		SAV_Z			! save first Z coordinate
+	REAL*4		AC_Z			! Z coordinate from AC record
+	REAL*4		DELTAX			! diff. in X point 2 to point 1
+	REAL*4		DELTAY			! diff. in Y point 2 to point 1
+	REAL*4		PI			! PI
 C
+	INTEGER*4	STCOL(2)    		! code for X and y coord.
+	INTEGER*4	OK			! SXF file status
+	REAL*4		STBUF(2,200)            ! X and Y coordinates
+	REAL*4          ZBUF(200)               ! Z coordinate
+	BYTE		CHRS(80) 		! text buffer
+C
+	PARAMETER	(PI = 3.1415926535)
+C
+C...............................................................................
 C Initiate local variables
 C
-	FC       = -1				! Not valid
-	LAYER    = -1				! Not valid
-	SXF_CODE = -1				! Not valid
-	LINE     = .FALSE.
-	TEXT     = .FALSE.
-	SYMBOL   = .FALSE.
-	ROTATION = 0.0
+	FC         	= -1			! Not valid
+	LAYER       	= -1			! Not valid
+	SXF_CODE   	= -1			! Not valid
+	NUMB_TS   	= 0
+	LINE       	= .FALSE.
+	TEXT       	= .FALSE.
+	SYMBOL     	= .FALSE.
+	HAD_AC_Z   	= .FALSE.
+	HAD_TEXTSTATUS	= .FALSE.
+	PLUS       	= .FALSE.
+	ROTATION   	= 0.0
+	TEXT_HIGHT 	= 0.0
+	AC_Z       	= 0.0
 C
-C First process the start of the IFF file to create the heading part
-C of the SXF file
+C...............................................................................
+C	process the start of the IFF file to create the headier of the SXF file
 C
-C...	CALL SXF_HEADING()
+	OK = FLWSEL(SXFLUN)
+	IF(OK .NE. LSL__NORMAL) THEN
+	    CALL LSL_PUTMSG(I2SXF__ERRSELSXF)
+	    GO TO 9999
+	ENDIF
 C
+C	........................................................................
+C	Output SXF file heading data
 C
+	OK = SXF_HEADING(IECODE,IELEN)
+	IF (OK .NE. LSL__NORMAL) GO TO 999
+	GO TO 20					!an entry in hand?
 C
-C
+C...............................................................................
 C Main loop
 C
-C Now start reading the rest of the features in the IFF file
-C
-10	CALL IFFNXT(IECODE,IELEN)
-20	IF (IELEN .EQ. -1 .OR. IERCD .NE. 0) GO TO 991
+10	CALL IFFNXT(IECODE,IELEN)			!next feature
+20	IF (IELEN .EQ. -1 .OR. IERCD .NE. 0) GO TO 991	!error
 	IF (IECODE .EQ. 'NO' ) GO TO 100
 	IF (IECODE .EQ. 'NF' ) GO TO 200
 	IF (IECODE .EQ. 'EO' ) GO TO 300
@@ -91,366 +146,368 @@ C
  	IF (IECODE .EQ. 'EF' ) GO TO 600
 	IF (IECODE .EQ. 'AC' ) GO TO 700
 	IF (IECODE .EQ. 'RO' ) GO TO 800
+	IF (IECODE .EQ. 'TH' ) GO TO 840
 	IF (IECODE .EQ. 'TX' ) GO TO 850
+	IF (IECODE .EQ. 'TS' ) GO TO 860
 	IF (IECODE .EQ. 'EJ' ) GO TO 900
 C
-C Thease entrys should have been dealtwith in heading processing
-C if thay appere there, just skip them.
+C	........................................................................
+C	These are entry types that we don't care about, so skip them.
+C
+	IF (IECODE .EQ. 'EM' ) GO TO 10
+	IF (IECODE .EQ. 'NS' ) GO TO 10
+	IF (IECODE .EQ. 'CC' ) GO TO 10
+	IF (IECODE .EQ. 'CP' ) GO TO 10
+C
+C	........................................................................
+C	These should have been dealtwith in heading processing, skip them
 C
 	IF (IECODE .EQ. 'RA' ) GO TO 10
 	IF (IECODE .EQ. 'HI' ) GO TO 10
 	IF (IECODE .EQ. 'MH' ) GO TO 10
 	IF (IECODE .EQ. 'MD' ) GO TO 10
 C
-C Thease are entry types that we don't care about, so skip them.
 C
-	IF (IECODE .EQ. 'EM' ) GO TO 10
-	IF (IECODE .EQ. 'NS' ) GO TO 10
-	IF (IECODE .EQ. 'CC' ) GO TO 10
-	IF (IECODE .EQ. 'CP' ) GO TO 10
-	IF (IECODE .EQ. 'TH' ) GO TO 10
+	GO TO 10						!next record
+C	
+C...............................................................................
+C	New Layer check if we want to output this layer
 C
-C Go back up and get the next record.
-C
-	GO TO 10
-C
-C
-100	CONTINUE
-C
-C New Layer check if we want to output this layer
-C
-	CALL EIHR(LAYER,1,1)
+100	CALL EIHR(LAYER,1,1)
+	IF (HAD_LOG) CALL LSL_PUTMSG(I2SXF__LAYER,LAYER)
 	IF(.NOT. USE_LAYER(LAYER)) THEN
-	   CALL IFFNXC('NO',IELEN)		! SKIP TO NEXT LAYER
-	   GO TO 20
+	   IF (HAD_LOG) CALL LSL_PUTMSG(I2SXF__LAYSKIP,LAYER)
+	   CALL IFFNXC('EO',IELEN)		! skip to end of layer
 	ENDIF
-	GO TO 10				! USE THIS LAYER
+	GO TO 10				! continue
 C
+C	........................................................................
+C	New Feature read the FSN and set a flag that we got a new feature
 C
-C
-200	CONTINUE
-C
-C New Feature read the FSN and set a flag that we got a new feature
-C
-	CALL EIHR(FSN,1,1)
-	NEW_FEATURE = .TRUE.
+200	CALL EIHR(NFNUM,1,1)
+  	NEW_FEATURE = .TRUE.
+	LINE_START  = .TRUE.
 	GO TO 10
 C
-300	CONTINUE
+C	........................................................................
+C	End of layer (overlay) mark that the layer is no longer valid
 C
-C End of layer (overlay) mark that the layer is no longer valid
-C by setting to -1
-C
-	LAYER = -1
+300	LAYER = -1				!mark layer as invalid
 	GO TO 10
 C
+C	........................................................................
+C	Feature status FS read the feature code FC and set feature type flags
 C
-400	CONTINUE
-C
-C Feature status FS read the feature code FC and set feature type flags
-C
-	CALL EIHR(ISTAT,4,1)
+400	CALL EIHR(ISTAT,4,1)
 	FC = ISTAT(1)
 C
-C Check what type of feature is at hand
+C 	Check what type of feature is at hand
+C
+	IF(FRTFND(FC) .AND. HAD_FRT) THEN
+	   CALL LSL_PUTMSG(I2SXF__NOFRT,FC)
+	ENDIF
 C
 	ITYPE  = ISTAT(3) .AND. 'C000'X
 	SYMBOL = (ITYPE .EQ. '4000'X)
 	TEXT   = (ITYPE .EQ. '8000'X)
 	LINE   = (ITYPE .EQ. '0000'X)
 C
-	GO TO 10
-C
-C
-500	CONTINUE
-C
-C Coordinate block CB. This is there the real processing takes place
-C
-C If this is a new feature do some checking
-C
-	IF(NEW_FEATURE) THEN
-C
-C Check what we have a valid layer at hand
-C
-	   IF (LAYER .EQ. -1) THEN
-C...	      CALL LSL_PUTMSG(SXF__    )
-	      GO TO 10
-	   ENDIF
-C
-C Check what we have a valid feature code at hand
-C
-	   IF (FC .EQ. -1) THEN
-C...	      CALL LSL_PUTMSG(SXF__  )
-	      GO TO 10
-C
-C
-	   ELSEIF(FC .EQ. -2) THEN
-C
-C This is a valid but not wanted feature
-C
- 	      GO TO 10
-C
-	   ENDIF
-C
-C
-C Check if we want to output this feature
-C
-	   IF(.NOT. USE_FC(FC)) THEN
-C
-C Mark this feature as not wanted (FC = -2)
-C
-	      FC = -2 
-	      GO TO 10
-C
-	   ENDIF
-C
-C Get the SXF code from the code table
-C
-	   SXF_CODE = GET_SXF_CODE(FC)
-C
-C Check for  missing code
-C
-	   IF (SXF_CODE .EQ. -1) THEN
-C
-C Output error message
-C
-C...	   CALL LSL_PUTMSG(SXF__ )
-C
-C...  set up dummy SXF_CODE ?????
-C
-	   ENDIF
-C
-C Add it to internal table to be output to summary file at end of program
-C
-C...	   CALL ADD_SUMMARY(FC,SXF_CODE)
-	   NEW_FEATURE = .FALSE.
+	IF ((TEXT.OR.SYMBOL).AND. HAD_FRT) THEN
+	    TEXT_HIGHT = FRTSIZ
 	ENDIF
 C
+	GO TO 10
 C
-C If this is a line it is OK to start processing coordinates now
+C	........................................................................
+C	Coordinate block CB. This is there the real processing takes place
 C
-40	IF (LINE) THEN
+500	IF(NEW_FEATURE) THEN
 C
-C CB entry - produce co-ord data units
-C	   - basic grid square data unit if changed
-C	   - invisible line flag data unit if pen up
-C          - height data unit if changed
-C          - and subsequent string in feature
+	   IF (LAYER .EQ. -1) THEN			!is layer valid?
+	      CALL LSL_PUTMSG(I2SXF__ILLAYER)
+	      GO TO 10
+	   ENDIF
 C
-290	CALL EIHRCB_HEAD(CBH)
+	   IF (FC .EQ. -1) THEN				!is FC valid
+	      CALL LSL_PUTMSG(I2SXF__ILFC)
+	      GO TO 10
+	   ELSEIF(FC .EQ. -2) THEN			!valid but unwanted
+	      GO TO 10
+	   ENDIF
+C
+	   IF(.NOT. USE_FC(FC)) THEN			!dont want to use FC
+	      IF (HAD_LOG) CALL LSL_PUTMSG(I2SXF__FCSKIP,FC)
+	      FC = -2 					!mark as unwanted
+	      GO TO 10
+	   ENDIF
+C
+	   SXF_CODE = GET_SXF_CODE(FC)			!get SXF code
+C
+	   IF (SXF_CODE .EQ. -1) THEN			!code missing
+	      CALL LSL_PUTMSG(I2SXF__UNKFC,FC,FSN)
+	      CALL IFFNXC('EF',IELEN)			! skip to next feature
+	      GO TO 10
+	   ENDIF
+C
+	   NEW_FEATURE = .FALSE.			!no longer a new feature
+	ENDIF
+C
+C	************************************************************************
+C	CB entry - produce co-ord data units
+C
+	CALL EIHRCB_HEAD(CBH)
 	CALL EIHRCB_DATA(CBD)
 C
-C if this is not the start of a feature, and we have the pen up flag,
-C then output an invisible line flag
+C	read the points into buffers for convenience
 C
+	STCOL(1)  = IFF_C_X
+ 	STCOL(2)  = IFF_C_Y
+	STPTR     = CBH.NROW
+	N_COLUMNS = CBH.NCOL
+	PLUS      = (N_COLUMNS .GT. 2)
 C
-C read the points into buffers for convenience
-C
-	STCOL(1) = CODE_X
-	STCOL(2) = CODE_Y
-	STPTR = CBH.NROW
-C
-C if it's an empty entry (which should never happen!) ignore it
-C
-	IF (STPTR.EQ.0) THEN
-	   CALL LSL_PUTMSG(I2OSTF__NOPTS,FSN)
-	   GOTO 130
+	IF (STPTR.EQ.0) THEN				!empty CB 
+	    CALL LSL_PUTMSG(I2SXF__NOPTS,FSN)		
+	    GOTO 10					!ignore it
 	ENDIF
 C
 	CALL IFS_CB_READ(CBH,CBD,STBUF,2,STCOL,1,STPTR)
 C
-	IF (PLUS) THEN
-	   CALL IFS_CB_READ(CBH,CBD,ZBUF,1,CODE_Z,1,STPTR)
-	   CALL IFS_CB_READ(CBH,CBD,DZBUF,1,CODE_DZ,1,STPTR)
-	   CALL IFS_CB_READ(CBH,CBD,CXYBUF,1,CODE_CAPXY,1,STPTR)
-	   CALL IFS_CB_READ(CBH,CBD,CZBUF,1,CODE_CAPZ,1,STPTR)
-	ELSEIF (.NOT. (SIMPLE_XY .OR. CHUCKED_OUT)) THEN
-	   CALL LSL_PUTMSG(I2OSTF__CHUCKED)
-	   CHUCKED_OUT = .TRUE.
+ 	IF (PLUS) THEN
+	    DO LOOP = 1,200
+		ZBUF(LOOP) = 0.0
+	    ENDDO
+	    CALL IFS_CB_READ(CBH,CBD,ZBUF,1,IFF_C_Z,1,STPTR)
 	ENDIF
 C
-C remember the first point of the feature (for texts and symbols)
-C
-	IF (NEWF) THEN
-	   SAV_X     = STBUF(1,1)
-	   SAV_Y     = STBUF(2,1)
-	   SAV_Z     = ZBUF(1)
-	   SAV_DZ    = DZBUF(1)
-	   SAV_CAPXY = CXYBUF(1)
-	   SAV_CAPZ  = CZBUF(1)
+	IF (HAD_AC_Z) THEN
+	    DO LOOP = 1,STPTR
+	        ZBUF(LOOP) = AC_Z		
+            ENDDO
+	    DO LOOP = STPTR+1,200
+		ZBUF(LOOP) = 0.0
+	    ENDDO
+	ELSE
+	    DO LOOP = 1,200
+		ZBUF(LOOP) = 0.0
+	    ENDDO
 	ENDIF
 C
-C process each pair of co-ordinates
-C (note that text and symbol coordinates are not output here, although
-C  angle calculations, etc, may be done)
+C	************************************************************************
+C	remember the first point of the feature (for texts and symbols)
 C
-	DO 350 I = 1,STPTR
+	SAV_X     = STBUF(1,1)
+	SAV_Y     = STBUF(2,1)
+	SAV_Z     = ZBUF(1)
 C
-C get the next point in hand
+	IF (LINE) THEN
+	    IF (LINE_START) THEN			! set up contin. flag
+		LENGTH = EXPAND('L,%U%P0%I9,%P %I8,'//
+     &				'%F5.2,%F5.2,%I1,%F6.2,'//
+     &				'%F5.2,%F5.2,            ;',
+     &				SXF_CODE,FSN,0.0,0.0,7,0.0,0.0,0.0)
+	        OK = FLWLIN(EXPBUF)
+	    ELSE
+	        CALL APPEND('L;')     			! cont. on same line
+	        OK = FLWLIN(EXPBUF)
+	    ENDIF
 C
-	  X     = STBUF(1,I)
-	  Y     = STBUF(2,I)
-	  Z     = ZBUF(I)
-	  DZ    = DZBUF(I)
-	  CAPXY = CXYBUF(I)
-	  CAPZ  = CZBUF(I)
-	  CAPCH = BLANK
+C	Ouput all but the last coordnate triplet in the line
 C
-C check whether we have only just had the first point
-C - if we are a text or symbol, then skip straight away to look for the 
-C   next point
-C - if we are a line, just output the point
+	    DO LOOP=1,STPTR-1
+		LENGTH = EXPAND('M,K,%F11.3,%F11.3,%F8.3,L;',
+     &                           STBUF(2,LOOP),STBUF(1,LOOP),
+     &                           ZBUF(LOOP))
+		OK = FLWLIN(EXPBUF)
+	    ENDDO
 C
-	  IF (I.EQ.1) THEN
-	     IF (TEXTF.OR.SYMBF) GOTO 350	! get next point
-	     IF (NEWF) GOTO 330			! output point
-	  ENDIF
+C	Output last point in line leaving out record termination
 C
-C we need to know the displacement over the first 2 points, in order
-C to calculate an angle...
-C for lines, we also need to know the displacement over the previous 
-C and current points, in order to check for duplicates...
-C - if it is a line then we want to calculate the angle in terms of the 
-C   OSTF output coordinates, rather than the input IFF coordinates...
+	    LENGTH = EXPAND('M,K,%F11.3,%F11.3,%F8.3,',
+     &			     STBUF(2,STPTR),STBUF(1,STPTR),
+     &			     ZBUF(STPTR))
 C
- 	  IF ( .NOT.SYMBF .AND. .NOT.TEXTF ) THEN
-	     CALL CNVTOS(SAV_X,SAV_Y,BGI,GX1,GY1,OX1,OY1)
-	     CALL CNVTOS(    X,    Y,BGI,GX2,GY2,OX2,OY2)
-	     DX = BGI*( (GX2+OX2/1000.0) - (GX1+OX1/1000.0) )
-	     DY = BGI*( (GY2+OY2/1000.0) - (GY1+OY1/1000.0) )
 C
-C - if it is a symbol or text, we use the input IFF coordinates to 
-C   ensure we get an angle even when the OSTF coordinates are 
-C   duplicated, since we only output one point
-C
-	  ELSE
-	     DX = X - SAV_X
-	     DY = Y - SAV_Y
-	  ENDIF
-C
-C if the displacement is 0, then complain, and ignore the current
-C point (in an appropriate manner)
-C
-	  IF ( (DX.EQ.0.0) .AND. (DY.EQ.0.0) ) THEN
-	     CALL LSL_PUTMSG( I2OSTF__DUPPTS, NFNUM, PREV_PTS+I )
-	     IF (NEWF .AND. I.EQ.2) THEN
-	        CALL LSL_PUTMSG( I2OSTF__FIRST2, NFNUM )
-	     ENDIF
-	     IF (.NOT.SYMBF) GOTO 350
-	     X     = SAV_X		! why do we do this ?
-	     Y     = SAV_Y		! (they should be the same)
-	     Z     = SAV_Z
-	     DZ    = SAV_DZ
-	     CAPXY = SAV_CAPXY
-	     CAPZ  = SAV_CAPZ
-	     GOTO 330			! goes to 350 anyway
-	  ENDIF
-C
-C once we have the first two valid points, we can find the angle of the 
-C thing, otherwise (i.e. for subsequent points) just output them
-C
-	  IF (HAD2PT) GOTO 330		! just output the point
-C
-C now we use DX,DY to compute an angle for any feature with two
-C or more points
-C
-	  ROT = ATAN2(DY,DX)
-C
-	  IF (ROT.LT.0.0) ROT = ROT+TWOPI	! make +ve by adding 2 pi
-	  DEG = (ROT*180.0/PI)*10		! angle in degrees*10
-	  DEG = MOD(DEG,3600)			! mod full circle
-	  HAD2PT = .TRUE.			! & thus we had 2 pts
-C
-C if this is a text feature, get the next point at once
-C if this is a symbol, then if we are here it is a scaled symbol
-C
-	  IF (TEXTF) GOTO 350			! only output lines
-C
-C if it is a symbol, then it is scaled - calculate the magnitude
-C (distance). If it is not a symbol, just output the angle
-C
-	  IF (SYMBF) THEN
-	     R1 = SQRT(DX*DX + DY*DY)		! real distance
-	     R1 = AMOD(R1,BGI)*(1000/BGI)	! into basic grid units
-	     IF (R1.LT.0.0) R1 = R1+1000	! ensure positive
-	     DIST = R1 + 0.5			! round to integer
- 	     GOTO 350				! and end this loop
-	  ELSE
-	     CALL FORMB(-12, DEG)		! output angle
-	  ENDIF					! and output point
+	ENDIF
+	LINE_START = .FALSE.
 	GO TO 10
 C
-	ELSEIF (TEXT) THEN
-	GO TO 10	
+C	........................................................................
+C	End of feature. 
 C
-	ELSEIF (SYMBOL) THEN
+600	IF(TEXT .AND. FC .GE. 0) THEN
+	    IF (HAD_TEXTSTATUS) THEN
+ 		CALL APPEND('%AZ62;',CHRS)
+		NUMB_TS = 0
+		HAD_TEXTSTATUS = .FALSE.
+	    ELSE
 C
-	ENDIF
-	GO TO 10
+C		Convert symbol rotation angle to GRADES and change direction
 C
+		IF(STPTR .EQ. 2 .AND. FRTGT .EQ. TEXTYP) THEN	 ! calculate 
+		    TEXT_HIGHT = SQRT(DELTAX*DELTAX + DELTAY*DELTAY) ! scale
+		ENDIF
 C
+		ROTATION = -63.67 * ROTATION
+		IF (ROTATION .LT. 0.0) ROTATION = 400.0 + ROTATION
 C
-600	CONTINUE
+		LENGTH = EXPAND('T,%U%P0%I9,%P %I1,'//
+     &			    '%F6.2,%F5.2,%F5.2,%F5.2,'//
+     &                      'K,%F11.3,%F11.3,%F8.3;',
+     &                      SXF_CODE,7,ROTATION,TEXT_HIGHT,
+     &                      TEXT_HIGHT,0.0,SAV_Y,SAV_X,SAV_Z)
+		OK = FLWLIN(EXPBUF)
 C
-C End of feature. 
-C Check if this was a text or a symbol. Now is the time to output it
+		LENGTH = EXPAND('U,IS,%AZ62;',CHRS)
+	    ENDIF
 C
-	IF(TEXT .OR. SYMBOL) THEN
-C....
+	    OK = FLWLIN(EXPBUF)
 C
 	ENDIF
 C
-C Set FC to none valid (FC = -1)
+C	************************************************************************
+C	Output symbol
+C	Convert symbol rotation angle to GRADES and change direction
 C
-	FC = -1
+	IF(SYMBOL .AND. FC .GE. 0) THEN
+	    IF(STPTR .EQ. 2 .AND. (FRTGT .EQ. ORITYP .OR.
+     &	    	FRTGT .EQ. SCATYP)) THEN			! calculate
+		    DELTAX = STBUF(1,2) - STBUF(1,1)            ! rotation
+		    DELTAY = STBUF(2,2) - STBUF(2,1)
+		    IF (DELTAX .LT. 0.001) THEN
+			ROTATION = PI/2.0
+		    ELSE
+			ROTATION = ATAN(DELTAY/DELTAX)
+		    ENDIF
+		    IF (DELTAX .LT. 0.0) ROTATION = ROTATION + PI
+	    ENDIF
+C
+	    ROTATION = -63.67 * ROTATION
+	    IF (ROTATION .LT. 0.0) ROTATION = 400.0 + ROTATION
+C
+	    IF(STPTR .EQ. 2 .AND. FRTGT .EQ. SCATYP) THEN	 ! calculate 
+		TEXT_HIGHT = SQRT(DELTAX*DELTAX + DELTAY*DELTAY) ! scale
+	    ENDIF
+C
+	    LENGTH = EXPAND('S,%U%P0%I9,'//
+     &			    '%P %F6.2,%F5.2,%F5.2,'//
+     &                      'K,%F11.3,%F11.3,%F8.3;',
+     &                      SXF_CODE,ROTATION,TEXT_HIGHT,
+     &                      TEXT_HIGHT,SAV_Y,SAV_X,SAV_Z)
+	    OK = FLWLIN(EXPBUF)
+C
+	ENDIF
+C
+C	************************************************************************
+C	Output line data termination
+C
+	IF (LINE .AND. FC .GE. 0) THEN 
+	    CALL APPEND('E;')
+	    OK = FLWLIN(EXPBUF)
+	ENDIF
+C
+C	************************************************************************
+C	Set FC to none valid (FC = -1)
+C
+	FC         = -1
+	HAD_AC_Z   = .FALSE.
+	TEXT_HIGHT = 0.0
+	ROTATION   = 0.0
 	GO TO 10
 C
+C	........................................................................
+C	AC record
 C
-700	CONTINUE
-C
-C AC record
-C
-C.........
+700	CALL EIHRI(ACTYPE,1,1)
+	IF (ACTYPE .EQ. 3) THEN				! hight
+	    CALL EIHRR(AC_Z,1,2)
+	    HAD_AC_Z = .TRUE.
+	ENDIF
 	GO TO 10
 C
+C	........................................................................
+C	Rotation
 C
-800	CONTINUE
-C
-C Rotation
-C
-C...	CALL EIHRR(ROTATION,1,1)
+800	CALL EIHRR(ROTATION,1,1)
     	GO TO 10
 C
-850	CONTINUE
+C	........................................................................
+C	Text hight
 C
-C Text
+840	CALL EIHRI(ITEXTH,1,1)
+	IF ((FRTGT .LT. UNOTYP .OR.
+     &	    FRTGT .GT. SCATYP) .AND. ITEXTH .NE. 0) THEN 
+		TEXT_HIGHT = FLOAT(ITEXTH) / 100.0
+	ENDIF
+	GO TO 10
 C
-C read the text in
+C	........................................................................
+C	Text
 C
+850	DO LOOP = 1,80
+		CHRS(LOOP) = 0                  ! is this realy needed   ?
+	ENDDO 					
+C
+	LOOP = 2 * IELEN
 	CALL EIHRI(CHRS,IELEN,1)
-	IF (CHRS(N).EQ.0) N = N-1	! remove padding null at end?
+	DO WHILE(CHRS(LOOP) .EQ. 0)
+	  IF (CHRS(LOOP).EQ.0) LOOP = LOOP - 1	! remove padding null at end?
+	ENDDO
+	NUMB_CHR = LOOP
 C
 	GO TO 10
 C
+C	........................................................................
+C	Text Status
 C
+860	NUMB_TS = NUMB_TS + 1
+	IF(HAD_TEXTSTATUS) THEN
+	    IF(NUMB_TS .EQ. 2) THEN
 C
-900	CONTINUE
+C		Convert symbol rotation angle to GRADES and change direction
 C
-C End of job   output the terminationg character to output file
-C and return to main
+		IF(STPTR .EQ. 2 .AND. FRTGT .EQ. TEXTYP) THEN	 ! calculate 
+		    TEXT_HIGHT = SQRT(DELTAX*DELTAX + DELTAY*DELTAY) ! scale
+		ENDIF
 C
-C...
+		ROTATION = -63.67 * ROTATION
+		IF (ROTATION .LT. 0.0) ROTATION = 400.0 + ROTATION
 C
+		LENGTH = EXPAND('T,%U%P0%I9,%P %I1,'//
+     &			    '%F6.2,%F5.2,%F5.2,%F5.2,'//
+     &                      'K,%F11.3,%F11.3,%F8.3;',
+     &                      SXF_CODE,7,ROTATION,TEXT_HIGHT,
+     &                      TEXT_HIGHT,0.0,SAV_Y,SAV_X,SAV_Z)
+		OK = FLWLIN(EXPBUF)
+C
+		LENGTH = EXPAND('U,IS,%AZ62',CHRS)	! start of text string
+	    ELSE
+		CALL APPEND('%AZ62',CHRS)	! add rest of text
+	    ENDIF
+	ELSE
+	    HAD_TEXTSTATUS = .TRUE.		! flag what we had a TS entry
+	ENDIF
+	GO TO 10
+C
+C	........................................................................
+C	End of job  output the terminationg character to output file and finish
+C
+900	LENGTH = EXPAND('E;')
+	OK = FLWLIN(EXPBUF)
+C
+	PROCESS = LSL__NORMAL
 	GO TO 9999
 C
-C
-C
-
+C...............................................................................
 C Error handling
 C
 991	CONTINUE
-C	IFF file internal structure error
-C	GO TO 9999
+C	
+	CALL LSL_PUTMSG(I2SXF__ENDINMAP)	!IFF file structure error
+	GO TO 9999
 C
+C...............................................................................
+C
+999	PROCESS = OK
 9999	RETURN
 	END

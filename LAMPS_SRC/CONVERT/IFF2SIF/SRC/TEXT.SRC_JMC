@@ -1,0 +1,218 @@
+	SUBROUTINE TEXT( DIM, NPTS, STBUF, HADRO, RO,
+     &					   HADTH, TH, BUFSTR )
+C
+***	IDENT	20MR92
+***	MODULE	TEXT
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 30 January 1985
+C
+C Outputs a text
+C	      - output the number of characters and justification
+C	      - output the placement and size required
+C	      - output the text itself
+C
+	IMPLICIT NONE
+C
+C Arguments
+C
+	INTEGER		DIM		! dimension of the points
+	INTEGER*2	NPTS		! number of points in STBUF
+	REAL		STBUF(DIM,NPTS)	! defining points
+	LOGICAL		HADRO		! are we to use the RO entry
+	REAL		RO		! angle of text in radians
+	LOGICAL		HADTH		! did we have a TH entry?
+	INTEGER*2	TH		! the TH entry itself
+	CHARACTER*(*)	BUFSTR		! the text to output
+C
+C common
+C
+	INCLUDE 'HERE:CONTROL.CMN'
+***	COMMON/HERE:SIF/
+***	COMMON/HERE:SIFCOM/
+C
+C
+C functions
+C
+	REAL		MM_TO_METRES	! convert mm on sheet to metres
+C					! on the ground
+	INTEGER		CONVERT		! convert to UORs
+C
+C workspace
+C
+	REAL	ANGLE		! symbol rotation
+	REAL	DX,DY
+	REAL	HEIGHT,WIDTH	! text size
+	REAL	TEMP
+	INTEGER	IH,IW		! temporary height,width
+	LOGICAL	ERROR		! return from CONVERT
+	REAL*8		MULT	! to convert to UORs with
+	REAL		STRING_LENGTH		! length of text string
+	INTEGER		TJUST		! our copy of JUST
+	INTEGER		TRANS_TEXT(0:8)	! Translation table
+C
+	DATA TRANS_TEXT /3,2,1,6,5,4,9,8,7/
+C
+C if we were given the RO explicitly, then use it
+C
+C or, if the text only has one defining point, output it horizontally
+C
+C otherwise, we have two points in STBUF, and calculate the rotation
+C from them - note that we ignore any Z displacement
+C
+	IF (HADRO) THEN
+	   ANGLE = RO
+	ELSEIF (NPTS.EQ.1) THEN
+	   ANGLE = 0.0				! default to horizontal
+	ELSE
+	   DX = STBUF(1,2)-STBUF(1,1)
+	   DY = STBUF(2,2)-STBUF(2,1)
+	   IF (DX.EQ.0.AND.DY.EQ.0) THEN
+	      CALL MOAN( MSG__NORO, FSN )	! points are coincident
+	      ANGLE = 0.0			! force horizontal
+	   ELSE
+	      ANGLE = ATAN2( DY,DX )
+	   ENDIF
+	ENDIF
+C
+C now work out what text sizes we are going to ask for
+C
+	IF ( TXTSIZ.EQ.USE_SDF ) THEN
+C
+C	 use the values read from the SDF file - ignore the TH
+C
+	   HEIGHT = SIF_HEIGHT
+	   WIDTH  = SIF_WIDTH
+C
+	ELSEIF ( .NOT. HADTH ) THEN
+C
+C	 we don't have a TH entry - we don't know the text size
+C	 - use the values from the SDF line
+C
+	   CALL MOAN( MSG__NOTH )
+	   HEIGHT = SIF_HEIGHT
+	   WIDTH  = SIF_WIDTH
+C
+	ELSE
+C
+C	 we have a TH entry - use it to work out the text size
+C
+	   IF ( TXTSIZ.EQ.USE_PT ) THEN
+C
+C	    use the 'point size' in the TH - look up the actual size
+C	    in the PTSIZ array
+C
+C	    check if the TH value is a valid pointsize (ie in range),
+C	    and then that the pointsize required is actually defined
+C	    (both values are set to -1.0 if the pointsize is undefined)
+C
+	      IF ( TH.LT.1 .OR. TH.GT.MAX_PTSIZ ) THEN
+		 CALL MOAN( MSG__PTSIZRANGE, TH, MAX_PTSIZ )
+		 HEIGHT = SIF_HEIGHT
+		 WIDTH  = SIF_WIDTH
+	      ELSEIF ( PTSIZ(PT_HT,TH).LT.0.0 ) THEN
+		 CALL MOAN( MSG__NOPTSIZ, TH )
+		 HEIGHT = SIF_HEIGHT
+		 WIDTH  = SIF_WIDTH
+	      ELSE
+	         HEIGHT = PTSIZ( PT_HT, TH )
+	         WIDTH  = PTSIZ( PT_WD, TH )
+	      ENDIF
+C
+	   ELSE
+C
+C	    otherwise, use the height in the TH, which is in 1/100 mm
+C	    on the sheet
+C
+	      TEMP   = TH			! coerce to a real
+	      HEIGHT = MM_TO_METRES( TEMP )	! height in m on ground
+	      WIDTH  = HEIGHT			! assume width the same
+C
+	   ENDIF
+C
+	ENDIF
+C
+C Check if there were ACs in this feature, if so output the IDE and 
+C ASV commands
+C
+	IF (HAD_AC) THEN
+	   CALL SIFIDE(FSN)
+	   CALL RESTORE_EXPC(ASVBUF,ASVBUFPTR,EXPMAX)
+	   CALL SIFOUT
+	   HAD_AC = .FALSE.
+	ENDIF
+C
+C and now perform the actual output
+C - output the text line characteristics
+C
+	CALL SIFTLC( LEN(BUFSTR) )
+C
+C - and the text itself
+C - if we are outputting a 2d file, then we use the TX3 command
+C   to define the rotation of the text
+C - if we are outputting a 3d file, then we use a matrix within
+C   the TXT command to output the rotation, as the TX3 command
+C   is not legal in 3d
+C
+C the height and width are given to us in metres, so we must
+C convert them to UORs for use with SIFTX3 and SIFTXT3D.
+C SIFTXT uses height and width in metres.
+C
+C
+C the height and width are given to us in metres, so we must
+C convert them to UORs
+C
+	MULT = FACTOR/UORUNIT		! to convert to UORs
+C convert the height to UORs
+C
+	IH = CONVERT( HEIGHT, MULT, 0.0, .FALSE., ERROR )
+C
+C did that produce an out of range error?
+C if so, then give an appropriate error message
+C
+	IF ( ERROR ) THEN
+	   CALL MOAN( MSG__TXHEIGHT, HEIGHT, FSN )
+	ENDIF
+C
+C and similarly for the width
+C
+	IW = CONVERT( WIDTH,  MULT, 0.0, .FALSE., ERROR )
+C
+	IF ( ERROR ) THEN
+	   CALL MOAN( MSG__TXWIDTH, WIDTH, FSN )
+	ENDIF
+C
+C work out length of text string
+	STRING_LENGTH = WIDTH * LEN(BUFSTR)
+C
+C establish the justification and offset X1,Y1 accordingly (if 3d ignore z)
+C
+	TJUST = TRANS_TEXT( TXTLOC )
+C
+	IF ((TJUST.EQ.1).OR.(TJUST.EQ.4).OR.(TJUST.EQ.7))
+     &	   STBUF(2,1) = STBUF(2,1) - HEIGHT
+	IF ((TJUST.EQ.2).OR.(TJUST.EQ.5).OR.(TJUST.EQ.8))
+     &     STBUF(2,1) = STBUF(2,1) - (HEIGHT/2)
+	IF ((TJUST.EQ.7).OR.(TJUST.EQ.8).OR.(TJUST.EQ.9))
+     & 	   STBUF(1,1) = STBUF(1,1) - STRING_LENGTH
+	IF ((TJUST.EQ.4).OR.(TJUST.EQ.5).OR.(TJUST.EQ.6))
+     &	   STBUF(1,1) = STBUF(1,1) - (STRING_LENGTH/2)
+C
+	IF ( DIM.EQ.2 ) THEN
+C
+C TX3 not required for SCITEX option
+	   IF (.NOT.HAD_SCITEX) THEN
+	      CALL SIFTX3( DIM, STBUF, ANGLE, IH, IW )
+	   ENDIF
+	   CALL SIFTXT( DIM, 0, STBUF, HEIGHT, STRING_LENGTH, ANGLE, BUFSTR )
+	ELSE
+	   IF (.NOT.HAD_SCITEX) THEN
+	      CALL SIFTXT3D( STBUF, ANGLE, IH, IW, 0, BUFSTR )
+	   ELSE
+	      CALL SIFTXT( DIM, 0, STBUF, HEIGHT, STRING_LENGTH, ANGLE, BUFSTR)
+	   ENDIF
+	ENDIF
+C
+	RETURN
+	END

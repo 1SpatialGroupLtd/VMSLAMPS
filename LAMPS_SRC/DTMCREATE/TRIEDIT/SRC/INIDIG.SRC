@@ -1,0 +1,390 @@
+	LOGICAL FUNCTION INIDIG(DIAG)
+C
+***	MODULE	INIDIG
+***	IDENT	27MR92
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Converted for TRIEDIT				TJH 07-Dec-1987
+CMOD	EOF returned by TEXTIN				TJH 12-Aug-1986
+CMOD	Function BITPAD renamed to TABLE		TJH 04-Aug-1986
+CMOD	New device types supported		 	 DM 03-Apr-1985
+CMOD    Bad indirect filename handled better as
+C	ALARMS not called				TJH 20-Nov-1984
+CMOD    Residuals printed properly !            	TJH 16-Jul-1984
+CMOD    Optional CP file read for table setup   	TJH 06-Jul-1984
+CMOD	Output error message if can't assign Tek	 DM 05-Jul-1984
+CMOD	Forces user to redo CPs if bad			TJH 04-Jul-1984
+C	Created						TJH 25-Jun-1984
+C
+C Do four point setup for map on digitiser table for TRIEDIT
+C Function returns .TRUE. if an error occurs
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+	LOGICAL	  	DIAG		! diagnostics
+	LOGICAL	  	EOF		! .t. = end of file detected
+C
+C w/s
+	BYTE            CH              ! one character
+	INTEGER         CMDRCT          ! number of args. read for CPs
+	CHARACTER*128   CPFILE		! for CP filename
+	INTEGER		CPFLEN		!		  and length
+	REAL	        CPTS(4,4)	! corner points
+	CHARACTER*2	CPTN(4)		! map corner names held in here
+	REAL	  	DX,DY		! differences in X and Y
+	REAL	        DXARR(4),DYARR(4) ! for temp. storage of resids.
+	INTEGER 	I,III,J		! for DO loops, etc
+	INTEGER         IERR            ! for filio error returns
+	LOGICAL         OK		! error status
+	REAL	  	MATRIX(5)       ! tracking matrix
+	INTEGER         NCHS            ! number of chars. on input line
+	REAL		SIDE		! length of side of map
+	INTEGER*4 	TERMS(3)	! X, Y
+	LOGICAL         TTIN            ! input from TT:?
+	REAL	  	XMAX,YMAX	! max residuals
+	REAL            XSIDE,YSIDE     ! side lengths for error checks
+	REAL	  	XRMS,YRMS	! RMS residuals
+	CHARACTER*100 	WORD
+C
+C Functions:
+	INTEGER		GETFILNAM	! reads file-spec
+	INTEGER		SIGCHS		! gives # signif. chars in string
+	INTEGER		LIB$GET_EF      ! to find a vacant event flag
+	INTEGER         FLROPN		! open file for LSLLIB FILEO	
+	LOGICAL		INIT_TAB	! initialise table
+	LOGICAL		INITEK		! assigns LSL$TK
+	LOGICAL         RDCPFL          ! read cp look up file 
+	LOGICAL         RDCH	        ! read char. skipping spaces
+	LOGICAL         RDCHS           ! read char.
+	LOGICAL         RDREAL          ! read real
+	LOGICAL		DIGTAB		! get a coord from the table(s)
+	INTEGER         TTRSTR		! read a string from TT:
+C
+C Use common area to preserve corner point coefficients.
+	REAL*8	  CPCOEF(3,2)
+	COMMON /CPCOM/ CPCOEF	! to hold the transform coeffs
+C
+	DATA CPTN /'NW','SW','SE','NE'/
+C
+	DATA TERMS/'   ','  X','  Y'/
+C
+	DATA MATRIX/-100.0,-500.0,0.0,1.0,1.0/
+C
+C Parameters:
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+	REAL      DGTCNT		! digitiser counts per mm
+	PARAMETER (DGTCNT = 50.0)
+	INTEGER   CPLUN			! CP file LUN
+	PARAMETER (CPLUN=77)
+C
+C Common:
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IDTPAR.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TABLE.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TTTYPE.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C ......................................................................
+C
+	INIDIG=.FALSE.			! assume all will be well
+C
+C Do we already have a table ?
+	IF (TABACT) THEN
+	   CALL CLOSE_TAB(OK)		! yes (odd !) - close it down
+	   TABACT=.FALSE.
+	ENDIF
+C
+C See which kind of table we want now
+	IF (MTABLE) THEN			! MUART
+C
+C Get an event flag to use for the digitising table
+	   OK=LIB$GET_EF(IDTAEF)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_GETMSG(OK,MESSAGE,I)	! what went wrong
+	      J=INDEX(MESSAGE,'!') - 1		! (ignore any FAO stuff)
+	      IF (J.LE.0) J=I
+	      CALL ALARMS(1,0,MESSAGE(:J))
+	   ENDIF
+C
+C Set up the TEK
+	   IF (.NOT.MT4014) THEN		! already done ?
+	      OK=INITEK()			! no - assign LSL$TK
+	      IF (.NOT.OK) THEN
+	         CALL OUTOPT(' ')
+	         CALL OUTOPT(ERROR//'assigning LSL$TK')
+	         GO TO 90
+	      ENDIF
+	      CALL TKINIT(1,,5)
+	   ENDIF
+C
+C Grab the table
+	   CALL TKIDEV(3,2,)
+C
+C Enable tracking with button 0
+	   CALL UNITS(1024.0/2500.0)
+	   CALL TKTRAC(2,0)		
+	   CALL TKMAPT(2,MATRIX)		! set up mapping matrix
+	   CALL ORIGIN(-1023.0*SCALE/2.0,-779.0*SCALE/2.0)
+	   CALL UNITS(SCALE)			! scale via /TABLE/
+C
+	   CALL LDWAIT				! flush the call out
+C
+C ......................................................................
+C
+	ELSE					! use table monitor
+	   I=INIT_TAB(,OK)
+	   IF (OK.EQ.-2) THEN
+	      CALL STOP_TAB(OK)
+	      CALL RESUME_TAB(,OK)
+	   ELSEIF (I.OR.OK.EQ.-4) THEN
+	      CALL OUTOPT(' ')
+	      CALL OUTOPT(ERROR //'initialising table.'//
+     &		' Returning to main loop.')
+	      IF (I) GO TO 90
+	      IF (OK.EQ.-4) CALL OUTOPT('The table is already in use')
+	      GO TO 140
+	   ENDIF
+	   TABACT=.TRUE.
+	   CALL STOP_TAB(OK)			! hibernate for now
+	ENDIF
+C
+C ......................................................................
+C
+C NOTE that we will normally write our requests for points to be
+C digitised to the graphics screen OR the VT100 (or whatever it is)
+C
+	IF (VT100) THEN
+	   CALL OUTOPT(' ')
+	ELSE
+	   CALL SCNCLR 				! clear the screen
+	ENDIF
+C
+	CALL OUTOPT('Now set up map on digitiser table')
+10	CALL OUTOPT(' ')
+	CALL OUTOPT('4 point map setup')
+C
+C ......................................................................
+C
+C Prompt the wretched user for the CP values and get him to digitise
+C the position of same on the table.
+20	TTIN=.TRUE.  ! first read  must be from TT: to get @file command
+	DO 40 I = 1,4
+	   IF (TTIN) THEN
+	      CALL OUTOPT(' ')
+	      CALL EXPAND('Type map %S corner value ',CPTN(I))
+	      CALL OUTOPT(EXPDSC)
+	   ENDIF
+C
+	   IF (I.EQ.1) THEN ! indirect CP file to be used ?
+	      CALL EXPAND 
+     &       ('X then Y (or "@filename" for corner point file): ')
+	   ELSE
+	      CALL EXPAND ('X then Y ')
+	   ENDIF
+C
+30	   IF (TTIN) THEN			! input from TT ?
+	      IF (VT100) THEN
+	         TXTPTR=80
+	         OK=TTRSTR(,,EXPDSC,IERR)
+	         IF (TXTPTR.EQ.0) GOTO 30	! empty line
+	         IF (.NOT.OK) GOTO 100 		! error or ^Z
+	      ELSE
+	         TXTPTR=80
+	         CALL TEXTOT(EXPDSC,0)
+	         CALL TEXTIN(TXTDSC,EOF)	! aliased to TXTBUF
+	         IF (TXTPTR.EQ.0) GOTO 30	! empty line
+	         IF (EOF.OR.(TXTPTR.LT.0)) GOTO 100! error or ^Z
+	      ENDIF
+	      CALL BSLN
+	      IF (I.EQ.1) THEN	       		! check for CP file
+	         IF (RDCHS(CH)) THEN		! empty line
+	            CALL EXPAND('Unexpected end of line. Try again: ')
+	            CALL OUTOPT(EXPDSC)
+	            GOTO 30			! try again 
+	         ENDIF
+	         IF (CH.EQ.'@') THEN		! indirect CP file given
+	            IF (RDCHS(CH)) THEN	! substantially empty line
+	               CALL OUTOPT(WARNING//
+     &				'"@" must precede a file-spec')
+	               GOTO 30
+	            ELSE
+	               CALL BSCH
+	            ENDIF
+		    WORD='SYS$DISK:[]'
+	            OK=GETFILNAM(CPFILE,CPFLEN,
+     &		WORD(1:SIGCHS(WORD))//'.COM;0',.TRUE.,%REF('!'))
+	            IF (.NOT.OK) THEN
+	               CALL LSL_GETMSG(OK,MESSAGE,MESLEN)
+	               CALL OUTOPT(MESSAGE(1:MESLEN))
+	               GOTO 30
+	            ENDIF
+C
+	            OK=FLROPN(CPLUN,CPFILE,IERR)
+	            IF (.NOT.OK) THEN
+	               CALL OUTOPT(WARNING//
+     &                     'Unable to open indirect CP file')
+	               CALL LSL_GETMSG(OK,MESSAGE,I) ! whats wrong?
+	               J=INDEX(MESSAGE,'!') - 1	! (ignore any FAO stuff)
+	               IF (J.LE.0) J=I
+	               CALL OUTOPT(MESSAGE(:J))
+	               GOTO 140			! return
+	            ENDIF
+	            TTIN = .FALSE.		! from now read file
+	            IF (RDCPFL(CPTS(3,I),CPTS(4,I))) 
+     &                                     GOTO 110 ! error or eof
+	            CALL OUTOPT(' ')
+	            CALL EXPAND('%S corner value = %F12.3  %F12.3',
+     &                         CPTN(I),          CPTS(3,I), CPTS(4,I))
+	            CALL OUTOPT(EXPDSC)
+	         ELSE
+	            CALL BSCH			    ! un-read non-'@'
+	            IF (RDREAL(CPTS(3,I))) GOTO 100  ! error or ^z
+	            IF (RDREAL(CPTS(4,I))) GOTO 100
+	         ENDIF				    ! CH .. @
+	      ELSE
+	         IF (RDCHS(CH)) THEN		    ! empty line
+	            CALL OUTOPT('Unexpected end of line. Try again: ')
+	            GOTO 30       		    ! try again
+	         ENDIF
+	         CALL BSCH			    ! un-read EOL test
+	         IF (RDREAL(CPTS(3,I))) GOTO 100    ! error or ^z
+	         IF (RDREAL(CPTS(4,I))) GOTO 100
+	      ENDIF
+	   ELSE			! input is from indirect CP file
+	      IF (RDCPFL(CPTS(3,I),CPTS(4,I))) GOTO 110  ! error or eof
+	      CALL EXPAND('%S corner value = %F12.3  %F12.3',
+     &                   CPTN(I),          CPTS(3,I), CPTS(4,I))
+	      CALL OUTOPT(EXPDSC)
+	   ENDIF	 	
+C
+	   CALL EXPAND('Digitise map %S corner', CPTN(I))
+	   CALL OUTOPT(EXPDSC)
+	   IF (DIGTAB(0.0,0.0,CPTS(1,I), CPTS(2,I),.FALSE.,J))
+     &					GOTO 120 ! nasty error
+	   IF (.NOT.VT100) CALL SCNCLR		! clear the screen
+40	CONTINUE
+C
+	IF (.NOT.TTIN) CALL FLRCLO(CPLUN)       ! close CP file
+C
+C ......................................................................
+C
+C now do the edges
+C
+	IF (DIAG) THEN		! show operator sidelengths
+	   DO 50 I = 1,4
+	      J = I+1
+	      IF (J.GT.4) J = 1
+	      SIDE = SQRT((CPTS(1,I)-CPTS(1,J))**2 +
+     &                 (CPTS(2,I)-CPTS(2,J))**2) / DGTCNT
+	      CALL EXPAND('Side %S-%S: %F9.2 mm',CPTN(I),CPTN(J),SIDE)
+	      CALL OUTOPT(EXPDSC)
+50	   CONTINUE
+	ENDIF
+C
+C ......................................................................
+C
+C set up the transform.
+	CALL CPSET(CPTS)
+C
+C test the goodness of fit.
+	XRMS=0.0
+	YRMS=0.0
+	XMAX=0.0
+	YMAX=0.0
+	DO 60 I=1,4
+	   CALL CPUSE(CPTS(1,I),CPTS(2,I))	! can destroy these now
+	   DX=CPTS(1,I) - CPTS(3,I)
+	   DY=CPTS(2,I) - CPTS(4,I)
+	   DX=ABS(DX)
+	   DY=ABS(DY)
+	   DXARR(I)=DX
+	   DYARR(I)=DY
+	   XRMS=XRMS + DX*DX
+	   YRMS=YRMS + DY*DY
+	   IF (DX.GT.XMAX) XMAX=DX
+	   IF (DY.GT.YMAX) YMAX=DY
+60	CONTINUE
+	XRMS=SQRT(XRMS/4.0)
+	YRMS=SQRT(YRMS/4.0)
+C
+C ......................................................................
+C If diagnostics wanted or errors unacceptable (>0.5% of sidelength)
+C give the user a summary of the setup.
+C
+	XSIDE=ABS(CPTS(3,3)-CPTS(3,2))
+	YSIDE=ABS(CPTS(4,1)-CPTS(4,2))
+	IF (DIAG.OR.(ABS(XMAX).GT.ABS(XSIDE)/200.0
+     &          .OR.ABS(YMAX).GT.ABS(YSIDE)/200.0))THEN
+	   CALL OUTOPT(' ')
+	   CALL OUTOPT('Four point transform coefficients:')
+	   DO 70 I=1,3
+	      CALL EXPAND('%A3     %E7     %E7',
+     &		       TERMS(I),CPCOEF(I,1),CPCOEF(I,2))
+	      CALL OUTOPT(EXPDSC)
+70	   CONTINUE
+	   CALL OUTOPT(' ')
+	   CALL OUTOPT('Corner points in map space:')
+	   CALL EXPAND(
+     &	        '%(14 %)Specified%(15 %)Approximated%(13 %)Residuals')
+	   CALL OUTOPT(EXPDSC)
+C
+	   DO 80 I=1,4
+	      CALL EXPAND(
+     &	        '%S %F12.3, %F12.3 %F12.3, %F12.3 %F9.4 %F9.4',
+     &	        CPTN(I),CPTS(3,I),CPTS(4,I),CPTS(1,I),CPTS(2,I),
+     &          DXARR(I),DYARR(I))
+	      CALL OUTOPT(EXPDSC)
+80	   CONTINUE
+C
+	   CALL EXPAND('RMS residuals:   %F9.4 %F15.4',XRMS,YRMS)
+	   CALL OUTOPT(EXPDSC)
+	   CALL EXPAND('Max residuals:   %F9.4 %F15.4',XMAX,YMAX)
+	   CALL OUTOPT(EXPDSC)
+	   CALL OUTOPT(' ')
+	   IF (.NOT.VT100) CALL LSL_WAIT(5,2)     ! wait for 5 seconds
+	ENDIF				      ! success !!
+C
+C ......................................................................
+C If errors unacceptable (>0.5% of sidelength) tell the user and make 
+C him do the setup again
+	IF (ABS(XMAX).GT.ABS(XSIDE)/200.0
+     &          .OR.ABS(YMAX).GT.ABS(YSIDE)/200.0)THEN
+	   CALL OUTOPT
+     &    (WARNING//'Setup errors unacceptable. Please try again.')
+	   IF (.NOT.VT100) CALL LSL_WAIT(5,2)    ! wait for 5 seconds
+	   GOTO 10
+	ELSE
+	   IF (.NOT.MTABLE) CALL STOP_TAB(OK)
+	   GO TO 150
+	ENDIF
+C
+C ......................................................................
+C
+C Errors:
+90	CALL LSL_GETMSG(OK,MESSAGE,I)		! what went wrong
+	J=INDEX(MESSAGE,'!') - 1		! (ignore any FAO stuff)
+	IF (J.LE.0) J=I
+	CALL OUTOPT(MESSAGE(:J))
+	GO TO 140
+C
+100	CALL OUTOPT (
+     &		ERROR//'reading CP value.  Returning to main loop.')
+	GOTO 130
+110	CALL OUTOPT (
+     &		ERROR//'reading CP file.  Returning to main loop.')
+	GOTO 130
+120	CALL OUTOPT (
+     &		ERROR//'reading from table. Returning to main loop.')
+130	IF (.NOT.MTABLE) THEN
+	   CALL CLOSE_TAB(OK)
+	   TABACT=.FALSE.
+	ENDIF
+	IF (.NOT.TTIN) CALL FLRCLO(CPLUN)       ! close CP file
+140	INIDIG =.TRUE.
+150	RETURN
+	END

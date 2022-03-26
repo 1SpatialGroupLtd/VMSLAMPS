@@ -1,0 +1,663 @@
+	SUBROUTINE IFFBDY(FINISH)
+C
+***	MODULE	IFFBDY
+***	IDENT	25JA89
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author:  R. Daly
+C
+C	Modified to handle CB entries            DRC    09 May 1988
+C	PATSET now takes an argument		 MWSR	18 Dec-1986
+C	ROVER version				 MWSR	   Jul-1986
+C	Allow drawing of offset features	 RWR	 6-Jun-1986
+C	SELECT FSN (and LAYER and FC) commands	 RWR	 3-Jun-1986
+C	Rotate command to take an argument	 RWR	30-May-1986
+C	New patterns				 RWR	14-May-1986
+C	Allow areas to be drawn			 RWR	26-Mar-1985
+C	Pick up location point from FS entry	 RWR	26-Mar-1985
+C	Now accepts AC type 3 height values 	 DRC	22-Jan-1985
+C	Assume OS MH if descriptor missing	 PGH    09-Nov-1984
+C	Labelling and contour plot facilities	 DRC    20-Aug-1984
+C	Use new GKS names for window & viewport	 CCB	27-Apr-1984
+C	Handle map and source scales better	 PGH	03-Apr-1984
+C	Handles IENDS correctly			 DM	26-Mar-1984
+C	Created					 RD	21-Jun-1983
+C
+C To read in the body of an IFF file and plot it
+C ROVER version may have a fair amount of redundant code.
+C
+C
+	IMPLICIT NONE
+C
+	BYTE FINISH	! set TRUE when file is finished with
+C
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+	INCLUDE	'LSL$CMNROVER:GKSPAR.PAR'
+C
+	INCLUDE 'LSL$CMNROVER:CB.CMN'
+	INCLUDE	'LSL$CMNROVER:CURFT.CMN'
+	INCLUDE	'LSL$CMNROVER:GKS.CMN'
+	INCLUDE	'LSL$CMNROVER:GRABUF.CMN'
+	INCLUDE	'LSL$CMNROVER:LABEL.CMN'
+	INCLUDE	'LSL$CMNROVER:CONT.CMN'
+	INCLUDE	'LSL$CMNROVER:DRAWIN.CMN'
+	INCLUDE	'LSL$CMNROVER:FPPDAT.CMN'
+	INCLUDE	'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE	'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFSTR.CMN'
+	INCLUDE	'LSL$CMNROVER:SCLDAT.CMN'
+	INCLUDE	'LSL$CMNROVER:SELECT.CMN'
+C
+C Workspace
+	REAL XRANGE,YRANGE	! range of limits taken from RA entry
+	REAL LIMITS(2,4)	! "corners" of map
+	REAL RNGE(4)		! rotated range
+	REAL RTRN(4)		! transformed range
+	REAL XTEMP,YTEMP	! temporary variables used in MH
+	REAL OFSETX,OFSETY	! OFF or ORI offset in mms on sheet
+	REAL FILMSZ(2)		! film size in metres
+	REAL MAXAXI		! maximum extent of film in metres
+	REAL XSHEET,YSHEET	! max size of enlarged sheet in mms
+	REAL RCVAL		! real 'contour' value
+	INTEGER PAUSE_COUNT	! count of features output
+	INTEGER*4 I
+	INTEGER*4 ICVAL         ! contour value
+	INTEGER*4 EOPOSN	! EO entry position held in NO entry
+	INTEGER*4 NOPOSN	! NO entry position
+	INTEGER*2 IECODE	! IFF entry read in
+	INTEGER*2 IELEN		! length of entry read in
+	INTEGER*2 ISTAT(4)	! IFF FS entry values
+	INTEGER*2 ITEMP		! temporary variable
+	INTEGER*2 CUSTNO	! map header customer number
+	INTEGER*2 TMPCNT	! number of chars in TMPBUF
+	INTEGER*2 NUMRED	! number of coord pairs to be read
+	INTEGER*2 STPTS		! number of coord pairs in ST entry
+	INTEGER*2 IENDS		! ST ends flag
+	INTEGER   START		! position in ST that coords read from
+ 	INTEGER*2 ACTYPE        ! AC type number
+	BYTE TMPBUF(81)		! temporary string buffer (for NS/TC)
+	LOGICAL*1 INFTR		! currently within NF - EF entries
+	LOGICAL*1 HADHGT        ! had height value
+	LOGICAL*1 HADCON        ! had contour value
+	LOGICAL*1 TXTF		! currently in a text feature
+	LOGICAL*1 MHDATA(2)	! for reading MH control data
+	LOGICAL*1 WANTED	! set if the current feature code -
+				! or layer is selected
+	LOGICAL*1 HADTS		! had TS entry
+C
+C Functions
+	INTEGER*4 MCESCL,OSSCL	! extract map scale from map headers
+	INTEGER*2 EXPAND	! returns no. of chars expanded
+	LOGICAL*1 LIB$EXTZV
+	LOGICAL*1 FRTFND	! finds a ft code in the FRT table
+	LOGICAL*1 CHKST		! checks no. of pts suits the ft type
+	LOGICAL*1 SETCON        ! set up con col and check if wanted
+	LOGICAL		HADCTRLC
+C
+C***********************************************************************
+C
+C Initialise
+	FINISH=.FALSE.		! not finished with file yet
+C	CALL LIB$INIT_TIMER	! start timing the plot (irrelevant -
+C				! for an interactive session)
+C
+C In ROVER no OFFSET or scale commands
+	TOTOFX = 0.0
+	TOTOFY = 0.0
+	SCALE  = 1.0
+	ENLARG = 1.0/SCLFRT
+C
+C clear any ctrl/c
+	CALL HADCTRLC
+C
+C Tell FRTLIB about scales and rotation
+C
+	CALL SRIUNI(SCLFRT*SCAFAC,ENLARG,THETA)
+C
+C Communicate the device nominal linewidth (in FRT units) to FRTLIB
+	CALL SRISLW(NOMLW*1000.0/SCAFAC)
+C
+C If thick lines have been (un)suppressed for this layer/file then
+C we must tell FRTLIB to permit/suppress thick lines in text/symbols
+	FRTHKS=(.NOT.THKLIN)
+C
+C Start counting number of features each call of IFFBDY
+	IF (PAUSE) PAUSE_COUNT = 0
+C
+C***********************************************************************
+C
+C Main loop - read the next entry
+10	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 998
+C
+C Which entry is it ?
+	IF (IECODE.EQ.'NF') GOTO 30
+	IF (IECODE.EQ.'FS') GOTO 40
+	IF (IECODE.EQ.'CB') GOTO 50
+	IF (IECODE.EQ.'TS') GOTO 70
+	IF (IECODE.EQ.'EF') GOTO 80
+	IF (IECODE.EQ.'TH') GOTO 140
+	IF (IECODE.EQ.'TX') GOTO 150
+	IF (IECODE.EQ.'RO') GOTO 160
+	IF (IECODE.EQ.'CH') GOTO 10
+	IF (IECODE.EQ.'TC') GOTO 170
+	IF (IECODE.EQ.'AC') GOTO 250
+	IF (IECODE.EQ.'NO') GOTO 180
+	IF (IECODE.EQ.'EO') GOTO 200
+	IF (IECODE.EQ.'JP') GOTO 10
+	IF (IECODE.EQ.'JB') GOTO 10
+	IF (IECODE.EQ.'MD') GOTO 10
+	IF (IECODE.EQ.'CC') GOTO 10
+	IF (IECODE.EQ.'CP') GOTO 10
+	IF (IECODE.EQ.'NS') GOTO 210
+	IF (IECODE.EQ.'EM') GOTO 10
+	IF (IECODE.EQ.'RA') GOTO 220
+	IF (IECODE.EQ.'MH') GOTO 230
+	IF (IECODE.EQ.'SH') GOTO 10
+	IF (IECODE.EQ.'EJ') GOTO 240
+	IF (IECODE.EQ.'VO') GOTO 10
+	IF (IECODE.EQ.'SL') GOTO 10
+	IF (IECODE.EQ.'SS') GOTO 10
+	IF (IECODE.EQ.'CS') GOTO 10
+	IF (IECODE.EQ.'HI') GOTO 10
+C
+C Unknown entry
+	CALL WRITEF('Unexpected %C in IFF at %^L%N',IECODE,LPOSH)
+	IF (INFTR)CALL WRITEF('Layer %^W%I6 - Ft no %^L%I6 - ISQ %I6'
+     &     ,LAYNUM,FTNUM,ISQ)
+	GOTO 10
+C
+C Error exits
+12	CALL WRITEF('Layer %^W%I6 - Ft no %^L%I6 - ISQ %I6',
+     &						LAYNUM,FTNUM,ISQ)
+14	CALL IFFNXC('EF',IELEN)
+	IF (IELEN.LT.0) GOTO 998
+	GOTO 10
+C
+C***********************************************************************
+C
+C NF - new feature
+C Has CTRL/C been pressed?
+C By putting it here we ensure that the plotting of a feature has been
+C completed.
+30	IF (HADCTRLC()) THEN
+     	   FSSET = .FALSE.	!unset override setting
+ 	   GOTO 999
+	ENDIF
+	CALL EIHRI(FTNUM,1,1)	! read feature number
+	FTNUM = IAND(FTNUM,65535) ! convert to unsigned longword
+	IF (FTNUM.EQ.0) GOTO 14	! dummy feature
+C
+C Is this feature number selected or not ?
+	WANTED=LIB$EXTZV(FTNUM,1,FSNMAP)
+	IF (.NOT.WANTED) GOTO 14
+C
+	CALL EIHRI(ISQ,1,2)	! read internal sequence number
+	ISQ = IAND(ISQ,65535)	! convert to unsigned longword
+	INFTR =.TRUE.		! now in a new ft
+	TXTF = .FALSE.		! don't know if its a text ft yet
+	FRSTST = .TRUE.		! 1st ST in feature
+	FIRST = .TRUE.		! 1st  ST not reached STDRAW yet
+	LAST = .FALSE.		! last ST not reached STDRAW yet
+	LOOP = .FALSE.		! assume ft will not be closed loop
+	HADRO = .FALSE.		! haven't had an RO entry in ft yet
+	HADVLAB = .FALSE.	! no label to plot
+	HADHGT = .FALSE.	! had an AC height value
+	OFFSETF = .FALSE.	! not an offset feature (FRTSIZ > 0.0)
+	STD = .FALSE.		! not started drawing offset features
+	ROTANG = 0.0		! reset rotation from any previous RO
+	ANGLE = 0.0		! default symbol/text ft angle
+	SIZE  = 0.0		! default symbol/text ft size
+	FTCNT = FTCNT+1		! keep track of total number of fts
+	LFTCNT = LFTCNT+1	! keep track of number of fts in layer
+	FTTHK = 0		! reset text thickness from TH entry
+	TOTPTS = 0		! reset number of points in ft
+	OUTPTR = 0		! reset buffer ptr used in ADDBLK
+	HADTS  = .FALSE.	! not had TS entry yet
+C
+	GOTO 10
+C
+C***********************************************************************
+C
+C FS - feature status (feature code)
+40	IF (FSSET) GOTO 45			! FTCODE fixed
+	CALL EIHRI(ISTAT(1),MIN0(IELEN,4),1)
+	FTCODE=ISTAT(1)		! extract ft code
+	IF (FTCODE.LT.0.OR.FTCODE.GT.MAXFC) THEN
+	  CALL WRITEF('Illegal ft code %^W%N found - ft ignored',FTCODE)
+	   GOTO 12
+	ENDIF
+C
+C Is this feature code selected or not ?
+	I = FTCODE			! convert to long
+	WANTED=LIB$EXTZV(I,1,FCMAP)
+	IF (.NOT.WANTED) GOTO 14
+C
+C Look the feature code up in the FRT table
+45	IF (FRTFND(FTCODE)) THEN
+	  CALL WRITEF('Unknown ft code %^W%N found - ft ignored',FTCODE)
+	  GOTO 12
+	ENDIF
+C
+C Set up line pattern, and thickness
+	IF (FRTLIN.OR.FRTARE.OR.FRTARC.OR.FRTCUR) THEN
+	   CALL SETLIN
+           IF (NFHGT) ICVAL = FTNUM
+	   IF (CONCMD.AND.NFHGT) THEN
+	      IF (SETCON(ICVAL)) GOTO 14
+           ENDIF
+C
+C offset feature?
+	   IF (FRTLIN.AND.FRTSIZ.NE.0.0) THEN
+	      OFFSETF = .TRUE.
+	      OFFDIST = FRTSIZ
+	   ENDIF
+	ENDIF
+C
+C Get locating point for text from FS(3), if it exists
+	IF (FRTTEX) THEN
+	   LOCAT=0
+	   IF (POSOPT) THEN		! positioning flag set
+	      IF (IELEN.GE.3) THEN
+	         LOCAT=ISTAT(3).AND.'17'O	! get text location
+	         IF (LOCAT.GT.8) THEN		! in range 0-8
+	            CALL WRITEF(
+     &	       'Illegal text location code %^W%N; defaulted to 0',LOCAT)
+	            LOCAT=0
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	   GOTO 10			! no NF labelling for texts
+	ENDIF
+C
+C set up size for symbol strings
+	IF (FRTGT.EQ.STRTYP) CALL ANGSIZ
+C
+C Set up NF labelling if requested
+	IF (LABNF) THEN
+	   TXPTR = EXPAND('%W%^L%N',TXBUF,FTNUM)
+	   HADVLAB=.TRUE.
+	ELSE
+	   HADVLAB=.FALSE.
+	ENDIF
+C
+C Look ahead if this is a curve to see if the ft is a loop or not
+C This is because INTRPL requires to know this in order to generate
+C points in a sensible order and so keep line patterns in phase
+	IF (FRTCUR) CALL LOOPY
+	GOTO 10
+C
+C***********************************************************************
+C
+C ST - string of coordinates
+C There is an unknown number of coords in the entry so we read
+C them in blocks (currently of up to 200 coord pairs)
+C There is always a block buffered (held in COORDS) which is output
+C when the next block has been read. The last block is output when
+C an IFF EF entry is found. This allows the last block to be signalled
+C as being the last block
+50	CALL EIHRCB_HEAD(CBH)
+	STPTS = CBH.NROW
+	IENDS = CBH.FLAGS
+	IF (STPTS.LE.0) GOTO 10
+	TOTPTS=TOTPTS+STPTS	! update total number of coords in ft
+	START=0			! position reading from in ST
+C
+C Do we want an invisible move to the 1st point ?
+C If this is not the first ST and the move is invisible, flush the
+C buffer first. Ignore invisibles in areas.
+	IF ((IENDS.AND.1).EQ.0.AND..NOT.(FRSTST.OR.FRTARE)) THEN
+	   LAST=.TRUE.		! pretend it's the end of this feature
+	   CALL BUFFER		! force out the buffer in hand
+	   LAST=.FALSE.		! drop the pretence ..
+	   FIRST=.TRUE.		! and tell a few blatant lies !!
+	   FRSTST=.TRUE.
+	   STD = .FALSE.	! not started outputting offset lines
+	   CALL OUTBLK		! output the previous coords
+	   CALL PATSET(FRTSC)	! reset pattern to start at end of gap
+				! this does not fail as pattern is set up
+	ENDIF
+C
+C Copy points from IFF in maximal chunks to minimise overheads
+	IF(SIMPLE_XY.AND.STPTS.LE.200)THEN
+	  CALL EIHRCB_DATA(BLKBUF)		!direct to buffer
+	ELSE
+	  CALL EIHRCB_DATA(CBD)			!to scratch array
+	ENDIF
+C
+C Read in the 1st block of coords
+C loop back to here for further buffers
+60	NUMRED=MIN0(STPTS,BLKSIZ)
+	BLKPTS=NUMRED
+	IF (SIMPLE_XY) THEN
+	   IF (START.NE.0.OR.STPTS.GT.200) CALL VIOMV3(
+     &			CBD.R(START*CBH.NCOL+1), 8*NUMRED, BLKBUF )
+	ELSE
+	  CALL IFS_CB_READ(CBH,CBD,BLKBUF,2,COLHXY,START+1,START+NUMRED)
+	ENDIF
+C
+C If labelling, then draw label now
+	IF (FRSTST) THEN
+	   IF (HADVLAB) THEN
+	      VLABX(1)=BLKBUF(1,1)
+	      VLABY(1)=BLKBUF(2,1)
+	      IF (BLKPTS.GT.1) THEN
+	        VLABX(2)=BLKBUF(1,2)
+	        VLABY(2)=BLKBUF(2,2)
+	      ELSE
+	        VLABX(2)=VLABX(1)		! force angle 0
+	        VLABY(2)=VLABY(1)
+	      ENDIF
+	      CALL DRWLAB
+	   ENDIF
+C
+C set colour for feature
+	   IF (CURCOL.GE.0)  THEN
+	      CALL SETCOL(CURCOL)
+	      CALL SRICOL(CURCOL)
+	   ELSE
+	      IF ((FRTCOL .GT. 0).AND. (FRTCOL .LE. NUMCOL)) THEN
+	         CALL SETCOL(FRTCOL)
+	         CALL SRICOL(-1)
+	      ELSE
+C
+C If FRT colour is black then it won't be displayed otherwise
+C or if its to big for current planes setting
+C
+		 CALL SETCOL(1)
+		 CALL SRICOL(1)
+	      ENDIF
+	   ENDIF
+	ENDIF
+C 
+	CALL BUFFER			! output the coords
+	STPTS=STPTS-NUMRED		! how many points remain in ST?
+	IF (STPTS.LE.0) GOTO 10		! any more points?
+	START=START+NUMRED		! update the reading position
+	GOTO 60				! back for next block of coords
+C
+C***********************************************************************
+C
+C TS - Text status
+70	CONTINUE
+C
+C only valid in text features - ignore otherwise
+	IF (.NOT.FRTTEX) THEN
+	   CALL WRITEF(
+     &	         'TS entry found in non-text feature - entry ignored')
+	   GOTO 10
+	ENDIF
+C
+C if not the first TS, then output the last text component
+C
+	IF (HADTS) THEN
+C check that number of points is valid
+C the feature type
+
+	   IF (.NOT.(CHKST())) GOTO 130	! jump to abort the ft
+C
+C Work out the angle and size
+	   CALL ANGSIZ
+C
+C Get the feature out
+	   LAST=.TRUE.
+	   CALL BUFFER	! empty the ST buffers
+	ENDIF
+C
+C overwrite ISTAT
+C
+	CALL EIHRI(ISTAT(1),MIN0(IELEN,4),1)
+	FTCODE=ISTAT(1)		! extract ft code
+	IF (FTCODE.LT.0.OR.FTCODE.GT.MAXFC) THEN
+	   CALL WRITEF('Illegal text commponent code %^W%N found '//
+     &	               '- ft ignored',FTCODE)
+	   GOTO 12
+	ENDIF
+C
+	IF (FRTFND(FTCODE)) THEN
+	   CALL WRITEF('Unknown text component code %^W%N found '//
+     &	               '- ft ignored',FTCODE)
+	   GOTO 12
+	ENDIF
+C
+C
+C only valid in text features - ignore otherwise
+	IF (.NOT.FRTTEX) THEN
+	   CALL WRITEF(
+     &	         'TS entry not text code - entry ignored')
+	   GOTO 10
+	ENDIF
+C
+C Get locating point for text from TS(3), if it exists
+	LOCAT=0
+	IF (POSOPT) THEN		! positioning flag set
+	   IF (IELEN.GE.3) THEN
+	      LOCAT=ISTAT(3).AND.'17'O	! get text location
+	      IF (LOCAT.GT.8) THEN		! in range 0-8
+	         CALL WRITEF(
+     &	      'Illegal text location code %N; defaulted to 0',LOCAT)
+	         LOCAT=0
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C now had a TS - treat like an NF
+C
+	FRSTST = .TRUE.		! 1st ST in feature
+	FIRST = .TRUE.		! 1st  ST not reached STDRAW yet
+	LAST = .FALSE.		! last ST not reached STDRAW yet
+	HADRO = .FALSE.		! haven't had an RO entry in ft yet
+	ROTANG = 0.0		! reset rotation from any previous RO
+	ANGLE = 0.0		! default symbol/text ft angle
+	SIZE  = 0.0		! default symbol/text ft size
+	FTTHK = 0		! reset text thickness from TH entry
+	TOTPTS = 0		! reset number of points in ft
+	OUTPTR = 0		! reset buffer ptr used in ADDBLK
+	CURCOL = -1		! assume use FRT colour
+	HADTS = .TRUE.
+C
+	GOTO 10
+C
+C***********************************************************************
+C
+C EF - end feature
+C Check that the number of points in this feature is sensible for
+C the feature type
+80	IF (.NOT.(CHKST())) GOTO 130	! jump to abort the ft
+C
+C Work out the angle and size for symbols and text features
+	IF ((FRTSYM.AND.FRTGT.NE.STRTYP).OR.FRTTEX) CALL ANGSIZ
+C
+C Get the feature out
+110	LAST=.TRUE.
+	CALL BUFFER	! empty the ST buffers
+	IF (FRTSYM.OR.FRTTEX) GOTO 130
+	CALL OUTBLK	! empty the output buffers for linear features
+C
+C Terminate feature
+130	INFTR=.FALSE.
+C
+	GOTO 10
+C
+C***********************************************************************
+C
+C TH - set thickness
+C This entry is only used for text height for current ft - if this
+C is not set then the text height is taken from the FRT size
+140	CALL EIHRI(FTTHK,1,1)
+	GOTO 10
+C
+C***********************************************************************
+C
+C TX - text string in aligned text feature
+C Check the number of characters is not too large
+150	IF (IELEN.GT.40) THEN
+	   CALL WRITEF('Text feature contains too many chars (max 80)')
+	   CALL WRITEF('Layer %^W%I6 - Ft no %^L%I6 - ISQ %I6',
+     &					LAYNUM,FTNUM,ISQ)
+	   IELEN=40		! chop off any extra characters
+	ENDIF
+C
+C Now read the characters in
+	CALL EIHR(TXBUF,IELEN,1)
+	TXPTR=IELEN*2
+C
+C Decrement the character count if the last byte (of the whole number
+C of words we have read in) is null
+	IF (TXBUF(TXPTR).EQ.0) TXPTR=TXPTR-1
+	TXTF=.TRUE.
+	GOTO 10
+C
+C***********************************************************************
+C
+C RO - rotation of symbol or text feature (given in radians -
+C clockwise from the horizontal)
+160	CALL EIHRR(ROTANG,1,1)
+	HADRO=.TRUE.
+	GOTO 10
+C
+C***********************************************************************
+C
+C TC - transmitted comment
+170	IF (.NOT.REPORT) GOTO 10
+	TMPCNT=MIN(IELEN,40)		! how many characters are there?
+	CALL EIHR(TMPBUF,TMPCNT,1)
+	TMPCNT = TMPCNT*2		! bytes
+	TMPBUF(TMPCNT+1)=0
+	CALL WRITEF('TC %A80',TMPBUF)
+	GOTO 10
+C
+C***********************************************************************
+C
+C NO - new overlay
+180	CALL EIHRI(LAYNUM,1,1)
+	IF (LAYNUM.LT.0.OR.LAYNUM.GT.MAXLAY) THEN
+	CALL WRITEF
+     &		('Illegal layer number %^W%N found - layer ignored.',
+     &					LAYNUM)
+	   GOTO 182				! skip it
+	ENDIF
+	I = LAYNUM				! convert to long
+	WANTED=LIB$EXTZV(I,1,LAYMAP)
+	IF (.NOT.WANTED) GOTO 182		! skip it
+C
+C	Check if this layer is selected with OVERRIDE
+	IF (HADOVR) THEN
+	   DO 195 I=1,NOVRRD
+	      IF (LAYNUM.EQ.OVERRD(1,I)) THEN
+	         FTCODE=OVERRD(2,I)
+	         FSSET=.TRUE.
+	         GOTO 196
+	      ENDIF
+195	   CONTINUE
+	ENDIF
+196	IF (REPORT.OR.HADINT) CALL WRITEF('Layer %^W%N.',LAYNUM)
+	IF (HADINT) GOTO 1000			! interactive
+	GOTO 10
+C
+C skip layer
+182	IF (IELEN.GE.4) THEN			! has EO pointer
+	   CALL EIHRL(EOPOSN,1,3)
+	   NOPOSN = LPOSH
+	   CALL IFFPKE(IECODE,IELEN,EOPOSN)	! get EO entry
+	   IF (IECODE.EQ.'EO') GOTO 10		! OK
+	   CALL WRITEF('Bad EO pointer in NO %^W%N',LAYNUM)
+	   CALL IFFPKE(IECODE,IELEN,NOPOSN)	! back to NO
+	ENDIF
+	CALL IFFNXC('EO',IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL WRITEF('Missing EO entry in layer %^W%N',LAYNUM)
+	   GOTO 998
+	ENDIF
+	GOTO 10
+C
+C***********************************************************************
+C
+C EO - empty the output buffers if necessary
+200	IF (REPORT)
+     &     CALL WRITEF
+     &		('Layer %^W%N contained %N features.',LAYNUM,LFTCNT)
+	FSSET=.FALSE.
+	LFTCNT=0
+	IF (HADINT) CALL GUWK(WKID,GSUPP)
+	GOTO 10
+C
+C***********************************************************************
+C
+C NS - new section
+210	IF (IELEN.EQ.0.OR..NOT.REPORT) GOTO 10
+	TMPCNT=MIN(IELEN,40)		! how many characters are there?
+	CALL EIHR(TMPBUF,TMPCNT,1)
+	TMPCNT = TMPCNT*2		! bytes
+	TMPBUF(TMPCNT+1)=0
+	CALL WRITEF('Section: %A80',TMPBUF)
+	GOTO 10
+C
+C***********************************************************************
+C
+C RA - range of coordinates in this file
+C Extract the range for use in working out the scale, unless we
+C have been given a WINDOW command
+220	IF (.NOT.HADWIN) CALL EIHRR(RANGE,4,1)
+	HADRA = .TRUE.		! had a RAnge now
+	GOTO 10
+C
+C***********************************************************************
+C
+C MH - map header contains map scale
+230	GOTO 10
+C
+C***********************************************************************
+C
+C EJ - reached end of IFF file
+240	IF (.NOT.HADINT) CALL GUWK(WKID,GSUPP)
+	IF (REPORT) THEN
+	   CALL WRITEF
+	   CALL WRITEF('Total of %^W%N features found in file.',FTCNT)
+	ENDIF
+	FTCNT=0
+	FINISH=.TRUE.
+	GOTO 1000
+C
+C***********************************************************************
+C AC - check for AC type 2 or 3
+250 	IF (HADHGT) GOTO 10		! already had a height
+	CALL EIHRI(ACTYPE,1,1)
+	IF (ACTYPE.EQ.2.OR.ACTYPE.EQ.3) THEN
+	   IF (ACTYPE.EQ.2) THEN
+	      CALL EIHRL(ICVAL,1,2)
+	   ELSE
+	      CALL EIHRR(RCVAL,1,2)
+	      ICVAL=NINT(RCVAL)
+	   ENDIF
+	   IF (CONCMD) THEN
+	      IF (SETCON(ICVAL)) GOTO 14
+           ENDIF
+	   HADHGT=.TRUE.
+	   IF (LABHGT) THEN
+	      IF(LABINX)THEN
+C	Test if divisible by contour index
+	        IF(MOD(ICVAL,CINDEX).NE.0)THEN
+	          HADVLAB=.FALSE.
+	          GOTO 10
+	        ENDIF
+	      ENDIF
+C
+	      IF (ACTYPE.EQ.2) THEN
+	         TXPTR = EXPAND('%W%^L%N',TXBUF,ICVAL)
+	      ELSE
+	         TXPTR = EXPAND('%W%F0.2',TXBUF,RCVAL)
+	      ENDIF
+              HADVLAB=.TRUE.
+C
+	   ENDIF
+	ENDIF
+	GOTO 10
+C
+C*********************************************************************
+C Errors
+998	CALL WRITEF('Unexpected end of IFF file.')
+999	FINISH=.TRUE.
+1000	RETURN
+C
+	END

@@ -1,0 +1,390 @@
+	INTEGER FUNCTION GKS_CLIP_POLY(LIMIT,XORY,HILO,
+     &	 NPOLY,MAXPOL,POLPTR,NEWPOL,NPTS,MAXPTS,PTS,PPTR,MAXINT,INTPT)
+C
+**	MODULE	GKS_CLIP_POLY
+**	IDENT	08JL92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	26-Jan-1991
+C
+C Clip one or more polygons to a single horizontal/vertical line
+C Returns number of output polygons (which is also in NPOLY)
+C The arguments are left ready for another call with a different line
+C
+C This routine may not produce the correct answer for polygons which
+C intersect themselves. See the code in GKS_CLIP_POLY2.SRC for one
+C which is thought to get this right.
+C
+	IMPLICIT NONE
+C
+C On entry LIMIT contains the clipping limit, XORY is 1 if limit is X
+C and 2 if Y, HILO is 1 if want stuff above limit or -1 if below.
+C PTS is an array of data points in no particular order - NPTS are
+C presently used and more may be added on the end by this routine.
+C NPOLY is the number of input polygons. POLPTR contains an index into
+C PTS for a single point belonging to each polygon.
+C PPTR contains indices of next/previous connected points.
+C The polygons are traced using these pointers until they return to
+C their start - the start/end point need not be duplicated.
+C NEWPOL is a workspace array which is copied back into POLPTR
+C on completion.
+C INTPT is a workspace array used to store indices of intersections
+C of a polygon with the clipping line.
+C Various dimensions/limits passed are NPTS - max number of data points,
+C MAXINT - max number of intersections of one polygon with clipping line,
+C MAXPOL - max number of resulting polygons.
+C
+C The output of the routine is a number of polygons constructed the
+C the same way as for input.
+C
+C Arguments
+	REAL	LIMIT		! in - the clipping limit
+	INTEGER	XORY 		! in - 1 if x limit, 2 if y
+	INTEGER	HILO 		! in - 1 if high side wanted, 2 if low
+	INTEGER	NPOLY		! in/out - number of polygons
+	INTEGER	MAXPOL		! in - max number of polygons
+	INTEGER	POLPTR(MAXPOL)	! in/out - pointers to a point for each poly
+	INTEGER	NEWPOL(MAXPOL)	! workspace - ditto
+	INTEGER	NPTS		! in/out - number of used points in PTS,PPTR
+	INTEGER	MAXPTS		! in - max number of points
+	REAL	PTS(2,MAXPTS)	! in/out - data points
+	INTEGER	PPTR(2,MAXPTS)	! in/out - for/back pointers
+	INTEGER	MAXINT		! in - max number of intersections
+	INTEGER	INTPT(MAXINT)	! workspace - intersection points
+C
+C Functions used
+	INTEGER	GKS_CF_PT,GKS_COPY_PT
+	EXTERNAL GKS_CF_PT,GKS_COPY_PT
+C
+C Internal variables
+	INTEGER	P,I,J
+	INTEGER	NORP
+	REAL	U1,U2
+	INTEGER	FIRST,NEXT,PREV
+	LOGICAL	INSIDE
+	INTEGER	STORE
+	LOGICAL	IN1,IN2
+	INTEGER	NUMINT
+	INTEGER	NNEW
+C
+	NNEW = 0		! no new polygons to start with
+C
+C For each polygon
+	DO 500 P=1,NPOLY
+C
+C Find a point that is definitely inside - if none then forget this polygon
+	   FIRST = POLPTR(P)
+	   I = FIRST
+C
+C get distance that point is inside limit
+110	   U2 = (PTS(XORY,I)-LIMIT)*HILO
+	   IF (U2.LE.0.0) THEN
+	      I = PPTR(1,I)
+	      IF (I.EQ.FIRST) GOTO 500	! entire polygon is clipped
+	      GOTO 110
+	   ENDIF
+	   INSIDE = .TRUE.		! now inside unclipped area
+	   FIRST = I			! begin with this point
+	   NEXT = PPTR(1,I)
+	   NUMINT = 0			! no intersections with limit yet
+C
+200	   PREV = I
+	   I = NEXT
+	   NEXT = PPTR(1,I)
+	   U1 = U2
+C
+C get distance that next point is inside limit
+	   U2 = (PTS(XORY,I)-LIMIT)*HILO
+C
+C If both points on/outside limit, then if we are already outside limit
+C do nothing, but if inside then add previous point to the list of
+C intersections and set its forward pointer to zero to indicate leaving
+	   IF (U1.LE.0.0.AND.U2.LE.0.0) THEN
+	      IF (INSIDE) THEN
+	         PPTR(1,PREV) = 0
+	         IF (NUMINT.GE.MAXINT) THEN
+	            CALL WRITEF('GKS_CLIP_POLY - too many intersections')
+	            GOTO 500
+	         ENDIF
+	         NUMINT = NUMINT+1
+	         INTPT(NUMINT) = PREV
+	         INSIDE = .FALSE.
+	      ENDIF
+C
+C If both points on/inside limit, then if we are already inside limit
+C do nothing, but if outside then add previous point to the list of
+C intersections and set its backward pointer to zero to indicate entering
+	   ELSEIF (U1.GE.0.0.AND.U2.GE.0.0) THEN
+	      IF (.NOT.INSIDE) THEN
+	         PPTR(2,PREV) = 0
+	         IF (NUMINT.GE.MAXINT) THEN
+	            CALL WRITEF('GKS_CLIP_POLY - too many intersections')
+	            GOTO 500
+	         ENDIF
+	         NUMINT = NUMINT+1
+	         INTPT(NUMINT) = PREV
+	         INSIDE = .TRUE.
+	      ENDIF
+	   ELSE				! crosses clip line
+C
+C If we reach here, we have a line that crosses the clipping limit, so
+C generate a new intersection point and set pointers to include it.
+C Either its forward or backward pointers will be zero, indicating
+C whether we are entering or leaving here.
+C
+	      IF (NPTS.GE.MAXPTS) THEN
+	         CALL WRITEF('GKS_CLIP_POLY - too many points in polygon')
+	         GOTO 500
+	      ENDIF
+	      NPTS = NPTS+1
+	      PTS(XORY,NPTS) = LIMIT
+	      PTS(3-XORY,NPTS) =
+     &		(PTS(3-XORY,I)*U1-PTS(3-XORY,PREV)*U2)/(U1-U2)
+	      IF (NUMINT.GE.MAXINT) THEN
+	         CALL WRITEF('GKS_CLIP_POLY - too many intersections')
+	         GOTO 500
+	      ENDIF
+	      NUMINT = NUMINT+1
+	      INTPT(NUMINT) = NPTS
+	      IF (U1.LT.0.0) THEN	! implies U2.GT.0.0
+	         PPTR(1,NPTS) = I
+	         PPTR(2,NPTS) = 0
+	         PPTR(2,I) = NPTS
+	         INSIDE = .TRUE.
+	      ELSE			! implies U2.LT.0.0,U1.GT.0.0
+	         PPTR(1,NPTS) = 0
+	         PPTR(2,NPTS) = PREV
+	         PPTR(1,PREV) = NPTS
+	         INSIDE = .FALSE.
+	      ENDIF
+	   ENDIF
+C
+C If not back to starting point yet, then proceed with next point
+	   IF (I.NE.FIRST) GOTO 200
+C
+C If no intersections, polygon is unclipped, so just one polygon
+	   IF (NUMINT.EQ.0) THEN
+	      IF (NNEW.GE.MAXPOL) THEN
+	         CALL WRITEF('GKS_CLIP_POLY - too many polygons')
+	         GOTO 500
+	      ENDIF
+	      NNEW = NNEW+1
+	      NEWPOL(NNEW) = FIRST
+	      GOTO 500
+	   ENDIF
+C
+C It is only sensible for the polygon to cut the clipping line an
+C even number of times
+	   IF (MOD(NUMINT,2).NE.0) THEN
+	      CALL WRITEF('GKS_CLIP_POLY - odd number of intersections')
+	      GOTO 500
+	   ENDIF
+C
+C Sort the intersection points in order of increasing
+C coordinate along the clipping line.
+C We first tell the comparison routine GKS_CF_PT whether to sort X or Y,
+C and in which array, by calling the setup routine.
+	   CALL GKS_CF_PT_SETUP(PTS,3-XORY)	! set up comparison routine
+	   CALL HEAP_SORT(INTPT,NUMINT,GKS_CF_PT,GKS_COPY_PT,STORE)
+C
+C Consider the intersection points in pairs.
+C We want to connect each pair by a line - if one of the pair is entering
+C the region while the other is leaving, this is easy, but if both go
+C the same way, then we reverse the chain attached to the second point
+C (until the point at which it again reaches the clipping line).
+	   DO 300 I=1,NUMINT,2
+	      IN1 = PPTR(1,INTPT(I)).NE.0	! non-zero forward pointer
+	      IN2 = PPTR(1,INTPT(I+1)).NE.0
+C
+	      IF (IN1.EQV.IN2) THEN
+C
+C reverse second chain until pointer is zero, indicating that a free
+C end on the clipping line has been reached.
+	         IF (IN2) THEN
+	            NORP = 2
+	         ELSE
+	            NORP = 1
+	         ENDIF
+	         J = INTPT(I+1)
+250	         STORE = PPTR(1,J)
+	         PPTR(1,J) = PPTR(2,J)
+	         PPTR(2,J) = STORE
+	         J = PPTR(NORP,J)
+	         IF (J.NE.0) GOTO 250
+	      ENDIF
+C
+C Now we have two ends with the opposite sense, so connect them up
+	      IF (IN1) THEN
+	         NORP = 2
+	      ELSE
+	         NORP = 1
+	      ENDIF
+	      PPTR(NORP,INTPT(I)) = INTPT(I+1)
+	      PPTR(3-NORP,INTPT(I+1)) = INTPT(I)
+300	   CONTINUE
+C
+C Now trace the polygons - all must begin at intersection points except in
+C the case of a single unclipped polygon, which has been dealt with already,
+C so we trace round starting at the first intersection, marking which other
+C intersections we use on the way. Then repeat for any remaining unused
+C intersections.
+C Unused intersections are flagged by negating their forward pointers - we
+C must ensure of course that these are returned to their positive state.
+C
+C Flag all intersections as unused
+	   DO 310 I=1,NUMINT
+	      PPTR(1,INTPT(I)) = -PPTR(1,INTPT(I))
+310	   CONTINUE
+C
+C Trace round from unused intersections
+	   DO 350 I=1,NUMINT
+	      FIRST = INTPT(I)
+	      IF (PPTR(1,FIRST).GT.0) GOTO 350
+	      IF (NNEW.GE.MAXPOL) THEN
+	         CALL WRITEF('GKS_CLIP_POLY - too many polygons')
+	         GOTO 500
+	      ENDIF
+	      NNEW = NNEW+1
+	      NEWPOL(NNEW) = FIRST
+	      J = FIRST
+C
+C Mark point as used (if it is not an intersection, then the pointer
+C will not be negative anyway)
+320	      IF (PPTR(1,J).LT.0) PPTR(1,J) = -PPTR(1,J)
+	      J = PPTR(1,J)
+	      IF (J.NE.FIRST) GOTO 320	! not back to start yet
+350	   CONTINUE
+C
+500	CONTINUE
+C
+C copy new polygons back to old ones
+	NPOLY = NNEW
+	DO 600 I=1,NPOLY
+	   POLPTR(I) = NEWPOL(I)
+600	CONTINUE
+C	
+	GKS_CLIP_POLY = NPOLY	! return number of output polygons
+	RETURN
+C
+	END
+C
+	INTEGER FUNCTION GKS_CF_PT( ELE_ONE, INDEX_1, ELE_TWO, INDEX_2 )
+C
+***	IDENT	02JA85
+***	MODULE	GKS_CF_PT
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author CC Brunt, 28-Jan-1991
+C
+	IMPLICIT NONE
+C
+C GKS_CF_PT is a longword function to compare two elements
+C
+C	   eg	GKS_CF_PT( TABLE, index1, TABLE, index2 )
+C	   or	GKS_CF_PT( TABLE, index1, STORE, 1 )
+C	   or	GKS_CF_PT( STORE, 1,      TABLE, index2 )
+C
+C	returns	-1 if  element 'index1' < element 'index2'
+C		 0 if			=
+C		+1 if			>
+C
+C In this case the elements point into a 2xN array of coordinates.
+C This array, and whether to sort on X or Y, are passed to grubby
+C entry point, and saved for future use.
+C
+C Arguments
+C
+	INTEGER		ELE_ONE(*)
+	INTEGER		INDEX_1		! index into ELE_ONE
+	INTEGER		ELE_TWO(*)
+	INTEGER		INDEX_2		! index into ELE_TWO
+C
+C and for entry point
+	REAL		PTS(2,*)
+	INTEGER		XORY
+C
+C function called
+	INTEGER		GKS_CF_PT_SUB
+C
+C entry point
+	INTEGER		GKS_CF_PT_SETUP
+C
+C workspace
+	INTEGER		XY
+	SAVE		XY
+	INTEGER		ARRLOC
+	SAVE		ARRLOC
+C
+C do the comparison, using subroutine to dereference ARRLOC
+C
+	GKS_CF_PT = GKS_CF_PT_SUB(ELE_ONE(INDEX_1), ELE_TWO(INDEX_2),
+     &						%VAL(ARRLOC),XY)
+	RETURN
+C
+C Grubby entry point to remember address of the array, and whether
+C sorting on X (1), or Y (2)
+	ENTRY		GKS_CF_PT_SETUP(PTS,XORY)
+	ARRLOC = %LOC(PTS)
+	XY = XORY
+	RETURN
+C
+	END
+C
+C
+	INTEGER FUNCTION GKS_CF_PT_SUB( INDEX_1, INDEX_2, PTS, XY )
+C
+***	IDENT	02JA85
+***	MODULE	GKS_CF_PT_SUB
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author CC Brunt, 29-Jan-1991
+C
+	IMPLICIT NONE
+C
+C Arguments
+C
+	INTEGER		INDEX_1		! first index
+	INTEGER		INDEX_2		! second index
+	REAL		PTS(2,*)	! array which indices point to
+	INTEGER		XY		! 1 for X, 2 for Y
+C
+C do the comparison
+C
+	IF (PTS(XY,INDEX_1).LT.PTS(XY,INDEX_2)) THEN
+	   GKS_CF_PT_SUB = -1
+	ELSEIF (PTS(XY,INDEX_1).GT.PTS(XY,INDEX_2)) THEN
+	   GKS_CF_PT_SUB = 1
+	ELSE
+	   GKS_CF_PT_SUB = 0
+	ENDIF
+C
+	RETURN
+	END
+C
+	SUBROUTINE	GKS_COPY_PT( FROM, FINDEX, TO, TINDEX )
+C
+***	IDENT	02JA85
+***	MODULE	GKS_COPY_PT
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author CC Brunt, 28-Jan-1990
+C
+	IMPLICIT NONE
+C
+C GKS_COPY_PT is a routine to copy an element of FROM to an element of TO
+C
+C Arguments
+C
+	INTEGER		FROM(*)
+	INTEGER		FINDEX		! index into FROM
+	INTEGER		TO(*)
+	INTEGER		TINDEX		! index into TO
+C
+	TO( TINDEX ) = FROM( FINDEX )
+C
+	RETURN
+	END

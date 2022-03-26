@@ -1,0 +1,306 @@
+	  INTEGER*4  FUNCTION CAM_FEATURE(DIMEN,GNAME,GFORM)
+C
+***	MODULE	CAM_FEATURE
+***	IDENT	15NO88
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,England
+C
+C Created.				FJB  14-Sept-1988
+C
+CMOD    Text features added             JDB  14-Nov-1988
+C
+CMOD    Arc features (GT 4,5) translated to ARC
+C
+C Construct a feature in KERN CAM format.
+C
+	IMPLICIT NONE
+C
+C Parameters:                                          
+	INCLUDE 'LSL$CMNI2KERNCAM:PARAMS.PAR'
+	INCLUDE 'LSL$CMNI2KERNCAM:I2KERNCAMMSG.PAR'
+C
+C Common:
+ 	INCLUDE 'LSL$CMNI2KERNCAM:COMMAND.CMN'
+ 	INCLUDE 'LSL$CMNI2KERNCAM:FEATURE.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+        INCLUDE 'LSL$CMNFRT:FRTCOM.CMN'
+C
+C Word:
+	INTEGER*2	M,N	! temporary/loop variable
+	INTEGER*2	DIMEN	! 2D or 3D coordinates given
+C
+	REAL		ZSBUFF(3,200)	! array for 3D coordinates
+	REAL		STBUFF(2,200)	! array for 2D coordinates
+	REAL		ZERO
+	REAL		XC
+	REAL		YC
+	REAL		ZC
+C
+C Longword:
+	INTEGER		OK,IERR	! for error return	
+	INTEGER		LPOSEO	! position of next EO entry
+	INTEGER*4	NFNUM(2)! feature number
+C
+C Logical:
+	LOGICAL		PEN_UP	! current pen state - up/down
+	LOGICAL	  	IN_SYMB ! decoding symbol entries
+	LOGICAL		HAD_RO	! had rotation entry
+C
+C Character:
+	CHARACTER*8	GFORM,GNAME	! graphical type names
+C
+C Functions:
+	INTEGER*4	FLWLIN
+	INTEGER*4	FLWSTR
+	INTEGER*4	IFFNXT
+C                                         
+C
+C Presets:
+	INTEGER*4 	SS$_NORMAL
+	EXTERNAL  	SS$_NORMAL	! normal successful 
+C                                       !   completion
+C ...............................................................
+C Assume the best
+	CAM_FEATURE = .TRUE.
+C
+	PEN_UP = .FALSE.
+	HAD_RO = .FALSE.
+	IN_SYMB = .FALSE.
+C
+	IF(GNAME .EQ. 'SYMBOL  ')IN_SYMB = .TRUE.
+C
+C Define scale if we have one, or writing a symbol feature
+	IF((HAD_SCALE) .OR. (IN_SYMB))THEN
+	   CALL EXPAND('CHANGE TO SCALE       %P %F11.6',AC_SCALE)
+	   IF(.NOT. FLWLIN(,,IERR))GOTO 998
+	ENDIF
+C
+C Adjust FC for linetype (must be between 0-999 for KERN CAM)
+C so remove thousands from FC value
+	IF(IFC .GT. 999) IFC = MOD (IFC, 1000)
+C
+C Start feature
+	CALL EXPAND('CHANGE TO %S%^W%P %N4',GNAME,IFC)
+	IF (HAD_FCNAME) THEN
+           CALL APPEND ('            ')
+           DO 5 M = 1,AC_FC_NAME_LEN
+           CALL APPEND ('%A1', AC_FC_NAME(M))
+5          CONTINUE
+        ENDIF
+	IF(.NOT. FLWLIN(,,IERR))GOTO 998
+C
+	IF(.NOT. IN_SYMB)THEN
+	   CALL EXPAND('CHANGE TO %S',GFORM)
+	   IF(.NOT. FLWLIN(,,IERR))GOTO 998
+C
+	   IF(HAD_HOUR)THEN
+	      CALL EXPAND('CHANGE TO HOUR          %P %F5.2',
+     &                                                  AC_HOUR)
+	      IF(.NOT. FLWLIN(,,IERR))GOTO 998
+	   ENDIF
+	ENDIF
+C
+C  *************************************************************
+C  			M A I N   L O O P
+C
+C Get coordinates
+10	CALL EIHRS(NPTS,IENDS)
+	IF(NPTS .LT. 1) GOTO 999
+C
+	IF((GFORM .EQ. 'STRAIGHT') .OR. 
+     &	   (GFORM .EQ. 'ARC     ') .OR.
+     &	   (GFORM .EQ. 'CONTOUR ') .OR.
+     &	   (GFORM .EQ. 'CURVE   '))THEN
+C
+C Move with pen up (eg. to start of feature or end of invisible 
+C segment)
+	   IF((IENDS .EQ. 0) .AND. (.NOT. PEN_UP))THEN
+   	      IF(.NOT. FLWSTR('CHANGE TO PEN UP',IERR)) GOTO 998
+	      PEN_UP = .TRUE.
+C
+C Move with pen down (e.g. to points within feature)
+	   ELSEIF((IENDS .EQ. 1) .AND. (PEN_UP))THEN        
+	      IF(.NOT.FLWSTR('CHANGE TO PEN DOWN',IERR))GOTO 998
+	      PEN_UP = .FALSE.
+	   ENDIF
+C
+C No pen up/down movement for symbols
+	ELSEIF(GFORM .EQ. 'OBJECT')THEN
+  	   GOTO 15
+C
+C can't cope with any thing else
+	ELSE    
+	      GOTO 999
+	ENDIF
+C
+C Get the coords. and write them to the KERN CAM file
+C 2D string
+15	IF(DIMEN .EQ .2)THEN     
+	   ZC = 0.0D0
+	   IF(HAD_HEIGHT) ZC = AC_HEIGHT
+	   CALL EIHRR(STBUFF,NPTS*2,1)
+C
+           IF (FRTGT.EQ.5) THEN
+C
+C  create an extra point to close a circle feature
+C
+              NPTS = 4
+              STBUFF(1,4) = STBUFF(1,1)
+              STBUFF(2,4) = STBUFF(2,1)
+           ENDIF
+C
+	   DO 20,N=1,NPTS
+	      XC = STBUFF(1,N) + MD2LOC(1)     	! correct for 
+	      YC = STBUFF(2,N) + MD2LOC(2)	! origin offset
+C
+C Don't write symbol coords until after any RO entry
+	      IF(IN_SYMB)GOTO 30
+C
+	      CALL EXPAND('%(3%P %F12.3%)',XC,YC,ZC)
+	      IF((N .EQ. 1) .AND. (HAD_ZSNAME))THEN
+                 CALL APPEND (' ')
+                 DO 19 M = 1, AC_ZS_NAME_LEN
+		 CALL APPEND('%A1', AC_ZS_NAME(M))
+19               CONTINUE
+	      ENDIF
+C
+	      IF(.NOT. FLWLIN(,,IERR)) GOTO 998
+	      IF((N .EQ. 1) .AND. PEN_UP)THEN
+		 IF(.NOT.FLWSTR('CHANGE TO PEN DOWN',IERR))GOTO 998
+		 PEN_UP = .FALSE.
+	      ENDIF
+20	   CONTINUE
+       	   HAD_ST = .TRUE.
+	ENDIF
+C
+C 3D string
+  	IF(DIMEN .EQ. 3)THEN     
+	   CALL EIHRR(ZSBUFF,NPTS*3,1)
+C
+           IF (FRTGT.EQ.5) THEN
+C
+C  create an extra point to close a circle feature
+C
+              NPTS = 4
+              ZSBUFF(1,4) = ZSBUFF(1,1)
+              ZSBUFF(2,4) = ZSBUFF(2,1)
+              ZSBUFF(3,4) = ZSBUFF(3,1)
+           ENDIF
+C
+	   DO 25,N=1,NPTS
+	      XC = ZSBUFF(1,N) + MD2LOC(1)
+	      YC = ZSBUFF(2,N) + MD2LOC(2)
+	      ZC = ZSBUFF(3,N) 
+C
+C Don't write symbol coords until after any RO entry
+	      IF(IN_SYMB)GOTO 30
+C
+	      CALL EXPAND('%(3%P %F12.3%)',XC,YC,ZC)
+C
+	      IF((N .EQ. 1) .AND. (HAD_ZSNAME))THEN
+                 CALL APPEND (' ')
+                 DO 21 M = 1, AC_ZS_NAME_LEN
+		 CALL APPEND('%A1', AC_ZS_NAME(M))
+21               CONTINUE
+	      ENDIF
+C
+	      IF(.NOT. FLWLIN(,,IERR)) GOTO 998
+	      IF((N .EQ. 1) .AND. PEN_UP)THEN
+		 IF(.NOT.FLWSTR('CHANGE TO PEN DOWN',IERR))GOTO 998
+		 PEN_UP = .FALSE.
+	      ENDIF
+25	   CONTINUE
+	   HAD_ZS = .TRUE.
+	ENDIF
+C
+C Read the rest of the IFF feature entry by entry, 
+C and take action on certain types of entry
+C
+30	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 999       ! error return
+	IF (IECODE.EQ.'ZS') GOTO 10 	! continue processing coords
+	IF (IECODE.EQ.'ST') GOTO 10	! continue processing coords
+	IF (IECODE.EQ.'RO') GOTO 40     ! rotation of symbol
+        IF (IECODE.EQ.'TX') GOTO 50     ! text of feature
+	IF (IECODE.EQ.'EF') GOTO 100    ! normal return
+	IF (IECODE.EQ.'EJ') GOTO 999    ! error return
+	GOTO 30
+C
+C ROtation
+40	CALL EIHRR(ROTN,1,1)
+C
+	HAD_RO = .TRUE.
+	GOTO 30
+C
+C TeXt: IELEN*2 bytes or IELEN words
+50      CALL EIHR (AC_ZS_NAME, IELEN, 1)
+        HAD_ZSNAME = .TRUE.
+        AC_ZS_NAME_LEN = IELEN*2
+        GOTO 30
+C                  
+100	IF(IN_SYMB)THEN
+C
+C Put in rotation if necessary
+	   IF((HAD_RO) .AND. (ROTN .GT. 0.0))THEN
+	      CALL EXPAND('CHANGE TO SYMBOL ROTATION  %P %F8.6',ROTN)
+	      IF(.NOT. FLWLIN(,,IERR))GOTO 998
+	      CALL EXPAND('CHANGE TO TEXT ROTATION    %P %F8.6',ROTN)
+	      IF(.NOT. FLWLIN(,,IERR))GOTO 998
+              GOTO 101
+	   ENDIF
+C
+C  always TEXT ROTATION for text feature
+C
+           IF (FRTGT.EQ.10) THEN
+              IF (.NOT.HAD_RO) ROTN = 0.0
+ 	      CALL EXPAND('CHANGE TO SYMBOL ROTATION  %P %F8.6',ROTN)
+	      IF(.NOT. FLWLIN(,,IERR))GOTO 998
+	      CALL EXPAND('CHANGE TO TEXT ROTATION    %P %F8.6',ROTN)
+	      IF(.NOT. FLWLIN(,,IERR))GOTO 998
+	   ENDIF
+C                     
+101	   CALL EXPAND('CHANGE TO %S',GFORM)
+	   IF(.NOT. FLWLIN(,,IERR))GOTO 998
+C
+	   IF(HAD_HOUR)THEN
+	      CALL EXPAND('CHANGE TO HOUR          %P %F5.2',AC_HOUR)
+	      IF(.NOT. FLWLIN(,,IERR))GOTO 998
+	   ENDIF
+C
+C Output coordinates
+	   CALL EXPAND('%(3%P %F12.3%)',XC,YC,ZC)
+C
+	   IF(HAD_ZSNAME) THEN
+              CALL APPEND (' ')
+              DO 102 M = 1, AC_ZS_NAME_LEN
+              CALL APPEND('%A1', AC_ZS_NAME(M))
+102           CONTINUE
+	   ENDIF
+C
+	   IF(.NOT. FLWLIN(,,IERR)) GOTO 998
+C
+	ENDIF
+C
+	GOTO 1000
+C
+C ...................................................................
+C			E R R O R S 
+C
+C Error writing to output file
+998	CALL LSL_PUTMSG(IERR)
+	GOTO 1000
+C
+C Unexpected end of file
+999	CAM_FEATURE=I2KERN__UNEXPEOF
+	CALL LSL_PUTMSG(CAM_FEATURE)
+	GOTO 1000
+C
+C ....................................................................
+C                         
+1000	IF (CAM_FEATURE) CAM_FEATURE=%LOC(SS$_NORMAL)
+	RETURN
+C
+C ....................................................................
+C
+	END

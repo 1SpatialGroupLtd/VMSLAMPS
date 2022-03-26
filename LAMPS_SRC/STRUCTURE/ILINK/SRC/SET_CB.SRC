@@ -1,0 +1,432 @@
+	INTEGER*4 FUNCTION SET_CB(
+     &		IN_FTR,PT,CC,FTR_PTS,FTR_START,IN_FTR_ADDR,nearest,
+     &		MAXPTS,MAXINFTRS,MAXOUTFTRS)
+C
+***	IDENT	23DE97
+***	MODULE	SET_CB
+C
+C	Copyright: Laser-Scan Ltd., Cambridge, England
+C
+CMOD1381						 JB 07-Jul-1994
+C	Implement the original SET_CB functionality for /PPJOIN and 
+C	/LPJOIN to keep the point attribute assignment for moving 
+C	points, but keep the strict point assignment for /LLJOIN and 
+C	higher, with NULL point attributes given for moved or new 
+C	points.
+C
+CMOD1231						 JB 21-May-1993
+C	Change attribute to point assignment for CB blocks by testing
+C	the x,y values in PT in PWK against the CB x,y values, and
+C	using the attributes there if coords are identical, otherwise
+C	set to absent, and try the next CB point.
+C
+CMOD1099						 JB 01-Apr-1992
+C	Fix attribute to point assignment for CB blocks by testing 
+C	for new feature address to reset the JPT attribute count block
+C	to start at 0.
+C	This is also done for any new pen-up CB entry as ILINK treats
+C	pen-up moves as new feeatures.
+C	Also copy first attribute across to last closing point for
+C	closed features, scrambled in previous calls to A2L and L2A.
+C
+CMOD	Remove faulty diagnostic code (INTRNLERR 3)	WJJ 07-Feb-1990
+CMOD	Converted to use Point Accuracy Codes		ACM 05-Dec-1988
+C
+C	Created: ACM					Apr 1988
+
+	IMPLICIT NONE
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+	INCLUDE		'($SSDEF)'
+
+	INCLUDE		'LSL$CMNILINK:ILINKCHAR.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+
+C Data in
+	INTEGER*4	IN_FTR			! input-ftr index
+	INTEGER*4	MAXPTS,MAXINFTRS,MAXOUTFTRS
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_START(MAXOUTFTRS)
+	INTEGER*4	IN_FTR_ADDR(MAXINFTRS)
+	REAL*4		PT(2,MAXPTS)
+	INTEGER*4	CC(MAXPTS)
+	integer*4	nearest(maxpts)
+
+C Workspace
+	RECORD/	IFF_CBH/	TMP_CBH	! header for CB for ftr IN_FTR
+	RECORD/	ILINK_CBD/	TMP_CBD	! data for CB for ftr IN_FTR
+
+	INTEGER*4	PAT(ILINK_MAXCBROW,IFF_MAXCBCOL)
+
+	INTEGER*4	ADDR		! IFF NF address
+	SAVE		ADDR		! keep it non-volatile
+	INTEGER*4	NEW_CB_ADDR	! IFF CB address
+	SAVE		NEW_CB_ADDR	! keep it non-volatile
+	INTEGER*4	JPT		! index to PAT
+	SAVE		JPT		! keep it non-volatile
+	INTEGER*4	K		! KPT point position CB
+
+	INTEGER*4	NPTS,I,IPT
+	INTEGER*4	KPT		! for CB point search
+
+	INTEGER*4	IPTPRV,IPTNXT
+	INTEGER*4	ICOL
+	INTEGER*4	IN_NCOLS	! num of col's in CB in
+	INTEGER*4	OUT_NCOLS	! num of col's in CB out
+	INTEGER*4	IATT,NATTS	! num of att's in CB
+	INTEGER*4	FIRST_PT	! original PT index of 1st pt
+	INTEGER*4	NEXT_FIRST_PT	! PT index of 1st pt of next ftr
+	INTEGER*4	I_ORIG_PT	! original PT index
+	INTEGER*4	ATT		! an attribute code
+	INTEGER*4	I1
+
+	INTEGER*2	IECODE,IELEN	! for IFFNXT
+
+	LOGICAL*4	LAST_CB		! last pen-up CB in ftr IN_FTR?
+	LOGICAL*4	NEW_FTR		! new ftr IN_FTR?
+	LOGICAL*4	ORIGINAL_PT	! is point original input point?
+	LOGICAL*1	DELETE(ILINK_MAXCBROW)	! delete pt?
+
+	REAL*4		DXPRV,DYPRV	! vector leading into pt
+	REAL*4		DXNXT,DYNXT	! vector leading out from pt
+	REAL*4		SQDST,SQTOL
+	REAL*4		CP,DP		! cross- and dot- vec products
+	REAL*4		DX,DY,DR	! for tolerance test
+
+C Functions
+	LOGICAL*4	GET_CB
+	INTEGER*4	PICK_CB
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Takes a string N_OUT_PTS no. of BASE PT indices, a string of
+C	ORIGinal PT indices (N_OUT_PTS/BASE_PT/I_ORIG_PT from ILINK.CMN),
+C	and a feature index IN_FTR, and assembles a Coordinate Block
+C	(CBH/BIG_CBD in ILINK.CMN) for output, getting X and Y from the
+C	BASE points, and other attributes from either the BASE or ORIG
+C	points, whichever come from the feature with feature index 
+C	IN_FTR.
+C
+C	Inserted points which are either (approximately) coincident or
+C	co-linear with their neighbours are ignored.
+C
+C	Returns SS$_NORMAL when successful
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	SET_CB  = SS$_NORMAL
+	SQTOL   = COORD_TOL*COORD_TOL
+	NEW_FTR = .FALSE.
+
+C Get CB for feature IN_FTR into TMP_CBH/TMP_CBD
+
+	CALL IFFSEL(INLUN)
+
+C Check if this a new feature, ie a different NF address from a 
+C previous call to SET_CB
+
+	IF (IN_FTR_ADDR(IN_FTR) .NE. ADDR) THEN
+	   NEW_FTR = .TRUE.
+	ENDIF
+
+	ADDR = IN_FTR_ADDR(IN_FTR)
+	CALL IFFPKE(IECODE,IELEN,ADDR)
+
+	IF (IELEN.EQ.-1) THEN
+	  SET_CB = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(SET_CB,INFILE(:IN_LEN))
+	  GOTO 999
+	ENDIF
+
+	IF (IECODE.NE.'NF') THEN
+	  SET_CB = ILINK__BADADDR
+	  CALL LSL_PUTMSG(SET_CB)
+	  GOTO 999
+	ENDIF
+
+	CALL IFFNXC('CB',IELEN)
+
+	IF (IELEN.EQ.-1) THEN
+	  SET_CB = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(SET_CB,INFILE(:IN_LEN))
+	  GOTO 999
+	ENDIF
+
+	LAST_CB = GET_CB(TMP_CBH,TMP_CBD)
+
+C Because more than one separate pen-up string is allowed within each
+C feature, if the string you now have is not the last it may not be the
+C one you want. In such cases it is necessary to find which pen-up
+C string sharing this same feature NF address is the one you want.
+
+	IF (.NOT.LAST_CB) THEN
+	  NEW_FTR = .TRUE.
+
+	  SET_CB = PICK_CB(TMP_CBH,TMP_CBD,IN_FTR,MAXINFTRS,IN_FTR_ADDR)
+	  IF (.NOT.SET_CB) THEN
+	    SET_CB = ILINK__INTRNLERR
+	    CALL LSL_PUTMSG(SET_CB,2,'SET_CB')
+	    GOTO 999
+	  ENDIF
+
+C If second time to pick this particuler CB position, no longer a new
+C feature 
+
+	  IF (LPOSH .EQ. NEW_CB_ADDR) THEN
+	     NEW_FTR = .FALSE.
+	  ENDIF
+
+	  NEW_CB_ADDR = LPOSH
+	ENDIF
+
+C Set index of first non fixed CB column index
+	I1 = 3
+
+	IF (HAD_TOL.OR.HAD_PAC) I1 = 4
+
+C Set up CBH
+
+	CBH.FLAGS = TMP_CBH.FLAGS
+	CBH.GTYPE = TMP_CBH.GTYPE
+
+	CBH.COLH(1) = IFF_C_X		! set up COLH with X and Y cols first
+	CBH.COLH(2) = IFF_C_Y
+
+	IF (HAD_TOL.OR.HAD_PAC) THEN
+	   CBH.COLH(3) = CAP_CODE
+	ENDIF
+
+	I = I1-1
+
+	IN_NCOLS = TMP_CBH.NCOL		! expand all attributes
+
+	DO 10 ICOL = 1,IN_NCOLS
+	  ATT = TMP_CBH.COLH(ICOL)
+	  IF (ATT.EQ.IFF_C_X) GOTO 10
+	  IF (ATT.EQ.IFF_C_Y) GOTO 10
+
+	  IF (HAD_TOL.OR.HAD_PAC) THEN
+	    IF (ATT.EQ.CAP_CODE) GOTO 10
+	  ENDIF
+
+	  I = I+1
+	  CBH.COLH(I) = ATT
+
+C Read non X,Y (and non accuracy-code) attribute data into PAT
+
+	  CALL IFS_CB_READ(TMP_CBH,TMP_CBD,
+     &			   PAT(1,I),1,ATT,1,TMP_CBH.NROW)
+
+10	CONTINUE
+
+	NATTS = TMP_CBH.NATT
+
+	DO 20 IATT = 1,NATTS
+	  ATT = TMP_CBH.ATT(IATT).ATTC
+	  IF (ATT.EQ.IFF_C_X) GOTO 20
+	  IF (ATT.EQ.IFF_C_Y) GOTO 20
+
+	  IF (HAD_TOL.OR.HAD_PAC) THEN
+	    IF (ATT.EQ.CAP_CODE) GOTO 20
+	  ENDIF
+
+	  I = I+1
+	  CBH.COLH(I) = ATT
+
+C Read non X,Y (and non accuracy-code) attribute data into PAT
+
+	  CALL IFS_CB_READ(TMP_CBH,TMP_CBD,
+     &			   PAT(1,I),1,ATT,1,TMP_CBH.NROW)
+
+20	CONTINUE
+
+	OUT_NCOLS = I			! no. of cols to write out
+	CBH.NCOL  = OUT_NCOLS
+	CBH.NATT  = 0
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Mark inserted points which are almost coincident or co-linear with
+C either neighbour to be deleted
+
+	DO 30 IPT = 1,N_OUT_PTS
+	  PWK(1,IPT) = PT(1,BASE_IPT(IPT))
+	  PWK(2,IPT) = PT(2,BASE_IPT(IPT))
+
+	  IF (HAD_TOL.OR.HAD_PAC) THEN
+	    CWK(IPT) = CC(BASE_IPT(IPT))
+	  ENDIF
+
+	  IF (.NOT.HAD_KEEP_COLINEAR) DELETE(IPT) = .TRUE.
+30	CONTINUE
+
+	IF (.NOT.HAD_KEEP_COLINEAR) 
+     X		CALL THIN(PWK,N_OUT_PTS,IWK,NPTS,COORD_TOL/10)
+
+	IF (.NOT.HAD_KEEP_COLINEAR) THEN
+	   DO 40 I = 1,NPTS
+	     DELETE(IWK(I)) = .FALSE.	! mark pts to be retained
+40	   CONTINUE
+	ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Set up BIG_CBD, point by point
+
+90	CONTINUE
+
+	NPTS = 0				! no points output yet
+	I    = 1				! IPT point posn in TMP_CBD
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Restore old SET_CB functionality for PPJOIN and LPJOIN
+
+	IF (HAD_PPJOIN .OR. HAD_LPJOIN) THEN
+
+C Restart the point count if starting a new feature CB
+
+	  IF (NEW_FTR) THEN
+	    JPT = 0				     ! PAT index
+	  ENDIF
+
+	  DO 210 IPT = 1,N_OUT_PTS
+
+	    I_ORIG_PT = ORIG_IPT(IPT)		     ! index to point array PT
+	    ORIGINAL_PT = (I_ORIG_PT.LE.N_ORIG_PTS)  ! new point?
+
+	    IF (ORIGINAL_PT) JPT = JPT+1	     ! index to PAT attrib block
+
+	    IF (DELETE(IPT)) GOTO 210
+
+	    NPTS = NPTS+1
+
+C Get the x,y values into BIG_CBD to match the input CB for x,y
+
+	    BIG_CBD.R(I)   = PWK(1,IPT)
+	    BIG_CBD.R(I+1) = PWK(2,IPT)
+
+	    IF (HAD_TOL.OR.HAD_PAC) THEN
+		BIG_CBD.I(I+2) = CWK(IPT)
+	    ENDIF
+
+C Convert unknown PAC to IFF_ABSENT for output
+
+	    IF (BIG_CBD.I(I+2).EQ.MIN_PAC-1) THEN
+		 BIG_CBD.I(I+2) = IFF_ABSENT
+	    ENDIF
+
+	    DO 200 ICOL = I1,OUT_NCOLS
+	      IF (ORIGINAL_PT) THEN
+	        BIG_CBD.I(I-1+ICOL) = PAT(JPT,ICOL)
+	      ELSE
+	        BIG_CBD.I(I-1+ICOL) = IFF_ABSENT
+	      ENDIF
+200	    CONTINUE
+
+	    I = I + OUT_NCOLS
+210	  CONTINUE
+
+	  GOTO 990				! exit
+	ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Restart the point count if starting a new feature CB
+
+	IF (NEW_FTR) THEN			! initialise everything
+	   JPT      = 0				! PAT index
+	ENDIF
+
+	DO 110 IPT = 1,N_OUT_PTS		! for each point from append_ftr
+
+	  IF (DELETE(IPT)) GOTO 110
+
+	  NPTS = NPTS+1
+
+C Get the x,y values into BIG_CBD to match the input CB for x,y
+
+	  BIG_CBD.R(I)   = PWK(1,IPT)		! next used x,y
+	  BIG_CBD.R(I+1) = PWK(2,IPT)
+
+C Test the point coords in PT in PWK against the CB block for 
+C coincidence, otherwise assume an inserted point and wait for next
+
+	  ORIGINAL_PT = .FALSE.			! assume not original
+	  IF (I1.GT.OUT_NCOLS) GOTO 101		! no attributes
+	  IF (JPT.GE.TMP_CBH.NROW) GOTO 101
+C
+	  K   = IN_NCOLS*JPT + 1		! get next CB coord posn
+	  IF (TMP_CBD.R(K)  .EQ.PWK(1,IPT) .AND.
+     &	      TMP_CBD.R(K+1).EQ.PWK(2,IPT) ) THEN
+
+	     JPT 	 = JPT + 1		! index to PAT
+
+	     ORIGINAL_PT = .TRUE.		! use attribs in PAT
+	     GOTO 101
+	  ENDIF
+
+C If no match, search CB block for a matching point
+
+	  KPT = JPT + 1				! start CB point count
+						! from last match
+98	  IF (KPT.GE.TMP_CBH.NROW) GOTO 101
+
+	  KPT = KPT + 1
+
+CCC CCB 09SE96 - I can't see that the DELETE array is for the input CB
+CCC so this line caused the wrong point attributes to be missed out
+CCC	  IF (DELETE(KPT)) GOTO 98		! skip if deleted
+
+	  K   = IN_NCOLS*(KPT-1) + 1		! get next CB coord posn
+
+	  IF (TMP_CBD.R(K)  .NE.PWK(1,IPT) .OR.
+     &	      TMP_CBD.R(K+1).NE.PWK(2,IPT) ) GOTO 98
+
+	  JPT         = KPT		! PAT index
+	  ORIGINAL_PT = .TRUE.		! use attribs in PAT
+
+101	  CONTINUE
+
+	  IF (HAD_TOL.OR.HAD_PAC) THEN
+	     BIG_CBD.I(I+2) = CWK(IPT)
+	  ENDIF
+
+C Convert unknown PAC to IFF_ABSENT for output
+
+	  IF (BIG_CBD.I(I+2).EQ.MIN_PAC-1) THEN
+	      BIG_CBD.I(I+2) = IFF_ABSENT
+	  ENDIF
+
+	  DO 100 ICOL = I1,OUT_NCOLS
+	    IF (ORIGINAL_PT) THEN
+	      BIG_CBD.I(I-1+ICOL) = PAT(JPT,ICOL)
+	    ELSE
+	      BIG_CBD.I(I-1+ICOL) = IFF_ABSENT
+	    ENDIF
+100	  CONTINUE
+
+	  I = I + OUT_NCOLS		! posn in output CB
+
+110	CONTINUE
+
+C Test for identical start and end points, disconnected in an earlier
+C call to A2L, and reassembled with L2A, with the resulting loss of end
+C point attributes
+
+990	CONTINUE
+
+	DX = BIG_CBD.R(1) - BIG_CBD.R(1+(NPTS-1)*OUT_NCOLS)
+	DY = BIG_CBD.R(2) - BIG_CBD.R(2+(NPTS-1)*OUT_NCOLS)
+	DR = DX*DX + DY*DY
+
+	IF (DR.LT.SQTOL) THEN		! closed feature, copy the first row 
+					! of attributes across to the last
+	   DO 995 IPT = 3,OUT_NCOLS
+	     BIG_CBD.I(IPT+(NPTS-1)*OUT_NCOLS) = BIG_CBD.I(IPT)
+995	   CONTINUE
+
+	ENDIF
+
+	CBH.NROW = NPTS
+
+999	RETURN
+	END
+

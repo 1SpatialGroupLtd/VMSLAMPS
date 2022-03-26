@@ -1,0 +1,188 @@
+	.TITLE	ICLMTIV
+	.IDENT	/13JA83/
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+; Author:  Susan Manning
+;
+; ICL magtape routines
+;		extracted from PDP-11 MTI.MAC
+ 
+; assemble with MTIVCM.MAR/MTIERR,MTINBL/
+; assemble with ICLMTCOM.MAR/ICLPLN,ICLNCH,ICLPTR/
+ 
+ 
+	$MTDEF
+
+BLKSIZ 	=512		; ICL 24 bit words
+BUFFSZ	= BLKSIZ*3	; for 9 track tape with 3 stripes per word
+ 
+
+	COMMON	MTIV_ICL
+
+BLKBYT:	.WORD	BUFFSZ	; number of bytes per block
+ICLBUF:	.BLKB	BUFFSZ	; to receive magtape blocks
+NSTRIP:	.WORD	0	; number of bytes in current block
+ 
+	DATA_PSECT	VIO
+
+; argument list for calling MTIRDB(BUFFER,LENGTH,BYTCNT)
+RDBARGLST:
+	.LONG	3	; number of arguments
+	.LONG	ICLBUF	; buffer address
+	.LONG	BLKBYT	; length
+	.LONG	NSTRIP	; to receive byte count
+ 
+; character buffer for 9 track repacking
+NCBUF:	.WORD	0	; number buffered
+CBUFL:	.WORD	0	; low order word
+CBUFH:	.WORD	0	; high order word
+ 
+	CODE_PSECT	VIO
+
+ 
+.ENTRY	ICLMTII,^M<>
+	CALLS	#0, G^MTII
+	CLRW	NSTRIP
+	CLRW	NCBUF
+	CLRW	ICLPTR
+	RET
+ 
+.ENTRY ICLMTIRDB,^M<>
+	CALLG	RDBARGLST, G^MTIRDB
+	CLRW	NCBUF
+	CLRW	ICLPTR
+	CLRW	ICLNCH
+	RET
+ 
+.ENTRY ICLMTISKP,^M<>
+	CLRW	ICLPLN		; no plots read
+	CLRW	MTINBL
+	CALLS	#0, G^MTSENS	; return characteristics in R0
+	BITL	#MT$M_BOT,R0	; at BOT ?
+	BEQL	5$		; no
+1$:	CALLS	#0, G^ICLMTIRDB ; read a block
+	TSTL	R0		; real block ?
+	BGTR	1$		; yes, keep looking
+	CMPW	MTIERR,#SS$_ENDOFFILE	; eof ?
+	BNEQ	2$		; no, return - error already set
+	CMPW	MTINBL,#4	; right block ?
+	BLSS	1$		; no, keep looking
+	BGTR	6$		; no, gone too far
+; here at eof at block 4
+	CALLS	#0, G^ICLMTIRDB ; read (skip) next block
+	CLRW	NSTRIP		; pretend buffer empty - skipping this block
+2$:	RET			; return (with errors set, if any)
+ 
+; not at BOT when should have been
+5$:	MOVL	#-1001,R0	; set own error code
+	BRB	7$
+; not correct ICL format
+6$:	MOVL	#-1002,R0	; set own error code
+7$:	MOVW	R0,MTIERR
+	RET
+ 
+ 
+; ICH = MTISTR
+ 
+.ENTRY	ICLMTISTR,^M<>
+	CMPW	ICLPTR,NSTRIP	; any in buffer
+	BLSS	1$		; yes
+	CALLS	#0, G^ICLMTIRDB ; read a block
+	TSTL	R0		; succeeded ?
+	BGTR	1$		; yes
+; was it end of file ?, if so return -10
+	CMPW	MTIERR,#SS$_ENDOFFILE
+	BNEQ	2$		; no
+	MOVL	#-10,R0		; return eof
+2$:	RET
+ 
+; return character
+1$:	MOVZWL	ICLPTR,R0
+	MOVZBL	L^ICLBUF(R0),R0	; extract character
+	INCW	ICLPTR
+	RET
+ 
+ 
+; ICH = ICLMTICH returns ASCII character, unpacking as neccessary,
+;		 character translated into ASCII from ICL 6 bit
+; ICH = ICLMTIBYT returns an ICL 6 bit char, unpacking as neccessary
+ 
+.ENTRY	ICLMTICH,^M<R2,R3,R4>
+	BSBB	$ICLCH		; get the next byte from the tape/buffer
+	BSBW	$ICLAS		; translate and ...
+	RET			; return it
+
+.ENTRY	ICLMTIBYT,^M<R2,R3,R4>
+	BSBB	$ICLCH		; get the next byte
+	RET			; return it
+
+
+$ICLCH:	TSTW	NCBUF		; anything buffered ?
+	BGTR	1$		; yes
+	MOVL	#3,R4		; 3 stripes
+	CLRL	R2		; to receive characters
+2$:	CALLS	#0, G^ICLMTISTR	; get next stripe
+	TSTL	R0		; good character ?
+	BGEQ	3$		; yes
+	RET			; no, return with error set
+3$:	ASHL	#8,R2,R2	; shift up to make room
+	BISB	R0,R2		; slot into low byte
+	SOBGTR	R4,2$
+; now take them out as 6 bit characters the other way
+	MOVL	#4,NCBUF	; soon there will be 4 of them
+	MOVAB	CBUFL,R1
+	CLRL	R3		; start extracting at bit position 0
+	MOVL	#6,R4		; size of bit field
+4$:	EXTZV	R3,R4,R2,R0	; extract from R2 to R0
+	MOVB	R0,(R1)+	; store
+	ADDL2	R4,R3		; update bit position
+	CMPL	R3,#24		; finished ?
+	BLSS	4$		; no
+1$:	DECW	NCBUF
+	MOVZWL	NCBUF,R1	; index
+	MOVZBL	L^CBUFL(R1),R0	; extract character
+	INCW	ICLNCH		; count it
+	RSB
+ 
+ 
+ 
+; ICLASC translates from ICL to ASCII code
+ 
+.ENTRY	ICLASC,^M<>
+	MOVZBL	@4(AP),R0	; FORTRAN argument is character
+	BSBB	$ICLAS		; macro call
+	MOVB	R0,@8(AP)	; return result
+	RET
+ 
+; macro call
+$ICLAS:: BITB	#^O40,R0 	; test bit 5
+	BEQL	1$		; a number
+	MOVB	#^O140,R1	; complement bits 5 & 6
+	BRB	2$
+1$:	MOVB	#^O60,R1	; complement bits 4 & 5
+2$:	XORB2	R1,R0		; do it
+	CMPB	#^O137,R0	; underline ?
+	BNEQ	3$		; no
+	MOVZBL	#^O15,R0	; correct code
+3$:	RSB
+ 
+ 
+; ICLMTERR outputs the error message corresponding to the code
+; in MTIERR, passed as argument
+ 
+.ENTRY	ICLMTERR,^M<>
+	MOVZWL	@4(AP),ICLVCOD
+	$PUTMSG_S MSGVEC=ICLVEC
+	RET
+ 
+; local workspace
+
+	DATA_PSECT	VIO
+
+ICLVEC:	.LONG	2	; argument count and default message flags
+ICLVCOD: .BLKL	1	; code from which to derive message
+	.LONG	0	; null STV parameter
+ 
+ 
+	.PSECT
+	.END

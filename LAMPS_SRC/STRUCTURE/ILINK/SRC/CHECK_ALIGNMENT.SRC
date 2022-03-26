@@ -1,0 +1,356 @@
+	SUBROUTINE CHECK_ALIGNMENT(
+     &		PT,NXT,PRV,NEAREST,NEAREST_INV,
+     &		PT_PR_FTR,FTR_PTS,PNT_FTR,LWK,
+     &		MAXPTS,MAXOUTFTRS)
+ 
+***	IDENT	28MY93
+***	MODULE	CHECK_ALIGNMENT
+ 
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+C	Created   : ACM					      Sep 1986
+
+CMOD1242Give warning message if deleting an original	JB 25-May-1993
+C	point if had /WARNING
+CMOD	Do not access NEAREST(0)			JB 12-Feb-1993
+ 
+	IMPLICIT NONE
+ 
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+
+C Data in
+	INTEGER*4	MAXPTS,MAXOUTFTRS
+	INTEGER*4	NXT(MAXPTS),PRV(MAXPTS)
+	INTEGER*4	NEAREST(MAXPTS),NEAREST_INV(MAXPTS)
+	INTEGER*4	PT_PR_FTR(MAXPTS)
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	LWK(MAXPTS)		! workspace
+
+	REAL*4		PT(2,MAXPTS)
+
+	LOGICAL*1  	PNT_FTR(MAXOUTFTRS)
+C
+C Workspace
+	INTEGER*4	I
+	INTEGER*4	ISTA,IFIN
+	INTEGER*4	IPTSTA,IPTFIN		! start/fin pt indices
+	INTEGER*4	JPTSTA,JPTFIN		! start/fin pt indices
+	INTEGER*4	IPT,JPT,KPT		! pt indices
+	INTEGER*4	IPT_PRV,JPT_PRV		! pt indices
+	INTEGER*4	IPT_NXT,JPT_NXT		! pt indices
+	INTEGER*4	IFTR,JFTR,JFTR_PRV	! ftr indices
+	INTEGER*4	IPT_SEC_STA,IPT_SEC_FIN
+	INTEGER*4	JPT_SEC_STA,JPT_SEC_FIN
+	INTEGER*4	IPT_SEC_STA_1,IPT_SEC_STA_2
+	INTEGER*4	IPT_TRUE_SEC_STA,IPT_TRUE_SEC_FIN
+	INTEGER*4	JPT_TRUE_SEC_STA,JPT_TRUE_SEC_FIN
+	INTEGER*4	IPT_STA,IPT_FIN		! linked-list start/stop
+	INTEGER*4	COUNT
+
+	LOGICAL  	INCR			! increasing?
+	LOGICAL  	MONO			! monotonic?
+	LOGICAL  	FIRST_SEC		! first section in ftr?
+	LOGICAL  	CLOSED			! ftr closed?
+	LOGICAL  	DELETE			! delete point?
+ 
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Sorts points along each feature so that consecutive point
+C	pairs do not "cross pointers" near to aligned junctions
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+ 
+	CALL VIOCLR(NEAREST_INV,N_PTS*4)	! clear NEAREST_INV
+
+	DO 190 IFTR = 1,N_PR_FTRS
+	  IPTSTA = FTR_PTS(1,IFTR)
+	  IPTFIN = FTR_PTS(2,IFTR)
+	  IF (IPTSTA.EQ.NIL .OR. IPTFIN.EQ.NIL) GOTO 190	! ftr deleted
+	  IF (IPTSTA.EQ.IPTFIN) GOTO 190			! 1-pt ftr
+ 
+	  FIRST_SEC = .TRUE.
+ 
+C Find whether feature IFTR is a closed loop
+ 
+	  CLOSED = NXT(IPTFIN).EQ.IPTSTA
+ 
+	  IPT_PRV = NIL
+	  JPT_PRV = NIL
+ 
+C Find indices of pts at which to start and stop scan of ftr IFTR for
+C sections with continuous pointed-to feature-index
+ 
+	  IF (.NOT.CLOSED) THEN
+	    IPT_STA = IPTSTA
+	    IPT_FIN = IPTFIN
+	  ELSE
+	    IPT = IPTSTA
+	    JPT = NEAREST(IPT)
+ 
+C	    IF (JPT.EQ.NIL) THEN
+	    IF (JPT.LE.NIL) THEN	! debug
+	      JFTR = NIL
+	    ELSE
+	      JFTR = PT_PR_FTR(JPT)
+	    ENDIF
+ 
+10	    IPT_PRV  = IPT
+	    JFTR_PRV = JFTR
+ 
+	    IPT = NXT(IPT)
+	    JPT = NEAREST(IPT)
+ 
+C	    IF (JPT.EQ.NIL) THEN
+	    IF (JPT.LE.NIL) THEN	! debug
+	      JFTR = NIL
+	    ELSE
+	      JFTR = PT_PR_FTR(JPT)
+	    ENDIF
+ 
+	    IF (JFTR.EQ.JFTR_PRV) GOTO 20
+ 
+	    IPT_FIN  = IPT_PRV
+	    IPT_STA  = IPT
+	    JFTR_PRV = JFTR
+	    GOTO 30
+ 
+20	    IF (IPT.NE.IPTFIN) GOTO 10
+
+	    GOTO 190				! no junctions in ftr
+	  ENDIF
+ 
+C Set up PT_COUNT increasing from IPT_STA to IPT_FIN in IFTR
+ 
+30	  IPT = IPT_STA
+	  I   = 0
+	  GOTO 50
+
+40	  IPT = NXT(IPT)
+50	  I = I+1
+	  LWK(IPT) = I
+	  IF (IPT.NE.IPT_FIN) GOTO 40
+ 
+C Find last pt IPT_SEC_FIN in section of IFTR aligned to ftr with
+C same index, setting NEAREST_INV in JFTR
+ 
+60	  IF (FIRST_SEC) THEN
+	    IPT_SEC_STA = IPT_STA
+	    IPT_SEC_FIN = IPT_STA
+	    FIRST_SEC   = .FALSE.
+	    IPT_SEC_STA_1 = NIL
+	    IPT_SEC_STA_2 = NIL
+
+	  ELSE
+	    IF (IPT_SEC_FIN.EQ.IPT_FIN) GOTO 190
+	    IF (PRV(IPT_SEC_FIN).EQ.NIL) GOTO 190         ! debug
+	    IF (NXT(IPT_SEC_FIN).EQ.IPT_SEC_STA) GOTO 190 ! debug
+	    IF (NXT(IPT_FIN).EQ.IPT_STA) GOTO 190 	  ! debug
+
+	    IPT_SEC_STA_1 = IPT_SEC_STA_2
+	    IPT_SEC_STA_2 = IPT_SEC_STA
+	    IPT_SEC_STA   = NXT(IPT_SEC_FIN)
+
+	    IF (IPT_SEC_STA.EQ.IPT_SEC_STA_1 .OR.
+     &	        IPT_SEC_STA.EQ.IPT_SEC_STA_2) GOTO 190    ! debug
+	  ENDIF
+ 
+C *** Do not allow IPT_SEC_STA to be 0
+
+	  IF (IPT_SEC_STA.EQ.NIL) GOTO 190	! debug - JB 12-2-93
+
+	  JPT_SEC_STA = NEAREST(IPT_SEC_STA)
+	  JPT_SEC_FIN = JPT_SEC_STA
+
+C	  IF (JPT_SEC_STA.EQ.NIL) THEN
+	  IF (JPT_SEC_STA.LE.NIL) THEN		! debug
+	    JFTR_PRV = NIL
+	  ELSE
+	    JFTR_PRV = PT_PR_FTR(JPT_SEC_STA)
+
+C Clear NEAREST_INV in JFTR_PRV
+
+	    JPTSTA = FTR_PTS(1,JFTR_PRV)
+	    JPTFIN = FTR_PTS(2,JFTR_PRV)
+	    IF (JPTSTA.EQ.JPTFIN) GOTO 60
+
+	    JPT = JPTSTA
+	    GOTO 65
+
+64	    JPT = NXT(JPT)
+65	    NEAREST_INV(JPT) = 0
+	    IF (JPT.NE.JPTFIN) GOTO 64
+
+	    NEAREST_INV(JPT_SEC_STA) = IPT_SEC_STA
+	  ENDIF
+ 
+	  IPT = IPT_SEC_STA
+	  JPT = JPT_SEC_STA
+
+70	  IPT_PRV = IPT
+	  IF (IPT.EQ.IPT_FIN) GOTO 85
+
+	  IPT = NXT(IPT)
+	  IF (IPT.EQ.NIL) GOTO 60	! debug
+ 
+80	  JPT_PRV = JPT
+ 
+	  JPT = NEAREST(IPT)
+ 
+	  IF (JPT.EQ.NIL) THEN
+	    JFTR = NIL
+	  ELSE
+	    JFTR = PT_PR_FTR(JPT)
+	    NEAREST_INV(JPT) = IPT
+	  ENDIF
+ 
+	  IF (JFTR.EQ.JFTR_PRV) GOTO 70		! JFTR unchanged
+ 
+85	  JFTR = JFTR_PRV
+	  IPT_SEC_FIN = IPT_PRV
+	  JPT_SEC_FIN = JPT_PRV
+ 
+	  IF (JFTR_PRV.EQ.NIL) GOTO 60		! unaligned section
+ 
+C Section of IFTR aligned to ftr JFTR_PRV starts at IPT_SEC_STA and ends
+C at IPT_SEC_FIN. Go into JFTR and find start and end PT indices of
+C pts marked from ftr IFTR
+ 
+C Starting at pt JPT_SEC_STA, move forwards and backwards to find end
+C pts of continuously aligned section in JFTR
+ 
+	  JPT = JPT_SEC_STA
+90	  JPT_PRV = JPT
+	  JPT = NXT(JPT)			! move in direction NXT
+	  IF (JPT.EQ.NIL) GOTO 100
+
+	  IF (PRV(JPT).NE.JPT_PRV) GOTO 190	! debug
+
+	  IF (NEAREST_INV(JPT).GT.0 .AND. JPT.NE.JPT_SEC_STA) GOTO 90
+100	  JPT_TRUE_SEC_FIN = JPT_PRV
+	  JPT = JPT_SEC_STA
+
+110	  JPT_NXT = JPT
+	  JPT = PRV(JPT)			! move in direction PRV
+	  IF (JPT.EQ.NIL) GOTO 120
+
+	  IF (JPT.LT.NIL) GOTO 190		! debug
+	  IF (NEAREST_INV(JPT).GT.0 .AND. JPT.NE.JPT_SEC_STA) GOTO 110
+
+120	  JPT_TRUE_SEC_STA = JPT_NXT
+ 
+C If end pts of marked JFTR section correspond to end pts of IFTR 
+C section then assume that alignment is OK
+
+	  IF (	(JPT_SEC_STA.EQ.JPT_TRUE_SEC_STA .AND.
+     &		 JPT_SEC_FIN.EQ.JPT_TRUE_SEC_FIN) .OR.
+     &		(JPT_SEC_STA.EQ.JPT_TRUE_SEC_FIN .AND.
+     &		 JPT_SEC_FIN.EQ.JPT_TRUE_SEC_STA) ) GOTO 60
+
+C If aligned section is only one or two pts long then leave it alone
+ 
+	  IF ( (JPT_TRUE_SEC_STA .EQ. JPT_TRUE_SEC_FIN) .OR.
+     &		NXT(JPT_TRUE_SEC_STA) .EQ. JPT_TRUE_SEC_FIN) GOTO 60
+ 
+C Move from start of JFTR section to end, to see if PT_COUNT from IFTR
+C is monotonic (increasing or decreasing)
+ 
+	  JPT_PRV = JPT_TRUE_SEC_STA
+	  JPT     = NXT(JPT_PRV)
+	  INCR = LWK(NEAREST_INV(JPT)) .GT. LWK(NEAREST_INV(JPT_PRV))
+
+130	  JPT_PRV = JPT
+	  JPT  = NXT(JPT_PRV)
+	  MONO = (LWK(NEAREST_INV(JPT)) .GT.
+     &	          LWK(NEAREST_INV(JPT_PRV))).EQV.INCR
+
+	  IF (.NOT.MONO) GOTO 140		! alignment need changng
+
+	  IF (JPT.NE.JPT_TRUE_SEC_FIN) GOTO 130
+ 
+	  GOTO 60				! alignment is OK
+ 
+C Here if alignment is not OK and needs changing
+ 
+C Move along JFTR section from start to fin, setting up arrays for
+C JPT index and corresponding IPT_COUNT values
+ 
+140	  JPT = JPT_TRUE_SEC_STA
+	  I = 0
+	  GOTO 160
+
+150	  JPT = NXT(JPT)
+160	  IPT = NEAREST_INV(JPT)
+	  I = I+1
+	  IWK(I) = IPT
+	  PT_COUNT_ARRAY(I) = LWK(IPT)
+	  IF (JPT.NE.JPT_TRUE_SEC_FIN) GOTO 150
+ 
+C Decide whether PT_COUNT_ARRAY should be increasing or decreasing
+ 
+	  ISTA = PT_COUNT_ARRAY(1)
+	  IFIN = PT_COUNT_ARRAY(I)
+	  INCR = ISTA.LT.IFIN
+ 
+C Now delete all pts in ftr IFTR which were mapped out of sequence
+ 
+	  JPT = JPT_TRUE_SEC_STA
+	  I   = 1
+
+170	  JPT = NXT(JPT)
+	  IF (JPT.EQ.JPT_TRUE_SEC_FIN) GOTO 185
+
+	  I = I+1
+	  COUNT = PT_COUNT_ARRAY(I)
+
+	  DELETE = ((COUNT.GT.ISTA).NEQV.INCR) .OR.
+     &	           ((COUNT.LT.IFIN).NEQV.INCR)
+
+	  IF (DELETE) THEN
+	    IPT = IWK(I)
+
+	    IF (HAD_WARNING .AND. IPT.GT.N_ORIG_PTS)
+     &		CALL LSL_PUTMSG(ILINK__ORIGPNTDEL,PT(1,IPT),PT(2,IPT))
+
+	    CALL DELPT(	IPT,
+     &			NXT,PRV,PT_PR_FTR,FTR_PTS,PNT_FTR,
+     &			MAXPTS,MAXOUTFTRS)
+
+	    IF (HAD_WARNING .AND. JPT.GT.N_ORIG_PTS)
+     &		CALL LSL_PUTMSG(ILINK__ORIGPNTDEL,PT(1,JPT),PT(2,JPT))
+
+	    CALL DELPT(	JPT,
+     &			NXT,PRV,PT_PR_FTR,FTR_PTS,PNT_FTR,
+     &			MAXPTS,MAXOUTFTRS)
+
+	  ELSE
+	    ISTA = COUNT
+	  END IF
+
+	  GOTO 170
+ 
+C Go to start next section if ftr IFTR
+ 
+185	  IPT_SEC_FIN = IPT
+	  GOTO 60
+ 
+190	CONTINUE	    
+
+C Delete any points which now point to points which have been deleted
+
+	DO 200 IPT = 1,N_PTS
+	  JPT = NEAREST(IPT)
+	  IF (JPT.NE.NIL) THEN
+	    IF (PRV(JPT).LT.0) THEN
+		IF (HAD_WARNING .AND. IPT.GT.N_ORIG_PTS)
+     &		   CALL LSL_PUTMSG(ILINK__ORIGPNTDEL,PT(1,IPT),PT(2,IPT))
+
+		CALL DELPT(
+     &			IPT,
+     &			NXT,PRV,PT_PR_FTR,FTR_PTS,PNT_FTR,
+     &			MAXPTS,MAXOUTFTRS)
+	    ENDIF
+	  ENDIF
+200	CONTINUE
+
+	END
+

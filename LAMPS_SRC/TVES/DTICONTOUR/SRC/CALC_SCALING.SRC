@@ -1,0 +1,291 @@
+	LOGICAL FUNCTION CALC_SCALING()
+C
+***	MODULE	CALC_SCALING
+***	IDENT	06JL89
+C
+C	Copyright (C), Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD782	Error given if ZLIMITS out of range of DTI data values
+C	Double precision variables introduced to avoid spurious  kinks 
+C	in the contours arising from rounding errors
+C							 JB  03-Jul-1989
+CMOD	NDTM now scaled from 1 to 32001 instead of 0 32000 so that 
+C	flagging by setting negative actually works (-0 = 0!)
+C							 JB  11-May-1989
+CMOD	No longer attempts division by zero if zmin=zmax TJH 13-Mar-1989
+CMOD	Projection units now catered for		 TJH 28-Nov-1988
+C	Created						 TJH 14-Oct-1987
+C
+C Function to set up scaling between the user's world and the
+C dimensionless world of DTICONTOUR's internal grid. 
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	REAL		RESCAL  ! rescaling coeff. for Feet to Metres
+	PARAMETER      (RESCAL=3.2808455)
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+C
+	INCLUDE 'LSL$CMNDTI:DTIPAR.PAR'
+	INCLUDE 'LSL$CMNDTICONTOUR:PARAMS.PAR'
+	INCLUDE 'LSL$CMNDTICONTOUR:DTICONTOURMSG.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C Common blocks:
+	INCLUDE 'LSL$CMNDTICONTOUR:ADDRESS.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:ANNOT.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:COMMAND.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:CONTR.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:FILES.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:MAPARE.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:RCONVI.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:SMTCMN.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIPROJ.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+C
+C W/s
+	CHARACTER*8	WORD		! for default contour interval
+	REAL            A,P		! temp. vars.
+	INTEGER*4	N_PAGES		! # pages requested
+	INTEGER*4	NDTM_SIZE	! NDTM size in bytes
+	INTEGER*4	BYTE_SIZE	! BYTE_BUFF size in bytes
+	INTEGER*4	WORD_SIZE	! WORD_BUFF size in bytes
+	INTEGER*4	LONG_SIZE	! LONG_BUFF size in bytes
+	INTEGER*4	REAL_SIZE	! REAL_BUFF size in bytes
+	INTEGER*4	STORE_SIZE	! planned workspace size (bytes)
+	INTEGER*4	ALLOCATION	! - and what we actually got!
+	INTEGER*4	RETADR(2)	! ends of store alloc, in bytes
+C
+C Functions
+	INTEGER*4	SYS$EXPREG
+C ......................................................................
+C
+	CALC_SCALING = SS$_NORMAL
+C
+C Find actual number of rows/columns in grid area to be contoured
+C
+	IF (WINSET) THEN
+	   WIN_START_COL = DTI_WINDOW_SWX(DTILUN)
+	   WIN_STOP_COL  = DTI_WINDOW_NEX(DTILUN)
+	   WIN_START_ROW = DTI_WINDOW_SWY(DTILUN)
+	   WIN_STOP_ROW  = DTI_WINDOW_NEY(DTILUN)
+	ELSE
+	   WIN_START_COL = 1
+	   WIN_STOP_COL  = X_EXTENT(DTILUN)
+	   WIN_START_ROW = 1
+	   WIN_STOP_ROW  = Y_EXTENT(DTILUN)
+	ENDIF
+C
+	WIN_NUM_COL = WIN_STOP_COL - WIN_START_COL + 1
+	WIN_NUM_ROW = WIN_STOP_ROW - WIN_START_ROW + 1
+C
+C Take account of the user's UNITS command to get size in IFF units
+C
+	IF (UNITS.EQ.UNITS_DTI) THEN		! DTI rows and cols
+	   XLEN = DBLE(WIN_STOP_COL - WIN_START_COL)
+	   YLEN = DBLE(WIN_STOP_ROW - WIN_START_ROW)
+C
+	ELSEIF (UNITS.EQ.UNITS_MET) THEN	! metres
+	   XLEN = DBLE(WIN_STOP_COL-WIN_START_COL)*X_GRID(DTILUN)
+	   YLEN = DBLE(WIN_STOP_ROW-WIN_START_ROW)*Y_GRID(DTILUN)
+C
+	ELSEIF (UNITS.EQ.UNITS_PROJ) THEN	! projection units
+	   XLEN = DBLE(WIN_STOP_COL-WIN_START_COL)
+     &				*DTIPROJ_SAMPLE(1,DTILUN)
+	   YLEN = DBLE(WIN_STOP_ROW-WIN_START_ROW)
+     &				*DTIPROJ_SAMPLE(2,DTILUN)
+C
+	ELSE				! seconds or Latlong
+	   XLEN = DBLE(WIN_STOP_COL-WIN_START_COL)*LONINT(DTILUN)
+	   YLEN = DBLE(WIN_STOP_ROW-WIN_START_ROW)*LATINT(DTILUN)
+	ENDIF
+C
+C Set map scaled integer size of the two axes, based on the ratio
+C between length in x and y directions in terms of the 'size' of 
+C grid specified in /MAPARE/.  The longest axis is scaled 
+C to 300000.0
+C
+	SRINC = 1.0D0/MIN(300000.0D0/XLEN, 300000.0D0/YLEN)
+C
+C Set XMIN,XMAX and YMIN,YMAX to cover the grid area only. 
+C XMIN,XMAX and YMIN,YMAX are offset in the IFF file by X_OFFSET(DTILUN)
+C and Y_OFFSET(DTILUN) in the type 2 MD origin offset
+C
+	XMIN = 0.0
+	XMAX = XLEN
+	YMIN = 0.0
+	YMAX = YLEN
+C
+C --------------------------------------------------------------------
+C
+	IF (UNITS.EQ.UNITS_DTI) THEN		! DTI rows and cols
+	   XRINC = 1.0D0/SRINC
+	   YRINC = 1.0D0/SRINC
+C
+	ELSEIF (UNITS.EQ.UNITS_MET) THEN	! metres
+	   XRINC = X_GRID(DTILUN)/SRINC
+	   YRINC = Y_GRID(DTILUN)/SRINC
+C
+	ELSEIF (UNITS.EQ.UNITS_PROJ) THEN	! projection units
+	   XRINC = DTIPROJ_SAMPLE(1,DTILUN)/SRINC
+	   YRINC = DTIPROJ_SAMPLE(2,DTILUN)/SRINC
+C
+	ELSE					! seconds or Latlong
+	   XRINC = LONINT(DTILUN)/SRINC
+	   YRINC = LATINT(DTILUN)/SRINC
+	ENDIF
+C
+C Calculate length of half grid cell diagonal
+C
+	DIAG = SQRT((XRINC*YRINC)*2.0D0)/2.0D0
+C
+C --------------------------------------------------------------------
+C Set Z limits (data_type bit not supported) from min and max data
+C   values for the whole DTI file
+C
+	GOTO (10,10,20,30), DATA_TYPE(DTILUN)
+C
+10	ZMIN = FLOAT(MIN_WVALUE(DTILUN))
+	ZMAX = FLOAT(MAX_WVALUE(DTILUN))
+	GOTO 40
+C
+20	ZMIN = FLOAT(MIN_LVALUE(DTILUN))
+	ZMAX = FLOAT(MAX_LVALUE(DTILUN))
+	GOTO 40
+C
+30	ZMIN = MIN_RVALUE(DTILUN)
+	ZMAX = MAX_RVALUE(DTILUN)
+C
+C Scale DTI value range of whole file to 1, 32001 based on the original
+C   data, unscaled by any mult or divide factor
+C
+40	IF (ZMIN.EQ.ZMAX) THEN
+	   CALL WRITEF (WARNING//
+     &		'DTI file has zero Z-range - no contours can be traced')
+	   CALC_SCALING = SS$_ABORT
+	   GOTO 999
+        ENDIF
+C
+	ZSC = 32000.0D0/(ZMAX-ZMIN)
+C
+C Calculate any Z value manipulation, e.g. metric to imperial
+C
+	IF (M2FEET) THEN
+	   ZMIN = ZMIN * RESCAL
+	   ZMAX = ZMAX * RESCAL
+	ELSEIF (FEET2M) THEN
+	   ZMIN = ZMIN/RESCAL
+	   ZMAX = ZMAX/RESCAL
+	ELSEIF (MULT.OR.DIVIDE) THEN
+	   ZMIN = ZMIN * MFACTR
+	   ZMAX = ZMAX * MFACTR
+	ENDIF
+C
+C Make sure that any ZLIMITS set by the user lie within the DTI file
+C   Z range
+C
+	IF (ZSET) THEN
+	   IF (ZWINMAX.LT.ZMIN) THEN
+	      CALL LSL_PUTMSG (DTICONT__ZMAXERR, ZWINMAX, ZMIN)
+	      CALC_SCALING = SS$_ABORT
+	      GOTO 999
+	   ELSEIF (ZWINMIN.GT.ZMAX) THEN
+	      CALL LSL_PUTMSG (DTICONT__ZMINERR, ZWINMIN, ZMAX)
+	      CALC_SCALING = SS$_ABORT
+	      GOTO 999
+	   ENDIF
+C
+	   ZWINMIN = MAX(ZWINMIN, ZMIN)
+	   ZWINMAX = MIN(ZWINMAX, ZMAX)
+	ENDIF
+C
+C --------------------------------------------------------------------
+C If the user didn't specify a contour interval...
+C
+	IF (.NOT.HADZ) THEN
+	   A = MAX((ZMAX-ZMIN)*0.111, 0.1)
+	   P = AINT(ALOG10(A))
+	   A = AINT(A*10.0**(-P))
+	   ZGAP = A*10.0**P		! contours
+	   WORD = ' '
+	   WRITE(WORD,50) ZGAP
+50	   FORMAT(F8.2)
+	   CALL WRITEF
+	   CALL WRITEF(
+     &		'    *****************************************'
+     &			//'*****************')
+	   CALL WRITEF(
+     &		'    *                       W A R N I N G    '
+     &			//'                *')
+	   CALL WRITEF(
+     &   	'    *        Using default contour interval ('
+     &			//WORD//')       *')
+	   CALL WRITEF(
+     &		'    *****************************************'
+     &			//'*****************')
+	   CALL WRITEF
+	ENDIF
+C
+	IF (.NOT.HADIZ) THEN
+	   INDX_ZGAP = ZGAP*5.0		! index contours
+	ENDIF
+C
+C --------------------------------------------------------------------
+C Change users annotation parameters expressed in IFF units to the
+C dimensionless world of DTICONTOUR's internal grid. 
+C ICML is the distance of travel (minimum) before a label is put
+C on a line. LABSIZ is the size of the label.
+C
+	ICML = RMINGAP/SRINC
+	LABSIZ = LABLSIZE/SRINC
+C
+C --------------------------------------------------------------------
+C Set up default dynamic array size  - align to longword boundary
+C
+	BYTE_SIZE = 4
+	WORD_SIZE = 4
+	LONG_SIZE = 4
+	REAL_SIZE = 4
+	IF (DATA_TYPE(DTILUN).EQ.DATA_BYTE) THEN
+	   BYTE_SIZE = WIN_NUM_ROW
+	ELSEIF (DATA_TYPE(DTILUN).EQ.DATA_WORD) THEN
+	   WORD_SIZE = WIN_NUM_ROW*2
+	ELSEIF (DATA_TYPE(DTILUN).EQ.DATA_LONG) THEN
+	   LONG_SIZE = WIN_NUM_ROW*4
+	ELSEIF (DATA_TYPE(DTILUN).EQ.DATA_REAL) THEN
+	   REAL_SIZE = WIN_NUM_ROW*4
+	ENDIF
+	NDTM_SIZE = 2*WIN_NUM_COL*WIN_NUM_ROW
+	STORE_SIZE = NDTM_SIZE
+     &		   + BYTE_SIZE
+     &		   + WORD_SIZE
+     &		   + LONG_SIZE
+     &		   + REAL_SIZE
+C
+C Allocate workspace
+	N_PAGES = (STORE_SIZE-1)/512+1
+C
+	CALC_SCALING = SYS$EXPREG(%VAL(N_PAGES),RETADR,,)
+C
+	IF (CALC_SCALING) THEN
+C
+C Find space successfully allocated
+	   ALLOCATION = RETADR(2)-RETADR(1)+1
+	   IF (ALLOCATION.LT.STORE_SIZE) THEN
+C
+C If the full amount could not be allocated then give up
+	     CALL LSL_PUTMSG(DTICONT__SPACELIM,ALLOCATION)
+	   ELSE
+	      NDTM_ADDRESS = RETADR(1)	! set up array start-addreses
+	      BYTE_BUFF_ADDRESS = NDTM_ADDRESS+NDTM_SIZE
+	      WORD_BUFF_ADDRESS = BYTE_BUFF_ADDRESS+BYTE_SIZE
+	      LONG_BUFF_ADDRESS = WORD_BUFF_ADDRESS+WORD_SIZE
+	      REAL_BUFF_ADDRESS = LONG_BUFF_ADDRESS+LONG_SIZE
+	   ENDIF
+	ELSE
+	   CALL LSL_PUTMSG(CALC_SCALING)
+	ENDIF
+C
+999	RETURN
+	END
+C

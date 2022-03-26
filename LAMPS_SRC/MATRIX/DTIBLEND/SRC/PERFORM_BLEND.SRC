@@ -1,0 +1,222 @@
+	LOGICAL FUNCTION PERFORM_BLEND()
+C
+***	MODULE	PERFORM_BLEND
+***	IDENT	20MY88
+C
+C	Copyright (C), Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	Created						TJH 20-MAY-1988
+C
+C Function to actually do the DTI file blending.
+C 4 possible blend processes are available:
+C
+C 1) Blend one DTI file to the edge of the other which is
+C    unaltered.
+C 2) As 1) but refering to IFF control.
+C 3) Blend both DTI files to a common edge mean.
+C 4) As 3) but refering to IFF control.
+C
+C DTI files are always modified in-situ - if the IN_SITU option is
+C enabled it is the input DTI file(s) that are modified. Otherwise
+C copies of the input DTI files are made and given the user supplied
+C file-spec and modifications are made to these. 
+C
+C
+C Blending is performed by loading the new edge values into EDGEARR
+C these values are taken from the relevant edge of the hold file in the 
+C case of a BLEND/HOLD combination, or the mean edge values in a
+C BLEND/BLEND combination. The BLEND file(s) are treated in turn,
+C the amount of change being spread inwards using linear interpolation
+C over BORDER rows or cols. This spreading process is altered by the
+C presence of IFF control intersections with the rows or columns.
+C
+C Function returns .TRUE. if all is well
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 'LSL$CMNDTIBLEND:DTIBLENDMSG.PAR'
+	INCLUDE 'LSL$CMNDTIBLEND:PARAMS.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:COMMAND.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:PROCESS.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:FILES.CMN'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C W/s
+	INTEGER		I,J
+	INTEGER		IERR			! error return
+C
+C Functions
+	LOGICAL		GET_FIXED_Z		! get fixed_z for interp
+	LOGICAL		INTERP			! interpolate new values
+	LOGICAL		LOAD_MEAN_EDGE		! calc mean edge values
+	LOGICAL		DTI_COPY_DATA		! copy DTI data!
+C
+C ......................................................................
+C
+	PERFORM_BLEND=SS$_ABORT			! assume failure
+C
+C Load up EDGEARR with the new edge values.
+	IF (HOLD_LUN.EQ.0) THEN
+C
+C If both files are to be blended, load with values which represent
+C the mean Z value along the common edge.
+	   PERFORM_BLEND=LOAD_MEAN_EDGE()
+	   IF (.NOT.PERFORM_BLEND) GOTO 40		
+	ELSE
+C
+C A hold file was specified. Load up the new edge values from the
+C hold file edge. 
+	   IF (HORIZONTAL_JOIN) THEN
+	      PERFORM_BLEND=DTI_COPY_DATA(
+     &		 HOLD_LUN,			! LUN
+     &		 EDGEARR,			! an edge
+     &		 .FALSE.,			! copy file to array
+     &		 DTI_WINDOW_SWX(HOLD_LUN),	! start col
+     &		 DTI_WINDOW_SWY(HOLD_LUN),	! start row
+     &		 DTI_WINDOW_NEX(HOLD_LUN)-DTI_WINDOW_SWX(HOLD_LUN)+1,
+     &		 1,				! number of rows
+     &		 IERR)				! system error
+C
+	   ELSE	! VERTICAL JOIN
+C
+	      PERFORM_BLEND=DTI_COPY_DATA(
+     &		 HOLD_LUN,			! LUN
+     &		 EDGEARR,			! an edge
+     &		 .FALSE.,			! copy file to array
+     &		 DTI_WINDOW_SWX(HOLD_LUN),	! start col
+     &		 DTI_WINDOW_SWY(HOLD_LUN),	! start row
+     &		 1,				! number of cols
+     &		 DTI_WINDOW_NEY(HOLD_LUN)-DTI_WINDOW_SWY(HOLD_LUN)+1,
+     &		 IERR)				! system error
+	   ENDIF
+	   IF (.NOT.PERFORM_BLEND) THEN
+	      CALL LSL_PUTMSG(PERFORM_BLEND)
+	      CALL LSL_ADDMSG(IERR)
+	      GOTO 40	        ! close file and return
+	   ENDIF
+	ENDIF	
+C
+C We now have in EDGEARR the new edge values for the common DTI edge.
+C now spread the difference between this and the original
+C edge post value over the BORDER distance worth of pixels.
+	DO 30 I=1,2
+	   IF (BLEND_LUN(I).EQ.0) GOTO 30
+	   IF (HAD_DIAG) THEN
+	      CALL WRITEF
+	      CALL WRITEF
+	      CALL WRITEF('----------------------------------'//
+     &			'------------------------------------------')
+	      CALL WRITEF('Blending posts in DTI file %S',
+     &		DTI_NAME(BLEND_LUN(I))
+     &		(1:DTI_NAME_LENGTH(BLEND_LUN(I))))
+	   ENDIF
+	   IF (HAD_LIST) THEN
+	      CALL FLWSEL(LISLUN)
+	      CALL FLWRTF
+	      CALL FLWRTF
+	      CALL FLWRTF('----------------------------------'//
+     &			'------------------------------------------')
+	      CALL FLWRTF('Blending posts in DTI file %S',
+     &		DTI_NAME(BLEND_LUN(I))
+     &		(1:DTI_NAME_LENGTH(BLEND_LUN(I))))
+	      CALL FLWRTF
+	   ENDIF
+	   IF (HORIZONTAL_JOIN) THEN
+C
+C For each column in turn
+	      DO 10 J=1,DTI_WINDOW_NEX(BLEND_LUN(I))
+     &			-DTI_WINDOW_SWX(BLEND_LUN(I))+1
+C
+C Get blend column fixed Z values to control re-interpolation.
+C Normally this will be only be 2: the post on the shared edge and the
+C post BORDER posts in from the edge. If however, there is IFF control
+C there may be anything between 2 and MAX_INS fixed Z values.
+	         PERFORM_BLEND=GET_FIXED_Z(J,BLEND_LUN(I))
+	         IF (.NOT.PERFORM_BLEND) GOTO 40
+C
+C Check that neither of the profile end posts is a null value - abort
+C whole profile if so
+	         IF (FIXZAR(2,1).EQ.NULL_VALUE
+     &			.OR.FIXZAR(2,NUMINS).EQ.NULL_VALUE) THEN
+	            IF (HAD_DIAG) THEN
+		       CALL WRITEF('Null value detected at end '//
+     &			'of blend profile')
+		       CALL WRITEF('No blend will be performed '//
+     &			'on column %N',DTI_WINDOW_SWX(BLEND_LUN(I))+J-1)
+	            ENDIF
+	            IF (HAD_ROVER) THEN
+		       CALL FLWSEL(ROVER_LUN(I))
+		       CALL FLWRTF(
+     &			'MESSAGE Null value detected at end '//
+     &			'of blend profile')
+		       CALL FLWRTF(
+     &			'MESSAGE No blend will be performed '//
+     &			'on column %N',DTI_WINDOW_SWX(BLEND_LUN(I))+J-1)
+		       CALL FLWRTF('MOVE %N %N',
+     &			DTI_WINDOW_SWX(BLEND_LUN(I))+J-1
+     &				      ,SHARED_ROW(BLEND_LUN(I)))
+	      	       CALL FLWRTF('PING')
+	      	       CALL FLWRTF('RESPOND')
+	            ENDIF
+		    GOTO 10
+	         ENDIF
+C
+C Then re-interpolate the blend column, and write it into the BLEND
+C DTI file
+	         PERFORM_BLEND=INTERP(J,BLEND_LUN(I),ROVER_LUN(I))
+	         IF (.NOT.PERFORM_BLEND) GOTO 40
+10	      CONTINUE
+	   ELSE
+C
+C For each row in turn
+	      DO 20 J=1,DTI_WINDOW_NEY(BLEND_LUN(I))
+     &			-DTI_WINDOW_SWY(BLEND_LUN(I))+1
+C
+C Get blend row fixed Z values to control re-interpolation.
+C Normally this will be only be 2: the post on the shared edge and the
+C post BORDER posts in from the edge. If however, there is IFF control
+C there may be anything between 2 and MAX_INS fixed Z values.
+	         PERFORM_BLEND=GET_FIXED_Z(J,BLEND_LUN(I))
+	         IF (.NOT.PERFORM_BLEND) GOTO 40
+C
+C Check that neither of the profile end posts is a null value - abort
+C whole profile if so
+	         IF (FIXZAR(2,1).EQ.NULL_VALUE
+     &			.OR.FIXZAR(2,NUMINS).EQ.NULL_VALUE) THEN
+	            IF (HAD_DIAG) THEN
+		       CALL WRITEF('Null value detected at end '//
+     &			'of blend profile')
+		       CALL WRITEF('No blend will be performed '//
+     &			'on row %N',DTI_WINDOW_SWY(BLEND_LUN(I))+J-1)
+	            ENDIF
+	            IF (HAD_ROVER) THEN
+		       CALL FLWSEL(ROVER_LUN(I))
+		       CALL FLWRTF(
+     &			'MESSAGE Null value detected at end '//
+     &			'of blend profile')
+		       CALL FLWRTF(
+     &			'MESSAGE No blend will be performed '//
+     &			'on row %N',DTI_WINDOW_SWY(BLEND_LUN(I))+J-1)
+		       CALL FLWRTF('MOVE %N %N',
+     &			DTI_WINDOW_SWX(BLEND_LUN(I))+J-1
+     &				      ,SHARED_COL(BLEND_LUN(I)))
+	      	       CALL FLWRTF('PING')
+	      	       CALL FLWRTF('RESPOND')
+	            ENDIF
+		    GOTO 20
+	         ENDIF
+C
+C Then re-interpolate the blend row, and write it into the BLEND
+C DTI file
+	         PERFORM_BLEND=INTERP(J,BLEND_LUN(I),ROVER_LUN(I))
+	         IF (.NOT.PERFORM_BLEND) GOTO 40
+20	      CONTINUE
+	   ENDIF
+30	CONTINUE
+	PERFORM_BLEND=SS$_NORMAL
+40	RETURN
+	END

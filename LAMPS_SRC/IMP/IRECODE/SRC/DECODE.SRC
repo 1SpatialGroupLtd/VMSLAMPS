@@ -1,0 +1,181 @@
+	LOGICAL FUNCTION DECODE(INSTR,LENSTR,NUMPAIRS,LUTABLE)
+C
+***	MODULE	DECODE
+***	IDENT	24AU93
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD    Size of lookup table for number pairs increased	 ST 24-Aug-1993
+C       from 256 to 1000. Mod 1286.
+CMOD	modifications made in error, removed		 SG 06-Jun-1991
+CMOD	modified to read strings from array		 SG 04-Jun-1991
+C
+CMOD	':' separator changd to '>'			TJH 04-Nov-1986
+CMOD	Output message if duplicate code changes 
+C	specified, made a logical function, ERR removed
+C	from argument list. FRL'ed.			TJH 24-Nov-1986
+CMOD	Check for zero length input string, tests
+C	for arguments being in range 0-32767 added	TJH 12-Nov-1986
+CMOD	LSL_STATUS reset to SS$_NORMAL on return	TJH 01-Sep-1986
+C
+C 	Adapted from source code in ILAYFC - Author MD
+C 	Created					        MWSR 04-Dec-1985
+C 	Author M.W.S. Reid
+C
+C DECODEs a command string of the form (int>int,...). Function returns
+C SS$_NORMAL if the decode is successful, SS$_ABORT if it fails. Despite
+C error messages LSL_STATUS will always be set to SS$_NORMAL on return
+C as we will fall into prompt mode if the command line decoding fails
+C (or is absent).
+C
+	IMPLICIT NONE
+C
+C Arguments passed
+	CHARACTER*32	INSTR(64)	! string to be DECODEd
+	INTEGER*2	LENSTR(64)	! length of string
+	INTEGER*4	NUMPAIRS	! number of strings
+	INTEGER*2	LUTABLE(2,30000)  ! look up table for number pairs
+	LOGICAL		SPECIAL		! special case of /ALPHA
+C
+C Parameters:
+	INCLUDE 'LSL$CMNIRECODE:IRECODEMSG.PAR'
+	INCLUDE 'LSL$CMNLSL:READSTR.PAR'
+	INTEGER	SS$_ABORT
+	EXTERNAL SS$_ABORT
+	INTEGER	SS$_NORMAL
+	EXTERNAL SS$_NORMAL
+C
+C Common blocks
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNIRECODE:ARGS.CMN'
+C
+C ......................................................................
+C
+C Workspace
+	INTEGER*2	BYTE_IDX	! index for copy into byte array
+	INTEGER*2	CINDEX		! index into INSTR
+	INTEGER*4	ITMP		! temporary variable
+	INTEGER*2	LINDEX		! index into look up table
+	INTEGER*4	LONG		! longword read by RDLONG
+	INTEGER*2	OLDVAL		! old change, now superseded
+	BYTE		STRBUF(32)	! byte buffer for string args
+	INTEGER*2	STR_IDX		! index into string array
+	INTEGER*4	RETVAL		! return value
+	INTEGER*4	NCHARS		! characters read
+C
+C Functions
+	LOGICAL		RDLONG		! read long integer from TEXTBUF
+	INTEGER*4	READSTR		! read strings from TEXTBUF
+C
+C .....................................................................
+C Initialise counting variables
+	STR_IDX = 1
+	LINDEX = 1
+	CINDEX = 1
+	DECODE = %LOC(SS$_NORMAL)
+C
+C .....................................................................
+C Check that the string that is to be decoded actually exists!
+C
+	IF (LENSTR(STR_IDX).EQ.0) THEN 
+	   DECODE=%LOC(SS$_ABORT)
+	   GOTO 999
+	ENDIF
+C
+C .....................................................................
+C Read strings using a sort of while loop
+C
+10	DO 20 BYTE_IDX=1,LENSTR(STR_IDX)
+	   STRBUF(BYTE_IDX) = ICHAR(INSTR(STR_IDX)(BYTE_IDX:BYTE_IDX))
+20	CONTINUE
+	CALL SETAUX(STRBUF,LENSTR(STR_IDX))
+
+	CALL SETWIN(CINDEX,)
+	IF (RDLONG(LONG)) THEN
+	  CALL LSL_PUTMSG(IRECODE__BADARGFMT)
+	  DECODE=%LOC(SS$_ABORT)
+	  GOTO 999
+	ELSE
+	  IF (LONG.GE.0.AND.LONG.LE.32767) THEN
+	    LUTABLE(1,LINDEX)=LONG
+	  ELSE
+	    CALL LSL_PUTMSG(IRECODE__BADARGRA)
+	    CALL EXPAND('%N',LONG)
+	    CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	    CALL LSL_ADDMSG(IRECODE__ARGRANGE)
+	    DECODE=%LOC(SS$_ABORT)
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C .....................................................................
+C Check for the colon seperator
+C
+	CINDEX = DCPTR
+	IF (STRBUF(CINDEX) .NE. '>') THEN
+	   CALL LSL_PUTMSG(IRECODE__BADARGFMT)
+	   DECODE= %LOC(SS$_ABORT)
+	   GOTO 999
+	ENDIF
+	CINDEX = CINDEX + 1
+C
+C .....................................................................
+C and the next number 
+C
+	CALL SETWIN(CINDEX,)
+	IF (RDLONG(LONG)) THEN
+	   CALL LSL_PUTMSG(IRECODE__BADARGFMT)
+	   DECODE=%LOC(SS$_ABORT)
+	   GOTO 999
+	ELSE
+	   IF (LONG.GE.0.AND.LONG.LE.32767) THEN
+C
+C .....................................................................
+C Test to see if the user has already specified a change for this
+C old value
+C
+	        DO 30 ITMP=1,(LINDEX-1)
+	           IF (LUTABLE(1,ITMP).NE.LUTABLE(1,LINDEX)) GOTO 30
+	           OLDVAL=LUTABLE(2,ITMP)
+	           LUTABLE(2,ITMP)=LONG	     ! yes - change output again
+	           LINDEX=LINDEX-1
+	           CALL LSL_PUTMSG(IRECODE__REPCHANGE)
+	           CALL EXPAND('%^W%N>%N and %N>%N'
+     &			    ,LUTABLE(1,ITMP),OLDVAL,LUTABLE(1,ITMP),LONG)
+	           CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	           GOTO 40
+30	        CONTINUE
+	        LUTABLE(2,LINDEX)=LONG
+	   ELSE
+	      CALL LSL_PUTMSG(IRECODE__BADARGRA)
+	      CALL EXPAND('%N',LONG)
+	      CALL LSL_ADDBUF(EXPBUF,EXPLEN)
+	      CALL LSL_ADDMSG(IRECODE__ARGRANGE)
+	      DECODE=%LOC(SS$_ABORT)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C .....................................................................
+C and now check for end of string
+C
+40	CINDEX = DCPTR
+	IF ((CINDEX-1) .NE. LENSTR(STR_IDX)) THEN
+	   CALL LSL_PUTMSG(IRECODE__BADARGFMT)
+	   DECODE=%LOC(SS$_ABORT)
+	   GOTO 999
+	ENDIF
+	STR_IDX = STR_IDX + 1
+	CINDEX = 1
+	LINDEX = LINDEX + 1
+	IF (STR_IDX .LE. NUMPAIRS) GOTO 10
+C
+	NUMPAIRS=LINDEX-1
+C .....................................................................
+999	LSL_STATUS=%LOC(SS$_NORMAL)
+	RETURN
+	END	

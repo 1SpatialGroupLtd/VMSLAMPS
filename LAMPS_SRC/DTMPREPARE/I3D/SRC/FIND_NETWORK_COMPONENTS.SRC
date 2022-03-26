@@ -1,0 +1,195 @@
+	LOGICAL FUNCTION FIND_NETWORK_COMPONENTS(	
+     &	NOD_I,NOD_R,NOD_L,ARM_I,ARM_L,LNK_I,LNK_R,LNK_L,PUP_I,
+     &	PDN_I,NET_I,STN_I,STN_R,STL_I,STL_L,MNX_I,MNX_R,PNT_I,PNT_R,
+     &	MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+C
+***	MODULE	FIND_NETWORK_COMPONENTS
+***	IDENT	13FE89
+C	
+C Copyright Laser Scan Laboratories, Cambridge, England.
+C 	
+C Created 						ALB 15-Apr-1988
+C
+CMOD	Changed the order in which I3D does things in so that the ONEARM
+C	stage is no longer required			ACM 04-Jan-1989
+C
+C Description
+C	Builds network components, i.e. traverses the entire
+C	river/ridgeline network, identifying, counting the number of
+C	nodes in, and finding the minimum and maximum heights in, each
+C	separate network component. 
+C
+C	The algorithm used is as follows:
+C
+C	For each node, search outwards to reach every part of the
+C	network connected to this node, using a deapth-first stack
+C	search. Each node is tagged as it is visited. A scan will
+C	traverse an entire network component before the outer INOD
+C	do-loop loops again. Nodes already visited are skipped.
+C	If any node in a network component is an unheighted terminal
+C	or unheighted ridge node, then the NET min and max height
+C	nodes are undefined.
+C
+	IMPLICIT NONE
+C	
+C Parameters
+	INCLUDE 'LSL$CMNI3D:I3DMSG.PAR'
+	INCLUDE 'LSL$CMNI3D:CONSTANTS.PAR'
+C
+C Common blocks
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+	INCLUDE 'LSL$CMNI3D:GROUP.CMN'
+	INCLUDE 'LSL$CMNI3D:SELECT.CMN'
+C
+C Structures
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+C
+C VM data declarations
+	INCLUDE 'LSL$CMNI3D:VM_ARG_DECL.SRC'
+C
+C Workspace
+	INTEGER		ILNK,INOD,IARM	! LNK,NOD,ARM indices
+	INTEGER		CUR_NOD		! current NOD index
+	INTEGER		NXT_NOD		! next NOD index
+	INTEGER		CUR_ARM		! current ARM index
+	INTEGER		I		! misc
+	INTEGER		LEVEL		! current stack level
+	INTEGER		NODMIN,NODMAX	! min & max ht NOD indices
+C
+	REAL		MAX_HEIGHT	! max height in component
+	REAL		MIN_HEIGHT	! min height in component
+C
+	LOGICAL		CAN_PUSH	! can stack be pushed?
+	LOGICAL		MINMAX_UNDEF	! min & max net hgts undefined?
+	LOGICAL		IS_RIVER	! river node?
+	LOGICAL		FREE_END	! end point node?
+	LOGICAL		HEIGHTED	! node height defined?
+C
+C **********************************************************************
+C
+	FIND_NETWORK_COMPONENTS = .TRUE.	! assume success
+C
+	DO 10 INOD = 1,NUM_NODS			! clear NOD_BEF flags
+	   NOD_L(NOD_BEF,INOD) = .FALSE.
+10	CONTINUE
+	NUM_NETS = 0				! zero component count
+	N_RIVER_NETS = 0
+	N_RIDGE_NETS = 0
+C ----------------------------------------------------------------------
+C
+	DO 50 INOD = 1,NUM_NODS			! for each node do...
+C	   IF (NOD_L(NOD_DEL,INOD)) GOTO 50	! skip if deleted
+	   IF (NOD_L(NOD_BEF,INOD)) GOTO 50	! skip if visited
+	   NOD_L(NOD_BEF,INOD) = .TRUE.		! now visited
+C ----------------------------------------------------------------------
+C Initialise network component array and min/max height variables
+C
+	   NUM_NETS = NUM_NETS+1		! new network component
+C
+	   NET_I(NET_IMN,NUM_NETS) = NIL
+	   NET_I(NET_IMX,NUM_NETS) = NIL
+	   NET_I(NET_GRP,NUM_NETS) = NOD_I(NOD_GRP,INOD)
+	   IF (NET_I(NET_GRP,NUM_NETS).EQ.RIVER) THEN
+	      N_RIVER_NETS = N_RIVER_NETS+1
+	   ELSEIF(NET_I(NET_GRP,NUM_NETS).EQ.RIDGE) THEN
+	      N_RIDGE_NETS = N_RIDGE_NETS+1
+	   ENDIF
+	   MAX_HEIGHT = -1.0E31			! very low value
+	   MIN_HEIGHT = 1.0E31			! very high value
+	   NODMAX = NIL				! no max NOD defined yet
+	   NODMIN = NIL				! no min NOD defined yet
+	   MINMAX_UNDEF = .FALSE.		! assume hts lims defind
+
+C ----------------------------------------------------------------------
+	   LEVEL = 0				! zero stack level
+	   CAN_PUSH = .TRUE.			! can always push from 0
+	   NXT_NOD = INOD			! first NOD is INOD
+	   GOTO 40				! push stack to level 1
+C ----------------------------------------------------------------------
+C See whether it is possible to push node stack by extending the
+C network component along any of the remaining arms at this level 
+C
+20	   CAN_PUSH = .TRUE.			! assume stack can push
+	   CUR_NOD = STN_I(STN_NOD,LEVEL)	! current NOD
+	   CUR_ARM = STN_I(STN_ARM,LEVEL)	! next ARM to try
+15	   IF (CUR_ARM.EQ.NIL) GOTO 30		! start each arm here
+	   ILNK = ARM_I(ARM_LNK,CUR_ARM)	! corresponding LNK indx
+	   IF (LNK_I(LNK_ND1,ILNK).EQ.CUR_NOD) THEN
+	      NXT_NOD = LNK_I(LNK_ND2,ILNK)
+	   ELSE
+	      NXT_NOD = LNK_I(LNK_ND1,ILNK)
+	   ENDIF
+	   IF (.NOT.NOD_L(NOD_BEF,NXT_NOD)) GOTO 40
+	   CUR_ARM = ARM_I(ARM_NXT,CUR_ARM)
+	   GOTO 15				! loop for next arm
+
+30	   CAN_PUSH = .FALSE.			! stack cannot be pushed
+C
+C ----------------------------------------------------------------------
+C
+C Store next arm at current stack level
+40	   IF (CAN_PUSH) THEN			! push node stack
+	      IF (LEVEL.GT.0)
+     &	         STN_I(STN_ARM,LEVEL) = ARM_I(ARM_NXT,CUR_ARM)
+C
+	      IF (LEVEL.GE.MAX_STNS) THEN
+C Stack overflow should be impossible, so class this as a logic error
+	         CALL LSL_PUTMSG(
+     &	            I3D__INTRNLERR,1,'FIND_NETWORK_COMPONENTS')
+	         FIND_NETWORK_COMPONENTS = .FALSE.
+	         GOTO 999
+	      ENDIF
+	      LEVEL = LEVEL+1			! incr stack level
+C
+C Node moved to
+	      STN_I(STN_NOD,LEVEL) = NXT_NOD
+C
+C First arm at this node
+	      STN_I(STN_ARM,LEVEL) = NOD_I(NOD_ARM,NXT_NOD)
+C
+	      NOD_L(NOD_BEF,NXT_NOD) = .TRUE.	! now visited
+	      NOD_I(NOD_NET,NXT_NOD) = NUM_NETS	! NET index
+C
+C Note min and max height, and corresponding NOD indices - but only if
+C node is a terminal node.
+C
+	      FREE_END = ARM_I(ARM_NXT,NOD_I(NOD_ARM,NXT_NOD)).EQ.NIL
+	      HEIGHTED = NOD_I(NOD_ZZZ,NXT_NOD).NE.IFF_ABSENT
+C
+	      IF (HEIGHTED) THEN
+	         IF ((IS_RIVER.AND.FREE_END).OR..NOT.IS_RIVER) THEN
+	            IF (NOD_R(NOD_ZZZ,NXT_NOD).GT.MAX_HEIGHT) THEN
+	               MAX_HEIGHT = NOD_R(NOD_ZZZ,NXT_NOD)
+	               NODMAX = NXT_NOD
+	            ENDIF
+	            IF (NOD_R(NOD_ZZZ,NXT_NOD).LT.MIN_HEIGHT) THEN
+	               MIN_HEIGHT = NOD_R(NOD_ZZZ,NXT_NOD)
+	               NODMIN = NXT_NOD
+	            ENDIF
+	         ENDIF
+	      ELSEIF (FREE_END) THEN
+C
+C If node is unheighted and is also a possible valid source or sink,
+C (ie. is a river terminal free-end) then min and max heights for
+C network component are effectively undefined. 
+C
+	         MINMAX_UNDEF = .TRUE.		! unheighted terminal
+
+	      ENDIF
+C
+	      GOTO 20
+	   ELSE IF (LEVEL.GT.1) THEN		! decr stack index
+	      LEVEL = LEVEL-1
+	      GOTO 20
+	   ENDIF
+C
+	   IF (.NOT.MINMAX_UNDEF) THEN
+	     NET_I(NET_IMN,NUM_NETS) = NODMIN
+	     NET_I(NET_IMX,NUM_NETS) = NODMAX
+	   ENDIF
+C
+50	CONTINUE	! component completed - move on to next node
+C
+999	RETURN
+	END
+

@@ -1,0 +1,278 @@
+	SUBROUTINE DOCANC
+C
+***	IDENT	29OC93
+***	MODULE	DOCANC
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					RWR	24-Apr-1985
+C
+C	LITES2 cartographic editor CANCEL command.
+C
+	IMPLICIT NONE
+C
+***     PARAMETER/CMN:MACMEN/		! macros, menus and puck buttons
+C
+***     COMMON/CMN:MACRO/		! macro variables
+C
+C this is a jacket routine that calls the real routine, passing it
+C the address of two arrays (of descriptors)
+C
+	CALL CANCEL(%VAL(MACDSL_ADDR),%VAL(MANDSL_ADDR))
+C
+	RETURN
+	END
+
+
+
+	SUBROUTINE CANCEL(MACDSL,MANDSL)
+C
+***	IDENT	07FE92
+***	MODULE	CANCEL
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					RWR	24-Apr-1985
+C
+C	LITES2 cartographic editor CANCEL command.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:EFNLUN/
+***     PARAMETER/CMN:MACMEN/		! macros, menus and puck buttons
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:REGPAR/
+C
+***	COMMON/CMN:DEFINE/
+***	COMMON/CMN:DMACRD/
+***	COMMON/CMN:DOUT/
+***	COMMON/LSL$CMNFRT:FRTACD/
+***	COMMON/CMN:GLOBAL/
+***	COMMON/CMN:LABELS/
+***     COMMON/CMN:MACRO/		! macro variables
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:REGCMN/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:VARIABLE/		! variables
+C
+C arguments
+	INTEGER*4	MACDSL(2,*)
+	INTEGER*4	MANDSL(2,*)
+C
+	EXTERNAL	NASTY,MOAN
+C
+C Functions called
+	INTEGER*4	GETMAC		! gets macro name
+	LOGICAL		RDCHS
+	LOGICAL		RSPINP
+	BYTE		GET_VARBYTE
+	INTEGER*4	GET_VARLONG
+C
+C Local Variables
+	INTEGER		I		! counter
+	INTEGER*4	REG		! region
+	INTEGER*4	IER		! return codes
+	BYTE		CH
+	INTEGER		DEFNO		! definition number
+	INTEGER		LENGTH,ADDR,ELEM
+C
+C dispatch on secondary command
+C
+	GOTO (100,200,300,400), DSECN
+C
+	DEFNO = DSECN - 4
+	IF (DEFNO.LE.DEF_NUMBER) GOTO 500	! cancel definition
+	IF (DEFNO.EQ.DEF_NUMBER+1) GOTO 600	! cancel definition of
+						! OS_MAP_FLAGS
+	IF (DEFNO.EQ.DEF_NUMBER+2) GOTO 700	! cancel definition of
+						! OS_MAP_TXTCAT
+C
+C secondary command out of range
+C
+	CALL MSGCMD(NASTY,MSG_ERRSECIND)
+	GOTO 900
+C
+C Secondary command REGION
+C
+100	REG=DINTS(1)
+	IF (REG.LT.1.OR.REG.GT.MAX_REG) THEN
+	   CALL MOAN(MSG_INVALREGNO,REG,1,MAX_REG)
+	   CALL IGNCMD
+C
+	ELSEIF (.NOT.REGDEF(REG)) THEN
+	   CALL MOAN(MSG_REGNOTDEF,REG)
+	   CALL IGNCMD
+C
+	ELSE
+	   CALL DELREG(REG)
+	   CALL STSARG			! set SAREGS
+C
+C if no regions now defined, cancel RGSLCT
+C
+	   DO 50, I=1,MAX_REG
+	      IF (REGDEF(I)) GOTO 900
+   50	   CONTINUE
+	   RGSLCT = .FALSE.
+	ENDIF
+	GOTO 900	
+C
+C Secondary command MACRO
+C
+200	IER = GETMAC(DSTR(:DSTRL),.FALSE.)! get macro name
+	IF (IER.EQ.0) THEN		! macro expansion found
+	   CALL STR$FREE1_DX(MACDSL(1,DMACN))	! delete expansion
+C
+C If it was a user macro (not a puck or menu box), then remove
+C it completely
+	   IF (DTABN.LE.MAXUSR) THEN	! user macro
+	      CALL STR$FREE1_DX(MANDSL(1,DMACN))! delete description
+	      CALL SELTAB(MACSAV)	! select macro table
+	      CALL REMCMD(DTABN)	! remove command
+	      CALL SAVTAB(MACSAV)	! save table again
+C
+C mark dynamic descriptor for macro expansion as free
+	      MACDSL(1,DTABN) = 0
+	   ENDIF
+	   CALL MACSTR			! form name in TXTDSC
+	   CALL LEARN(MSG_CANCELLED,'Macro',TXTDSC)
+	   IF (DMACN.EQ.ABS(ANNOMAC)) ANNOMAC = 0
+	ELSE
+	   CALL ERRMAC(IER,'macro')	! error, so complain
+	   CALL IGNCMD			! and exit
+	ENDIF
+	GOTO 900
+C
+C Secondary command VARIABLE
+C
+300	CALL SETAUX(%REF(DSTR),DSTRL)
+C
+C Find variable name.
+C Forbid system, must exist, forbid subscript, not substituting
+	CALL FINVAR(.FALSE.,.TRUE.,.FALSE.,.FALSE.)
+	IF (MOANED) THEN
+	   CALL IGNCMD
+	ELSE
+	   IF (.NOT.RDCHS(CH)) THEN
+C
+C Anything else on line?
+	      CALL MOAN(MSG_EXTRACHARS,'variable',DVAR(:DVARL))
+	      CALL IGNCMD
+	   ELSE
+C
+C All OK, so remove it
+C
+C If it's character type, then free contents
+	      IF (GET_VARBYTE(%VAL(VAR_DESC_ADDRESS),3,DVARN).EQ.3) THEN
+	         ELEM = GET_VARLONG(%VAL(VAR_DESC_ADDRESS),1,DVARN)
+	         CALL STR$FREE1_DX(ELEM)
+	      ELSE
+	         ELEM = GET_VARLONG(%VAL(VAR_DESC_ADDRESS),1,DVARN)
+	         ELEM = ELEM.AND.'FFFF'X
+C
+C arrays, and double variables need dynamic memory freeing
+	         IF (ELEM.GT.0.OR.
+     &                    (GET_VARBYTE(
+     &	                  %VAL(VAR_DESC_ADDRESS),3,DVARN).EQ.4)) THEN
+	            IF (GET_VARBYTE(%VAL(VAR_DESC_ADDRESS),
+     &	                              3,DVARN).LE.2) THEN
+	               LENGTH = 4		! integer or real
+	            ELSE
+	               LENGTH = 8		! double or char array
+	            ENDIF
+	            IF (ELEM.GT.0) LENGTH = LENGTH*ELEM
+	            ADDR = GET_VARLONG(%VAL(VAR_DESC_ADDRESS),2,DVARN)
+C
+C free actual strings in char array
+	            IF (GET_VARBYTE(%VAL(VAR_DESC_ADDRESS),3,DVARN).EQ.5)
+     &				CALL LIB$SFREEN_DD(ELEM,%VAL(ADDR))
+C
+C free char descriptors, or integer/real/double array
+	            CALL LIB$FREE_VM(LENGTH,ADDR)
+	         ENDIF
+	      ENDIF
+C
+C remove variable name from table
+	      CALL SELTAB(VARSAV)	! select variable table
+	      CALL REMCMD(DVARN)	! remove command
+	      CALL SAVTAB(VARSAV)	! save table again
+C
+C mark descriptor for variable as free
+	      CALL PUT_VARBYTE(%VAL(VAR_DESC_ADDRESS),3,DVARN,0)
+	      CALL LEARN(MSG_CANCELLED,'Variable',DVAR(:DVARL))
+	   ENDIF
+	ENDIF
+	GOTO 900
+C
+C Cancel respond - return to interactive input
+400	CONTINUE
+C
+C Check that the RESPOND command has been given
+C
+	IF (.NOT. RSPINP()) THEN	! not had RESPOND
+	   CALL MOAN(MSG_CMDNOTGIVEN,'RESPOND')
+	   CALL IGNCMD
+	ELSE
+	   CANC_RESP = .TRUE.		! go back to interactive input
+					! next time thru command decoder
+	ENDIF
+	GOTO 900
+C
+C cancel a definition
+500	CONTINUE
+	IF (DEFINITION(DEFNO).LE.0) THEN
+	   CALL MOAN(MSG_DEFNOTSET,DSEC(1:DSECL))
+	   CALL IGNCMD
+	ELSE
+	   CALL DELDEF(DEFINITION(DEFNO))
+	ENDIF
+	GOTO 900
+C
+C cancel definition of os_mh_flags
+600	CONTINUE
+	IF (DINTS(1).LT.1.OR.DINTS(1).GT.OS_MH_FLAGS) THEN
+	   CALL MOAN(MSG_ILLEGLMHOPER,1,OS_MH_FLAGS)
+	   CALL IGNCMD
+	ELSEIF (OS_MH_GRP(DINTS(1)-1).LE.0) THEN	! OS_MH arrays go
+	   CALL MOAN(MSG_MHFLGNOTSET,DINTS(1))		! from 0
+	   CALL IGNCMD
+	ELSE
+	   OS_MH_GRP(DINTS(1)-1)  = 0
+	   OS_MH_CHAR(DINTS(1)-1) = ' '
+	   IF (OS_MH_CAT_LIST(DINTS(1)-1) .GT.0)
+     &	                  CALL DELDEF(OS_MH_CAT_LIST(DINTS(1)-1))
+C
+C clear all these bits in all bit maps
+	   DO 610, I = 0,MAPTOP
+	      IF (MAP_EXIST(I)) CALL LIB$INSV(
+     &			0,DINTS(1)-1,1,OS_MH_FL_BMAP(1,I))
+610	   CONTINUE
+C
+C set OS_MH_EDIT flag, which may now not be required
+	   OS_MH_EDIT = .FALSE.
+	   DO 650, I = 0,OS_MH_FLAGS-1
+	      IF (OS_MH_GRP(I).GT.0) THEN
+	         OS_MH_EDIT = .TRUE.
+	         GOTO 660
+	      ENDIF
+650	   CONTINUE
+660	   CONTINUE
+	ENDIF
+	GOTO 900
+C
+C cancel definition of os_mh_textcat
+700	CONTINUE
+	IF (DINTS(1).LT.1.OR.DINTS(1).GT.OS_MH_FLAGS) THEN
+	   CALL MOAN(MSG_ILLEGLMHOPER,1,OS_MH_FLAGS)
+	   CALL IGNCMD
+	ELSEIF (OS_MH_GRP(DINTS(1)-1).LE.0) THEN	! OS_MH arrays go
+	   CALL MOAN(MSG_MHFLGNOTSET,DINTS(1))		! from 0
+	   CALL IGNCMD
+	ELSE
+	   IF (OS_MH_CAT_LIST(DINTS(1)-1) .GT.0)
+     &	                  CALL DELDEF(OS_MH_CAT_LIST(DINTS(1)-1))
+	ENDIF
+	GOTO 900
+C
+900	RETURN
+	END

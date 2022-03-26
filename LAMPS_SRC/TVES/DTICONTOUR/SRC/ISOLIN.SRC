@@ -1,0 +1,387 @@
+	LOGICAL FUNCTION ISOLIN(NDTM,M,N,ZGAP,INDX_ZGAP)
+C
+***	MODULE	ISOLIN
+***	IDENT	14JA92
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD1076Remove oscillation between -0.5 and +0.5 with an INTERVAL of
+C	1.0 and a zero level			 JB	08-Jan-1992
+c
+c NB. -32767 (not NULL) for LONG results in zero level missing through 
+c rounding errors in the transfer to/from NDTM in CONVER etc.
+C
+C
+CMOD782 Correct contour levels plotted when ZLIMITS qualifier used
+C	(rounding errors in conversion 	of integer to real)
+C	Single contour levels allowed if requested with ZLIMITS
+C	Double precision variables introduced to eliminate spurious
+C	contour kinks arising from rounding errors
+C						 JB	03-Jul-1989
+CMOD	Calculation of the contour levels to be plotted corrected,
+C	and also the number of levels and diagnostic messages
+C	corrected for negative DTI values. Also made more
+C	readable				 JB	28-May-1989
+CMOD	Updated for DTICONTOUR			TJH	03-Nov-1987
+CMOD	Explicit Z scaling calculated for TOMETRES
+C	and TOFEET				TJH	11-Apr-1986
+CMOD	Zero height contour now traced		TJH	31-Oct-1985
+CMOD	Contour height message format changed	TJH	01-Jul-1985
+CMOD    Each contour ht. reported if +DIAG      TJH     24-Oct-1984
+CMOD	Further bug fix in re-scaling code	TJH	29-Aug-1984
+CMOD	Bug fix in re-scaling code; tidied	 DM	12-Jul-1984
+CMOD	Rescaling between metres and feet added	TJH	11-Jun-1984
+C	Standardised				TJH	01-Jun-1984
+C
+	IMPLICIT NONE
+C
+C This routine is used for contouring over a rectangular mesh
+C with heights given at the points of the mesh. These heights are
+C expected to be integer scaled values between 1 and 32001 only
+C as markers make some of these values negative. The mesh is of
+C dimensions N (horizontal) by M (vertical) and the heights are
+C stored in the array NDTM. The height at which a contour is to be
+C drawn is stored in IGAP. Each contour is traced in turn through
+C the mesh, the points where it crosses the mesh lines being found
+C using inverse linear interpolation. In addition the surface 
+C height at the centre of each element of the mesh is assumed to be
+C the average of the heights at the corners. Additional points
+C where the contours cross the mesh diagonals are found by inverse
+C linear interpolation. The points are sent to routine DRAW for 
+C plotting and annotation.
+C
+C Function returns SS$_NORMAL if all is well
+C
+C Arguments:
+	INTEGER	  M,N		! number of rows and cols in
+	INTEGER*2 NDTM(M,N)	! the grid
+	REAL	  ZGAP		! contour interval
+	REAL	  INDX_ZGAP	! index contour interval
+C
+C Parameters:
+	INCLUDE 'LSL$CMNDTICONTOUR:PARAMS.PAR'
+	INCLUDE '($SSDEF)'
+C
+C Common:
+	INCLUDE 'LSL$CMNDTICONTOUR:CONTR.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:RCONVI.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:COMMAND.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:IFCTRL.CMN'
+C
+C W/s
+	LOGICAL	  INDX		! index contour?
+	INTEGER   ITYP		! contour type loop var.
+	INTEGER   I,J,K,L,IK,JK	! temp & loop variables
+	INTEGER	  IH		! ht.
+	INTEGER	  I1,J1
+	INTEGER   IGAP		! scaled  contour interval
+	INTEGER   IZERO		! scaled value for 0.0
+	INTEGER	  JC11,JR11	
+	INTEGER	  HIGHEST	! max height in window
+	INTEGER   LOWEST	! min height in window
+	INTEGER	  JOPEN		! 0=closed contour,1=open contour
+	INTEGER	  LZ1,LZ2,LZZ	! used for edge search definition
+	INTEGER   NCONT		! number of contours
+	INTEGER   COUNT
+	INTEGER   IZMIN,IZMAX	! file/user supplied Z range
+C
+	REAL	  GAP		! contour interval
+	REAL*8	  R_MIN_HEIGHT	! min height in window
+	REAL*8 	  R_MAX_HEIGHT	
+	REAL*8	  ZSCAL		! local scaling factor
+C ..................................................................
+C
+	ISOLIN = SS$_NORMAL
+C
+C Look for the lowest and highest contours present in the
+C grid area to be contoured. The limits 1,NROW and 1,NCOL
+C mark the rows and columns of the grid that are going to be
+C contoured 
+C
+	ZSCAL = 32000.0D0/(ZMAX-ZMIN) ! ZMAX,ZMIN scaled by MFACTR etc
+	HIGHEST = 1
+	LOWEST  = 32001
+C
+C If the user specified z limits - use them
+C
+	IF (ZSET) THEN
+	   IZMIN = MAX(INT((ZWINMIN-ZMIN)*ZSCAL), 1)
+	   IZMAX = MIN(INT((ZWINMAX-ZMIN)*ZSCAL), 32001)
+	ELSE
+	   IZMIN = 1
+	   IZMAX = 32001
+	ENDIF	
+C
+C Find the highest and lowest data values in the grid area of 
+C   interest and within the supplied ZLIMITS
+C
+	DO 20 J = 1,NROW
+	   DO 10 I = 1,NCOL
+	      IF (NDTM(J,I).EQ.-32767) GOTO 10
+	      K = MAX(IZMIN, MIN0(NDTM(J,I), IZMAX))
+	      HIGHEST = MAX(HIGHEST, K)
+	      LOWEST  = MIN(LOWEST, K)
+10	   CONTINUE
+20	CONTINUE
+C
+C Calculate contour interval in scaled units.
+C
+C Do the index contours first, then fill in with the intermediates
+C
+	DO 120 ITYP = 1,2
+C
+C Are there to be any index contours?
+C
+	   IF (ITYP.EQ.1 .AND. DISABLED_INDEX) GOTO 120
+C
+C Do we have a zero index or intermediate contour interval
+C
+	   IF (ITYP.EQ.1 .AND. INDX_ZGAP.EQ.0.0) GOTO 120
+	   IF (ITYP.EQ.2 .AND. ZGAP.EQ.0.0) GOTO 120
+C
+	   IF (HAD_DIAG) THEN
+	      CALL WRITEF
+	      CALL WRITEF
+	      IF (ITYP.EQ.1) THEN
+	         CALL WRITEF(
+     &			'             +----------------------------+')
+	         CALL WRITEF(
+     &			'             | Tracing any index contours |')
+	         CALL WRITEF(
+     &			'             +----------------------------+')
+	      ELSE
+	         IF (.NOT.DISABLED_INDEX) THEN
+	            CALL WRITEF(
+     &		'          +-----------------------------------+')
+	            CALL WRITEF(
+     &		'          | Tracing any intermediate contours |')
+	            CALL WRITEF(
+     &		'          +-----------------------------------+')
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C
+C Get heights corresponding to the specified grid area Z-limits and 
+C   work out the number of contours to be drawn.
+C
+	   CALL VALUE (R_MIN_HEIGHT, LOWEST)
+	   CALL VALUE (R_MAX_HEIGHT, HIGHEST)
+	   CALL CONVER (0.0D0, IZERO)
+C
+C rounding errors in converting the real numbers to integers can lead
+C  to some contour levels being missed when ZLIMITS are supplied and 
+C  determine the z range upper or lower bound
+C
+	   IF (ZSET) THEN
+	      IF (LOWEST.EQ.IZMIN)  R_MIN_HEIGHT = ZWINMIN
+	      IF (HIGHEST.EQ.IZMAX) R_MAX_HEIGHT = ZWINMAX
+	   ENDIF
+C
+	   IF (ITYP.EQ.1) THEN			! INDEX contours
+	      INDX = .TRUE.
+	      FEATFC = INDEX_CONT_FC		! set contour FC
+	      LABELFC = INDEX_LAB_FC		! also label FC
+C
+	      IF (ABS(R_MIN_HEIGHT) .GT. 1.0D-6) THEN  ! non-zero ht?
+		 COUNT = R_MIN_HEIGHT/INDX_ZGAP
+		 IF (R_MIN_HEIGHT .GT. COUNT*INDX_ZGAP) THEN
+		    R_MIN_HEIGHT = (COUNT+1)*INDX_ZGAP - 0.5D0
+		 ELSE
+		    R_MIN_HEIGHT = COUNT*INDX_ZGAP - 0.5D0
+		 ENDIF
+	      ELSE					! coastline
+	         R_MIN_HEIGHT = -0.5D0
+	      ENDIF
+C
+	      IF (R_MAX_HEIGHT.GE.0.0D0) THEN
+	         R_MAX_HEIGHT = AINT(R_MAX_HEIGHT/INDX_ZGAP)*INDX_ZGAP
+	      ELSE
+		 R_MAX_HEIGHT = AINT(R_MAX_HEIGHT/INDX_ZGAP)*INDX_ZGAP
+     &						- INDX_ZGAP
+	      ENDIF
+C
+	      IF (R_MAX_HEIGHT.LT.R_MIN_HEIGHT) THEN
+		 NCONT = 0
+		 GOTO 15
+	      ENDIF
+C
+	      NCONT = 1 +
+     &           INT((R_MAX_HEIGHT-(R_MIN_HEIGHT+0.5D0))/INDX_ZGAP 
+     &							+ 0.5D0)
+C
+15	      IGAP = INDX_ZGAP*ZSCAL
+	      GAP = INDX_ZGAP
+	      IF (NCONT.EQ.0) THEN
+		 CALL WRITEF(
+     &		    'No index contours lie within window Z-limits')
+	         GOTO 120
+	      ENDIF
+C
+	   ELSE					! INTERMEDIATE contours
+	      INDX = .FALSE.
+	      FEATFC = CONTOUR_FC		! set contour FC
+	      LABELFC = CONT_LAB_FC		! also label FC
+C
+	      IF (ABS(R_MIN_HEIGHT) .GT. 1.0D-6) THEN	! non-zero ht?
+		 COUNT = R_MIN_HEIGHT/ZGAP
+		 IF (R_MIN_HEIGHT .GT. COUNT*ZGAP) THEN
+		    R_MIN_HEIGHT = (COUNT+1)*ZGAP - 0.5D0
+		 ELSE
+		    R_MIN_HEIGHT = COUNT*ZGAP - 0.5D0
+		 ENDIF
+	      ELSE					! coastline
+	         R_MIN_HEIGHT = -0.5D0
+	      ENDIF
+C
+	      IF (R_MAX_HEIGHT.GE.0.0D0) THEN
+	      	 R_MAX_HEIGHT = AINT(R_MAX_HEIGHT/ZGAP)*ZGAP
+	      ELSE
+		 R_MAX_HEIGHT = AINT(R_MAX_HEIGHT/ZGAP)*ZGAP - ZGAP
+	      ENDIF
+C
+	      IF (R_MAX_HEIGHT.LT.R_MIN_HEIGHT) THEN
+		 NCONT = 0
+		 GOTO 25
+	      ENDIF
+C
+	      NCONT = 1 + 
+     &		 INT((R_MAX_HEIGHT - (R_MIN_HEIGHT+0.5D0))/ZGAP 
+     &							+ 0.5D0)
+C
+25	      IGAP = ZGAP*ZSCAL
+	      GAP = ZGAP
+	      IF (NCONT.EQ.0) THEN
+	        IF (DISABLED_INDEX) THEN
+		   CALL WRITEF(
+     &	           'No intermediate contours lie within '//
+     &					'window Z-limits')
+	        ELSE
+		   CALL WRITEF(
+     &	           'No contours lie within window Z-limits')
+	        ENDIF
+	        GOTO 120
+	      ENDIF
+	   ENDIF
+C
+C Each contour height in turn is processed.
+C
+	   R_MIN_HEIGHT = R_MIN_HEIGHT - GAP
+C
+	   DO 110 IK = 1,NCONT
+	      R_MIN_HEIGHT = R_MIN_HEIGHT + GAP
+	      ZVAL = R_MIN_HEIGHT + 0.5D0	 	! for /IFCTRL/
+C
+C Ensure that we don't draw an intermediate contour on top of an index
+C   contour
+	      IF (ITYP.EQ.2 .AND. MOD(ZVAL,INDX_ZGAP).EQ.0) GOTO 110
+C
+	      IF (HAD_DIAG) THEN
+	         IF (ITYP.EQ.1) THEN
+	            CALL WRITEF
+     &	        ('Tracing index contours with a height of %F', ZVAL)
+	         ELSE
+	            IF (DISABLED_INDEX) THEN
+	               CALL WRITEF('Tracing contours with a '//
+     &					'height of %F', ZVAL)
+	            ELSE
+	               CALL WRITEF('Tracing intermediate contours '//
+     &					'with a height of %F', ZVAL)
+	            ENDIF
+	         ENDIF
+	      ENDIF
+C
+C Test R_MIN_HEIGHT equal to -0.5 within 1E-6, ie. zero level
+C
+	      IF (ABS(R_MIN_HEIGHT+0.5D0) .LT. 1.0D-6) THEN
+		 ZERO_LEVEL = .TRUE.
+	         CALL CONVER (0.0D0, IH)		! IH = IZERO
+	         IH = IH + 1
+	      ELSE
+		 ZERO_LEVEL = .FALSE.
+	         CALL CONVER (R_MIN_HEIGHT, IH)
+	         IF (IH.EQ.IZERO)IH = IH + 1
+	      ENDIF
+C
+C Put character values equivalent to contour height IH into NDIG
+C  buffer ready for possible frequent contour labelling without the
+C  necessity of recalculating the digits or format.
+C
+	      CALL POSTVL(ZVAL)
+C
+C The array NDTM is set up for this height, NDTM(I,J) is set -ve
+C if a contour of this height crosses the line joining (I-1,J) to
+C (I,J) in the direction of increasing J with high ground on right.
+C
+	      JC11 = 2
+	      JR11 = 2
+	      DO 40 J = JC11, NCOL-1
+	         DO 30 I = JR11, NROW
+	            L = IABS(NDTM(I,J))
+	            IF (IABS(NDTM(I-1,J)).GE.IH .AND. L.LT.IH)L = -L
+	            NDTM(I,J) = L
+30	         CONTINUE
+40	      CONTINUE
+C
+C A search is made for open contours. The variable JOPEN is set and
+C the search begun by scanning the edge col=1. If a contour is found
+C it is traced using LACE.
+C
+	      JOPEN = 1
+	      DO 50 I = JR11,NROW
+	         IF (IABS(NDTM(I-1,1)).GE.IH .AND. IABS(NDTM(I,1)).LT.IH)
+     &		    CALL LACE(NDTM,M,N,INDX,JOPEN,I,1,-1,0,IH,IGAP)
+50	      CONTINUE
+C
+C The edge I=NROW is now scanned for the start of an open contour.
+C
+	      DO 60 J = JC11,NCOL
+	         IF (IABS(NDTM(NROW,J-1)).GE.IH .AND.
+     &		     IABS(NDTM(NROW,J)).LT.IH)
+     &		 CALL LACE(NDTM,M,N,INDX,JOPEN,NROW,J,0,-1,IH,IGAP)
+60	      CONTINUE
+C
+C The edge J=NCOL is now scanned for the start of an open contour.
+C
+	      LZZ = NROW-1
+	      DO 70 I1 = 1,LZZ
+	         I = NROW-I1
+	         IF (IABS(NDTM(I+1,NCOL)).GE.IH .AND.
+     &		     IABS(NDTM(I,NCOL)).LT.IH)
+     &		 CALL LACE(NDTM,M,N,INDX,JOPEN,I,NCOL,1,0,IH,IGAP)
+70	      CONTINUE
+C
+C The edge I=1 is now scanned for the start of an open contour.
+C
+	      LZZ = NCOL-1
+	      DO 80 J1 = 1,LZZ
+	         J = NCOL-J1
+	         IF (IABS(NDTM(1,J+1)).GE.IH .AND.
+     &		     IABS(NDTM(1,J)).LT.IH)
+     &		 CALL LACE(NDTM,M,N,INDX,JOPEN,1,J,0,1,IH,IGAP)
+80	      CONTINUE
+C
+C A search is now made for closed contours. The variable JOPEN is
+C set zero and the array NDTM scanned for any element that is -ve.
+C If the element NDTM(I,J) is -ve a closed contour starts from the
+C line joining (I-1,J) to (I,J). It is then traced using LACE.
+C
+	      LZ1 = NCOL-1
+	      LZ2 = NROW-1
+	      DO 100 J1 = 2,LZ1
+	         J = NCOL-J1+1
+	         DO 90 I1 = 1,LZ2
+	            I = NROW-I1+1
+	            IF (NDTM(I,J).LT.0)
+     &		    CALL LACE(NDTM,M,N,INDX,0,I,J,-1,0,IH,IGAP)
+90	         CONTINUE
+100	      CONTINUE
+C
+C All contours of this height have been found and the routine
+C returns to deal with the next height.
+C
+110	   CONTINUE
+120	CONTINUE
+C
+130	RETURN
+	END
+C

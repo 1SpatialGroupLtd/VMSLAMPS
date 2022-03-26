@@ -1,0 +1,454 @@
+	INTEGER*4 FUNCTION SCAN_OUT(PRINTER)
+C
+***	MODULE SCAN_OUT
+***	IDENT	13JL93
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author : 	L.A.Jones
+C
+CMOD	Loop which clears NF/layer bitmap should have	ST  13-Jul-1993
+C	upper limit of LIMFT not MAXNF. Correct FSN
+C       given after TC and CH entires (Mod 1252).
+CMOD	Changed to use FLWRTF instead of WRITEF,
+C	and deals with CBs (like other routines!)	TJH 16-Jan-1989
+CMOD	Changed to use WRITEF instead of WRITE		ACM 15-Dec-1988
+CMOD	LIMTCH increased from 80 to 255			TJH 05-Feb-1987
+CMOD	Made a function					TJH 03-Dec-1986
+CMOD	Message symbols changed to include 'LAYER' rather
+C	than 'OVERLAY'					TJH 06-Nov-1986	
+C 	Created 					LAJ 13-Jun-1986
+C
+C
+C***********************************************************************
+C***********************************************************************
+C
+C
+C Function to output information about the layers and text strings in 
+C the IFF file.  It reports on the number of features and points per
+C layer, and which features are repeated.
+C
+C
+C***********************************************************************
+C***********************************************************************
+C
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE	'($SSDEF)'
+	INCLUDE 'LSL$CMNIINFO:IINFOMSG.PAR'	! Message file
+	INCLUDE	'LSL$CMNIFF:IFFMSG.PAR'
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+C
+C Common blocks
+C
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNIINFO:INFCMN.CMN'
+C
+	PARAMETER	LIMTCH = 255
+	PARAMETER	LIMFT = (MAXNF + 31)/32
+C
+C Argument
+C
+	LOGICAL 	PRINTER
+C
+C Variables
+C
+	RECORD/	IFF_CBH/CBH		! CB header
+	RECORD/	IFF_CBD/CBD		! CB data
+C
+	LOGICAL*1	DONEOV		! True if have output ov. no.
+	LOGICAL*1	DONEFT		! True if have output ft. no.
+	LOGICAL*1	ISNS		! FALSE if TC or CH, TRUE if NS
+	LOGICAL*1	OKFT		! TRUE => in feature
+	LOGICAL*4	Z_PRESENT	! CB contains Z attribute?
+	LOGICAL*4	Z_CONSTANT	! CB Z value constant?
+	LOGICAL*4	RET		! function return
+C
+	BYTE		TCHBUF(LIMTCH)	! TC/CH/NS buffer
+C
+	INTEGER*2	IECODE,IELEN	! Arguments to read next IFF
+					! entry
+	INTEGER*2	TMP_IELEN	! temporary IELEN
+	INTEGER*2	NPTS,IENDS	! Arguments to read entry data
+	INTEGER*2	CUROV		! Current layer number
+	INTEGER*2	OVLNUM		! Layer number read
+	INTEGER*2	OVDONE		! Used in final
+	INTEGER*2	NOVNO		! layer scan
+	INTEGER*2	TCH		! Characters of TC,CH or NS
+	INTEGER*2	J,K
+C
+	INTEGER*4	CURNF		! Current feature number
+	INTEGER*4	OVNF(LIMFT,LIMOV) ! Feature usage array
+	INTEGER*4	OVPTR		! Pointer to this layer's OVNF
+	INTEGER*4	NFNUM		! Feature number read
+	INTEGER*4	TFTCNT		! Total features
+	INTEGER*4	T2DPTS		! Total 2-D points
+	INTEGER*4	T3DPTS		! Total 3-D points
+	INTEGER*4	NXTOV		! Next layer to allocate
+	INTEGER*4	I
+C
+	REAL*4		PT_Z		! a Z-coordinate
+C
+	CHARACTER*255	TCHSTR		! String to output text in
+C
+C Functions
+	LOGICAL		BBCS
+	INTEGER*4	IFS_CB_READ
+C
+C***********************************************************************
+C
+C	START OF CODE
+C
+C***********************************************************************
+C
+	SCAN_OUT=SS$_NORMAL		! assume success
+C
+C Initialisation
+C
+	CALL IFFRWD			! ensure at start of file
+	NXTOV = 0
+	COVPTR = -1
+	DONEOV = .TRUE.
+	DONEFT = .TRUE.
+	TFTCNT = 0
+	T2DPTS = 0
+	T3DPTS = 0
+	DO 10 I=1,LIMOV 
+	   FTCNT(I) = 0
+	   PTCNT2D(I) = 0
+	   PTCNT3D(I) = 0
+10	CONTINUE
+	OKFT = .FALSE.
+C
+C Output header for subsequent information
+C
+	CALL FLWRTF
+	CALL FLWRTF
+	CALL FLWRTF(' Scan Information')
+	CALL FLWRTF(' ----------------')
+	CALL FLWRTF
+C
+C***********************************************************************
+C
+C Now look for the IFF entries we are interested in
+C
+20	CALL IFFNXT(IECODE,IELEN)	! Get entry
+	IF (IELEN .EQ. -1) GOTO 310
+	IF (IECODE .EQ. 'NS') GOTO 190
+	IF (IECODE .EQ. 'NO') GOTO 30
+	IF (IECODE .EQ. 'NF') GOTO 100
+	IF (IECODE .EQ. 'TC') GOTO 160
+	IF (IECODE .EQ. 'CH') GOTO 160
+!	IF (IECODE .EQ. 'CH') GOTO 170
+	IF (IECODE .EQ. 'CB') GOTO 250
+	IF (IECODE .EQ. 'EF') THEN
+	   OKFT = .FALSE.
+	   HAD_NF = .FALSE.
+	   DONEFT = .FALSE.
+	ENDIF
+	IF (IECODE .EQ. 'EO') THEN
+	   HAD_NO = .FALSE.
+	   DONEFT = .FALSE.
+	ENDIF
+	IF (IECODE .EQ. 'EJ') GOTO 270
+	GOTO 20
+C
+C
+C***********************************************************************
+C
+C Deal with new layer
+C
+30	IF (HAD_NO .EQ. .TRUE.) THEN		! If we're already in
+	   SCAN_OUT=IINFO__BADLAY
+	   CALL LSL_PUTMSG(SCAN_OUT,OVLNUM) 	! a layer there must
+	   GOTO 320				! trouble, return.
+	ENDIF
+	CALL EIHRI(OVLNUM,1,1)			! Read layer number
+	HAD_NO = .TRUE.				! Say we're in one now
+C
+	IF (OVLNUM .EQ. CUROV .AND. NXTOV .GT.0) GOTO 20 ! Ignore if 
+						! have started and this
+						! is the same as the 
+						! last
+	CUROV = OVLNUM
+	IF (NXTOV .EQ.0) GOTO 50		! If this is the first
+C
+C Find a slot for this layer
+C
+	DO 40 I=1,NXTOV
+	   IF (OVNOS(I) .EQ. CUROV) GOTO 70	! Already in the table
+40	CONTINUE
+C
+C Allocate slot in table
+C
+50	IF (NXTOV .GE. LIMOV) GOTO 90		! No room
+	NXTOV = NXTOV + 1			! Next free space
+	OVNOS(NXTOV) = CUROV			! Put number in table
+	DO 60 I=1,LIMFT
+	   OVNF(I,NXTOV) = .FALSE.		! Clear NF/layer map
+60	CONTINUE
+C
+	I = NXTOV				! To join with code for
+						! layer already in
+						! table
+C
+C Set up pointer to this layer
+C
+70	COVPTR = I
+80	DONEOV = .FALSE.			! Don't output this one
+						! yet
+CCC	DONEFT = .TRUE.				! Had no features yet
+	GOTO 20
+C
+C No room to handle layer
+C
+90	CALL FLWRTF
+C Say we can't cope
+	CALL FLWRTF(' No room to analyse layer %^W%I4',CUROV)
+	COVPTR = -1				! Tell the rest of the 
+						! code
+	GOTO 80
+C
+C***********************************************************************
+C
+C
+C Deal with new feature
+C
+100	IF (HAD_NF .EQ. .TRUE.) THEN		! If we're alredy in a
+	   SCAN_OUT=IINFO__BADNF
+	   CALL LSL_PUTMSG(SCAN_OUT,NFNUM)	! feature, there must be
+	   GOTO 320				! trouble, return.
+	ENDIF
+	CALL EIHRI(NFNUM,1,1)			! Get feature number
+	HAD_NF = .TRUE.				! Say we're in one now
+C
+	IF (NFNUM .LE. 0) GOTO 150		! Ignore if <0
+	IF (NFNUM .GT. MAXNF) GOTO 140		! Diagnose out of range
+C
+C Check if we have a repeat
+C
+	IF (COVPTR .LT. 0) GOTO 150		! No current layer
+	IF (BBCS(NFNUM,OVNF(1,COVPTR)))THEN 	! Not repeated
+	   GOTO 110 
+	ENDIF
+C
+C Diagnose repeat
+C
+	IF (.NOT. DONEOV) THEN
+	   CALL FLWRTF
+	   CALL FLWRTF
+	   CALL FLWRTF(' In layer %^W%I4',CUROV) ! Say which layer
+	   CALL FLWRTF(' -------------')
+	   CALL FLWRTF
+	   DONEOV = .TRUE.
+	ENDIF
+	CALL FLWRTF(' Feature %I5 repeated',NFNUM)! Say which feature
+	DONEFT = .TRUE.
+	OKFT = .FALSE.
+	GOTO 130
+C
+C Not repeated here
+C
+110	CONTINUE
+	OKFT = .TRUE.
+	FTCNT(COVPTR) = FTCNT(COVPTR) + 1	! Update counts
+	TFTCNT = TFTCNT + 1
+120	DONEFT = .FALSE.			! Force NF output
+130	CURNF = NFNUM				! Save number
+	GOTO 20
+C
+C Diagnose bad feature number
+C
+140	IF (.NOT. DONEOV) THEN
+	   CALL FLWRTF
+	   CALL FLWRTF
+	   CALL FLWRTF(' In layer %^W%I4',CUROV)
+	   CALL FLWRTF(' -------------')
+	   DONEOV = .TRUE.
+	ENDIF
+C Say out of range
+	CALL FLWRTF(' NF number %I5 out of range',NFNUM)
+150	OKFT = .FALSE.
+	GOTO 120
+C
+C***********************************************************************
+C
+C Deal with 'TC's
+C
+160	TCH = IECODE
+	CALL EIHMK(1)
+	CALL IFFNXC('NF',TMP_IELEN)
+	CALL EIHRI(NFNUM,1,1)			! Get feature number
+	IF (NFNUM .LE. 0) GOTO 150		! Ignore if <0
+	IF (NFNUM .GT. MAXNF) GOTO 140		! Diagnose out of range
+	CURNF=NFNUM
+	CALL IFFRWM
+	CALL EIHMK(0)
+	ISNS = .FALSE.
+	GOTO 200
+C
+C
+C***********************************************************************
+C
+C Deal with 'NS's
+C
+190	ISNS = .TRUE.
+	TCH = 'NS'
+C
+C
+C All join together here
+C
+200	DO 210 J = 1,LIMTCH
+	   TCHBUF(J) = 0			! Clear buffer for use
+210	CONTINUE
+C
+	IF (IELEN .EQ.0) GOTO 20		! Ignore if empty
+	IELEN = MIN(IELEN,LIMTCH/2)		! Limit length
+	CALL EIHR(TCHBUF,IELEN,1)		! Read text into buffer
+	IELEN = IELEN*2				! Convert to byte count
+	IF (TCHBUF(IELEN) .EQ. 0) THEN
+	   IELEN = IELEN - 1			! Limit length
+	ENDIF
+C
+	DO 220 J=1,IELEN			! Stick it in a text 
+	   TCHSTR(J:J) = CHAR(TCHBUF(J))	! string - YUK!
+220	CONTINUE
+C
+C No header if NS
+C
+	IF (ISNS) GOTO 230
+C
+C Space out any header
+C
+	IF (.NOT.((DONEOV .OR. COVPTR .LT. 0) .AND. DONEFT)) THEN
+	   CALL FLWRTF
+	ENDIF					!  necessary
+C
+	IF (COVPTR .GE. 0 .AND..NOT. DONEOV) THEN
+	   CALL FLWRTF(' In layer %^W%I4',CUROV) ! Say which layer
+	   CALL FLWRTF(' -------------')
+	ENDIF
+C
+	DONEOV = .TRUE.
+C After which feature?
+	IF (.NOT.DONEFT) CALL FLWRTF(' Before feature %I5',CURNF)
+	DONEFT = .TRUE.
+C
+C Now output the text
+C
+230	CALL FLWRTF(' %A2 : %S',TCH,TCHSTR(1:MIN(72,IELEN)))
+	IF (IELEN.GT.72) THEN
+	   J=IELEN/78
+	   K=72
+	   DO 240 I=1,J
+	      CALL FLWRTF('%S',TCHSTR((K+1):MIN(K+78,IELEN)) )
+	      K=K+78
+240	   CONTINUE
+	ENDIF
+	GOTO 20
+C
+C
+C***********************************************************************
+C
+C Deal with CB entry
+C
+250	IF (OKFT) THEN
+	   CALL EIHRCB_HEAD(CBH)		! Read CB header
+	   CALL EIHRCB_DATA(CBD)		! Read CB data
+	   NPTS = CBH.NROW			! Note No. of pts in CB
+C
+C Try to get a Z coord (if present)
+C
+	   RET = IFS_CB_READ(CBH,CBD,PT_Z,1,IFF_C_Z,1,1)
+C
+	   Z_PRESENT = RET.NE.IFF__MISSING	! Z coord present?
+	   IF (.NOT.Z_PRESENT) THEN		! 2D points
+	      T2DPTS = T2DPTS + NPTS		! Add up for totals info
+	      PTCNT2D(COVPTR) = PTCNT2D(COVPTR) + NPTS
+	   ELSE					! 3D points
+	      T3DPTS = T3DPTS + NPTS		! Add up for totals info
+	      PTCNT3D(COVPTR) = PTCNT3D(COVPTR) + NPTS
+	   ENDIF
+	ENDIF
+	GOTO 20
+C
+C***********************************************************************
+C
+C Now output the summaries
+C
+270	IF (NXTOV .EQ. 0) GOTO 300		! No layers allocated
+	OVDONE = -1
+C
+C Loop through the layer numbers - output data in numeric order of 
+C layers.
+C
+280	NOVNO = 32767
+	DO 290 I=1,NXTOV
+	   IF (OVNOS(I) .LE. OVDONE .OR. OVNOS(I) .GE. NOVNO) GOTO 290
+						! Layer already done, 
+	   					! or not the lowest 
+						! layer number left 
+						! to do, so look again.
+	   NOVNO = OVNOS(I)			! Update current lowest 
+						! layer number found.
+	   COVPTR = I				! Where it is in the 
+						! table
+290	CONTINUE
+C
+C If we've found a layer....
+C
+	IF (NOVNO .EQ. 32767) THEN		! We've finished, so 
+						! write out totals.
+	   CALL FLWRTF
+	   CALL FLWRTF
+	   CALL FLWRTF(' Totals Information')
+	   CALL FLWRTF(' ------------------')
+	   CALL FLWRTF
+C Features
+	   CALL FLWRTF(' Total number of features   : %I8',TFTCNT)
+C 2-D points,
+	   CALL FLWRTF(' Total number of 2-D points : %I8',T2DPTS)
+C and 3-D points
+	   CALL FLWRTF(' Total number of 3-D points : %I8',T3DPTS)
+	   GOTO 320				! and exit
+	ENDIF
+C
+	OVDONE = NOVNO				! Update which layer 
+						! we've just done
+	CALL SCAN_LAYER(OVNF(1,COVPTR),NOVNO)	! Output data for this 
+						! layer
+	CALL FLWRTF
+C
+C	CALL FLWRTF(' This layer contains     :    %I5 feature%m',
+C     &	   FTCNT(COVPTR))
+	CALL FLWRTF(' This layer contains     :    %I5 feature%m, '//
+     &	            'excluding duplicate ones',FTCNT(COVPTR))
+C
+C	CALL FLWRTF('                           %I8 2-D point%m,',
+C     &	   PTCNT2D(COVPTR))
+	CALL FLWRTF('                           %I8 2-D point%m, '//
+     &	            'excluding duplicate features',PTCNT2D(COVPTR))
+C
+C	CALL FLWRTF('                           %I8 3-D point%m.',
+C     &	   PTCNT3D(COVPTR))
+	CALL FLWRTF('                           %I8 3-D point%m, '//
+     &	            'excluding duplicate features',PTCNT3D(COVPTR))
+C
+	GOTO 280				! Do next layer
+C
+C No layers
+C
+C Say no layers
+300	CALL FLWRTF
+	CALL FLWRTF(' No layers - no layer summaries')
+	GOTO 320
+C
+310	IF (.NOT. PRINTER) CALL FLWRTF
+	CALL LSL_PUTMSG(IINFO__UNEXPEOF)	! Unexpected EOF
+C
+320	RETURN
+	END

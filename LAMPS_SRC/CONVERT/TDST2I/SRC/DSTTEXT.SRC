@@ -1,0 +1,325 @@
+	LOGICAL*4 FUNCTION DSTTEXT
+C
+***	MODULE DSTTEXT
+***	IDENT 28MR91
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+C	Author 		A.D.Trigg, 24th May 1988
+C	Modified        P.Pan, 14th February 1990
+C
+CMOD879	J Barber 					25 April 1990
+C	To output object names to which text belongs to ACs
+C
+CMOD980	J Barber 					25 April 1990
+C	Use parameter file to derive FC from colour and text 
+C	inclination (font style)
+C
+C	Processes text entries within logic sections.
+C	DST text entries may contain more than one line of text and so we 
+C	must make allowances for outputting composite text. However DST text 
+C	cannot have different attributing for each line of text so the TS
+C	entries in the composite text features will always be the same.
+C	Use separate TX features instead for now
+C
+	IMPLICIT NONE
+C
+	INCLUDE 	'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE		'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE		'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE		'LSL$CMNDSTPAR:LOOKUP.CMN'
+	INCLUDE 	'HERE:TDST2I.CMN'
+	INCLUDE 	'HERE:TDST2IMSG.PAR'
+C
+C  Functions
+	INTEGER 	FLRLIN
+	INTEGER 	READSTR
+	INTEGER 	SIGCHS
+	LOGICAL		RDCH
+	LOGICAL 	RDINT
+	LOGICAL 	RDREAL
+C
+	INTEGER 	SS$_NORMAL
+	EXTERNAL 	SS$_NORMAL
+C
+C  Declarations:
+	INTEGER*2	NLEV,NOBJ,DUMMY
+	INTEGER		IJK,KJI,LMN,NOP
+	INTEGER 	LEN
+	INTEGER*2	TXLEN
+	INTEGER*2	INCLN			!Inclination index
+	INTEGER*2 	COLOUR			!Colour ID number
+	INTEGER*2 	TXTHT			!Text height
+	INTEGER*2 	NTXLI			!Number of text lines
+	INTEGER		TXTSPA			!Text spacing
+	INTEGER		TXTDISP			!Dispalcement of multiple text
+						!lines from the original seed
+	REAL*4  	ROTAT			!Rotation of text feature
+	REAL*4		SPASTB(2,1)		!Temp array for seed points of
+						!multiple line text 
+	REAL*4		STBUF(2)		!Coord array
+	INTEGER*2 	FS(4)			!FS of current feature
+	INTEGER		REM
+	INTEGER		GT
+C
+	BYTE		TEXT(80)
+	BYTE		NAME_ARRAY(30,MAX_OBJ)
+	INTEGER*2	NAME_LEN(MAX_OBJ)
+	BYTE		AC_ARRAY(30)
+	CHARACTER*40	STRING
+	LOGICAL		END			!Return value from reading text
+	LOGICAL		IGNORE
+C
+C ******************************************************************
+C Assume success
+C
+	DSTTEXT = %LOC(SS$_NORMAL)
+C
+C Reset object, level counts
+C
+	NOBJ = 0
+	NLEV = 0
+C
+C First line either: nlev (followed by level names,ids on further lines)
+C		     nobj (followed by object names on further lines)
+C		  or colour size isl iun nlin x y ang
+C
+C Read and ignore number of levels to which text belongs
+C
+	DSTTEXT=FLRLIN()
+	IF (.NOT.DSTTEXT) GOTO 999
+C
+	NUMLIN=NUMLIN+1
+	CALL BSLN
+C
+C Read first as integer
+C
+	IF (RDINT(NLEV)) GOTO 900
+C
+C Check if there a second integer on the line
+C
+	IF (RDINT(DUMMY)) THEN		! no second int, so it was nlev
+	   GOTO 499
+	ELSE				! text attribute data
+	   GOTO 699
+	ENDIF
+C
+499	DO 500 IJK=1,NLEV
+	   DSTTEXT=FLRLIN()
+	   IF (.NOT.DSTTEXT) GOTO 999
+C
+	   NUMLIN=NUMLIN+1
+500	CONTINUE
+C
+C Read number of objects to which text belongs
+C
+	DSTTEXT=FLRLIN()
+	IF (.NOT.DSTTEXT) GOTO 999
+C
+	NUMLIN=NUMLIN+1
+	CALL BSLN
+C
+C Read first as integer
+C
+	IF (RDINT(NOBJ)) GOTO 900
+C
+C Check if there a second integer on the line
+C
+	IF (RDINT(DUMMY)) THEN		! no second int, so it was nobj
+	   GOTO 599
+	ELSE				! text attribute data
+	   GOTO 699
+	ENDIF
+C
+599	DO 600 IJK = 1,NOBJ
+	   DSTTEXT=FLRLIN()
+	   IF (.NOT.DSTTEXT) GOTO 999
+C
+	   NUMLIN=NUMLIN+1
+	   CALL BSLN
+	   LEN = READSTR(STRING)
+C
+	   IF (HAD_OBJ) THEN
+	      NAME_LEN(IJK) = LEN
+	      DO 650 KJI = 1,LEN
+	         NAME_ARRAY(KJI,IJK) = TXTBUF(KJI)
+650	      CONTINUE
+	   ENDIF
+C
+600	CONTINUE
+C
+C Process line with feature attributes on it
+C
+	DSTTEXT=FLRLIN()
+	IF (.NOT.DSTTEXT) GOTO 999
+C
+	NUMLIN=NUMLIN+1
+C
+699	CONTINUE
+C
+	CALL BSLN
+C
+	IF(RDINT(COLOUR)) GOTO 900		!colour of text
+	IF(RDINT(TXTHT))  GOTO 900		!height of text in 1.1 mm.
+C
+	TXTSPA = 20*TXTHT			!define text spacing
+	TXTHT = TXTHT*110.0			!convert to scale mm./100
+C
+	IF (RDINT(INCLN)) GOTO 900		!get inclination index
+	IF (RDINT(DUMMY)) GOTO 900		!get unwanted underlining
+	IF (RDINT(NTXLI)) GOTO 900		!get number of text lines
+C
+	IGNORE = .FALSE.
+C
+C Get FC if given in parameter file
+C
+	IF (HAD_PAR) THEN
+C Search for colour and style combination
+C
+	   DO 101 IJK=1,TXT_CNT
+	      IF (DSTCOLOUR(DST_TEXT,IJK).EQ.COLOUR .AND.
+     &		  DSTPATTERN(DST_TEXT,IJK).EQ.INCLN) THEN
+		 FS(1) = DST_FC(DST_TEXT,IJK)
+C
+C Insert bit into FS array to indicate a point feature
+		 CALL LIB$INSV(2,14,2,FS(3))
+		 GT    = DST_GT(DST_TEXT,IJK)
+		 GOTO 104
+	      ENDIF
+101	   CONTINUE
+C
+C No match; ignore this entity
+C
+	   CALL LSL_PUTMSG(DSTI__ENTIGNORE,NUMLIN)
+	   IGNORE = .TRUE.
+	   GOTO 104
+	ENDIF
+C
+C No parameter file; use simple FC calculation as before
+C
+	REM=MOD(COLOUR,10)
+	IF(REM.EQ.0)THEN
+	   FS(1)=35
+	ELSE
+	   FS(1)=25+REM
+	ENDIF
+C
+C Insert bit into FS array to indicate a point feature
+C
+	CALL LIB$INSV(2,14,2,FS(3))
+	GT = TEXTYP
+C
+104	CONTINUE
+C
+	IF (IGNORE) GOTO 105
+C
+C Read the information relevant to the position and orientation of the 
+C feature
+C
+	IF (RDREAL(STBUF(1))) GOTO 900		!x coor of seed point
+	IF (RDREAL(STBUF(2))) GOTO 900		!y coor of seed point
+	IF (RDREAL(ROTAT))    GOTO 900		!rotation of text feature
+C
+C Create text feature(s)
+C
+105	DO 800 IJK=1,NTXLI
+C
+C Retrieve text values
+C
+C Text entries consist of two lines the first tells us the length of
+C the text entry which is on the second line.  Readstr returns the 
+C length anyway so we do not need to process the first line at all
+C
+	   DSTTEXT=FLRLIN()
+	   IF (.NOT.DSTTEXT) GOTO 999
+C
+	   NUMLIN=NUMLIN+1
+C
+	   DSTTEXT=FLRLIN()
+	   IF (.NOT.DSTTEXT) GOTO 999
+C
+	   NUMLIN=NUMLIN+1
+	   CALL BSLN
+C
+	   IF (IGNORE) GOTO 800
+C
+C Use readstr to calculate the length of the text string, then read 
+C it one byte at a time before outputting it in an IFF TX entry
+C
+	   LEN = READSTR(STRING,,ON_EOL,.FALSE.)
+	   TXLEN = LEN
+	   CALL BSLN
+	   DO 775 LMN = 1,LEN
+	      END = RDCH(TEXT(LMN))
+	      IF (TEXT(LMN).EQ.95) TEXT(LMN)=32	!OS TRI does not support
+						!"_" so substitute " "
+	      IF (END) GOTO 900
+775	   CONTINUE
+C
+	   IF (IJK.EQ.1) THEN
+	      SPASTB(1,1) = STBUF(1)
+	      SPASTB(2,1) = STBUF(2)
+	      ROTAT = ROTAT*PI/180			!convert to radians
+	   ELSE
+	      TXTDISP = (IJK-1)*TXTSPA
+	      IF (ROTAT.GE.0 .AND. ROTAT.LE.90) THEN 
+	   	 ROTAT = ROTAT*PI/180			!convert to radians
+		 SPASTB(1,1) = STBUF(1) + TXTDISP*SIN(ROTAT) 
+		 SPASTB(2,1) = STBUF(2) - TXTDISP*COS(ROTAT)
+	      ELSEIF (ROTAT.GT.90 .AND. ROTAT.LE.180) THEN
+	   	 ROTAT = (ROTAT-90) * PI/180		!convert to radians
+		 SPASTB(1,1) = STBUF(1) + TXTDISP*COS(ROTAT) 
+		 SPASTB(2,1) = STBUF(2) + TXTDISP*SIN(ROTAT)
+	      ELSEIF (ROTAT.GT.180 .AND. ROTAT.LE.270) THEN 
+	   	 ROTAT = (ROTAT-180) * PI/180		!convert to radians
+		 SPASTB(1,1) = STBUF(1) - TXTDISP*SIN(ROTAT) 
+		 SPASTB(2,1) = STBUF(2) + TXTDISP*COS(ROTAT)
+	      ELSEIF (ROTAT.GT.270 .AND. ROTAT.LE.360) THEN 
+	   	 ROTAT = (ROTAT-270) * PI/180		!convert to radians
+		 SPASTB(1,1) = STBUF(1) + TXTDISP*SIN(ROTAT) 
+		 SPASTB(2,1) = STBUF(2) + TXTDISP*COS(ROTAT)
+	      ENDIF
+	   ENDIF
+C
+ 	   NUMFEAT = NUMFEAT+1
+C
+	   CALL IFFNF(NUMFEAT,NUMFEAT)
+	   CALL IFFFS(FS)
+C
+	   IF (HAD_OBJ) THEN
+	      DO 850 NOP = 1,NOBJ
+		 DO 860 KJI = 1,NAME_LEN(NOP)
+		    AC_ARRAY(KJI) = NAME_ARRAY(KJI,NOP)
+860		 CONTINUE
+C
+		 CALL IFFAC(AC_NUMBER,0,AC_ARRAY,NAME_LEN(NOP) )
+850	      CONTINUE
+	   ENDIF
+C
+	   CALL IFFTH(TXTHT)
+C
+	   CALL UPDATE_RANGE(SPASTB(1,1),SPASTB(2,1))
+C
+	   CALL IFFST(SPASTB,1,0)
+C
+C Need full angle for IFFRO
+C
+	   CALL IFFRO(ROTAT)
+ 	   CALL IFFTX(TEXT,TXLEN)
+	   CALL IFFEF
+800	CONTINUE
+C
+	GOTO 1000
+C
+C Error
+C
+900	DSTTEXT=DSTI__ERRINTLIN
+	CALL LSL_PUTMSG(DSTTEXT,NUMLIN)
+	GOTO 1000
+C
+999	CALL LSL_PUTMSG(DSTTEXT)
+	CALL LSL_ADDMSG(DSTI__ERRINTLIN,NUMLIN)
+C
+1000	RETURN
+	END
+C

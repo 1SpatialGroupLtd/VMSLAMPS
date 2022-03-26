@@ -1,0 +1,482 @@
+	LOGICAL FUNCTION OBEY
+C
+***	IDENT	14MA90
+***	MODULE	OBEY
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C This function decodes the command line, using the LSLLIB DCL routines.
+C It returns TRUE if it failed, and we should exit.
+C
+C Modified:  P Pan, 14 May 1990 
+C	     To implement an additional qualifier /IGNORE
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/HERE:IDIFFMSG/	! messages parameter file
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'	! we need this for CBCMN
+C
+***	COMMON/LSL$CMNLSL:FILENAME/	! LSLLIB filename common
+***	COMMON/LSL$CMNLSL:CLD/		! LSLLIB command decoding
+***	COMMON/HERE:FILES/		! filenames
+***	COMMON/HERE:PARAM/		! flags set by qualifiers
+***	COMMON/HERE:CBCMN/		! we need this for MAXGAP
+C
+C functions
+C
+	LOGICAL		DCL_STARTUP	! get the command line in hand
+	LOGICAL		DCL_QUAL	! detect a qualifier
+	LOGICAL		DCL_FILE	! read a filename
+	LOGICAL		DCL_INT		!      an integer
+	LOGICAL		DCL_REAL	!      and a real
+	LOGICAL		GET_2ND_FILE	! get second input filename
+	LOGICAL		PUTFLN		! put filename into /FILENAME/
+	LOGICAL		EXPFLN		! get it back again
+	LOGICAL		FRTINI		! read in a FRT file
+	LOGICAL		FRT_ACDINI	! don't read in a FRT file
+C
+C workspace
+C
+	LOGICAL		OK		! function return
+	LOGICAL		ABSENT		! filename absent?
+	LOGICAL		HAD_QUAL	! qualifier present?
+	LOGICAL		PRESENT,NEGATED	! ignored by us
+C
+C and we need a CLD
+C
+	EXTERNAL	IDIFFERENCE_CLD
+C
+C *********************************************************************
+C assume the worst
+C
+	OBEY = .TRUE.
+C
+C *********************************************************************
+C start up our command line reading
+C
+	OK = DCL_STARTUP( 'IDIFFERENCE',	! the command verb
+     &			  .FALSE.,		! don't burst
+     &			  IDIFFERENCE_CLD,	! CLD name
+     &			  .TRUE. )		! report errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999
+C
+C **********************************************************************
+C we must always have at least one input file - look for it
+C
+	OK = DCL_FILE( 'FILE_1',		! the first input file
+     &			'LSL$IF:IFF.IFF;0',	! the default name
+     &			ABSENT,			! true if not there
+     &			.FALSE.,       		! not a list
+     &			.TRUE. )		! report errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999
+C
+C remember the name for later use
+C
+	FIRST_LEN  = FIL_LEN(1)
+	FIRST_FILE = FILARY(1)(:FIRST_LEN)
+C
+C *********************************************************************
+C we would like to have a second input file - look for that as well
+C
+	OK = DCL_FILE( 'FILE_2',		! the second input file
+     &			FIRST_FILE(:FIRST_LEN),	! the default name
+     &			ABSENT,			! true if not there
+     &			.FALSE.,       		! not a list
+     &			.TRUE. )		! report errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999
+C
+C if the filename was not specified by the user, then we must make it up
+C - we try to use the previous version of the first file
+C
+	IF ( ABSENT ) THEN
+	   IF ( GET_2ND_FILE() ) GOTO 9999
+	ELSE
+	   SECOND_LEN  = FIL_LEN(1)
+	   SECOND_FILE = FILARY(1)(:SECOND_LEN)
+	ENDIF
+C
+C *********************************************************************
+C /DEBUG = integer - switch debugging on, to a particular level
+C
+	OK = DCL_QUAL( 'DEBUG',		! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+C if the switch was present, then read its value
+C into the CLD common block, from whence we will retrieve it
+C
+ 	IF ( HAD_QUAL ) THEN
+	   OK = DCL_INT( 'DEBUG',	! qualifier name
+     &			 .TRUE. )	! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+	   ARM = IARRAY(1)		! remember the value
+	ELSE
+	   ARM = 0			! default - no debug information
+	ENDIF
+C
+C *********************************************************************
+C /SUMMARY - only output a summary of the differences
+C
+	OK = DCL_QUAL( 'SUMMARY',	! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+ 	FULL = .NOT.HAD_QUAL		! are we outputting FULL info?
+C
+C *********************************************************************
+C /PRINTER - spool our output
+C	     (if we are outputting to the printer, then set up
+C	      a default output filename, in case /OUTPUT is not
+C	      specified)
+C
+	OK = DCL_QUAL( 'PRINTER',	! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+	IF ( HAD_QUAL ) THEN
+ 	   TOLP = .TRUE.		! spool output TO the Line-Printer
+	   TOFILE = .TRUE.		! & thus to a file as well
+	   OUTPUT_FILE = 'IDIFFERENCE.LIS'
+	   OUTPUT_LEN  =  15
+	ELSE
+	   TOLP = .FALSE.
+	ENDIF
+C
+C *********************************************************************
+C /OUTPUT - output data to a different place
+C	    (if /OUTPUT is given without a filename, then output
+C	     to the /PRINTER default file. If /OUTPUT is not given,
+C	     then obviously /PRINTER will output to the default .LIS
+C	     file. Otherwise, we output to SYS$OUTPUT)
+C
+	OK = DCL_QUAL( 'OUTPUT',	! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+ 	IF ( HAD_QUAL ) THEN			! had the /OUTPUT switch
+C
+	   OK = DCL_FILE( 'OUTPUT',		! the output file
+     &			  'IDIFFERENCE.LIS',	! the default name
+     &			  ABSENT,		! true if not there
+     &			  .FALSE.,       	! not a list
+     &			  .TRUE. )		! report errors itself
+	   IF ( .NOT.OK ) GOTO 9999
+C
+	   IF ( ABSENT ) THEN
+	      OUTPUT_LEN  =  15
+	      OUTPUT_FILE = 'IDIFFERENCE.LIS'	! default name
+	   ELSE
+	      OUTPUT_LEN  = FIL_LEN(1)		! remember the filename
+	      OUTPUT_FILE = FILARY(1)(:OUTPUT_LEN)
+	   ENDIF
+	   TOFILE = .TRUE.			! output to a file
+C
+	ELSEIF ( .NOT.TOLP ) THEN		! not outputting to LP
+C
+	   OUTPUT_FILE = 'SYS$OUTPUT'		! so outputting to the
+	   OUTPUT_LEN  =  10			! terminal...
+	   TOFILE = .FALSE.			! & not to a file
+C
+	ENDIF
+C
+C **********************************************************************
+C /TOLERANCE=(FACTOR=real,DEFAULT=real)
+C
+C Specify the tolerance to which to test real numbers
+C - use FACTOR as a multiplication factor for attributes with an
+C   interval specified, and DEFAULT for all others
+C
+	OK = DCL_QUAL( 'TOLERANCE',		! qualifier name
+     &	     	       HAD_QUAL,		! out - globally there
+     &		       PRESENT,			! out - locally there
+     &		       NEGATED,			! out - true if negated
+     &		       .TRUE. )			! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999		! failed - give up with status
+C
+ 	IF ( HAD_QUAL ) THEN
+	   OK = DCL_QUAL( 'TOLERANCE.DEFAULT',	! qualifier name
+     &	     	          HAD_QUAL,		! out - globally there
+     &		          PRESENT,		! out - locally there
+     &		          NEGATED,		! out - true if negated
+     &		          .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9999		! failed - give up with status
+C
+	   IF ( HAD_QUAL ) THEN
+	      OK = DCL_REAL( 'TOLERANCE.DEFAULT',.TRUE. )
+  	      IF ( .NOT.OK ) GOTO 9999 		! failed - give up with status
+	      DEFAULT_TOLERANCE = RARRAY(1)
+	      IF ( DEFAULT_TOLERANCE.LT.0.0 ) THEN
+	         CALL LSL_PUTMSG( IDIFF__NEGTOL, DEFAULT_TOLERANCE )
+	         GOTO 9999			! give up
+	      ENDIF
+	      HAD_DEFAULT_TOLERANCE = .TRUE.
+	   ELSE
+	      HAD_DEFAULT_TOLERANCE = .FALSE.
+	   ENDIF
+C
+	   OK = DCL_QUAL( 'TOLERANCE.FACTOR',	! qualifier name
+     &	     	          HAD_QUAL,		! out - globally there
+     &		          PRESENT,		! out - locally there
+     &		          NEGATED,		! out - true if negated
+     &		          .TRUE. )		! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9999		! failed - give up with status
+C
+	   IF ( HAD_QUAL ) THEN
+	      OK = DCL_REAL( 'TOLERANCE.FACTOR',.TRUE. )
+  	      IF ( .NOT.OK ) GOTO 9999 		! failed - give up with status
+	      TOLERANCE_FACTOR = RARRAY(1)
+	      IF ( TOLERANCE_FACTOR.LT.0.0 ) THEN
+	         CALL LSL_PUTMSG( IDIFF__NEGTOL, TOLERANCE_FACTOR )
+	         GOTO 9999			! give up
+	      ENDIF
+	   ELSE
+	      TOLERANCE_FACTOR = DEFAULT_TOLERANCE_FACTOR
+	   ENDIF
+	ELSE
+	   TOLERANCE_FACTOR      = DEFAULT_TOLERANCE_FACTOR
+	   HAD_DEFAULT_TOLERANCE = .FALSE.
+	ENDIF
+C
+C *********************************************************************
+C /LOOKAHEAD = integer - change the acceptance window for coordinate
+C			 comparison
+C
+	OK = DCL_QUAL( 'LOOKAHEAD',	! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+C if the switch was present, then read its value
+C into the CLD common block, from whence we will retrieve it
+C
+ 	IF ( HAD_QUAL ) THEN
+	   OK = DCL_INT( 'LOOKAHEAD',	! qualifier name
+     &			 .TRUE. )	! deal with errors itself
+	   IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+	   TOLGAP = IARRAY(1)  		! remember the value
+C
+ 	   IF ( TOLGAP.LT.0 .OR. TOLGAP.GT.MAXGAP ) THEN
+	      CALL LSL_PUTMSG( IDIFF__LOOKAHEAD, TOLGAP, MAXGAP )
+	      GOTO 9999
+	   ENDIF
+C
+	ELSE
+	   TOLGAP = DEFAULT_GAP		! use the default value
+	ENDIF
+C
+C *********************************************************************
+C /PLOT = (what) - produce output IFF files as requested
+C
+	OK = DCL_QUAL( 'PLOT',		! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+	PLOT = HAD_QUAL			! do we want to plot?
+C
+C if we are requested to plot, see if the user has specified what
+C we should plot
+C
+	IF ( PLOT ) THEN
+C
+	   OK = DCL_QUAL( 'PLOT.COORDINATES',
+     &			  PLOT_GEOM,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+ 	   OK = DCL_QUAL( 'PLOT.ATTRIBUTES',
+     &			  PLOT_ATTR,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+	   OK = DCL_QUAL( 'PLOT.OTHER',
+     &			  PLOT_OTHR,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+C	 if no qualifiers were specified (ie just /PLOT) then
+C	 pretend that all were given
+C
+	   IF ( .NOT.(PLOT_GEOM
+     &		  .OR.PLOT_ATTR
+     &		  .OR.PLOT_OTHR) ) THEN
+	      PLOT_GEOM = .TRUE.	! geometrical (coordinate) differences
+	      PLOT_ATTR = .TRUE.	! attribute differences
+	      PLOT_OTHR = .TRUE.	! other differences
+	   ENDIF
+C
+C	 and deduce appropriate filenames for our plot output
+C	 - use the second input filename, with appropriate additions
+C
+	   OK = PUTFLN( SECOND_FILE(:SECOND_LEN) )
+	   IF ( .NOT.OK ) THEN
+	      CALL LSL_PUTMSG( IDIFF__PLOTSPEC,
+     &			       SECOND_FILE(:SECOND_LEN))
+	      CALL LSL_ADDMSG( OK )
+	      GOTO 9999
+	   ENDIF
+C
+ 	   HAD_VER = .FALSE.	! discard any version numbers
+C
+	   STR_NAM = STR_NAM(:LEN_NAM) // '_DEL'
+	   LEN_NAM = LEN_NAM + 4
+C
+	   OK = EXPFLN( DEL_FILE, DEL_LEN )
+	   IF ( .NOT.OK ) THEN
+	      CALL LSL_PUTMSG( IDIFF__PLOTCRE,
+     &			       DEL_FILE(:DEL_LEN))
+	      CALL LSL_ADDMSG( OK )
+	      GOTO 9999
+	   ENDIF
+C
+	   STR_NAM = STR_NAM(:LEN_NAM-3) // 'CRE'
+	   CALL EXPFLN( CRE_FILE, CRE_LEN )
+C
+	   STR_NAM = STR_NAM(:LEN_NAM-3) // 'DIF'
+	   CALL EXPFLN( DIF_FILE, DIF_LEN )
+C
+	ENDIF
+C
+C *********************************************************************
+C /OS - we are comparing two Ordnance Survey files
+C
+	OK = DCL_QUAL( 'OS',		! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+	OS = HAD_QUAL
+C
+C *********************************************************************
+C /LOG - output some extra information
+C
+	OK = DCL_QUAL( 'LOG',		! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+	LOG = HAD_QUAL
+C
+C *********************************************************************
+C /FRT	- read a FRT file
+C
+C This is deliberately done last, so that if we do read an FRT
+C we will do it after having checked any errors in any other part
+C of the command line.
+C
+	OK = DCL_QUAL( 'FRT',		! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+C - if we had an FRT filespec, we read the file in now
+C - otherwise, we call FRT_ACDINI to set up the default ACD
+C   descriptions
+C
+ 	IF ( HAD_QUAL ) THEN			! had the /FRT switch
+	   OK = DCL_FILE( 'FRT',		! the output file
+     &			  'LSL$FRT:.FRT;0',	! the default name
+     &			  ABSENT,		! true if not there
+     &			  .FALSE.,       	! not a list
+     &			  .TRUE. )		! report errors itself
+	   IF ( .NOT.OK ) GOTO 9999
+	   IF ( FRTINI(FILARY(1)(1:FIL_LEN(1))) ) GOTO 9999
+	   IF (LOG) CALL LSL_PUTMSG(IDIFF__FRTFILE, FILARY(1)(1:FIL_LEN(1)))
+	   HADFRT = .TRUE.
+	ELSE
+	   HADFRT = .FALSE.
+	   IF ( FRT_ACDINI() ) GOTO 9999
+	ENDIF
+C
+C *********************************************************************
+C /IGNORE = (what) - to ignore the items specified in the list
+C
+	OK = DCL_QUAL( 'IGNORE',	! qualifier name
+     &		       HAD_QUAL,	! out - globally there
+     &		       PRESENT,		! out - locally there
+     &		       NEGATED,		! out - true if negated
+     &		       .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.OK ) GOTO 9999	! failed - give up with status
+C
+	IGNORE = HAD_QUAL		! do we want to ignore any items?
+C
+C if we are going to ignore some entries, see if the user has specified what
+C we should ignore
+C
+	IF ( IGNORE ) THEN
+C
+	   OK = DCL_QUAL( 'IGNORE.FSFC',
+     &			  IGN_FC,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+	   OK = DCL_QUAL( 'IGNORE.FSSTATUS',
+     &			  IGN_STATUS,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+	   OK = DCL_QUAL( 'IGNORE.FSPCTEXT',
+     &			  IGN_PCTEXT,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+	   OK = DCL_QUAL( 'IGNORE.FSUSERWORD',
+     &			  IGN_USRWRD,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+	   OK = DCL_QUAL( 'IGNORE.HI',
+     &			  IGN_HI,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+	   OK = DCL_QUAL( 'IGNORE.MD',
+     &			  IGN_MD,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+	   OK = DCL_QUAL( 'IGNORE.NS',
+     &			  IGN_NS,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+	   OK = DCL_QUAL( 'IGNORE.TH',
+     &			  IGN_TH,
+     &			  PRESENT,NEGATED,.TRUE. )
+C
+        ENDIF
+C
+C *********************************************************************
+C return success
+C
+	OBEY = .FALSE.
+C
+9999	RETURN
+	END

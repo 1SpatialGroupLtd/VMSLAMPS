@@ -40,7 +40,7 @@ C subtract the origin offset
 C
 	XNEW = X*SCALE_FACTOR - XOFF
 	YNEW = Y*SCALE_FACTOR - YOFF
-	ZNEW = Z - ZOFF
+	ZNEW = Z
 C
 C Check for duplicate points
 C

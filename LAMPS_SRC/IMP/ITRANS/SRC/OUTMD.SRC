@@ -1,0 +1,710 @@
+	LOGICAL FUNCTION OUTMD(MD,LUN)
+C
+***	MODULE OUTMD
+***	IDENT 13JL95
+C
+C 	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD    Add Modified-stereographic projections (WI 1500)        TJM 30-Jun-1995
+CMOD	Oblique Mercator - change reference to latitude	        RWR 25-Nov-1993
+C	of origin to latitude of centre 
+CMOD	Add Krovak, Bonne, Mollweide, Hammer-Aitoff	        RWR 11-Feb-1993
+C	    and Winkel III projections (wi 93/3)
+CMOD    Add Cassini Projection	    			        RWR 19-Nov-1992
+CMOD	Output correct information for Equirectangular 
+C	and Sinusoidal projections			        RWR  8-May-1991
+CMOD    Use new LSLLIB DISPANG			 	        RWR  5-Aug-1988
+CMOD	Output scale after projection code
+C	(mod M2/420) 					        RWR 16-Feb-1987
+C
+CMOD    Convert for F77 GCTPLIB compatibility (WI/CC 1514)      TJM 26-Oct-1995
+C
+C	Author    Ron Russell			                     9-Dec-1985
+C
+C       This subroutine lists a map descriptor
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/HERE:ITRANSMSG/
+***	PARAMETER/LSL$CMNLSL:READANG/
+C
+***	COMMON/HERE:GENERAL/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***     COMMON/HERE:DESCRIPT/
+C
+C argument
+	INTEGER*2	MD(DESCLN)
+	INTEGER*4	LUN		! channel to use
+C
+C working storage
+	INTEGER*2	THISMD(DESCLN)	! this is a copy of the argument
+					! to equivalence it
+C
+	INTEGER*2	MATTHS		! note I*2, for compatability
+	INTEGER*2	THSDUM		! and a dummy for longword
+					! alignment
+	REAL*8		THSLOC(2)	! local origin
+	REAL*8		THSSCL		! scale of map
+	INTEGER*4	THSPRJ		! projection system
+	INTEGER*4	THSUNT		! units that IFF file is in
+	INTEGER*4	THSSPH		! spheroid
+	REAL*8		THSSEP		! geoid - spheroid separation
+	REAL*8		THSUSP(2)	! user defined spheroid
+	REAL*8		THSPAR(15)	! parameters for projection
+C
+C which is equivalenced onto the variables
+C
+	EQUIVALENCE	(MATTHS,THISMD(1)),
+     &			(THSDUM,THISMD(2)),
+     &			(THSLOC,THISMD(3)),
+     &			(THSSCL,THISMD(11)),
+     &			(THSPRJ,THISMD(15)),
+     &			(THSUNT,THISMD(17)),
+     &			(THSSPH,THISMD(19)),
+     &			(THSUSP,THISMD(21)),
+     &			(THSPAR,THISMD(29)),
+     &			(THSSEP,THISMD(MD2LEN+3))
+C
+	INTEGER*4	I,J		! loop counters
+	INTEGER		PRJIND          ! projection index
+	INTEGER		MODIND		! modified-stereographic proj. index
+	INTEGER		UNTIND		! unit index
+	INTEGER		SPHIND		! spheroid index
+	INTEGER		NUMUNT		! number of types of units
+	CHARACTER*1	TYPE		! format for projections 8 & 20
+	CHARACTER*30	PROJ
+	CHARACTER*60	ERR
+	CHARACTER*80	STRNG
+	INTEGER		STRNL
+	REAL*8		TEMPLAT,TEMPLON
+	REAL*8		TEMPLATS,TEMPLONS
+C
+	REAL*8		DATA(15)
+	INTEGER		SYS,ZONE,UNIT
+C
+	CHARACTER*45	ZONESTR
+	DATA		ZONESTR/'Zone'/
+C
+	INTEGER		IERR		! error code for GCTP
+	COMMON/ERRM/	IERR
+	LOGICAL		EQUIRECT	! equirectangular
+	LOGICAL		MERC 		! Mercator projection
+C
+C initialised parameters for spherical Oblique Mercator projection
+C
+	REAL*8		A,E,KS0,X0,Y0,LATP,LON0,AL,UL,
+     &			SINLATP,COSLATP
+	COMMON /CNST21/ A,E,KS0,X0,Y0,LATP,LON0,AL,UL,
+     &	                SINLATP,COSLATP
+C
+	INTEGER*4	LAT,LONG
+	PARAMETER	(LONG=READANG_LONGITUDE,LAT=READANG_LATITUDE)
+	INTEGER*4	SCL,COORD
+	PARAMETER	(COORD=0,SCL=1)
+C
+C functions
+	INTEGER		SIGCHS
+	CHARACTER*14	DISPANG
+	REAL*8		ADJL
+C
+C assume success
+C
+	OUTMD=ITRANS__NORMAL
+C
+C assume not Equirectangular or Mercator projection at the moment
+	EQUIRECT = .FALSE.
+	MERC     = .FALSE.
+C
+C make a copy of the argument
+C
+	DO 10, I=1,DESCLN
+	   THISMD(I)=MD(I)
+   10	CONTINUE
+C
+C get the spheroid index
+C
+	DO 20 I=1,MD2_NOSPH
+	   IF (THSSPH.EQ.MD2_SPHCD(I)) THEN
+	      SPHIND=I
+	      GOTO 30
+	   ENDIF
+   20	CONTINUE
+C
+	CALL LSL_PUTMSG(ITRANS__BADSPHCDS,THSSPH)
+	OUTMD=ITRANS__BADSPHCDS
+	GOTO 9999
+C
+C get the projection index
+C
+30	CONTINUE
+C
+	DO 40 I=1,MD2_NOPRJ
+	   IF (THSPRJ.EQ.MD2_PRJCD(I)) THEN
+	      PRJIND=I
+	      GOTO 50
+	   ENDIF
+   40	CONTINUE
+C
+	CALL LSL_PUTMSG(ITRANS__BADPRJCDS,THSPRJ)
+	OUTMD=ITRANS__BADPRJCDS
+C
+	GOTO 9999
+C
+C get the unit index
+C
+50	CONTINUE
+C
+C if dealing with points, then allow dd mm ss format
+C
+	IF (HAD_POINT) THEN
+	   NUMUNT=MD2_NOUNT+1
+	ELSE
+	   NUMUNT=MD2_NOUNT
+	ENDIF
+C
+	DO 60 I=1,NUMUNT
+	   IF (THSUNT.EQ.MD2_UNTCD(I)) THEN
+	      UNTIND=I
+	      GOTO 70
+	   ENDIF
+   60	CONTINUE
+C
+	CALL LSL_PUTMSG(ITRANS__BADUNTCDS,THSUNT)
+	OUTMD=ITRANS__BADUNTCDS
+	GOTO 9999
+C
+C all spheroids known by GCTP are specified in International metres
+C
+C if user specified spheroid, then we talk about projection units;
+C
+C when dealing with Oblique Stereographic (UKSL format) with user
+C specified conformal earth's radius, then we had also better talk
+C about projection units
+C
+   70	CONTINUE
+C
+	IF (THSSPH.EQ.101 .OR.
+     &	    THSPRJ.EQ.22 .AND. THSPAR(4).GT.0.0) THEN
+	   MD2_UNT(3)='projection units'
+	ELSE
+	   MD2_UNT(3)='metres'
+	ENDIF
+C
+C now write out information
+C
+	CALL FLWSEL(LUN)
+	CALL FLWRTF(' ')
+C
+C spheroid
+C
+	IF (THSPRJ.NE.0) THEN
+	   CALL FLWRTF('Spheroid     :%^L%I4 (%S)',MD2_SPHCD(SPHIND),
+     &	            MD2_SPH(SPHIND)(1:SIGCHS(MD2_SPH(SPHIND))))
+	   IF (THSSPH.EQ.101) THEN
+	      CALL FLWRTF('  defined as %^D%F0.3 %F0.3',
+     &	                  THSUSP(1),THSUSP(2))
+	   ENDIF
+	ENDIF
+C
+C for accurate datum shifts, we know the geoid - spheroid separation
+C
+	IF (HAD_HEIGHT) THEN
+	   CALL FLWRTF('                   (with Geoid - Spheroid '//
+     &	               'separation of %^D%F0.3)',THSSEP)
+	ENDIF
+C
+C projection
+C
+CCC	IF (THSPRJ.NE.8 .AND. THSPRJ.NE.20 .AND. THSPRJ.NE.21 .AND.
+CCC     &					 THSPRJ.NE.24) THEN
+C
+	IF (THSPRJ.NE.8 .AND. THSPRJ.NE.20 .AND. THSPRJ.NE.21) THEN
+	   CALL FLWRTF('Projection   :%^L%I4 (%S)',MD2_PRJCD(PRJIND),
+     &	            MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))))
+	ELSE
+C
+C find out variant of projection
+C
+	   IF ((THSPRJ.EQ.8 .AND. THSPAR(9).EQ.0.0) .OR.
+     &	      ((THSPRJ.EQ.20 .OR. THSPRJ.EQ.21) .AND.
+     &	        THSPAR(13).EQ.0.0) .OR.
+     &	       (THSPRJ.EQ.24 .AND. THSPAR(10).EQ.0.0)) THEN	   
+	      TYPE='A'
+C
+	   ELSE
+	      TYPE='B'
+	   ENDIF
+C
+	   CALL FLWRTF('Projection   :%^L%I4 (%S - format %S)',
+     &	               MD2_PRJCD(PRJIND),MD2_PRJ(PRJIND)
+     &	               (3:SIGCHS(MD2_PRJ(PRJIND))),TYPE)
+	ENDIF
+C
+C projection parameters
+C
+C switch on projection index
+C
+C	     unset,  utm,   spc,  alb,   lcc,  mer, pol ster, poly, eqd con
+C	        tm, ster,  laea,   az,  gnom,  orth,
+C	      gvnp, sinu, equirect, mill,  vdg,
+C	      obl mer (hot/sph),  ster,  cass,  krov,  bonn
+C	      moll, hamm, wink, mod ster, unset , unset
+
+	GOTO (9000,  100,   200,   300,   400,   500,   600,  700,  800,
+     &	       900, 1000,  1100,  1200,  1300,  1400,
+     &	      1500, 1600,  1700,  1800,  1900,
+     &	      2000, 2100,         2200,  2300,  2400,  2500,
+     &        2600, 2700,  2800,  2900,  9000,  9000) PRJIND
+C
+C no such projection defined
+C
+	CALL LSL_PUTMSG(ITRANS__BADPRJCDS,THSPRJ)
+	OUTMD=ITRANS__BADPRJCDS
+	GOTO 9999
+C
+C************************************************************************
+C UTM - only if zone 0
+C************************************************************************
+C
+  100	CONTINUE
+C
+C zone
+C
+	ZONE=THSPAR(3)			! R*8 -> I*4
+	CALL FLWRTF(' ')
+	IF (THSPAR(2).LT.0.0) THEN
+	   CALL FLWRTF('   %S:%I5 (Southern hemisphere)',
+     &	               ZONESTR,ZONE)
+	ELSE
+	   CALL FLWRTF('   %S:%I5',ZONESTR,ZONE)
+	ENDIF
+C
+	IF (ZONE.EQ.0) THEN		! need point in geographicals
+	   CALL OUTANG('Longitude of a point in the UTM zone',THSPAR(1),
+     &	               LONG)
+	ENDIF
+C
+	GOTO 9000
+C
+C************************************************************************
+C State Plane Coordinate system
+C***********************************************************************
+C
+  200	CONTINUE
+C
+C zone
+	ZONE=THSPAR(3)
+	CALL FLWRTF(' ')
+	CALL FLWRTF('   %S:%I5',ZONESTR,ZONE)
+C
+	GOTO 9000
+C
+C************************************************************************
+C Albers Conical equal area
+C************************************************************************
+C Lambert Conformal Conic
+C************************************************************************
+C
+  300	CONTINUE
+  400	CONTINUE
+C
+C latitude of standard parallels
+C
+	CALL FLWRTF(' ')
+	CALL OUTANG('Latitude of 1st standard parallel',THSPAR(3),LAT)
+	CALL OUTANG('Latitude of 2nd standard parallel',THSPAR(4),LAT)
+C
+C long of central meridian, latitude of origin, false eastings
+C and false northings (often common with other projections)
+C
+  435	CONTINUE
+C
+	CALL OUTANG('Latitude  of the projection origin',THSPAR(6),LAT)
+	CALL OUTANG('Longitude of the central meridian',THSPAR(5),LONG)
+C
+  470	CONTINUE
+C
+	CALL OUTDBL('Eastings  of origin',THSPAR(7),COORD)
+	CALL OUTDBL('Northings of origin',THSPAR(8),COORD)
+C
+	GOTO 9000
+C
+C************************************************************************
+C MERCATOR 
+C************************************************************************
+C POLAR STEREOGRAPHIC
+C************************************************************************
+C
+  500	CONTINUE
+C
+	MERC = .TRUE.
+C
+  600	CONTINUE	
+C
+C latitude of true scale
+C
+	CALL FLWRTF(' ')
+	CALL OUTANG('Latitude of true scale',THSPAR(6),LAT)
+C
+C longitude of central meridian (for Mercator)
+C
+	IF (MERC) THEN
+	   CALL OUTANG('Longitude of the central meridian',THSPAR(5),
+     &	                  LONG)
+C
+C for Polar sterographic, longitude straight down from the pole
+C
+	ELSE
+	   CALL OUTANG('Longitude down from N Pole (up from S)',
+     &	                  THSPAR(5),LONG)
+	ENDIF
+C
+C rest is same as projection 3 and 4
+C
+	GOTO 470
+C
+C************************************************************************
+C POLYCONIC
+C************************************************************************
+C
+  700	CONTINUE
+C
+C similar to other conics
+C
+	GOTO 435
+C
+C************************************************************************
+C EQUIDISTANT CONIC - type B is same as other conics
+C************************************************************************
+C
+  800	CONTINUE
+C
+	IF (TYPE.EQ.'B') GOTO 400
+C
+C type A is slightly different
+C
+	CALL FLWRTF(' ')
+	CALL OUTANG('Latitude of standard parallel',THSPAR(3),LAT)
+C
+C now the same as other conics
+C
+	GOTO 435
+C
+C************************************************************************
+C Transverse Mercator
+C************************************************************************
+C
+  900	CONTINUE
+C
+C scale factor of Central meridian
+C
+	CALL FLWRTF(' ')
+	CALL OUTDBL('Scale factor on central meridian',THSPAR(3),SCL)
+C
+C now the same as other conics
+C
+	GOTO 435
+C
+C************************************************************************
+C STEREOGRAPHIC, LAMBERT AZIMUTHAL EQUAL AREA, AZIMUTHAL, GNOMONIC,
+C ORTHOGRAPHIC are all the same
+C************************************************************************
+C
+ 1000	CONTINUE
+ 1100	CONTINUE
+ 1200	CONTINUE
+ 1300	CONTINUE
+ 1400	CONTINUE
+C
+	CALL FLWRTF(' ')
+C
+ 1430	CONTINUE			! get lon of centre of proj
+C
+	CALL OUTANG('Latitude  of centre of projection',THSPAR(6),LAT)
+	CALL OUTANG('Longitude of centre of projection',THSPAR(5),LONG)
+C
+C now false eastings and northings
+C
+	GOTO 470
+C
+C************************************************************************
+C General Vertical Near-side Perspective
+C************************************************************************
+C
+ 1500	CONTINUE
+C
+C height of perspective point above surface
+C
+	CALL FLWRTF(' ')
+	CALL OUTDBL('Height of perspective point above surface',
+     &	               THSPAR(3),COORD)
+C
+C now the same as other spherical projections
+C
+	GOTO 1430
+C
+C************************************************************************
+C Sinusoidal, Miller Cylindrical and Van der Grinten projection
+C Equi-rectangular, Mollweide, Hammer-Aitoff and Winkel III
+C************************************************************************
+C
+ 1700	CONTINUE     			! equirectangular
+C
+	EQUIRECT = .TRUE.
+C
+ 1600	CONTINUE
+ 1800	CONTINUE
+ 1900	CONTINUE
+C
+ 2600	CONTINUE
+ 2700	CONTINUE
+ 2800	CONTINUE
+C
+C latitude of true scale, for equi-rectangular projection
+C
+	CALL FLWRTF(' ')
+	IF (EQUIRECT) THEN
+	   CALL OUTANG('Latitude of true scale',THSPAR(6),LAT)
+	ENDIF
+C
+C longitude of central meridian
+C
+	CALL OUTANG('Longitude of central meridian',THSPAR(5),LONG)
+C
+C rest is same as projection 3 and 4
+C
+	GOTO 470
+C
+C************************************************************************
+C Oblique Mercator (Hotine)
+C************************************************************************
+C
+ 2000	CONTINUE
+C
+C scale factor at centre of projection
+C
+	CALL FLWRTF(' ')
+	CALL OUTDBL('Scale factor at centre of projection',
+     &	               THSPAR(3),SCL )
+C
+C type B, azimuth angle east of north of central line
+C longitude of point on central line where azimuth is measured
+C
+	IF (TYPE.EQ.'B') THEN
+	   CALL OUTANG('Azimuth of central line (east of north)',
+     &	                THSPAR(4),0)
+	   CALL OUTANG('Longitude of point on central line where '//
+     &	               'azimuth measured',THSPAR(5),LONG)
+	ENDIF
+C
+C now latitude of centre of map, and false origin
+C
+	CALL OUTANG('Latitude of the centre point of projection',THSPAR(6),
+     &	               LAT)
+	CALL OUTDBL('Eastings  of origin',THSPAR(7),COORD)
+	CALL OUTDBL('Northings of origin',THSPAR(8),COORD)
+C
+C typeA - end points of central line
+C
+	IF (TYPE.EQ.'A') THEN
+	   CALL OUTANG('Latitude  of 1st point on central line',
+     &	                  THSPAR(10),LAT)
+	   CALL OUTANG('Longitude of 1st point on central line',
+     &	                  THSPAR(9),LONG)
+	   CALL OUTANG('Latitude  of 2nd point on central line',
+     &	                  THSPAR(12),LAT)
+	   CALL OUTANG('Longitude of 2nd point on central line',
+     &	                  THSPAR(11),LONG)
+	ENDIF
+C
+	GOTO 9000
+C
+C*********************************************************************
+C Oblique Mercator (Spherical)
+C*********************************************************************
+C
+ 2100	CONTINUE
+C
+C initialise projection, to get values for false eastings and northings
+C
+	CALL FLWRTF(' ')
+	CALL PARINIT(SYS,ZONE,DATA,UNIT,THISMD,1)	! only care
+							! about DATA
+	IERR=0
+	ITREX=.FALSE.					! clear exception
+	CALL IS21F(ZONE,DATA)
+C
+	IF (IERR.NE.0.) THEN
+	   CALL GTRNERR(IERR,PROJ,ERR)			! get error message
+	   CALL LSL_GETFORMAT(ITRANS__WGCTPERR,STRNG,STRNL)
+	   CALL FLWRTF(STRNG(1:STRNL),PROJ(1:SIGCHS(PROJ)))
+	   CALL FLWRTF('*** %S',ERR(1:SIGCHS(ERR)))
+C
+	ELSEIF (ITREX) THEN
+	   CALL LSL_GETFORMAT(ITRANS__WGCTPERR,STRNG,STRNL)
+	   CALL FLWRTF(STRNG(1:STRNL),
+     &	            MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))))
+	ENDIF	   
+C
+C scale factor at centre of projection
+C
+	CALL OUTDBL('Scale factor on false equator',THSPAR(3),SCL )
+C
+C now false origin (in geographicals)
+C
+	CALL OUTANG('Latitude  of datum',THSPAR(8),LAT)
+	CALL OUTANG('Longitude of datum',THSPAR(7),LONG)
+C
+C and in projection units
+C
+	IF (IERR.EQ.0.AND..NOT.ITREX) THEN
+	   CALL OUTDBL('   Eastings  of origin',X0,COORD)
+	   CALL OUTDBL('   Northings of origin',Y0,COORD)
+	ENDIF
+C
+C type A - end points of central line
+C
+	IF (TYPE.EQ.'A') THEN
+	   CALL OUTANG('Latitude  of 1st point on central line',
+     &	                  THSPAR(10),LAT)
+	   CALL OUTANG('Longitude of 1st point on central line',
+     &	                  THSPAR(9),LONG)
+	   CALL OUTANG('Latitude  of 2nd point on central line',
+     &	                  THSPAR(12),LAT)
+	   CALL OUTANG('Longitude of 2nd point on central line',
+     &	                  THSPAR(11),LONG)
+C
+C work out vertex
+C
+	   TEMPLON = LON0 + PI*0.5
+	   TEMPLON = ADJL(TEMPLON)
+	   TEMPLONS = TEMPLON * 3600.0 * 180.0 / PI	! in secs
+	   TEMPLAT = PI*0.5 - LATP
+	   TEMPLATS = TEMPLAT * 3600.0 * 180.0 / PI	! in secs
+	   CALL FLWRTF('      (Vertex  %S %S)',DISPANG(TEMPLATS,LAT),
+     &	                      DISPANG(TEMPLONS,LONG))
+C
+C work out pole
+C
+	   TEMPLON =TEMPLON + PI
+	   TEMPLON = ADJL(TEMPLON)
+	   TEMPLONS = TEMPLON * 3600.0 * 180.0 / PI	! in secs
+	   TEMPLATS = LATP  * 3600.0 * 180.0 / PI	! in secs
+	   CALL FLWRTF('      (Pole    %S %S)',DISPANG(TEMPLATS,LAT),
+     &	                      DISPANG(TEMPLONS,LONG))
+	ELSE
+C
+C type B - geographical coordinates of vertex
+C
+	   CALL OUTANG('Latitude  of vertex of central line',
+     &	                  THSPAR(10),LAT)
+	   CALL OUTANG('Longitude of vertex of central line',
+     &	                  THSPAR(9),LONG)
+	ENDIF
+C
+	GOTO 9000
+C
+C***********************************************************************
+C Stereographic (UKSL format)
+C***********************************************************************
+C
+ 2200	CONTINUE
+C
+	CALL FLWRTF(' ')
+	IF (THSPAR(4).GT.0.0) 
+     $	      CALL OUTDBL('Radius of Conformal Earth',THSPAR(4),COORD)
+	CALL OUTANG('Latitude  of centre of projection',THSPAR(6),LAT)
+	CALL OUTANG('Longitude of centre of projection',THSPAR(5),LONG)
+C
+C now false eastings and northings
+C
+	GOTO 470
+C
+C************************************************************************
+C Cassini
+C************************************************************************
+C
+ 2300	CONTINUE
+C
+C same as the conics
+C
+	GOTO 435
+C
+C************************************************************************
+C Krovak
+C************************************************************************
+C
+ 2400	CONTINUE
+C
+	CALL FLWRTF(' ')
+C
+	CALL OUTANG('Latitude for conformal projection to sphere',
+     &	                THSPAR(9),LAT)
+	CALL OUTANG('Latitude of origin',THSPAR(4),LAT)
+	CALL OUTANG('Longitude of origin',THSPAR(3),LONG)
+	CALL OUTANG('Latitude of origin on oblique sphere',THSPAR(5),LAT)
+	CALL OUTDBL('Scale factor on standard line through origin',
+     &	               THSPAR(6),SCL )
+C
+C and false origin
+C
+	GOTO 470
+C
+C************************************************************************
+C Bonne
+C************************************************************************
+C
+ 2500	CONTINUE
+C
+	CALL FLWRTF(' ')
+	CALL OUTANG('Latitude of standard parallel',THSPAR(3),LAT)
+	CALL OUTANG('Longitude of the central meridian',THSPAR(5),LONG)
+	CALL OUTDBL('Eastings  of origin',THSPAR(7),COORD)
+	CALL OUTDBL('Northings of origin',THSPAR(8),COORD)
+C
+	GOTO 9000
+C
+C************************************************************************
+C Modified-stereographic
+C************************************************************************
+C
+ 2900	CONTINUE
+C
+	MODIND = THSPAR(4)
+C
+	CALL FLWRTF('Modification :%^L%I4 (%S)',
+     &	            MD2_MODCD(MODIND),MD2_MOD(MODIND)
+     &	            (3:SIGCHS(MD2_MOD(MODIND))))
+	CALL FLWRTF(' ')
+C
+C now the same as other spherical projections
+C
+	GOTO 1430
+C
+C scale and units
+C
+ 9000	CONTINUE
+C
+	CALL FLWRTF(' ')
+	IF (.NOT.HAD_POINT) THEN
+	   CALL FLWRTF('Scale        : %^D%F13.1',THSSCL)
+	ENDIF
+C
+	CALL FLWRTF('Units        :%^L%I4 (%S)',MD2_UNTCD(UNTIND),
+     &	            MD2_UNT(UNTIND)(1:SIGCHS(MD2_UNT(UNTIND))))
+C
+C local origin
+C
+	IF (.NOT.HAD_POINT) THEN
+	   IF (THSPRJ.EQ.100) THEN
+	      CALL FLWRTF('Local origin : %^D%F15.3 (Latitude) '//
+     &	                  '%F15.3 (Longitude)',THSLOC(2),THSLOC(1))
+	   ELSE
+	      CALL FLWRTF('Local origin : %^D%F15.3 (Eastings) '//
+     &	                  '%F15.3 (Northings)',THSLOC(1),THSLOC(2))
+	   ENDIF
+	ENDIF
+C
+ 9999	RETURN
+	END
+C

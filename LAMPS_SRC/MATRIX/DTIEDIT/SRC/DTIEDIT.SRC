@@ -1,0 +1,845 @@
+	PROGRAM DTIEDIT
+C
+***	MODULE DTIEDIT
+***	IDENT  19AP93
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C	D R Catlow
+C
+CMOD	Use new DTI_UNITS routine		        MWSR 23-Nov-1988
+CMOD    Fix bug in SPAWN command which caused DCL 	MWSR 23-Nov-1988
+C       line  concatenation
+CMOD    Always display matrix units to start with       MWSR 12-Dec-1988
+C
+CMOD1216 Always update z range entries on exit for 
+C	 bit FILES					  JB 19-Apr-1993
+C
+C	Digital Terrain Image Editor
+C
+C	This is a considerably modified version of the original
+C	DTI program. (Created by AJW on 02-Mar-1983 )
+C	It now utilises DTILIB, and allows display and editing
+C	of all DTI header and data types.
+C	Modified to use LSLLIB.
+C
+C	Editing has been made 'more difficult' to prevent accidental
+C	changing of height values - keypad '-' changes the mode
+C	of operation from viewing to editing.  This keypad key is only
+C	recognised if the ENABLE EDIT command has been given in command
+C	line mode.
+C
+C	The status line has been modified to display the cursor
+C	position and associated value when in VIEW mode. (? is no
+C	longer required). 
+C
+C------------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters:
+	INCLUDE '($IODEF)'
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/		!LSLLIB message file
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/		!DTILIB message file
+***	PARAMETER/LSL$CMNLSL:READSTR/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+C
+C LSLLIB common blocks:
+***	COMMON/LSL$CMNLSL:CMDCOM/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/LSL$CMNLSL:EXPC/
+C
+C DTILIB common blocks:
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C DTI common blocks
+***	COMMON/HERE:DTICOM/
+***	COMMON/HERE:DTIQIO/
+C
+C--------------------------------------------------------------------------
+C locals
+	INTEGER*4   	FLAGS		! return from SCREEN_INFO
+	INTEGER*4	I		! counter
+	INTEGER*4	CMD		! command index
+	INTEGER*4 	RETVAL		! LSLLIB or DTILIB function returns
+	INTEGER*4	IERR4		! system error code
+	INTEGER*4    	ICFLEN		! length of ind cmd file name
+	LOGICAL  	DIRECT		! direct or indirect command input
+	CHARACTER*128 	ICFNAM		! name of file of indirect commands
+	CHARACTER*80	LINE		! used by spawn
+	BYTE	  CH			! character read by RDCHS
+C
+	INTEGER*4		FAKSTR(2)	!fake string descriptor
+	INTEGER*4		FAKLEN		!length of string
+	BYTE			FAKBUF(80)
+	EQUIVALENCE		(FAKLEN,FAKSTR(1))
+C
+C functions:
+	INTEGER*4 DTI_MINMAX_DATA	! to calculate data range
+	INTEGER*4 DTI_CLOSE		! to close a DTI file
+	INTEGER*4 DTI_PRINT_HEADER	! to print DTI header
+C
+	INTEGER*4 FLROPN		! to open the indirect command file
+	INTEGER*4 FLRCLO		! to close the indirect command file
+	INTEGER*4 FLRLIN		! to read a line from the ind cmd file
+	INTEGER*4 DTI_UNITS		! check valid units
+C
+	INTEGER*4 RDCOMM		! decode command
+	INTEGER*4 PARFILN		! parse filename
+	INTEGER*4 READSTR		! read a string
+	INTEGER*4 TTRSTR		! to read command line
+	LOGICAL   RDCHS			! read single character
+	LOGICAL	  RDCH			! read a character
+	INTEGER   RDFILT		! to read a filename
+C
+	LOGICAL	  OPEN_DTI_FILE		! to open input DTI file
+	LOGICAL	  EDIT_AREA		! to edit an area
+	LOGICAL	  EDIT_LINE		! to edit a line
+	LOGICAL	  EDIT_POINT		! to edit a point
+C------------------------------------------------------------------------------
+C	System functions
+	INTEGER   LIB$PUT_OUTPUT
+	INTEGER   LIB$SCREEN_INFO
+	INTEGER	  LIB$SPAWN
+C
+	INTEGER   SYS$ASSIGN
+C
+C------------------------------------------------------------------------------
+C	Command dictionaries
+	EXTERNAL  DTIEDIT_CMD_TABLE
+	EXTERNAL  RESET_CMD_TABLE
+	EXTERNAL  EDIT_CMD_TABLE
+	EXTERNAL  ENABLE_CMD_TABLE
+	EXTERNAL  SHOW_CMD_TABLE
+	EXTERNAL  SET_CMD_TABLE
+	EXTERNAL  UNITS_CMD_TABLE
+C
+C------------------------------------------------------------------------------
+C	Initialise the libraries
+	CALL LSL_INIT
+	CALL DTI_INIT
+C
+C	Announce ourself
+	CALL DTMJPI
+C
+C 	Assign the input channel
+	IERR4 = SYS$ASSIGN('SYS$INPUT',ICHAN,,)
+	IF (.NOT.IERR4) THEN
+	  CALL LSL_PUTMSG(IERR4)
+	  GOTO 999			! exit
+	ENDIF
+C
+C 	Set up a terminator mask for the SCREDT QIO
+	TERMAD(1)=16			! descr for mask
+	TERMAD(2)=%LOC(TERMSK)
+	DO 10 I=1,4
+	  TERMSK(I)=-1			! all chars are terminators
+10	CONTINUE
+C
+	COLUMN=80			! 80 screen columns
+	QUIET=.FALSE.
+	DIRECT = .TRUE.			! commands given interactively
+	ZLOWER = 0
+	ZUPPER = 0
+	INCHGT  = 0
+C
+C--------------------------------------------------------------------------
+C	Read a command from the terminal
+20	IF (DIRECT) THEN
+	   RETVAL = TTRSTR(,,'DTIEDIT> ',IERR4)
+C
+	   IF(.NOT.RETVAL)THEN
+	     IF(RETVAL.EQ.LSL__EOF)GOTO 999	! ^Z
+	     CALL LSL_PUTMSG(RETVAL)
+	     GOTO 20
+	   ENDIF
+C
+	   IF(TXTPTR.EQ.0)GOTO 20			! Blank line
+	ELSE				
+C
+C-------------------------------------------------------------------------
+C	Read a line from the command file
+	  RETVAL = FLRLIN()
+	  IF(RETVAL.NE.LSL__NORMAL)THEN
+	     IF(RETVAL.NE.LSL__EOF)THEN
+	       CALL WRITEF('%S Reading from command file',ERROR_BELL)
+               CALL WRITEF('Returning to terminal input')
+	     ELSE
+	       CALL WRITEF('%S Reading from command file',ERROR_BELL)
+	       CALL WRITEF('End of command file detected')
+	     ENDIF
+	     GOTO 1650		!to close the file 
+	  ELSE
+C	Echo the command on the terminal
+	     CALL BSLN
+	     CALL EXPAND('DTIEDIT> ')
+	     CALL APPEND(TXTDSC)
+	     CALL TTWSTR
+	  ENDIF
+	END IF
+C
+C------------------------------------------------------------------------
+C	Check for ! or @ on command line
+	CALL BSLN
+	IF(RDCHS(CH))GOTO 20	! next command
+C
+	IF(CH.EQ.'!')GOTO 20	! next command
+	IF(CH.EQ.'@')GOTO 50
+	CALL BSCH
+C
+C------------------------------------------------------------------------------
+C 	Decode the command
+	CMD=RDCOMM(DTIEDIT_CMD_TABLE)
+	IF (CMD .LE. 0) THEN
+	   CALL WRITEF('%S Specifying DTIEDIT command',ERROR_BELL)
+	   GOTO 20
+	ENDIF
+C
+C	FILEIN, UNITS, HELP, ORIGIN,
+C	STEP, LIMITS, SHOW, ENABLE,
+C	DISABLE,SET,PRINT,CHANGE,
+C	SPAWN,EDIT,RESET,
+C	RETURN,EXIT,SUBSTITUTE
+C
+	GOTO  (
+     &  100,200,300,400,
+     &  500,600,700,800,
+     &  900,1000,1100,1200,
+     &  1300,1400,1500,
+     &	1600,1700,1800) CMD
+C
+C catch anything which gets here
+	GOTO 20		! get next command
+C
+C-------------------------------------------------------------------------
+C	@
+C	Get the associated file-spec
+C
+50	IF(.NOT.DIRECT)THEN
+	  CALL WRITEF('%S Specifying command @',ERROR_BELL)
+	  CALL WRITEF('Nested command files not supported')
+	  GOTO 20
+	ENDIF
+C
+	IF(RDCHS(CH))THEN
+	  CALL WRITEF('%S Specifying command @',ERROR_BELL)
+	  CALL WRITEF('Command file specification is missing')
+	  GOTO 20
+	ENDIF
+C
+C	Parse the filename
+	FAKSTR(2)=%LOC(FAKBUF)	! set up fake string descriptor
+	FAKLEN=128
+	IF(CH.EQ.34.OR.CH.EQ.39)THEN
+	  FAKLEN=READSTR(FAKSTR,CH,ON_CHAR2,.TRUE.)
+	ELSE
+	  CALL BSCH
+	  FAKLEN=READSTR(FAKSTR,' ',ON_CHAR2,.TRUE.)
+	ENDIF
+C
+C	Parse the input file name against LSL$COM:.COM
+	RETVAL=PARFILN(ICFNAM,
+     &                 ICFLEN,
+     &	               FAKSTR,
+     &                 'SYS$DISK:[].COM;0',
+     &	               .TRUE.)
+	IF(RETVAL.NE.LSL__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  GOTO 999			!return
+	ENDIF
+C
+C 	Open the indirect command file
+	RETVAL = FLROPN(1,ICFNAM,IERR4,)
+	IF(.NOT. RETVAL)THEN
+	   CALL WRITEF
+     &     ('%S Unable to open indirect command file %S',
+     &     ERROR_BELL,ICFNAM(1:ICFLEN))
+	   CALL LSL_PUTMSG(RETVAL)
+	   GOTO 20		!get next command from terminal
+	ENDIF
+C
+	DIRECT = .FALSE.	!signal that input is from a command file
+	GOTO 20		!get next command from the file
+C
+C---------------------------------------------------------------------------
+C	FILEIN 
+C
+C	Call Function OPEN_DTI_FILE to read DTI input filename,
+C	and map it into memory.
+C	Input DTI file is opened on 1
+C
+100	IF(.NOT.OPEN_DTI_FILE(1))GOTO 20
+C
+C	Confirm successful opening of file, by writing out header details
+C
+	CALL WRITEF(' ')
+	RETVAL=DTI_PRINT_HEADER(1,UNITS)
+	IF(.NOT.RETVAL)CALL LSL_PUTMSG(RETVAL)
+C
+C	Set up default limits
+C
+	IF(DATA_TYPE(1).EQ.3)THEN
+	  ZLOWER=MIN_LVALUE(1)
+	  ZUPPER=MAX_LVALUE(1)
+	ELSE IF(DATA_TYPE(1).EQ.4)THEN
+	  ZLOWER=INT(MIN_RVALUE(1))
+	  ZUPPER=INT(MAX_RVALUE(1))+1
+	ELSE
+	  ZLOWER=MIN_WVALUE(1)
+	  ZUPPER=MAX_WVALUE(1)
+	ENDIF
+C
+C	Set up default ORIGIN 
+	XORI=1
+	YORI=1
+	XCOUNTS_W=X_EXTENT(1)
+	YCOUNTS_W=Y_EXTENT(1)
+C
+C	Determine suitable step value
+	CALL AUTRAN
+C
+	NEWRAN=.FALSE.
+	GOTO 20		! get next command
+C
+C--------------------------------------------------------------------------
+C	UNITS
+C
+C	Set the units used to print out header details
+200	CMD=RDCOMM(UNITS_CMD_TABLE)	
+	IF(CMD.LE.0) THEN! unrecognised command
+	  CALL WRITEF('%S Specifying command UNITS',ERROR_BELL)
+	  CALL WRITEF
+     &	 ('Command qualifiers are MATRIX, METRES, SECONDS, LATLONG '//
+     &    'or PROJECTION')
+	  GOTO 20
+	ENDIF
+C
+	IF (DTILUN_INUSE(1)) THEN
+	   RETVAL = DTI_UNITS(1,CMD)
+	   IF (.NOT. RETVAL) THEN
+	      IF (RETVAL .EQ. DTI__INVUNITS) THEN
+	         CALL WRITEF('%S Specifying command UNITS',ERROR_BELL)
+	         CALL WRITEF
+     &           ('Command qualifier is invalid for the input file')
+	      ELSE
+	         CALL LSL_PUTMSG(RETVAL)
+	      ENDIF
+	      GOTO 20
+	   ENDIF
+	ENDIF
+	UNITS = CMD
+C	
+	GOTO 20
+C
+C------------------------------------------------------------------------------
+C 	HELP
+C
+300	CALL HELP	
+	GOTO 20
+C
+C----------------------------------------------------------------------------
+C 	ORIGIN
+C
+C	Check for 2 integer arguments
+400	IF(CMDICT.NE.2)THEN
+	  CALL WRITEF('%S Specifying command ORIGIN',ERROR_BELL)
+	  CALL WRITEF('Command requires 2 integer arguments')
+	  GOTO 20
+	ENDIF
+C
+	IF(.NOT.DTILUN_INUSE(1))THEN
+	  CALL WRITEF('%S Specifying command ORIGIN',ERROR_BELL)
+	  CALL WRITEF('No DTI file has been defined')
+	  GOTO 20
+	ENDIF
+C
+	IF(INTARG(1).LT.1.OR.INTARG(1).GT.X_EXTENT(1).OR.
+     &     INTARG(2).LT.1.OR.INTARG(2).GT.Y_EXTENT(1))THEN
+	  CALL WRITEF('%S Specifying command ORIGIN',ERROR_BELL)
+	  CALL WRITEF('The coordinates of the origin are out of range')
+	  GOTO 20
+	ENDIF
+C
+	XORI=INTARG(1)
+	YORI=INTARG(2)
+	GOTO 20
+C
+C----------------------------------------------------------------------------
+C 	STEP
+C
+500	IF(CMDICT.NE.1)THEN
+	  CALL WRITEF('%S Specifying command STEP',ERROR_BELL)
+	  CALL WRITEF('Command requires an integer argument')
+ 	  GOTO 20
+	ENDIF
+C
+	IF(INTARG(1).LE.0)THEN
+	  CALL WRITEF('%S Specifying command STEP',ERROR_BELL)
+	  CALL WRITEF('Command requires a postive integer argument')
+	  GOTO 20
+	ENDIF
+C
+	INCHGT=INTARG(1)
+C
+	IF(ZLOWER+(INCHGT*26).LT.ZUPPER)THEN
+	  ZUPPER=ZLOWER+(INCHGT*26)
+	  CALL WRITEF
+     &    ('%S Step value too small for current LIMITS',WARN_BELL)
+	  CALL WRITEF
+     &    ('Upper LIMITS value has been adjusted to %N',ZUPPER)
+	ENDIF
+C	  
+C	Confirm what we have done by doing a SHOW DISPLAY
+	GOTO 710
+C
+C----------------------------------------------------------------------------
+C	LIMITS
+C
+600	IF(CMDICT.NE.2)THEN
+	  CALL WRITEF('%S Specifying command LIMITS',ERROR_BELL)
+	  CALL WRITEF('Command requires 2 integer arguments')
+	  GOTO 20
+	ENDIF
+C
+C	Validate the input Z values
+	IF(INTARG(2).LE.INTARG(1))THEN
+	  CALL WRITEF('%S Specifying command LIMITS',ERROR_BELL)
+	  CALL WRITEF('Upper value must exceed lower value')
+	  GOTO 20
+	ENDIF
+C
+	ZLOWER=INTARG(1)
+	ZUPPER=INTARG(2)
+	BASHGT=ZLOWER
+C
+	IF(ZLOWER+(INCHGT*26).LT.ZUPPER)THEN
+	  CALL AUTRAN
+	  CALL WRITEF
+     &    ('%S Step value too small for new LIMITS',WARN_BELL)
+	  CALL WRITEF
+     &    ('STEP value has been adjusted to %N',INCHGT)
+	ENDIF
+C
+C	Confirm what we have done by doing a SHOW DISPLAY
+	GOTO 710
+C
+C-----------------------------------------------------------------------------
+C	SHOW
+C
+700	CMD = RDCOMM(SHOW_CMD_TABLE)	
+C
+	IF (CMD.LE.0) THEN	! qualifier unrecognised
+	  CALL WRITEF('%S Specifying command SHOW',ERROR_BELL)
+	  CALL WRITEF('Command qualifiers are DISPLAY or FILEIN')
+	  GOTO 20 
+	ENDIF
+C
+	GOTO (710,720)CMD	
+C
+C-----------------------------------------------------------------------------
+C	SHOW DISPLAY
+C
+710	CALL WRITEF
+	CALL WRITEF('Display Origin      : %I6 %I6',XORI,YORI)
+	CALL WRITEF
+	CALL WRITEF('Data Display Limits : %I6 %I6',ZLOWER,ZUPPER)
+	CALL WRITEF('Data Display Step   : %I6',INCHGT)
+C	CALL WRITEF('Number of Steps     : %I6',NSTEP)
+	CALL WRITEF
+	CALL WRITEF('Screen Width        : %I6',COLUMN)
+	CALL EXPAND('Warning Bell        :')
+	IF(QUIET)THEN
+	  CALL APPEND('     Off')
+	ELSE
+	  CALL APPEND('     On')
+	ENDIF
+	CALL TTWLIN
+	CALL WRITEF
+	CALL EXPAND('Edit of Data Values :')
+	IF(ALLOW_EDIT)THEN
+	  CALL APPEND('     Enabled')
+	ELSE
+	  CALL APPEND('     Disabled')
+	ENDIF
+	CALL TTWLIN
+	CALL WRITEF
+	GOTO 20
+C
+C------------------------------------------------------------------------------
+C       SHOW FILEIN
+C
+C	Is a DTI file opened on the LUN?
+720	IF(.NOT.DTILUN_INUSE(1))THEN
+	  CALL WRITEF
+	  CALL WRITEF
+     &    ('%S The input DTI file is undefined',WARN_BELL)
+	  CALL WRITEF
+	  GOTO 20
+	ENDIF
+C
+C	Print out what we know about the file
+	CALL WRITEF
+	RETVAL=DTI_PRINT_HEADER(1,UNITS)
+	IF(.NOT.RETVAL)CALL LSL_PUTMSG(RETVAL)
+	GOTO 20
+C
+C---------------------------------------------------------------------------
+C	ENABLE
+C
+800	CMD = RDCOMM(ENABLE_CMD_TABLE)	
+C
+	IF (CMD.LE.0) THEN	! qualifier unrecognised
+	  CALL WRITEF('%S Specifying command ENABLE',ERROR_BELL)
+	  CALL WRITEF('Command qualifiers are BELL or EDIT')
+	  GOTO 20 
+	ENDIF
+C
+	GOTO (810,820)CMD	
+C
+C---------------------------------------------------------------------------
+C	ENABLE BELL
+C
+810	QUIET=.FALSE.		!audible warning
+	GOTO 20
+C
+C---------------------------------------------------------------------------
+C	ENABLE EDIT
+C
+820	ALLOW_EDIT=.TRUE.
+	GOTO 20
+C
+C---------------------------------------------------------------------------
+C	DISABLE
+C
+900	CMD = RDCOMM(ENABLE_CMD_TABLE)	
+C
+	IF (CMD.LE.0) THEN	! qualifier unrecognised
+	  CALL WRITEF('%S Specifying command DISABLE',ERROR_BELL)
+	  CALL WRITEF('Command qualifiers are BELL or EDIT')
+	  GOTO 20 
+	ENDIF
+C
+	GOTO (910,920)CMD	
+C
+C---------------------------------------------------------------------------
+C	DISABLE BELL
+C
+910	QUIET=.TRUE.		!audible warning
+	GOTO 20
+C
+C---------------------------------------------------------------------------
+C	DISABLE EDIT
+C
+920	ALLOW_EDIT=.FALSE.
+	GOTO 20
+C
+C---------------------------------------------------------------------------
+C	SET
+C
+1000	CMD = RDCOMM(SET_CMD_TABLE)	
+C
+	IF (CMD.LE.0) THEN	! qualifier unrecognised
+	  CALL WRITEF('%S Specifying command SET',ERROR_BELL)
+	  CALL WRITEF('Command qualifier is SCREEN')
+	  GOTO 20 
+	ENDIF
+C
+	GOTO (1010) CMD
+C
+C----------------------------------------------------------------------
+C 	SET SCREEN
+C
+1010	IF(CMDICT.NE.1)THEN
+	  CALL WRITEF('%S Specifying command SET SCREEN',ERROR_BELL)
+	  CALL WRITEF('Command requires an integer argument')
+	  GOTO 20
+	ENDIF
+C
+	IF(INTARG(1).NE.80.AND.INTARG(1).NE.132)THEN
+	  CALL WRITEF('%S Specifying command SET SCREEN',ERROR_BELL)
+	  CALL WRITEF('Valid screen widths are 80 or 132')
+	  GOTO 20
+	ENDIF
+C
+	COLUMN=INTARG(1)
+	GOTO 20
+C
+C----------------------------------------------------------------------
+C	PRINT
+C
+1100	IF(CMDICT.NE.2)THEN
+	  CALL WRITEF('%S Specifying command PRINT',ERROR_BELL)
+	  CALL WRITEF('Command requires 2 integer arguments')
+	  GOTO 20
+	ENDIF
+C
+	IF(.NOT.DTILUN_INUSE(1))THEN
+	  CALL WRITEF('%S Specifying command PRINT',ERROR_BELL)
+	  CALL WRITEF('No DTI file has been defined')
+	  GOTO 20
+	ENDIF
+C
+	CALL PRINTER(INTARG(1),INTARG(2))
+	GOTO 20		!get next command
+C
+C-----------------------------------------------------------------------
+C	CHANGE
+C
+1200	IF(.NOT.DIRECT)THEN
+	  CALL WRITEF('%S Specifying command CHANGE',ERROR_BELL)
+	  CALL WRITEF
+     &    ('Command not valid when reading from an command file')
+	  GOTO 20
+	ENDIF
+C
+C	Check that we have a file to display
+	IF(.NOT.DTILUN_INUSE(1))THEN
+	  CALL WRITEF('%S Specifying command CHANGE',ERROR_BELL)
+	  CALL WRITEF('No DTI file has been defined')
+	  GOTO 20
+	ENDIF
+C
+C 	Check that the terminal is a VT100, 	
+	RETVAL=LIB$SCREEN_INFO(FLAGS)
+	IF (.NOT.RETVAL) THEN
+	  CALL LIB$SIGNAL(%VAL(RETVAL))
+	ELSEIF ((FLAGS.AND.2).NE.2) THEN
+	  CALL WRITEF('%S Specifying command CHANGE',ERROR_BELL)
+	  CALL WRITEF('Terminal is not a VT100 compatible display')
+	ENDIF
+C
+	XCUR =XORI
+	XCURL=XCUR
+	XMARK=XCUR
+	YCUR =YORI
+C
+	YCURL=YCUR
+	YMARK=YCUR
+	XORIL=XORI
+	YORIL=YORI
+	GOTMRK=.FALSE.
+C
+C erase the whole screen, by setting to 80 or 132 chars
+	IF (COLUMN.EQ.132) THEN
+	   CALL LIB$PUT_OUTPUT(ESC//'[?3h')
+	ELSE
+	   CALL LIB$PUT_OUTPUT(ESC//'[?3l')
+	ENDIF
+C
+C set up a scroll area
+	CALL LIB$SET_SCROLL(1,LINES)
+C
+C set the keypad and cursor keys up
+	CALL LIB$PUT_OUTPUT(ESC//'='//ESC//'[?1h')
+C
+C go to keypad mode
+	CALL SCREDT 
+C
+C and set to 80 columns again (clearing the screen) and reset the keys
+	CALL LIB$PUT_OUTPUT(ESC//'>'//ESC//'[?1l'//ESC//'[?3l')
+	GOTO 20
+C
+C---------------------------------------------------------------------------
+C	SPAWN DCL process - primarily designed for file management
+C
+1300	IF(.NOT.DIRECT)THEN
+	  CALL WRITEF('%S Specifying command SPAWN',ERROR_BELL)
+	  CALL WRITEF
+     &    ('Command not valid when reading from an command file')
+	  GOTO 20
+	ENDIF
+C
+	I=0
+1310	IF(RDCH(CH))THEN
+	  GOTO 1320
+	ELSE	
+	  I=I+1
+	  IF(I.GT.80)THEN
+	    CALL WRITEF('%S Specifying command SPAWN',ERROR_BELL)
+	    CALL WRITEF('DCL command line cannot exceed 80 characters')
+	    GOTO 20
+	  ENDIF	  
+	  LINE(I:I)=CHAR(CH)
+	  GOTO 1310
+	ENDIF
+C
+1320	IF(I.EQ.0)THEN
+	  CALL WRITEF('%S Specifying command SPAWN',ERROR_BELL)
+	  CALL WRITEF('Command requires a valid DCL command')
+	  GOTO 20
+	ENDIF
+C
+	RETVAL= LIB$SPAWN ( LINE(1:MIN(I,80)))
+	IF(.NOT.RETVAL)THEN
+          CALL LIB$SIGNAL(%VAL(RETVAL)) !error
+	  CALL WRITEF('%S Unable to spawn command, returning to DTIEDIT',
+     &              ERROR_BELL)
+	ENDIF
+	CALL WRITEF
+	GOTO 20
+C
+C----------------------------------------------------------------------------
+C	EDIT command
+C
+1400	CMD=RDCOMM(EDIT_CMD_TABLE)
+C
+	IF(CMD.LE.0)THEN
+	  CALL WRITEF('%S Specifying command EDIT',ERROR_BELL)
+	  CALL WRITEF('Command qualifiers are AREA, LINE or POINT')
+	  GOTO 20
+	ENDIF
+C
+	GOTO (1420,1440,1460)CMD
+C
+C---------------------------------------------------------------------------
+C	EDIT AREA
+C
+1420	IF(EDIT_AREA(1))GOTO 20
+	GOTO 20
+C
+C---------------------------------------------------------------------------
+C	EDIT LINE
+C
+1440	IF(EDIT_LINE(1))GOTO 20
+	GOTO 20		
+C-----------------------------------------------------------------------------
+C	EDIT POINT
+C
+1460	IF(EDIT_POINT(1))GOTO 20
+	GOTO 20		
+C
+C----------------------------------------------------------------------------
+C 	RESET MINMAX
+C
+1500	CMD = RDCOMM(RESET_CMD_TABLE)
+	IF(CMD.LE.0)THEN
+	  CALL WRITEF('%S Specifying command RESET',ERROR_BELL)
+	  CALL WRITEF('Command qualifiers are LIMITS, MINMAX or STEP')
+	  GOTO 20
+	ENDIF
+C
+	GOTO(1510,1520,1530)CMD
+C
+C--------------------------------------------------------------------------
+C	RESET LIMITS
+C
+C	reset limits to minimum and maximum data values as currently
+C	defined in the DTIHDR commom block
+1510	IF(.NOT.DTILUN_INUSE(1))THEN
+	  CALL WRITEF('%S Specifying command RESET LIMITS',ERROR_BELL)
+	  CALL WRITEF('No DTI file has been defined')
+	  GOTO 20
+	ENDIF
+C
+	IF(DATA_TYPE(1).EQ.3)THEN
+	  ZLOWER=MIN_LVALUE(1)
+	  ZUPPER=MAX_LVALUE(1)
+	ELSE IF(DATA_TYPE(1).EQ.4)THEN
+	  ZLOWER=INT(MIN_RVALUE(1))
+	  ZUPPER=INT(MAX_RVALUE(1))+1
+	ELSE
+	  ZLOWER=MIN_WVALUE(1)
+	  ZUPPER=MAX_WVALUE(1)
+	ENDIF
+C
+	IF(ZLOWER+(INCHGT*26).LT.ZUPPER)THEN
+	  CALL AUTRAN
+	  CALL WRITEF
+     &    ('%S Step value too small for new LIMITS',WARN_BELL)
+	  CALL WRITEF
+     &    ('STEP value has been adjusted to %N',INCHGT)
+	ENDIF
+C
+C	Confirm limits have been reset, by doing a SHOW DISPLAY command
+	GOTO 710
+C
+C---------------------------------------------------------------------------
+C	RESET MINMAX
+C
+C	Recalculate minimum and maximum data values	
+1520	IF(.NOT.DTILUN_INUSE(1))THEN
+	  CALL WRITEF('%S Specifying command RESET MINMAX',ERROR_BELL)
+	  CALL WRITEF('No DTI file has been defined')
+	  GOTO 20
+	ENDIF
+C
+	CALL WRITEF(
+     &  'Determining maximum and minimum values - please wait')
+	RETVAL = DTI_MINMAX_DATA (1,.TRUE.,IERR4)
+	IF(RETVAL.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(IERR4)
+	ENDIF
+C
+C	Print out file header details to confirm new values
+	NEWRAN=.FALSE.
+	RETVAL=DTI_PRINT_HEADER(1,UNITS)
+	IF(.NOT.RETVAL)CALL LSL_PUTMSG(RETVAL)
+	GOTO 20
+C
+C-----------------------------------------------------------------------
+C	RESET STEP
+C
+C	Recalculate step interval using current ZLOWER and ZUPPER values.	
+1530	IF(.NOT.DTILUN_INUSE(1))THEN
+	  CALL WRITEF('%S Specifying command RESET STEP',ERROR_BELL)
+	  CALL WRITEF('No DTI file has been defined')
+	  GOTO 20
+	ENDIF
+C
+	CALL AUTRAN
+C
+C	Confirm STEP has been reset, by doing a SHOW DISPLAY command
+	GOTO 710
+C
+C------------------------------------------------------------------------
+C	RETURN
+C
+1600	IF(DIRECT)THEN
+	  CALL WRITEF('%S Specifying command RETURN',ERROR_BELL)
+	  CALL WRITEF
+     &    ('The RETURN command is only valid in a command file')
+	  GOTO 20
+	ENDIF
+C
+	CALL WRITEF('Returning to terminal input')
+C
+1650	RETVAL=FLRCLO(1)
+	IF(.NOT.RETVAL)CALL LSL_PUTMSG(RETVAL)
+	DIRECT=.TRUE.
+	GOTO 20
+C
+C------------------------------------------------------------------------
+C 	EXIT
+C
+C	Update the range and close any opened DTI file
+1700	IF(DTILUN_INUSE(1))THEN
+	  IF(NEWRAN)THEN
+	    CALL WRITEF(
+     &  'Determining maximum and minimum values - please wait')
+	    RETVAL = DTI_MINMAX_DATA (1,.TRUE.,IERR4)
+	    IF(RETVAL.NE.DTI__NORMAL)THEN
+	      CALL LSL_PUTMSG(RETVAL)
+	      IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(IERR4)
+	    ENDIF
+	  ENDIF
+C
+	  RETVAL=DTI_CLOSE(1,.FALSE.,.TRUE.,IERR4)
+	  IF(RETVAL.NE.DTI__NORMAL)THEN
+	    CALL LSL_PUTMSG(RETVAL)
+	    IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(IERR4)
+	    GOTO 999		!get next command
+	  ENDIF
+	ENDIF
+	GOTO 999
+C
+C----------------------------------------------------------------------------
+C	SUBSTITUTE
+C
+1800	CALL SUBSTITUTE(1)
+	GOTO 20
+C
+C----------------------------------------------------------------------------
+C
+999	CALL LSL_EXIT
+	END
+C

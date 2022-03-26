@@ -1,0 +1,311 @@
+        INTEGER*4  FUNCTION IFFBDY()
+C
+***	MODULE	IFFBDY
+***	IDENT	15NO88
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,England
+C
+C Created.					  FJB  07-Sep-1988
+C
+CMOD  take out TC entries                         JDB  20-Oct-1988
+C
+CMOD  add arc and circle (GTs 4,5) to ARC         JDB  14-Nov-1988
+C
+CMOD  text features (GT 10) processed
+C
+C Transfer input IFF file (open on lun IFFLUN) to KERN CAM format.
+C
+	IMPLICIT NONE
+C
+C Parameters:                                          
+	INCLUDE 'LSL$CMNI2KERNCAM:PARAMS.PAR'
+	INCLUDE 'LSL$CMNI2KERNCAM:I2KERNCAMMSG.PAR'
+C
+C Common:
+  	INCLUDE 'LSL$CMNI2KERNCAM:COMMAND.CMN'
+  	INCLUDE 'LSL$CMNI2KERNCAM:FEATURE.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTCOM.CMN'
+C
+C Word:
+	INTEGER*2	WORD	! temporary/loop variable
+	INTEGER*2 	NOVER	! layer number
+	INTEGER*2 	DIMEM	! 2D or 3D string
+C
+C Longword:
+	INTEGER		IERR	! for error return	
+	INTEGER		LPOSEO	! position of next EO entry
+	INTEGER*4	NFNUM(2)! feature number
+C
+C Functions:
+	INTEGER*4	CAM_FEATURE	! write feature to output file
+	INTEGER*4 	FLWLIN		! write a line to ouput file
+	INTEGER*4	FLWSTR		! write a string to ouput file
+	INTEGER*4	GET_AC		! derive various ACs
+	INTEGER*4	FRTFND		! get FRT parameters for FC
+C
+C Character:
+	CHARACTER*8	GFORM,GNAME	! graphical type names
+C
+C Presets:
+	INTEGER*4 	SS$_NORMAL
+	EXTERNAL  	SS$_NORMAL	! normal successful completion
+C
+C ....................................................................
+C Assume the best
+	IFFBDY=%LOC(SS$_NORMAL)
+C
+C Initialise origin offset and scale for IFF files without map 
+C   descriptor
+	MD2LOC(1)=0.0D0
+	MD2LOC(2)=0.0D0
+C
+C Rewind IFF file
+	CALL IFFRWD
+C
+C Enable Read Look Ahead
+	CALL IFFRLA(.TRUE.)
+C
+C .....................................................................
+C
+C			M A I N   L O O P
+C
+C Read the IFF file entry by entry and take action on certain types of 
+C  entry
+C
+C	
+10	CALL IFFNXT(IECODE,IELEN)
+11	IF (IELEN.EQ.-1) GOTO 220
+	IF (IECODE.EQ.'MD') GOTO 20
+	IF (IECODE.EQ.'NO') GOTO 30
+	IF (IECODE.EQ.'NF') GOTO 40
+	IF (IECODE.EQ.'FS') GOTO 50
+	IF (IECODE.EQ.'AC') GOTO 60
+	IF (IECODE.EQ.'ST') GOTO 80     
+	IF (IECODE.EQ.'ZS') GOTO 90
+	IF (IECODE.EQ.'EF') GOTO 100
+	IF (IECODE.EQ.'EJ') GOTO 120
+	GOTO 10
+C
+C ....................................................................
+C
+C MD - Map Descriptor, be careful in case it is a new type MD with 
+C an origin offset. We must of course take this into account while 
+C reformatting to KERN CAM.
+C
+20	IF (IELEN.EQ.MD2LEN) THEN	! type 2 MD with origin offset?
+C
+	   CALL EIHR(MD2ARR,MD2LEN,1)	! apparently yes,
+	   IF (MATV2.NE.2) THEN		! MD unavailable as it is unset
+	     CALL LSL_PUTMSG(I2KERN__UNSETMD)
+	   ELSE				! use existing MD
+C
+C Start KERN CAM file.
+	     CALL EXPAND
+     &		('CHANGE TO MAP SCALE%F14.4%F14.4',MD2SCL,MD2SCL)
+	     IF(.NOT.FLWLIN(,,IERR))GOTO 210
+	     CALL EXPAND
+     &		('CHANGE TO MAP ROTATION   0.000000      0.0000')
+	     IF(.NOT.FLWLIN(,,IERR))GOTO 210
+	     IF(.NOT. FLWSTR('CHANGE TO MAP INDEX',IERR))GOTO 210
+	     CALL EXPAND('%F13.3%F13.3',MD2LOC(1),MD2LOC(2))
+	     IF(.NOT.FLWLIN(,,IERR))GOTO 210
+	   ENDIF
+C
+	ENDIF
+C
+	IF(.NOT. FLWSTR('START',IERR))GOTO 210
+	GOTO 10
+C
+C ......................................................................
+C
+C NO - New Overlay
+C
+30	CALL EIHRI(NOVER,1,1)		! read layer number
+	CALL EIHRL(LPOSEO,1,3)		! & position of corresponding EO
+C
+	IF (HAD_DIAG) THEN
+	   CALL LSL_PUTMSG(I2KERN__LAYER,NOVER)
+	ENDIF
+C
+C Skip over layer 0
+	IF(NOVER .LT. 1)THEN
+	   CALL IFFPKE(IECODE,IELEN,LPOSEO)	! skip to EO
+	   IF (IELEN.LT.0.OR.IECODE.NE.'EO') GOTO 220
+	ENDIF	   
+C               
+	GOTO 10				! get next IFF entry
+C
+C ......................................................................
+C
+C NF - New Feature
+C
+40	CALL EIHRI(WORD,1,1)		! read feature serial number
+	NFNUM(1)=0			! clear longword
+	NFNUM(1)=WORD       
+	CALL EIHRI(WORD,1,2)		! read internal seq. no.
+	NFNUM(2)=0			! clear longword
+	NFNUM(2)=WORD
+C
+C initialise for new feature
+	HAD_ZS=.FALSE.			! reset had 3D string flag
+	HAD_ST=.FALSE.			! reset had 2D string flag
+	HAD_HEIGHT=.FALSE.              ! reset height flag
+	HAD_SCALE=.FALSE.               ! reset scale flag
+	HAD_HOUR=.FALSE.                ! reset hour flag
+	HAD_FCNAME=.FALSE.              ! reset FC name flag
+	HAD_ZSNAME=.FALSE.              ! reset coordinate name flag
+	ROTN = 0.0			! default rotation
+	AC_SCALE=1.0                    ! default symbol scale
+	AC_HEIGHT=0.0                   ! default contour/symbol height
+C
+  	GOTO 10				! get next IFF entry
+C
+C ......................................................................
+C
+C FS - Feature Code
+C
+50	CALL EIHRI(IFC,1,1)		! read feature code
+C
+C Lookup parameters in FRT file
+	IF(FRTFND(IFC))THEN
+	   CALL LSL_PUTMSG(I2KERN__UNKFCOD,IFC)  ! moan if unknown
+	   CALL IFFNXC('EF',IELEN)               ! and skip to end of feature
+	   IF (IELEN.EQ.-1) GOTO 220
+	   GOTO 11
+ 	ENDIF
+C
+	GOTO 10				! get next IFF entry
+C
+C ......................................................................
+C
+C AC - Ancillary Code
+C
+60	IF(.NOT. GET_AC())GOTO 280
+C
+	GOTO 10
+C
+C ......................................................................
+C
+C ST - string (2D)
+C
+80	DIMEM = 2
+	GOTO 95
+C
+C ......................................................................
+C
+C ZS - string (3D)
+90	DIMEM = 3
+	GOTO 95
+C
+C What GC type have we got?                                        
+95	GOTO(701,799,799,704,704,706,708,708,799,710,701,701),FRTGT
+C                                              
+799	CALL LSL_PUTMSG(I2KERN__UNKGT,FRTGT)
+	CALL IFFNXC('EF',IELEN)            ! and skip to end of feature
+	IF (IELEN.EQ.-1) GOTO 220
+	GOTO 10
+C
+C Here with a Linear line (GT1, 11, 12)
+701	IF(.NOT. CAM_FEATURE(DIMEM,'LINETYPE','STRAIGHT'))GOTO 240
+	GOTO 10
+C
+C Here with a three point circumcircle arc or full circle (GT4,5)
+704	IF(.NOT. CAM_FEATURE(DIMEM,'LINETYPE','ARC     '))GOTO 250
+	GOTO 10
+C
+C Here with an interpolated line. (GT6)                                 
+C Decide on curve or contour from IFC:
+706	IF((IFC .GT. 999 ) .AND. (IFC .LT. 2000))GFORM='CURVE   '
+	IF((IFC .GT. 1999) .AND. (IFC .LT. 3000))GFORM='CONTOUR '
+        IF(.NOT. CAM_FEATURE(DIMEM,'LINETYPE',GFORM))GOTO 260
+	GOTO 10
+C
+C Here with a symbol (possibly orientated) (GT7&8)
+708	IF(.NOT. CAM_FEATURE(DIMEM,'SYMBOL  ','OBJECT  '))GOTO 270
+	GOTO 10
+C
+C Here with text feature (GT 10)
+C
+710	IF(.NOT. CAM_FEATURE(DIMEM,'SYMBOL  ','OBJECT  '))GOTO 270
+	GOTO 10
+C                                          
+C ......................................................................
+C
+C EF - End Feature
+C
+100	IF(.NOT. HAD_ST .OR. .NOT. HAD_ZS)GOTO 290
+	GOTO 10
+C                        
+C ......................................................................
+C
+C EJ - End Job
+C
+120	IF(.NOT. FLWSTR('QUIT',IERR))GOTO 230
+C
+	GOTO 1000             
+C
+C ......................................................................
+C
+C			E R R O R S 
+C
+C Error writing MD info to ouput file
+210	IFFBDY=I2KERN__ERROROUTMD
+	CALL LSL_PUTMSG(IFFBDY)
+	CALL LSL_ADDMSG(IERR)
+	GOTO 1000
+C
+C Unexpected end of file
+220	IFFBDY=I2KERN__UNEXPEOF
+	CALL LSL_PUTMSG(IFFBDY)
+	GOTO 1000
+C
+C Error writing to ouput file
+230	IFFBDY=I2KERN__ERROROUT
+	CALL LSL_PUTMSG(IFFBDY,NOVER)
+	CALL LSL_ADDMSG(IERR)
+	GOTO 1000
+C
+C Error writing line 
+240	IFFBDY=I2KERN__CAMLINE
+	CALL LSL_PUTMSG(IFFBDY,NFNUM(1),NFNUM(2))
+	GOTO 1000
+C
+C Error writing arc
+250	IFFBDY=I2KERN__CAMARC
+	CALL LSL_PUTMSG(IFFBDY,NFNUM(1),NFNUM(2))
+	GOTO 1000
+C
+C
+C Error writing curve
+260	IFFBDY=I2KERN__CAMCURVE
+	CALL LSL_PUTMSG(IFFBDY,NFNUM(1),NFNUM(2))
+	GOTO 1000
+C
+C
+C Error writing symbol
+270	IFFBDY=I2KERN__CAMSYMBOL
+	CALL LSL_PUTMSG(IFFBDY,NFNUM(1),NFNUM(2))
+	GOTO 1000
+C
+C Problem in feature
+C
+280	IFFBDY = I2KERN__BADFEAT
+	CALL LSL_PUTMSG(IFFBDY,NFNUM(1),NFNUM(2))
+	GOTO 1000
+C
+C No coords in feature
+C
+290	IFFBDY = I2KERN__NOCOORDS
+	CALL LSL_PUTMSG(IFFBDY,NFNUM(1),NFNUM(2))
+	GOTO 1000
+C
+C ......................................................................
+C
+1000	IF (IFFBDY) IFFBDY=%LOC(SS$_NORMAL)
+	RETURN
+C
+C ......................................................................
+C
+	END

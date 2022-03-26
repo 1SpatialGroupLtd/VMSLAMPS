@@ -1,0 +1,721 @@
+	.TITLE	VSSG
+ 
+	.IDENT	/03NO88/
+
+	CODE_PSECT	VS
+ 
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+
+; Author: Tony Ibbs
+;
+; VSTBOF frees the event flags			 DM	14-May-1984
+; Argument passing in VSRDSC fixed		 DM	28-Mar-1984
+; Testing for 2nd arg in VSRDSC fixed		 DM	27-Mar-1984
+; Testing of FBs in VS_TB_AST fixed		AJW	14-Sep-1983
+
+ 
+; SIGMA SPECIFIC ROUTINES (COLOUR TABLE, BLINK, TRACK BALL) FOR VSLIB
+
+
+
+; VSRDSC( 'filename ' [,ierr] )	reads in the specified file as a system
+; constants file, returns any error in the optional error return
+
+.ENTRY	VSRDSC,^M<>
+;
+	PUSHL	4(AP)			; the filename argument
+	CALLS	#1,G^VS_GET_SYSC	; read the file in & set it up
+	CMPL	(AP),#2			; look at number of args
+	BLSS	SGRET			; skip if no 2nd arg
+;
+; return the return status from VS_GET_SYSC
+	MOVL	R0,@8(AP)		; there it goes
+SGRET:	RET
+
+
+
+
+; VSSGCT( num, colours ) 	sets the Video Transformation Table
+; (Colour Table) for the Sigma where num is how many entries we define,
+; and colours is a 4 by num array of bytes
+
+.ENTRY	VSSGCT,^M<R2,R3,R4,R5,R6>
+;
+	MOVL	@4(AP),R6		; get how many colours
+	BLEQ	SGRET			; no op if zero length table
+; SGVTMX is the maximum number of colours - ie max no of longwords we may have
+; SGVTTL holds the number of colours defined - ie no of longwords we do have
+	CMPL	#SGVTMX,R6		; is it too many?
+	BGEQ	10$			; no, OK
+	MOVL	#SGVTMX,R6		; yes, take the max
+10$:	MOVW	R6,SGVTTL		; remember how many entries
+	MOVAL	@8(AP),R4		; get the start of the array
+	ASHL	#2,#SGVTMX,R0		; get max length in bytes
+	ASHL	#2,R6,R6		; and actual length in bytes
+	MOVC5	R6,(R4),#0,R0,SGVTT	; transfer the data (counts in bytes)
+; and we want to output the new video transformation table -
+; to do this, we use SGVBUF as our buffer, containing a full LVT
+; instruction. Thus we must first flush the main buffer...
+	JSB	$VFLUSH
+; and now we must complete the instruction, by inserting the number of
+; entries-1 into the instruction word, which is the first word in SGVBUF
+	MOVW	SGVTTL,R0		; number of colour entries
+	DECW	R0			; 1 less
+	MOVW	#SIGLVT,R4		; load VTT instn
+	INSV	R0,#SGBYT1,#SGWOSZ,R4	; insert (entries-1) count
+	MOVW	R4,SGVBUF		; and place the instruction
+; and work out the length of the buffer...
+	MOVZWL	SGVTTL,R4		; length in longwords needed for colours
+	ASHL	#1,R4,R4		; in words
+	ADDL2	#2,R4			; table + (instn+offset) length in words
+	BBS	#VFLG_V_XA,VSFLAG,20$
+
+	MOVAL	SGVBUF,VO.START		; primary buffer temporarily
+	MOVL	R4,VO.LEN2		; store length in words
+	JSB	$VSSEND			; and obey the instruction
+	MOVAL	SGBUF1,VO.START		; restore normal buffer to the QIO...
+	BRB	50$
+
+20$:	MOVAL	SGVBUF,VO.HDR		; primary buffer temporarily
+	ASHL	#1,R4,VO.LEN		; store length in bytes
+	JSB	$VSSEND			; and obey the instruction
+	MOVAW	SGBUF1,VO.HDR		; restore normal buffer to the QIO...
+
+50$:	RET
+
+
+; VSSGSC( colour, newvalue ) 	Set individual Colour
+; where colour is the number of it (0 to SGVTMX-1) and newvalue is 4
+; bytes to define the colour.
+
+.ENTRY	VSSGSC,^M<R4,R5,R6,R7>
+;
+	MOVL	@4(AP),R6		; get the colour number
+	BLSS	50$			; no op if negative colour
+; SGVTMX holds the number of colours defined - ie size of table
+	CMPL	R6,#SGVTMX		; is it too big?
+	BGEQ	50$			; yes, do nowt
+	MOVAL	@8(AP),R7		; get the new colour defn
+	MOVL	(R7),R7			; "dereference" the definition
+	BSBB	$COLSET			; go and set the new colour
+50$:	RET				; and that should be it...
+
+
+; VSBLNK( colour, on/off )	set blink for a given colour
+; colour range is 0-15
+; on/off is in the range 0-4 - 0 is off, bits set individual blink generators
+
+.ENTRY	VSBLNK,^M<R4,R5,R6,R7>
+	MOVL	@4(AP),R6		; get first arg (colour)
+	BLSS	50$			; no op if negative colour
+; SGVTMX holds the number of colours defined - ie size of table
+	CMPL	R6,#SGVTMX		; is it too big?
+	BGEQ	50$			; yes, do nowt
+; colour value OK, so get the blink value
+	MOVL	@8(AP),R5		; and 2nd arg (on/off)
+	BICL2	#MASK4,R5		; mask to 4 bits 
+; so we have our arguments in sanitary form - let us find the colour
+; from our remembered copy of the video transformation table...
+	MOVL	SGVTT[R6],R7		; get the old value
+	INSV	R5,#SGBLPS,#SGBLSZ,R7	; insert the n/0
+	CMPL	R7,SGVTT[R6]		; any noticeable result?
+	BEQL	50$			; no, do nowt
+; so we wish to set the new value up, but also to remember it
+	BSBB	$COLSET			; go and do so
+50$:	RET				; and that's all
+
+
+; subroutine to set a single colour (number in R6, colour in R7)
+$COLSET:MOVL	R7,SGVTT[R6]		; remember the value we're setting
+	MOVL	#4,R0			; need four words in buffer
+	JSB	$VSCHKBF		; check we've got them
+	MOVW	#SIGLVT,R4		; load video table (1 entry only)
+	JSB	$VSBFW			; buffer instn
+	MOVW	R6,R4			; which entry to change
+	JSB	$VSBFW			; buffer it
+	MOVW	R7,R4			; low half of entry longword
+	JSB	$VSBFW			; buffer it
+	EXTZV	#16,#16,R7,R4		; get the top half of the longword
+	JSB	$VSBFW			; and buffer it
+	JSB	$VFLUSH			; and obey right away
+	RSB
+
+
+; VSSGQC( colour, value ) 	Inquire individual Colour
+; where colour is the number of it (0 to SGVTMX-1) and value is 4
+; bytes to define the colour.
+
+.ENTRY	VSSGQC,^M<>
+;
+	MOVL	@4(AP),R0		; get the colour number
+	BLSS	50$			; no op if negative colour
+; SGVTMX holds the number of colours defined - ie size of table
+	CMPL	R0,#SGVTMX		; is it too big?
+	BGEQ	50$			; yes, do nowt
+	MOVL	SGVTT[R0],@8(AP)	; return value
+50$:	RET				; and that should be it...
+
+
+; VSSGPB( gen_no, on_period, off_period )	(Program Blink) change the
+; on/off periods for the blink generator number gen_no. Note that the
+; number for gen_no is actually 1 greater than the genarator number (ie 1-4)
+; The default on,off periods are 6,6
+
+; in order to retain phase relationships between the generators in a fairly
+; constant manner, we always define ALL the generators whenever we change
+; any one (if we don't do that, then the time at which one is defined can
+; cause quite large phase discrepancies).
+
+.ENTRY	VSSGPB,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVL	@4(AP),R6		; first arg - generator number (1-4)
+	DECL	R6			; make it in range (0-3)
+	BICL2	#MASK2,R6		; mask to 2 bits (0-3)
+	BLSS	50$			; no op if is negative
+	MOVL	@8(AP),R7		; 2nd arg - on period
+	BICL2	#MASK4,R7		; mask to 4 bits (0-15)
+	MOVL	@12(AP),R8		; 3rd arg - off period
+	BICL	#MASK4,R8
+; build up the new blink program...
+	CLRW	R4			; ...starts at zero
+	INSV	R7,#SGBYT1,#SGBYSZ,R4	; insert the on period
+	INSV	R8,#SGBYT2,#SGBYSZ,R4	; and the off period (not in the place
+					; the documentation misled me to!)
+; now place it in the table of blink generator programs...
+	MOVW	R4,SGBLNK_TAB[R6]	; store it in the correct place
+; and resubmit all of the generator descriptions...
+	MOVL	#8,R0			; need at least 8 words in the buffer
+	JSB	$VSCHKBF		; check we have them free
+	CLRL	R6			; start at generator '0'
+; loop round the instructions...
+20$:	MOVW	#SIGPBG,R4		; get the instruction
+	INSV	R6,#SGBYT1,#2,R4	; and insert the gen_no
+	JSB	$VSBFW			; buffer the instruction
+	MOVW	SGBLNK_TAB[R6],R4	; get the next on/off program
+	JSB	$VSBFW			; and buffer it
+	AOBLEQ	#3,R6,20$		; loop for R6 = 0 to 3
+;
+	JSB	$VFLUSH			; and obey it now
+50$:	RET				; and we have finished
+
+
+
+
+; VSFILL( sx, sy, ex, ey )	draw a filled block with diagonal from
+; sx,sy to ex,ey (filled with current colour). Leaves pen at ex,ey.
+
+.ENTRY	VSFILL,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R7		; start X
+	MOVF	@8(AP),R9		; start Y
+	JSB	VS$MTO			; and move there
+; now set block fill mode...
+	MOVW	#SIGSDM,R4			; set drawing mode
+	INSV	#SGBLK,#SGBYT1,#SGBYSZ,R4	; to solid blocks
+	JSB	$VSCBFW				; and buffer it
+; now draw the block to the end position...
+	MOVF	@12(AP),R7		; end X
+	MOVF	@16(AP),R9		; end Y
+	JSB	VS$LTO			; and draw there
+; and we must now restore line mode...
+	MOVW	#SIGSDM,R4			; set drawing mode
+	INSV	#SGLIN,#SGBYT1,#SGBYSZ,R4	; to solid lines
+	JSB	$VSCBFW				; and buffer it
+	RET					; and that's all
+
+
+
+; VSPXWT( array )	VS PiXel WriTe - uses the data in the array to write
+; pixels on the display.
+; This routine now calls new version, VSPXWT2, in which the control stuff
+; and the actual pixel array are separate.
+; The array is of the form:
+
+;	word				offset:
+;	 1:	size-1			 :0
+;	 2:	d, 3			 :1
+;	 3:	X start			 :2
+;	 4:	Y start			 :3
+;	 5:	no of X points		 :4		(points per line)
+;	 6:	no of Y points		 :5		(number of lines)
+;	 7:	no of data words	 :6
+;	 8:	col byte, col byte	 :7
+;			....
+;	..:	col byte, col byte
+;			....
+;	 n:	0			 :m
+
+; where 'size' determines how many display pixels there will be to a side of
+; the square used as the drawing pixel (1-32), and 'd' is normally 0, but
+; specifies the direction to draw things in (0 means left to right in X, then
+; bottom to top in Y, ie 0,0 at bottom left hand corner). The 3 specifies byte
+; packing of the colour bytes (ie 2 per data word)
+; and 'n' is the number of data words + 8, 'm' is thus 'n' - 1
+
+.ENTRY	VSPXWT,^M<R2,R3,R4,R5>
+;
+	MOVAB	@4(AP),R2		; get the address of the array
+	EXTZV	#4,#3,2(R2),-(SP)	; extract direction
+	MOVAB	14(R2),R2		; move on to data array
+
+; stack up argument list for VSPXWT2
+	PUSHAB	(R2)			; data array
+	PUSHAL	-(R2)			; y points
+	PUSHAW	-(R2)			; x points
+	PUSHAW	-(R2)			; y start
+	PUSHAW	-(R2)			; x start
+	PUSHAL	THREE			; packing mode
+	PUSHAL	24(SP)			; direction (stacked above)
+	PUSHAL	-(R2)			; size-1
+	CALLS	#8,B^VSPXWT2		; call routine
+	RET				; allow RET to unstack direction
+
+THREE:	.LONG	3
+
+
+; VSPXWT2(size-1,dir,pack mode,X,Y,X points,Y points,array)	
+; VS PiXel WriTe - 2nd version.
+; If only one word is to be written, the command
+; is buffered as normal (and not flushed out).
+; The array is of the form:
+
+.ENTRY	VSPXWT2,^M<R2,R3,R4,R5>
+;
+	BISL2	#VFLG_M_FRCABS,VSFLAG	; force abs move next line move
+;
+	MOVL	#9,R0
+	JSB	$VSCHKBF		; check for space
+;
+; first a set size instruction
+	CLRW	R4
+	BICB3	#^XE0,@4(AP),R4		; mask to 5 bits
+	BISW2	#SIGSSZ,R4		; add in SSZ instruction
+	JSB	$VSBFW			; and buffer it
+;
+; now the FPW instruction
+	MOVZBL	@12(AP),R4		; packing mode
+	MOVL	R4,R3			; save it
+	INSV	@8(AP),#SGBYT2,#SGBYSZ,R4 ; direction control
+	BISW2	#SIGFPW,R4		; add in FPW instruction
+	JSB	$VSBFW			; and buffer it
+
+	MOVW	@16(AP),R4		; X
+	JSB	$VSBFW
+	MOVW	@20(AP),R4		; Y
+	JSB	$VSBFW
+
+	MOVZWL	@24(AP),R4		; X points (cols)
+	MOVL	R4,R2			; save it
+	JSB	$VSBFW
+	MOVZWL	@28(AP),R4		; Y points (rows)
+	MULL2	R4,R2			; total number of points
+	JSB	$VSBFW
+
+	SUBL3	R3,#4,R3		; convert pack mode to a shift n
+	ASHL	R3,#1,R0		; construct 2**n
+	DECL	R0			; 2**n -1
+	ADDL2	R0,R2			; round up number of points
+	MNEGL	R3,R3			; now want a right shift
+	ASHL	R3,R2,R4		; number of words
+	JSB	$VSBFW
+
+;
+; check if writing just one word, if so then just buffer it
+	CMPL	R4,#1
+	BGTR	20$			; no, so submit users array
+;
+; yes, so buffer commands normally
+	MOVW	@32(AP),R4		; data word
+	JSB	$VSBFW
+	BRB	40$
+
+; otherwise QIO the user's buffer
+; must ensure that a TB interrupt does not get between our two buffers,
+; so we simultaneously disable the TB (low bit), and clear sign bit
+; which is set by the timer AST if it goes off
+20$:	BICB2	#^X81,TBISON		; clear sign and low bit
+21$:	JSB	$VFLUSH			; flush out first part of command
+
+	BBS	#VFLG_V_XA,VSFLAG,30$
+
+	PUSHL	VO.START		; save the address of it
+	MOVAB	@32(AP),VO.START	; now use the array as command buffer
+	MOVL	R4,VO.LEN2		; set its length (words)
+	JSB	$VSSEND			; submit the array
+	MOVL	(SP)+,VO.START		; reinstate the normal buffer
+	BRB	39$
+
+30$:	PUSHL	VO.HDR			; save the address of it
+	MOVAB	@32(AP),VO.HDR		; now use the array as command buffer
+	ASHL	#1,R4,VO.LEN		; set its length (bytes)
+	JSB	$VSSEND			; submit the array
+	MOVL	(SP)+,VO.HDR		; reinstate the normal buffer
+
+; is the TB needed on again?
+; if the timer AST has gone off during our VSPXWT, then the sign bit of
+; VSTBON will be set
+39$:	TSTB	TBISON
+	BEQL	40$			; no
+	BISB2	#1,TBISON		; re-enable
+	BGEQ	40$			; not missed timer
+	CALLS	#0,W^VS_TB_AST		; get timer going
+
+; finally, set size back to 0
+40$:	MOVW	#SIGSSZ,R4
+	JSB	$VSBFW
+	RET
+
+
+; VSPXRD( array )	VS PiXel ReaD - reads pixels into array
+; The array is of the form:
+
+;	word				offset:
+;	 1:	d, 3			 :0
+;	 2:	X start			 :1
+;	 3:	Y start			 :2
+;	 4:	no of X points		 :3		(points per line)
+;	 5:	no of Y points		 :4		(number of lines)
+;	 6:	no of data words	 :5
+;	 7:	header			 :6
+;			....
+;	10:	header			 :9
+;	11:	col byte, col byte	 :10
+;			....
+;	 n:	col byte, col byte	 :m
+
+; where 'd' is normally 0, but specifies the direction to draw things in (0
+; means left to right in X, then bottom to top in Y, ie 0,0 at bottom left hand
+; corner). The 3 specifies byte packing of the colour bytes (ie 2 per data
+; word) and 'n' is the number of data words + 10, 'm' is thus 'n' - 1 
+
+; this array is then used to submit the command itself...
+
+.ENTRY	VSPXRD,^M<R4,R5,R6>
+;
+	MOVL	#6,R0			; need room for 6 words
+	JSB	$VSCHKBF
+
+	MOVAL	@4(AP),R6		; get the address of the array
+;
+; and now for the direction, etc
+	BICW3	#^XFF00,(R6)+,R4	; mask to one byte
+	BISW2	#SIGFPR,R4		; add in FPR instruction
+	JSB	$VSBFW			; buffer it
+	MOVL	#5,R0			; 5 words to do
+10$:	MOVZWL	(R6)+,R4		; next word
+	JSB	$VSBFW			; buffer
+	SOBGTR	R0,10$			; loop
+
+;
+; calculate the length of the array as a whole (in words)
+	BBS	#VFLG_V_XA,VSFLAG,20$
+	MOVAL	(R6),VI.BUF2		; new buffer
+	ADDL3	#4,R4,VI.LEN2		; and add the header length (4)
+	BRB	30$
+
+20$:	MOVAL	8(R6),VI.BUF1		; new buffer
+	ASHL	#1,R4,VI.LEN1		; convert to byte-count
+
+30$:	JSB	$VSSGRD			; read
+
+; and that should be that
+SGRET1:	RET
+
+
+
+; VSTBON selects/resets the trackerball (TB) and switches (FBs)
+; this should be called before attempting to use the TB or FBs
+; It is called by VSINIT if bit 4 is set (ie typically by VSINIT(15))
+
+.ENTRY	VSTBON,^M<R4,R5>
+	BLBS	TBISON,SGRET1			; on already
+;
+; do the actual TB reset for VSTBON, etc.
+	MOVW	#SIGDEV,R4			; a device operation
+	INSV	#TBDEV,#SGBYT2,#SGBYSZ,R4	; tracker ball device number
+	INSV	#TBSEL,#SGBYT1,#SGBYSZ,R4	; select/reset
+	JSB	$VSCBFW				; buffer the instruction
+	JSB	$VFLUSH				; and obey it now
+	CLRW	SGOLDXC			; clear the memory
+	CLRW	SGOLDYC			; of what was done
+	CLRW	SGOLDFB			; recently
+; sort out TB/FB event flags - these are held in common IDXPAR
+; first is the timer event flag...
+	TSTW	IDEFN0			; is it set?
+	BNEQ	170$			; yes
+	CLRL	-(SP)
+	PUSHAL	(SP)
+	CALLS	#1,G^LIB$GET_EF		; get an EFN
+	BLBS	R0,160$			; OK
+	BRW	20$			; no, error
+160$:	CVTLW	(SP)+,IDEFN0		; get our EFN
+; function button communication...
+170$:	TSTW	IDFBEF			; do we have an FB EFN
+	BNEQ	180$			; is it set? Yes
+	CLRL	-(SP)
+	PUSHAL	(SP)
+	CALLS	#1,G^LIB$GET_EF		; get an EFN
+	BLBS	R0,175$
+	BRW	20$			; error
+175$:	CVTLW	(SP)+,IDFBEF		; get our EFN
+; tracker ball communication...
+180$:	TSTW	IDTBEF			; is the TB EFN set?
+	BNEQ	188$			; yes
+	CLRL	-(SP)
+	PUSHAL	(SP)
+	CALLS	#1,G^LIB$GET_EF		; get an EFN
+	BLBS	R0,187$
+	BRW	20$
+187$:	CVTLW	(SP)+,IDTBEF		; get our EFN
+; and an EFN for the AST QIOs
+188$:	CLRL	-(SP)
+	PUSHAL	(SP)
+	CALLS	#1,G^LIB$GET_EF		; get an EFN
+	BLBS	R0,189$
+	BRW	20$
+189$:	MOVL	(SP)+,TBR.EFN		; and place the EFN in the first QIO
+	MOVL	TBR.EFN,TBW.EFN		; and in the other as well
+; and get the ID for the timer request - defaults to 1
+190$:	TSTW	IDAST			; is it set?
+	BNEQ	200$			; yes
+	MOVW	IDTBEF,IDAST		; no, give it the TB EFN as default
+; set up the instructions in the AST primary buffer
+200$:	MOVW	#SIGDEV,SGTBINST	; the instruction to use
+	INSV	#TBDEV,#SGBYT2,#SGBYSZ,SGTBINST	; it's a trackerball
+	MOVW	SGTBINST,SGTBINS2	; and again in the next word
+; clear the event flags which tell us we had a TB/FB action...
+	CVTWL	IDFBEF,R0		; get it to the right length
+	$CLREF_S	EFN=R0
+	BLBC	R0,20$
+	CVTWL	IDTBEF,R0
+	$CLREF_S	EFN=R0
+	BLBC	R0,20$
+; set up the TB/FBs read AST which will check the TB/FBs every 1/10th second
+	MOVZWL	IDEFN0,R0			; broaden the EFN number
+	DECB	TBISON				; note the TB is on now
+	$SETIMR_S	EFN=R0,-		; EFN to set on time
+			ASTADR=VS_TB_AST,-	; the AST to call then
+			DAYTIM=VSTB_BINTIM,-	; and when to do it
+			REQIDT=IDAST		; and what it's known as
+	BLBC	R0,20$
+	RET
+
+20$:	JSB	VSERRSIG		; complain of error
+	RET				; and give up
+
+VSTB_BINTIM:	.LONG	-1000000,-1	; one tenth second delta time
+
+
+; VSTBOF deselects the trackerball (TB) and switches (FBs)
+; this should be called to switch off the TB AST if the TB/FBs are
+; not going to be used for a while
+
+.ENTRY	VSTBOF,^M<R4,R5>
+;
+; do the actual TB disable, etc.
+	BLBC	TBISON, 10$			; it was off already
+;
+; cancel the timer requests which cause the TB to be inspected and free
+; all the event flags.
+	CLRB	TBISON				; note TB is off
+	$CANTIM_S	REQIDT=IDAST		; cancel the request
+	MOVZWL	IDEFN0,-(SP)			; free the event flags
+	PUSHAL	(SP)
+	CALLS	#1,G^LIB$FREE_EF
+	MOVZWL	IDTBEF,(SP)
+	PUSHAL	(SP)
+	CALLS	#1,G^LIB$FREE_EF
+	MOVZWL	IDFBEF,(SP)
+	PUSHAL	(SP)
+	CALLS	#1,G^LIB$FREE_EF
+	MOVAL	TBR.EFN,(SP)			; this must be last
+	CALLS	#1,G^LIB$FREE_EF
+10$:	RET
+
+
+
+; VSFBWT( FBno, on/off )	writes to a particular FB (1=>on, 0=>off)
+
+.ENTRY	VSFBWT,^M<R4,R5,R6>
+	CVTWL	@4(AP),R0		; get which FB
+	DECL	R0			; and which bit that is
+	CVTWL	#MASK2,R4		; expand the mask to a longword
+	BICL2	R4,R0			; force to be 0-3
+	MOVZWL	SGSAVFB,R6		; get the saved value of FBs lit
+	INSV	@8(AP),R0,#1,R6		; set/unset the bit as relevant
+	JSB	$FBWT			; go do the write
+	RET
+
+
+; VSFBW4(switch) writes to the TB lights (FBs) - bit coded for all lights
+
+.ENTRY	VSFBW4,^M<R4,R5,R6>
+	MOVZWL	@4(AP),R6		; get the new switch value
+	JSB	$FBWT			; and write it out
+	RET
+
+
+; do the actual tracker ball write for VSFBWT, etc.
+$FBWT:	BICL2	#MASK4,R6		; mask to 4 bits (4 lights)
+	MOVW	R6,SGSAVFB		; save the value being written
+	ASHL	#3, R6, R6		; get to right (silly) place
+	MOVW	#SIGDEV,R4		; device operation
+	INSV	#TBDEV,#SGBYT2,#SGBYSZ,R4   ; tracker ball device number
+	INSV	#TBWRITE,#SGBYT1,#SGBYSZ,R4 ; write to it
+	JSB	$VSCBFW			; buffer it
+	MOVW	R6,R4			; the value to write
+	JSB	$VSBFW			; buffer it
+	JSB	$VFLUSH			; and do it now
+10$:	RSB
+ 
+
+; VSFBRD( .... )	indefinite number of args - returns the FBs pressed
+; from least significant upwards, 'til it runs out, then returns zero
+
+.ENTRY	VSFBRD,^M<R4,R5,R6>
+	$SETAST_S	#0		; disable ASTs
+	CLRL	R5			; pointer at arg list
+10$:	AOBLEQ	(AP),R5,20$		; loop around all the arg list
+	FFS	#0,#4,SGOLDFB,R4	; any FBs left?
+	BNEQ	50$			; don't clear flag if so
+	MOVZWL	IDFBEF,R0		; broaden the EFN
+	$CLREF_S	EFN=R0		; note we've read the FBs now
+50$:	$SETAST_S	#1		; reenable ASTs
+	RET
+
+; return one arg for the VSFBRD function
+20$:	MOVL	(AP)[R5],R6		; get argument pointer
+	BEQL	10$			; silly, so ignore it
+	FFS	#0,#4,SGOLDFB,R4	; find least FB pressed
+	BEQL	30$			; if EQL, none there
+	BBCC	R4,SGOLDFB,30$		; clear the bit (if already clear ->!!)
+	INCL	R4			; increment - get FB number
+	MOVL	R4,(R6)			; return the arg
+	BRB	10$			; loop for next
+;
+30$:	CLRL	(R6)			; no FB set
+	BRB	10$			; loop for next
+
+
+; VSFBR4(switch) reads the (bitwise) value of the switches on the TB
+
+.ENTRY	VSFBR4,^M<R4,R5,R6>
+	$SETAST_S	#0		; disable ASTs
+	MOVZWL	SGOLDFB,@4(AP)		; get the FB value to the caller
+	CLRW	SGOLDFB			; clear the FB accumulation
+	MOVZWL	IDFBEF,R0		; broaden the EFN
+	$CLREF_S	EFN=R0		; note we've read the FBs
+	$SETAST_S	#1		; reenable ASTs
+	RET
+
+
+
+; VSTBRD(dx,dy) reads the value of x,y displacement from the tracker ball
+
+.ENTRY	VSTBRD,^M<R4,R5,R6,R7,R9>
+	$SETAST_S	#0		; disable ASTs
+; and get at the values we need...
+	MOVW	SGOLDXC,R7		; total X displacement
+	MOVW	SGOLDYC,R9		; ditto for Y
+	CLRW	SGOLDXC			; clear remembered cursor
+	CLRW	SGOLDYC			; values
+; transform pixel displacement into user units
+; 	ie DX := R7/VSTRX, DY := R9/VSTRY
+	CVTWF	R7,R7
+	CVTWF	R9,R9
+	DIVF3	VSTRX,R7,@4(AP)		; return to caller
+	DIVF3	VSTRY,R9,@8(AP)		; return to caller
+	MOVZWL	IDTBEF,R0		; broaden the EFN
+	$CLREF_S	EFN=R0		; note we've read the TB values
+	$SETAST_S	#1		; reenable ASTs
+	RET
+ 
+ 
+; AST routine for the Sigma, to sample the TB/FBs every so often...
+
+.ENTRY	VS_TB_AST,^M<>
+
+; now check if the TB is actually enabled...
+	BLBS	TBISON,7$			; if on, then read from it
+
+; not presently on, so assert the sign bit of TBISON
+; this informs VSPXWT code that AST needs re-enabling
+	BBCS	#7,TBISON,1$
+1$:	RET				; stop queuing AST requests
+
+; prime the instruction in the primary buffer...
+7$:	INSV	#TBREAD,#SGBYT1,#SGBYSZ,SGTBINST	; read the TB
+	BBS	#VFLG_V_XA,VSFLAG,11$
+
+	$QIOW_G	TBR.DPB				; and do the read QIO
+; check if this has worked or not...
+	BLBS	R0,10$				; branch if QIO went through
+	BRW	70$
+10$:	CMPV	#SGERRPS,#SGERRSZ,SGSTATUS+4,#SGERR
+	BNEQ	15$
+	BRW	60$				; branch if an error
+
+11$:	PUSHL	TBW.P2			; save length
+	MOVL	#2,TBW.P2		; 2 bytes for read TB
+	$QIOW_G	TBW.DPB			; write instruction
+	POPL	TBW.P2			; restore length
+	BLBS	R0,12$			; success
+	BRW	70$
+12$:	BLBS	SGSTATUS,13$		; sucess
+	BRW	70$
+13$:	$QIOW_G	TBR.DPB			; read result
+	BLBS	R0,14$			; success
+	BRW	70$
+14$:	BLBS	SGSTATUS,15$		; sucess
+	BRW	70$
+
+; sort out if anything actually happened...
+15$:	TSTL	SGTBX			; look at SGTBX & SGTBY as one
+	BEQL	20$			; they had no value - ignore them
+
+; save any accumulation of TB movement...
+	ADDW2	SGTBX,SGOLDXC		; accumulate X
+	ADDW2	SGTBY,SGOLDYC		; and also Y
+	MOVZWL	IDTBEF,R0		; broaden the EFN
+	$SETEF_S	EFN=R0		; set the TB efn
+
+; now we must save the accumulated FB values...
+20$:	EXTZV	#3,#4,SGTBSW,R0		; get the FB bits in R0 (added AJW)
+	BEQL	30$			; nothing there - ignore
+	BISB2	R0,SGOLDFB		; button presses
+	MOVZWL	IDFBEF,R0		; broaden the EFN
+	$SETEF_S	EFN=R0		; set the FB efn
+
+; and now reset the tracker ball so the next read will work...
+; (we also rewrite the FBs, so you can't tell that a TB reset occurred)
+30$:	INSV	#TBSEL,#SGBYT1,#SGBYSZ,SGTBINST		; select/reset
+	INSV	#TBWRITE,#SGBYT1,#SGBYSZ,SGTBINS2	; write FBs
+	MOVW	SGSAVFB,R0		; the FBs saved
+	ASHL	#3, R0, R0		; get to right (silly) place
+	MOVW	R0,SGTBINS3		; the value to write
+	$QIOW_G	TBW.DPB			; do the operation
+	BLBS	R0,35$			; branch if QIO went through
+	BRW	70$			; else deal with the error
+35$:	BBS	#VFLG_V_XA,VSFLAG,36$
+	CMPV	#SGERRPS,#SGERRSZ,SGSTATUS+4,#SGERR
+	BNEQ	40$			; skip if OK
+	BRW	60$			; branch if an error
+
+36$:	BLBS	SGSTATUS,40$		; success
+	BRW	60$
+
+; and resubmit the request for this AST after a short wait...
+40$:	MOVZWL	IDEFN0,R0			; broaden our EFN
+	$SETIMR_S	EFN=R0,-		; EFN to set on time
+			ASTADR=VS_TB_AST,-	; the AST to call then
+			DAYTIM=VSTB_BINTIM,-	; and when to do it
+			REQIDT=IDAST		; and what it's known as
+50$:	RET
+
+; deal with an error condition from the QIO - give up on the ASTs
+60$:	MOVL	#SS$_DEVREQERR,R0	; get device request error
+70$:	PUSHL	R0
+	CALLS	#1,G^LIB$SIGNAL		; tell the world
+	BRW	50$			; don't reissue the AST request
+
+ 
+	.END

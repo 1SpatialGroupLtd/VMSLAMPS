@@ -1,0 +1,180 @@
+	LOGICAL FUNCTION INIT_TAB( TMO, IERR, AST)
+C
+***	IDENT	15DE89
+***	MODULE	INIT_TAB
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 30 July 1984
+C
+C This is the initialisation subroutine for the TABLE_MONITOR library
+C - it wakes the table monitor process up, maps to the global section,
+C sets a null lock on the relevant resource, and maps to the global
+C event flag cluster.
+C
+C we return FALSE if it all works, and TRUE if we fail
+C
+	IMPLICIT NONE
+C
+C system parameters
+C
+	INCLUDE	'($SECDEF)'
+	INCLUDE	'($SSDEF)'
+C
+C and our own parameters
+C
+***	PARAMETER/CMN:TABMON/		! names, offsets, etc
+C
+C and common
+C
+***	COMMON/CMN:TABNAMES/
+***	COMMON/CMN:SECTION/		! global section base, etc
+C
+C we were passed
+C
+	INTEGER*4	TMO  !optional	! timeout in 1/100 seconds
+	INTEGER*4	IERR		! error return
+	EXTERNAL	AST  !optional	! AST when event happens
+C
+C and we call
+C
+	INTEGER*4	SYS$WAKE	! to wake the process up
+	INTEGER*4	SYS$MGBLSC	! map global section
+	INTEGER*4	SYS$SETEF	! to set an event flag
+	INTEGER*4	TRNALL
+	INTEGER*4	SIGCHS
+	LOGICAL		GETLOCK		! get a null lock
+	LOGICAL		ASCEFC		! get an event flag cluster
+	LOGICAL		WRITE_LOCK	! establish an exclusive lock
+	LOGICAL		UNLOCK		! release it again
+	LOGICAL		TAB_HAVARG	! check for presence
+	LOGICAL		CHECK_STATE	! is the monitor in hibernate?
+	LOGICAL		LOCK_TABLE	! sieze the table
+	LOGICAL		STOP_TAB
+C
+C and workspace
+C
+	INTEGER*4	VERSION		! version of TABMON.PAR
+	INTEGER*4	COUNT
+	LOGICAL		IN_HIB		! in hibernation?
+	CHARACTER*(255)	NAME		! logical name
+	CHARACTER*(40)	TERM		! terminal name
+	INTEGER*4	INADR(2)
+	DATA		INADR/2*'200'X/	! P0 space for SYS$MGBLSC
+	INTEGER*4	LOCAST		! address of AST routine
+C
+C assume that things go badly
+C
+	INIT_TAB = .TRUE.
+C
+C get the terminal name
+C
+	IERR=TRNALL(LOG_NAME,TERM)	! see if logical name exists
+C
+	IF (IERR.NE.SS$_NORMAL.AND.IERR.NE.SS$_NOLOGNAM) GOTO 9999
+C
+C set up names to use
+C
+	CALL GET_NAMES(IERR.EQ.SS$_NOLOGNAM,TERM)
+C
+C - so, we now try to start the thing up!! our next action is to
+C lock the table system to ourselves - this will stop anyone else
+C using the system whilst we are. If we can't do that, we give up
+C
+	LOCAST = 0
+	IF ( TAB_HAVARG(3) ) LOCAST = %LOC(AST)
+	IF ( LOCK_TABLE( IERR, %VAL(LOCAST) ) ) GOTO 9999
+C
+C so we have the table, and can initialise the library
+C - first, we map to the global section
+C
+	IERR = SYS$MGBLSC( INADR, SEC_ADDR,,
+     &	                   %VAL(SEC$M_WRT.OR.SEC$M_EXPREG),
+     &	                   SEC_NAME(1:SECL),,)
+	IF ( .NOT.IERR ) GOTO 9999
+C
+C and we do an unprotected read of the version of the section and other
+C parameters from TABMON.PAR
+C
+	CALL COPY_LONG( %VAL(SEC_BASE+SECTION_VERSION), VERSION )
+C
+C do we agree with the section as to what version of the world we have?
+C
+	IF ( VERSION.NE.FILE_VERSION ) THEN
+	   IERR = -4
+	   GOTO 9999
+	ENDIF
+C
+C and next we attempt a null lock on the global section
+C
+	IF ( GETLOCK( IERR ) ) GOTO 9999
+C
+C now we associate with a common event flag cluster, to talk to the
+C monitor process with
+C
+	IF ( ASCEFC( IERR, .FALSE. ) ) GOTO 9999
+C
+C and now assert a real lock on the global section...
+C
+	IF ( WRITE_LOCK(IERR) ) GOTO 9999
+C
+C and so let us copy the time-out over - NB this is an optional arg
+C
+	IF ( TAB_HAVARG(1) ) THEN
+	   CALL COPY_LONG( TMO, %VAL( SEC_BASE+TIME_OUT) )
+	ELSE
+	   CALL COPY_LONG( DEFAULT_TIMEOUT, %VAL( SEC_BASE+TIME_OUT) )
+	ENDIF
+C
+C and set the EXTRA_FLGS word, to say we are the "NEW" TABLIB that knows
+C about the extra event flags
+C
+	CALL COPY_LONG(-1,%VAL(SEC_BASE+EXTRA_FLGS))
+C
+C and now unlock the lock
+C
+	IF ( UNLOCK(IERR) ) GOTO 9999
+C
+C and set the 'ready for a button' event flag
+C
+	IERR = SYS$SETEF( %VAL(NO_BUTTON) )
+	IF ( .NOT.IERR ) GOTO 9999
+C
+C is the table monitor hibernating? 
+C if it isn't, then try to hibernate it, and check again
+C
+10	CONTINUE
+	IF ( CHECK_STATE( IN_HIB, IERR ) ) GOTO 9999
+	IF (.NOT.IN_HIB) THEN
+	   IF (COUNT.LT.5) THEN
+	      IF (STOP_TAB(IERR)) GOTO 9999
+	      COUNT = COUNT + 1
+	      GOTO 10
+	   ENDIF
+	ENDIF
+C
+C and finally, we must attempt to wake the table monitor process up
+C
+	IF ( IN_HIB ) THEN
+C
+C	 if the table monitor is asleep, then wake it up
+C
+	   IERR = SYS$WAKE( , MONITOR_NAME(1:MONITORL))
+	   IF ( .NOT.IERR ) GOTO 9999
+C
+	ELSE
+C
+C	 it was asleep - we don't mind that, but set IERR anyway
+C
+	   IERR = -2
+C
+	ENDIF
+C
+C so we have presumably succeeded in starting things up...
+C
+	INIT_TAB = .FALSE.
+C
+C failure joins us here
+C
+9999	RETURN
+	END

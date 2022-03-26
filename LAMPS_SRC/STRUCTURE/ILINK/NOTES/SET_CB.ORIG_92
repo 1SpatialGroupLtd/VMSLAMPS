@@ -1,0 +1,317 @@
+	INTEGER*4 FUNCTION SET_CB(
+     &		IN_FTR,PT,CC,FTR_PTS,FTR_START,IN_FTR_ADDR,
+     &		MAXPTS,MAXINFTRS,MAXOUTFTRS)
+
+***	IDENT	29AP92
+***	MODULE	SET_CB
+
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+
+CMOD1099						 JB 01-Apr-1992
+C	Fix attribute to point assignment for CB blocks by testing 
+C	for new feature address to reset the JPT attribute count block
+C	to start at 0.
+C	This is also done for any new pen-up CB entry as ILINK treats
+C	pen-up moves as new feeatures.
+C	Also copy first attribute across to last closing point for
+C	closed features, scrambled in previous calls to A2L and L2A.
+
+CMOD	Remove faulty diagnostic code (INTRNLERR 3)	WJJ 07-Feb-1990
+CMOD	Converted to use Point Accuracy Codes		ACM 05-Dec-1988
+
+C	Created   : ACM					Apr 1988
+
+	IMPLICIT NONE
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+	INCLUDE		'($SSDEF)'
+
+	INCLUDE		'LSL$CMNILINK:ILINKCHAR.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+
+C Data in
+	INTEGER*4	IN_FTR		! input-ftr index
+	INTEGER*4	MAXPTS,MAXINFTRS,MAXOUTFTRS
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_START(MAXOUTFTRS)
+	INTEGER*4	IN_FTR_ADDR(MAXINFTRS)
+	REAL*4		PT(2,MAXPTS)
+	INTEGER*4	CC(MAXPTS)
+
+C Workspace
+	RECORD/	IFF_CBH/	TMP_CBH	! header for CB for ftr IN_FTR
+	RECORD/	ILINK_CBD/	TMP_CBD	! data for CB for ftr IN_FTR
+
+	INTEGER*4	PAT(ILINK_MAXCBROW,IFF_MAXCBCOL)
+
+	INTEGER*4	ADDR		! IFF NF address
+	SAVE		ADDR		! keep it non-volatile
+	INTEGER*4	NEW_CB_ADDR	! IFF CB address
+	SAVE		NEW_CB_ADDR	! keep it non-volatile
+	INTEGER*4	JPT
+	SAVE		JPT		! keep it non-volatile
+
+	INTEGER*4	NPTS,I,IPT
+	INTEGER*4	IPTPRV,IPTNXT
+	INTEGER*4	ICOL,NCOLS	! num of col's in CB
+	INTEGER*4	IATT,NATTS	! num of att's in CB
+	INTEGER*4	FIRST_PT	! original PT index of 1st pt
+	INTEGER*4	NEXT_FIRST_PT	! PT index of 1st pt of next ftr
+	INTEGER*4	ORIG_NPT	! original PT index
+	INTEGER*4	ATT		! an attribute code
+	INTEGER*4	I1
+
+	INTEGER*2	IECODE,IELEN	! for IFFNXT
+
+	LOGICAL*4	LAST_CB		! last pen-up CB in ftr IN_FTR?
+	LOGICAL*4	NEW_FTR		! new ftr IN_FTR?
+	LOGICAL*4	ORIGINAL_PT	! is point original input point?
+	LOGICAL*1	DELETE(ILINK_MAXCBROW)	! delete pt?
+
+	REAL*4		DXPRV,DYPRV	! vector leading into pt
+	REAL*4		DXNXT,DYNXT	! vector leading out from pt
+	REAL*4		SQDST,SQTOL
+	REAL*4		CP,DP		! cross- and dot- vec products
+	REAL*4		DX,DY,DR	! for tolerance test
+
+C Functions
+	LOGICAL*4	GET_CB
+	INTEGER*4	PICK_CB
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Takes a string N_OUT_PTS no. of BASE PT indices, a string of
+C	ORIGinal PT indices (N_OUT_PTS/BASE_PT/ORIG_PT from ILINK.CMN),
+C	and a feature index IN_FTR, and assembles a Coordinate Block
+C	(CBH/BIG_CBD in ILINK.CMN) for output, getting X and Y from the
+C	BASE points, and other attributes from either the BASE or ORIG
+C	points, whichever come from the feature with feature index
+C	IN_FTR.
+C
+C	Inserted points which are either (approximately) coincident or
+C	colinear with their neighbours are ignored.
+C
+C	Returns SS$_NORMAL when successful
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	SET_CB  = SS$_NORMAL
+	SQTOL   = COORD_TOL*COORD_TOL
+	NEW_FTR = .FALSE.
+
+C Get CB for feature IN_FTR into TMP_CBH/TMP_CBD
+
+	CALL IFFSEL(INLUN)
+
+C Check if this a new feature, ie a different NF address from a 
+C previous call to SET_CB
+
+	IF (IN_FTR_ADDR(IN_FTR) .NE. ADDR) NEW_FTR = .TRUE.
+
+	ADDR = IN_FTR_ADDR(IN_FTR)
+	CALL IFFPKE(IECODE,IELEN,ADDR)
+
+	IF (IELEN.EQ.-1) THEN
+	  SET_CB = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(SET_CB,INFILE(:IN_LEN))
+	  GOTO 999
+	ENDIF
+
+	IF (IECODE.NE.'NF') THEN
+	  SET_CB = ILINK__BADADDR
+	  CALL LSL_PUTMSG(SET_CB)
+	  GOTO 999
+	ENDIF
+
+	CALL IFFNXC('CB',IELEN)
+
+	IF (IELEN.EQ.-1) THEN
+	  SET_CB = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(SET_CB,INFILE(:IN_LEN))
+	  GOTO 999
+	ENDIF
+
+	LAST_CB = GET_CB(TMP_CBH,TMP_CBD)
+
+C Because more than one separate pen-up string is allowed within each
+C feature, if the string you now have is not the last it may not be the
+C one you want. In such cases it is necessary to find which pen-up
+C string sharing this same feature NF address is the one you want.
+
+	IF (.NOT.LAST_CB) THEN
+	  NEW_FTR = .TRUE.
+
+	  SET_CB = PICK_CB(TMP_CBH,TMP_CBD,IN_FTR,MAXINFTRS,IN_FTR_ADDR)
+	  IF (.NOT.SET_CB) THEN
+	    SET_CB = ILINK__INTRNLERR
+	    CALL LSL_PUTMSG(SET_CB,2,'SET_CB')
+	    GOTO 999
+	  ENDIF
+
+C If second time to pick this particuler CB position, no longer a new
+C feature 
+
+	  IF (LPOSH .EQ. NEW_CB_ADDR) NEW_FTR = .FALSE.
+
+	  NEW_CB_ADDR = LPOSH
+	ENDIF
+
+C Set index of first non fixed CB column index
+	I1 = 3
+	IF (HAD_TOL.OR.HAD_PAC) I1 = 4
+
+C Set up CBH
+
+	CBH.FLAGS = TMP_CBH.FLAGS
+	CBH.GTYPE = TMP_CBH.GTYPE
+
+	CBH.COLH(1) = IFF_C_X	! set up COLH with X and Y cols first
+	CBH.COLH(2) = IFF_C_Y
+	IF (HAD_TOL.OR.HAD_PAC) CBH.COLH(3) = CAP_CODE
+
+	I = I1-1
+
+	NCOLS = TMP_CBH.NCOL	! expand all attributes
+
+	DO 10 ICOL = 1,NCOLS
+	  ATT = TMP_CBH.COLH(ICOL)
+	  IF (ATT.EQ.IFF_C_X) GOTO 10
+	  IF (ATT.EQ.IFF_C_Y) GOTO 10
+
+	  IF (HAD_TOL.OR.HAD_PAC) THEN
+	    IF (ATT.EQ.CAP_CODE) GOTO 10
+	  ENDIF
+	  I = I+1
+	  CBH.COLH(I) = ATT
+
+C Read non X,Y (and non accuracy-code) attribute data into PAT
+
+	  CALL IFS_CB_READ(TMP_CBH,TMP_CBD,
+     &			   PAT(1,I),1,ATT,1,TMP_CBH.NROW)
+
+10	CONTINUE
+
+	NATTS = TMP_CBH.NATT
+
+	DO 20 IATT = 1,NATTS
+	  ATT = TMP_CBH.ATT(IATT).ATTC
+	  IF (ATT.EQ.IFF_C_X) GOTO 20
+	  IF (ATT.EQ.IFF_C_Y) GOTO 20
+
+	  IF (HAD_TOL.OR.HAD_PAC) THEN
+	    IF (ATT.EQ.CAP_CODE) GOTO 20
+	  ENDIF
+
+	  I = I+1
+	  CBH.COLH(I) = ATT
+
+C Read non X,Y (and non accuracy-code) attribute data into PAT
+
+	  CALL IFS_CB_READ(TMP_CBH,TMP_CBD,
+     &			   PAT(1,I),1,ATT,1,TMP_CBH.NROW)
+
+20	CONTINUE
+
+	NCOLS = I
+	CBH.NCOL = NCOLS
+	CBH.NATT = 0
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Mark inserted points which are almost coincident or colinear with
+C either neighbour to be deleted
+
+	DO 30 IPT = 1,N_OUT_PTS
+	  PWK(1,IPT) = PT(1,BASE_IPT(IPT))
+	  PWK(2,IPT) = PT(2,BASE_IPT(IPT))
+	  IF (HAD_TOL.OR.HAD_PAC) CWK(IPT) = CC(BASE_IPT(IPT))
+	  DELETE(IPT) = .TRUE.
+30	CONTINUE
+
+	CALL THIN(PWK,N_OUT_PTS,IWK,NPTS,COORD_TOL/10)
+
+	DO 40 I = 1,NPTS
+	  DELETE(IWK(I)) = .FALSE.	! mark pts to be retained
+40	CONTINUE
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Set up BIG_CBD, point by point
+
+90	CONTINUE
+
+
+CCC Faulty, needs a PRocessed FTR index here, not INput FTR
+CCC
+CCC	FIRST_PT = FTR_START(IN_FTR)
+CCC	IF (IN_FTR.LT.N_ORIG_PR_FTRS) THEN
+CCC	  NEXT_FIRST_PT = FTR_START(IN_FTR+1)
+CCC	ELSE
+CCC	  NEXT_FIRST_PT = N_ORIG_PTS+1
+CCC	ENDIF
+
+
+	NPTS = 0
+	I = 1
+
+C Restart the point count if starting a new feature CB
+
+	IF (NEW_FTR) JPT = 0
+
+	DO 110 IPT = 1,N_OUT_PTS
+	  ORIG_NPT = ORIG_IPT(IPT)
+	  ORIGINAL_PT = (ORIG_NPT .LE. N_ORIG_PTS)
+	  IF (ORIGINAL_PT) JPT = JPT+1
+
+	  IF (DELETE(IPT)) GOTO 110
+
+	  NPTS = NPTS+1
+	  BIG_CBD.R(I)   = PWK(1,IPT)
+	  BIG_CBD.R(I+1) = PWK(2,IPT)
+
+	  IF (HAD_TOL.OR.HAD_PAC) BIG_CBD.I(I+2) = CWK(IPT)
+
+C Convert unknown PAC to IFF_ABSENT for output
+
+	  IF (BIG_CBD.I(I+2).EQ.MIN_PAC-1) BIG_CBD.I(I+2) = IFF_ABSENT
+
+
+CCC Removed since cannot set up NEXT_FIRST_POINT (above)
+CCC	  IF (ORIGINAL_PT .AND. ORIG_NPT.GE.NEXT_FIRST_PT) THEN
+CCC	    SET_CB = ILINK__INTRNLERR
+CCC	    CALL LSL_PUTMSG(SET_CB,3,'SET_CB')
+CCC	    GOTO 999
+CCC	  ENDIF
+
+
+	  DO 100 ICOL = I1,NCOLS
+	    IF (ORIGINAL_PT) THEN
+	      BIG_CBD.I(I-1+ICOL) = PAT(JPT,ICOL)
+	    ELSE
+	      BIG_CBD.I(I-1+ICOL) = IFF_ABSENT
+	    ENDIF
+100	  CONTINUE
+
+	  I = I + NCOLS
+110	CONTINUE
+
+C Test for identical start and end points, disconnected in an earlier
+C call to A2L, and reassembled with L2A, with the resulting loss of end
+C point attributes
+
+	DX = BIG_CBD.R(1) - BIG_CBD.R(1+(NPTS-1)*NCOLS)
+	DY = BIG_CBD.R(2) - BIG_CBD.R(2+(NPTS-1)*NCOLS)
+	DR = DX*DX + DY*DY
+
+	IF (DR.LT.SQTOL) THEN		! closed feature, copy the first row 
+					! of attributes across to the last
+	   DO 995 IPT = 3,NCOLS
+	     BIG_CBD.I(IPT+(NPTS-1)*NCOLS) = BIG_CBD.I(IPT)
+995	   CONTINUE
+
+	ENDIF
+
+	CBH.NROW = NPTS
+
+999	RETURN
+	END
+

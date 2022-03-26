@@ -1,0 +1,186 @@
+	LOGICAL FUNCTION CREATE_DTI_FILE
+C
+***	IDENT	11SE91
+***	MODULE	CREATE_DTI_FILE
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C	Created   : 22 Decmeber 1988
+C
+C	Function to create a new DTI output file, and 
+C	initialise the background matrix values
+C
+	IMPLICIT NONE
+C
+C Parameters
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+***	PARAMETER/HERE:BELLS/
+C
+C Commons
+***	COMMON/LSL$CMNDTI:DTIPROJ/
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	COMMON/LSL$CMNIFF:MD2DES/	
+C
+***	COMMON/HERE:CULTRE/
+C
+C Workspace
+	REAL*4		XRANGE			! IFF x coord range
+	REAL*4		YRANGE			! IFF y coord range
+	INTEGER*4	RETVAL			! function return code
+	INTEGER*4	SYSERR			! system error code
+	INTEGER*4	HEADER_LENGTH		! Length of LSLA header
+	INTEGER*4	REM
+	INTEGER*4	UNITS			! units of measurement
+	INTEGER*4	I			! counter
+C
+C functions
+C
+	INTEGER*4	DTI_CREATE		!create a new file
+	INTEGER*4	DTI_WRITE_PROJ_REC	!write proj. record
+	INTEGER*4	CLOSE_DTI		!close an existing file
+C
+	INTEGER*4	DTI_INIT_BIT_DATA
+	INTEGER*4	DTI_INIT_BYTE_DATA
+	INTEGER*4	DTI_INIT_WORD_DATA
+	INTEGER*4	DTI_INIT_LONG_DATA
+	INTEGER*4	DTI_INIT_REAL_DATA
+C
+C----------------------------------------------------------------------
+C
+	CREATE_DTI_FILE = .FALSE.	
+C
+C----------------------------------------------------------------------
+C	Close and unmap any file opened on this channel
+	IF(DTILUN_INUSE(1))THEN
+	  RETVAL = CLOSE_DTI() 
+	  IF(RETVAL.NE.DTI__NORMAL)GOTO 999
+	  HADDTI=.FALSE.
+	ENDIF
+C
+C----------------------------------------------------------------------
+C	Transfer DTI file parameters to common variables
+	X_GRID(1) = EGRID
+	Y_GRID(1) = NGRID
+	HEADER_TYPE(1) = HTYPE
+	DATA_TYPE(1)   = DTYPE
+C
+C----------------------------------------------------------------------
+C	Calculate the number of columns and rows in the output file
+	XRANGE = (WIND(2,1)-WIND(1,1))
+	YRANGE = (WIND(2,2)-WIND(1,2))
+C
+	XSIZE = NINT(XRANGE/X_GRID(1))+1
+	YSIZE = NINT(YRANGE/Y_GRID(1))+1
+C
+	IF(XSIZE.LT.1.OR.YSIZE.LT.1) THEN
+	  CALL WRITEF('Matrix too small.  File abandoned.') 
+	  GOTO 999
+	END IF
+C
+C 	If data type is BIT then force YSIZE to be a multiple of 8
+	IF(DATA_TYPE(1).EQ.DATA_BIT)THEN
+	   REM = YSIZE-8*INT(YSIZE/8)
+	   IF(REM.NE.0)THEN
+	     CALL WRITEF
+     &	('%S Y extent increased to become a multiple of 8',WNGBELL)
+	     CALL WRITEF
+     &	('The top %N rows of the matrix will not be used',REM)
+	     YSIZE = 8*INT(YSIZE/8)+8
+	   ENDIF
+	ENDIF
+C
+	X_EXTENT(1) = XSIZE
+	Y_EXTENT(1) = YSIZE
+C
+C----------------------------------------------------------------------
+C If the file is an LSLA file, then we can create a DTI Projection
+C Record.
+C
+	IF(HEADER_TYPE(1).EQ.DTI_LSLA)THEN
+          HEADER_LENGTH=DEFAULT_LSLA_HEADER+DTIPROJ_RECORD_LENGTH
+	ENDIF
+C
+C----------------------------------------------------------------------
+C Create the DTI file
+C
+	RETVAL = DTI_CREATE(	1,		! LUN
+     &				DTI_NAME(1),
+     &				DTI_NAME_LENGTH(1),
+     &				HEADER_TYPE(1),	! header type
+     &				HEADER_LENGTH,	! header size
+     &				DATA_TYPE(1),	! data type
+     &				X_EXTENT(1),	! xsize
+     &				Y_EXTENT(1),	! ysize
+     &				SYSERR)
+	IF (RETVAL.NE.DTI__NORMAL) THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  IF (RETVAL.EQ.DTI__SYSERR) CALL LSL_PUTMSG(SYSERR)
+	  GOTO 999				! return
+	END IF
+C
+C----------------------------------------------------------------------
+C	If the file is an LSLA file, write a projection record
+	IF (MATV2.EQ.2 .AND. HEADER_TYPE(1).EQ.DTI_LSLA) THEN
+C
+C	Remember to add the SW corner of the rectangular area of
+C	interest to the DTM origin offset.
+C
+	  DTIPROJ_SAMPLE(1,1) = X_GRID(1)	!x grid
+	  DTIPROJ_SAMPLE(2,1) = Y_GRID(1)	!y grid
+	  DTIPROJ_ORIGIN(1,1) = MD2LOC(1)+WIND(1,1) !x origin
+	  DTIPROJ_ORIGIN(2,1) = MD2LOC(2)+WIND(1,2) !y origin
+	  X_OFFSET(1) = DTIPROJ_ORIGIN(1,1)
+	  Y_OFFSET(1) = DTIPROJ_ORIGIN(2,1)
+C
+	  DTIPROJ_PROJECTION(1) = MD2PRJ	!projection
+	  DTIPROJ_UNITS(1)      = MD2UNT	!units
+	  DTIPROJ_SPHEROID(1)   = MD2SPH	!spheroid
+C
+	  DTIPROJ_USER_SPHEROID(1,1)= MD2USP(1) !user spheroid
+	  DTIPROJ_USER_SPHEROID(2,1)= MD2USP(2) !parameters
+C
+	  DO 200 I=1,15                         !proj. params
+	    DTIPROJ_PROJ_PARAMS(I,1) = MD2PAR(I) 
+200	  CONTINUE
+C
+C	Write the projection variables to the header of the file 
+	  RETVAL=DTI_WRITE_PROJ_REC(1,DEFAULT_LSLA_HEADER,SYSERR)
+	  IF(.NOT.RETVAL)THEN
+	    CALL LSL_PUTMSG(RETVAL)
+	    IF(RETVAL.EQ.DTI__SYSERR)CALL LSL_PUTMSG(SYSERR)
+	  ENDIF
+	ENDIF
+C
+C----------------------------------------------------------------------
+C	Set the value of the background pixels
+	IF(BACKGROUND_VALUE.NE.0)THEN
+	  IF(DTYPE.EQ.DATA_BIT)THEN
+	    RETVAL=DTI_INIT_BIT_DATA(1,1)
+	  ELSE IF(DTYPE.EQ.DATA_BYTE)THEN
+	    RETVAL=DTI_INIT_BYTE_DATA(1,INT(BACKGROUND_VALUE))
+	  ELSE IF(DTYPE.EQ.DATA_WORD)THEN
+	    RETVAL=DTI_INIT_WORD_DATA(1,INT(BACKGROUND_VALUE))
+	  ELSE IF(DTYPE.EQ.DATA_LONG)THEN
+	    RETVAL=DTI_INIT_LONG_DATA(1,INT(BACKGROUND_VALUE))
+	  ELSE
+	    RETVAL=DTI_INIT_REAL_DATA(1,BACKGROUND_VALUE)
+	  ENDIF
+C
+	  IF(.NOT.RETVAL)THEN
+	    CALL LSL_PUTMSG(RETVAL)
+	  ENDIF
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C	Now treat as though an existing file
+	CREATE_DTI=.FALSE.
+C
+C	and signal success
+	HADDTI=.TRUE.
+	CREATE_DTI_FILE=.TRUE.
+C
+C-----------------------------------------------------------------------
+999	RETURN
+	END
+C

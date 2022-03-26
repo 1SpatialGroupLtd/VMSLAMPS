@@ -53,7 +53,8 @@ C... send status request to the GP1
 
 C... wait for status-byte answer
 
-      MAX_TIME = 5
+CCCC      MAX_TIME = 5
+	  MAX_TIME = 50
 C... if symbol-storing, wait longer for answer
       IF (CODE .EQ. 112) MAX_TIME = 50
 C... if text-type change, wait longer for answer

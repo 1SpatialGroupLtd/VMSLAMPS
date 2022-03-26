@@ -1,0 +1,881 @@
+	SUBROUTINE IFFBDY(MAP)
+C
+	IMPLICIT NONE
+C
+***	MODULE	IFFBDY
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt, 29 February 1984
+C
+C To read in the body of an IFF file
+C The input file is on INLUN
+C Output file is on OUTLUN
+C When FLUSH is called, it may select the output file, so we
+C re-select the input explicitly, and set MAPCUR = -1 so that
+C FLUSH realises that its selection has been lost
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:CB/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/CMN:LAYERS/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:STRIKE/
+***	COMMON/CMN:TIMING/
+C
+C arguments
+	INTEGER	MAP		! map we are reading
+C
+C functions called
+C
+	REAL	SECNDS		! FORTRAN timer
+	INTEGER	FNDOVR		! get internal layer number
+	LOGICAL	FRTFND		! find a feature code
+	LOGICAL GENAUX		! generate auxiliary array for symbols,
+C				! texts, and arcs
+	LOGICAL LOOPY		! check if curve is a closed loop
+	LOGICAL	HADCTRLC	! had a CTRL/C?
+	LOGICAL	GETATT		! read attributes from CB
+C
+C w/s
+C
+	REAL		ORG(2)		! origin of this map
+	INTEGER		I
+	INTEGER*2	PTS,ENDS	! for reading ST entry
+	INTEGER*4	NPTS,START	! for counting ST points
+	INTEGER*2	IECODE,IELEN	! for reading from IFF
+	INTEGER*2	ISQ		! sequence no.
+	INTEGER		FC		! feature code
+	INTEGER		TFC		! text feature code (from TS)
+	INTEGER		TXSIZE		! text size from TH entry
+	INTEGER*2	OVNO		! overlay number
+	INTEGER*2	ISTAT(4)	! feature status words
+	INTEGER*2	TSTAT(4)	! text status words
+	INTEGER		OVR		! overlay pointer
+	INTEGER		SYMB,TEXTB	! number of features with
+					! text or symbol bits missing
+	INTEGER		OTHB		! other features with bit set
+	LOGICAL*1	INF		! in (ordinary) feature
+	LOGICAL*1	INF0		! in NF 0-type feature
+	LOGICAL*1	HADNO,HADFS,HADST,HADTH
+	LOGICAL*1	HADTS	
+	LOGICAL*1	HADPTR
+	LOGICAL*1	ALIGN		! had a symbol alignment
+	LOGICAL*1	TOOMNY		! too many points in feature
+	LOGICAL*1	OOKFLG		! overlay OK to use for MAXFSN
+	LOGICAL*1 	CTRL		! set true if we get a CTRL/C
+	INTEGER		PREVPCNT	! last value of percent read
+	LOGICAL		FIRSTPCNT	! has PERCENT been called?
+	LOGICAL		CBOVR,FOVR	! attributes overflowed?
+C
+	EXTERNAL	DELPAK
+C
+	FROM_IFFBDY = .TRUE.
+	TIMING(TIMREAD) = SECNDS(TIMING(TIMREAD))
+C
+	CALL IFFSEL(INLUN)
+	MAPCUR = -1			! no current selection
+	CALL IFFRWD
+	ORG(1) = MAPORG(1,MAP)		! origin of this map
+	ORG(2) = MAPORG(2,MAP)
+
+	SYMB = 0			! 0 symbol bits missing
+	TEXTB = 0			! 0 text bits missing
+	OTHB = 0			! 0 other bits
+C
+C initialise
+	HADNO = .FALSE.
+	INF = .FALSE.
+	INF0 = .FALSE.
+	HADPTR = .FALSE.
+	CTRL = .FALSE.
+	MAXNF(MAP) = 0
+	COIPAK(PAKFSN) = 0
+	COIPAK(PAKMAP) = MAP
+	OVR = -1
+	PREVPCNT = -1
+	FIRSTPCNT = .TRUE.
+C
+C main loop
+20	CALL IFFNXT(IECODE, IELEN)
+	IF (IELEN.EQ.-1) GOTO 240
+C
+C If had a CTRL/C (detected at EF), then go pretend we have an EO
+	IF (CTRL) GOTO 265
+C
+  	IF (IECODE.EQ.'CB') GOTO 70
+	IF (IECODE.EQ.'NF') GOTO 30
+	IF (IECODE.EQ.'FS') GOTO 60
+	IF (IECODE.EQ.'TH') GOTO 350
+	IF (IECODE.EQ.'EF') GOTO 120
+	IF (IECODE.EQ.'AC') GOTO 25
+	IF (IECODE.EQ.'TC') GOTO 130
+	IF (IECODE.EQ.'RO') GOTO 390
+	IF (IECODE.EQ.'TX') GOTO 320
+	IF (IECODE.EQ.'NO') GOTO 370
+	IF (IECODE.EQ.'EO') GOTO 265
+	IF (IECODE.EQ.'RA') GOTO 25
+	IF (IECODE.EQ.'TS') GOTO 400
+	IF (IECODE.EQ.'HI') GOTO 25
+	IF (IECODE.EQ.'MH') GOTO 27
+	IF (IECODE.EQ.'MD') GOTO 25
+	IF (IECODE.EQ.'NS') GOTO 28
+	IF (IECODE.EQ.'CC') GOTO 28
+	IF (IECODE.EQ.'CP') GOTO 28
+	IF (IECODE.EQ.'EJ') GOTO 260
+	IF (IECODE.EQ.'EM') GOTO 270
+	IF (IECODE.EQ.'CH') GOTO 130		! same as TC
+	IF (IECODE.EQ.'SL') GOTO 25
+	IF (IECODE.EQ.'SS') GOTO 25
+C
+C codes to ignore
+	IF (IECODE.EQ.'VO') GOTO 20
+	IF (IECODE.EQ.'SH'.OR.IECODE.EQ.'JP'.OR.IECODE.EQ.'JB') GOTO 20
+C
+C unexpected code
+	CALL MOAN(MSG_UNKENT,IECODE,LPOSH)
+	GOTO 20
+C
+C general copy entry in hand to output
+25	IF (.NOT.USEINP) CALL EIHCPY(OUTLUN)
+	GOTO 20
+C
+C MH - map header
+27	IF (.NOT.HADNO) THEN		! deal with first occurance
+	   GOTO 25			! just copy 
+	ENDIF
+	CALL MOAN(MSG_MULTMAP)		! winge for subsequent
+	IF (MAPINS(MAP)) CALL MOAN(MSG_EXIT)
+	GOTO 260			! join EJ
+C
+C NS,CC,CP - new section header
+28	IF (HADNO) GOTO 20		! ignore subsequent ones
+	GOTO 25				! copy first one
+C
+C NF - new feature
+30	CALL EIHRI(COIPAK(PAKFSN),1,1)	! read into low word, upper 0
+	IF (COIPAK(PAKFSN).LE.0) THEN
+	   INF0 = .TRUE.	! NF 0 features are thrown away
+	ELSE
+	   INF = .TRUE.
+C
+C Things we haven't had yet
+	   HADFS = .FALSE.	! no FS (feature code)
+	   HADTH = .FALSE.	! no TH (text height)
+	   HADST = .FALSE.	! no ST with coordinates
+	   HADRO = .FALSE.	! no RO for rotation
+	   COIANG = 0.0		! default zero angle
+	   ALIGN = .FALSE.	! no symbol alignment
+	   HADTX = .FALSE.	! no TX entry
+	   TXSIZE = 0		! zero default size (obtain from TH)
+	   COMTXT = .FALSE.
+	   COILEN = 0		! empty text buffer
+	   TOOMNY = .FALSE.	! not yet too many points in feature
+	   HADTS = .FALSE.	! no TS entry
+	   FOVR = .FALSE.	! attributes not overflowed
+	   RINATT = 0		! no attributes
+C
+C preserve maximum
+	   IF (OOKFLG.AND.MAXNF(MAP).LT.COIPAK(PAKFSN)) THEN
+	      MAXNF(MAP) = COIPAK(PAKFSN)
+	   ENDIF
+C
+C set up OIIH data
+	   CALL FLUSH(0)	! initialise FLUSH
+	   COIPAK(PAKSEG) = 0	! not got a segment number
+	   COIPAK(PAKFLG) = 0	! clear flags
+C
+C output the NF
+	   IF (.NOT.USEINP) CALL IFFSEL(OUTLUN)
+C
+C The pack pointer to feature may have already been set up to point
+C to a leading TC, but if not then do it now
+	   IF (.NOT.HADPTR) THEN
+	      IF (USEINP) THEN
+	         COIPAK(PAKPNF) = LPOSH ! pointer to start of feature
+	      ELSE
+	         COIPAK(PAKPNF) = LPOSE
+	      ENDIF
+	      HADPTR = .TRUE.
+	   ENDIF
+	   IF (.NOT.USEINP) THEN
+	      ISQ = 0			! must set explicit zero
+	      CALL IFFNF( COIPAK(PAKFSN), ISQ )
+	      CALL IFFSEL(INLUN)
+	   ENDIF
+	ENDIF
+	GOTO 20
+C
+C FS - feature status
+60	IF (INF0) THEN
+	   CALL MOAN(MSG_UNEXPENT,IECODE,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+	IF (INF) THEN
+	   IF (HADFS) THEN
+	      CALL MOAN(MSG_MULTFS,COIPAK(PAKFSN))
+	      GOTO 20
+	   ENDIF
+	ELSE
+	   CALL MOAN(MSG_ENTNOTINF,IECODE,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+C
+C read the relevant bits
+	ISTAT(3) = 0
+	ISTAT(4) = 0
+	CALL EIHRI(ISTAT,MIN0(IELEN,4),1)
+	FC = ISTAT(1)			! convert to long
+C
+C preserve deleted features and edit flag only if EDITED option
+C selected
+C
+	IF (.NOT. EDTOPT) THEN
+	    IF (IAND(ISTAT(2),16).NE.0) THEN
+	       GOTO 126   ! deleted, ignore it
+	    ELSE
+C
+C clear edited flag
+	       ISTAT(4)= IAND(ISTAT(4),NOT(1))
+	    ENDIF
+	ELSE
+C
+C ENABLE EDIT so retain deleted features  
+	  IF (IAND(ISTAT(2),16).NE.0 ) THEN
+	     COIPAK(PAKFLG) = LIMFLG
+	  ENDIF
+	ENDIF
+C
+	IF (FRTFND(FC)) THEN
+	   CALL MOAN(MSG_BADFC,FC,COIPAK(PAKFSN))
+	   GOTO 125			! reject feature
+	ENDIF
+C
+C Check for symbol and text bits in the third word of ISTAT
+	IF (FRTGT.GE.UNOTYP.AND.FRTGT.LE.SCATYP) THEN	! symbol feature
+	   IF ((ISTAT(3).AND.'4000'X).EQ.0) THEN
+	      CALL LIB$INSV(1,14,2,ISTAT(3))
+	      SYMB = SYMB+1
+	   ENDIF
+	ELSEIF (FRTTEX) THEN
+	   IF ((ISTAT(3).AND.'8000'X).EQ.0) THEN	! text feature
+	      CALL LIB$INSV(2,14,2,ISTAT(3))
+	      TEXTB = TEXTB+1
+	   ENDIF
+	ELSE
+	   IF ((ISTAT(3).AND.'C000'X).NE.0) THEN	! other feature
+	      CALL LIB$INSV(0,14,2,ISTAT(3))
+	      OTHB = OTHB+1
+	   ENDIF
+	ENDIF
+C
+C Can now set up the feature code and graphical type in the pack
+	COIPAK(PAKFC) = FC
+	COIPAK(PAKGT) = FRTGT
+C
+C save the FS array for text and symbol drawing routines
+	CALL CPYPAK(2,ISTAT,COIFS)
+C
+C COIPAK(PAKFC) is overwritten by COIFC in FLUSH for composite texts,
+C so set it here for all texts
+	IF (FRTTEX) COIFC = FC
+C
+C output the thing
+	IF (.NOT.USEINP) THEN
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFFS(ISTAT)
+	   CALL IFFSEL(INLUN)
+	ENDIF
+	HADFS = .TRUE.
+	GOTO 20
+C
+C ST - string of coordinates
+70	IF (INF0) THEN
+	   CALL MOAN(MSG_UNEXPENT,IECODE,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+	IF (.NOT.INF) THEN
+	   CALL MOAN(MSG_ENTNOTINF,IECODE,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+	IF (.NOT.HADFS) THEN
+C
+C reject the feature, can't progress with no feature code
+	   CALL MOAN(MSG_NOFS,COIPAK(PAKFSN))
+	   GOTO 125
+	ENDIF
+	CALL EIHRCB_HEAD(CBH)
+	PTS = CBH.NROW
+	ENDS = CBH.FLAGS
+	IF (PTS.LE.0) THEN
+	   CALL MOAN(MSG_STEMPTY,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+C
+C check number of coords for circles (want single ST with 3 points)
+	IF (FRTARC) THEN
+	   IF (HADST) THEN
+	      IF (.NOT.TOOMNY) THEN
+	         CALL MOAN(MSG_TOOMANYST,COIPAK(PAKFSN))
+	         TOOMNY = .TRUE.	! prevent repeated error message
+	      ENDIF
+	      GOTO 20			! ignore the ST
+	   ENDIF
+C
+C so it's the first ST
+C are there too few points
+	   IF (PTS.LT.3) THEN
+	      CALL MOAN(MSG_TOOFEWPTS,COIPAK(PAKFSN))
+	      GOTO 125			! reject it
+	   ENDIF
+C
+C or too many points
+	   IF (PTS.GT.3) THEN
+	      CALL MOAN(MSG_TOOMANYPTS,COIPAK(PAKFSN))
+	      TOOMNY = .TRUE.		! prevent repeated error message
+	      PTS = 3			! truncate to 3 points
+	   ENDIF
+	ENDIF
+C
+C check no. of coords for symbol features
+C want a single ST with one (or possibly two points)
+	IF ((FRTSYM.AND.FRTGT.NE.STRTYP).OR.FRTTEX) THEN
+C So its some sort of symbol or text
+	   IF (HADST) THEN
+	      IF (.NOT.TOOMNY) THEN
+	         CALL MOAN(MSG_TOOMANYST,COIPAK(PAKFSN))
+	         TOOMNY = .TRUE.	! prevent repeated error message
+	      ENDIF
+	      GOTO 20			! ignore the ST
+	   ENDIF
+	   IF ((FRTGT.EQ.UNOTYP.AND.PTS.GT.1).OR.PTS.GT.2) THEN
+	      CALL MOAN(MSG_TOOMANYPTS,COIPAK(PAKFSN))
+	      TOOMNY = .TRUE.		! prevent repeated error message
+	      IF (FRTGT.EQ.UNOTYP) THEN
+	         PTS = 1		! truncate to one point
+	      ELSE
+	         PTS = 2		! all other types to two
+	      ENDIF
+	   ENDIF
+	   IF (PTS.EQ.2) ALIGN = .TRUE.	! its an alignment
+	ENDIF
+C
+C Flush the previous ST if there was such
+	IF (HADST) THEN
+	   CALL FLUSH(1)
+	   IF (.NOT.USEINP) THEN
+	      CALL IFFSEL(INLUN)
+	      MAPCUR = -1			! no output map selected
+	   ENDIF
+	ELSE
+C
+C get the TH out before first ST (and after all ACs hopefully)
+	   IF (HADTH.AND..NOT.USEINP) THEN
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFTH(TXSIZE)
+	      CALL IFFSEL(INLUN)
+	   ENDIF
+	ENDIF
+C
+C generate auxiliary array for symbol strings
+C NB not read coords yet, but GENAUX won't try to use them
+	IF (.NOT.HADST.AND.FRTGT.EQ.STRTYP) THEN
+C
+C GENAUX will produce its own error message if it fails,
+C which is sufficiently disastrous for us to reject the feature
+	   IF (GENAUX(
+     &	 PTS,COIXY(1,2),COIAUX,COIDSC,COIANG,TXSIZE,COIPAK,ISTAT))
+     &				GOTO 125
+	ENDIF
+C
+C If on first ST or this ST starts 'pen up' then
+C see whether a curve feature is a closed loop
+	IF (FRTCUR.AND.((.NOT.HADST).OR.(IAND(ENDS,1).EQ.0))) THEN
+	   OILOOP = LOOPY()
+	ENDIF
+C
+C now we are sure the previous ST has been done, we can transfer
+C ENDS to the common version OIENDS, for the next FLUSH
+C and get location of this ST if editing in-situ
+	IF (USEINP) OIPST = LPOSH
+	OIENDS = ENDS
+C
+C copy points from IFF in maximal chunks to minimise overheads
+	IF (SIMPLE_XY.AND.PTS.LE.200) THEN	! simple ST format
+	   CALL EIHRCB_DATA(RIXY)		! read direct to RIXY
+	ELSE
+	   CALL EIHRCB_DATA(CBD)		! read to scratch
+	ENDIF
+C
+	START = 0
+80	NPTS = MIN0(PTS, 200)
+	IF (SIMPLE_XY) THEN
+	   IF (START.NE.0.OR.PTS.GT.200) CALL VIOMV3(
+     &			CBD.R(START*CBH.NCOL+1), 8*NPTS, RIXY )
+	ELSE
+	   CBOVR = GETATT(RIXY,RINATT,STR_MAX_ATTR+1,
+     &	                  RIATTC,RIATTV,0,START+1,START+NPTS)
+	   FOVR = FOVR.OR.CBOVR
+	ENDIF
+	IF (DO_FLY_TRANS) THEN
+C
+C pass the coordinates through as they are. They will be transformed in
+C FLUSH when required
+	   CONTINUE
+	ELSEIF (ORG(1).NE.0.0.OR.ORG(2).NE.0.0) THEN
+	   CALL ADDORG(ORG,RIXY,NPTS)
+	ENDIF
+	START = START+NPTS
+	PTS = PTS-NPTS
+	DO 100 I = 1,NPTS
+C Probably need to check points here - just pass on for now
+	   CALL ADCORD(RIXY(1,I),RINATT,RIATTC,RIATTV(1,I))
+100	CONTINUE
+	IF (PTS.GT.0) THEN
+C Too many points in the ST
+C Flush out the ones we have done so far
+	   CALL FLUSH(1)
+	   IF (.NOT.USEINP) THEN
+	      CALL IFFSEL(INLUN)
+	      MAPCUR = -1			! no output map selected
+	   ELSE
+C If using input file, then put out warning
+	      CALL NASTY(MSG_TOOBIGST,COIPAK(PAKFSN))
+	   ENDIF
+	   GOTO 80
+	ENDIF
+C
+C mark we've had an ST
+	HADST = .TRUE.
+	GOTO 20
+C
+C EF - end feature
+120	IF (INF0) THEN			! end of dummy feature
+	   INF0 = .FALSE.
+	   GOTO 122
+	ENDIF
+	IF (.NOT.INF) THEN
+	   CALL MOAN(MSG_ENTNOTINF,IECODE,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+C
+	IF (.NOT.HADST) THEN
+	   CALL MOAN(MSG_NOST,COIPAK(PAKFSN))
+	   IF (HADTS) THEN
+	      GOTO 500
+	   ELSE
+	      GOTO 125			! go and delete it
+	   ENDIF
+	ENDIF
+C
+C generate auxiliary array for texts,symbols,circles
+	IF (FRTARC.OR.(FRTSYM.AND.FRTGT.NE.STRTYP).OR.FRTTEX) THEN
+C
+C if just had a TS, then copy it into ISTAT
+	   IF (HADTS) THEN
+	      DO 121, I=1,4
+	         ISTAT(I) = TSTAT(I)
+121	      CONTINUE
+	   ENDIF
+C
+C GENAUX will produce its own error message if it fails,
+C which is sufficiently disastrous for us to reject the feature
+	   IF (GENAUX(
+     &	 NPTS,COIXY(1,2),COIAUX,COIDSC,COIANG,TXSIZE,COIPAK,ISTAT)) THEN
+	      IF (HADTS) THEN
+	         GOTO 500    ! may have to delete partly flushed feature
+	      ELSE
+	         GOTO 125
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C have attributes overflowed?
+	IF (FOVR) CALL MOAN(MSG_ATTLOST,COIPAK(PAKFSN))
+C
+C flush last bit of feature (maybe all of it!)
+C FLUSH will add any necessary RO and TX entries, and the EF
+	CALL FLUSH(2)
+C
+C reselect input
+	IF (.NOT.USEINP) THEN
+	   CALL IFFSEL(INLUN)
+	   MAPCUR = -1			! no output map selected
+	ENDIF
+C
+C leave feature
+122	INF = .FALSE.
+	HADPTR = .FALSE.		! not had pointer
+	CALL PERCENT(PREVPCNT,FIRSTPCNT,.FALSE.)
+C
+C Check for CTRL/C
+	CTRL = HADCTRLC()
+	GOTO 20
+C
+C Abandon current feature
+125	CALL MOAN(MSG_REJFTR,COIPAK(PAKFSN))
+C
+C Step to EF, if not there already
+126	IF (IECODE.NE.'EF') THEN
+	   CALL IFFNXC('EF',IELEN)
+	   IF (IELEN.EQ.-1) GOTO 240
+	ENDIF
+C
+C Remove part feature from output
+	IF (.NOT.USEINP) THEN
+	   CALL IFFSEL(OUTLUN)
+C
+C set end of file back to our pointer to start of feature
+C c.f. IFFDEL but we want to get rid of any leading TC's rather than
+C just move back to the NF
+	   CALL IFFUPP(0,LPOSM,LPOSH,COIPAK(PAKPNF))
+	   CALL IFFSEL(INLUN)
+	ENDIF
+	GOTO 122
+C
+C TC - transmitted comment (or CH - character data)
+C Set our 'start of feature' pointer if not done already
+130	IF (.NOT.HADPTR) THEN
+	   IF (USEINP) THEN
+	      COIPAK(PAKPNF) = LPOSH
+	   ELSE
+	      CALL IFFSEL(OUTLUN)
+	      COIPAK(PAKPNF) = LPOSE
+	      CALL IFFSEL(INLUN)
+	   ENDIF
+	   HADPTR = .TRUE.
+	ENDIF
+	GOTO 25
+C
+240	CALL MOAN(MSG_UNEXPEIFF)
+	GOTO 999
+C
+C EJ - end job
+260	CONTINUE
+C
+C set re-opening position for INSITU map, if not done already
+	IF (USEINP.AND.LPOSFT(MAP).EQ.0) LPOSFT(MAP) = LPOSH
+C
+C set open layer in preparation for re-opening this file
+	MAPOVL(MAP) = OVR
+C
+C set 100% read value
+	IF (.NOT.CTRL) PREVPCNT = 100 
+	GOTO 999
+C
+C EO - end overlay
+265	IF (USEINP) THEN
+	   LPOSFT(MAP) = LPOSH
+	ELSE
+C
+C select output map
+	   CALL SELIF(MAP)
+C
+C set position for new features in this file (in case final layer)
+	   LPOSFT(MAP) = LPOSE
+	   CALL IFFSEL(INLUN)
+	   MAPCUR = -1			! no output map selected
+	ENDIF
+C
+C If there were any trailing TCs in the layer, then start of feature
+C pointer will point to first one. Cancel HADPTR here, otherwise
+C pointer will be used for first feature in next layer.
+	HADPTR = .FALSE.
+C
+C If here after CTRL/C, then join EJ
+	IF (CTRL) GOTO 260
+	GOTO 20
+C
+C EM - end map
+270	CONTINUE
+C
+C set re-opening position for INSITU map, if not done already
+	IF (USEINP.AND.LPOSFT(MAP).EQ.0) LPOSFT(MAP) = LPOSH
+	GOTO 20
+C
+C TX - text string
+320	IF (.NOT.FRTTEX) THEN
+	   CALL MOAN(MSG_UNEXPTX,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+	IF (IELEN.EQ.0) THEN
+            IF (.NOT.HADTS) THEN
+               CALL MOAN(MSG_TEXTTOOSHORT)
+               GOTO 125	  		! go and delete it
+            ELSE
+               COIBUF(1) = 32		! replace with space
+               COILEN = 1
+            ENDIF
+         ELSE
+            IELEN = MIN(IELEN,(LNFAKE+1)/2)		! truncate
+            CALL EIHR(COIBUF,IELEN,1)
+            COILEN = IELEN*2
+C
+C Remove any trailing null
+            IF (COIBUF(COILEN).EQ.0) COILEN = COILEN-1
+            COILEN = MIN(COILEN,LNFAKE)
+	ENDIF
+	HADTX = .TRUE.
+	GOTO 20
+C
+C TH - obtain text size from it (output before first ST)
+350	CALL EIHRI(TXSIZE,1,1)		! longword cleared above
+	HADTH = .TRUE.
+	GOTO 20
+C
+C NO - new overlay
+370	CALL EIHRI(OVNO,1,1)
+	IF (MAPINS(MAP).AND.IELEN.LT.4) CALL MOAN(MSG_NOEOPTR,OVNO)
+	HADNO = .TRUE.
+	OVR = FNDOVR(OVNO)		! returns internal number
+	IF (OVR.LT.0) THEN		! not found
+	   OVR = -OVR-2			! convert to new internal number
+	   IF (OVR.LT.0) THEN
+	      CALL MOAN(MSG_TOOMANYLAY)
+	   ELSE
+	      OVNOS(OVR) = OVNO		! allocate new one
+	      OVSEL(OVR) = .TRUE.	! selected
+	   ENDIF
+	ENDIF
+C
+C check if layer is a REGISTRATION LAYER (ignore for max FSN purposes)
+	OOKFLG = .TRUE.
+	DO 375, I=1,NOIGNL
+	   IF (IGNLAY(I).EQ.OVNO) THEN
+	      OOKFLG = .FALSE.
+	      GOTO 376
+	   ENDIF
+375	CONTINUE
+C
+C Set up internal number in pack
+376	COIPAK(PAKOVL) = OVR
+C
+	IF (USEINP) THEN
+C
+C Remember position and number of overlay
+	   LPOSNO(MAP) = LPOSH
+	   MAPOVL(MAP) = OVR
+	ELSE
+C
+C Output the NO (after terminating previous layer if necessary)
+	   CALL SELIF(MAP)
+	   CALL STRTOV(OVR)
+	   CALL IFFSEL(INLUN)
+	   MAPCUR = -1			! no output map selected
+	ENDIF
+	GOTO 20
+C
+C RO - symbol or text rotation
+390	IF (FRTTEX.OR.(FRTSYM.AND.FRTGT.NE.UNOTYP).AND..NOT.ALIGN) THEN
+	   CALL EIHRR(COIANG,1,1)
+	   HADRO = .TRUE.
+	ELSE
+	   CALL MOAN(MSG_UNEXPENT,IECODE,COIPAK(PAKFSN))
+	ENDIF
+	GOTO 20
+C
+C TS - text status
+400	IF (INF0) THEN
+	   CALL MOAN(MSG_UNEXPENT,IECODE,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+C
+	IF (.NOT.INF) THEN
+	   CALL MOAN(MSG_ENTNOTINF,IECODE,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+C
+	IF (.NOT.FRTTEX) THEN
+	   CALL MOAN(MSG_UNEXPTS,COIPAK(PAKFSN))
+	   GOTO 20
+	ENDIF
+C
+	IF (.NOT.HADFS) THEN
+C
+C reject the feature, can't progress with no feature code
+	   CALL MOAN(MSG_NOFS,COIPAK(PAKFSN))
+	   GOTO 125
+	ENDIF
+C
+	IF (.NOT.COMOPT) THEN
+	   CALL MOAN(MSG_DISABLEDCOM,COIPAK(PAKFSN))
+	   GOTO 125
+	ENDIF
+C
+	IF (HADTS.AND..NOT.HADST) THEN
+	   CALL MOAN(MSG_NOST,COIPAK(PAKFSN))
+	   GOTO 500
+	ENDIF
+C
+C flush out feature up to this TS, if it is not the first
+C FLUSH will add any necessary RO and TX entries
+C GENAUX will produce its own error message if it fails,
+C which is sufficiently disastrous for us to reject the feature
+	IF (HADST) THEN
+	   IF (GENAUX(
+     &	 NPTS,COIXY(1,2),COIAUX,COIDSC,COIANG,TXSIZE,COIPAK,TSTAT)) THEN
+	      IF (HADTS) THEN
+	         GOTO 500    ! may have to delete partly flushed feature
+	      ELSE
+	         GOTO 125
+	      ENDIF
+	   ENDIF
+C
+	   CALL FLUSH(1)
+	   IF (.NOT.USEINP) THEN
+	      CALL IFFSEL(INLUN)
+	      MAPCUR = -1			! no output map selected
+	   ENDIF
+	ENDIF
+C
+C read the relevant bits
+	TSTAT(3) = 0
+	TSTAT(4) = 0
+	CALL EIHRI(TSTAT,MIN0(IELEN,4),1)
+	GOTO 430
+C
+C when problem with TSTAT, then default to ISTAT
+410	DO 420, I= 1,4
+	   TSTAT(I) = ISTAT(I)
+420	CONTINUE
+C
+430	TFC = TSTAT(1)			! convert to long
+C
+	IF (FRTFND(TFC)) THEN
+	   CALL MOAN(MSG_BADTC,TFC,COIPAK(PAKFSN))
+	   CALL INFORM(MSG_DEFAULTFS)
+	   GOTO 410
+	ENDIF
+C
+	IF (.NOT.FRTTEX) THEN
+	   CALL MOAN(MSG_TCNOTTEXT,TFC,COIPAK(PAKFSN))
+	   CALL INFORM(MSG_DEFAULTFS)
+	   GOTO 410
+	ENDIF
+C
+C text bits in the third word of TSTAT?
+	IF (FRTTEX) THEN
+	   IF ((TSTAT(3).AND.'8000'X).EQ.0) THEN	! text feature
+	      CALL LIB$INSV(2,14,2,TSTAT(3))
+	      TEXTB = TEXTB+1
+	   ENDIF
+	ENDIF
+C
+C Can now set up the feature code and graphical type in the pack
+	COIPAK(PAKFC) = TFC
+C
+C save this as the FS array for text and symbol drawing routines
+	CALL CPYPAK(2,TSTAT,COIFS)
+C
+C output the TS
+	IF (.NOT.USEINP) THEN
+	   CALL IFFSEL(OUTLUN)
+	   COIPAK(PAKPST) = LPOSE	! special case for composite text
+	   CALL IFFTS(TSTAT)
+	   CALL IFFSEL(INLUN)
+	   MAPCUR = -1			! no output map selected
+	ELSE
+	   COIPAK(PAKPST) = LPOSH
+	ENDIF
+C
+C now had TS - treat like an NF
+C
+	IF (HADTS) THEN
+	   HADTX = .FALSE.
+	   TXSIZE = 0
+	   HADRO = .FALSE.
+	   COIANG = 0.0
+	   HADST = .FALSE.
+	   TOOMNY = .FALSE.
+	   COIIND = 1		! empty buffer
+	   COILEN = 0
+	ENDIF
+	HADTS = .TRUE.
+	COMTXT = .TRUE.
+C
+	GOTO 20
+C
+C delete feature, which has been partly flushed
+C
+C This is only required when dealing with composite text, and an
+C ST is missing, but others have been already flushed out. We
+C need to call FLUSH(2) to complete feature. This will be at the same
+C point as last ST, but as FLUSH(1) has removed the origin, it must be
+C added again, so that FLUSH(2) can remove it!
+C
+500	CONTINUE
+	CALL MOAN(MSG_REJFTR,COIPAK(PAKFSN))
+	IF (.NOT.COIFST) THEN		! something has been flushed
+C
+	   COILEN = 0			! ignore this text
+	   COIIND = 2			! use last point
+C
+	   IF (DO_FLY_TRANS) THEN
+	      COIXY(1,2) = COPY_COIXY(1,2)
+	      COIXY(2,2) = COPY_COIXY(2,2)
+	   ELSEIF (USE_ORG) THEN
+	      CALL ADDORG(ORGXY,COIXY(1,1),COIIND)	! add origin of map
+	   ENDIF
+C
+	   CALL FLUSH(2)
+C
+	   IF (OIDRAW) CALL LDSG(COIPAK,.TRUE.)	! remove from screen
+C
+C if using input file, then just remove packs, otherwise remove
+C feature also
+C
+	   IF (USEINP) THEN
+	      CALL SCNFTR(COIPAK(PAKLNK),DELPAK)
+	      NOFEAT=NOFEAT-1
+	   ELSE
+	      CALL DELFT(COIPAK,LPOSE)
+	   ENDIF
+	   LASPAK = 0		! no candidate for search last
+C
+C get onto EF
+	   CALL IFFSEL(INLUN)
+	   IF (IECODE.NE.'EF') THEN
+	      CALL IFFNXC('EF',IELEN)
+	      IF (IELEN.EQ.-1) GOTO 240
+	   ENDIF
+	   GOTO 122
+	ELSE
+	   GOTO 126
+	ENDIF
+	GOTO 20
+C
+999	CALL PERCENT(PREVPCNT,FIRSTPCNT,.TRUE.)
+C
+C write report
+C
+	IF (CTRL) THEN
+	   CALL INFORM(MSG_INPABORT,MAP+1)
+	   IF (MAPINS(MAP)) CALL INFORM(MSG_EXIT)
+	ENDIF
+C
+	IF (TEXTB.GT.0.OR.SYMB.GT.0) THEN
+	   IF (TEXTB.GT.0) CALL MOAN(MSG_NOTEXTBIT,TEXTB)
+	   IF (SYMB.GT.0)  CALL MOAN(MSG_NOSYMBIT,SYMB)
+	   CALL LEARN(MSG_BITADDED)
+	ENDIF
+	IF (OTHB.GT.0) THEN	
+	   CALL MOAN(MSG_SYTEXTBIT,OTHB)
+	   CALL LEARN(MSG_BITCLEARED)
+	ENDIF
+	IF (TEXTB+SYMB+OTHB.GT.0) CALL LEARN(MSG_WRONGFRT)
+	TIMING(TIMREAD) = SECNDS(TIMING(TIMREAD))
+	FROM_IFFBDY = .FALSE.
+	RETURN
+	END

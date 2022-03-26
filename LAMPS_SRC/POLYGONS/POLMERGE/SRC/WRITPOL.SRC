@@ -1,0 +1,488 @@
+C
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	INTEGER*4 FUNCTION WRITPOL(POLY_INDX,NUM_SEGS_WRITTEN)
+C
+***	MODULE	WRITPOL
+***	IDENT	12MY92
+C
+	IMPLICIT NONE
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+C argument
+	INTEGER*4	POLY_INDX		! polygon to work on
+	INTEGER*4	NUM_SEGS_WRITTEN	!number of segments written to
+C
+	INTEGER*4	ACTUAL_WRITPOL
+C
+C	........................................................................
+C
+	WRITPOL = ACTUAL_WRITPOL(POLY_INDX,NUM_SEGS_WRITTEN,
+     &			POLMAX,TABMAX,POLNEST_MAX, PARTS_MAX,
+     &			%VAL(PTR$_POLY_PARTS),
+     &			%VAL(PTR$_POLY_START),
+     &			%VAL(PTR$_SEGTAB)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	INTEGER*4 FUNCTION ACTUAL_WRITPOL(POLY_INDX,NUM_SEGS_WRITTEN,
+     &		POLMAX,TABMAX,POLNEST_MAX,PARTS_MAX,
+     &		POLY_PARTS,
+     &		POLY_START,
+     &		SEGTAB
+     &	)
+C
+
+***	MODULE	ACTUAL_WRITPOL
+***	IDENT	07OC87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    02-Jul-1987
+C   Much of it stolen from IFJ
+C
+C Writes features in polygon to output file.
+C 
+C
+	IMPLICIT NONE
+C
+C Parameters
+C
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNPOLMERGE:POLMERGEMSG.PAR'
+	INCLUDE 	'LSL$CMNPOLYGONS:POLYGONSMSG.PAR'
+	INCLUDE		'($STSDEF)'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+C
+	INCLUDE         'LSL$CMNPOLYGONS:HIT.CMN'
+	INCLUDE         'LSL$CMNPOLMERGE:IFJ.CMN'
+	INCLUDE         'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE         'LSL$CMNIFF:IFFJUN.CMN'
+C
+C argument
+	INTEGER*4 POLY_INDX	! polygon to work on
+	INTEGER*4 NUM_SEGS_WRITTEN	!number of segments written to
+C
+	INTEGER*4	POLMAX
+	INTEGER*4	TABMAX
+	INTEGER*4	POLNEST_MAX
+	INTEGER*4	PARTS_MAX
+C
+	INTEGER		POLY_PARTS(2,PARTS_MAX)
+	INTEGER		POLY_START(3,POLMAX)
+	INTEGER*4	SEGTAB(2,TABMAX)
+C				! IFJ file
+C Local Varaiables
+	REAL JCPOSF(2),JCPOSL(2) ! hold position of 1st, 2nd jncs in ftr
+	INTEGER   SEGPTR         ! pointer to segment table
+	INTEGER   ISQ		! internal sequence number from NF.
+	INTEGER   CODE		! AC code
+	INTEGER	  IREV		! if -ve then reverse segment
+	INTEGER   FSN_USED(FSN_BITMAP_MAX) !flag used features bit map
+	INTEGER   JBPOSN	! address of input file JB
+	INTEGER   JPPOSN	! address of input file JP
+	INTEGER	  IERR		!function return
+	INTEGER   SAVREV	!saved direction 
+	INTEGER   SAVPOLY1,SAVPOLY2 ! saved polygon indices
+	INTEGER   POLY1,POLY2   ! polygon indices
+	INTEGER   INDX
+	INTEGER   START_POS     ! start position of outp str 
+	                        ! within POLY_BUF
+	INTEGER   CUR_POS       ! start pos of input string within
+C			        ! POLY_BUF
+	INTEGER   SAVARM	! maximum no of arms encountered
+	INTEGER   FIRSTPTR	! pointer to first seg in poly
+	INTEGER   LASTPTR 	! pointer to actual last seg output
+	INTEGER   NCHS,NOCHS	! number of chars in text buffer
+	INTEGER   FSNNUM        ! feature serial number
+	INTEGER   THNUM		! TH value
+	INTEGER	  JPK		! counter for JPs in ftr.
+	INTEGER*2 OFFSET	! offset of jnct. in i/p JB
+	INTEGER*2 IECODE,IELEN
+	INTEGER*2 NPTS,IENDS
+	INTEGER*2 TYPE		! AC type
+	INTEGER*2 MAXARMF,MAXARML ! Max arms in 1st & last ftr. junct.
+	INTEGER*2 FSNUM		!feature status
+	INTEGER*2 NEWFSNUM      !fisrt read of FS
+	INTEGER*2 START_READ    ! string real to start reading on
+	BYTE	  CHBUF(255)	! to hold AC text
+	BYTE	  OTHBUF(255)	! to hold AC text
+	LOGICAL	  FIRST_SEG	! is this the first segment of the poly
+	LOGICAL	  HADAC4	!had an ac 4 for this feature
+	LOGICAL	  HADAC5	!had an ac 5 for this feature
+	LOGICAL   SAME_POLIES   ! same poly indices as prev seg
+	LOGICAL   DIFFERENT	! sequential poly codes diff
+	LOGICAL   HADTH         ! had a TH entry
+	LOGICAL   STARTED       ! already started a feature
+C
+C functions
+	LOGICAL	  BBCS		! sets flag in bitmap
+	LOGICAL	  EXT1V		! finds out if bit set in bit map
+	INTEGER*4 GET_ACTXT     ! gets AC text of neighbouring poly
+	LOGICAL   CHECK_SAME    ! checks if poly indices are same
+	LOGICAL	  FLUSH_OUT     ! flushes output feature
+C ......................................................................
+C
+	ACTUAL_WRITPOL=%LOC(SS$_NORMAL)
+C
+C Initialise.
+	HTPOSH=0
+	HTPOSJ=0
+	FIRST_SEG  = .TRUE.
+	HADAC4 = .FALSE.
+	HADAC5 = .FALSE.
+	POLY_PTS = 0
+	SAVARM = 0
+	HADTH = .FALSE.
+	STARTED = .FALSE.
+C
+C get the AC code for the polygon
+	FIRSTPTR = IABS(POLY_START(1,POLY_INDX))
+	CALL IFFSEL(INLUN)
+	ACTUAL_WRITPOL = 
+     &	      GET_ACTXT(FIRSTPTR,POLY_INDX,.TRUE.,CHBUF,NCHS,.FALSE.)
+	IF ((IBITS(ACTUAL_WRITPOL,0,3).EQ.STS$K_SEVERE)) GOTO 150
+	IF(CHBUF(NCHS).EQ.0)NCHS=NCHS-1
+C
+C first position within output string buffer
+	START_POS = POLY_BUF_MAX/2 + 1
+C
+	NUM_SEGS_WRITTEN=0
+C
+C start outputting polygon on first segment which has different 
+C polygons on either side from the first one
+C so first find that segment
+	CALL GET_SECOND(POLY_INDX,LASTPTR)
+C	
+	SEGPTR=LASTPTR
+	IF (SEGPTR .EQ. 0) SEGPTR = FIRSTPTR
+C
+C Store sign of segment pointer. If negative we will have to
+C reverse this segment for contiguous polygon boundary formation
+10	IREV=ISIGN(1,POLY_PARTS(1,SEGPTR))
+C
+C find the polies on either side
+C if their same as before then we don't create a new feature for
+C this input feature
+	FSNNUM = SEGTAB(1,ABS(POLY_PARTS(1,SEGPTR)))
+	POLY1 = LR_SEGMENT(1,FSNNUM)
+	POLY2 = LR_SEGMENT(2,FSNNUM)
+	IF (FIRST_SEG) THEN
+	   SAME_POLIES = .FALSE.
+	   SAVREV = IREV
+	   SAVPOLY1 = POLY1
+	   SAVPOLY2 = POLY2
+	ELSE
+	   SAME_POLIES = CHECK_SAME(POLY1,POLY2,SAVPOLY1,SAVPOLY2)
+C
+	   IF (SAME_POLIES) THEN
+C
+C check there's not a horrible single node neighbour
+	     IF (POLY1 .EQ. POLY_INDX) THEN
+	        INDX = POLY2
+	     ELSE
+	        INDX = POLY1
+	     ENDIF
+	     CALL CHECK_NODE_NEIGH
+     &       (INDX,FSNNUM,DIFFERENT)
+	     IF ( DIFFERENT) THEN
+	        SAME_POLIES =.FALSE.
+	     ENDIF
+	   ENDIF
+	   IF (.NOT. SAME_POLIES) THEN
+	      SAVPOLY1 = POLY1
+	      SAVPOLY2 = POLY2
+	      SAVREV = IREV
+	   ENDIF
+	ENDIF
+C
+C check to see that this segment hasn't already been done
+	IF (EXT1V(SEGTAB(1,ABS(POLY_PARTS(1,SEGPTR))),FSN_USED))THEN
+	    GOTO 120
+	ENDIF
+C
+	HADAC4 = .FALSE.
+	HADAC5 = .FALSE.
+C
+C Jump to current segment of the polygon (IFF address stored
+C in /TABLES/SEGTAB)
+	CALL IFFSEL(INLUN)
+	CALL IFFPKE(IECODE,IELEN,
+     &				SEGTAB(2,ABS(POLY_PARTS(1,SEGPTR))))
+	IF (IELEN.LE.-1) GOTO 140	! eof?
+	IF (IECODE.NE.'NF') THEN
+	   ACTUAL_WRITPOL=PMERGE__LOST
+	   CALL LSL_PUTMSG(ACTUAL_WRITPOL,IECODE)
+	   GOTO 150
+	ENDIF
+	CALL EIHRI(NFNUM,1,1)
+	NFNUM = IAND(NFNUM,65535)
+C
+C get each entry in this feature and copy it 
+20	CALL IFFSEL(INLUN)
+30	CALL IFFNXT(IECODE,IELEN)
+40	IF (IELEN.LE.-1)GOTO 140
+	IF (IECODE.EQ.'FS') GOTO 100
+	IF (IECODE.EQ.'ST') GOTO 50
+	IF (IECODE.EQ.'JP') GOTO 90
+	IF (IECODE.EQ.'EF') GOTO 70
+	IF (IECODE.EQ.'AC') GOTO 80
+	IF (IECODE.EQ.'TH') GOTO 110
+	CALL EIHCPY(OUTLUN)
+	GOTO 30
+C
+C ST - need to buffer up ST points and positions of JP entries
+50	CALL IFFSEL(INLUN)
+	CALL EIHRS(NPTS,IENDS)
+C
+C Loop through all STs in this feature until the 2nd end point is known.
+C First read the last point in the 1st ST.
+	START_READ = 1
+	CUR_POS  = START_POS + POLY_PTS
+	IF (SAME_POLIES) THEN
+	   NPTS = NPTS - 1
+	   IF (IREV .GT. 0) THEN
+	      START_READ = 5
+	   ENDIF
+	   IF (SAVREV .LT. 0) THEN
+C
+C in this case - we must decrement start position within string
+C buffer because previous segment had its adjacent point to this
+C string in the first position
+	      START_POS = START_POS - NPTS
+	      CUR_POS = START_POS
+	   ENDIF
+	ENDIF
+60	CALL EIHRR(POLY_BUF(1,CUR_POS),NPTS*2,START_READ)
+	   POLY_PTS= POLY_PTS+NPTS
+C
+	   IF (IREV .NE. SAVREV.AND. SAME_POLIES) THEN 
+C
+C must reverse the coordinates
+	      IF(SAVREV .LT. 0) THEN
+	         CALL REVERSE(POLY_BUF(1,START_POS),NPTS)
+	      ELSE     
+	         CALL REVERSE(POLY_BUF(1,START_POS+POLY_PTS-NPTS),NPTS)
+	      ENDIF
+	   ENDIF
+	   CALL IFFNXT(IECODE,IELEN)	! get next IFF entry
+	   IF (IELEN.EQ.-1) GO TO 140	! end of file ?
+	   IF (IECODE.NE.'ST') GO TO 40	
+	   CALL EIHRS(NPTS,IENDS)
+	   START_READ = 1
+	   IF (SAVREV .LT. 0 .AND. SAME_POLIES) THEN
+	        START_POS = START_POS -NPTS
+	      CUR_POS = START_POS
+	   ELSE
+	      CUR_POS  = START_POS + POLY_PTS
+	   ENDIF
+	GOTO 60
+C
+C EF - output later
+70	FIRST_SEG = .FALSE.
+C 
+C flag as used
+	 CALL BBCS(NFNUM,FSN_USED)
+	 GOTO 120
+C
+C AC - copy unless its a 4 or 5 (L or R) codes.
+80	IF (SAME_POLIES) GOTO 20         ! ignore if same output feature
+	CALL EIHR(TYPE,1,1)
+	IF ((TYPE .NE. 4).AND. (TYPE.NE. 5))THEN
+	    CALL LSL_PUTMSG(PMERGE__ACIGN,NFNUM)
+	    GOTO 20			 ! ignore non LR acs
+	ENDIF
+	CALL EIHR(CODE,2,2)	
+C
+C the left code (or right if seg is reversed) has already been obtained
+C this is the polygon code this poly
+C The right code(or left if the segment is reversed must be obtained
+C with reference to the neighbouring polygon. This is done in GET_ACTXT
+	IF (TYPE .EQ. 4) THEN
+	   IF (HADAC4) THEN
+C
+C only allow one AC 4
+	      CALL LSL_PUTMSG(PMERGE__MULTAC4,NFNUM)
+	      GOTO 20
+	   ENDIF
+	   HADAC4 = .TRUE.   
+	   IF (IREV .GT. 0) THEN
+C
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFAC(TYPE,CODE,CHBUF,NCHS)
+	   ELSE
+	      CALL IFFSEL(INLUN)
+	      CALL EIHMK(1)		!mark current pos
+	      ACTUAL_WRITPOL = 
+     &	      GET_ACTXT(SEGPTR,POLY_INDX,.FALSE.,OTHBUF,NOCHS,.FALSE.)
+	      IF ((IBITS(ACTUAL_WRITPOL,0,3).EQ.STS$K_SEVERE)) GOTO 150
+	      CALL IFFRWM		!get back to mark
+	      IF(OTHBUF(NOCHS).EQ.0)NOCHS=NOCHS-1
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFAC(TYPE,CODE,OTHBUF,NOCHS)
+	   ENDIF
+C
+C-----------------------------------------------------------------------
+	ELSE				!AC 5
+	   IF (HADAC5) THEN
+C
+C only allow one AC 5
+	      CALL LSL_PUTMSG(PMERGE__MULTAC5,NFNUM)
+	      GOTO 20
+	   ENDIF
+	   HADAC5 = .TRUE.   
+	   IF(IREV .LT. 0) THEN
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFAC(TYPE,CODE,CHBUF,NCHS)
+	   ELSE
+	      CALL IFFSEL(INLUN)
+	      CALL EIHMK(1)		!mark current pos
+	      ACTUAL_WRITPOL = 
+     &	      GET_ACTXT(SEGPTR,POLY_INDX,.FALSE.,OTHBUF,NOCHS,.FALSE.)
+	      IF ((IBITS(ACTUAL_WRITPOL,0,3).EQ.STS$K_SEVERE)) GOTO 150
+	      CALL IFFRWM		!get back to mark
+	      IF(OTHBUF(NOCHS).EQ.0)NOCHS=NOCHS-1
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFAC(TYPE,CODE,OTHBUF,NOCHS)
+	   ENDIF
+C
+C----------------------------------------------------------------------
+	ENDIF
+	GOTO 20
+C.................................................................
+C
+C JP - Junction pointer
+C Read the position and offset of the JB containing this junction,
+C jump to it and extract the junction (X,Y) position and the number
+C of arms. We may as well use this input file information rather than
+C keep jumping about and having to guess the possible number of arms
+C in the junction!
+90	JPK=JPK+1
+	IF (JPK .EQ. 3) JPK = 2
+	JPPOSN=LPOSH			! remember where we are
+	CALL EIHRL(JBPOSN,1,1)		! read JB position
+	CALL EIHRI(OFFSET,1,3)		! read junction offset
+	IF (JPK.EQ.1) THEN		! first JB in ftr?
+	   CALL IFJPKJ(JCPOSF(1),JCPOSF(2),MAXARMF,JBPOSN,OFFSET)
+	   SAVARM = MAXARMF
+	ELSE				! no - second
+	   CALL IFJPKJ(JCPOSL(1),JCPOSL(2),MAXARML,JBPOSN,OFFSET)
+	ENDIF
+	IF (MAXARML .GT. SAVARM) SAVARM = MAXARML
+	IF (SAME_POLIES) THEN
+C
+C can't be sure about maximum no of junctions when concatenating 
+C features so make it the maximum encountered
+	   MAXARML = SAVARM
+	   MAXARMF = SAVARM
+	ENDIF
+	CALL IFFPKE(IECODE,IELEN,JPPOSN)! back to remembered JP posn.
+	IF (IECODE.NE.'JP'.OR.IELEN.LT.0) GOTO 130
+	GOTO 20
+C
+C FS - feature status its here that we do the output of the previous 
+C feature because can only concatenate features if feature codes
+C are the same.
+100	CALL EIHRI(NEWFSNUM,1,1)
+	IF (.NOT. SAME_POLIES.OR. (FSNUM .NE. NEWFSNUM)) THEN
+C
+C output the rest of the previous feature 
+	   IF (.NOT. FIRST_SEG.AND. STARTED) THEN
+	        STARTED = .FALSE.
+	        IF (.NOT.FLUSH_OUT(MAXARMF,MAXARML,
+     &	      START_POS))GOTO 130
+	   ENDIF
+C
+C reinitialise feature logicals
+	   JPK =0 
+	   ISQ = 0
+	   POLY_PTS = 0
+	   NUM_SEGS_WRITTEN = NUM_SEGS_WRITTEN +1
+	   HADTH = .FALSE.
+C
+	   CALL IFFSEL(OUTLUN)
+C
+C output NF and FS for this feature 
+	   CALL IFFNF(NFNUM,ISQ)
+	   STARTED = .TRUE.
+C
+	   CALL IFFSEL(INLUN)
+C copy the FS
+	   CALL EIHCPY(OUTLUN)
+	   SAME_POLIES = .FALSE.
+	   START_POS = POLY_BUF_MAX/2 + 1
+	   FSNUM = NEWFSNUM
+	   SAVARM = 0
+	ENDIF
+	GOTO 20
+C
+110	THNUM =0
+	IF (.NOT. HADTH) THEN
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFTH(THNUM)
+	ENDIF
+	HADTH = .TRUE.
+	GOTO 20
+C.................................................................
+C
+C Get pointer to next segment in polygon
+120	SEGPTR=POLY_PARTS(2,SEGPTR)
+C
+C Have we finished the polygon? If not get next segment forming the
+C polygon and add its coordinates into POLY_BUF
+	IF (SEGPTR .EQ. LASTPTR) THEN 
+ 	   IF (STARTED) THEN
+	     IF(.NOT.FLUSH_OUT(MAXARMF,MAXARML,
+     &	      START_POS))GOTO 130
+	   ENDIF
+	   GOTO 150			! return
+	ENDIF
+C
+	IF(SEGPTR.EQ.0)THEN
+C end of polygon so now do the first segment
+	   SEGPTR = FIRSTPTR
+	ENDIF
+C
+	GOTO 10
+C ......................................................................
+130	CALL LSL_PUTMSG(PMERGE__UNEXPENTJP,IECODE,NFNUM)
+	ACTUAL_WRITPOL = PMERGE__UNEXPENTJP
+	GOTO 150
+C
+C Unexpected end of file
+140	ACTUAL_WRITPOL=PMERGE__UNEXPEOF
+	CALL LSL_PUTMSG(ACTUAL_WRITPOL,IN_FILE(:IN_LEN))
+C
+150	RETURN
+	END

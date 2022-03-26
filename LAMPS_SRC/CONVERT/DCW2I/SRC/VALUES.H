@@ -1,0 +1,6 @@
+#define	MAXSHORT		32767
+#define	MAXINT			2147483647
+#define	MAXLONG			2147483647
+#define	MAXFLOAT		1.7E38
+#define L_UNDEFINED	       -2147483647
+#define S_UNDEFINED  	       -32767

@@ -1,0 +1,276 @@
+	LOGICAL FUNCTION IFFBDY(FINISHED,NF,NEW_FEATURE)
+C
+***	MODULE	IFFBDY
+***	IDENT	11AU99
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	MD (for origin offset) now read in READIN,
+C	new ENABLE/DISABLE INVERSE and DATUM commands	TJH 21-Dec-1988
+CMOD	Now operates at input revision level 1 (CB's)	TJH 26-Jul-1988
+CMOD 	Now traps illegal features containing STs 
+C	and ZSs						TJH 05-Jul-1988
+C	Created 					TJH 28-Jul-1987
+C
+C Read-in strings from IFF file and buffers then up in /COORDS/ for
+C transfer into the TRIANG box structure.
+C
+C Function returns TRUE if succesful, otherwise FALSE
+C 
+	IMPLICIT NONE
+C
+C Arguments (out):
+	INTEGER	  NF(2)		! Features FSN and internal seq. #
+	LOGICAL	  FINISHED	! finished file?
+	LOGICAL	  NEW_FEATURE	! started a new ftr or just within one?
+C
+C W/s
+	LOGICAL	  AC3HT		! .NOT. AC2HT
+	INTEGER*2 ACTYPE	! type of AC
+	INTEGER*2 LAYER		! layer number
+	INTEGER*2 FC		! feature code
+	LOGICAL	  HAD_MATCH	! .T. if match found in bitmap
+	LOGICAL	  HADLEF	! .T. if had LHS height for cliff
+	LOGICAL	  HADRIG	! .T. if had RHS height for cliff
+	INTEGER	  I		! loop variable
+	INTEGER*2 IELEN,IECODE	! type and length of current IFF entry
+	INTEGER   LONG          ! 32 bits
+	INTEGER*2 NPTS,IENDS	! ST size, pen control
+	LOGICAL	  OK		! for error reporting
+	INTEGER*2 WORD		! 16 bits
+	INTEGER	  NORMAL_XYZCOL(3) ! for extracting X,Y and Z from CBD
+	INTEGER	  CLIFF_XYZCOL(4) ! for extracting X,Y and Z from CBD
+	LOGICAL	  IGNORE_FEATURE  ! ignore this feature?
+C
+C Parameters
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNTRIANG:TRIANGMSG.PAR'
+	INCLUDE 'LSL$CMNIFF:IFFMSG.PAR'
+C
+C Common blocks
+	INCLUDE 'LSL$CMNTRIANG:CONTRL.CMN'
+	INCLUDE 'LSL$CMNTRIANG:COORDS.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFSTR.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE 'LSL$CMNTRIANG:SELECTIONS.CMN'
+C
+C IFF CB structure definition:
+	INCLUDE   'LSL$CMNIFF:CB.STR'
+C
+	RECORD	/IFF_CBH/CBH	! CB header
+	RECORD	/IFF_CBD/CBD	! CB data
+C
+C Functions:
+	LOGICAL		BITMATCH	! test for match in bitmap
+	LOGICAL		FEATURE_TYPE	! determines type of feature
+	LOGICAL		FEATURE_CHECKS	! checks feature's attributes
+C
+C ......................................................................
+C
+C
+C Fill array of CB column headers
+	NORMAL_XYZCOL(1) = IFF_C_X
+	NORMAL_XYZCOL(2) = IFF_C_Y
+	NORMAL_XYZCOL(3) = IFF_C_Z
+	CLIFF_XYZCOL(1) = IFF_C_X
+	CLIFF_XYZCOL(2) = IFF_C_Y	
+	CLIFF_XYZCOL(3) = 80		! cliff left
+	CLIFF_XYZCOL(4) = 81		! cliff right
+C
+	IFFBDY=.TRUE.			! assume success
+	AC3HT=.NOT.AC2HT		! for heights in type 3 ACs
+	FINISHED=.FALSE.		! not had end of file yet
+C
+C Main loop
+10	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.LE.-1) GOTO 120	! unexpected end of file?
+	IF (IECODE.EQ.'NF') GOTO 60 	! new feature
+	IF (IECODE.EQ.'FS') GOTO 30	! feature status
+	IF (IECODE.EQ.'AC') GOTO 40	! ancillary code
+	IF (IECODE.EQ.'EF') GOTO 110	! end of feature
+	IF (IECODE.EQ.'CB') GOTO 70	! coordinate string
+	IF (IECODE.EQ.'NO') GOTO 50	! end of layer
+	IF (IECODE.EQ.'EJ') THEN	! tidy end of file?
+	   FINISHED=.TRUE.
+	   GOTO 140
+	ENDIF	  
+	GOTO 10
+C
+C ......................................................................
+C Waste feature here if FEATURE_IGNORE is set by FEATURE_CHECKS
+20	CALL IFFNXC(%REF('EF'),IELEN)
+	IF (IELEN.LE.-1) GOTO 120	! error or eof
+	GOTO 10
+C
+C ......................................................................
+C FS - feature code
+30	CALL EIHRI(FC,1,1)
+C
+C Check that we are to use features with this FC
+	OK=BITMATCH(USEFC,FC,HAD_MATCH)
+	IF (.NOT.OK) GOTO 130
+	IF (.NOT.HAD_MATCH) THEN	! skip  feat.?
+	   CALL IFFNXC(%REF('EF'),IELEN)! yes, let's waste it.
+	   IF (IELEN.LE.-1) GOTO 120	! error or eof
+	   IF (DIAG) THEN
+	      CALL EXPAND('Feature code %^W%N has been DESELECT''ed',FC)
+	      CALL APPEND(' - excluding feature with FSN %^L%N (%N)',
+     &							NF(1),NF(2))
+	      CALL TTWLIN
+	   ENDIF
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C AC (ancillary code)
+40	CALL EIHRI(ACTYPE,1,1)
+	IF (ACTYPE.EQ.2.AND.AC2HT) THEN 
+	   CALL EIHRL(LONG,1,2)		! read the long word height
+	   ZVAL=FLOAT(LONG)   		! force it to be real
+	   HADAC2=.TRUE.     		! note that we have had an AC
+	ELSE IF(ACTYPE.EQ.3.AND..NOT.AC2HT) THEN
+	   CALL EIHRR(ZVAL,1,2)		! read the ht.
+	   HADAC3=.TRUE.       		! note that we have had an AC
+	ELSE IF(ACTYPE.EQ.80) THEN
+	   CALL EIHRR(ZLEFT,1,2)	! read the ht.
+	   HADLEF=.TRUE.       		! note we have a LHS cliff AC
+	ELSE IF(ACTYPE.EQ.81) THEN
+	   CALL EIHRR(ZRIGHT,1,2)	! read the ht.
+	   HADRIG=.TRUE.       		! note we have a RHS cliff AC
+	ELSE
+	   CALL WRITEF
+     &		(WARNING//'Unexpected type %^W%N AC  - ignored',ACTYPE)
+	ENDIF
+	GOTO 10  
+C
+C ......................................................................
+C NO - New layer
+50	CALL EIHRI(LAYER,1,1)
+C
+C Test whether the DESELECT LAYER option is set and we have a
+C layer so defined 
+	OK=BITMATCH(USEOV,LAYER,HAD_MATCH)
+	IF (.NOT.OK) GOTO 130
+	IF (.NOT.HAD_MATCH) THEN	! skip layer.?
+	   CALL IFFNXC(%REF('EO'),IELEN)! yes, let's waste it.
+	   IF (IELEN.LE.-1) GOTO 120	! error or eof
+	   IF (DIAG) THEN
+	      CALL EXPAND('Layer %^W%N has been DESELECT''ed',LAYER)
+	      CALL APPEND(' - excluding layer')
+	      CALL TTWLIN
+	   ENDIF
+	   GOTO 10
+	ENDIF
+C 
+C Check for layer 0 and ie control-ticks and skip them if found
+	IF (LAYER.EQ.0) THEN
+	   CALL IFFNXC(%REF('EO'),IELEN)! skip layer zero
+	   IF (IELEN.LE.-1) GOTO 120
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C NF - new feature
+60	NEW_FEATURE=.TRUE.
+	NCOORD=0			! no coords. in CB - yet
+	HADAC2=.FALSE.			! not had a type 2 AC  - yet
+	HADAC3=.FALSE.			! not had a type 3 AC  - yet
+	HADRIG=.FALSE.			! unset 'had' RHS ....
+	HADLEF=.FALSE.			! and LHS cliff height flags
+	CALL EIHRI(WORD,1,1)		! get FSN
+	NF(1)=0				! clear longword
+	NF(1)=WORD			! convert word to long
+	CALL EIHRI(WORD,1,2)		! get internal seq. no.
+	NF(2)=0				! clear longword
+	NF(2)=WORD			! convert word to long
+	GOTO 10
+C
+C ......................................................................
+C CB (ZS or ST) all are treated as CBs under revision level one.
+C
+C ......................................................................
+C Determine string type - breakline, river, ridge or cliff?
+70	IF (NEW_FEATURE) THEN
+	   OK=FEATURE_TYPE(LAYER,FC,ITYP,RIDPTS,RIVPTS)
+	   IF (.NOT.OK) GOTO 130
+C
+C Now see if the ACs and string dimensionality are consistent within
+C the feature and with the definition of the feature's role - e.g. cliff
+C
+	   OK=FEATURE_CHECKS(ITYP,HADLEF,HADRIG,HADAC2,
+     &			RIDPTS,RIVPTS,
+     &			HADAC3,AC2HT,AC3HT,NF,IGNORE_FEATURE)
+	   IF (.NOT.OK) GOTO 130
+	   IF (IGNORE_FEATURE) GOTO 20
+	ENDIF
+C
+C Read the CB.
+	CALL EIHRCB_HEAD(CBH)
+	CALL EIHRCB_DATA(CBD)
+C
+C Now extract the necessary columns and put into TBUF4
+	DO 80 I=1,CBH.NROW
+	   IF (ABS(ITYP).EQ.1) THEN
+	      CALL IFS_CB_READ(CBH,CBD,TBUF4(1,I),2,NORMAL_XYZCOL,I,I)
+	      TBUF4(3,I)=ZVAL
+	   ELSEIF (ABS(ITYP).EQ.2) THEN
+	      CALL IFS_CB_READ(CBH,CBD,TBUF4(1,I),3,NORMAL_XYZCOL,I,I)
+	   ELSEIF (ABS(ITYP).EQ.3) THEN
+	      CALL IFS_CB_READ(CBH,CBD,TBUF4(1,I),2,NORMAL_XYZCOL,I,I)
+	      TBUF4(3,I)=ZLEFT
+	      TBUF4(4,I)=ZRIGHT
+	   ELSEIF (ABS(ITYP).EQ.4) THEN
+	      CALL IFS_CB_READ(CBH,CBD,TBUF4(1,I),4,CLIFF_XYZCOL,I,I)
+	   ENDIF
+80	CONTINUE
+	NCOORD=CBH.NROW
+C
+C If a non-zero origin offset has been read - apply it
+	IF (MD2LOC(1).NE.0.0D0.OR.MD2LOC(2).NE.0.0D0) THEN
+	   DO 90 I=1,NCOORD
+	      TBUF4(1,I)=TBUF4(1,I)+MD2LOC(1)
+	      TBUF4(2,I)=TBUF4(2,I)+MD2LOC(2)
+90	   CONTINUE
+	ENDIF
+C
+C If height inversion or a non-zero datum offset has been read...
+	IF (DATUM.NE.0.0.OR.INVERSE) THEN
+	   DO 100 I=1,NCOORD
+	      IF (INVERSE) THEN
+	         TBUF4(3,I)=-TBUF4(3,I)
+	         TBUF4(4,I)=-TBUF4(4,I)
+	      ENDIF
+	      TBUF4(3,I)=TBUF4(3,I)+DATUM
+	      TBUF4(4,I)=TBUF4(4,I)+DATUM
+100	   CONTINUE
+	ENDIF
+	GOTO 140
+C
+C ......................................................................
+C EF
+C
+C If DIAG tell user what the string types are
+110	IF (DIAG) THEN
+	   IF ((ITYP.EQ.-1.OR.ITYP.EQ.-2))
+     &	      CALL WRITEF('Feature with FSN %N (%N) is a breakline'
+     &					,NF(1),NF(2))
+	   IF (ABS(ITYP).GE.3)
+     &	      CALL WRITEF('Feature with FSN %N (%N) is a cliff'
+     &					,NF(1),NF(2))
+	   IF (RIVPTS)
+     &	      CALL WRITEF('Feature with FSN %N (%N) is a river'
+     &					,NF(1),NF(2))
+	   IF (RIDPTS)
+     &	      CALL WRITEF('Feature with FSN %N (%N) is a ridgeline'
+     &					,NF(1),NF(2))
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C Errors
+C
+120	CALL LSL_PUTMSG(TRIANG__UNEXPEOF)
+130	IFFBDY=.FALSE.
+140	RETURN
+	END

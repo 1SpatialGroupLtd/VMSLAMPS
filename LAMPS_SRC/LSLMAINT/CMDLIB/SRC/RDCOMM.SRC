@@ -1,0 +1,533 @@
+	INTEGER*4 FUNCTION RDCOMM(TABLE)
+C
+***	MODULE RDCOMM
+***	IDENT 07OC85
+C
+	IMPLICIT NONE
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England
+C Author R. Fairbairns
+C
+C Coded October 1981
+C From SOL original, coded March 1976
+C
+C To read a command from the command line buffer, and to read
+C  its arguments, as defined in the command flag bits
+C
+	INTEGER*2	TABLE(6)	! (minimum size)
+C
+C TABLE is a table of commands, assembled with CMDTAB.MAR
+C	(q.v. for format)
+C
+C Function result is 0 if error, or
+C		     command number
+C (eventually result -1 will signify numeric command)
+C
+C workspace
+	BYTE		CH, CHX		! characters from command line
+	INTEGER*4	CMDNDX		! internal storage
+	INTEGER*2	SV_DCPTR	! preserves DCPTR
+	INTEGER*4	I, NUMARG	! loop control
+	LOGICAL*1 	HADSGN		! sign found
+	LOGICAL*1	CMFULL		! 'full' flag
+	LOGICAL*1	PRIMARY		! TRUE while processing 1ary cmd
+	INTEGER*4	CMFLG_SAV	! saving command, table flags
+	INTEGER*4	TBFLG_SAV	!  while reading inequal name
+	INTEGER*4	UFLAG_SAV	! .. ditto user flags
+	LOGICAL*1	NOUFLG_SAV	! .. ditto 'no user flags'
+C					!		 indicator
+	INTEGER*4	CMDNUM_SAV	! .. ditto command number
+	INTEGER*4	CMDFST_SAV(2)	! .. ditto 'command found' name
+	CHARACTER*3	INEQUALITY	! for building up inequality
+C					!  from <=> symbols
+	INTEGER*4	INEQ_NAME(2)	! for reading
+	BYTE		INEQ_BUF(10)	!  '.<inequality>.'
+C
+C functions called
+	INTEGER*4	FIND_CMD
+	INTEGER*4	RDSTR
+	LOGICAL		RDCH, RDCHS, RDLONG, RDREAL
+C
+C private command table
+	INTEGER*4	INEQUAL_CMD_TABLE
+	EXTERNAL	INEQUAL_CMD_TABLE
+C
+	INCLUDE '($SSDEF)/NOLIST'
+C
+***	PARAMETER/LSL$CMNVIO:CMDFLG/
+***	PARAMETER/LSL$CMNVIO:TBLFLG/
+C
+***	COMMON/HERE:CMDCOM/
+***	COMMON/LSL$CMNVIO:TXTC/
+C
+C extensions to CMDCOM
+	BYTE		CMDNBF(80)	! buffer of command name string
+	BYTE		SECNBF(80)	!	    2ndary command name
+	BYTE		STARBF(80)	!	    string argument
+	COMMON /CMDCOM/	CMDNBF,SECNBF,STARBF
+C
+C initial estimates
+	RDCOMM = 0				! pessimism
+	SECMDN = 0				! no 2ndary yet
+	CMDNUM = 0				! nor any command at all
+	ARGMSG = .FALSE.			! no arguments missing
+	HADDOT = .TRUE.				! default
+	CMDACT = 0				! no arguments
+	CMDICT = 0				! integers
+	CMDRCT = 0				! or reals
+	INEQUAL = 0				! no inequality
+	PRIMARY = .TRUE.			! looking for 1ary
+C
+C no exception yet
+	RDCOMM_EXCP = SS$_NORMAL
+C
+C save in case we're to try a numeric command
+	IF (.NOT.RDCHS(CH)) CALL BSCH		! first skip blanks
+	SV_DCPTR = DCPTR
+C
+C is there anything on the line?
+	IF (RDCHS(CH)) THEN			! no diagnostic if not
+	  ERRNUM = 0				! nor even an 'error'
+	  GOTO 990				!  (mod 2/298)
+	ENDIF
+C
+C is this a 'sign' character (logical argument)?
+	CMDNEG = .FALSE.
+	IF (CH.EQ.'-') GOTO 10
+	IF (CH.EQ.'+') GOTO 20
+C
+C not a sign
+	HADSGN = .FALSE.
+	CALL BSCH
+	GOTO 30
+C
+C - to start command
+10	CMDNEG = .TRUE.
+C
+C + to start command
+20	HADSGN = .TRUE.
+C
+C now get the actual command
+30	CMDNLE = 80
+	CMDNLE = RDSTR(CMDNST, 0)		! force alphabetic str
+	IF (CMDNLE.GT.0) GOTO 70
+C
+C should we try for a numeric command now?
+	TABFLG = TABLE(2)			! would otherwise have
+C						!  been done by FINCMD
+	IF ((TABFLG.AND.CMT$M_NUMFBD).NE.0) GOTO 40
+C
+C we should - go back to start of the command
+	DCPTR = SV_DCPTR
+	IF ((TABFLG.AND.CMT$M_NUMREA).NE.0) GOTO 39
+C
+C integer command - establish if default base
+	IF (DEFBASE.NE.0) GOTO 37
+	IF (RDLONG(INTARG(1))) GOTO 38
+C
+C successful numeric command
+35	RDCOMM = -1
+	CMDNUM = -1
+	GOTO 196
+C
+C read integer to non-standard default base
+37	IF (.NOT.RDLONG(INTARG(1), DEFBASE)) GOTO 35
+C
+C failed to read number - was it an arithmetic fault?
+38	IF (.NOT.RDCOMM_EXCP) GOTO 900
+	GOTO 40
+C
+C read real-number command
+39	IF (.NOT.RDREAL(REALAR(1))) GOTO 35
+	IF (.NOT.RDCOMM_EXCP) GOTO 900
+C
+C why did we get an unexpected end?
+40	IF (RDCH(CH)) GOTO 60
+C
+C bad character
+50	UNXCHR = CH				! copy to common block
+	IF (NOMESS) GOTO 55
+	CALL WRITEF('Unexpected "%^B%C"', UNXCHR)
+C
+C signal error in common block
+55	ERRNUM = ERRUXC
+	GOTO 990
+C
+C naughty end of line
+60	IF (NOMESS) GOTO 65
+	CALL WRITEF('Unexpected end of line')
+C
+C signal error in common block
+65	ERRNUM = ERREOL
+	GOTO 990
+C
+C so we got a command name string
+70	CALL SORTAB(TABLE)		! ensure the table's in order
+	CMDNDX = FIND_CMD(CMDNST, TABLE) ! look up the command
+	IF (CMDNDX) 80,90,100
+C
+C unknown command
+80	IF (.NOT.NOMESS) CALL WRITEF('Unexpected ''%S''', CMDNST)
+C
+C signal error in common block
+	ERRNUM = ERRUXS
+	GOTO 990
+C
+C ambiguity
+90	IF (.NOT.NOMESS) THEN
+	  CALL WRITEF('''%S'' is ambiguous', CMDNST)
+	  CALL WRITEF(' (as between ''%S'' and ''%S'')', CMDFST, CMDAST)
+	ENDIF
+C
+C signal error in common block
+	ERRNUM = ERRAMB
+	GOTO 990
+C
+C command - check on logical argument
+100	IF (.NOT.HADSGN) GOTO 110		! none - never
+	IF ((CMDFLG.AND.CMD$M_LOG).NE.0) GOTO 110 ! they are permitted
+C
+C naughty sign
+	DCPTR = SV_DCPTR
+	GOTO 40
+C
+C any sign was OK
+C  - initialise flag and counts
+110	IF ((CMDFLG.AND.CMD$M_MNEM).NE.0) THEN	! 2ndary table present
+	  IF (RDCHS(CH)) THEN			! it's not there
+	    SECMDN = 0				! so there's no cmd no
+	    IF ((CMDFLG.AND.CMD$M_FULL).NE.0)
+     &					GOTO 60	! it had to be there
+	    GOTO 195				! it needn't - return
+	  ENDIF
+	  CALL BSCH				! unread it if it is
+	  SV_DCPTR = DCPTR			! so's we can get back
+	  IF (CH.EQ.'+' .OR. CH.EQ.'-') THEN	! process 2ndary's sign
+	    CALL RDCH(CH)			! has to be OK
+	    CMDNEG = CH.EQ.'-'
+	    HADSGN = .TRUE.
+	  ENDIF
+	  CMDNUM_SAV = CMDNUM			! preserve 1ary cmd no
+	  UFLAG_SAV = UFLAG			! and user flags
+	  NOUFLG_SAV = NOUFLG			! and their 'presence'
+	  DO I = 1,2
+	    CMDFST_SAV(I) = CMDFST(I)
+	  ENDDO
+	  SECNLE = 80
+	  SECNLE = RDSTR(SECNST, 0)		! get 2ndary cmd name
+	  IF (SECNLE.EQ.0) THEN			! couldn't find one
+	    SECMDN = 0				! no command, then
+	    IF (HADSGN) DCPTR = SV_DCPTR	! restore decode posn to
+C						!   before any sign
+	    IF ((CMDFLG.AND.CMD$M_FULL).NE.0)
+     &					GOTO 60	! it had to be there
+	    GOTO 195				! it needn't - return
+	  ENDIF
+	  CALL SORTAB(%VAL(SECTAB))		! ensure 2ndary sorted
+	  SECMDN = FIND_CMD(SECNST, %VAL(SECTAB)) ! look up 2ndary
+	  DO I = 1,2
+	    CMSFST(I) = CMDFST(I)
+	    CMDFST(I) = CMDFST_SAV(I)
+	  ENDDO
+	  PRIMARY = .FALSE.			! on 2ndary now
+	  IF (SECMDN.LT.0) THEN			! failed to find name
+	    IF (.NOT.NOMESS) CALL WRITEF('Unexpected ''%S''', SECNST)
+	    ERRNUM = ERSUXS
+	    GOTO 890
+	  ELSE IF (SECMDN.EQ.0) THEN		! ambiguity
+	    IF (.NOT.NOMESS) THEN
+	      CALL WRITEF('''%S'' is ambiguous', SECNST)
+	      CALL WRITEF(' (as between ''%S'' and ''%S'')',
+     &				      CMSFST,	 CMDAST	   )
+	    ENDIF
+	    ERRNUM = ERSAMB
+	    GOTO 890
+	  ENDIF
+	  SECMDN = CMDNUM			! copy (correct) 2ndary
+C						!  command number
+	  CMDNUM = CMDNUM_SAV			! restore 1ary
+	  SUFLAG = UFLAG			! copy 2ndary user flag
+	  UFLAG = UFLAG_SAV			! and restore its 1ary
+	  NSUFLG = NOUFLG			! copy 2ndary flag
+C						!	    indicator
+	  NOUFLG = NOUFLG_SAV			! and restore 1ary
+	  IF (HADSGN) THEN			! check sign was allowed
+	    IF ((CMDFLG.AND.CMD$M_LOG).EQ.0) THEN ! it wasn't
+	      DCPTR = SV_DCPTR
+	      GOTO 40				! let standard routine
+C						!   sort it out
+	    ENDIF
+	  ENDIF
+	  GOTO 100				! go to decode 2ndary's
+C						!  arguments
+	ENDIF
+C
+C get on and decode 'real' arguments
+	CMFULL = (CMDFLG.AND.CMD$M_FULL).NE.0
+C
+C cope with '=' sign before the arguments
+	IF ((CMDFLG.AND.CMD$M_EQUAL).NE.0) THEN
+	   IF (.NOT.RDCHS(CH)) THEN
+	      IF (CH.NE.'=' .AND. CH.NE.':') THEN
+		 CALL BSCH
+	      ENDIF
+	   ENDIF
+	ELSE IF ((CMDFLG.AND.CMD$M_INEQUAL).NE.0) THEN
+	   CMFLG_SAV = CMDFLG
+	   TBFLG_SAV = TABFLG
+	   UFLAG_SAV = UFLAG
+	   NOUFLG_SAV = NOUFLG
+	   CMDNUM_SAV = CMDNUM
+	   DO I = 1,2
+	      CMDFST_SAV(I) = CMDFST(I)
+	   ENDDO
+	   IF (.NOT.RDCHS(CH)) THEN
+	      IF (CH.EQ.'<') THEN
+		 INEQUALITY = 'LSS'		! first stab
+		 IF (RDCH(CHX)) GOTO 50		! fault '< <eol>'
+		 IF (CHX.EQ.'>') THEN
+		    INEQUALITY = 'NEQ'
+		 ELSE IF (CHX.EQ.'=') THEN
+		    INEQUALITY = 'LEQ'
+		 ELSE
+		    CALL BSCH			! 2nd char not part
+C						!   of symbol
+		 ENDIF
+	      ELSE IF (CH.EQ.'=') THEN
+		 INEQUALITY = 'EQL'
+	      ELSE IF (CH.EQ.'>') THEN
+		 INEQUALITY = 'GTR'		! first stab
+		 IF (RDCH(CHX)) GOTO 50		! fault '> <eol>'
+		 IF (CHX.EQ.'=') THEN
+		    INEQUALITY = 'GEQ'
+		 ELSE
+		    CALL BSCH
+		 ENDIF
+	      ELSE IF (CH.EQ.'.') THEN		! FORTRAN-type inequal
+		 INEQ_NAME(1) = 10
+		 INEQ_NAME(2) = %LOC(INEQ_BUF(1))
+		 INEQ_NAME(1) = RDSTR(INEQ_NAME, CH, .FALSE.)
+		 IF (INEQ_NAME(1).EQ.0)
+     &				GOTO 50		! reject no string as
+C						!  unexpected '.'
+		 CALL SORTAB(INEQUAL_CMD_TABLE)
+		 INEQUAL = FIND_CMD(INEQ_NAME, INEQUAL_CMD_TABLE)
+		 IF (INEQUAL.LT.0) THEN
+		    IF (.NOT.NOMESS) CALL WRITEF
+     &			('Unexpected inequality ''%S''', INEQ_NAME)
+		    GOTO 880
+		 ENDIF
+		 IF (INEQUAL.EQ.0) THEN
+		    IF (.NOT.NOMESS) THEN
+			CALL WRITEF('Inequality ''%S'' is ambiguous',
+     &					   INEQ_NAME)
+			CALL WRITEF(' (as between ''%S'' and ''%S'')',
+     &						CMDFST,	   CMDAST)
+		    ENDIF
+		    GOTO 880
+		 ENDIF
+		 GOTO 112			! got a .-name
+	      ELSE
+		 CALL BSCH			! not an inequality
+		 GOTO 113
+	      ENDIF
+C
+C here, we've generated an inequality name - so that
+C  we're SURE it's right !!!
+	      CALL SORTAB(INEQUAL_CMD_TABLE)
+	      INEQUAL = FIND_CMD(INEQUALITY, INEQUAL_CMD_TABLE)
+C
+C adjust from command number to inequality number
+112	      INEQUAL = CMDNUM-1
+113	      CONTINUE
+	   ENDIF				! RDCHS
+	   CMDFLG = CMFLG_SAV
+	   TABFLG = TBFLG_SAV
+	   UFLAG = UFLAG_SAV
+	   NOUFLG = NOUFLG_SAV
+	   CMDNUM = CMDNUM_SAV
+	   DO I = 1,2
+	      CMDFST(I) = CMDFST_SAV(I)
+	   ENDDO
+	ENDIF
+C
+C get integer arguments
+	NUMARG = CMDFLG.AND.CMD$M_INTS
+	IF (NUMARG.EQ.0) GOTO 140
+	DO 120 I = 1,NUMARG
+	   IF (DEFBASE.EQ.0) GOTO 114
+C
+C read to some abnormal base
+	   IF (RDLONG(INTARG(I), DEFBASE)) GOTO 115
+	   GOTO 116
+C
+C read to default decimal base
+114	   IF (.NOT.RDLONG(INTARG(I))) GOTO 116
+C
+C no integer - is it a 'free-format no number here'?
+115	   IF ((CMDFLG.AND.CMD$M_COMMA).EQ.0) GOTO 130
+	   IF (I.EQ.NUMARG) THEN
+	      IF ((CMDFLG .AND.
+     &		  (CMD$M_REALS.OR.CMD$M_STRING.OR.CMD$M_CHAR)).EQ.0)
+     &		   GOTO 130		! nothing following -
+C					!  nothing to separate
+	   ENDIF
+	   IF (RDCHS(CH)) GOTO 130
+	   IF (CH.NE.',') THEN		! it's not - end of ints
+	      CALL BSCH			! unread non-comma
+	      GOTO 130
+	   ENDIF
+	   GOTO 117
+C
+C got an integer - swallow comma, iff appropriate
+116	   IF ((CMDFLG.AND.CMD$M_COMMA).NE.0) THEN
+	      IF (I.EQ.NUMARG) THEN
+		 IF ((CMDFLG .AND.
+     &		      (CMD$M_REALS.OR.CMD$M_STRING.OR.CMD$M_CHAR)).EQ.0)
+     &			GOTO 117	! nothing following -
+C					!  nothing to separate
+	      ENDIF
+	      IF (.NOT.RDCHS(CH)) THEN
+		 IF (CH.NE.',') CALL BSCH
+	      ENDIF
+	   ENDIF
+C
+C count arguments found
+117	   CMDACT = CMDACT+1
+	   CMDICT = CMDICT+1
+120	CONTINUE
+	GOTO 140
+C
+C (at least one) integer argument missing
+130	IF (.NOT.RDCOMM_EXCP) GOTO 900
+	IF (CMFULL) GOTO 40
+	ARGMSG = .TRUE.
+C
+C get real arguments
+140	NUMARG = (CMDFLG.AND.CMD$M_REALS)/8
+	IF (NUMARG.EQ.0) GOTO 170
+	DO 150 I = 1,NUMARG
+	   IF (RDREAL(REALAR(I), HADDOT)) THEN
+C
+C no real number - is it a 'free-format no number here'?
+	      IF ((CMDFLG.AND.CMD$M_COMMA).EQ.0) GOTO 160
+	      IF (I.EQ.NUMARG) THEN	! last argument
+		 IF ((CMDFLG.AND.(CMD$M_STRING.OR.CMD$M_CHAR)).EQ.0)
+     &			GOTO 160	! nothing following -
+C					!  nothing to separate
+	      ENDIF
+	      IF (RDCHS(CH)) GOTO 160
+	      IF (CH.NE.',') THEN	! it's not - end of reals
+		 CALL BSCH		! unread non-comma
+		 GOTO 160
+	      ENDIF
+	   ELSE				! got a real - swallow a comma
+	      IF ((CMDFLG.AND.CMD$M_COMMA).NE.0) THEN
+		 IF (I.LT.NUMARG .OR.
+     &		     (CMDFLG.AND.(CMD$M_STRING.OR.CMD$M_CHAR)).NE.0)
+     &			THEN
+		    IF (.NOT.RDCHS(CH)) THEN
+		       IF (CH.NE.',') CALL BSCH
+		    ENDIF
+		 ENDIF
+	      ENDIF
+	   ENDIF
+C
+C count arguments found
+	   CMDACT = CMDACT+1
+	   CMDRCT = CMDRCT+1
+150	CONTINUE
+	GOTO 170
+C
+C real argument missing
+160	IF (.NOT.RDCOMM_EXCP) GOTO 900
+	IF (CMFULL) GOTO 40
+	ARGMSG = .TRUE.
+C
+C string argument to be had?
+170	IF ((CMDFLG.AND.(CMD$M_STRING.OR.CMD$M_CHAR)).EQ.0) GOTO 195
+	IF (.NOT.RDCHS(CH)) GOTO 200
+C
+C no string argument
+180	STARLE = 0
+C
+C string argument missing, one way or another
+190	ARGMSG = .TRUE.
+	IF (CMFULL) GOTO 40
+C
+C return command number, no error
+195	RDCOMM = CMDNUM
+C
+C numeric command exits
+196	ERRNUM = 0
+	RETURN
+C
+C there is an arg - is it to be a character argument?
+200	IF ((CMDFLG.AND.CMD$M_CHAR).NE.0) THEN
+	   STARLE = 1
+	   STARBF(1) = CH
+	   GOTO 195
+	ENDIF
+C
+C no - is it an acceptable string delimiter?
+	IF (CH.EQ.'''' .OR. CH.EQ.'"') GOTO 210
+C
+C not - set 'no string'
+	CALL BSCH
+	GOTO 180
+C
+C get string argument
+210	CMDACT = CMDACT+1		! preemptively
+	STARLE = 80			! the room we've got
+	STARLE = RDSTR(STARST, CH)	! get string
+	IF (STARLE.GT.0) GOTO 195	! if OK, we're done
+	CALL BSCH			! not OK -
+	GOTO 40				! moan about it
+C
+C * * *  error handling
+C
+C bad inequality
+880	ERRNUM = ERRBIQ
+C
+C restore 1ary data
+890	CMDFLG = CMFLG_SAV
+	TABFLG = TBFLG_SAV
+	UFLAG  = UFLAG_SAV
+	NOUFLG = NOUFLG_SAV
+	CMDNUM = CMDNUM_SAV
+	DO I = 1,2
+	  CMDFST(I) = CMDFST_SAV(I)
+	ENDDO
+	GOTO 990
+C
+C trap/fault exception detected by some number-read routine
+900	IF (NOMESS) GOTO 990		! no message needed
+C
+C generate the relevant message
+	GOTO (910,920,930,940,950), ERRNUM-ERRFDV+1
+C
+C a silly:
+	ERRNUM = ERRBEX
+	CALL WRITEF('Bad exception code')
+	GOTO 990
+C
+910	CALL WRITEF('Floating divide by zero')
+	GOTO 990
+C
+920	CALL WRITEF('Floating overflow')
+	GOTO 990
+C
+930	CALL WRITEF('Floating underflow')
+	GOTO 990
+C
+940	CALL WRITEF('Integer divide by zero')
+	GOTO 990
+C
+950	CALL WRITEF('Integer overflow')
+C
+C if error reading 1ary, zap CMDNUM (if reading 2ndary, CMDNUM stays;
+C   this tells the user where the error was)
+990	IF (PRIMARY) CMDNUM = -CMDNUM
+	RETURN
+C
+	END	!!!

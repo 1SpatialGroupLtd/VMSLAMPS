@@ -1,0 +1,698 @@
+        SUBROUTINE DOSPLI
+C
+***     IDENT   09MY96
+***     MODULE  DOSPLI
+C
+C       Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C       Written                                 CCB	24-SEP-1984
+C
+C Description
+C
+C	LITES2 cartographic editor SPLIT command.
+C
+        IMPLICIT NONE
+C
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:CONSTS/
+***	PARAMETER/CMN:AUXDEF/
+***     PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:STAPAR/
+C
+C
+***	COMMON/CMN:ATTBTS/
+***	COMMON/CMN:CSTRCT/
+***	COMMON/CMN:CTXS/
+***	COMMON/CMN:DEFINE/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/CMN:DOUT/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:GLOBAL/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:MODIFY/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:STATE/
+***	COMMON/CMN:STRIKE/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C functions called
+	LOGICAL		STRTFT		! start new feature
+	INTEGER		GENNF		! generate new FSN (NF)
+	INTEGER		MINDEX
+	LOGICAL		COIDLE		! get into MODIFY state
+	LOGICAL		GENAUX
+	INTEGER		FINSTR
+	LOGICAL		FRTFND
+	LOGICAL		NDSTCN
+C
+C local variables
+	EXTERNAL	NASTY,MOAN
+C
+	REAL		SAV_JSTPROP
+	INTEGER		I,J
+	INTEGER 	ADDR,STAADR,FINADR
+	REAL		X,Y
+	INTEGER		DUMPAK(PAKLEN)	! a dummy pack for GENAUX (only
+					! DUMPAK(PAKFC) is significant)
+	LOGICAL 	ARC		! dealing with arc
+	LOGICAL		CIRCLE		! dealing with full circle
+	REAL		XY(2)		! a coordinate pair
+	REAL		CSANG		! angle to cursor
+	REAL		ANG
+	INTEGER*2	FS(4)		! FS entry to use
+	INTEGER		GT
+	INTEGER		SUB_LEN		! length of substring
+	REAL		AUX(AUXLEN)	! an auxiliary array
+C
+	INTEGER*2	TMPLEN		! text length
+	INTEGER*4	TMPADR		! buffer address
+	INTEGER		OPER
+	INTEGER		SUBTXT_NUM
+	REAL		ZP
+	INTEGER		SAVFC
+C
+C set JSTPROP to 0, as we want GENAUX to calculate the true length
+C of texts. This is reset at the end of the routine
+	SAV_JSTPROP = JSTPROP
+	JSTPROP = 0
+	OVERHANG = .FALSE.
+C
+C Despatch according to secondary command
+	GOTO (500,500,500,500,100), DSECN
+C
+C Secondary command number out of range
+	IF (DSECN.EQ.0) GOTO 100	! default is LINE
+	CALL MSGCMD(NASTY,MSG_ERRSECIND)
+	GOTO 998
+C
+C split a LINE or ARC
+100	CONTINUE
+C
+C only valid in LINE or ARC state
+	IF (SINDEX.EQ.STATE_TEXT.OR.SINDEX.EQ.STATE_MODIFY) THEN
+	   IF (DSECN .EQ. 0) THEN		! no secondary command
+	      DSECN = 1				! so lie
+	      DSEC  = 'LINE'
+	      DSECL = 4
+	   ENDIF
+	   CALL MSGCMD(MOAN,MSG_CMDNOTVALID)
+	   GOTO 998
+	ENDIF
+C
+	ARC = FOPAK(PAKGT).GE.CLOTYP.AND.FOPAK(PAKGT).LE.FULTYP
+	CIRCLE = ARC .AND. FOPAK(PAKGT).EQ.FULTYP
+	GT = FOPAK(PAKGT)
+C
+C points on arcs are never created with attributes
+	IF (.NOT.ARC) THEN
+	   OPER = DEFINITION(P_BREAK)
+	   IF (OPER.EQ.0) OPER = DEFINITION(P_OTHER)
+	ENDIF
+C
+C make copy of FS entry
+C
+	DO 10, I=1,4
+	   FS(I) = FOFS(I)
+   10	CONTINUE
+C
+C for full circle, need to check that there is a circum arc FC available
+C
+	IF (CIRCLE) THEN
+	   IF (FRTFND(ARCFC)) THEN
+	      CALL MOAN(MSG_BADCODE,ARCFC)
+	      CALL LEARN(MSG_EXPLAINARC1)
+	      CALL LEARN(MSG_EXPLAINARC2)
+	      CALL LEARN(MSG_SETARC)
+	      GOTO 998
+	   ENDIF
+	   IF (FRTGT.NE.CIRTYP) THEN
+	      CALL MOAN(MSG_FCNOTARC,ARCFC)
+	      CALL LEARN(MSG_EXPLAINARC1)
+	      CALL LEARN(MSG_EXPLAINARC2)
+	      CALL LEARN(MSG_SETARC)
+	      GOTO 998
+	   ENDIF
+	   FS(1) = ARCFC
+	ENDIF
+C
+C Must be actually on the line
+	IF (.NOT.FONLIN) THEN
+	   CALL MOAN(MSG_NOTONLINE)
+	   CALL LEARN(MSG_USEON)
+	   GOTO 998
+	ENDIF
+C
+C must not be on an end
+C
+	IF ((.NOT.ARC.AND.FONVRT.AND.(FOVRT.EQ.1.OR.FOVRT.EQ.FOLST)).OR.
+     &	    (ARC.AND.(FOSTRT.OR.FOEND))) THEN
+	   CALL MOAN(MSG_ONEND)
+	   GOTO 998
+	ENDIF
+C
+C work out angle between start of arc and cursor
+C
+	IF (ARC) THEN
+	   CSANG = ATAN2(CSXY(2)-FOAUX(YCENI),CSXY(1)-FOAUX(XCENI))
+	   IF (CSANG.LT.0.0) CSANG = CSANG+TWOPI
+	   CSANG = CSANG - FOAUX(STAI)	! angle relative to start
+	   IF (FOAUX(TOTI).GT.0.0.AND.CSANG.LT.0.0) THEN
+	      CSANG = CSANG+TWOPI
+	   ELSEIF (FOAUX(TOTI).LT.0.0.AND.CSANG.GT.0.0) THEN
+	      CSANG = CSANG-TWOPI
+	   ENDIF
+	ENDIF
+C
+C Start off the first part using the segment number and NF number
+C of the old feature
+	CALL CPYPAK(PAKLEN,FOPAK,COIPAK)
+	COIPAK(PAKFLG) = 0			! not deleted
+C
+C if circle, use our new FC and GT
+C
+	IF (CIRCLE) THEN
+	   COIPAK(PAKFC) = ARCFC
+	   COIPAK(PAKGT) = FRTGT		! FRTFND called above
+	ENDIF
+	FLG_GEOCHANGE = .TRUE.			! geometrical change
+	IF (STRTFT(FOPAK,FOTC,FS,FOAC,FOTH)) GOTO 998
+C
+C Delete old segment (remove from screen)
+	CALL LDSG(FOPAK,.TRUE.)
+C
+C deal with linear features
+	IF (.NOT.ARC) THEN
+C
+C Output points from start to found point
+	   CALL ADDVRT(FOPAK,1,FOVRT,.FALSE.)
+C
+C add cursor position, if not on a vertex, with attributes from OPERATION
+C BREAK or OTHER
+	   IF (.NOT.FONVRT) THEN
+C
+	      CONATT = 0
+	      IF (ZOPT.AND.CSZI.NE.IFF_ABSENT) THEN
+	         CALL ADDZ(CSZI,MXATTR,CONATT,COATTC,COATTV)
+	      ENDIF
+	      CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+	      CALL ADCORD(CSXY,CONATT,COATTC,COATTV)
+	   ENDIF
+C
+C deal with circle arcs
+	ELSE
+C
+C first point
+	   CONATT = 0
+C
+C add point (Note: - no operations on attributes. Arcs are thought not
+C to have attributes)
+	   IF (CIRCLE) THEN
+C
+C interpolate Z value for this point
+	      IF (ZOPT.AND.FOC_DEFINED) THEN
+	         CALL PLANE_INTERPL(CSXY,FOCOEFFS,ZP)
+	         CALL ADDZ(ZP,MXATTR,CONATT,COATTC,COATTV)
+	      ENDIF
+	      CALL ADCORD(CSXY,CONATT,COATTC,COATTV)
+	   ELSE
+	      XY(1) = FOAUX(XCENI) + FOAUX(RADI)*COS(FOAUX(STAI))
+	      XY(2) = FOAUX(YCENI) + FOAUX(RADI)*SIN(FOAUX(STAI))
+C
+C interpolate Z value for this point
+	      IF (ZOPT.AND.FOC_DEFINED) THEN
+	         CALL PLANE_INTERPL(XY,FOCOEFFS,ZP)
+	         CALL ADDZ(ZP,MXATTR,CONATT,COATTC,COATTV)
+	      ENDIF
+	      CALL ADCORD(XY,CONATT,COATTC,COATTV)
+	   ENDIF
+C
+C second point
+	   IF (GT.EQ.CLOTYP.OR.GT.EQ.ANTTYP) THEN	! want centre
+	      XY(1) = FOAUX(XCENI)
+	      XY(2) = FOAUX(YCENI)	
+	   ELSE
+	      IF (CIRCLE) THEN			! go 1/2 way round
+	         ANG = CSANG + PIBI2
+	      ELSE				! go 1/2 way to CSXY
+	         ANG = FOAUX(STAI) + CSANG*0.5
+	      ENDIF
+	      XY(1) = FOAUX(XCENI) + FOAUX(RADI)*COS(ANG)
+	      XY(2) = FOAUX(YCENI) + FOAUX(RADI)*SIN(ANG)
+	   ENDIF
+C
+C interpolate Z value for this point
+	   CONATT = 0
+	   IF (ZOPT.AND.FOC_DEFINED) THEN
+	      CALL PLANE_INTERPL(XY,FOCOEFFS,ZP)
+	      CALL ADDZ(ZP,MXATTR,CONATT,COATTC,COATTV)
+	   ENDIF
+	   CALL ADCORD(XY,CONATT,COATTC,COATTV)
+C
+C third point
+	   IF (CIRCLE) THEN
+	      ANG = CSANG + PI
+	      XY(1) = FOAUX(XCENI) + FOAUX(RADI)*COS(ANG)
+	      XY(2) = FOAUX(YCENI) + FOAUX(RADI)*SIN(ANG)
+	      CALL ADCORD(XY,CONATT,COATTC,COATTV)	      
+	   ELSE
+	      XY(1) = CSXY(1)
+	      XY(2) = CSXY(2)
+	   ENDIF
+C
+C interpolate Z value for this point
+	   IF (ZOPT.AND.FOC_DEFINED) THEN
+	      CALL PLANE_INTERPL(XY,FOCOEFFS,ZP)
+	      CALL ADDZ(ZP,MXATTR,CONATT,COATTC,COATTV)
+	   ENDIF
+	   CALL ADCORD(CSXY,CONATT,COATTC,COATTV)
+C
+C need to GENAUX, as ENDFT uses auxiliary array to sector arc
+	   CALL GENCIR(COIPAK(PAKGT),COIXY(1,2),COIAUX)
+	   IF (MOANED) THEN
+	      CALL ABACON
+	      GOTO 998
+	   ENDIF
+	ENDIF
+C
+C Terminate feature
+	CALL ENDFT
+C
+C Now for the other part
+C COIPAK will now have correct values in it, so we re-use it
+	COIPAK(PAKFLG) = 0		! not deleted
+	COIPAK(PAKSEG) = 0		! want a new segment number
+	COIPAK(PAKFSN) = GENNF(COIPAK)
+C
+C this has no right to fail, since it is trying to start off a
+C similar feature to that above, so...
+	IF (STRTFT(FOPAK,FOTC,FS,FOAC,FOTH)) THEN
+	   CALL COLAPS(110)		! but continue
+	ENDIF
+C
+C deal with lines
+	IF (.NOT.ARC) THEN
+C
+C add cursor position, if not on a vertex, with attributes from OPERATION
+C BREAK
+	   I = 0
+	   IF (.NOT.FONVRT) THEN
+	      CONATT = 0
+	      IF (ZOPT.AND.CSZI.NE.IFF_ABSENT) THEN
+	         CALL ADDZ(CSZI,MXATTR,CONATT,COATTC,COATTV)
+	      ENDIF
+	      CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+	      CALL ADCORD(CSXY,CONATT,COATTC,COATTV)
+	      I = I+1			! don't add FOVRT
+	   ENDIF
+C
+C and add the rest of the vertices up to the end
+	   CALL ADDVRT(FOPAK,FOVRT+I,FOLST,.FALSE.)
+C
+C deal with circle arcs
+	ELSE
+C
+C first point
+	   CONATT = 0
+	   IF (CIRCLE) THEN
+C
+C interpolate Z value for this point
+	   IF (ZOPT.AND.FOC_DEFINED) THEN
+	      CALL PLANE_INTERPL(XY,FOCOEFFS,ZP)
+	      CALL ADDZ(ZP,MXATTR,CONATT,COATTC,COATTV)
+	   ENDIF
+	      CALL ADCORD(XY,CONATT,COATTC,COATTV)
+	   ELSE
+C
+C interpolate Z value for this point
+	      IF (ZOPT.AND.FOC_DEFINED) THEN
+	         CALL PLANE_INTERPL(CSXY,FOCOEFFS,ZP)
+	         CALL ADDZ(ZP,MXATTR,CONATT,COATTC,COATTV)
+	      ENDIF
+	      CALL ADCORD(CSXY,CONATT,COATTC,COATTV)
+	   ENDIF
+C
+C second point
+	   IF (GT.EQ.CLOTYP.OR.GT.EQ.ANTTYP) THEN	! want centre
+	      XY(1) = FOAUX(XCENI)
+	      XY(2) = FOAUX(YCENI)	
+	   ELSE
+	      IF (CIRCLE) THEN			! go 1/2 way round
+	         ANG = CSANG + THREEPIBI2
+	      ELSE				! go 1/2 way to CSXY
+	         ANG = FOAUX(STAI) + CSANG + (FOAUX(TOTI)-CSANG)*0.5
+	      ENDIF
+	      XY(1) = FOAUX(XCENI) + FOAUX(RADI)*COS(ANG)
+	      XY(2) = FOAUX(YCENI) + FOAUX(RADI)*SIN(ANG)
+	   ENDIF
+C
+C interpolate Z value for this point
+	   CONATT = 0
+	   IF (ZOPT.AND.FOC_DEFINED) THEN
+	      CALL PLANE_INTERPL(XY,FOCOEFFS,ZP)
+	      CALL ADDZ(ZP,MXATTR,CONATT,COATTC,COATTV)
+	   ENDIF
+	   CALL ADCORD(XY,CONATT,COATTC,COATTV)
+C
+C third point
+	   IF (CIRCLE) THEN
+	      XY(1) = CSXY(1)
+	      XY(2) = CSXY(2)
+	   ELSE
+	      ANG = FOAUX(STAI) + FOAUX(TOTI)
+	      XY(1) = FOAUX(XCENI) + FOAUX(RADI)*COS(ANG)
+	      XY(2) = FOAUX(YCENI) + FOAUX(RADI)*SIN(ANG)
+	   ENDIF
+C
+C interpolate Z value for this point
+	   IF (ZOPT.AND.FOC_DEFINED) THEN
+	      CALL PLANE_INTERPL(XY,FOCOEFFS,ZP)
+	      CALL ADDZ(ZP,MXATTR,CONATT,COATTC,COATTV)
+	   ENDIF
+	   CALL ADCORD(XY,CONATT,COATTC,COATTV)
+C
+	   CALL GENCIR(COIPAK(PAKGT),COIXY(1,2),COIAUX)
+	   IF (MOANED) THEN
+	      CALL ABACON
+	      GOTO 998
+	   ENDIF
+	ENDIF
+C
+C Terminate feature
+	CALL ENDFT
+499	CONTINUE
+C
+C Remove the old found object completely
+	CALL DELFT(FOPAK,FOEF)
+C
+C Abandon
+	CALL ABANDN
+	GOTO 999
+C
+C**********************************************************************
+C deal with texts
+C
+  500	CONTINUE
+C
+C only valid in TEXT or MODIFY state
+	IF (SINDEX.NE.STATE_TEXT.AND.SINDEX.NE.STATE_MODIFY) THEN
+	   CALL MSGCMD(MOAN,MSG_CMDNOTVALID)
+	   GOTO 998
+C
+C check for text
+	ELSEIF (SINDEX.EQ.STATE_MODIFY.AND.COIPAK(PAKGT).NE.TEXTYP) THEN
+	   CALL MSGCMD(MOAN,MSG_CMDONLYTEXT)
+	   GOTO 998
+C
+C only valid if COMOPT has been enabled
+C
+	ELSEIF (.NOT.COMOPT) THEN
+	   CALL MSGCMD(MOAN,MSG_ONLYWITHCOMP)
+	   GOTO 998
+	ENDIF
+C
+C SPLIT APART not valid if on first subtext
+	IF (DSECN.EQ.4) THEN
+     	   IF ((SINDEX.EQ.STATE_TEXT.AND.
+     &	      FTRCTXD(CTXD_FSTCTX).EQ.FTRCTXD(CTXD_HOME)).OR.
+     &	       (SINDEX.EQ.STATE_MODIFY.AND.
+     &	        COICTXD(CTXD_FSTCTX).EQ.COICTXD(CTXD_HOME))) THEN
+	      CALL MSGCMD(MOAN,MSG_NOTONFIRST)
+	      GOTO 998
+	   ELSE
+	      GOTO 700
+	   ENDIF
+	ENDIF
+C
+C get the text
+	TXTPTR = 0				! assume none
+	CALL SETAUX(%REF(DSTR),DSTRL)
+	TXTPTR = TXTLIM				! maximum length
+	TXTPTR = FINSTR(TXTDSC,'text')
+	IF (MOANED) GOTO 998
+	SUB_LEN = TXTPTR
+C
+C get addresses of CTXs
+C
+  510	CONTINUE
+	IF (SINDEX.EQ.STATE_TEXT) THEN	! look at whole of feature
+	   STAADR = FTRCTXD(CTXD_FSTCTX)
+	   FINADR = FTRCTXD(CTXD_LSTCTX)
+	ELSEIF(SUBTXT) THEN
+	   STAADR = COICTXD(CTXD_HOME)
+	   FINADR = COICTXD(CTXD_HOME)
+	ELSE
+	   STAADR = COICTXD(CTXD_FSTCTX)
+	   FINADR = COICTXD(CTXD_LSTCTX)
+	ENDIF
+C
+C search for text
+C
+	ADDR = STAADR
+  520	CONTINUE
+	I = MINDEX(%VAL(ADDR+CTX_O_DESC),TXTDSC)
+	IF (I.NE.0) THEN			! found substring
+C
+C get the length of the text that we have just found
+	   CALL STR$ANALYZE_SDESC(%VAL(ADDR+CTX_O_DESC),TMPLEN,TMPADR)
+C
+C check for zero length texts (when not in TEXT state)
+	   IF (SINDEX.NE.STATE_TEXT) THEN
+	      IF (DSECN.EQ.1.AND.I.EQ.1) THEN
+	         CALL INFORM(MSG_ALREADYSPLIT,'before',TXTDSC)
+	      ELSEIF (DSECN.EQ.2.AND.(I+TXTPTR-1).EQ.TMPLEN) THEN
+	         CALL INFORM(MSG_ALREADYSPLIT,'after',TXTDSC)
+	      ELSEIF (DSECN.EQ.3.AND.TXTPTR.EQ.TMPLEN) THEN
+	         CALL INFORM(MSG_ALREADYSPLIT,'around',TXTDSC)
+	      ENDIF
+	   ENDIF
+C
+C if not in MODIFY state, get into it
+C
+	   IF (SINDEX.EQ.STATE_TEXT) THEN
+	      IF (COIDLE(.TRUE.)) GOTO 998	! (deleting original)
+	      GOTO 510				! need to find text again
+	   ELSE
+	      GOTO 530
+	   ENDIF
+	ENDIF
+C
+C is there another CTX to try?
+C
+	IF (ADDR.EQ.FINADR) THEN		! not found anything
+	   CALL MOAN(MSG_STRNOTFOUND,TXTDSC)
+	   GOTO 998
+	ELSE
+	   CALL PUTLNG(%VAL(ADDR+CTX_O_NXTPTR),ADDR)
+	   GOTO 520
+	ENDIF
+C
+C get this CTX into CTXBUF
+C
+  530	CONTINUE
+	COICTXD(CTXD_CUR) = ADDR
+	CALL THISCTX(COICTXD)		
+	FLG_GEOCHANGE = .TRUE.			! a geometrical change
+C
+C must make it home as well, as INSRTCTX adds CTX after home
+	COICTXD(CTXD_HOME) = COICTXD(CTXD_CUR)
+C
+C loop to split text before / after the locating text
+	DO 600, J = 1,2
+C
+C don't do anything if not required to split at this end
+	   IF (J.EQ.1.AND.DSECN.EQ.2) GOTO 590
+	   IF (J.EQ.2.AND.DSECN.EQ.1) GOTO 600
+C
+C don't do anything if cannnot split at the beginning
+	   IF (J.EQ.1.AND.I.EQ.1) GOTO 590
+C
+C don't do anything if cannnot split at the end. In this case,
+C move onto next CTX, so that we can move back!!!
+	   IF (J.EQ.2.AND.I.EQ.(CTXBUFW(CTX_W_TXTLEN)+1)) THEN
+	      IF (COICTXD(CTXD_CUR).NE.COICTXD(CTXD_LSTCTX))
+     &	         CALL PUTLNG(%VAL(COICTXD(CTXD_CUR)+CTX_O_NXTPTR),
+     &	                          COICTXD(CTXD_CUR))
+	      GOTO 600
+	   ENDIF
+C
+C get position of start of text from locating point and auxiliary array
+C (need to genaux current text with JSTPROP = 0)
+	   CALL PUTLNG(%VAL(ADDR+CTX_O_TS),DUMPAK(PAKFC))
+	   IF (GENAUX(1,XY,				! XY not used
+     &	             %VAL(ADDR+CTX_O_AUX),
+     &	             %VAL(ADDR+CTX_O_DESC),
+     &	             %VAL(ADDR+CTX_O_RO),
+     &	             %VAL(ADDR+CTX_O_TH),
+     &	             DUMPAK,
+     &	             %VAL(ADDR+CTX_O_TS))) THEN
+	      GOTO 998
+	   ENDIF
+C
+	   CALL PUTLNG(%VAL(ADDR+CTX_O_X),X)
+	   CALL PUTLNG(%VAL(ADDR+CTX_O_Y),Y)
+	   CALL CPYPAK(AUXLEN,%VAL(ADDR+CTX_O_AUX),AUX)
+	   XY(1) = X + AUX(MINXI)*AUX(COSI) - AUX(MINYI)*AUX(SINI)
+	   XY(2) = Y + AUX(MINXI)*AUX(SINI) + AUX(MINYI)*AUX(COSI)
+C
+C put right hand end of current string into CTXBUF. As it is not a
+C dynamic descriptor, need to set the length ourselves
+	   CALL STR$ANALYZE_SDESC(%VAL(ADDR+CTX_O_DESC),
+     &	                          CTXBUFW(CTX_W_TXTLEN),TMPADR)
+	   CTXBUFW(CTX_W_TXTLEN) = MIN(CTXBUFW(CTX_W_TXTLEN)-I+1,CTXMAX)
+	   CALL STR$RIGHT(CTXBUFL(CTX_L_DESC),%VAL(ADDR+CTX_O_DESC),I)
+C
+C truncate current text string 
+	   CALL STR$LEFT(%VAL(ADDR+CTX_O_DESC),%VAL(ADDR+CTX_O_DESC),
+     &	                 I-1)
+C
+C genaux current text (now truncated)
+	   IF (GENAUX(1,XY,				! XY not used
+     &	             %VAL(ADDR+CTX_O_AUX),
+     &	             %VAL(ADDR+CTX_O_DESC),
+     &	             %VAL(ADDR+CTX_O_RO),
+     &	             %VAL(ADDR+CTX_O_TH),
+     &	             DUMPAK,
+     &	             %VAL(ADDR+CTX_O_TS))) THEN
+	      GOTO 998
+	   ENDIF
+C
+C and calculate locating point, from start of text
+	   CALL CPYPAK(AUXLEN,%VAL(ADDR+CTX_O_AUX),AUX)
+	   X = XY(1) - AUX(MINXI)*AUX(COSI) + AUX(MINYI)*AUX(SINI)
+	   Y = XY(2) - AUX(MINXI)*AUX(SINI) - AUX(MINYI)*AUX(COSI)
+C
+C put coords back
+	   CALL PUTLNG(X,%VAL(ADDR+CTX_O_X))
+	   CALL PUTLNG(Y,%VAL(ADDR+CTX_O_Y))
+C
+C now fill CTXBUF, to create a new CTX from
+C
+C lower left of text is located at lower right of current text
+	   X = XY(1) + (AUX(MAXXI) - AUX(MINXI))*AUX(COSI)
+	   Y = XY(2) + (AUX(MAXXI) - AUX(MINXI))*AUX(SINI)
+C
+C genaux the new text string
+	   IF (GENAUX(1,XY,				! XY not used
+     &	             CTXBUFR(CTX_L_AUX1),
+     &	             CTXBUFL(CTX_L_DESC),
+     &	             CTXBUFL(CTX_L_RO),
+     &	             CTXBUFL(CTX_L_TH),
+     &	             DUMPAK,
+     &	             CTXBUFL(CTX_L_TSA))) THEN
+	      GOTO 998
+	   ENDIF
+C
+C and now calculate new locating point
+	   CALL CPYPAK(AUXLEN,CTXBUFL(CTX_L_AUX1),AUX)
+	   CTXBUFR(CTX_L_X) = X-AUX(MINXI)*AUX(COSI)+AUX(MINYI)*AUX(SINI)
+	   CTXBUFR(CTX_L_Y) = Y-AUX(MINXI)*AUX(SINI)-AUX(MINYI)*AUX(COSI)
+C
+C insert it in list of CTXs - it is now the current CTX
+	   CALL INSRTCTX(COICTXD)
+	   COICTXD(CTXD_HOME) = COICTXD(CTXD_CUR)
+C
+C get index to split at next time
+C
+	   ADDR = COICTXD(CTXD_CUR)
+	   I = 1		! the sub_text is at start of buffer
+590	   I = I + SUB_LEN
+600	CONTINUE
+C
+C load COI variables, and update cursor
+	IF (DSECN.EQ.3.AND.
+     &	   COICTXD(CTXD_CUR).NE.COICTXD(CTXD_LSTCTX)) THEN
+C
+C get BEFORE where we split
+	   CALL PUTLNG(%VAL(COICTXD(CTXD_CUR)+CTX_O_PREPTR),
+     &	                   COICTXD(CTXD_CUR))
+	ENDIF
+	CALL THISCTX(COICTXD)		
+	CALL LOADCOI(.TRUE.)
+C
+C Splitting "AROUND" should put us into Modify PART state
+	IF (DSECN.EQ.3.AND..NOT.SUBTXT) THEN
+	   SUBTXT = .TRUE.
+	   CALL VTSTAT
+	ENDIF
+	MODMOD = .TRUE.		! get MODCHK to genaux again
+	GOTO 999
+C
+C ******************************************************************
+C
+C SPLIT APART
+700	CONTINUE
+C
+C if not in MODIFY state, get into it
+C
+	IF (SINDEX.EQ.STATE_TEXT) THEN
+	   IF (COIDLE(.TRUE.)) GOTO 998	! (deleting original)
+	ENDIF
+C
+	SAVFC = COIFC		! this is FC for whole feature
+C
+C save second half of text
+	SUBTXT_NUM = COICTXD(CTXD_NCTX)
+	STAADR = COICTXD(CTXD_HOME)
+	FINADR = COICTXD(CTXD_LSTCTX)
+C
+C stop first half of text, before current subtext
+	CALL PUTLNG(%VAL(COICTXD(CTXD_HOME)+CTX_O_PREPTR),
+     &	               COICTXD(CTXD_LSTCTX))
+	CALL PUTLNG(0,%VAL(COICTXD(CTXD_LSTCTX)+CTX_O_NXTPTR))
+C
+C count the number of sub texts now
+	CALL COUNT_SUBTEXT(COICTXD)
+C
+C if only one subtext, then set feature code to be the TS of that one
+	IF (COICTXD(CTXD_NCTX).EQ.1) THEN
+	   CALL PUTLNG(%VAL(COICTXD(CTXD_FSTCTX)+CTX_O_TS),FS)
+	   COIFC = FS(1)
+	   COIPAK(PAKFC) = COIFC
+	ENDIF	   
+C
+C remember how many left, so no need to count next time
+	SUBTXT_NUM = SUBTXT_NUM - COICTXD(CTXD_NCTX)
+C
+C output first half of text
+	COIPAK(PAKFLG) = 0			! not deleted
+	IF (NDSTCN(.TRUE.)) GOTO 998
+C
+C Now for the other part
+C COIPAK will now have correct values in it, so we re-use it
+	COIFC = SAVFC			! reset FC to use
+	COIPAK(PAKFLG) = 0		! not deleted
+	COIPAK(PAKSEG) = 0		! want a new segment number
+	COIPAK(PAKFSN) = -1
+C
+C clear out COICTXD
+	CALL FREECTX(COICTXD)
+C
+C and fill it up with second half
+	COICTXD(CTXD_FSTCTX) = STAADR
+	COICTXD(CTXD_LSTCTX) = FINADR
+	COICTXD(CTXD_NCTX) = SUBTXT_NUM
+C
+C if only one subtext, then set feature code to be the TS of that one
+	IF (COICTXD(CTXD_NCTX).EQ.1) THEN
+	   CALL PUTLNG(%VAL(COICTXD(CTXD_FSTCTX)+CTX_O_TS),FS)
+	   COIFC = FS(1)
+	   COIPAK(PAKFC) = COIFC
+	ENDIF	   
+C
+C output second half of text
+	DELOIH = .FALSE.	! feature already deleted, if required
+	IF (NDSTCN(.TRUE.)) GOTO 998
+	CALL ABANDN
+	GOTO 999
+C
+C error exit
+998	CALL IGNCMD
+C
+999	JSTPROP = SAV_JSTPROP
+	OVERHANG = .TRUE.
+	RETURN
+        END

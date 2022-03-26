@@ -1,0 +1,423 @@
+	SUBROUTINE DOEDIT
+C
+***	IDENT	27FE91
+***	MODULE	DOEDIT
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					CCB	24-SEP-1984
+C
+C Description
+C
+C	LITES2 cartographic editor EDIT command.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:END/
+***     PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:CB/
+***	COMMON/CMN:CTXS/
+***	COMMON/CMN:DEFINE/
+***	COMMON/CMN:DOUT/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:RFCTRL/
+***	COMMON/CMN:STATE/
+***	COMMON/CMN:STRIKE/
+***	COMMON/CMN:WORKS/
+C
+C w/s
+	EXTERNAL	DELPAK
+	EXTERNAL	MOAN,NASTY
+C
+	INTEGER		ACTYPE		! the attribute number
+	INTEGER		OUTSTR_L	! the length of the string
+	CHARACTER*1	OUTSTR		! the output string
+	INTEGER		ACVALUE		! the value (as an integer)
+	LOGICAL		GOT_VALUE
+	INTEGER		I,J
+	REAL		XY(2,3)
+	INTEGER		Z(3)
+C
+C functions
+	LOGICAL		ATTDECOD
+	LOGICAL		IFS_CB_WRITE
+	LOGICAL		STRTFT
+	LOGICAL		COIDLE
+	LOGICAL		NDSTCN
+	LOGICAL		CHK_PRIV_ATT
+	LOGICAL		PLANE
+C
+C deal with default
+	IF (DSECN .EQ. 0) THEN			! no secondary command
+	   DSECN = 1				! so lie
+	   DSEC  = 'POINT'
+	   DSECL = 5
+	ENDIF
+C
+C check for valid states
+C EDIT CP is only valid in READY state, other edits are not
+	IF (DSECN.EQ.4.AND.SINDEX.NE.STATE_READY.OR.
+     &	    DSECN.LE.3.AND.SINDEX.EQ.STATE_READY) THEN
+	   CALL MSGCMD(MOAN,MSG_CMDNOTVALID)
+	   GOTO 998
+	ENDIF
+C
+C edit control points
+	IF (DSECN.EQ.4) THEN
+	   CALL EDITCP
+	   GOTO 999
+	ENDIF
+C
+C is map read-only?
+	IF (MAPRO(FOPAK(PAKMAP))) THEN
+	   CALL MOAN(MSG_MAPREADONLY,FOPAK(PAKMAP)+1)
+	   GOTO 998
+	ENDIF
+C
+C Must be on line and on a vertex to EDIT, except VISIBILITY (3)
+	IF ((DSECN.NE.3).AND..NOT.(FONLIN.AND.FONVRT)) THEN
+	   CALL MOAN(MSG_NOTONVRT)
+	   CALL LEARN(MSG_USEVERT)
+	   GOTO 998
+	ENDIF
+C
+C Despatch according to secondary command
+	GOTO (100,200,300), DSECN
+C
+C Secondary command number out of range
+	CALL MSGCMD(NASTY,MSG_ERRSECIND)
+	GOTO 999
+C
+C EDIT POINT
+C 
+100	CONTINUE
+C
+C edit point only valid in LINE state
+	IF (SINDEX.NE.STATE_LINE) THEN
+	   IF (DSECN .EQ. 0) THEN		! no secondary command
+	      DSECN = 1			! so lie
+	      DSEC  = 'POINT'
+	      DSECL = 5
+	   ENDIF
+	   CALL MSGCMD(MOAN,MSG_CMDNOTVALID)
+	   GOTO 998
+	ENDIF
+C
+C set up planes for forcing onto
+	IF (ZOPT) THEN
+	   CALL HAULIN(0)		! make sure vertices present
+	   IF (FO_Z_COL.NE.-1) THEN
+	      DO 105, J = 1,3
+	         I = FOVRT - FOVO		! index into found object
+	         IF (J.EQ.1) THEN
+	            IF (FOVRT.NE.1) THEN
+	               I = I-1
+	            ELSE
+	               I = I+1
+	            ENDIF
+	         ELSEIF (J.EQ.3) THEN
+	            IF (FOVRT.EQ.FOLST) THEN
+	               I = I-1
+	            ELSE
+	               I = I+1
+	            ENDIF
+	         ENDIF
+	         XY(1,J) = FOXY(1,I)
+	         XY(2,J) = FOXY(2,I)
+	         Z(J) = FOATTV(FO_Z_COL,I)
+105	      CONTINUE
+	      FORCE_C_SETUP=PLANE(XY,Z,FORCE_COEFFS)
+	      IF (Z(2).NE.IFF_ABSENT) THEN
+	         CALL PUTLNG(Z(2),FORCE_HEIGHT)
+	         FORCE_H_SETUP = .TRUE.
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	CALL HANDLE				! take object into hand
+	NDMODE = END_EDIT			! ready to END
+	CALL SETSTA(STATE_EDIT)			! into EDIT state
+C
+C set up rubber banding
+	RUBCHG = .TRUE.
+	IF (IHVRT.NE.1) THEN
+	   RUBLIN(1) = .TRUE.
+	   RUBARR(1,1) = IHXY(1,IHVRT-IHVO-1)
+	   RUBARR(2,1) = IHXY(2,IHVRT-IHVO-1)
+	ENDIF
+	IF (IHVRT.NE.IHLST) THEN
+	   RUBLIN(2) = .TRUE.
+	   RUBARR(1,2) = IHXY(1,IHVRT-IHVO+1)
+	   RUBARR(2,2) = IHXY(2,IHVRT-IHVO+1)
+	ENDIF
+	GOTO 999
+C
+C===============================================================
+C EDIT ATTRIBUTE
+C
+200	CONTINUE
+C
+C decode the ACD type, and its value
+	IF (.NOT.ATTDECOD(DSTR(1:DSTRL),ACTYPE,OUTSTR_L,OUTSTR,ACVALUE,
+     &	                  .FALSE.,GOT_VALUE)) GOTO 998
+C
+C check for "end of line"
+	IF (OUTSTR_L.GT.0) THEN
+	   CALL MOAN(MSG_CMDLIBUXC,%REF(OUTSTR))
+	   GOTO 998
+	ENDIF
+C
+C check that allowed to operate on this attribute
+	IF (CHK_PRIV_ATT(ACTYPE)) GOTO 998
+C
+C want to remove an attribute?
+	IF (.NOT.GOT_VALUE) ACVALUE = IFF_ABSENT
+C
+C branch if dealing with texts or symbols
+	IF (SINDEX.NE.STATE_TEXT.AND.SINDEX.NE.STATE_SYMBOL) THEN
+C
+C get the vertex to be altered into memory
+	   CALL GETVRT(FOPAK,FOVRT,FOVRT)
+C
+C alter the vertex
+	   IF (IFS_CB_WRITE(CBH,CBD,ACVALUE,1,ACTYPE,CBROW,CBROW)) THEN
+C
+C if editing Z, and using KRISS, then delete feature, so that it can
+C be reflushed (and redrawn) later
+	      IF (KRSINI.AND.ACTYPE.EQ.IFF_C_Z) THEN
+C
+C Delete old segment (remove from screen)
+	         CALL LDSG(FOPAK,.TRUE.)
+C
+C Do GETVRT again, in case LDSG has lost IFF position
+	         CALL GETVRT(FOPAK,FOVRT,FOVRT)
+C
+C and write the value back into CBD (which must work)
+	         CALL IFS_CB_WRITE(CBH,CBD,ACVALUE,1,ACTYPE,CBROW,CBROW)
+	      ENDIF
+C
+	      CALL EIHWCB(CBH,CBD)
+C
+C update ACs if required
+	      IF (FOAC.GT.0.AND.DEFINITION(F_CODECHANGE).GT.0)
+     &	         CALL ACFSET(FOPAK,FOAC,DEFINITION(F_CODECHANGE))
+C
+C set edited flag if required
+	      IF (EDTOPT) CALL SETEDT(FOPAK)
+C
+C update os map header?
+	      IF (OS_MH_EDIT) CALL OS_MH_UPDATE(FOPAK,FOFS)
+C
+C if editing Z, and using KRISS, then reflush
+	      IF (KRSINI.AND.ACTYPE.EQ.IFF_C_Z) THEN
+	         CALL SCNFTR(FOPAK(PAKLNK), DELPAK)	! delete packs
+	         FOPAK(PAKFLG) = 0			! clear flags
+	         CALL FLUFTR(FOPAK)			! flush
+	      ENDIF
+C
+	      CALL ABANDN
+C
+C no room, so construct new feature
+	   ELSE
+C
+C Start off the new feature
+	      CALL CPYPAK(PAKLEN,FOPAK,COIPAK)
+	      COIPAK(PAKFLG) = 0
+	      FLG_CODECHANGE = .TRUE.
+	      IF (STRTFT(FOPAK,FOTC,FOFS,FOAC,FOTH)) GOTO 998
+C
+C Delete old segment (remove from screen)
+	      CALL LDSG(FOPAK,.TRUE.)
+C
+C Output points, up to current one
+	      IF (FOVRT.GT.1) CALL ADDVRT(FOPAK,1,FOVRT-1,.FALSE.)
+C
+C get existing attributes for our point (could have saved it before)
+	      CALL GETVRT(FOPAK,FOVRT,FOVRT)
+C
+C update the row
+	      DO 110, I = 1,RINATT
+	         IF (RIATTC(I).EQ.ACTYPE) THEN
+	            RIATTV(I,1) = ACVALUE
+	            GOTO 120
+	         ENDIF
+110	      CONTINUE
+C
+	      IF (.NOT.GOT_VALUE) GOTO 120	! don't do anything
+C
+C not already there, so add it
+	      IF (RINATT.LT.18) THEN
+	         RINATT = RINATT+1
+	         RIATTV(RINATT,RITOP) = ACVALUE
+	         RIATTC(RINATT) = ACTYPE
+	      ELSE
+	         CALL MOAN(MSG_OVERFLWPTATTR,18)
+	         GOTO 998
+	      ENDIF
+C
+C write this point
+120	      CALL ADCORD(RIXY(1,1),RINATT,RIATTC,RIATTV)
+C
+C write rest of points
+	      IF (FOVRT.LT.FOLST)
+     &	               CALL ADDVRT(FOPAK,FOVRT+1,FOLST,.FALSE.)
+C
+C Terminate feature
+	      CALL ENDFT
+C
+C Remove the old found object completely
+	      CALL DELFT(FOPAK,FOEF)
+C
+C Abandon
+	      CALL ABANDN
+	   ENDIF
+C
+C deal with text and symbols (don't do in situ)
+	ELSE
+	   FLG_CODECHANGE = .TRUE.
+	   IF (COIDLE(.TRUE.)) GOTO 998
+C
+C update attributes with specified one
+	   IF (COIPAK(PAKGT).EQ.TEXTYP) THEN
+	      CALL ADDDEF(%VAL(COICTXD(CTXD_HOME)+CTX_O_ATTR),
+     &	                  ACTYPE,ACVALUE,I)
+	   ELSE
+C
+C update the row
+	      DO 210, I = 1,COINATT
+	         IF (COIATTC(I).EQ.ACTYPE) THEN
+	            COIATTV(I,2) = ACVALUE
+	            GOTO 220
+	         ENDIF
+210	      CONTINUE
+C
+	      IF (.NOT.GOT_VALUE) GOTO 220	! don't do anything
+C
+C not already there, so add it
+	      IF (COINATT.LT.18) THEN
+	         COINATT = COINATT+1
+	         COIATTV(COINATT,2) = ACVALUE
+	         COIATTC(COINATT) = ACTYPE
+	      ELSE
+	         CALL MOAN(MSG_OVERFLWPTATTR,18)
+	         GOTO 998
+	      ENDIF
+220	   ENDIF
+	   IF (NDSTCN(.TRUE.)) GOTO 998
+	   CALL ABANDN
+	ENDIF
+	GOTO 999
+C
+C===============================================================
+C EDIT VISIBILITY
+C
+300	CONTINUE
+C
+C EDIT VISIBILITY only valid in LINE state
+	IF (SINDEX.NE.STATE_LINE) THEN
+	   CALL MSGCMD(MOAN,MSG_CMDNOTVALID)
+	   GOTO 998
+	ENDIF
+C
+C Must be on line but not on a vertex to EDIT VISIBILITY
+	IF (.NOT.FONLIN.OR.FONVRT) THEN
+	   CALL MOAN(MSG_NOTBETWEEN)
+	   CALL LEARN(MSG_USEFRAC)
+	   GOTO 998
+	ENDIF
+C
+C argument must be 0 (invisible) or 1 (visible)
+	IF (DINTS(1).LT.0.OR.DINTS(1).GT.1) THEN
+	   CALL MOAN(MSG_ILLEGVIS)
+	   GOTO 998
+	ENDIF
+C
+C check if segment already visible/invisible
+	IF ((FOFLG(FOVRT+1-FOVO).AND.1).EQ.DINTS(1)) THEN
+	   CALL INFORM(MSG_ALREADYVIS)
+	   GOTO 998
+	ENDIF
+C
+C get the vertex to be altered into memory (and set CBROW)
+	CALL GETVRT(FOPAK,FOVRT+1,FOVRT+1)
+C
+C can do insitu, unless making INVISIBLE a point not at start of CB
+	IF (DINTS(1).EQ.1.OR.CBROW.EQ.1) THEN
+C
+C Delete old segment (remove from screen)
+	   CALL LDSG(FOPAK,.TRUE.)
+C
+C Do GETVRT again, in case LDSG has lost IFF position
+	   CALL GETVRT(FOPAK,FOVRT+1,FOVRT+1)
+C
+C change visibility (if making visible, then must be first point)
+	   CBH.FLAGS = DINTS(1)
+	   CALL EIHWCB(CBH,CBD)
+C
+C update ACs if required
+	   IF (FOAC.GT.0.AND.DEFINITION(F_CODECHANGE).GT.0)
+     &	         CALL ACFSET(FOPAK,FOAC,DEFINITION(F_CODECHANGE))
+C
+C set edited flag if required
+	   IF (EDTOPT) CALL SETEDT(FOPAK)
+C
+C update os map header?
+	      IF (OS_MH_EDIT) CALL OS_MH_UPDATE(FOPAK,FOFS)
+C
+C re-flush the feature
+	   CALL SCNFTR(FOPAK(PAKLNK), DELPAK)	! delete packs
+	   FOPAK(PAKFLG) = 0			! clear flags
+	   CALL FLUFTR(FOPAK)			! flush
+	   CALL ABANDN
+	ELSE
+C
+C Start off the new feature
+	   CALL CPYPAK(PAKLEN,FOPAK,COIPAK)
+	   COIPAK(PAKFLG) = 0
+	   FLG_CODECHANGE = .TRUE.
+	   IF (STRTFT(FOPAK,FOTC,FOFS,FOAC,FOTH)) GOTO 998
+C
+C Delete old segment (remove from screen)
+	   CALL LDSG(FOPAK,.TRUE.)
+C
+C Output points, up to current one
+	   CALL ADDVRT(FOPAK,1,FOVRT,.FALSE.)
+C
+C get existing attributes for our point (could have saved it before)
+	   CALL GETVRT(FOPAK,FOVRT+1,FOVRT+1)
+C
+C Flush if making invisible
+	   IF (DINTS(1).EQ.0) THEN
+	      CALL FLUSH(1)
+	      OIENDS = 0		! invisible
+	   ENDIF
+	   CALL ADCORD(RIXY(1,1),RINATT,RIATTC,RIATTV(1,1))
+C
+C write rest of points
+	   IF (FOVRT.LT.FOLST-1) CALL ADDVRT(FOPAK,FOVRT+2,FOLST,.FALSE.)
+C
+C Terminate feature
+	   CALL ENDFT
+C
+C Remove the old found object completely
+	   CALL DELFT(FOPAK,FOEF)
+	   CALL ABANDN
+	ENDIF
+	GOTO 999
+C
+C error exit
+998	CALL IGNCMD
+C
+999	RETURN
+	END

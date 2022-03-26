@@ -1,0 +1,565 @@
+	LOGICAL FUNCTION READ_ATTREC( GOT_ATTRIB, IELEN )
+C
+***     MODULE READ_ATTREC
+***     IDENT	15DE94
+C
+C     Copyright Laser-Scan Ltd, Cambridge, England
+C
+C	Author		IMcL	05-Aug-1989
+C	Read NTF attribute records
+C
+CMOD							VLG 16-Mar-1990
+CMOD	removed unused declarations, suspect that this is more complex than
+C	it needs to be, needs looking into		SG  25-Jun-1991
+CMOD	BS7567 (v2.0) support added (W93/13)		ST  02-Jun-1993
+CMOD    Now supported dates of form yymmdd & yyyymmdd	ST  20-Jul-1993
+C       (Mod 1256)
+CMOD	Prevent int overflow when assigning the result	ST  27-Apr-1994
+C       of ICHAR to a byte by first assigning it to an
+C	int equivalenced onto a byte. (Mod 1359).
+CMOD	Allow for attributes whose mnemonic ends a line	ST  15-Dec-1994
+C	but whose value start on the next continuation
+C	record. Mod 1445.
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	LOGICAL		GOT_ATTRIB	! If we have a valid attrib. record
+	INTEGER*2	IELEN		! Length of IFF AC entry
+C
+C Common:
+	INCLUDE 	'LSL$CMNFRT:FRTCOM.CMN'	! general FRT stuff
+	INCLUDE 	'LSL$CMNFRT:FRTACD.CMN'	! default attribute info
+	INCLUDE 	'ATTRIBUTE.CMN'		! Att. desc. table
+	INCLUDE 	'ATTCMN.CMN'		! Atribute data for feature
+	INCLUDE 	'RECORD.CMN'		! STRING etc read from NTF
+	INCLUDE 	'NTFDATA.CMN'		! for DIVIDER
+	INCLUDE 	'NTF2IMSG.PAR'
+C
+C Functions:
+C
+	INTEGER*2	EXPAND
+	LOGICAL		RDLONG
+	LOGICAL		RDINT
+	LOGICAL		RDREAL
+	LOGICAL		CVT_DATE
+	LOGICAL		IS_CONTINUATION
+	LOGICAL		READ_CONTINUE		! Get the continuation record
+	INTEGER*2	GET_NEXT_ATTR		! Return the start of the
+						! next attribute
+C
+C Workspace:
+C
+	INTEGER*2	I,J,K		! Loop counters
+	INTEGER		ATTR_LEN
+	INTEGER		COUNT
+	INTEGER*2	ATNO		! Pointer to the attribute table
+	INTEGER*2	ACTYPE		! Type of AC
+	EQUIVALENCE	( ACTYPE, RDARR(1) )
+	INTEGER*2	WIDTH		! Of the text string
+	INTEGER*2	IMONTH		! Month in integer format 1..12
+	INTEGER*2	RDARR(3)	! Temp storage for ACTYPE,LCODE
+	INTEGER*2	START		! Start pos of AC field
+	INTEGER*2	CURPOS		! Current pos. in AC field
+	INTEGER*2	AC_COUNT	! How many AC for this feature
+	INTEGER*2	AC_PTR		! Where we are in AC table
+C
+	INTEGER		CHARINT
+	BYTE		CHARBYTE
+	EQUIVALENCE	(CHARINT,CHARBYTE)
+C
+	INTEGER		AC_NOS( MAX_ATTR_NUM )		! AC types read
+	INTEGER		AC_VALUE ( MAX_ATTR_NUM )	! The values
+	INTEGER		UNUSED				! Unused argument
+	INTEGER		ACD_DATATYPE_TX		! Optional text datatype
+	PARAMETER	( ACD_DATATYPE_TX = 6 )	! Fudge to look like FRTLIB
+	INTEGER*4	LCODE			! Value ( interpretation depends
+						!         on the AC type )
+	EQUIVALENCE	( LCODE , RDARR(2) )
+C
+	LOGICAL		OK		! Success flag
+	LOGICAL		TRY_TIME	! NTF has no date format, if user
+	DATA 	TRY_TIME /.TRUE./	! Initialise it
+	SAVE 	TRY_TIME		! and remember it
+C
+	REAL		R_VALUE		! Temp storage ( AC value
+C
+	CHARACTER*4	C_VALUE		!   ""
+	EQUIVALENCE	( LCODE, R_VALUE )
+	EQUIVALENCE	( LCODE, C_VALUE )
+c
+	CHARACTER*255	CBUFF			! Temp storage
+	BYTE		BBUFF(255)		!  "
+	EQUIVALENCE	( CBUFF,BBUFF(1) )
+C
+	CHARACTER*2	NTF_MNEM	! NTF attribute mnemonic
+	CHARACTER*12	DATE		! Temp storage
+C
+	CHARACTER*3	MONTHS(12)	! JAN, FEB,...,DEC
+	CHARACTER*4	YEAR
+C
+	DATA MONTHS /	'JAN','FEB','MAR','APR','MAY','JUN',
+     &			'JUL','AUG','SEP','OCT','NOV','DEC' /
+C
+	BYTE		AC_TEXT  ( 255,MAX_ATTR_NUM )	! Optional text
+C.........................................................................
+C Initialise everything
+C
+	OK = .TRUE.
+	AC_COUNT = 0
+	START = 9
+	ATTR_LEN = 0
+C.........................................................................
+C Get the attribute code ( type )
+C
+250	CURPOS = START + 2
+C
+	NTF_MNEM = STRING(START:START+1)
+C .........................................................................
+C Do we know about it
+C
+10	DO 150 I=1,ATTR_PTR
+	   IF ( NTF_MNEM.EQ.NTF_ATT_NAME(I) ) THEN
+	      ATTR_LEN = FIELD_WIDTH(I)
+	      GOTO 151
+	   ENDIF
+150	CONTINUE
+C 
+C We aren't meant to be translating it, make sure it was in the 
+C  ATTDESC
+C 
+	DO 160 I=1,IGN_PTR
+	   IF ( NTF_MNEM.EQ.NTF_NAM_IGN(I) ) THEN
+CCCCCCC	      ATTR_LEN = FIELD_WIDTH(I)    !!!!!! BUG !!!!!!
+	      ATTR_LEN = NTF_LEN_IGN(I)
+	      GOTO 161
+	   ENDIF
+160	CONTINUE
+C
+C If it was one of the standard ones (LC,FC,ST) they don't have to have a
+C corresponding attribute description record. It still has to be skipped
+C since it would have already been extracted
+C
+	DO 171 I=1,NUM_STD_CODES
+	   IF (NTF_MNEM.EQ.STD_ATTR_CODES(I)) THEN
+	      ATTR_LEN = STD_ATTR_LEN(I)
+	      GOTO 161
+	   ENDIF
+171	CONTINUE
+C
+C Unrecognised attribute, no idea what this is or how long it is.
+C look for a DIVIDER or start on the next record. Warn the user.
+C
+	DO 170 I=1,UNKN_PTR
+	   IF (UNKN_ATT(I).EQ.NTF_MNEM) GOTO 180	! warned already
+170	CONTINUE
+	UNKN_PTR = UNKN_PTR + 1
+	IF (UNKN_PTR.GT.UNKN_MAX) GOTO 175
+	UNKN_ATT(UNKN_PTR) = NTF_MNEM
+175	CALL LSL_PUTMSG(NTF2I__NOTRANS,NTF_MNEM)
+180	START = GET_NEXT_ATTR( CURPOS, 0,.FALSE.)
+	IF ( START.EQ.0 ) GOTO 900		! No more
+	GOTO 250	! Back up to read next one
+C .......................................................................
+C We've found the definition of the attribute so skip over it's length
+C to the next one
+C
+161	START = GET_NEXT_ATTR( CURPOS,ATTR_LEN,.FALSE.)
+	IF ( START.EQ.0 ) GOTO 900		! No more
+C
+C If we are ignoring an attribute and it ends on a line but whose value
+C starts on new line, thus: PNfred\NP1% where NP is the next attribute, then
+C we want to skip what is at the begining of the new line.
+C
+	IF (CURPOS.GE.LENGTH-1.AND.START.EQ.3) THEN
+	   START = GET_NEXT_ATTR(START,ATTR_LEN,.FALSE.)
+	   IF ( START.EQ.0 ) GOTO 900 ! No more
+	ENDIF
+
+	GOTO 250	! Back up to read next one
+C ........................................................................
+C We know what the attribute is and we are going to (try to) convert it
+C
+151	ATNO = I	! We know it
+C
+C See if we have had one already ( value or text )
+C  This is because we may have a value and a text string to go from 
+C  separate NTF attributes into the same IFF AC.
+C
+	DO 210 AC_PTR = 1,AC_COUNT
+	   IF ( AC_NOS(AC_PTR).EQ.IFF_ATT_NUM( ATNO ) ) GOTO 152
+210	CONTINUE
+C
+C Not had it before, add to end of list
+C
+	AC_COUNT = AC_COUNT + 1
+	AC_PTR = AC_COUNT
+	AC_NOS( AC_PTR ) = IFF_ATT_NUM( ATNO )
+	AC_VALUE ( AC_PTR ) = 0
+	AC_TEXT ( 1,AC_PTR ) = 0
+C .......................................................................
+C So read the value 
+C
+C Integer
+C
+152	IF ( ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_I ) THEN	
+C
+C Check for attribute ending on line but value starting on new line
+C Thus: PNfred\NP1% where NP is the next attribute.
+C
+	   IF (CURPOS.GE.LENGTH-1) THEN
+	      CURPOS = 0
+	      IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) GOTO 9999
+	      OK = READ_CONTINUE( 'ATTREC' )
+	      IF ( .NOT.OK ) GOTO 9999
+C
+C set pointer to start of record
+C
+	      CURPOS = 3		! Skip the record identifier ( '00' )
+	   ENDIF
+C
+C
+C Pull out the value
+C
+	   CALL SETAUX(%REF(STRING(CURPOS:CURPOS+FIELD_WIDTH(ATNO))),
+     &				FIELD_WIDTH(ATNO) )
+	   IF (RDLONG(LCODE)) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+	   AC_VALUE( AC_PTR ) = LCODE
+C
+C Since FIELD_WIDTH(ATNO)=ATTR_LEN and ATTR_LEN is added in GET_NEXT_ATTR,
+C we do not need this. It was offsetting CURPOS by twice the field width!
+C
+C	   CURPOS = CURPOS + FIELD_WIDTH(ATNO)
+C .......................................................................
+C Real
+C
+	ELSEIF ( ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_R ) THEN
+C
+C Check for attribute ending on line but value starting on new line
+C Thus: PNfred\NP1% where NP is the next attribute.
+C
+	   IF (CURPOS.GE.LENGTH-1) THEN
+	      CURPOS = 0
+	      IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) GOTO 9999
+	      OK = READ_CONTINUE( 'ATTREC' )
+	      IF ( .NOT.OK ) GOTO 9999
+C
+C set pointer to start of record
+C
+	      CURPOS = 3		! Skip the record identifier ( '00' )
+	   ENDIF
+	   CALL SETAUX(%REF(STRING(CURPOS:CURPOS+FIELD_WIDTH(ATNO))),
+     &				FIELD_WIDTH(ATNO) )
+	   IF (RDREAL(R_VALUE)) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+	   R_VALUE = R_VALUE / ATT_R_MULT( ATNO )
+C
+	   AC_VALUE( AC_PTR ) = LCODE		! Equiv. to R_VALUE
+C
+C Since FIELD_WIDTH(ATNO)=ATTR_LEN and ATTR_LEN is added in GET_NEXT_ATTR,
+C we do not need this. It was offsetting CURPOS by twice the field width!
+C
+C	   CURPOS = CURPOS + FIELD_WIDTH(ATNO)
+C .......................................................................
+C Character
+C
+	ELSEIF ( ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_C ) THEN
+C
+C Check for attribute ending on line but value starting on new line
+C Thus: PNfred\NP1% where NP is the next attribute.
+C
+	   IF (CURPOS.GE.LENGTH-1) THEN
+	      CURPOS = 0
+	      IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) GOTO 9999
+	      OK = READ_CONTINUE( 'ATTREC' )
+	      IF ( .NOT.OK ) GOTO 9999
+C
+C set pointer to start of record
+C
+	      CURPOS = 3		! Skip the record identifier ( '00' )
+	   ENDIF
+	   IF (CURPOS.EQ.(LENGTH-1)) THEN
+	      CURPOS=GET_NEXT_ATTR(CURPOS,ATTR_LEN,.FALSE.)
+	   ENDIF
+	   C_VALUE = STRING ( CURPOS:CURPOS+FIELD_WIDTH(ATNO)-1)
+	   AC_VALUE( AC_PTR ) = LCODE ! Equivalenced to C_VALUE
+C
+C Since FIELD_WIDTH(ATNO)=ATTR_LEN and ATTR_LEN is added in GET_NEXT_ATTR,
+C we do not need this. It was offsetting CURPOS by twice the field width!
+C
+C	   CURPOS = CURPOS + FIELD_WIDTH(ATNO)
+C .......................................................................
+C Date
+C
+	ELSEIF ( ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_D ) THEN
+C
+C Check for attribute ending on line but value starting on new line
+C Thus: PNfred\NP1% where NP is the next attribute.
+C
+	   IF (CURPOS.GE.LENGTH-1) THEN
+	      CURPOS = 0
+	      IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) GOTO 9999
+	      OK = READ_CONTINUE( 'ATTREC' )
+	      IF ( .NOT.OK ) GOTO 9999
+C
+C set pointer to start of record
+C
+	      CURPOS = 3		! Skip the record identifier ( '00' )
+	   ENDIF
+C
+C The date needs some converting, it comes as a character string
+C in the form yymmdd or yyyymmdd, but IFF wants dd-mmm-yyyy
+C
+C Rewrite in new order translating the month to chars ( e.g. 'APR' ) 
+C from integer ( '03' )
+C
+	   IF (FIELD_WIDTH(ATNO).EQ.6) THEN
+	      CALL SETAUX(%REF(STRING(CURPOS+2:CURPOS+3)),2)
+	   ELSE
+	      CALL SETAUX(%REF(STRING(CURPOS+4:CURPOS+5)),2)
+	   ENDIF
+	   IF (RDINT( IMONTH )) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+C 1950 is the start of the calendar. Hence 50mmdd is 1950 and 49mmdd is 2049
+C
+	   IF (FIELD_WIDTH(ATNO).EQ.6) THEN
+	      IF (STRING(CURPOS:CURPOS+1).GT.'49') THEN
+		 YEAR(1:4) = '19'//STRING(CURPOS:CURPOS+1)
+	      ELSE
+		 YEAR(1:4) = '20'//STRING(CURPOS:CURPOS+1)
+	      ENDIF
+	      CALL EXPAND ( '%WS%S2% -%S3% -%S4',DATE,
+     &						STRING(CURPOS+4:CURPOS+5),
+     &						MONTHS( IMONTH ),
+     &						YEAR)
+	   ELSE
+	      CALL EXPAND ( '%WS%S2% -%S3% -%S4',DATE,
+     &						STRING(CURPOS+6:CURPOS+7),
+     &						MONTHS( IMONTH ),
+     &						STRING(CURPOS:CURPOS+3))
+	   ENDIF
+C
+C And put the converted date into the longword ready for the AC
+C
+	   IF (.NOT.CVT_DATE ( DATE, LCODE, UNUSED )) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+	   AC_VALUE( AC_PTR ) = LCODE
+C
+C Since FIELD_WIDTH(ATNO)=ATTR_LEN and ATTR_LEN is added in GET_NEXT_ATTR,
+C we do not need this. It was offsetting CURPOS by twice the field width!
+C
+C	   CURPOS = CURPOS + FIELD_WIDTH(ATNO)
+C .......................................................................
+C And Time
+C
+	ELSEIF ( ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_T ) THEN
+C
+C Check for attribute ending on line but value starting on new line
+C Thus: PNfred\NP1% where NP is the next attribute.
+C
+	   IF (CURPOS.GE.LENGTH-1) THEN
+	      CURPOS = 0
+	      IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) GOTO 9999
+	      OK = READ_CONTINUE( 'ATTREC' )
+	      IF ( .NOT.OK ) GOTO 9999
+C
+C set pointer to start of record
+C
+	      CURPOS = 3		! Skip the record identifier ( '00' )
+	   ENDIF
+C
+C There is no time format in NTF so we don't know what to expect
+C try to read it as VMS time - make sure we don't moan too often
+C
+	   IF ( TRY_TIME ) THEN
+	      IF (.NOT.CVT_DATE (STRING(CURPOS:CURPOS+FIELD_WIDTH(ATNO)),
+     &			 UNUSED, LCODE)) THEN
+ 	         CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	 	 CALL LSL_ADDMSG(NTF2I__BADTIME)
+	         OK=.FALSE.
+	         TRY_TIME = .FALSE.
+	         GOTO 9999
+	      ENDIF
+	   ENDIF
+C
+	   AC_VALUE( AC_PTR ) = LCODE
+C
+C Since FIELD_WIDTH(ATNO)=ATTR_LEN and ATTR_LEN is added in GET_NEXT_ATTR,
+C we do not need this. It was offsetting CURPOS by twice the field width!
+C
+C	   CURPOS = CURPOS + FIELD_WIDTH(ATNO)
+C ....................................................................
+C Optional text string
+C We read a text attribute until we reach a terminating DIVIDER or 
+C we have read FIELD_WIDTH characters ( 255 for variable length field ).
+C The field may well spill over onto subsequent records.
+C
+C
+	ELSEIF ( ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_TX ) THEN
+C
+C .....................................................................
+C Read the text string
+C
+	   ATTR_LEN = 0
+	   DO 110 I=1,FIELD_WIDTH(ATNO)
+C
+C If we are at the end of a record - get a new one
+C
+	      IF (CURPOS.EQ.(LENGTH-1)) THEN
+		 CURPOS=GET_NEXT_ATTR(CURPOS,ATTR_LEN,.FALSE.)
+	      ENDIF
+	      IF (CURPOS.EQ.0) GOTO 320
+C
+C Have we had a record divider
+C
+	      IF ( STRING(CURPOS:CURPOS).NE.DIVIDER ) THEN
+C
+C No so store this character in the text buffer
+C
+		 CHARINT = ICHAR(STRING(CURPOS:CURPOS))
+	         AC_TEXT( I, AC_PTR ) = CHARBYTE
+	         CURPOS = CURPOS + 1
+	      ELSE
+C
+C We are at the end of the string - Jump out
+C
+	         WIDTH = I
+	         GOTO 320
+	      ENDIF
+110	   CONTINUE
+	   ATTR_LEN = FIELD_WIDTH(ATNO)
+	   WIDTH = ATTR_LEN + 1
+	   CURPOS = CURPOS - ATTR_LEN
+C
+C We have the string - add terminating character
+C
+320	   AC_TEXT( WIDTH, AC_PTR ) = 0
+C
+	   IF (VERSION.EQ.2.0 .AND. LEVEL.EQ.3 .AND. 
+     &	       IS_TEXTREC .AND. NTF_MNEM.EQ.'TX') THEN
+	      HAD_TXTSTRING = .TRUE.
+	      TXTSTRING_LEN = WIDTH-1
+	      DO 321 K = 1, TXTSTRING_LEN
+		 TXTSTRING(K:K) = CHAR(AC_TEXT(K,AC_PTR))
+321	      CONTINUE
+	      AC_COUNT = AC_COUNT - 1
+	      AC_PTR = AC_COUNT
+	   ENDIF
+C
+C .......................................................................
+C We have gone through the normal cases. If we get here then the
+C data has to be converted in some way
+C
+	ELSEIF ( ATTR_TRANS(ATNO).EQ. 7 ) THEN	
+C
+C Check for attribute ending on line but value starting on new line
+C Thus: PNfred\NP1% where NP is the next attribute.
+C
+	   IF (CURPOS.GE.LENGTH-1) THEN
+	      CURPOS = 0
+	      IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) GOTO 9999
+	      OK = READ_CONTINUE( 'ATTREC' )
+	      IF ( .NOT.OK ) GOTO 9999
+C
+C set pointer to start of record
+C
+	      CURPOS = 3		! Skip the record identifier ( '00' )
+	   ENDIF
+C
+C Comes as a real but IFF attribute is an iteger
+C
+	   CALL SETAUX(%REF(STRING(CURPOS:CURPOS+FIELD_WIDTH(ATNO))),
+     &				FIELD_WIDTH(ATNO) )
+	   IF (RDREAL(R_VALUE)) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+	   LCODE = NINT( R_VALUE / ATT_R_MULT( ATNO ) )
+C
+	   AC_VALUE( AC_PTR ) = LCODE
+C
+C Since FIELD_WIDTH(ATNO)=ATTR_LEN and ATTR_LEN is added in GET_NEXT_ATTR,
+C we do not need this. It was offsetting CURPOS by twice the field width!
+C
+C	   CURPOS = CURPOS + FIELD_WIDTH(ATNO)
+C .......................................................................
+C
+	ELSEIF ( ATTR_TRANS(ATNO).EQ. 8 ) THEN
+C
+C Check for attribute ending on line but value starting on new line
+C Thus: PNfred\NP1% where NP is the next attribute.
+C
+	   IF (CURPOS.GE.LENGTH-1) THEN
+	      CURPOS = 0
+	      IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) GOTO 9999
+	      OK = READ_CONTINUE( 'ATTREC' )
+	      IF ( .NOT.OK ) GOTO 9999
+C
+C set pointer to start of record
+C
+	      CURPOS = 3		! Skip the record identifier ( '00' )
+	   ENDIF
+C
+C Should be real but came as an integer
+C
+	   CALL SETAUX(%REF(STRING(CURPOS:CURPOS+FIELD_WIDTH(ATNO))),
+     &				FIELD_WIDTH(ATNO) )
+	   IF (RDLONG(LCODE)) THEN
+	      CALL LSL_PUTMSG(NTF2I__ATTREC,NTF_MNEM,SEC_REC)
+	      OK=.FALSE.
+	      GOTO 9999
+	   ENDIF
+C
+	   R_VALUE = REAL( LCODE )
+C
+	   AC_VALUE( AC_PTR ) = LCODE		! Equiv. to R_VALUE
+C
+C Since FIELD_WIDTH(ATNO)=ATTR_LEN and ATTR_LEN is added in GET_NEXT_ATTR,
+C we do not need this. It was offsetting CURPOS by twice the field width!
+C
+C	   CURPOS = CURPOS + FIELD_WIDTH(ATNO)
+C .......................................................................
+C
+C
+	ENDIF
+C .......................................................................
+C Have we any more records/fields to read
+C
+	START = GET_NEXT_ATTR(CURPOS,ATTR_LEN,.FALSE.)
+C
+C Head back up to the top and read it
+C
+	IF (( START.GT.0 ).AND.(START.LT.LENGTH-2) ) GOTO 250
+C .......................................................................
+C We are now ready to output any AC's we have read
+C 
+900	DO 901 AC_PTR = 1, AC_COUNT
+C
+	   CALL IFFAC ( AC_NOS( AC_PTR ), 	! Type
+     &			AC_VALUE( AC_PTR ),	! Value 
+     &			AC_TEXT( 1,AC_PTR ))	! Optional text
+C
+901	CONTINUE
+C.........................................................................
+C
+9999	READ_ATTREC = OK
+	RETURN
+	END

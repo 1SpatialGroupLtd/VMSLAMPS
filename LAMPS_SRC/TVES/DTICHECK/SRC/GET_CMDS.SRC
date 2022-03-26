@@ -1,0 +1,350 @@
+	LOGICAL FUNCTION GET_CMDS(CHECK)
+C
+***	MODULE	GET_CMDS
+***	IDENT	09AU93
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Remove redundant call to WAIT_CMD      MWSR     09-Jan-1989
+C       Modified for DTICHECK                   DJG     18-Feb-1988
+C	Created 				TJH	09-Oct-1987
+C
+C This function reads the user input to DTICHECK, checks that the command
+C is valid against DTICHECK_CMDTAB and passes control to the appropriate
+C routine for further processing
+C
+	IMPLICIT NONE
+C
+C Argument:
+C
+	LOGICAL	CHECK		! do the checking ?
+C
+C Parameters:
+C
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNDTICHECK:PARAMS.PAR'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C Common blocks:
+C
+	INCLUDE 'LSL$CMNDTICHECK:IFCTRL.CMN'
+	INCLUDE 'LSL$CMNDTICHECK:COMMAND.CMN'
+	INCLUDE 'LSL$CMNDTICHECK:FILES.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C W/s:
+C
+	BYTE		CH	! for use with RDCHS
+	INTEGER		CMD     ! decoded command number
+	LOGICAL		OK	! function return
+	INTEGER		IERR	! error code
+C
+C Define command tables:
+C
+	EXTERNAL	DTICHECK_CMD_TABLE
+	INTEGER		DTICHECK_CMD_TABLE
+C
+C Functions:
+C
+	LOGICAL		DISABLE_CMD	! decode disable keywords
+	LOGICAL		ENABLE_CMD	! decode enable keywords
+	LOGICAL		FILEIN_CMD	! get input file-spec
+	LOGICAL		GETFILNAM	! get the name of the input file
+	INTEGER		FLROPN		! 
+	INTEGER		FLRSTR		! 
+	LOGICAL		GO_CMD		! performs checking
+	LOGICAL		HELP_CMD	! give help
+	LOGICAL		IFF_CMD		! open an IFF file for output
+	LOGICAL		LITES2_CMD	! open a Lites2 command file for output
+	LOGICAL		NULL_CMD	! set the null value for checking
+	LOGICAL		PAUSE_CMD	! get pause command
+	LOGICAL		PLOTUNITS_CMD	! get plot_units command
+	LOGICAL		QUIT		! quit the program
+	LOGICAL		RETURN_CMD	! return to terminal control
+	LOGICAL		RDCHS		! read character
+	LOGICAL		RDCOMM		! read command
+	LOGICAL		ROVER_CMD	! open a rover command file for output
+	LOGICAL         SET_CMD		! set IFF feature codes
+	LOGICAL         SHOW_CMD	! show status
+	LOGICAL		SLOPE_CMD	! set the slope value for checking against
+	LOGICAL         SPAWN_CMD	! for DCL SPAWN
+	INTEGER		TTRSTR		!
+	LOGICAL		UNITS_CMD	! get units command
+	LOGICAL		WINDOW_CMD	! get WINDOW command args
+C
+C ......................................................................
+C
+C Initialise all the command flags
+C
+	TTIN   		= .TRUE.	! assume reading from terminal
+	LAYER		=1		! default IFF layer 
+	PMEING		=.FALSE.	! PME running?
+	SLOPE		=.FALSE.	! Dont check for max slope
+	MINUS		=.FALSE.	! Dont check for -ve heights
+	NULL		=.FALSE.	! Dont check for missing data
+	ZERO		=.FALSE.	! Dont check for zero heights
+C
+C Set UNITS text
+C
+	UNITS_TEXT(1)='DTI matrix units'
+	UNITS_TEXT(2)='Metres on the ground'
+	UNITS_TEXT(3)='Latlong (deg,min,sec)'
+	UNITS_TEXT(4)='Latlong (seconds)'
+	UNITS_TEXT(5)='Projection Units'
+C
+C Set plot UNITS text
+C
+	PLOT_UNITS_TEXT(1)='Metres on the ground'
+	PLOT_UNITS_TEXT(2)='Latlong (seconds)'
+C
+C ......................................................................
+C
+C Get an input line from the terminal or from the command file
+C
+10	TXTPTR=80
+	IF (TTIN) THEN
+	   OK=TTRSTR(,,'DTICHECK> ',IERR)
+	ELSE
+	   CALL FLRSEL(INDLUN)
+	   OK=FLRSTR(,,IERR)
+	ENDIF
+C
+C If an error is detected in the indirect command file, close and return
+C to the terminal
+C
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      IF (TTIN) THEN
+	         GOTO 240		! end of file = exit
+	      ELSE
+	         CALL WRITEF('%S Unexpected end of indirect command '//
+     &			'file detected',WARNING)
+	         CALL WRITEF('                RETURN command assumed '//
+     &				'- returning to terminal input')
+	         GOTO 170		! close indirect file etc.
+	      ENDIF
+	   ENDIF
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 20
+	ENDIF
+C
+C Otherwise, ( command seems to be ok ), echo and decode the line
+C
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('DTICHECK> ')
+	   CALL APPEND(TXTDSC) ! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+	CALL BSLN
+C
+C Look for comment
+C
+	IF (RDCHS(CH)) GOTO 10	! substantially empty line
+	IF (CH.EQ.'!') GOTO 10	! comment!
+C
+C Look for indirect file start
+C
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 20
+	      ELSE
+	         CALL BSCH
+	      ENDIF
+	      OK=GETFILNAM(INDFILE,INDLEN,
+     &				'SYS$DISK:[].COM;0',.TRUE.,%REF('!'))
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	      OK=FLROPN(INDLUN, INDFILE(:INDLEN), IERR)
+	      IF (OK) THEN
+	         CALL WRITEF('Command input now being read from %S'
+     &					,INDFILE(:INDLEN))
+	         TTIN=.FALSE.
+	         GOTO 10
+	      ELSE
+	         CALL WRITEF('%S Can''t open indirect command file %S'
+     &			  ,ERROR,INDFILE(:INDLEN))
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+	CALL BSCH			! un-read non-'@'
+C
+C Command must be input from the terminal, so check input against valid
+C commands listed in DTICHECK_CMDTAB.MAR
+C
+	CMD=RDCOMM(DTICHECK_CMD_TABLE)
+	GOTO (	20,
+     &		40,	! disable
+     &		50,	! enable
+     &		60,	! filein
+     &		70,	! go
+     &		80,	! help
+     &		90,	! iff
+     &		105,	! lites2
+     &		110,	! null
+     &		120,	! pause
+     &		125,	! plot_units
+     &		240,	! quit
+     &		130,	! return
+     &		150,	! rover
+     &		160,	! set
+     &		170,	! show
+     &		190,	! slope
+     &		200,	! spawn
+     &		210,	! units
+     &          230     ! window
+     &	      		), CMD+1
+C
+C command number out of range
+C
+	CALL WRITEF('Command not yet implemented')
+C
+C close indirect input following disaster
+C
+20	IF (.NOT.TTIN) THEN
+	   TTIN=.TRUE.
+	   CALL FLRCLO(INDLUN)
+	   CALL WRITEF(' ')
+	   CALL WRITEF('%S Indirect file error - returning to '//
+     &			'terminal input',WARNING)
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C Disable 'sub-command'
+C
+40	IF (.NOT.DISABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C Enable 'sub-command'
+C
+50	IF (.NOT.ENABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C FILEIN [file-spec]
+C
+60	IF (DTIOPN) THEN  	! already had successful FILEIN?
+	   CALL WRITEF('%S the DTI input file is already open!'
+     &					,WARNING)
+	ELSE
+	   IF (.NOT.FILEIN_CMD()) GOTO 20
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C GO - perform checking
+C
+70	IF ( .NOT. GO_CMD() ) GOTO 20
+	CHECK = .TRUE.
+	GET_CMDS=SS$_NORMAL
+	GOTO 250
+C ......................................................................
+C HELP
+C
+80	IF (.NOT.HELP_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C IFF - output an IFF file
+C
+90	IF ( .NOT. IFF_CMD() ) GOTO 20
+	GOTO 10
+C ......................................................................
+C LITES - output a LITES2 driving file
+C
+105	IF ( .NOT. LITES2_CMD() ) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C NULL - 
+C
+110	IF ( .NOT. NULL_CMD() ) GOTO 20
+	GOTO 10
+C ......................................................................
+C PAUSE
+C
+120	CALL PAUSE_CMD(TTIN)
+	GOTO 10
+C
+C ......................................................................
+C PLOT_UNITS
+C
+125	IF (.NOT.PLOTUNITS_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C RETURN - return to terminal input
+C
+130	IF (TTIN) THEN
+	   CALL WRITEF(
+     &		'RETURN command ignored - command '//
+     &			'input is already from terminal')
+	ELSE
+	   CALL WRITEF(
+     &		'RETURN command detected - returning to terminal input')
+	ENDIF
+140	IF (.NOT.TTIN) CALL FLRCLO(INDLUN)
+	TTIN=.TRUE.
+	GOTO 10
+C
+C ......................................................................
+C ROVER - 
+C
+150	IF ( .NOT. ROVER_CMD(2) ) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SET
+C
+160	IF (.NOT.SET_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SHOW
+C
+170	IF (.NOT.SHOW_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SLOPE -
+C
+190	IF ( .NOT. SLOPE_CMD() ) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SPAWN DCL process - primarily designed for file management
+C
+200	IF (.NOT.SPAWN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C UNITS
+C
+210	IF (.NOT.UNITS_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C WINDOW
+C
+230	IF (.NOT.WINDOW_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C QUIT
+C
+240	GET_CMDS=SS$_ABORT
+C
+250	RETURN
+	END

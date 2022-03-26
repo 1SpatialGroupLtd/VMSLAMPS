@@ -1,0 +1,932 @@
+	PROGRAM DTICOMBINE
+C
+***	MODULE	DTICOMBINE
+***	IDENT	15OC92
+C
+C Copyright Laser-Scan Limited, Cambridge, England.
+C
+C	Created					TJH 	18-Jan-1988
+C
+C	Modified to remove call to DTI_PRINT_HEADER 
+C	(This is now done later, immediately before the DTI file is 
+C	closed.)				DRC     15-Jun-1988
+C	Classification implemented		JHR	16-Sep-1988
+CMOD	ENABLE/DISABLE absolute added	       MWSR	24-Nov-1988
+CMOD	Add NULL_HANDLING		       MWSR     08-Dec-1988
+CMOD	Added output file type			 SG	22-Apr-1991
+CMOD	Added flags to show whether union or intersection
+C	are active and re-calculates UNION and intersection
+C	when GO command issued			 SG	23-Apr-1991
+CMOD	Put back code which copied headers	 SG	14-Jun-1991
+C
+CMOD1124 Fix BYTE reading, and tidy the diagnostics output
+C	 and make variable names sensible	 JB	07-Jul-1992
+C
+CMOD1131 The map offset always used the minimised (MIN_SWX, MIN_SWY)
+C	 These were only set with INTERSECTION, and were 0 otherwise
+C	 Code uses (MAX_SWX, MAX_SWY) when appropriate
+C						 SG	28-Jul-1992
+C
+CMOD1133 Use NULL_HANDLING to signal not to output NULL if there
+C 	 is a single NULL input, but use remaining input values
+C	 to create a sensible output value - only for MAX,MIN at
+C	 present.
+C	 OUTPUT UNION option tidied, especially for NULL values
+C	 present.
+C						 JB	04-Aug-1992
+C
+CMOD1154 Use NINT instead of INT in calculation of output matrix
+C	 extents				 JB	15-Oct-1992
+C
+C DTICOMBINE is the MATRIX grid combination utility.
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNDTI:DTIDEF.PAR'
+	INCLUDE 'LSL$CMNDTI:DTIPAR.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'($SSDEF)/NOLIST'
+C
+C Common:
+	INCLUDE	'LSL$CMNDTICOMBINE:CONTROL.CMN'
+	INCLUDE	'LSL$CMNDTICOMBINE:ERRMSG.CMN'
+	INCLUDE	'LSL$CMNDTICOMBINE:XPRCMN.CMN'
+	INCLUDE	'LSL$CMNDTICOMBINE:FILES.CMN'
+	INCLUDE	'LSL$CMNDTICOMBINE:CLASS_SEL.CMN'
+	INCLUDE	'LSL$CMNDTICOMBINE:CLASS_PARSE.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIPROJ.CMN'	!MOD 14-June-1991
+	INCLUDE	'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE	'LSL$CMNLSL:TXTC.CMN'
+C
+C Functions:
+	LOGICAL BRIDGE		! bridging function for ARITHM
+	LOGICAL CLOSE_FILES	! close all files
+	LOGICAL CHECK_OPERANDS	! check operands relate to open files
+	INTEGER	DTI_CREATE	! create and open a DTI file
+	INTEGER	DTI_COPY_HEADER	! cop DTI header (from, to ...)
+	LOGICAL	DTMJPI		! get process information
+	LOGICAL EXPRESSION	! decode expression
+	LOGICAL	FILEIN_CMD	! get input file-spec
+	LOGICAL	FILEOUT_CMD	! get output file
+	INTEGER	FLRSTR  	! reads indirect file
+	INTEGER	FLROPN  	! opens indirect file
+	LOGICAL	GETFILNAM	! read file-spec
+	LOGICAL HELP_CMD	! give help
+	LOGICAL RDCHS		! read character from line
+	LOGICAL RDCH		! read character from line
+	LOGICAL	RDREAL		! read real from line
+	LOGICAL	RDINT		! read integer from line
+	INTEGER	RDFILN		! reads and parses a filename
+	INTEGER	RDCOMM		! decode command
+	LOGICAL SHOW_CMD	! show 
+	INTEGER	SIGCHS		! # signif. characters in string
+	LOGICAL SPAWN_CMD	! for DCL SPAWN
+	INTEGER	TTRSTR  	! read line from terminal
+	LOGICAL UNITS_CMD	! UNITS command
+	LOGICAL WAIT_CMD	! wait
+	LOGICAL	WINDOW_CMD	! sets window for current input file
+	INTEGER	CREATE_CLASS	! create/modify a class
+	INTEGER	FND_CLASS	! find class in list
+C
+C W/s
+	LOGICAL*1 GO_ERR		! errors in GO command?
+	LOGICAL*1 HAD_VRS		! had variables in expression?
+	LOGICAL*1 HAD_FILEOUT		! had a FILEOUT command?
+	LOGICAL*1 CLASS_DELETED		! TRUE if we've deleted a class.
+	LOGICAL OK,IERR			! function returns
+C
+	INTEGER	NUMDTI			! number of input DTI files open
+	INTEGER	I,J,K,L			! loop vars
+	INTEGER	CMD			! command number
+	INTEGER	DATA_TYP		! to set output file data type
+	INTEGER*4 DEL_IDENT		! ident of class to delete
+C
+	REAL*4	DEL_CLASS		! actual class to delete
+	REAL*4	LUN_SWX,LUN_SWY,LUN_NEX,LUN_NEY
+	BYTE	CH			! a character
+C
+	CHARACTER*256 TEXT,ERRTXT! error mesage text
+	CHARACTER*1 ALPHA(8)
+	DATA ALPHA/'A','B','C','D','E','F','G','H'/
+C
+C Command tables:
+	EXTERNAL	ENABLE_CMD_TABLE
+	INTEGER		ENABLE_CMD_TABLE
+	EXTERNAL	DISABLE_CMD_TABLE
+	INTEGER		DISABLE_CMD_TABLE
+	EXTERNAL	CLOSE_CMD_TABLE
+	INTEGER		CLOSE_CMD_TABLE
+	EXTERNAL	DTICOMBINE_CMD_TABLE
+	INTEGER		DTICOMBINE_CMD_TABLE
+C------	EXTERNAL	BOOL_CMD_TABLE
+C------	INTEGER		BOOL_CMD_TABLE
+	EXTERNAL	OUTPUT_CMD_TABLE
+	INTEGER		OUTPUT_CMD_TABLE
+C
+C.......................................................................
+C Init libraries
+	CALL LSL_INIT
+	CALL DTI_INIT
+	OK=DTMJPI()
+	IF (.NOT.OK) GOTO 999
+C
+	CURRENT_FILE  = 0	! no current input file
+	HAD_FILEOUT   = .FALSE.	! no FILEOUT command - yet
+	CLASS_ENABLED = .FALSE.	! classification not yet enabled
+	CLASS_OPEN    = .FALSE.	! no class opened yet
+	HAD_ABSOLUTE  = .TRUE.	! use absolute coordinates
+	INTERSECTION  = .TRUE.	! output is the intersection of files
+	MAX_SET       = .FALSE.	! no active union
+	MIN_SET       = .FALSE.	! no active intersection
+C	NULL_HANDLING = .TRUE.	! pass any nulls thro' to output file
+C				! (never used)
+C
+C Set UNITS text
+	UNITS_STR(1)='DTI matrix units'
+	UNITS_STR(2)='Metres on the ground'
+	UNITS_STR(3)='Latlong (seconds)'
+	UNITS_STR(4)='Latlong (degrees, minutes and seconds)'
+	UNITS_STR(5)='Projection units'
+C
+C set default values
+	DTI_TRUTH  = -1.0
+	DTI_FALSE  = 0.0
+	TRUTH_TYPE = .FALSE.
+C ......................................................................
+C Get an input line from the terminal
+C
+	TTIN=.TRUE.
+10	TXTPTR=80
+	IF (TTIN) THEN
+	   OK=TTRSTR(,,'DTICOMBINE> ',IERR)
+	ELSE
+	   CALL FLRSEL(INDLUN)
+	   OK=FLRSTR(,,IERR)
+	ENDIF
+C
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      IF (TTIN) THEN
+	         GOTO 999		! end of file = exit
+	      ELSE
+     	         CALL WRITEF('%S Unexpected end of indirect command '//
+     &			'file detected',WARNING)
+	         CALL WRITEF('                RETURN command assumed '//
+     &				'- returning to terminal input')
+	         GOTO 220		! close indirect file etc.
+	      ENDIF
+	   ENDIF
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 20
+	ENDIF
+C
+C echo and decode the line
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('DTICOMBINE> ')
+	   CALL APPEND(TXTDSC) 		! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+	CALL BSLN
+C
+C Look for comment
+	IF (RDCHS(CH)) GOTO 10		! substantially empty line
+	IF (CH.EQ.'!') GOTO 10		! comment
+C
+C Look for indirect file start
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 20
+	      ELSE
+	         CALL BSCH
+	      ENDIF
+	      OK=GETFILNAM(INDFILE,INDLEN,
+     &				'SYS$DISK:[].COM;0',.TRUE.,%REF('!'))
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+C
+	      OK=FLROPN(INDLUN, INDFILE(:INDLEN), IERR)
+	      IF (OK) THEN
+	         CALL WRITEF('Command input now being read from %S'
+     &					,INDFILE(:INDLEN))
+	         TTIN=.FALSE.
+	         GOTO 10
+	      ELSE
+	         CALL WRITEF('%S Can''t open indirect command file %S'
+     &			  ,WARNING,INDFILE(:INDLEN))
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+	CALL BSCH			! un-read non-'@'
+C
+	CMD=RDCOMM(DTICOMBINE_CMD_TABLE)
+	GOTO (	20,
+     &		30,			! filea
+     &		40,			! fileb
+     &		50,			! filec
+     &		60,			! filed
+     &		70,			! filee
+     &		80,			! filef
+     &		90,			! fileg
+     &		100,			! fileh
+     &		110,			! fileout
+     &		210,			! return
+     &		999,			! quit
+     &		230,			! help
+     &		240,			! byte
+     &		250,			! word
+     &		260,			! real
+     &		270,			! longword
+     &		290,			! spawn
+     &		330,			! enable
+     &		300,			! disable
+     &		360,			! window
+     &		370,			! close
+     &		380,			! pause
+     &		390,			! wait
+     &		400,			! show
+     &		410,			! units
+     &		120,			! go
+     &		420,			! class
+     &		430,			! includes
+     &		440,			! excludes
+     &		450,			! delete
+     &		480			! output
+     &	      		), CMD+1
+C
+C command number out of range
+	CALL WRITEF('Command not yet implemented')
+C
+C close indirect input following disaster
+C
+20	IF (.NOT.TTIN) THEN
+	   TTIN=.TRUE.
+	   CALL FLRCLO(INDLUN)
+	   CALL WRITEF(' ')
+	   CALL WRITEF('%S Indirect file error - returning to '//
+     &			'terminal input',WARNING)
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C FILEA	[infile-spec]
+30	IF (.NOT.FILEIN_CMD(1)) GOTO 20
+	CURRENT_FILE=1
+	GOTO 10
+C
+C ......................................................................
+C FILEB	[infile-spec]
+40	IF (.NOT.FILEIN_CMD(2)) GOTO 20
+	CURRENT_FILE=2
+	GOTO 10
+C
+C ......................................................................
+C FILEC	[infile-spec]
+50	IF (.NOT.FILEIN_CMD(3)) GOTO 20
+	CURRENT_FILE=3
+	GOTO 10
+C
+C ......................................................................
+C FILED	[infile-spec]
+60	IF (.NOT.FILEIN_CMD(4)) GOTO 20
+	CURRENT_FILE=4
+	GOTO 10
+C
+C ......................................................................
+C FILEE	[infile-spec]
+70	IF (.NOT.FILEIN_CMD(5)) GOTO 20
+	CURRENT_FILE=5
+	GOTO 10
+C
+C ......................................................................
+C FILEF	[infile-spec]
+80	IF (.NOT.FILEIN_CMD(6)) GOTO 20
+	CURRENT_FILE=6
+	GOTO 10
+C
+C ......................................................................
+C FILEG	[infile-spec]
+90	IF (.NOT.FILEIN_CMD(7)) GOTO 20
+	CURRENT_FILE=7
+	GOTO 10
+C
+C ......................................................................
+C FILEH	[infile-spec]
+100	IF (.NOT.FILEIN_CMD(8)) GOTO 20
+	CURRENT_FILE=8
+	GOTO 10
+C
+C ......................................................................
+C FILEOUT [filespec]   - get output file-spec 
+C
+110	IF (.NOT.FILEOUT_CMD(HAD_FILEOUT)) GOTO 20
+	HAD_FILEOUT=.TRUE.
+	GOTO 10
+C
+C ......................................................................
+C GO
+C
+120	GO_ERR=.FALSE.
+	NUMDTI=0
+	DO 130 I=1,MAX_DTI-1			! how many DTI files open?
+	   IF (DTILUN_INUSE(I)) NUMDTI=NUMDTI+1
+130	CONTINUE
+C
+	GO_ERR = .TRUE.
+	IF (NUMDTI.LT.1) THEN
+	   CALL WRITEF(WARNING//'At least one input DTI file'
+     &		//' must be specified before processing can begin')
+	ELSEIF (.NOT.HAD_EQU) THEN
+	   CALL WRITEF(WARNING//'The expression defining the file combination'
+     &		//' must be specified before processing can begin')
+	ELSEIF (.NOT.HAD_FILEOUT) THEN
+	   CALL WRITEF(WARNING//'The output DTI file must be specified with'
+     &		//' the FILEOUT command before processing can begin')
+	ELSE
+	   GO_ERR = .FALSE.
+	ENDIF	   
+	IF (GO_ERR) GOTO 20	
+	IF (.NOT.CHECK_OPERANDS()) GOTO 20	!check operands with open files
+C
+C ......................................................................
+C Now create the output DTI file. Give it the characteristics of the
+C lowest alphabetic input file that the user specified;
+C unless data type is different (as specified by equation result)
+C ......................................................................
+C
+	IF (BYTE_RESULT)   DATA_TYP=1
+	IF (WORD_RESULT)   DATA_TYP=2
+	IF (LONG_RESULT)   DATA_TYP=3
+	IF (REAL_RESULT)   DATA_TYP=4
+C
+C ..........................modification..................................
+C  for each file, work out current area of interest in real_world coords
+C  and use this to update the maximised and if nec the minimised areas
+C ......................................................................
+C
+	FIRST_LUN = 0
+	DO 135 I=1,MAX_DTI-1				! for each file
+	   IF (DTILUN_INUSE(I)) THEN			! if file being used
+	      IF (FIRST_LUN.EQ.0) FIRST_LUN = I		! first file in use
+C
+C	      ............................................................
+C	      work out current area of interest in file
+C
+	      LUN_SWX = X_OFFSET(I)		! find area of interest
+	      LUN_SWY = Y_OFFSET(I)
+C
+	      IF (WIN_SET(I)) THEN
+	         LUN_NEX = LUN_SWX + ( (DTI_WINDOW_NEX(I)-1)*X_GRID(I) )
+	         LUN_NEY = LUN_SWY + ( (DTI_WINDOW_NEY(I)-1)*Y_GRID(I) )
+	         LUN_SWX = LUN_SWX + ( (DTI_WINDOW_SWX(I)-1)*X_GRID(I) )
+	         LUN_SWY = LUN_SWY + ( (DTI_WINDOW_SWY(I)-1)*Y_GRID(I) )
+	      ELSE
+	         LUN_NEX = LUN_SWX + ( (X_EXTENT(I)-1) * X_GRID(I))
+	         LUN_NEY = LUN_SWY + ( (Y_EXTENT(I)-1) * Y_GRID(I))
+	      ENDIF
+C
+	      IF (DIAG) THEN
+		CALL WRITEF('Area of interest in file %N:',I)
+		CALL WRITEF('%TSouth-West: (%T%F , %F%T)',LUN_SWX,LUN_SWY)
+		CALL WRITEF('%TNorth-East: (%T%F , %F%T)',LUN_NEX,LUN_NEY)
+ 		CALL WRITEF('Size of file')
+		CALL WRITEF('%TSize of data: %I',SEC_SIZE(I))
+	      ENDIF
+C
+C	      ............................................................
+C	      always update maximised region, in case files don't intersect
+C	      there are two parts to this. (the default is the union)
+C		1) if a maximum hasn't been set use the current files maximum
+C		2) otherwise compare file max with stored values
+C
+	      IF (.NOT.MAX_SET) THEN
+		 MAX_SWX = LUN_SWX
+		 MAX_SWY = LUN_SWY
+	         MAX_NEX = LUN_NEX
+	         MAX_NEY = LUN_NEY
+		 MAX_SET = .TRUE.
+	      ELSE
+		 MAX_SWX = MIN(MAX_SWX,LUN_SWX)
+		 MAX_SWY = MIN(MAX_SWY,LUN_SWY)
+		 MAX_NEX = MAX(MAX_NEX,LUN_NEX)
+	 	 MAX_NEY = MAX(MAX_NEY,LUN_NEY)	
+	      ENDIF
+C
+C	      ............................................................
+C	      update area of intersection, minimised area
+C
+	      IF (INTERSECTION) THEN
+		 IF (.NOT.MIN_SET) THEN
+		    MIN_SWX = LUN_SWX
+		    MIN_SWY = LUN_SWY
+	            MIN_NEX = LUN_NEX
+	            MIN_NEY = LUN_NEY
+		    MIN_SET = .TRUE.
+	         ELSE
+		    MIN_SWX = MAX(MIN_SWX,LUN_SWX)
+		    MIN_SWY = MAX(MIN_SWY,LUN_SWY)
+		    MIN_NEX = MIN(MIN_NEX,LUN_NEX)
+		    MIN_NEY = MIN(MIN_NEY,LUN_NEY)
+		    IF ((MIN_NEX.LT.MIN_SWX).OR.(MIN_NEY.LT.MIN_NEY)) THEN
+		       CALL WRITEF(WARNING//
+     &			 'File does not overlap, setting OUTPUT to UNION')
+		       INTERSECTION = .FALSE.
+		       MIN_SET = .FALSE.
+		    ENDIF
+		 ENDIF
+	      ENDIF
+	   ENDIF
+135	CONTINUE
+C
+C	........................................................
+C			work out extent of output dtifile
+C	........................................................
+150	X_GRID(OUTLUN) = X_GRID(FIRST_LUN)
+	Y_GRID(OUTLUN) = Y_GRID(FIRST_LUN)
+C
+	IF (INTERSECTION) THEN
+	  X_OFFSET(OUTLUN) = MIN_SWX
+	  Y_OFFSET(OUTLUN) = MIN_SWY
+	  X_SIZE = 1 + NINT( (MIN_NEX - MIN_SWX)/X_GRID(OUTLUN) )
+	  Y_SIZE = 1 + NINT( (MIN_NEY - MIN_SWY)/Y_GRID(OUTLUN) )
+	ELSE
+	  X_OFFSET(OUTLUN) = MAX_SWX
+	  Y_OFFSET(OUTLUN) = MAX_SWY
+	  X_SIZE = 1 + NINT( (MAX_NEX - MAX_SWX)/X_GRID(OUTLUN) )
+	  Y_SIZE = 1 + NINT( (MAX_NEY - MAX_SWY)/Y_GRID(OUTLUN) )
+	ENDIF
+C
+	X_EXTENT(OUTLUN) = X_SIZE
+	Y_EXTENT(OUTLUN) = Y_SIZE
+	DTI_WINDOW_SWX(OUTLUN) = 1
+	DTI_WINDOW_SWY(OUTLUN) = 1
+	DTI_WINDOW_NEX(OUTLUN) = X_SIZE
+	DTI_WINDOW_NEY(OUTLUN) = Y_SIZE
+C
+C	........................................................
+C				DIAGNOSTICS
+C	........................................................
+	IF (DIAG) THEN
+	  CALL WRITEF
+	  IF (INTERSECTION) THEN
+	     CALL WRITEF('Minimised Area, (INTERSECTION):')
+	     CALL WRITEF('%TSouth-West: (%T%F , %F%T)',MIN_SWX,MIN_SWY)
+	     CALL WRITEF('%TNorth-East: (%T%F , %F%T)',MIN_NEX,MIN_NEY)
+	  ELSE
+	     CALL WRITEF('Maximised Area, (UNION):')
+	     CALL WRITEF('%TSouth-West: (%T%F , %F%T)',MAX_SWX,MAX_SWY)
+	     CALL WRITEF('%TNorth-East: (%T%F , %F%T)',MAX_NEX,MAX_NEY)
+	  ENDIF
+C
+	  CALL WRITEF('Extent of output file:')
+	  CALL WRITEF('%TX: %I ,%TY:%I',X_EXTENT(OUTLUN),Y_EXTENT(OUTLUN))
+	  CALL WRITEF('Matrix grid step output file:')
+	  CALL WRITEF('%TX: %F ,%TY:%F',X_GRID(OUTLUN),Y_GRID(OUTLUN))
+	ENDIF
+C
+C	........................................................
+C 			open the file	
+C	........................................................
+C
+	OK=DTI_CREATE(  OUTLUN,			! lun
+     &			DTI_NAME(OUTLUN),	! file-spec
+     &			DTI_NAME_LENGTH(OUTLUN),! spec-length
+     &			HEADER_TYPE(FIRST_LUN),	! header type
+     &			DATA_OFFSET(FIRST_LUN), ! sets LSLA hdr size
+     &			DATA_TYP,		! data type 
+     &			X_SIZE,			! matrix
+     &			Y_SIZE,			!	 sizes
+     &			IERR)			! system error return
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 999
+	ENDIF
+C
+CMOD	14-Jun-1991.....................................................
+CMOD	now copy the header information which will be updated on closing
+CMOD	................................................................
+C
+	IF(HEADER_TYPE(FIRST_LUN).NE.DTI_MIKE)THEN
+	  OK=DTI_COPY_HEADER(FIRST_LUN,OUTLUN,IERR)
+	  IF (.NOT.OK) THEN
+	     CALL LSL_PUTMSG(OK)
+	     CALL LSL_ADDMSG(IERR)
+	     GOTO 999
+	  ENDIF
+	ENDIF
+C
+CMOD	14-Jun-1991 & 29-Jul-1992.........................................
+CMOD	edit header information for grid offset (will be copied on closing)
+CMOD	..................................................................
+C	
+	IF (INTERSECTION) THEN
+	  DTIPROJ_ORIGIN(1,OUTLUN) = MIN_SWX
+	  DTIPROJ_ORIGIN(2,OUTLUN) = MIN_SWY
+	ELSE
+	  DTIPROJ_ORIGIN(1,OUTLUN) = MAX_SWX
+	  DTIPROJ_ORIGIN(2,OUTLUN) = MAX_SWY
+	ENDIF
+C
+C ......................................................................
+C We now have an output file with a set header but a virgin data area,
+C ready to receive the results of the user specified DTICOMBINE equation
+C Check that the data type of the output file (as now copied from the
+C first (alphabetically) input file) is still what we wanted. If not
+C coerce it! 
+C ......................................................................
+C
+	IF (DATA_TYPE(OUTLUN).NE.DATA_TYP) THEN
+	   DATA_TYPE(OUTLUN)=DATA_TYP
+	ENDIF
+	IF (DIAG)  CALL WRITEF('Output file %S opened:',
+     &		      DTI_NAME(OUTLUN)(1:DTI_NAME_LENGTH(OUTLUN)))
+C
+C	..............................................................
+C 	    Process the data via exception handling bridge function
+C	..............................................................
+C
+	OK=BRIDGE()
+	IF (.NOT.OK) THEN 		! we've had an exception
+	   IF (OK.NE.SS$_ABORT) THEN
+	      CALL WRITEF(ERROR//
+     &		'arithmetic exception detected evaluating expression:')
+	      CALL WRITEF
+	      CALL LSL_GETMSG(OK,TEXT,I)	   ! what went wrong
+	      CALL SYS$FAOL(TEXT,J,ERRTXT,ERRARG(3)) ! patch in any args
+	      DO 170 I=1,J		! strip off all the nulls (!!)
+	         L=J-I+1
+	         IF (ERRTXT(L:L).NE.CHAR(0)) GOTO 180
+170	      CONTINUE
+C
+180	      CALL WRITEF('%S',ERRTXT(1:L))
+	      CALL WRITEF
+	      CALL WRITEF('Expression being evaluated is:')
+	      CALL WRITEF
+	      CALL WRITEF('      %S',EXPSTR(1:SIGCHS(EXPSTR)))
+	      CALL WRITEF
+	      HAD_VRS=.FALSE.
+	      DO 190 K=1,ARGNUM
+	         IF (ARGMAP(K).NE.0) THEN
+		    CALL WRITEF('where %T%C = %F','A'+ARGMAP(K)-1,ARGLST(K))
+		    HAD_VRS = .TRUE.
+		 ENDIF		   
+190	      CONTINUE
+	   ENDIF
+	ENDIF
+	GOTO 999
+C
+C ......................................................................
+C RETURN - return to terminal input
+C
+210	IF (TTIN) THEN
+	   CALL WRITEF(	'RETURN command ignored - command '//
+     &			'input is already from terminal')
+	ELSE
+	   CALL WRITEF(
+     &		'RETURN command detected - returning to terminal input')
+	ENDIF
+220	IF (.NOT.TTIN) CALL FLRCLO(INDLUN)
+	TTIN=.TRUE.
+	GOTO 10
+C
+C ......................................................................
+C HELP
+230	IF (.NOT.HELP_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C BYTE
+240	BYTE_RESULT=.TRUE.
+	WORD_RESULT=.FALSE.
+	LONG_RESULT=.FALSE.
+	REAL_RESULT=.FALSE.
+	GOTO 280
+C
+C ......................................................................
+C WORD
+250	WORD_RESULT=.TRUE.
+	BYTE_RESULT=.FALSE.
+	LONG_RESULT=.FALSE.
+	REAL_RESULT=.FALSE.
+	GOTO 280
+C
+C ......................................................................
+C REAL
+260	REAL_RESULT=.TRUE.
+	BYTE_RESULT=.FALSE.
+	WORD_RESULT=.FALSE.
+	LONG_RESULT=.FALSE.
+	GOTO 280
+C
+C ......................................................................
+C LONGWORD
+270	LONG_RESULT=.TRUE.
+	BYTE_RESULT=.FALSE.
+	WORD_RESULT=.FALSE.
+	REAL_RESULT=.FALSE.
+C
+C ......................................................................
+C Decode expression 
+C
+280	IF (EXPRESSION()) THEN
+	   HAD_EQU=.TRUE.
+	ELSE
+	   BYTE_RESULT=.FALSE.
+	   WORD_RESULT=.FALSE.
+	   LONG_RESULT=.FALSE.
+	   REAL_RESULT=.FALSE.
+	   HAD_EQU    =.FALSE.
+	   GOTO 20
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C SPAWN DCL process - primarily designed for file management
+C
+290	IF (.NOT.SPAWN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C DISABLE command
+C
+300	CMD=RDCOMM(DISABLE_CMD_TABLE)
+	GOTO (305,310,315,320,325), CMD+1
+C
+305	CALL WRITEF
+	CALL WRITEF('%S Specifying command DISABLE',ERROR)
+	CALL WRITEF
+	CALL WRITEF('Available DISABLE command qualifiers are:')
+	CALL WRITEF
+	CALL WRITEF
+     &  ('ABSOLUTE      DIAGNOSTICS     CLASSIFICATION     PME ')
+	GOTO 20
+
+310	DIAG=.FALSE.			! disable diagnostics
+	GOTO 10
+C
+315	CLASS_ENABLED = .FALSE.		! disable classification
+	CLASS_OPEN = .FALSE.		! close any current class
+	GOTO 10
+C
+320	IF (.NOT.PMEING) THEN
+	   CALL WRITEF('%S You were not using PME !', WARNING)
+	ELSE
+	   CALL PME_EXIT
+	   PMEING=.TRUE.
+	ENDIF
+	GOTO 10
+C
+325	HAD_ABSOLUTE = .FALSE.
+	GOTO 10
+C
+C ......................................................................
+C ENABLE command
+C
+330	CMD=RDCOMM(ENABLE_CMD_TABLE)
+	GOTO (335,340,345,350,355), CMD+1
+C
+335	CALL WRITEF
+	CALL WRITEF('%S Specifying command ENABLE',ERROR)
+	CALL WRITEF
+	CALL WRITEF('Available ENABLE command qualifiers are:')
+	CALL WRITEF
+	CALL WRITEF
+     &  ('ABSOLUTE      DIAGNOSTICS     CLASSIFICATION     PME ')
+	GOTO 20
+C
+340	DIAG=.TRUE.			! enable diagnostics
+	GOTO 10
+C
+345	CLASS_ENABLED = .TRUE.		! enable classification
+	GOTO 10
+C
+350	IF (PMEING) THEN
+	   CALL WRITEF('%S You are already using PME !', WARNING)
+	ELSE
+	   CALL PME_INIT
+	   PMEING=.TRUE.
+	ENDIF
+	GOTO 10
+355     HAD_ABSOLUTE = .TRUE.
+	GOTO 10
+C
+C ......................................................................
+C WINDOW command
+C
+360	IF (.NOT.WINDOW_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C CLOSE command
+C
+370	CMD=RDCOMM(CLOSE_CMD_TABLE)
+	IF (CMD.LE.0) THEN
+	   GOTO 20
+	ELSE
+	   IF (.NOT.CLOSE_FILES(CMD)) GOTO 20
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C PAUSE command
+C
+380	CALL PAUSE(TTIN)
+	GOTO 10
+C
+C ......................................................................
+C WAIT command
+C
+390	IF (.NOT.WAIT_CMD(TTIN)) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SHOW command
+C
+400	IF (.NOT.SHOW_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C UNITS command
+C
+410	IF (CURRENT_FILE.EQ.0) THEN
+	   IF (TTIN) THEN
+	      CALL WRITEF(
+     &	      WARNING//'The UNITS command must follow a FILEx command')
+	   ELSE
+	      CALL WRITEF(
+     &	      ERROR//'The UNITS command must follow a FILEx command')
+	   ENDIF
+	ELSE
+	   IF (UNITS_CMD()) GOTO 10
+	ENDIF
+	GOTO 20
+C
+C ......................................................................
+C CLASS command
+C
+420	IF (.NOT. CLASS_ENABLED)  THEN
+	  CALL WRITEF(WARNING//'CLASSIFICATION not ENABLEd')
+	  GOTO 10
+	ENDIF
+	IF ( .NOT. RDREAL(CURR_CLASS) )  THEN
+	  CALL CREATE_CLASS(CURR_CLASS, .TRUE., .TRUE. )
+	  CLASS_OPEN = .TRUE.
+	ELSE
+	  CALL WRITEF(WARNING//'Missing or illegal class number')
+	  CLASS_OPEN = .FALSE.
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C INCLUDES command
+C
+430	IF (.NOT. CLASS_ENABLED)  THEN
+	  CALL WRITEF(WARNING//'CLASSIFICATION not ENABLEd')
+	  GOTO 10
+	ENDIF
+	IF (.NOT. CLASS_OPEN)  THEN
+	  CALL WRITEF(WARNING//
+     &	    'No class currently open - use command CLASS n first')
+	ELSE
+	  CALL CLASS_PROCESS(.TRUE.)		! process the include
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C EXCLUDES command
+C
+440	IF (.NOT. CLASS_ENABLED)  THEN
+	  CALL WRITEF(WARNING//'CLASSIFICATION not ENABLEd')
+	  GOTO 10
+	ENDIF
+	IF (.NOT. CLASS_OPEN)  THEN
+	  CALL WRITEF(WARNING//
+     &	    'No class currently open - use command CLASS n first')
+	ELSE
+	  CALL CLASS_PROCESS(.FALSE.)		! process the exclude
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C DELETE-class command
+C
+450	IF (.NOT. CLASS_ENABLED)  THEN
+	  CALL WRITEF(WARNING//'CLASSIFICATION not ENABLEd')
+	  GOTO 10
+	ENDIF
+C
+	IF ( .NOT. RDREAL(DEL_CLASS) )  THEN
+	  CLASS_DELETED = .FALSE.
+451	  DEL_IDENT = FND_CLASS(DEL_CLASS)		! get the class ID.
+	  IF (DEL_IDENT .NE. 0)  THEN
+	    DO 455 I = DEL_IDENT+1, NCLSSEL
+	      CLSSEL(I-1) = CLSSEL(I)
+455	    CONTINUE
+	    NCLSSEL = NCLSSEL - 1
+	    CALL WRITEF('CLASS %F0.4 deleted', DEL_CLASS)
+	    CLASS_DELETED = .TRUE.
+	    GOTO 451				! look for subsequent records
+	  ELSE
+	    IF (.NOT. CLASS_DELETED)
+     &		CALL WRITEF(WARNING//'No CLASS deleted')
+	    GOTO 10
+	  ENDIF
+	ELSE					! no num. - delete all classes?
+	  CALL BSCH
+	  IF (.NOT. RDCHS(CH))  THEN
+	    IF ( (CH .EQ. 'A') .OR. (CH .EQ. 'a') )  THEN
+	      DO 456 I =1,2
+	        IF ( .NOT. RDCHS(CH) )  THEN
+	          IF ( (CH .NE. 'L') .AND. (CH .NE. 'l') )  THEN
+	            CALL WRITEF(ERROR//'Missing or illegal CLASS specified')
+	            GOTO 10
+		  ENDIF
+	        ELSE
+	          CALL WRITEF(ERROR//'Missing or illegal CLASS specified')
+	          GOTO 10
+	        ENDIF
+456	      CONTINUE	    
+	      IF (NCLSSEL .GT. 0)  THEN
+	        NCLSSEL = 0				! delete all classes
+	        CALL WRITEF('All CLASSes deleted')
+	      ELSE
+		CALL WRITEF(WARNING//'No CLASSes deleted')
+	      ENDIF
+	    ELSE
+	      CALL WRITEF(ERROR//'Missing or illegal CLASS specified')
+	    ENDIF
+	  ELSE
+	    CALL WRITEF(ERROR//'Missing or illegal CLASS specified')
+	  ENDIF
+	ENDIF
+	GOTO 10
+C
+C .......................................................................
+C .		TOLERANCE sets the lowest limit on boolean true 	.
+C . not required, see revised expression syntax, issued by PGH 18-4-1991.
+C .......................................................................
+C
+C460	IF (RDREAL(DTI_FALSE)) THEN
+C	    CALL WRITEF(ERROR//'reading number')
+C	    CALL WRITEF(WARNING//'Value of FALSE reset to 1E-6')
+C	    DTI_FALSE = 1E-6
+C	ENDIF	
+C	GOTO 10
+C
+C .......................................................................
+C .	BOOLEAN_FALSE sets whether 0 or EVEN numbers are false		.
+C . not required, see revised expression syntax, issued by PGH 18-4-1991.
+C .......................................................................
+C
+C470	CMD = RDCOMM(BOOL_CMD_TABLE)
+C	GOTO(472,474,476), CMD+1
+C472	CALL WRITEF
+C	CALL WRITEF(ERROR//'Specifying command BOOLEAN_FALSE')
+C	CALL WRITEF
+C	CALL WRITEF('Available BOOLEAN_FALSE command qualifiers are:')
+C	CALL WRITEF
+C	CALL WRITEF ('		EVEN		ZERO')
+C	GOTO 20
+C474	TRUTH_TYPE = .TRUE.
+C	GOTO 478
+C476	TRUTH_TYPE = .FALSE.
+C478	GOTO 10
+C ......................................................................
+C OUTPUT
+C
+480	CMD = RDCOMM(OUTPUT_CMD_TABLE)
+	IF (CMD.EQ.0) THEN
+	  CALL WRITEF
+	  CALL WRITEF(ERROR//'Specifying command OUTPUT')
+	  CALL WRITEF
+	  CALL WRITEF('Available OUTPUT command qualifiers are:')
+	  CALL WRITEF
+	  CALL WRITEF ('	    UNION	INTERSECTION')
+	  GOTO 20
+	ELSE IF (CMD.EQ.1) THEN
+	  INTERSECTION = .FALSE.
+	ELSE IF (CMD.EQ.2) THEN
+	  INTERSECTION = .TRUE.
+	ENDIF
+	GOTO 10
+C ......................................................................
+C
+999	IERR=CLOSE_FILES(0)
+	IF (OK .AND. .NOT.IERR) OK=IERR	! retain original status
+C
+	IF (OK) OK=SS$_NORMAL
+	CALL LSL_EXIT(OK)
+	END
+C

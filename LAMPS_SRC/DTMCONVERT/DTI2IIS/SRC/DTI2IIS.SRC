@@ -1,0 +1,289 @@
+	PROGRAM DTI2IIS
+C
+***	MODULE DTI2IIS
+***	IDENT 16AU93
+C
+C © Copyright Laser-Scan Ltd., Cambridge, England
+C
+C Author Andrew Trigg   29-Jul-1988
+C
+C MOD    Andrew Trigg   12-Dec-1988
+C MOD    Jon Barber	18-May-1992
+C			Add /HEADER = n to specify how many 512 byte header
+C			blocks (empty) to write to the IIS file
+C
+C	DTI to IIS System 500 format convertor
+C	======================================
+C   System 500 format divides the grid into vertical swaths each of a maximum
+C width of 512 bytes (i.e. 256 short integers or 128 long integers). The data is
+C stored by swath row starting from the top left. Swaths are stored 
+C consecutively from left to right.  
+C
+	IMPLICIT NONE
+C
+	INCLUDE      'LSL$CMNLSL:CLD.CMN'
+	INCLUDE	     'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE	     'LSL$CMNDTI2IIS:DTI2IISMSG.PAR'
+	INCLUDE	     'LSL$CMNDTI:DTIHDR.CMN'
+C
+C Functions
+	INTEGER	     DCL_STARTUP	! Gets parsed comand line
+	INTEGER	     DCL_FILE		! Parses command line for files
+	INTEGER	     DCL_QUAL		! Gets a command line qualifier
+	INTEGER	     DCL_INT		! Gets a command line qualifier int
+C
+	LOGICAL      FLWOPB		! Open a file for block write
+	LOGICAL	     DTI_READ_WORD_HEADER    ! Get a word from the header
+	LOGICAL	     DTI_COPY_WORD_DATA      ! Copy DTI word data to a buffer
+	LOGICAL	     DTI_COPY_BYTE_DATA      ! Copy DTI byte data to a buffer
+	LOGICAL      DTI_COPY_LONG_DATA      ! Copy DTI long data to a buffer
+	LOGICAL      FLWBLK		! Writes data to the IIS system by block
+	LOGICAL      DTI_OPEN		! Opens a DTI file
+C
+C W/s
+	CHARACTER*128 DTIFIL,IISFIL	! Input and output
+C
+	LOGICAL	     OK,ABSENT
+	LOGICAL	     HAD_SHORT		! Short integer option chosen?
+	LOGICAL	     HAD_LONG		! Long integer option chosen?
+	LOGICAL	     LOCAL
+	LOGICAL      LOCNEG
+C
+	LOGICAL	     HAD_HEADER		! Had /HEADER?
+	INTEGER	     HEADER_COUNT	! No fo 512 byte header blocks 
+C					! (default remains at 1) to write
+C
+	BYTE	     BYUSER(512)	! Array for output of bytes
+C
+	INTEGER	     DTILEN,IISLEN	! String length of in/output names
+	INTEGER	     IERR		! System error code
+	INTEGER      IALQ		! Block allocation
+	INTEGER      STX		! Start column of read from DTI
+	INTEGER      ICOUNT		! Swath Counter
+	INTEGER      I,J		! Do loop index
+	INTEGER	     LOUSER(128)	! Array for output of long ints
+C
+	INTEGER*2    SHUSER(256)	! Array for output of short inTs
+	INTEGER*2    BUFF1(256)		! Holds header info 
+	INTEGER*4    EEXTENT		! Eastern extent of image left
+	INTEGER*4    NEXTENT		! Northern extent of image
+	INTEGER*4    MINH		! Minimum value in dti grid
+	INTEGER*4    MAXH		! Maximum value in dti grid
+	INTEGER*2    WIDTH		! Width of current swath
+C
+	EXTERNAL     DTI2IIS_CLD
+C
+C**********************************************************************
+C
+	CALL LSL_INIT
+	CALL DTI_INIT
+C
+	HAD_HEADER = .FALSE.
+	HEADER_COUNT = 1
+C
+C Decode the command line
+C
+	OK = DCL_STARTUP('DTI2IIS',.FALSE.,DTI2IIS_CLD,.TRUE.)
+C
+C DTI file
+C
+	IF (OK) THEN
+	   OK = DCL_FILE('P1','LSL$DTI:DTI.DTI',ABSENT,
+     &						.FALSE.,.TRUE.)
+	   IF (OK) CALL EXPFLN(DTIFIL,DTILEN)
+	ENDIF
+C
+C Open the DTI file
+C
+	IF (OK) OK = DTI_OPEN(1,DTIFIL,DTILEN,.FALSE.,IERR)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(D2I__UNAOPNDTI)
+	   GOTO 500
+	ENDIF
+C
+C IIS file
+C
+	IF (OK) THEN
+	   OK = DCL_FILE('P2','LSL$DTI:IIS.IIS',ABSENT,
+     &						.FALSE.,.TRUE.)
+	   IF (OK) CALL EXPFLN(IISFIL,IISLEN)
+	END IF
+C
+C Open the IIS file
+C
+	IF (OK) OK = FLWOPB(2,IISFIL,IERR,IALQ)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(D2I__UNAOPNIIS)
+	   GOTO 500
+	ENDIF
+C
+C Write header details. First the extents of the file ...
+C
+	EEXTENT = X_EXTENT(1)				!East extent
+	NEXTENT = Y_EXTENT(1)				!North extent
+	CALL LSL_PUTMSG(D2I__EXTENT,EEXTENT,NEXTENT)
+C
+C now the range of values.
+C
+	IF(DATA_TYPE(1).EQ.3)THEN
+	  MINH = MIN_LVALUE(1)				!Min height
+	  MAXH = MAX_LVALUE(1)				!Max height
+	ELSE
+	  MINH = MIN_WVALUE(1)
+	  MAXH = MAX_WVALUE(1)
+	ENDIF
+	CALL LSL_PUTMSG(D2I__HEIGHT,MINH,MAXH)
+C
+C Get no. of header blocks to write
+C
+	OK = DCL_QUAL('HEADER',HAD_HEADER,LOCAL,LOCNEG,.TRUE.)
+C
+	IF (HAD_HEADER) THEN
+	   OK = DCL_INT('HEADER', .TRUE.)
+	   IF (OK) HEADER_COUNT = IARRAY(1)
+	ENDIF
+C
+C Write the header blocks (empty)
+C
+	DO 5 I = 1,HEADER_COUNT
+	   OK = FLWBLK(0,BUFF1)
+	   IF (.NOT.OK) THEN
+	     CALL LSL_PUTMSG(OK)
+	     GOTO 500
+	   ENDIF
+5	CONTINUE
+C
+C Sort out whether we are dealing with byte, short or long. Byte is the
+C default
+C
+	OK = DCL_QUAL('SHORT',HAD_SHORT,LOCAL,LOCNEG,.TRUE.)
+	IF (HAD_SHORT) GOTO 200
+C
+	OK = DCL_QUAL('LONG',HAD_LONG,LOCAL,LOCNEG,.TRUE.)
+	IF (HAD_LONG) GOTO 300
+C
+C.......................................................................
+C   Byte data
+C.......................................................................
+100	ICOUNT = 0			! Initialise swath counter
+C
+C Output has to be done in swaths of 512, therefore check whether a full
+C swath remains
+C
+110	IF (EEXTENT.LE.512) THEN 
+	   WIDTH = EEXTENT		! Set remaining width to swath width
+	ELSE
+	   WIDTH = 512			! Full swath still available
+	END IF
+	ICOUNT = ICOUNT+1		! Increase counter of swaths processed
+C
+C Write out swath one row at a time for entire north - south range of the image
+C
+	DO 120 J = NEXTENT,1,-1
+	   STX = (ICOUNT-1)*512+1
+C
+C Copy DTI data into user buffer and then write to IIS file 
+C
+	   OK = DTI_COPY_BYTE_DATA(1,BYUSER,.FALSE.,
+     +	        STX,J,WIDTH,1,IERR)
+	   OK = FLWBLK(0,BYUSER)
+	   IF (MOD(NEXTENT-J,100).EQ.0 .AND. NEXTENT-J.NE.0)
+     +     CALL LSL_PUTMSG(D2I__NUMCOLSWA,NEXTENT-J,ICOUNT)
+120	CONTINUE
+C
+C Redefine remaining eastern extent of image
+C
+	EEXTENT = EEXTENT-512
+C
+C Return to process next swath if applicable
+C
+	IF (EEXTENT.GT.0) GOTO 110
+	GOTO 1000
+C
+C...............................................................................
+C  Integer*2 data
+C...............................................................................
+200	ICOUNT = 0			! Initialise swath counter
+C
+C Output has to be done in swaths of 256 therefore check whether a full swath
+C remains
+C
+210	IF (EEXTENT.LE.256) THEN 
+	   WIDTH = EEXTENT		! Set remaining width to swath width
+	ELSE
+	   WIDTH = 256			! Full swath still available
+	END IF
+	ICOUNT = ICOUNT+1		! Increase counter of swaths processed
+C
+C Write out swath one row at a time for entire north - south range of the image
+C from transformed array
+C
+	DO 220 J = NEXTENT,1,-1
+	   STX = (ICOUNT-1)*256+1
+C
+C Copy DTI data into user buffer and then write to IIS file 
+C
+	   OK = DTI_COPY_WORD_DATA(1,SHUSER,.FALSE.,
+     +	        STX,J,WIDTH,1,IERR)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      GOTO 1000
+	   END IF
+	   OK = FLWBLK(0,SHUSER)
+	   IF (MOD(NEXTENT-J,100).EQ.0 .AND. NEXTENT-J.NE.0) 
+     +     CALL LSL_PUTMSG(D2I__NUMCOLSWA,NEXTENT-J,ICOUNT)
+220	CONTINUE
+C
+C Redefine remaining eastern extent of image
+C
+	EEXTENT = EEXTENT-256
+C
+C Return to process next swath if applicable
+C
+	IF (EEXTENT.GT.0) GOTO 210
+	GOTO 1000
+C
+C...............................................................................
+C  Integer*4 data
+C...............................................................................
+300	ICOUNT = 0		!initialise swath counter
+C
+C Output has to be done in swaths of 128 therefore check whether a full swath
+C remains
+C
+310	IF (EEXTENT.LE.128) THEN 
+	   WIDTH = EEXTENT		!set remaining width to swath width
+	ELSE
+	   WIDTH = 128			!full swath still available
+	END IF
+	ICOUNT = ICOUNT+1		!increase counter of swaths processed
+C
+C Write out swath one row at a time for entire north - south range of the image
+C from transformed array
+C
+	DO 320 J = NEXTENT,1,-1
+	   STX = (ICOUNT-1)*128+1
+C
+C Copy DTI data into user buffer and then write to IIS file 
+C
+	   OK = DTI_COPY_LONG_DATA(1,LOUSER,.FALSE.,
+     +	        STX,J,WIDTH,1,IERR)
+	   OK = FLWBLK(0,LOUSER)
+	   IF (MOD(NEXTENT-J,100).EQ.0 .AND. NEXTENT-J.NE.0) 
+     +     CALL LSL_PUTMSG(D2I__NUMCOLSWA,NEXTENT-J,ICOUNT)
+320	CONTINUE
+C
+C Redefine remaining eastern extent of image
+C
+	EEXTENT = EEXTENT-128
+C
+C Return to process next swath if applicable
+C
+	IF (EEXTENT.GT.0) GOTO 310
+	GOTO 1000
+C...............................................................................
+500	CALL LSL_EXIT(OK)
+C
+1000	STOP ' '
+	END
+C

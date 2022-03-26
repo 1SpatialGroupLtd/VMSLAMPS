@@ -1,0 +1,223 @@
+	LOGICAL FUNCTION IFF_ARC( )
+C
+***	IDENT	05DE94
+***	MODULE	IFF_ARC
+C
+C Copyright (C) Laser-Scan Ltd, Cambridge, England
+C
+C Author  :  Paul Pan, 5 September 1989
+C Modified:  Paul Pan, 13 March 1990
+C	     to introduce PARAMETER file handling
+C
+CMOD960	     Jon Barber 				 4-Feb-1991
+C	     Output AC heights to group 38, ZS contents
+C	     only to 3x groups
+C	     Correct radius calculation and error detection;
+C	     (remove ANGLE_SOL routine)
+C	     Get start and end angles in correct order
+C
+CMOD1125     Jon Barber				 	13-Jul-1992
+C	     Use abs coords for /ABSOLUTE qualifier
+C
+CMOD1439     Jon Barber				 	05-Dec-1994
+C	     Do not use IFF_ABSENT as a 'real' number,
+C	     preventing an AXP crash.
+C
+C Purpose :  Manipulate the ARC transformation: edge,centre,edge
+C
+        IMPLICIT NONE
+C
+C Messages:
+	INCLUDE	 'HERE:I2DXFMSG.PAR'
+C
+C Common Blocks:
+	INCLUDE  'LSL$CMNIFF:CB.STR'		! for IFF_ABSENT
+        INCLUDE  'LSL$CMNFRT:FRTCOM.CMN'        ! added on 04 October 89
+        INCLUDE  'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE  'LSL$CMNDXFPAR:LOOKUP.CMN'
+	INCLUDE  'HERE:I2DXF.CMN'		! added on 28/02/90
+        INCLUDE  'HERE:FEATURE.CMN'
+        INCLUDE  'HERE:POINT.CMN'
+C
+C Workspace:
+	INTEGER*2   IELEN			! end of file/entry length
+        INTEGER*2   IECODE   
+	INTEGER     I				! loop counter
+C
+C for radius
+        REAL        CENTRE_X,CENTRE_Y,RADIUS
+        REAL	    RADIUS1,RADIUS2
+        REAL	    ANGLE1,ANGLE2
+C
+C for the calculation of starting & ending angles
+        REAL        START_ANG,END_ANG
+C
+	INTEGER	    INT_EQUIV			! for IFF_ABSENT comparison
+	REAL	    REAL_EQUIV
+	EQUIVALENCE (INT_EQUIV,REAL_EQUIV)
+C
+C----------------------------------------------------------------
+C
+	IFF_ARC = I2DXF__NORMAL
+C
+C output DXF file has already been selected
+C----------------------------------------------------------------
+C test whether input DXF ENTITY type is legal for this routine
+C    valid DXF entry is:
+C    	   ARC
+C
+	IF (DXFENTTYP(SELENTIND).EQ.DXFARC) GOTO 104
+C
+C report illegal cross-referencing and leave the routine
+C	
+	IFF_ARC = I2DXF__BADCROSREF
+	CALL LSL_PUTMSG(I2DXF__BADCROSREF)
+	CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
+	GOTO 1000
+C
+C----------------------------------------------------------------
+C extract record by record from the IFF file 
+C    we just consider the entry containing the arc data points
+C
+104     CONTINUE
+C
+        CALL IFFNXT( IECODE,IELEN )
+        IF( IECODE.EQ.'ST' ) GOTO 102
+        IF( IECODE.EQ.'ZS' ) GOTO 102
+        IF( IECODE.EQ.'EF' ) GOTO 103
+C
+        GOTO 104
+C
+C reading the data points 
+C
+102     CONTINUE
+        CALL EIHRS(NO_OF_PTS,PEN)
+C
+C go ahead only if there are exactly three pairs of coords
+C
+        IF (NO_OF_PTS.NE.3) THEN
+	   IFF_ARC = I2DXF__BADCOORD
+           CALL LSL_PUTMSG(I2DXF__BADCOORD)
+	   CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
+           GOTO 1000
+        ENDIF
+C
+C extract the coordinate pairs (or triples if ZS)
+C
+	IF ( IECODE.EQ.'ZS' ) THEN
+C
+C Read block of x, y, z points into buffer
+C
+	   CALL EIHRR( PT_BUFFER,9,1 )
+	   HAD_ZS = .TRUE.
+C
+	ELSE
+	   DO 500 I = 1,3
+C
+C Read 1 point at a time because reading a block would mix up the values
+C by putting a pair of values into a 3D array.
+C
+	      CALL EIHRR(PT_BUFFER(1,I), 2, I*4-3)
+500	   CONTINUE
+	ENDIF
+C
+C now assign the read data to the buffer
+C
+        CENTRE_X = PT_BUFFER( 1,2 )
+        CENTRE_Y = PT_BUFFER( 2,2 )
+C
+C now calculate the radius
+C
+        RADIUS1 = ( (PT_BUFFER(1,1) - CENTRE_X) * 
+     &		    (PT_BUFFER(1,1) - CENTRE_X) ) +
+     &		  ( (PT_BUFFER(2,1) - CENTRE_Y) * 
+     &		    (PT_BUFFER(2,1) - CENTRE_Y) )
+        RADIUS2 = ( (PT_BUFFER(1,3) - CENTRE_X) * 
+     &		    (PT_BUFFER(1,3) - CENTRE_X) ) +
+     &		  ( (PT_BUFFER(2,3) - CENTRE_Y) * 
+     &		    (PT_BUFFER(2,3) - CENTRE_Y) )
+C
+	IF (ABS(RADIUS1 - RADIUS2).GT.0.1) THEN
+	   IFF_ARC = I2DXF__UNAARCRAD
+           CALL LSL_PUTMSG(I2DXF__UNAARCRAD)
+	   CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
+           GOTO 1000
+        ENDIF
+C
+	RADIUS = SQRT( (RADIUS1+RADIUS2)/2 )
+C
+C then decide the starting & ending angles
+C    
+C calculating clockwise arc
+C
+	ANGLE1 = ATAN2( (PT_BUFFER(2,1)-CENTRE_Y),
+     &			(PT_BUFFER(1,1)-CENTRE_X) )
+C
+	ANGLE2 = ATAN2( (PT_BUFFER(2,3)-CENTRE_Y),
+     &			(PT_BUFFER(1,3)-CENTRE_X) )
+C
+C compare Starting Angle with Ending Angle for coincidence
+C
+        IF (ABS(ANGLE1 - ANGLE2) .LT. 1E-6) THEN
+	   IFF_ARC = I2DXF__ANGCOIN
+	   CALL LSL_PUTMSG(I2DXF__ANGCOIN)
+	   CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
+	   GOTO 1000
+	ENDIF
+C
+	IF (FRTGTTYPE(SELENTIND).EQ.CLOTYP) THEN
+C
+C calculating clockwise arc
+C
+	   START_ANG = 180*ANGLE2/PI
+	   END_ANG   = 180*ANGLE1/PI
+C
+C calculating anti-clockwise arc
+C
+	ELSEIF (FRTGTTYPE(SELENTIND).EQ.ANTTYP) THEN
+C
+	   START_ANG = 180*ANGLE1/PI
+	   END_ANG   = 180*ANGLE2/PI
+	ENDIF
+C
+	GOTO 104    
+C
+C now output the data to DXF file
+C
+103     CONTINUE
+C
+	CALL FLWSTR( '  0' )
+	CALL FLWSTR( 'ARC' )
+	CALL FLWSTR( '  8' )
+	CALL FLWRTF( '%S',DXFLAYNAM(SELLAYIND)
+     &				(1:DXFLAYLEN(SELLAYIND)) ) 
+	CALL FLWSTR( '  6' )
+	CALL FLWRTF( '%S',DXFENTNAM(SELENTIND)
+     &				(1:DXFENTLEN(SELENTIND)) ) 
+	CALL FLWSTR( ' 62' )
+	CALL FLWRTF( '%^W%N6',ENTCOLOUR(SELENTIND) ) 
+C
+	CALL OUTPUT_COORD(CENTRE_X, CENTRE_Y, 1)
+C
+	REAL_EQUIV = PT_BUFFER(3,2)		! use height of centre pt.
+	IF (HAD_ZS .AND. INT_EQUIV.NE.IFF_ABSENT) THEN
+	   CALL FLWSTR( ' 30' )
+	   CALL FLWRTF( '%F',PT_BUFFER(3,2) )
+	ENDIF
+C
+	IF (HAD_HT) THEN
+	   CALL FLWSTR( ' 38' )
+	   CALL FLWRTF( '%F',AC_HT )		! use height from AC.
+	ENDIF
+C
+	CALL FLWSTR( ' 40' )
+	CALL FLWRTF( '%F',RADIUS )
+	CALL FLWSTR( ' 50' )
+	CALL FLWRTF( '%F',START_ANG )
+	CALL FLWSTR( ' 51' )
+	CALL FLWRTF( '%F',END_ANG )
+C
+C Exit
+1000	RETURN
+	END
+C

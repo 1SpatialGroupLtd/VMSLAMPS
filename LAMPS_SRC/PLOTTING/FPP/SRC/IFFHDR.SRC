@@ -1,0 +1,452 @@
+	SUBROUTINE IFFHDR(ABORT)
+C
+***	MODULE	IFFHDR
+***	IDENT	08DE94
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author:  S. Townrow
+C
+C	Created					 ST	10 March 1992
+C
+C To read the header entries of an IFF file and leave it positioned at the NO.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:GKSPAR/
+C
+***	COMMON/CMN:CURFT/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:FPPDAT/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/LSL$CMNIFF:MHDEF/
+***	COMMON/CMN:SCALES/
+***	COMMON/CMN:SELECT/
+***	COMMON/CMN:TITLE/
+C
+C W/s
+	REAL*8	MAPORG(2)	! map origin
+	REAL LIMITS(2,4)	! "corners" of map
+	REAL RNGE(4)		! rotated range
+	REAL RTRN(4)		! transformed range
+	REAL XTEMP,YTEMP	! temporary variables used in MH
+	REAL OFSETX,OFSETY	! OFF or ORI offset in mms on sheet
+	REAL FILMSZ(2)		! film size in metres
+	REAL MAXAXI		! maximum extent of film in metres
+	REAL XSHEET,YSHEET	! max size of enlarged sheet in mms
+
+	INTEGER ERRIND		! GKS error indicator
+	INTEGER RASTSZ(2)	! GKS film size in raster units
+	INTEGER	DCUNIT		! device coordinate unit indicator
+	INTEGER*4 EOPOSN	! EO entry position held in NO entry
+	INTEGER*4 NOPOSN	! NO entry position
+	LOGICAL   WANTED	! set if the current feature code -
+
+
+C	INTEGER	MHSCL,MHORG(2)	! map header scale/origin
+C	REAL*8	MDSCL,MDORG(2)	! map descriptor scale/origin
+C	REAL XRANGE,YRANGE	! range of limits taken from RA entry
+	INTEGER*4 I
+	INTEGER*2 IECODE	! IFF entry read in
+	INTEGER*2 IELEN		! length of entry read in
+	INTEGER   CUST		! map header customer number
+	INTEGER*2 TMPCNT	! number of chars in TMPBUF
+	BYTE TMPBUF(MAXTXTLEN+1) ! temporary string buffer (for NS/TC)
+	LOGICAL	  ABORT		! set TRUE when file is finished with
+C
+C Functions
+	LOGICAL	  LIB$EXTZV
+C
+C***********************************************************************
+C
+C Initialise
+	ABORT=.FALSE.		! not finished with file yet
+C
+	MHORG(1)  = 0	! integers
+	MHORG(2)  = 0
+	MHSCL     = 0
+C
+	MDORG(1)  = 0.0	! R*8s
+	MDORG(2)  = 0.0
+	MDSCL     = 0.0
+C
+C***********************************************************************
+C
+C Main loop - read the next entry
+10	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 998
+C
+C Which entry is it ?
+	IF (IECODE.EQ.'RA') GOTO 100
+	IF (IECODE.EQ.'MH') GOTO 200
+	IF (IECODE.EQ.'MD') GOTO 300
+	IF (IECODE.EQ.'NS') GOTO 400
+	IF (IECODE.EQ.'NO') GOTO 500
+C
+C Ignore any other entries
+C
+	GOTO 10
+C
+C***********************************************************************
+C
+C RA - range of coordinates in this file
+C Extract the range for use in working out the scale, unless we
+C have been given a WINDOW command
+100	CALL EIHRR(RANGE,4,1)
+	IF (.NOT.HADWIN) THEN
+	   XRANGE=RANGE(2)-RANGE(1)		! just temporary
+	   YRANGE=RANGE(4)-RANGE(3)
+	   IF (XRANGE.LT.0.0.OR.YRANGE.LT.0.0.OR.
+     &	       (XRANGE.EQ.0.0.AND.YRANGE.EQ.0.0)) THEN
+	      CALL TTWSTR('Bad RAnge entry in IFF file')
+	      CALL TTWSTR('Amend it, or use WINDOW to provide values')
+	      GOTO 999
+	   ENDIF
+	ENDIF
+	HADRA = .TRUE.		! had a RAnge now
+	GOTO 10
+C
+C***********************************************************************
+C
+C MH - map header contains map scale and origin
+C Different customers files have different format map headers and
+C consequently different common blocks. To avoid multiply defining
+C variables by including both common blocks in the routine we call
+C different routines to extract the scale and offset for each customer
+C If the map scale has been given explicitly or the SCALE IFF/SHEET mode
+C of scaling is not being used then no need to do this
+200	CALL EIHRI(MHARR,MIN(IELEN,MHLEN),1)	! map header
+	CUST=MHDESC(2)				! see MHDEF common block
+	IF (CUST.EQ.0.OR.CUST.EQ.2) THEN	! assume OS if unset
+	   CALL OSHEAD(MHSCL,MHORG)
+	ELSEIF (CUST.EQ.1) THEN
+	   CALL MCEHEA(MHSCL,MHORG)
+	ENDIF
+	GOTO 10
+C
+C***********************************************************************
+C
+C MD - map descriptor contains scale and origin
+C use it only if type 2 and ENABLE DESCRIPTOR
+300	IF (IELEN.EQ.MD2LEN.AND.DESOPT) THEN
+	   CALL EIHRI(MD2ARR,MD2LEN,1)
+	   MDSCL    = MD2SCL
+	   MDORG(1) = MD2LOC(1)
+	   MDORG(2) = MD2LOC(2)
+	ENDIF
+	GOTO 10
+C
+C***********************************************************************
+C
+C NS - new section
+400	IF (IELEN.EQ.0.OR..NOT.REPORT) GOTO 10
+	TMPCNT=MIN(IELEN,40) 		
+	CALL EIHR(TMPBUF,TMPCNT,1)
+	TMPCNT = TMPCNT*2		! bytes
+	TMPBUF(TMPCNT+1)=0
+	CALL WRITEF('Section: %A80',TMPBUF)
+	GOTO 10
+C
+C***********************************************************************
+C
+C NO - new overlay
+500	CONTINUE
+C sort out scale and origin of this map - use values from MD if they
+C are not zero, otherwise use values from map header if they seem more
+C sensible
+C
+	MAPSCL = MDSCL
+	IF (MDSCL.LE.0.0.AND.MHSCL.GT.0) THEN
+	   MAPSCL = MHSCL
+	ENDIF
+	MAPORG(1) = MDORG(1)
+	MAPORG(2) = MDORG(2)
+	IF (MDORG(1).EQ.0.0.AND.MDORG(2).EQ.0.0.AND.
+     &	    (MHORG(1).NE.0.OR.MHORG(2).NE.0)) THEN
+	   MAPORG(1) = MHORG(1)
+	   MAPORG(2) = MHORG(2)
+	ENDIF
+C
+C get corners of map
+C
+	IF (HADWIN) THEN
+	   IF (ABSOPT) THEN
+	      LIMITS(1,1) = WINDOW(1)-MAPORG(1)
+	      LIMITS(2,1) = WINDOW(4)-MAPORG(2)
+	      LIMITS(2,2) = WINDOW(3)-MAPORG(2)
+	      LIMITS(1,3) = WINDOW(2)-MAPORG(1)
+	   ELSE
+	      LIMITS(1,1) = WINDOW(1)
+	      LIMITS(2,1) = WINDOW(4)
+	      LIMITS(2,2) = WINDOW(3)
+	      LIMITS(1,3) = WINDOW(2)
+	   ENDIF
+	ELSE
+	   LIMITS(1,1) = RANGE(1)
+	   LIMITS(2,1) = RANGE(4)
+	   LIMITS(2,2) = RANGE(3)
+	   LIMITS(1,3) = RANGE(2)
+	ENDIF
+	LIMITS(1,2) = LIMITS(1,1)
+	LIMITS(2,3) = LIMITS(2,2)
+	LIMITS(1,4) = LIMITS(1,3)
+	LIMITS(2,4) = LIMITS(2,1)
+C
+C rotate these by rotation of plot
+C
+	DO 202, I=1,4
+	   XTEMP       = LIMITS(1,I)*COSTHETA - LIMITS(2,I)*SINTHETA
+	   LIMITS(2,I) = LIMITS(1,I)*SINTHETA + LIMITS(2,I)*COSTHETA
+	   LIMITS(1,I) = XTEMP
+  202	CONTINUE
+C
+C get range of these rotated corners
+C
+	RNGE(1) = MIN(LIMITS(1,1),LIMITS(1,2),LIMITS(1,3),LIMITS(1,4))
+	RNGE(2) = MAX(LIMITS(1,1),LIMITS(1,2),LIMITS(1,3),LIMITS(1,4))
+	RNGE(3) = MIN(LIMITS(2,1),LIMITS(2,2),LIMITS(2,3),LIMITS(2,4))
+	RNGE(4) = MAX(LIMITS(2,1),LIMITS(2,2),LIMITS(2,3),LIMITS(2,4))
+C
+	XRANGE=RNGE(2)-RNGE(1)
+	YRANGE=RNGE(4)-RNGE(3)
+C
+C Have we got a sensible sheet scale value?
+C
+	IF (.NOT.(HADWIN.OR.HADRA)) THEN
+	   CALL TTWSTR('Missing RAnge entry in IFF file')
+	   CALL TTWSTR('Insert one, or use WINDOW to provide values')
+	   GOTO 999
+	ENDIF
+C
+C get sheet size
+	CALL GQMDS(WTYPE,ERRIND,DCUNIT,FILMSZ(1),FILMSZ(2),RASTSZ(1)
+     &	,RASTSZ(2))
+	IF (DCUNIT.NE.GMETRE) CALL WRITEF(
+     &		'Unknown device coordinate units. Assuming metres.')
+C
+C Work out maximum extent of the enlarged plot
+	XSHEET=FILMSZ(1)*ENLARG*1000.0
+	YSHEET=FILMSZ(2)*ENLARG*1000.0
+C
+C The type of scaling cannot be changed now so disable the default
+C enlargement if we are auto-scaling
+	IF (HADSA) ENLARG=1.0
+C
+C SCALE is such that IFF units * SCALE = sheet mm
+C
+	IF (HADSF) THEN
+	   SCALE=SCAFAC		! use data from SCALE FACTOR
+	   SCAMAP=1
+	ELSEIF (HADSA) THEN
+	   SCALE = MIN(XSHEET/XRANGE,YSHEET/YRANGE)
+	   HADOFF = .FALSE.	! no offset allowed
+	   HADORI = .FALSE.	! or origin
+	   SCAMAP=1
+	ELSEIF (HADSM.AND.HADSS) THEN
+	   SCALE=SCAMAP/SCASOU	! (SCAMAP may be default of 1000)
+	ELSEIF (HADSM.AND.MAPSCL.GT.0) THEN
+	   SCALE=SCAMAP/MAPSCL
+C
+C when no SCALE commands have been given
+C use scale of map and assume IFF units are in metres 
+C (OS case by default)
+C
+	ELSEIF (MAPSCL.GT.0) THEN
+	   SCALE=1000.0/MAPSCL
+	ELSE
+	   SCALE=1
+	   CALL WRITEF('Illegal map scale %F7.3, assuming 1.0',MAPSCL)
+	ENDIF
+C
+C tell FRTLIB about scales and rotation
+C 1.0/ENLARG relates mm on the plotted (not enlarged) sheet to world units,
+C so as to set hatch thickness and spacing in symbols/texts.
+C 2nd arg 1.0 relates FRT mm to world units. This is definitely 1.0 since
+C FPP world units are enlarged sheet mm.
+C Last arg 1.0 relates mm on the enlarged sheet to world units, so as
+C to set FRTLIB circle/curve tolerances for the enlarged sheet.
+C
+	CALL SRIUNI(1.0/ENLARG,1.0,THETA,1.0)
+C
+C Tell GKS about rotation (for correct hatching angles)
+	CALL LSG_SET_ROTATION(THETA)
+C
+C Communicate the device nominal linewidth (in world coords) to FRTLIB
+	CALL SRISLW(NOMLW*ENLARG*1000.0)
+C
+	SCALED = .TRUE.
+C
+C Work out explicit offset given by OFF or ORI command
+	OFSETX=0.0
+	OFSETY=0.0
+	IF (HADOFF) THEN
+	   OFSETX=OFFX
+	   OFSETY=OFFY
+	ELSEIF (HADORI) THEN
+	   OFSETX=ORIX*SCALE
+	   OFSETY=ORIY*SCALE
+	ENDIF
+C
+C If new origin required, then calculate it
+	IF (.NOT.NEWORG) GOTO 1899
+C
+	FPPORG(1) = MAPORG(1)
+	FPPORG(2) = MAPORG(2)
+C
+C Work out offsets to be added to all coordinates in mms on the
+C enlarged sheet (default position is centred on the film)
+C Equation is in expanded form to try to avoid rounding errors
+C
+	XTEMP = 0.0
+	YTEMP = 0.0
+	GOTO (1801,1802,1803),PLTPOS/3+1	! x position
+C left
+1801	XTEMP = 0.0
+	GOTO 1810
+C centre
+1802	XTEMP=(XSHEET/SCALE-XRANGE)/2
+	GOTO 1810
+C right
+1803	XTEMP = XSHEET/SCALE-XRANGE
+C
+1810	GOTO (1811,1812,1813),PLTPOS-3*(PLTPOS/3)+1	! y position
+C bottom
+1811	YTEMP = 0.0
+	GOTO 1820
+C centre
+1812	YTEMP=(YSHEET/SCALE-YRANGE)/2
+	GOTO 1820
+C top
+1813	YTEMP = YSHEET/SCALE-YRANGE
+C
+1820	NEWOFX=(XTEMP-RNGE(1))*SCALE+OFSETX
+	NEWOFY=(YTEMP-RNGE(3))*SCALE+OFSETY
+C
+C Set up the GKS transformations to transform from mms on the enlarged
+C sheet to mms on the film (unenlarged) via GKS normalised device
+C coordinates
+	MAXAXI=MAX(FILMSZ(1),FILMSZ(2))	! for normalisation transform
+C
+C Set workstation window (normalised device coords)
+	CALL GSWKWN(WKID,0.0,FILMSZ(1)/MAXAXI,0.0,FILMSZ(2)/MAXAXI)
+C
+C Set workstation viewport (metres on film)
+	CALL GSWKVP(WKID,0.0,FILMSZ(1),0.0,FILMSZ(2))
+C
+C adjust (rotated) origin offsets for a subsequent map
+1899	XTEMP = (MAPORG(1)-FPPORG(1))*SCALE
+	YTEMP = (MAPORG(2)-FPPORG(2))*SCALE
+	TOTOFX = NEWOFX + XTEMP*COSTHETA - YTEMP*SINTHETA
+	TOTOFY = NEWOFY + XTEMP*SINTHETA + YTEMP*COSTHETA
+C
+C transform our RANGE to enlarged sheet mm
+	RTRN(1)=RNGE(1)*SCALE+TOTOFX
+	RTRN(2)=RNGE(2)*SCALE+TOTOFX
+	RTRN(3)=RNGE(3)*SCALE+TOTOFY
+	RTRN(4)=RNGE(4)*SCALE+TOTOFY
+C
+C force onto sheet edges
+	RTRN(1) = MAX(RTRN(1),0.0)
+	RTRN(2) = MIN(RTRN(2),XSHEET)
+	RTRN(3) = MAX(RTRN(3),0.0)
+	RTRN(4) = MIN(RTRN(4),YSHEET)
+C
+C Set window (mms on enlarged map sheet)
+	CALL GSWN(1,RTRN(1),RTRN(2),RTRN(3),RTRN(4))
+C
+C Set viewport (normalised device coords)
+C (The MAX and MIN in this should not have any significant effect,
+C they merely prevent rounding errors)
+	CALL GSVP(1,
+     &		MAX((RTRN(1)/XSHEET)*FILMSZ(1)/MAXAXI,0.0),
+     &		MIN((RTRN(2)/XSHEET)*FILMSZ(1)/MAXAXI,1.0),
+     &		MAX((RTRN(3)/YSHEET)*FILMSZ(2)/MAXAXI,0.0),
+     &		MIN((RTRN(4)/YSHEET)*FILMSZ(2)/MAXAXI,1.0) )
+	CALL GSELNT(1)	! select normalisation transformation
+C
+C output scale information
+	IF (.NOT.REPORT) GOTO 1000
+	NEWORG = .FALSE.
+	CALL SHSCAL
+	CALL WRITEF(
+     &		'Local origin is %^D%G0.15, %G0.15',MAPORG(1),MAPORG(2))
+	CALL WRITEF('IFF RAnge is %G0.5 by %G0.5 IFF units',
+     &			RANGE(2)-RANGE(1),RANGE(4)-RANGE(3))
+	CALL WRITEF('Enlarged media size is %F7.1 by %F7.1 mm',
+     &                                     XSHEET,YSHEET)
+	CALL WRITEF('Enlarged  plot size is %F7.1 by %F7.1 mm',
+     &			(RNGE(2)-RNGE(1))*SCALE,
+     &			(RNGE(4)-RNGE(3))*SCALE)
+	CALL WRITEF
+C
+C Note first layer number
+C
+	CALL EIHRI(LAYNUM,1,1)
+C
+C get EO position if there
+	IF (IELEN.GE.4) THEN			! has EO pointer
+	   CALL EIHRL(EOPOSN,1,3)
+	   NOPOSN = LPOSH
+	   CALL IFFPKE(IECODE,IELEN,EOPOSN)	! get EO entry
+	   IF (IECODE.NE.'EO') THEN		! bad EO
+	      CALL WRITEF('Bad EO pointer in NO %^W%N',LAYNUM)
+	      EOPOSN = 0			! remember no EO position
+	   ENDIF
+	   CALL IFFPKE(IECODE,IELEN,NOPOSN)	! back to NO
+	ELSE
+	   EOPOSN = 0				! remember no EO position
+	ENDIF
+C
+	IF (LAYNUM.LT.0) THEN
+	   CALL WRITEF(
+     &	'Illegal layer number %^W%N found - layer ignored.',LAYNUM)
+	   GOTO 182				! skip it
+	ENDIF
+C
+C test if we want this layer
+	I = LAYNUM				! convert to long
+	WANTED=LIB$EXTZV(I,1,LAYMAP)
+	IF (.NOT.WANTED) GOTO 182		! skip it
+C
+C record layer start and end for plot progress reporting
+	TITLE_LAYERSTART = NOPOSN
+	TITLE_LAYEREND = EOPOSN
+C
+C Check if this layer is selected with OVERRIDE
+	IF (HADOVR) THEN
+	   DO 195 I=1,NOVRRD
+	      IF (LAYNUM.EQ.OVERRD(1,I)) THEN
+	         FTCODE=OVERRD(2,I)
+	         FSSET=.TRUE.
+	         GOTO 196
+	      ENDIF
+195	   CONTINUE
+	ENDIF
+196	IF (REPORT.OR.HADINT) THEN
+	   IF (.NOT.PRIOPT) CALL WRITEF('Layer %^W%N.',LAYNUM)
+	ENDIF
+	GOTO 1000
+C
+C skip layer
+182	IF (EOPOSN.NE.0) THEN
+	   CALL IFFPKE(IECODE,IELEN,EOPOSN)	! get EO entry
+	ELSE
+	   CALL IFFNXC('EO',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      CALL WRITEF('Missing EO entry in layer %^W%N',LAYNUM)
+	      GOTO 998
+	   ENDIF
+	ENDIF
+C
+	GOTO 1000
+C
+C Leave IFF file positioned here
+C
+C*********************************************************************
+C Errors
+998	CALL WRITEF('Unexpected end of IFF file.')
+999	ABORT=.TRUE.
+1000	RETURN
+C
+	END

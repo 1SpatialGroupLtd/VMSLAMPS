@@ -1,0 +1,504 @@
+	LOGICAL*4 FUNCTION PARSE2(CMDSTR,LINLEN,USRSTR,USRLEN)
+C
+***	MODULE	PARSE2
+***	IDENT	12FE90
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Qualifier /UNIQUE_FSN now added			PP   08-Feb-1990
+CMOD	Now accepts 7 input files as advertised!	TJH  06-Mar-1989
+CMOD	Version number on output file now removed	TJH  27-Mar-1987
+CMOD	XFER_QUAL now reports its own errors		TJH  20-Nov-1986
+CMOD	IFF default file-spec no longer has version no. TJH  31-Oct-1986
+C	Author						TJH  23-Jan-1986
+C
+C DCL command handling routine using positional qualifiers 
+C and two stage parse for IMP utility IMERGE.
+C
+C All results are returned in /COMMAND/, /OVRS/ and /OVLST/
+C
+C Function returns set to SS$_NORMAL if all is well, otherwise one of
+C a variety of LSLLIB or system CLI condition codes. Because of the 
+C use of CLI routines all error messages will be output here, before 
+C return to IMERGE.
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	CHARACTER*256	CMDSTR		! the cmd. string for parsing
+	CHARACTER*256	USRSTR		! the cmd. string as typed
+	INTEGER*4	LINLEN		! length of command line
+	INTEGER*4	USRLEN		! length of typed command line
+C
+C Parameters:
+	INCLUDE 	'($RMSDEF)'
+	INCLUDE 	'($SSDEF)'
+	INCLUDE 	'($STSDEF)'
+	INCLUDE		'LSL$CMNIMERGE:PARAMS.PAR'
+	INCLUDE		'LSL$CMNIMERGE:IMERGEMSG.PAR'
+C
+C Common:
+	INCLUDE		'LSL$CMNIMERGE:COMMAND.CMN'
+	INCLUDE		'LSL$CMNIMERGE:OVLST.CMN'
+	INCLUDE		'LSL$CMNIMERGE:OVRS.CMN'
+	INCLUDE 	'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 	'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 	'LSL$CMNLSL:EXCEPTION.CMN'
+	INCLUDE 	'LSL$CMNLSL:STATUS.CMN'
+C
+C Common block to control error reporting in condition handler
+	COMMON /REPORT/ REPORT	
+C
+C condition handler
+	EXTERNAL	CML_ERRET
+C
+	INTEGER 	CLI$DCL_PARSE, LIB$GET_INPUT
+	EXTERNAL	LIB$GET_INPUT
+C
+C
+C Command Language Definitions
+	EXTERNAL        IMERGEPAR_CLD
+C W/S
+C
+	INTEGER*2	PROLEN		! length of prompt
+	INTEGER*2	STARTP		! start of first parameter
+C
+	INTEGER*4	I,J		! tmp. vars.
+C
+	INTEGER*4 	CLI$_PRESENT	! cmd. line element present?
+	EXTERNAL 	CLI$_PRESENT
+	INTEGER 	CLI$PRESENT
+C
+	BYTE		CH		! one byte of TXTBUF
+C
+	LOGICAL		ABSENT		! .T. if file param. not found
+	LOGICAL		HAD_LAY		! .T. if /LAYER in cmd. line
+	LOGICAL		LIST		! controls search of file lists
+	LOGICAL		LOCAL		! .T. if qual. is local
+	LOGICAL		LOCNEG		! .T. if qual. locally negated
+	LOGICAL		REPORT		! .T. if local error reporting
+C
+	CHARACTER*2	PARAMS(8) 	! parameter names
+C
+C Functions called
+	INTEGER*4	DCL_CML		! gets parsed command line
+	INTEGER*4	DCL_FILE	! reads and parses file title 
+C					  from DCL command line
+	INTEGER*4	DCL_INT		! gets qualifier args. (integer)
+	INTEGER*4	DCL_QUAL	! looks for specified qualifier
+	INTEGER*4	DCL_REAL	! gets qualifier args. (real)
+	INTEGER*4	DCL_STR		! gets qualifier args. (strings)
+	INTEGER		EXPFLN		! gets file-spec from /FILENAME/
+	INTEGER*4	FLWOPN		! open a file for write
+	INTEGER*4	FLWSEL		! select a file for write
+	INTEGER		PUTFLN		! puts file-spec into /FILENAME/
+	INTEGER*4	XFER_QUAL	! transfers /LAYER args. to OVRS
+	INTEGER*4	WRTCMD		! gets process info, prints cmd
+C					! line to listing file
+	LOGICAL		RDCH
+	LOGICAL		RDCHS
+C
+	DATA PARAMS/'P1','P2','P3','P4','P5','P6','P7','P8'/
+C
+C ......................................................................
+C
+C Initialise things.
+C
+	DEBUG    =	.FALSE. ! .TRUE. if /DEBUG (devt. purposes only)
+	HAD_LAY  = 	.FALSE.	! .TRUE. if /LAYER in cmd. line
+	HAD_LST  = 	.FALSE.	! .TRUE. if /OUTPUT=lstfile
+	HAD_LOG  = 	.FALSE.	! .TRUE. if /LOG
+	HAD_ILAY = 	.FALSE.	! .TRUE. if /LAYER
+	HAD_RLAY = 	.FALSE.	! .TRUE. if /REST_LAYER
+	HAD_SLAY = 	.FALSE.	! .TRUE. if /SINGLE_LAYER
+	HAD_SPLIT= 	.FALSE.	! .TRUE. if /SPLIT
+	HAD_UNIQUE_FSN= .FALSE.	! .TRUE. if /UNIQUE_FSN
+	LIST	 =	.FALSE. ! parameters are single files not lists
+	LOCAL 	 = 	.FALSE.	! .TRUE. if qual. is local
+	LOCNEG 	 = 	.FALSE.	! .TRUE. if qual. is locally negated
+	NEWCP	 = 	.FALSE.	! .TRUE. if /CP_EXPANSION
+	REPORT	 = 	.TRUE.	! LSLDCL local error reporting
+C
+C Init. the (optional) index for global layer selections - this would
+C generally be 1. 
+	GLBLAY=0
+C
+C Init. the array of overlay numbers, grouped according to file. More
+C specifically, for each file there is a list of overlay numbers
+C to be used, terminated by -1 (0 is legal layer number).
+	DO 10 I=1,MAXFIL*5
+	   OVRS(I)=0
+10	CONTINUE
+C
+C Init. the general index into this array. NOVR holds the index of the 
+C last filled cell within OVRS.
+	NOVR=0
+C
+C Init. INOVR, which  is an array of such indices - each entry is for 
+C one input file and points to the start of a group of layer numbers in 
+C OVRS().
+	DO 20 I=1,MAXFIL
+	   INOVR(I)=0
+20	CONTINUE
+C
+C Init. the number of input files counter.
+	NUMPAR=0
+C
+C Establish condition handler
+	CALL LIB$ESTABLISH( CML_ERRET )
+C
+C ......................................................................
+C
+C Un-pick the special characters placed into the command line to fool 
+C the parser in CMDLIN
+	DO 30 I=1,LINLEN
+	   IF (CMDSTR(I:I).EQ.'|') THEN
+	      CMDSTR(I:I)='/'
+	   ELSEIF (CMDSTR(I:I).EQ.'&') THEN
+	      CMDSTR(I:I)=','
+	   ELSEIF (CMDSTR(I:I).EQ.'~') THEN
+	      CMDSTR(I:I)='='
+	   ELSEIF (CMDSTR(I:I).EQ.'{') THEN
+	      CMDSTR(I:I)='('
+	   ELSEIF (CMDSTR(I:I).EQ.'}') THEN
+	      CMDSTR(I:I)=')'
+	   ENDIF
+30	CONTINUE	    
+C
+C ......................................................................
+C
+C Split input parameter list into separate parameters by replacing the 
+C list separators (commas) with spaces
+	    CALL COMMA(CMDSTR,LINLEN)
+C
+C Now parse the command line against the CLD module which assumes that
+C all the parameters are optional.
+	PARSE2=
+     &	     CLI$DCL_PARSE(CMDSTR,IMERGEPAR_CLD,LIB$GET_INPUT,%VAL(0))
+ 
+	IF (.NOT.PARSE2) GOTO 60		! return
+C
+C Retrieve the complete parsed command line and stick it into CMDSTR
+C for use with /OUTPUT 
+	PARSE2=DCL_CML(CMDSTR,LINLEN,.TRUE.)
+	IF (.NOT.PARSE2) GOTO 60		! return
+C
+C ......................................................................
+C
+C 		C H E C K   F O R   Q U A L I F I E R S
+C
+C We could have /DEBUG, /LOG, /LAYER=(int,...),/SINGLE_LAYER=(int,...) 
+C /SPLIT=splitfile, /REST_LAYER, /CP_EXPANSION and /UNIQUE_FSN.
+C
+C First /DEBUG - if present DEBUG will be returned .T. (this qualifier
+C is not described in the user documentation. It is for development
+C /debugging purposes only).
+C
+	PARSE2=DCL_QUAL('DEBUG',DEBUG,LOCAL,LOCNEG,.TRUE.) 
+	IF (.NOT.PARSE2) GOTO 60		! return
+C
+C ......................................................................
+C
+C Now /UNIQUE_FSN - if present HAD_UNIQUE_FSN will be returned .T.
+C
+	PARSE2=DCL_QUAL('UNIQUE_FSN',HAD_UNIQUE_FSN,LOCAL,LOCNEG,.TRUE.) 
+	IF (.NOT.PARSE2) GOTO 60		! return
+C
+C ......................................................................
+C
+C Now /LOG - if present HAD_LOG will be returned .T.
+C
+	PARSE2=DCL_QUAL('LOG',HAD_LOG,LOCAL,LOCNEG,.TRUE.) 
+	IF (.NOT.PARSE2) GOTO 60		! return
+C
+C ......................................................................
+C
+C Now /CP_EXPANSION - if present NEWCP will be returned .T.
+C
+	PARSE2=DCL_QUAL('CP_EXPANSION',NEWCP,LOCAL,LOCNEG,.TRUE.) 
+	IF (.NOT.PARSE2) GOTO 60		! return
+C
+C ......................................................................
+C
+C Now /SPLIT=restfile - if present will be returned .T.
+C
+	PARSE2=DCL_QUAL('SPLIT',HAD_SPLIT,LOCAL,LOCNEG,.TRUE.) 
+	IF (.NOT.PARSE2) GOTO 60		! return
+C
+C If we have got /SPLIT get the filespec
+	IF (HAD_SPLIT) THEN
+	   PARSE2=DCL_FILE('SPLIT','LSL$IF:IMERGE_SPLIT.IFF'
+     &		   ,ABSENT		! .T. if no filename found
+     &		   ,.FALSE.		! don't expect list of filenames
+     &		   ,.TRUE.)		! local error reporting
+	   IF (.NOT.PARSE2) GOTO 60		! return
+C
+C Transfer the file-spec to a local variable 
+	   SPLIT_FILE=FILARY(1)(:FIL_LEN(1))
+	   SPLIT_LEN=FIL_LEN(1)
+	ENDIF	
+C
+C
+C ......................................................................
+C
+C Now /REST_LAYER - if present HAD_RLAY will be returned .T.
+C
+	PARSE2=DCL_QUAL('REST_LAYER',HAD_RLAY,LOCAL,LOCNEG,.TRUE.) 
+	IF (.NOT.PARSE2) THEN
+	   GOTO 60				! return
+	ELSEIF (HAD_RLAY.AND.HAD_SPLIT) THEN	! get the arguments
+	   PARSE2=DCL_INT('REST_LAYER',.TRUE.)
+	   IF (.NOT.PARSE2) GOTO 60		! return
+	   RLAYER=IARRAY(1)	! transfer output layer to local var.
+	ENDIF
+C
+C ......................................................................
+C
+C Now /OUTPUT=listfile - if present HAD_LST will be returned .T.
+C
+	PARSE2=DCL_QUAL('OUTPUT',HAD_LST,LOCAL,LOCNEG,.TRUE.) 
+	IF (.NOT.PARSE2) GOTO 60		! return
+C
+C If we have got /OUTPUT get the filespec
+	IF (HAD_LST) THEN
+	   PARSE2=DCL_FILE('OUTPUT','IMERGE.LIS'
+     &		   ,ABSENT		! .T. if no filename found
+     &		   ,.FALSE.		! don't expect list of filenames
+     &		   ,.TRUE.)		! local error reporting
+	   IF (.NOT.PARSE2) GOTO 60	! return
+
+C
+C Open the listing file 
+	   PARSE2=FLWOPN(LSTLUN,FILARY(1)(1:FIL_LEN(1)))
+	   IF (.NOT.PARSE2) THEN
+	      CALL LSL_PUTMSG(PARSE2)
+	      GOTO 60			! return
+	   ENDIF
+C
+C Set "file is open" flag
+	   LSTFLO=.TRUE.
+C
+C and select the file
+	   PARSE2=FLWSEL(LSTLUN)
+	   IF (.NOT.PARSE2) THEN
+	      CALL LSL_PUTMSG(PARSE2)
+	      GOTO 60			! return
+	   ENDIF
+	ENDIF	   
+C
+C ......................................................................
+C
+C Now /SINGLE_LAYER - if present HAD_SLAY will be returned .T.
+C
+	PARSE2=DCL_QUAL('SINGLE_LAYER',HAD_SLAY,LOCAL,LOCNEG,.TRUE.) 
+	IF (.NOT.PARSE2) THEN
+	   GOTO 60			! return
+	ELSE IF (HAD_SLAY) THEN		! get the arguments
+	   PARSE2=DCL_INT('SINGLE_LAYER',.TRUE.)
+	   IF (.NOT.PARSE2) RETURN
+	   SLAYER=IARRAY(1)	! transfer output layer to local var.
+	ENDIF
+C
+C ......................................................................
+C
+C Now try /LAYER in a global sense (ie after the verb but BEFORE
+C the parameters) If is is in this position then we may assume the
+C user wishes the selection arguments to apply to all the input files.
+C Our call to DCL_QUAL will return LOCAL as .F. if we have a global
+C useage of /LAYER.
+C
+	PARSE2=DCL_QUAL('LAYER',HAD_ILAY,LOCAL,LOCNEG,.TRUE.)
+	IF (.NOT.PARSE2) THEN
+	    GOTO 60				! return
+	ELSEIF (HAD_ILAY.AND..NOT.LOCAL) THEN	! get the arguments
+	   HAD_LAY=.TRUE.
+	   PARSE2 = DCL_INT('LAYER',.TRUE.)
+	   IF (.NOT.PARSE2) GOTO 60		! return
+C
+C Transfer the qualifier args. to the common layer selection holding 
+C array OVRS().
+	   PARSE2=XFER_QUAL(NUMPAR)
+	   IF (.NOT.PARSE2) GOTO 60		! return
+	ENDIF
+C
+C ......................................................................
+C
+C Now get the infiles which will probably have /LAYER qualifiers
+C interspersed between them.
+C
+C Get the first infile 'P1', as far as the CLD module is concerned this 
+C and all the others are optional.
+C
+	PARSE2=DCL_FILE(PARAMS(1),'LSL$IF:IFF.IFF'
+     &		   ,ABSENT		! .T. if no filename found
+     &		   ,.FALSE.		! don't expect list of filenames
+     &		   ,.TRUE.)		! local error reporting
+	IF (.NOT.PARSE2) GOTO 60	! return
+C
+C Transfer the file-spec to a local variable 
+	INFILE(1)=FILARY(1)(:FIL_LEN(1))
+	LENFIL(1)=FIL_LEN(1)
+	NUMPAR=1	! store the number of input file parameters read
+C
+C ......................................................................
+C
+C Now see if there is a /LAYER qualifier in the environment of this
+C parameter (/LAYER was declared with "PLACEMENT=POSITIONAL" in the 
+C EXAMPLE2.CLD module). 
+C
+	PARSE2=DCL_QUAL('LAYER'	! qualifier name
+     &			,HAD_ILAY	! returned .T. if qual. found
+     &			,LOCAL	 	! .T. if qual local to parameter
+     &			,LOCNEG  	! .T. if qual. negated locally
+     &			,.TRUE.) 	! .T. - local error reporting
+	IF (.NOT.PARSE2) THEN
+	    GOTO 60			! return
+C
+C get the arguments
+	ELSE IF (HAD_ILAY.AND.LOCAL) THEN	
+	   HAD_LAY=.TRUE.
+	   PARSE2=DCL_INT('LAYER',.TRUE.)
+	   IF (.NOT.PARSE2) GOTO 60	! return
+
+C
+C Transfer the qualifier args. to the common layer selection holding 
+C array OVRS().
+	   PARSE2=XFER_QUAL(NUMPAR)
+C
+C If something dreadful has happened warn the user then return.
+	   IF (.NOT.PARSE2) THEN
+	      CALL LSL_PUTMSG(PARSE2)
+	      GOTO 60		! return
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C
+C Now loop for any other input file specs, we can have up to 7 infiles.
+C Use a DEC style "rolling default" file-spec ie parse against the
+C previous file-spec in the command line
+C
+	DO 40 I=2,8
+	   PARSE2=DCL_FILE(PARAMS(I),INFILE(I-1)(:LENFIL(I-1)),ABSENT,
+     &		     					.FALSE.,.TRUE.)
+C
+	   IF (.NOT.PARSE2) GOTO 60	! return
+C
+	   IF (ABSENT) GOTO 50		! no more file parameters
+	   NUMPAR=I	! increment number of input file parameters read
+C
+C If we get here we will have got a file-spec in FILARY(1) which we must
+C copy into a local variable, unless it is the eigth parameter, in which
+C case this is the output file parameter.
+C
+	   IF (NUMPAR.EQ.8) GOTO 50
+	   INFILE(I)=FILARY(1)(:FIL_LEN(1))
+	   LENFIL(I)=FIL_LEN(1)	
+C
+C As with P1 see if there is a /LAYER qualifier in the environment of
+C this parameter.
+C
+	PARSE2=DCL_QUAL('LAYER'	! qualifier name
+     &			,HAD_ILAY	! returned .T. if qual. found
+     &			,LOCAL	 	! .T. if qual local to parameter
+     &			,LOCNEG  	! .T. if qual. negated locally
+     &			,.TRUE.) 	! .T. - local error reporting
+C
+	IF (.NOT.PARSE2) THEN
+	    GOTO 60				! return
+	ELSEIF (HAD_ILAY.AND.LOCAL) THEN	! get the arguments
+	   HAD_LAY=.TRUE.
+	   PARSE2=DCL_INT('LAYER',.TRUE.)
+	   IF (.NOT.PARSE2) GOTO 60		! return
+C
+C Transfer the qualifier args. to the common layer selection holding 
+C array OVRS().
+	   PARSE2=XFER_QUAL(NUMPAR)
+C
+C If something dreadful has happened warn the user then return.
+	   IF (.NOT.PARSE2) THEN
+	      CALL LSL_PUTMSG(PARSE2)
+	      GOTO 60			! return
+	   ENDIF
+	ENDIF
+40	CONTINUE	
+C
+C ......................................................................
+C
+C When we get here we can assume that the last "input" file read was in 
+C fact the output file. Treat accordingly, ensuring that any version
+C number is removed 
+C 
+50	PARSE2=PUTFLN(FILARY(1),FIL_LEN(1))
+	IF (.NOT.PARSE2) THEN
+	   CALL LSL_PUTMSG(PARSE2)
+	   GOTO 60	
+	ENDIF
+	LEN_VER=0
+	HAD_VER=.FALSE.
+	PARSE2=EXPFLN(OUTFIL,OUTLEN)
+	IF (.NOT.PARSE2) THEN
+	   CALL LSL_PUTMSG(PARSE2)
+	   GOTO 60	
+	ENDIF
+	NUMPAR=NUMPAR-1		! decrement no. input file parameters
+C
+C Check that the user hasn't specified /LAYER after the output 
+C file-spec. This will be treated as ambiguous and the run aborted.
+C
+C First reset the local parameter decoding environment
+	PARSE2=CLI$PRESENT(PARAMS(NUMPAR+1))
+	IF (PARSE2.NE.%LOC(CLI$_PRESENT)) THEN
+	   PARSE2=IMERGE__QUALPOSINV
+	   CALL LSL_PUTMSG(PARSE2)
+	   GOTO 60
+	ELSE
+	   PARSE2=DCL_QUAL('LAYER'	! qualifier name
+     &		,HAD_ILAY		! returned .T. if qual. found
+     &		,LOCAL		 	! .T. if qual local to parameter
+     &		,LOCNEG  		! .T. if qual. negated locally
+     &		,.TRUE.) 		! .T. - local error reporting
+	ENDIF
+C
+	IF (.NOT.PARSE2) THEN
+	    GOTO 60				! return
+	ELSEIF (HAD_ILAY.AND.LOCAL) THEN
+	   PARSE2=IMERGE__QUALPOSINV
+	   CALL LSL_PUTMSG(PARSE2)
+	   GOTO 60				! return
+	ENDIF
+C
+C Check that we have had /LAYER somewhere in the command line for use
+C with /SPLIT. Complain if not, then give up.
+C
+	IF (HAD_SPLIT.AND..NOT.HAD_LAY) THEN
+	   CALL LSL_PUTMSG(IMERGE__MISSQ,'/SPLIT')
+	   GOTO 60
+	ENDIF
+C
+C Check that we have had /LAYER somewhere in the command line for use
+C with /REST_LAYER. Complain if not, then give up.
+C
+	IF (HAD_RLAY.AND..NOT.HAD_LAY) THEN
+	   CALL LSL_PUTMSG(IMERGE__MISSQ,'/REST_LAYER')
+	   GOTO 60
+	ENDIF
+C
+C
+C ......................................................................
+C
+C
+C If /OUTPUT was set the write the command line to the listing file
+	IF (HAD_LST) THEN
+	   PARSE2=WRTCMD(USRSTR,USRLEN)
+	ENDIF	
+C
+C Revert to normal error processing. 
+60	CALL LIB$REVERT
+C
+C Return with the decoded command line components all safely in common,
+C and hopefully condition code as SS$_NORMAL.
+	IF (PARSE2) PARSE2=SS$_NORMAL
+	RETURN
+	END

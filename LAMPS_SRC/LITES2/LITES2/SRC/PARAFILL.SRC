@@ -1,0 +1,215 @@
+	LOGICAL FUNCTION PARAFILL
+C
+***	IDENT   09MY96
+***	MODULE  PARAFILL
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written                                 RWR	 Feb-1988
+C
+C	Fills a paragraph of text
+C	returns .TRUE. for failure, .FALSE. for success
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CHARS/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/LSL$CMNLSL:READSTR/
+C
+***	COMMON/CMN:CTXS/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:PARA/
+C
+C w/s
+	EXTERNAL	MOAN,NASTY
+C
+	INTEGER*2	TEMPCC
+	REAL		TEMPSIZE
+	CHARACTER*(CTXMAX) WORD		! the current word
+	INTEGER		WORD_CHAR	! the number of characters in it
+	REAL		WORD_LEN	! the length of the word
+	INTEGER		INPUT_BUF_ADDR
+	INTEGER*2	INPUT_BUF_LEN	! length of input buffer
+	REAL		AUX(AUXLEN)	! auxiliary array
+	LOGICAL		NEWCTX
+	LOGICAL		FIRST_WORD
+	BYTE		CH
+	REAL		TOTAL_LEN
+C
+C functions called
+	INTEGER	READSTR
+	LOGICAL RDCHS
+	LOGICAL GENAUX
+	INTEGER LIB$EXTZV
+	LOGICAL	PARALINE
+C
+C assume success
+	PARAFILL = .FALSE.
+C
+C*******************************************************************
+C
+C get ready to read from text in first CTXD
+	CALL STR$ANALYZE_SDESC(%VAL(COICTXD(CTXD_CUR)+CTX_O_DESC),
+     &	            INPUT_BUF_LEN,INPUT_BUF_ADDR)
+	CALL SETAUX(%VAL(INPUT_BUF_ADDR),INPUT_BUF_LEN)
+C
+	CTXBUFW(CTX_W_TXTLEN) = 0		! no characters in buffer
+	FIRST_WORD = .TRUE.
+	NEWCTX = .FALSE.
+C
+C loop that reads words from input CTX, and outputs them (ultimately
+C to PARA_CTXD
+10	CONTINUE
+C
+C are we at end of this CTX
+	IF (RDCHS(CH)) THEN
+C
+C are there any more CTXs
+	   IF (COICTXD(CTXD_CUR).EQ.COICTXD(CTXD_LSTCTX)) GOTO 100
+C
+C get ready to read from next one
+	   CALL PUTLNG(%VAL(COICTXD(CTXD_CUR)+CTX_O_NXTPTR),
+     &	               COICTXD(CTXD_CUR))
+	   CALL STR$ANALYZE_SDESC(%VAL(COICTXD(CTXD_CUR)+CTX_O_DESC),
+     &	               INPUT_BUF_LEN,INPUT_BUF_ADDR)
+	   CALL SETAUX(%VAL(INPUT_BUF_ADDR),INPUT_BUF_LEN)
+C
+C does it need a new CTX  - has CC or height changed?
+	   CALL PUTLNG(%VAL(COICTXD(CTXD_CUR)+CTX_O_AUXSIZ),TEMPSIZE)
+	   CALL PUTLNG(%VAL(COICTXD(CTXD_CUR)+CTX_O_TH),PARA_CURRTH)
+	   TEMPCC = LIB$EXTZV(0,16,%VAL(COICTXD(CTXD_CUR)+CTX_O_TS))
+C
+	   NEWCTX = (TEMPCC.NE.PARA_CURRCC.OR.TEMPSIZE.NE.PARA_CURRSIZE)
+	   PARA_CURRSIZE = TEMPSIZE
+	   PARA_CURRCC   = TEMPCC	
+	   PARA_DUMPAK(PAKFC) = PARA_CURRCC
+	ELSE
+	   CALL BSCH
+	ENDIF
+C
+C get a word from the input CTX
+	WORD_CHAR = READSTR(WORD,0,ON_SPACE,.TRUE.,)	
+C
+C ignore spaces and tabs
+	IF (WORD_CHAR .LE. 0) GOTO 10
+C
+C find the length of this word
+	IF (GENAUX(1,PARA_CURRXY,		! XY not used
+     &	          AUX,
+     &	          WORD(1:WORD_CHAR),
+     &	          CTXBUFL(CTX_L_RO),
+     &	          PARA_CURRTH,
+     &	          PARA_DUMPAK,
+     &	          %VAL(COICTXD(CTXD_CUR)+CTX_O_TS))) THEN
+	   CALL MOAN(MSG_FTABANDONED)
+	   CALL ABANDN
+	   GOTO 998
+	ENDIF
+	WORD_LEN = AUX(MAXXI) - AUX(MINXI)
+C
+C get the total length of the line, including this word
+	IF (FIRST_WORD) THEN
+	   TOTAL_LEN = WORD_LEN
+	ELSE
+	   TOTAL_LEN = PARA_LINE_LEN + WORD_LEN
+	ENDIF
+C
+C is there any reason why we should not just add this word to CTXBUF?
+C too long for justification
+	IF (((ABS(TOTAL_LEN).GT.PARA_FILL_WIDTH).OR.
+C
+C too long for CTX
+     &	       ((CTXBUFW(CTX_W_TXTLEN)+WORD_CHAR).GT.CTXMAX).OR.
+C
+C change in size or FC
+     &	       (NEWCTX)).AND.
+C
+C there is a buffer to complete
+     &	       (.NOT.FIRST_WORD)) THEN
+C
+C finish this buffer, and add it to PARA_CTXD
+	   CALL ADDCTX(PARA_CTXD,.FALSE.)
+C
+C if this is first of line, remember its address
+	   IF (PARA_LINE_ADDR.LE.0) PARA_LINE_ADDR = PARA_CTXD(CTXD_CUR)
+C
+C if finished a line, then calculate locations for all the subtexts
+C in the line
+	   IF (ABS(TOTAL_LEN).GT.PARA_FILL_WIDTH) THEN
+C
+C output this line to PARA_CTXD
+	      IF (PARALINE(PARA_CTXD,PARA_BLANK_LEN)) THEN
+	         CALL MOAN(MSG_FTABANDONED)
+	         CALL ABANDN
+	         GOTO 998
+	      ENDIF
+C
+C now ready to start a new line
+	      PARA_LINE_ADDR = 0
+	      PARA_LINE_LEN  = 0.0
+	   ENDIF
+C
+C starting a new sub-text, so fill in variable parts of CTXBUF   
+	   CTXBUFL(CTX_L_TH)  = PARA_CURRTH
+	   CTXBUFW(CTX_W_TS1) = PARA_CURRCC
+	   CTXBUFW(CTX_W_TXTLEN) = 0		! no characters in buffer
+	   FIRST_WORD = .TRUE.
+C
+C add on the length of a blank - if not the first subtext of a line
+	   IF (PARA_LINE_ADDR.GT.0)
+     &	               PARA_LINE_LEN = PARA_LINE_LEN + PARA_BLANK_LEN
+C
+C now dont need a new CTX
+	   NEWCTX = .FALSE.
+	ENDIF
+C
+C add a space if necessary
+	IF (.NOT.FIRST_WORD) THEN
+	   WORD = BLANK//WORD
+	   WORD_CHAR = MIN(WORD_CHAR+1,CTXMAX)
+	   WORD_LEN = WORD_LEN + PARA_BLANK_LEN
+	ELSE
+	   FIRST_WORD = .FALSE.
+	ENDIF
+C
+C add the word to CTXBUF
+	CALL EXPAND('%W%S',CTXTEXT(CTXBUFW(CTX_W_TXTLEN)+1),
+     &	      WORD(1:WORD_CHAR))
+	CTXBUFW(CTX_W_TXTLEN) = CTXBUFW(CTX_W_TXTLEN) + WORD_CHAR
+C
+C and its length to the total length
+	PARA_LINE_LEN = PARA_LINE_LEN + WORD_LEN
+C
+C go and get next word
+	GOTO 10
+C
+C ================================================================
+C
+C got to end of composite text
+C
+100	CONTINUE
+C
+C finish this buffer, and add it to TEMPCTX
+	CALL ADDCTX(PARA_CTXD,.FALSE.)
+C
+C if this is first of line, remember its address
+	IF (PARA_LINE_ADDR.LE.0) PARA_LINE_ADDR = PARA_CTXD(CTXD_CUR)
+C
+C output this line to PARA_CTXD
+	IF (PARALINE(PARA_CTXD,PARA_BLANK_LEN)) THEN
+	   CALL MOAN(MSG_FTABANDONED)
+	   CALL ABANDN
+	   GOTO 998
+	ENDIF
+	GOTO 999
+C
+998	PARAFILL = .TRUE.
+C
+999	CONTINUE
+	RETURN
+	END

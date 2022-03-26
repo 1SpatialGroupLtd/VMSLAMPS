@@ -1,0 +1,269 @@
+	LOGICAL FUNCTION SRIINI(SRINAM,HWSYM,HWCIR,HWPAT,HWLNS,HWCUR)
+C
+***	MODULE	SRIINI
+***	IDENT	07DE94
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author  Paul Hardy
+C
+C Coded and typed 31-Aug-1983
+C
+C returns FALSE if it succeeds in opening, reading, and closing
+C the specified Symbol Representation IFF file SRINAM
+C The contents of the file are left set up in COMMON/SRICOM/
+C
+	IMPLICIT NONE
+C
+	CHARACTER*(*)	SRINAM			! filename
+	LOGICAL		HWSYM			! (optional argument)
+						! .true. if hardware
+						! symbols available
+						! .false. by default
+	LOGICAL		HWCIR			! ditto for circles
+	INTEGER		HWLNS			! ditto for line types
+	LOGICAL		HWPAT			! ditto for patterns
+	LOGICAL		HWCUR			! ditto for curves
+C
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNFRT:FRTSCT/
+***	COMMON/LSL$CMNFRT:FRTSRI/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+**	IF LSLLIB
+***	COMMON/LSL$CMNLSL:TXTC/
+**	IFF
+***	COMMON/LSL$CMNVIO:TXTC/
+**	ENDC
+***	COMMON/HERE:FRTWORK/		! for complex hull
+C
+C functions called
+C
+	LOGICAL*4	LIB$GET_EF
+	LOGICAL*4	LIB$FREE_EF
+	LOGICAL		HAVE_I_AN_ARG
+	INTEGER		LIB$GET_VM,LIB$FREE_VM
+	INTEGER		FRT_GET_MAX
+C
+C w/s
+	LOGICAL*4	HADERR		! error return
+	INTEGER*4	SRILUN		! IFF unit number
+	INTEGER*2	IECODE,IELEN	! IFF variables
+	INTEGER*2	IFSN,ISN	! feature number and serial
+	INTEGER*2	IFS		! feature status (symbol number)
+	INTEGER*2	INO		! new overlay number
+	INTEGER		I		! DO loop count
+	INTEGER		NST		! number of STs this feature
+C
+C Overlay CBH,CBD on the FRTWORK common block to save space
+C Would have liked to equivalence them to the common variables,
+C but the use of a record name there is illegal.
+	INCLUDE	'LSL$CMNIFF:CB.STR'	! CB structure definitions
+	RECORD		/IFF_CBH/CBH	! CB header
+	RECORD		/IFF_CBD/CBD	! CB data
+	COMMON/FRTWORK/CBH,CBD
+	INTEGER		XYCOL(2)	! for extracting X and Y from CBD
+	DATA		XYCOL/IFF_C_X,IFF_C_Y/
+C
+	SRIINI = .TRUE.		! assume failure
+C
+C are hardware symbols available?
+	IF (HAVE_I_AN_ARG(2)) THEN
+	   SRIHWS = HWSYM
+	ELSE
+	   SRIHWS = .FALSE.
+	ENDIF
+C
+C are hardware circles available?
+	IF (HAVE_I_AN_ARG(3)) THEN
+	   SRIHWC = HWCIR
+	ELSE
+	   SRIHWC = .FALSE.
+	ENDIF
+C
+C are hardware patterns available?
+	IF (HAVE_I_AN_ARG(4)) THEN
+	   SRIHWP = HWPAT
+	ELSE
+	   SRIHWP = .FALSE.
+	ENDIF
+C
+C are hardware line types available?
+	IF (HAVE_I_AN_ARG(5)) THEN
+	   SRIHWL = HWLNS
+	ELSE
+	   SRIHWL = 0
+	ENDIF
+C
+C are hardware curves (I for interpolation) available?
+	IF (HAVE_I_AN_ARG(6)) THEN
+	   SRIHWI = HWCUR
+	ELSE
+	   SRIHWI = .FALSE.
+	ENDIF
+C
+C get an IFF LUN (actually an event flag) to read file on
+	HADERR = LIB$GET_EF(SRILUN)
+	IF (.NOT.HADERR) THEN
+***	IF LSLLIB
+	   CALL LSL_PUTMSG(HADERR)
+***	IFF
+	   CALL GEN_SYSMSG(HADERR)
+***	ENDC
+	   GOTO 1000
+	ENDIF
+C
+C Obtain dynamic memory for SRI storage
+C free old SRI space
+	IF (SRIMAX.GT.0) THEN
+	   I = LIB$FREE_VM(SRIMAX*2*4,SRIBUF_LOC)	! coords
+	   IF (.NOT.I) CALL LIB$SIGNAL(%VAL(I))
+	   SRIBUF_LOC = 0
+	   I = LIB$FREE_VM(SRIMAX*2,SRITAB_LOC)		! numbers
+	   IF (.NOT.I) CALL LIB$SIGNAL(%VAL(I))
+	   SRITAB_LOC = 0
+	ENDIF
+	SRIMAX = 0			! no SRI memory allocated
+C
+C Try for logical name LSL$FRT_SRIMAX to get maximum number of coords
+	SRIMAX = FRT_GET_MAX('LSL$FRT_SRIMAX',SRIMAX_DEF,0,1000000)
+C
+C get memory for SRI tables
+	IF (SRIMAX.GT.0) THEN
+	   I = LIB$GET_VM(SRIMAX*2*4,SRIBUF_LOC)	! coords
+	   IF (I)
+     &	      I = LIB$GET_VM(SRIMAX*2,SRITAB_LOC)	! numbers
+	   IF (.NOT.I) THEN
+	      CALL LIB$FREE_VM(SRIMAX*2*4,SRIBUF_LOC)
+	      SRIBUF_LOC = 0
+	      CALL LIB$FREE_VM(SRIMAX*2,SRITAB_LOC)
+	      SRITAB_LOC = 0
+	      CALL FRTWRT('Cannot allocate memory for SRI')
+	      CALL LSL_PUTMSG(I)
+	      SRIMAX = 0
+	   ENDIF
+	ENDIF
+C
+C free old LSL$FRT_HULLMAX space for the symbol array %VAL(POINTS_LOC)(2,*)
+	IF ( MAXPOINTS.GT.0 ) THEN
+	   I = LIB$FREE_VM(MAXPOINTS*2*4,POINTS_LOC)
+	   IF (.NOT.I) CALL LIB$SIGNAL(%VAL(I))
+	   POINTS_LOC = 0
+	ENDIF
+	MAXPOINTS = 0
+C
+C init things
+	SRICNT = 0		! no symbols defined yet
+	SRITOP = 0		! no symbol space used yet
+	SRISEL = -1		! no symbol selected
+	SRIIND = 0		! no current symbol
+	IFSN = -1		! ditto
+C
+C open up the file
+C
+	CALL IFFOPN(SRILUN,SRINAM,0)	! open IFF file
+	IF (IERCD.NE.0) THEN
+	   CALL FRTWRT('Error opening SRI file %S',SRINAM)
+	   SRIINI = .TRUE.			! and we have failed
+	   GOTO 999
+	ENDIF
+C
+C open for business now
+C
+	CALL IFFIRV(1)				! use CBs
+	CALL IFFRWD
+C
+C now we read it in, feature by feature
+C
+50	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 910
+	IF (IECODE.EQ.'NO') GOTO 110
+	IF (IECODE.EQ.'NF') GOTO 200
+	IF (IECODE.EQ.'FS') GOTO 210
+	IF (IECODE.EQ.'CB') GOTO 220
+	IF (IECODE.EQ.'TX') GOTO 80
+	IF (IECODE.EQ.'EJ') GOTO 800
+	GOTO 50
+C
+C unexpected things
+C
+80	CALL FRTWRT('Unexpected %A2 entry',IECODE)
+	GOTO 900
+C
+C NO - new overlay
+C
+110	CALL EIHRI(INO,1,1)
+	IF (INO.EQ.0) CALL IFFNXC('EO',IELEN)	! skip layer 0
+	GOTO 50
+C
+C NF - new feature
+C
+200	CALL EIHRI(IFSN,1,1)
+	CALL EIHRI(ISN,1,2)
+	IF (IFSN.LE.0) CALL IFFNXC('EF',IELEN)	! skip dummy NF 0s
+	NST = 0			! no STs read yet
+	GOTO 50
+C
+C FS - feature status
+C
+210	CALL EIHRI(IFS,1,1)
+	GOTO 50
+C
+C ST - string of coords
+C
+220	CALL EIHRCB_HEAD(CBH)
+	CALL EIHRCB_DATA(CBD)
+C is there room ?
+	IF (SRITOP+CBH.NROW.GT.SRIMAX) THEN
+	   CALL FRTWRT('SRI buffer overflow (%N points)',SRITOP+CBH.NROW)
+	   GOTO 900
+	ENDIF
+C read coords
+	CALL IFS_CB_READ(CBH,CBD,
+     &			%VAL(SRIBUF_LOC+SRITOP*8),2,XYCOL,1,CBH.NROW)
+C set SCT flags
+	DO 225 I=1,CBH.NROW
+	   CALL FRT_PUTWORD(IFS,%VAL(SRITAB_LOC+(SRITOP+I-1)*2))
+225	CONTINUE
+C
+C if first ST of symbol component, then store -symbol number, or if
+C this ST starts pen up, then flag by -32768
+	NST = NST + 1
+	IF (NST.EQ.1) THEN
+	   CALL FRT_PUTWORD(-IFSN,%VAL(SRITAB_LOC+SRITOP*2))
+	ELSEIF ((CBH.FLAGS.AND.1).EQ.0) THEN
+	   CALL FRT_PUTWORD(-32768,%VAL(SRITAB_LOC+SRITOP*2))
+	ENDIF
+	SRITOP = SRITOP + CBH.NROW
+	GOTO 50
+C
+C and finally, close the file
+C
+800	CALL IFFCLO(SRILUN)
+	IF (IERCD.NE.0) THEN
+	   CALL FRTWRT('Error closing SRI file %S',SRINAM)
+	   SRIINI = .TRUE.			! and we have failed
+	   GOTO 999
+	ENDIF
+	GOTO 998
+C
+C error recovery here
+900	CALL FRTWRT(
+     &     'In Feature %^W%N (ISN %N) of SRI file %S',IFSN,ISN,SRINAM)
+	GOTO 50				! get next entry
+C
+C fatal errors
+C
+910	CALL FRTWRT('Unexpected end of SRI file')
+	GOTO 800
+C
+C that's all
+C
+998	SRIINI = .FALSE.		! succeeded
+999	HADERR = LIB$FREE_EF(SRILUN)
+***	IF LSLLIB
+	IF (.NOT.HADERR) CALL LSL_PUTMSG(HADERR)
+***	IFF
+	IF (.NOT.HADERR) CALL GEN_SYSMSG(HADERR)
+***	ENDC
+1000	RETURN
+	END
+C

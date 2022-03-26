@@ -1,0 +1,431 @@
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL*4 FUNCTION FORM_POLYGONS(CLOCK,ONE_USE,HAD_PERIM,NPOLY,NTREE)
+C
+*** 	MODULE	FORM_POLYGONS
+***	IDENT	30AP92
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+C	Arguments:
+		LOGICAL	CLOCK		! /OPTIONS=CLOCKWISE specified?
+		LOGICAL	ONE_USE		! /ONEARM=USE specified?
+		LOGICAL	HAD_PERIM	! calculate perimeter?
+		INTEGER	NPOLY		! return # of polygons
+		INTEGER NTREE		! return # of trees
+C
+	LOGICAL*4	ACTUAL_FORM_POLYGONS
+C
+C	........................................................................
+C
+	FORM_POLYGONS = ACTUAL_FORM_POLYGONS(
+     &			CLOCK,ONE_USE,HAD_PERIM,NPOLY,NTREE,
+     &			POLMAX,TABMAX,
+     &			%VAL(PTR$_SEGTAB),
+     &			%VAL(PTR$_STTAB),
+     &			%VAL(PTR$_JPTAB),
+     &			%VAL(PTR$_JPOFF),
+     &			%VAL(PTR$_POLY_STACK)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL*4 FUNCTION ACTUAL_FORM_POLYGONS(
+     &		CLOCK,ONE_USE,HAD_PERIM,NPOLY,NTREE,
+     &		POLMAX,TABMAX,SEGTAB,STTAB,JPTAB,JPOFF,POLY_STACK)
+C
+*** 	MODULE	ACTUAL_FORM_POLYGONS
+***	IDENT	30OC91
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD 	FIRST_VERTEX now LOGICAL*1 			TJH 28-Mar-1989
+CMOD	Unreferenced declaration of VIOCLR removed	TJH 23-Mar-1989
+CMOD	Use STTAB to knock out seed-points from the input
+C	IFF segment file				AC   19-Aug-1988
+CMOD	Simplified use of /ONEARM qualifier, introduction of
+C	trees when ONE_USE is .TRUE. and warning of possible
+C	double-digitising				AC   21-Jun-1988
+C	Author						TJH  20-Feb-1987
+C
+C
+C Function to form the first order polygons from the tables formed
+C in TAB_BUILD(). The method used is to go through the segment features
+C sequentially and check if their LRUSED flags are set. If not then the
+C clockwise (/CLOCKWISE) or anticlockwise (default) polygon is found.
+C
+C If segments connected to one-arm JUNCtions are not to be used then the 
+C polygon building process must back-track. To enable this when a one arm 
+C JUNCtion is found, all polygons are initially stored on a temporary stack 
+C called POLY_STACK. This temporary stack is reused for each polygon. 
+C
+C As a polygon is being built a list of the JUNCtions 
+C through which we have passed and which arm we entered the
+C JUNCtion on and which arms have been tried is maintained on
+C a complementary set of stacks:
+C
+C JUNC_STACK - addresses of JUNCtions used so far in the polygon
+C NARMS_STACK - no. of arms in each       "    "  "  "   "   "
+C INARM_STACK - the arm we entered each JUNCtion on 
+C TRIEDARM_STACK - the arms tried so far in each JUNCtion (bitwise)
+C
+C Only when the polygon finally closes (possibly 
+C after several iterations of back-tracking) is the list of
+C segments forming the polygon flushed to more permanent workspace in 
+C /POLYGONS/POLY_PARTS. 
+C
+C An index to the component segment features of each polygon are stored
+C in /POLYGONS/ POLY_PARTS. The start of each polygon in POLY_PARTS
+C is stored in POLY_START. POLY_PARTS points to /TABLES/SEGTAB. These
+C data are used later to determine nested polygons, seed point
+C association etc. 
+C
+C If an error is found while following the edge of a polygon then
+C no attempt is made to continue with that polygon. The segments
+C found up to that point are unflagged as unsed and we try again,
+C starting from  different segment.
+C
+C Function returns SS$_NORMAL if all is well or one of a variety of
+C IPOLYGON error codes on failure.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNPOLYGONS:POLYGONSMSG.PAR'
+	INCLUDE		'($STSDEF)'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+	INTEGER		SS$_ABORT
+	EXTERNAL	SS$_ABORT	! failure
+C
+C Arguments:
+	LOGICAL	CLOCK		! /OPTIONS=CLOCKWISE specified?
+	LOGICAL	ONE_USE		! /ONEARM=USE specified?
+	LOGICAL	HAD_PERIM	! calculate perimeter?
+	INTEGER	NPOLY		! return # of polygons
+	INTEGER NTREE		! return # of trees
+C
+C	Arguments
+		INTEGER*4	POLMAX
+		INTEGER*4	TABMAX
+C
+		INTEGER*2	JPOFF(2,TABMAX)
+		INTEGER*4	JPTAB(2,TABMAX)
+		INTEGER		POLY_STACK(TABMAX)
+		INTEGER*4	SEGTAB(2,TABMAX)
+		INTEGER*4	STTAB(2,TABMAX)
+C
+C
+C Common:
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TREES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:STACKS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+C
+C W/s
+	INTEGER*2 FRSTOF	! holds offset of 1st JUNCtion (JB)
+	INTEGER*2 I		! loop variable
+	INTEGER*2 IECODE,IELEN	! IFF entry code and length
+	INTEGER*2 IENDS		! line state (coded bitwise)
+	INTEGER*2 JUNC		! points to required end (1/2)
+	INTEGER*2 LRSIDE	! left(1) or right(2) hand segment side
+	INTEGER*2 NARMS		! number of arms from JUNCtion
+	INTEGER*2 NXTOFF	! holds offset of next JUNCtion (JB)
+	INTEGER*2 OFFSET	! JUNCtion offset.
+	INTEGER*2 OPSIDE	! opposite side of current segment
+	INTEGER*2 SIDE		! current side of current segment (1/2)
+	INTEGER*2 STEND		! end of ST connected to JUNCtion
+	LOGICAL*1 FIRST_VERTEX	! ST vertex number at JUNCtion
+C
+	INTEGER	  CLOSE_PTR	! 1st closure STACK_PTR value
+C If CLOSE_PTR has non 0 then poly. has already closed once at that
+C STACK_PTR value but the first and closure segment STPOSN's
+C didn't tally. We could however, close poly. if further growth is not
+C possible due to 1 arm JUNCtions. 
+	INTEGER   FSN		! feature serial number
+	INTEGER   FRSTJB	! position of 1st JB of polygon
+	INTEGER   FRST_STPOSN	! position of 1st ST in polygon
+	INTEGER   OP_STPOSN	! position of ST at opposite end of ftr
+	INTEGER   MAXSEG	! max number of segments in a polygon
+	INTEGER   MINSEG	! min number of segments in a polygon
+	INTEGER   NXTJB		! position of next JB of polygon
+	INTEGER	  PTR,NXTPTR,OLD_NXTPTR	! general pointers
+	INTEGER   STPOSN,POSN	! position of connecting ST in file
+	INTEGER	  LAST_SEG_INDEX! index of last segment in POLY_PARTS
+C
+	REAL	  JBX,JBY	! JUNCtion coords
+	REAL	  COORD(2)	! position for error message
+C
+	LOGICAL	  ABORT		! polygon formation aborted?
+	LOGICAL	  CLOSED	! polygon closed?
+	LOGICAL	  UNWOUND	! polygon formation stacks unwound?
+	LOGICAL	  DBLE_DIGIT	! evidence of double digitising?
+C
+C Functions:
+	LOGICAL		ABORT_POLY	! erase all evidence of poly
+	LOGICAL		EXT1V		! extract 1-bit field
+	LOGICAL		FIND_CURRENT_ARM! finds current arm in JUNCt.
+	LOGICAL		INIT_POLY	! sets ground for new polygon
+	LOGICAL		POLY_COMPLETE	! deals with completed polygon
+	LOGICAL		POLY_EXTEND	! continues polygon growth
+	LOGICAL		READ_NEXT_JUNC	! read next junction
+	LOGICAL		SET_LRUSED	! set side used flag
+C
+C ......................................................................
+C
+C
+C Re-select the segment input file if we /SEED_FILE was specified
+	CALL IFFSEL(INLUN)
+C
+C Initialise the polygon counter, and segment counters
+	NUM_POLY=0
+	NUM_TREE=0
+	LAST_SEG_INDEX=0
+	MINSEG=1
+	MAXSEG=1
+C
+	DBLE_DIGIT=.FALSE.
+C
+C ......................................................................
+C       L O O P    F O R    E A C H    S E G M E N T
+C
+C Knock out seed point features and symbols
+	DO 40 PTR = 1,NUM_SEG
+	   FSN=SEGTAB(1,PTR)
+	   IF ((STTAB(1,PTR).EQ.0).OR.(STTAB(2,PTR).EQ.0)) GOTO 40
+C
+C loop for both sides of segment
+	   DO 30 SIDE = 1,2	
+	      CLOSE_PTR=0
+	      CLOSED=.FALSE.
+	      OPSIDE = 3 - SIDE
+C 
+C See if segment has been used for a polygon on this side
+	      IF (EXT1V(FSN,LRUSED(1,SIDE))) GOTO 30
+C
+C "Segment used" flag not set so loop though the JBs until we return to
+C the 1st.
+	      FRSTJB = JPTAB(SIDE,PTR)
+	      FRSTOF = JPOFF(SIDE,PTR)
+	      STPOSN = STTAB(OPSIDE,PTR)! needed for choosing next arm.
+	      FRST_STPOSN=STPOSN 
+	      STEND = SIDE		! set to 1 = forward
+C	      				!        2 = backwards
+C
+C Jump to first junction
+	      CALL IFJPKJ(JBX,JBY,NARMS,FRSTJB,FRSTOF)
+	      JUNC = OPSIDE
+	      NXTPTR = PTR
+C
+C We are starting a new polygon. Increment/reset counters and initialise
+C the /STACKS/ arrays, set during formation of last polygon
+	      ACTUAL_FORM_POLYGONS=INIT_POLY()
+	      IF (.NOT.ACTUAL_FORM_POLYGONS) GOTO 50
+C
+C Note that we have used this segment on this side.
+	      ACTUAL_FORM_POLYGONS=SET_LRUSED(SEGTAB(1,NXTPTR),SIDE)
+	      IF (.NOT.ACTUAL_FORM_POLYGONS) THEN
+	         ACTUAL_FORM_POLYGONS=ABORT_POLY()	! abandon polygon
+	         IF (.NOT.ACTUAL_FORM_POLYGONS) GOTO 50
+	         GOTO 30	
+	      ENDIF
+C
+C ......................................................................
+C       I N N E R    P O L Y G O N     F O R M I N G   L O O P.
+C
+10	      STACK_PTR=STACK_PTR+1
+	      IF (STACK_PTR.GT.TABMAX) THEN
+	         ACTUAL_FORM_POLYGONS=POLY__STACKOVER
+	         CALL LSL_PUTMSG(ACTUAL_FORM_POLYGONS)
+	         GOTO 50
+	      ELSE
+	         POLY_STACK(STACK_PTR)=NXTPTR
+	      ENDIF
+C
+C Before we can find the 'current' arm in a junction we must determine
+C whether there is more than one ST in the current inter-junction link.
+C If so we must use the address of the ST (if any) at the far end of
+C the link. 
+	      OP_STPOSN = STTAB(3-JUNC,NXTPTR)
+C
+C Now read the next junction into hand.
+	      ACTUAL_FORM_POLYGONS=READ_NEXT_JUNC(JUNC,NXTPTR,NXTJB,NXTOFF,
+     &					NARMS)
+	      IF (.NOT.ACTUAL_FORM_POLYGONS) THEN
+	         IF (IBITS(ACTUAL_FORM_POLYGONS,0,3).EQ.STS$K_WARNING) THEN
+	            ACTUAL_FORM_POLYGONS=ABORT_POLY()	! abandon polygon
+	            IF (.NOT.ACTUAL_FORM_POLYGONS) GOTO 50
+	            GOTO 30
+	         ELSE
+	            GOTO 50			! fatal error - return
+	         ENDIF
+	      ENDIF
+C
+C Having got the junction in hand and the addresses of 1) the ST and 2)
+C a possible subsequent ST in the segment, actually find the 'current'
+C arm.
+	      ACTUAL_FORM_POLYGONS=FIND_CURRENT_ARM(STPOSN,OP_STPOSN,JUNC,
+     &			NARMS,FIRST_VERTEX,NXTPTR)
+	      IF (.NOT.ACTUAL_FORM_POLYGONS) THEN
+	         IF (IBITS(ACTUAL_FORM_POLYGONS,0,3).EQ.STS$K_WARNING) THEN
+	            ACTUAL_FORM_POLYGONS=ABORT_POLY()	! abandon polygon
+	            IF (.NOT.ACTUAL_FORM_POLYGONS) GOTO 50
+	            GOTO 30	
+	         ELSE
+	            GOTO 50			! fatal error - return
+	         ENDIF
+	      ENDIF
+C
+C Do we have to flag this segment for reversal? Negate POLY_STACK
+C element if so.
+	      IF (FIRST_VERTEX) THEN	! look at vertex number
+	         POLY_STACK(STACK_PTR)=-POLY_STACK(STACK_PTR)	        
+	      ENDIF
+C
+C Having read the coordinates we must jump back to the JB again 
+	      CALL IFJPKJ(JBX,JBY,NARMS,NXTJB,NXTOFF)
+C
+C ......................................................................
+C
+C Is the polygon completed?
+	      IF ((NXTJB.EQ.FRSTJB).AND.(NXTOFF.EQ.FRSTOF)) THEN
+C
+C Even if we have closure and the STPOSN's don't tally this may be the
+C real closure because there are onearm junction(s) which are causing
+C the STPOSNs not to tally. We must therefore record the present value
+C of the stack pointer STACK_PTR so that we may return to this state 
+C of provisional closure if the CLOSED logical comes back .T.
+	         CLOSE_PTR=STACK_PTR
+C
+C Make really sure that it is by checking that not only are we at the
+C start junction address but that also the next arm out of the junction
+C is the same one that we started off along right at the start of the
+C polygon
+		 OLD_NXTPTR=NXTPTR
+	         ACTUAL_FORM_POLYGONS=POLY_EXTEND(NARMS,STPOSN,STEND,JBX,JBY,
+     &		     NXTPTR,JUNC,LRSIDE,ABORT,.TRUE.,CLOSE_PTR,CLOSED,
+     &		     CLOCK,ONE_USE)
+	         IF (.NOT.ACTUAL_FORM_POLYGONS) GOTO 50
+C
+C Did the polygon abort?
+	         IF (ABORT) GOTO 30
+C
+C Do we now have the very first ST used in the polygon back in hand?
+	         IF (STPOSN.EQ.FRST_STPOSN) THEN
+C
+C Yes! As we are on the next segment AFTER polygon closure restore
+C old NXTPTR that obtained when the polygon did actually close
+		    NXTPTR=OLD_NXTPTR
+C
+C Deal with special cases and flush polygon from the formation
+C stack into more permanent workspace. 
+	            ACTUAL_FORM_POLYGONS=POLY_COMPLETE(MINSEG,MAXSEG,
+     &		       LAST_SEG_INDEX,NXTPTR,CLOCK,
+     &		       HAD_PERIM,ONE_USE)
+	            IF (ACTUAL_FORM_POLYGONS.EQ.POLY__DBLDIG) THEN
+	  	       DBLE_DIGIT=.TRUE.
+		       ACTUAL_FORM_POLYGONS=%LOC(SS$_NORMAL)
+		    ENDIF
+	            IF (.NOT.ACTUAL_FORM_POLYGONS) GOTO 50
+	         ELSE
+C
+C No - flag segment as used on this side and then keep extending the
+C polygon, link by link until we do get back to the start ST position/
+C start junction
+	            ACTUAL_FORM_POLYGONS=SET_LRUSED(SEGTAB(1,NXTPTR),LRSIDE)
+	            IF (.NOT.ACTUAL_FORM_POLYGONS) THEN
+	               ACTUAL_FORM_POLYGONS=ABORT_POLY() ! abandon polygon
+	               IF (.NOT.ACTUAL_FORM_POLYGONS) GOTO 50
+	               GOTO 30
+	            ENDIF		 
+	            GOTO 10	! process this new segment
+	         ENDIF
+C
+	      ELSE
+C
+C ......................................................................
+C
+C No. Choose the next arm to follow from the junction and get the
+C table pointer for the next segment.
+	         ACTUAL_FORM_POLYGONS=POLY_EXTEND(NARMS,STPOSN,STEND,JBX,JBY,
+     &		    NXTPTR,JUNC,LRSIDE,ABORT,.FALSE.,CLOSE_PTR,CLOSED,
+     &		     CLOCK,ONE_USE)
+	         IF (.NOT.ACTUAL_FORM_POLYGONS) GOTO 50
+C
+C Did a provisional polygon closure take effect deep inside
+C NXTARM due to the influence of one arm junctions?
+		 IF (CLOSED) THEN	    
+C
+C Yes! Deal with special cases and flush polygon from the formation
+C stack into more permanent workspace.
+	            ACTUAL_FORM_POLYGONS=POLY_COMPLETE(MINSEG,MAXSEG,
+     &		       LAST_SEG_INDEX,NXTPTR,CLOCK,
+     &		       HAD_PERIM,ONE_USE)
+	            IF (ACTUAL_FORM_POLYGONS.EQ.POLY__DBLDIG) THEN
+	  	       DBLE_DIGIT=.TRUE.
+		       ACTUAL_FORM_POLYGONS=%LOC(SS$_NORMAL)
+		    ENDIF
+		    IF (.NOT.ACTUAL_FORM_POLYGONS) GOTO 50
+	            GOTO 30
+	         ENDIF
+	         IF (ABORT) THEN
+	            GOTO 30
+	         ELSE
+	            GOTO 10
+	         ENDIF
+	      ENDIF		! polygon complete?
+30	   CONTINUE
+40	CONTINUE
+
+C
+C ......................................................................
+C
+C If all is well so be it. If we have had to warn the user (but
+C continued processing) change to severity SUCCESS now to enable further
+C processing.
+50	IF ((ACTUAL_FORM_POLYGONS.OR.
+     &	   (IBITS(ACTUAL_FORM_POLYGONS,0,3).EQ.STS$K_WARNING)).AND.
+     &		.NOT.DBLE_DIGIT) THEN
+C
+C Even if we have had warnings we will attempt to continue
+	   ACTUAL_FORM_POLYGONS=%LOC(SS$_NORMAL)
+	   NPOLY=NUM_POLY
+	   NTREE=NUM_TREE
+C
+C Tell user what has been done?
+	   IF (HAD_LOG) THEN
+	      CALL FORMATION_SUMMARY(MINSEG,MAXSEG,CLOCK,ONE_USE)
+	   ENDIF
+	ELSE
+	   ACTUAL_FORM_POLYGONS=POLY__FORMPOLY
+	   CALL LSL_PUTMSG(ACTUAL_FORM_POLYGONS)
+	   DELETE=.TRUE.
+	ENDIF
+	RETURN
+	END

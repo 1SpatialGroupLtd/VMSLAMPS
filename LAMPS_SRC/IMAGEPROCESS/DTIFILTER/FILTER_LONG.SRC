@@ -1,0 +1,188 @@
+	LOGICAL FUNCTION FILTER_LONG(FILTER_TYPE)
+C
+***	MODULE	FILTER_LONG
+***	IDENT	17DE86
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    26-Nov-1986
+C
+C filtering routine with LONG data
+C Works by passing kernel over data
+C actual filtering troutine called from this routine
+C loosely based on FILTER routine from VECTORISE by ACM
+C
+	IMPLICIT NONE
+C
+C Parameters
+C
+***	COMMON/LSL$CMNDTIFILTER:DTIFILTERMSG.PAR/
+C
+C Common Blocks
+C
+***	COMMON/LSL$CMNDTIFILTER:DFILCMN/
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C argument
+	INTEGER*4	FILTER_TYPE		! 1 convolution
+C						! 2 median
+C						! 3 mode
+C Functions
+	INTEGER*4	DTI_READ_LONG_DATA
+	INTEGER*4	DTI_COPY_LONG_DATA
+	INTEGER*4	CONVOLVE_LONG
+	INTEGER*4	MEDIAN_LONG
+	INTEGER*4	MODE_LONG
+	INTEGER*4	SHARPEN_LONG
+	LOGICAL		HADCTRLC
+C
+C Local Varaiables
+C
+	INTEGER*4	OUTVAL		! output value for pixel
+	INTEGER*4	XKERHWID	!half the kernel size
+	INTEGER*4	YKERHWID	
+	INTEGER*4	XMIN,YMIN,XMAX,YMAX !actual working window
+	INTEGER*4	I,J,X,Y
+	REAL		PCENT,LPCENT,PCF	!% process completion	
+	INTEGER*4	RET,IERR
+	INTEGER*4	DTIKER(1:DF_MAXKERNEL,1:DF_MAXKERNEL)
+	INTEGER*4	COLUMN(2000)
+C
+C
+	IF (.NOT. DF_HADINP) THEN
+	    CALL LSL_PUTMSG(DTIFIL__NOINPUT)
+	    GOTO 999
+	ENDIF
+C
+	IF (.NOT.DF_HADOUP) THEN
+	   IF (.NOT. DF_INSITU) THEN
+	      CALL LSL_PUTMSG(DTIFIL__NOOUTPUT)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C	   
+C if DTI window corresponds to edges then window to be filtered 
+C then edge values are omitted from the output matrix. 
+C The number of rows and columns omitted depends on the x and y kernel
+C extents
+C
+	XMIN = MAX(DF_XKERHWID+1,DF_XMINWIN)
+	YMIN = MAX(DF_YKERHWID+1,DF_YMINWIN)
+	XMAX = MIN(X_EXTENT(DF_INLUN)-DF_XKERHWID,DF_XMAXWIN)
+	YMAX = MIN(Y_EXTENT(DF_INLUN)-DF_YKERHWID,DF_YMAXWIN)
+C
+C initialise data column
+C
+	DO 20 I = 1,YMAX
+	   COLUMN(I) = 0
+20	CONTINUE	
+C
+C progress stuff
+C
+	IF (DF_LOG .AND. (.NOT. DF_CMDFIL)) THEN
+	   PCF = 100.0/(DF_XMAXWIN-DF_XMINWIN+1)
+	   PCENT = 0
+	   LPCENT = 0
+	   WRITE(*,'(1X,F6.2,''%'')')PCENT
+	ENDIF
+C
+Cmain loop
+C
+	DO 100 X = XMIN , XMAX
+C
+C put an area of DTI into a local array which corresponds to the kernel 
+C in dimensions. The values can be cycled as we move up the DTI column.
+C	
+	   DO 30 I = 1, DF_YKERSIZE-1
+	      DO 35 J = 1,DF_XKERSIZE
+		 RET = DTI_READ_LONG_DATA
+     &	       (DF_INLUN,DTIKER(J,I+1),X-DF_XKERHWID+J-1,
+     &	       YMIN-DF_YKERHWID+I-1)
+		 IF (.NOT. RET) THEN
+		   CALL LSL_PUTMSG(RET)
+		   GOTO 999
+		 ENDIF
+35	      CONTINUE
+30	   CONTINUE
+C
+	   DO 80 Y = YMIN , YMAX
+C
+C cycle values
+C
+	      DO 42 I= 1,DF_YKERSIZE-1
+		 DO 41 J =1, DF_XKERSIZE
+	           DTIKER(J,I) = DTIKER(J,I+1)
+41	         CONTINUE
+42	      CONTINUE
+C
+C read in next row of kernel
+C
+	      DO 55 I = 1,DF_XKERSIZE
+		 RET =DTI_READ_LONG_DATA
+     &	   	    (DF_INLUN,DTIKER(I,DF_YKERSIZE),X-DF_XKERHWID+I-1,
+     &			   Y+DF_YKERHWID)
+		 IF (.NOT. RET) THEN
+		   CALL LSL_PUTMSG(RET)
+		   GOTO 999
+		 ENDIF
+55	      CONTINUE
+C
+C branch according to filter type 
+C
+	      GOTO(60,62,64,66)FILTER_TYPE
+C
+C convolution
+60	      COLUMN(Y-YMIN+1) = CONVOLVE_LONG(DTIKER)
+	      GOTO 80
+C
+C median
+62	      COLUMN(Y-YMIN+1) = MEDIAN_LONG(DTIKER)
+	      GOTO 80
+C mode
+64	      COLUMN(Y-YMIN+1) = MODE_LONG(DTIKER)
+  	      GOTO 80
+C sharpen
+66	      COLUMN(Y-YMIN+1) = SHARPEN_LONG(DTIKER)
+  	      GOTO 80
+C
+80	  CONTINUE
+C
+C show progress
+C
+	  IF (DF_LOG) THEN
+	     PCENT = (X-DF_XMINWIN+1)*PCF
+	     IF (PCENT-LPCENT.GT.1) THEN
+	       WRITE(*,'(1H+,F6.2)')PCENT	! don't WRITE too often
+	       LPCENT = PCENT
+	     END IF
+	  ENDIF
+C
+C
+C write column of values to output
+C
+	  RET = DTI_COPY_LONG_DATA(DF_OUTLUN,COLUMN,.TRUE.,X-DF_XMINWIN
+     &	 +1,YMIN-DF_YMINWIN+1
+     &	        ,1,(YMAX-YMIN+1),IERR)
+	  IF (.NOT. RET) THEN
+	   	CALL LSL_PUTMSG(RET)
+		CALL LSL_ADDMSG(IERR)
+		GOTO 999
+	  ENDIF
+C
+C check for CTRLC
+C
+	IF (HADCTRLC()) GOTO 999	
+C
+100	CONTINUE
+C
+	IF (DF_LOG .AND. (.NOT. DF_CMDFIL)) THEN
+	   PCENT = 100
+	   WRITE(*,'(1H+,F6.2)')PCENT
+	ENDIF
+C
+	FILTER_LONG = .FALSE.
+C
+999	RETURN
+	END

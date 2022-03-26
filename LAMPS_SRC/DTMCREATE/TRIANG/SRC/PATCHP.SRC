@@ -1,0 +1,431 @@
+	SUBROUTINE PATCHP(IDAT,JDAT,KOLR1,KOLR2,KOLR3)
+C
+***	MODULE	PATCHP
+***	IDENT	10MR93
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CCC
+CMOD    Check that breakline/cliffline nodes J and K are in the
+C       same feature before aborting the node insertion. This is
+C       done by ensuring the signs of MAC(4,J) and MAC(4,K) are the same.
+C       Mod 1201					ST  10-Mar-1993
+CMOD	Obtain D2 by a direct call to EUCLID instead,
+C	which avoids it being square rooted then squared
+C	again and losing accuracy.			CCB 11-Nov-1991
+CMOD	More words from our friendly saint. Insertion
+C	problems caused by new node creation within
+C	LIMDIS of an existing node now solved.		MJM  29-Nov-1987
+CMOD	Converted for LSLLIB message formats		TJH  31-Jul-1987
+CMOD	The word according to St. Michael!		MJM  18-Feb-1987
+CMOD	Calls to OUTBUF added when changing graphics
+C	colour						TJH  21-Jul-1986
+CMOD	Graphics added to aid debugging. PATCHP now
+C	deals with the case of trying to patch a gap in a 
+C	string which has a neighbour vertex EXACTLY on
+C	the line IPNODE-IPNOD1 probably caused by RIV3D
+C	Michael gave up and returned at this juncture.
+C	We cannot easily do vertex replacement, so
+C	we pretend that the vertex on which the intersection
+C	occurs is really the next point in our string and 
+C	continue our new point insertions from there.	TJH  16-Jul-1986
+CMOD	GOTO after the check for neighbours of J and K
+C	being breaklines changed from 101 (ie. RETURN)
+C	to 118 (end of loop) which means 2 parallel 
+C	breaklines are now sucessfully patched.		ATT  20-Jun-1986
+C
+CMOD	LIMDIS decreased to 4 and call to ALARMS
+C	at label 103 and after 118 now only warning 
+C	in a hope to save the triangulation.		TJH  18-Oct-1985
+C	Created 				    MJM/TJH  06-Oct-1985
+C
+C Insert pts into the triangulation between nodes IPNOD1 & IPNODE.
+C IDAT holds the position of the terminating point, JDAT holds the
+C position of the starting point. Unlike INSRTP, PATCHP does not
+C touch the pts IPNOD1 and IPNODE if they exist already (which they
+C do). Additionally the point insert process is terminated if any
+C of the cross-links between IPNOD1 and IPNODE are breakline 
+C connections. Particular care is taken in this latter case to
+C avoid confusion with imaginary point links.
+C
+C Parameters:
+	INCLUDE 'LSL$CMNTRIANG:DIMS.PAR'
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNTRIANG:TRIANGMSG.PAR'
+C
+C Common:
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$CMNTRIANG:CONTRL.CMN'
+	INCLUDE 'LSL$CMNTRIANG:DATQ.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFDEV.CMN'
+	INCLUDE 'LSL$CMNTRIANG:RCONVI.CMN'
+	INCLUDE 'LSL$CMNTRIANG:TPOLGY.CMN'
+C
+	BYTE	TPOL		! feature code byte
+	DIMENSION IDAT(4),JDAT(4)
+	DIMENSION LIST(NAYMAX),NTEM(NAYMAX),IXY(2),ITEMP(2,2),
+     1  EQA(3),EQB(3)
+C
+C Function:
+	LOGICAL NEARLY		! checks if points are nearly coincident
+C
+C ......................................................................
+C
+C
+C KOLR1 is the colour to draw linework, KOLR2 is the one to use
+C for inserted point symbols (crosses), and KOLR3 is used to draw
+C all replaced nodes. Set KOLR1 to begin with.
+	IF (GRAPHICS) THEN
+	   CALL COLOUR(KOLR1,.FALSE.)
+	ENDIF
+C Set previous node (NODP) to entry previous node value (IPNODE).
+C set first node on inserting line (LSTART) to entry previous node
+C value (IPNODE).
+C Ensure that the string marker is set to the same value as that
+C used by the string including IPNODE to IPNOD1.
+	LASTSN=ISIGN(1,MAC(4,IPNODE))
+	TPOL=TPOLGY(IPNODE)
+	NODP=IPNODE
+	LSTART=IPNODE
+C Check IPNOD1 or IPNODE lying inside the perimeter of the map area
+C covered by the triangulation presently held in memory. This
+C is always a rectangular area, and hence can be checked very
+C quickly.
+	IF (IDAT(1).LT.MX1.OR.IDAT(1).GT.MX2.OR.
+     1     IDAT(2).LT.MY1.OR.IDAT(2).GT.MY2) GOTO 70
+	IF (JDAT(1).LT.MX1.OR.JDAT(1).GT.MX2.OR.
+     1     JDAT(2).LT.MY1.OR.JDAT(2).GT.MY2) GOTO 70
+C Points lie inside the map area, but do they lie on top of each
+C other?
+10	IF (.NOT.
+     &	   NEARLY(IDAT(1),IDAT(2),JDAT(1),JDAT(2),LIMDIS)) GOTO 20
+C Yes they do, ignore these points, and return
+	GOTO 70
+C
+C************ MAP PATH FROM PREVIOUS POINT TO PRESENT POINT ************
+C
+C We have to join the previous point in the string to this point,
+C chopping all links crossed on the way between them thus creating
+C a possible myriad of new points on the way to the present point.
+C
+C Check for the line joining previous and present points with all
+C sides of all triangles along the path in between the two points.
+C start with the triangles around the previous point, and work
+C towards the location of the present point. Every new pnt inserted
+C on the way to the present pnt becomes (in its turn) the previous
+C point.
+C
+C Get most recent previously inserted node number (NODP)
+20	NPREV=NODP
+C Get equation of the line between previous and present point
+	CALL LINEQN(JDAT(1),JDAT(2),IDAT(1),IDAT(2),D,EQA)
+CCC
+CCC Obtain D2 by a direct call to EUCLID instead, which avoids it being
+CCC square rooted then sqared again and losing accuracy.
+CCC	D2=D*D
+	CALL EUCLID(JDAT(1),JDAT(2),IDAT(1),IDAT(2),D2,0)
+CCC
+C Get neighbours of the last inserted point (NODP)
+	CALL GETNAY(NODP,NTEM,NAYMAX,NUM)
+C Go through all the sides unconnected with NPREV to determine
+C possible intersection, and hence path of the inserted line
+	DO 60 I=2,NUM
+	   J=NTEM(I-1)
+	   K=NTEM(I)
+C Calculate line equation for the edge from nodes J to K
+	   MACX=MAC(1,J)
+	   MACY=MAC(2,J)
+	   MACX2=MAC(1,K)
+	   MACY2=MAC(2,K)
+	   CALL LINEQN(MACX,MACY,MACX2,MACY2,D,EQB)
+C Calculate intersection between edge and new insertion line
+	   CALL INTSEC(EQA,EQB,IXY,IPAR)
+C Check for being parallel. this is not the case we want if
+C they are parallel
+	   IF (IPAR.EQ.1) GOTO 60
+C Test for being the correct intersection: ie lying closer to
+C IDAT than JDAT is to IDAT.
+	   CALL EUCLID(IDAT(1),IDAT(2),IXY(1),IXY(2),A,0)
+C Test relative to tolerance to overcome arithmetical rounding by EUCLID
+	   IF ((A.GT.D2).AND.(ABS(A-D2).GT.1.0)) GOTO 60
+C Store outside triangle edge pnts temporarily (for use in INTONL)
+	   ITEMP(1,1)=MAC(1,J)
+	   ITEMP(1,2)=MAC(2,J)
+	   ITEMP(2,1)=MAC(1,K)
+	   ITEMP(2,2)=MAC(2,K)
+C Check for intersection at ends of outside edge (ie at vertices)
+	   CALL INTONL(IXY,ITEMP,2,1,MARK)
+C Check for no intersection
+	   IF (MARK.EQ.0) GOTO 60
+C Check for nodes J and K being breakline connections. If they
+C are then we don't want to extend across them - their connections
+C take preference. watch out for imaginary points, these too will
+C have a -ve MAC(3,*), but will have a node value less than or
+C equal to LIMPOL.
+C
+CMOD 1201. Also check that J and K are in the same feature by checking
+C          the signs of MAC(4,J) and MAC(4,K)
+C
+	   IF ((MAC(3,J).LT.0).AND.(MAC(3,K).LT.0).AND.
+     1		(IABS(J-K).EQ.1).AND.
+     2		(ISIGN(1,MAC(4,J)).EQ.ISIGN(1,MAC(4,K))).AND.
+     3		(J.GT.LIMPOL).AND.(K.GT.LIMPOL)) THEN
+	      CALL LNKNOD(IDAT(1),IDAT(2),0)
+	      GOTO 70
+	   ENDIF
+C Intersection exists with the outside edge, does it also exist
+C from the edge with the inserted line direction? (In other words
+C does the present point occur before the intersection has been
+C reached?)
+	   ITEMP(1,1)=JDAT(1)
+	   ITEMP(1,2)=JDAT(2)
+	   ITEMP(2,1)=IDAT(1)
+	   ITEMP(2,2)=IDAT(2)
+	   CALL INTONL(IXY,ITEMP,2,1,LARK)
+C Check intersection type
+	   IF (LARK.EQ.0) THEN
+C First: (lark=0) none present, but there was one with a polygon
+C external edge. Present point must lie in this triangle, if the
+C intersection is closer to IDAT than to JDAT.
+	      CALL EUCLID(JDAT(1),JDAT(2),IXY(1),IXY(2),B,0)
+	      IF (A.GT.B) GOTO 60
+C Intersection is nearest IDAT, but we need to check that it is
+C not parallel to one of the sides coming from the previous
+C inserted point - NP. if it is mark will be set to 2 (left node
+C intersection) or 3 (right node intersection). MARK=1 indicates
+C we are inside the triangle and not on its edge. should not
+C happen as present point exists.
+	      CALL LSL_GETMSG(TRIANG__STOPNOD,MESSAGE,MESLEN)
+	      CALL ALARMS(MESSAGE(:MESLEN))
+	   ENDIF
+C Second: (LARK=1) along the insert path but not at present point.
+C do the usual extra point insertion, and cycle round 
+	   IF (LARK.EQ.1) GOTO 50
+C Third: (LARK=2) at previous point. this must mean that we have
+C just crossed a very thin triangle and the previous intersection
+C and this one are almost the same.
+	   IF (LARK.EQ.2) GOTO 40
+C Fourth: (LARK=3) at present point. this is either a vertex
+C replacement or an edge split using the present point. this
+C latter case should not happen as present point exists.
+30	   IF (MARK.GT.1) THEN
+C Vertex replacement. this means we have reached a node, possibly
+C IPNOD1. We must check whether this is IPNOD1 (IDAT) or whether
+C it is some earlier node of a line just wandering across the line
+C we are dealing with. If it is IPNOD1 then we can terminate.
+C
+C Pick up J or K node depending which it is
+	      IF (MARK.EQ.3)J=K
+C Test whether the vertex found is the end node (IPNOD1 or IDAT)
+	      IF (MAC(1,J).EQ.IDAT(1).AND.MAC(2,J).EQ.IDAT(2)) THEN
+C Vertex is the end node, so draw link and return
+	         CALL LNKNOD(IDAT(1),IDAT(2),1)
+	         GOTO 70
+	      ELSE
+C On a vertex on another line. Present line will be dominant, so
+C must ensure that it is not cutting a breakline.
+	         IF (MAC(3,J).LT.0.AND.J.GT.LIMPOL) THEN
+C It is a breakline, so abandon the process now
+	            CALL LNKNOD(IDAT(1),IDAT(2),0)
+C Ensure that the patching carries on beyond the breakline vertex
+	            JDAT(1)=MAC(1,J)
+	            JDAT(2)=MAC(2,J)
+	            JDAT(3)=MAC(3,J)
+	            JDAT(4)=KLIFFN(J)
+	            NODP=J
+	            GOTO 20
+	         ELSE
+C Add new point to data retaining vertex position, but changing
+C vertex value to new one
+	            MACX=MAC(1,J)
+	            MACY=MAC(2,J)
+	            CALL EUCLID(JDAT(1),JDAT(2),IXY(1),IXY(2),A,1)
+	            CALL EUCLID(IDAT(1),IDAT(2),IXY(1),IXY(2),B,1)
+	            IZ=(IABS(JDAT(3))+
+     1	           (IABS(IDAT(3))-IABS(JDAT(3)))*
+     2	           A/(A+B))*ISIGN(1,MAC(3,NODP))
+C
+C Check if this is a cliffline If so lineally interpolate height for
+C the RHS
+	            IF (KLIFFN(LSTART).NE.-NPMAX) THEN
+	               JZ=JDAT(4)+(IDAT(4)-JDAT(4))*A/(A+B)
+	            ELSE
+	               JZ=-NPMAX
+	            ENDIF
+	            CALL ENTPOS(MACX,MACY,IZ,JZ,TPOL)
+C Substitute new vertex for old one
+	            CALL ONVRTX(J,NTEM,NAYMAX,NUM,NP)
+C Modify the previous point location to agree with the new vertex
+	            JDAT(1)=MAC(1,NP)
+	            JDAT(2)=MAC(2,NP)
+	            JDAT(3)=MAC(3,NP)
+	            JDAT(4)=KLIFFN(NP)
+C Plot link if graphics is on, and mark with a white cross
+	            IF (GRAPHICS) THEN
+	               CALL LNKNOD(JDAT(1),JDAT(2),1)
+	               CALL COLOUR(KOLR3,.FALSE.)
+	               CALL CROSS(JDAT(1),JDAT(2),4)
+	               CALL COLOUR(KOLR1,.FALSE.)
+	            ENDIF
+C Go round again looking for IPNOD1
+	            NODP=NP
+	            GOTO 20
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C ......................................................................
+C ......Intersection within LIMDIS of final patch point but buggered by
+C ......a barrier, so get fourth point
+	   CALL GTFRTH(J,K,NODP,NODD)
+C ......Delete unwanted link
+	   CALL DELCON(J,K)	
+	   CALL DELCON(K,J)	
+C ......Join NODP to the 4th point
+	   CALL INJOIN(NODD,J,NODP,K)
+	   CALL INJOIN(NODP,J,NODD,K)
+C ......Plot link if graphics is on, and mark with a white cross
+	   IF (GRAPHICS) THEN
+	      CALL LNKNOD(MAC(1,NODD),MAC(2,NODD),1)
+	      CALL COLOUR(KOLR3,.FALSE.)
+	      CALL CROSS(MAC(1,NODD),MAC(2,NODD),4)
+	      CALL COLOUR(KOLR1,.FALSE.)
+	   ENDIF
+C ......Normal case
+	   IF (NODD.EQ.IPNOD1) THEN
+	      GOTO 70				! all finished - return
+	   ELSE	
+C ......Another link is in the way
+	      GOTO 20
+	   ENDIF	
+C
+C ......................................................................
+C
+C Previous point intersection. caused by a node very close to an
+C intervening triangle side (lt limdis) leading to an intersection
+C value close to the previous point, although in effect slightly
+C (but marginally) further along the insert path.
+C
+C Check for insersection with left or right edge nodes (j or k).
+C if this is the case we need to pick it as the extra point
+C (by replacement)
+40	   IF (MARK.NE.1) GOTO 50
+C No left/right node intersection. we must not insert another
+C node as we are too close to the previous one, but can instead
+C cut the edge that intersected with the insertion line in two,
+C and join the previous node onto its fourth point.
+C This is a type of partial node-on-edge insertion without adding
+C a node.
+C
+C Get fourth node
+	   CALL GTFRTH(J,K,NPREV,NPTD)
+C We must check whether any such link would pass outside the limits
+C of the triangle being crossed. this can be done by checking for
+C nodes J or K lying inside the triangle that would be created.
+C If either does then we must choose to replace that node instead.
+C
+C Assemble the triangle nprev,nptd,k and test whether j falls
+C inside
+	   MARK=0
+	   CALL INSTST(NPREV,NPTD,K,J,ICOND)
+	   IF (ICOND.EQ.1)MARK=2
+C Assemble the triangle NPREV,NPTD,J and test whether K falls
+C inside
+	   CALL INSTST(NPREV,NPTD,J,K,ICOND)
+	   IF (ICOND.EQ.1)MARK=MARK+3
+C MARK now has values of (0=link removal, 2=replace j, 3=replace k,
+C 5=replace whichever of J and K is closest to IDAT)
+	   IF (MARK.NE.0) THEN
+	      IF (MARK.EQ.5) THEN
+C Choose closest to IDAT, and then go and do vertex replacement
+	         MARK=2
+	         MACX=MAC(1,J)
+	         MACY=MAC(2,J)
+	         CALL EUCLID(MACX,MACY,IDAT(1),IDAT(2),A,0)
+	         MACX=MAC(1,K)
+	         MACY=MAC(2,K)
+	         CALL EUCLID(MACX,MACY,IDAT(1),IDAT(2),B,0)
+	         IF (B.LT.A)MARK=3
+	      ENDIF
+	      GOTO 50
+	   ELSE
+C Ok to do link removal, as J and K fall outside the new triangle.
+C Insert NPREV in the list for NPTD and also insert NPTD in the
+C list for NPREV
+	      CALL INJOIN(NPREV,J,NPTD,K)
+	      CALL INJOIN(NPTD,J,NPREV,K)
+C Remove the link between J and K (in both directions)
+	      CALL DELCON(J,K)
+	      CALL DELCON(K,J)
+C All modified. Now go around and try again
+	      GOTO 20
+	   ENDIF
+C
+C*********************** EXTRA POINT INSERTION *************************
+C
+C The usual situation - create a new point and redistribute links
+C to the neighbours. Plot extra point (if interactive window is in
+C operation).
+C Interpolate the data point height linearly between the first
+C point on this insertion string and JDAT(3) weighted according
+C to distance. This is Z for an ordinary point. LHS height for a cliff.
+50	   MACX=MAC(1,LSTART)
+	   MACY=MAC(2,LSTART)
+	   CALL EUCLID(MACX,MACY,IXY(1),IXY(2),A,1)
+	   CALL EUCLID(IDAT(1),IDAT(2),IXY(1),IXY(2),B,1)
+	   IZ=(IABS(MAC(3,LSTART))+
+     1	     (IABS(IDAT(3))-IABS(MAC(3,LSTART)))*
+     2	     A/(A+B))*ISIGN(1,MAC(3,LSTART))
+C
+C Check if this is a cliffline If so lineally interpolate height for
+C the RHS
+	   IF (KLIFFN(LSTART).NE.-NPMAX) THEN
+	      JZ=KLIFFN(LSTART)+(IDAT(4)-KLIFFN(LSTART))*A/(A+B)
+	   ELSE
+	      JZ=-NPMAX
+	   ENDIF
+
+C Check for type of intersection with triangle edge.
+C MARK=1 indicates an intersection in the middle of the edge,
+C MARK=2 at left end node and mark=3 at right hand node.
+	   IF (MARK.EQ.1) THEN
+C Apparently in middle of edge.
+	      LIST(1)=J
+	      LIST(2)=K
+	      LIST(3)=NPREV
+C Add intersection point to the data set.
+	      CALL ENTPOS(IXY(1),IXY(2),IZ,JZ,TPOL)
+C Update nodp to new np value
+	      NODP=NP
+C Update connections
+	      CALL ONEDGE(LIST,NAYMAX,NODP)
+C Carry on inserting points on the way to present point
+C return to get next part of line using edges stored in ntem
+C jdat is updated to the new point just entered to ensure that
+C the line equation intersection check (intonl) does not find
+C a back path towards the previous point.
+	      JDAT(1)=MAC(1,NODP)
+	      JDAT(2)=MAC(2,NODP)
+C Plot path to point if graphics is on, and plot inserted node
+C as a symbol (+)
+	      IF (GRAPHICS) THEN
+	         CALL LNKNOD(JDAT(1),JDAT(2),1)
+	         CALL COLOUR(KOLR2,.FALSE.)
+	         CALL CROSS(JDAT(1),JDAT(2),2)
+	         CALL COLOUR(KOLR1,.FALSE.)
+	      ENDIF
+C Go round again looking for IPNOD1
+	      GOTO 20
+	   ELSE
+C Intersection is at a vertex at either end of link
+	      GOTO 30
+	   ENDIF
+C Check the next triangle round the node
+60	CONTINUE
+C This section should not be attainable, as all terminations will
+C be completed at an old node, not in a triangle as in arbitrary
+C insertion.
+	CALL LSL_GETMSG(TRIANG__STOPNOD,MESSAGE,MESLEN)
+	CALL ALARMS(MESSAGE(:MESLEN))
+70	RETURN
+	END

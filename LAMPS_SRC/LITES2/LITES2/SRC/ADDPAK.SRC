@@ -1,0 +1,136 @@
+	LOGICAL FUNCTION ADDPAK( PACK, SECTOR )
+C
+***	IDENT	27FE90
+***	MODULE	ADDPAK
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author Clarke Brunt, 28 February 1984
+C
+C To add a pack to a sector chain, returning .TRUE. if fails,
+C or .FALSE. if succeeds.
+C It will replace a deleted pack if possible, or failing that add it
+C to the end of the chain.
+C Each pack for a feature contains a pointer in PACK(PAKLNK) to the
+C previous pack. The first pack points to the last one, so packs are
+C linked circularly.
+C ADDPAK maintains these pointers, using the flags in PACK(PAKFLG) to
+C determine the first and last packs for a feature.
+C
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:SECTOR/
+C
+***	PARAMETER/CMN:PACK/
+***	COMMON/CMN:SECMAP/
+C
+C arguments
+	INTEGER		PACK(PAKLEN)	! the external pack
+	INTEGER		SECTOR		! the sector to use
+C
+C function called
+	LOGICAL		GETBLK
+	INTEGER		GETARR
+C
+C workspace
+	INTEGER*4	BLKADR		! for address of new block
+	INTEGER*4	TEMP
+c
+	INTEGER*4	TMP
+C					! or address of deleted pack
+C
+	INTEGER*4	CURPNF		! current NF pointer (for debug)
+	INTEGER*4	CURMAP		! current map (for debug)
+	SAVE		CURPNF,CURMAP
+C
+	ADDPAK = .TRUE.			! assume failure
+C
+C Debugging checks
+	IF (IAND(PACK(PAKFLG),FSTFLG).NE.0) THEN	! first
+	   IF (LSTLNK.NE.0) THEN	! already have active chain
+	      CALL NASTY(MSG_BADCHAIN)
+	      CALL COLAPS(MSG_BADCHAIN)
+	      GOTO 999
+	   ENDIF
+	   CURPNF = PACK(PAKPNF)	! current NF pointer
+	   CURMAP = PACK(PAKMAP)	! and map
+	ELSE				! not first pack
+	   IF (LSTLNK.EQ.0) THEN	! no chain active
+	      CALL NASTY(MSG_BADCHAIN)
+	      CALL COLAPS(MSG_BADCHAIN)
+	      GOTO 999
+	   ENDIF
+	   IF (PACK(PAKPNF).NE.CURPNF.OR.PACK(PAKMAP).NE.CURMAP) THEN
+	      CALL NASTY(MSG_BADCHAIN)
+	      CALL COLAPS(MSG_BADCHAIN)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C end of debugging checks
+C
+C Insert back pointer in the pack
+	PACK(PAKLNK) = LSTLNK
+C
+C Are there any deleted packs for this sector?
+	TEMP = GETARR(%VAL(DELPTR),SECTOR)
+	IF (TEMP.NE.0) THEN	! yes
+C
+C Read pointer to next deleted pack into BLKADR (as a temporary)
+	   CALL PUTLNG(%VAL(TEMP),BLKADR)
+C
+C set LSTLNK to address where pack is to go
+	   LSTLNK = TEMP
+C
+C aim the pointer at the next deleted one
+	   CALL PUTARR(BLKADR,%VAL(DELPTR),SECTOR)
+	   GOTO 40			! go and add the pack
+	ENDIF
+C
+	IF (GETARR(%VAL(FSTBLK),SECTOR).EQ.0) THEN
+C
+C No blocks allocated to this sector - try to get one
+	   IF (GETBLK(BLKADR,SECTOR)) GOTO 999	! failed
+	ELSE
+C
+C So there is something in sector
+C Is last block full?
+	   IF (GETARR(%VAL(LSTPTR),SECTOR).GT.NXTPTR-PAKSZ) THEN	! yes
+C
+C Get new block
+	      IF (GETBLK(BLKADR,SECTOR)) GOTO 999	! failed
+	   ENDIF
+	ENDIF
+C
+C Set LSTLNK to address where pack is to go
+	TEMP = GETARR(%VAL(LSTPTR),SECTOR)
+	LSTLNK = GETARR(%VAL(LSTBLK),SECTOR)+TEMP
+     &	                        
+C
+C increment by size of pack
+!!!!	CALL PUTARR(TEMP+PAKSZ,%VAL(LSTPTR),SECTOR)
+	TMP =TEMP+PAKSZ
+	CALL PUTARR(TMP,%VAL(LSTPTR),SECTOR)
+C
+C Insert the new pack
+40	CALL PUTPAK( PACK, %VAL(LSTLNK) )
+C
+C Check if first or last pack for feature (for chaining)
+	IF (IAND(PACK(PAKFLG),FSTFLG).NE.0) THEN	! first
+	   FSTLNK = LSTLNK		! remember where we put it
+	ENDIF
+C
+	IF (IAND(PACK(PAKFLG),LSTFLG).NE.0) THEN	! last
+C Insert pointer into this pack itself for benefit of FLUSH,
+C so that it can set up pointer for the segment.
+C (N.B. not the value present when this pack was written!)
+	   PACK(PAKLNK) = LSTLNK
+C Insert pointer to this pack into first one, to complete chain
+	   CALL PUTLNG( LSTLNK, %VAL(FSTLNK) )
+	   LSTLNK = 0			! flag no active chain (debug)
+	ENDIF
+	ADDPAK = .FALSE.		! succeeded
+C
+999	RETURN
+	END

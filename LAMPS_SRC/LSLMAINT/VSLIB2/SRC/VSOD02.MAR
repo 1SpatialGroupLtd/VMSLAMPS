@@ -1,0 +1,591 @@
+	.TITLE	VSOD
+ 
+	.IDENT	/27NO88/
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+ 
+; Author:				Susan Manning
+
+; code to make VSINIT not clear the ARGS screen, if so requested, added
+; (note; may make ARGS interface hang - according to comments)
+;					 R.W. Russell  29-Aug-1985
+; Explicitly obtain EFNS for I/O (don't use 0)	 DM	02-May-1985
+; $VSFCA added (force to absolute move)	 DM	09-Apr-1984
+; Amended for Sigma ARGS display:	Tony J Ibbs	Sept/Oct 1982
+ 
+ 
+; VSLIB GRAPHIC LIBRARY ODDMENTS
+ 
+	$DVIDEF
+ 
+	DATA_PSECT	VS
+
+; item list for $GETDVI
+DVILST:		.WORD	4,DVI$_DEVNAM
+		.ADDRESS DEVNAM
+		.ADDRESS DEVLEN
+		.LONG	0
+
+DEVNAM:		.BLKB	4
+DEVLEN:		.BLKL	1
+
+; descriptor for the default system constants file...
+VSIDSY_DSC:	.ASCID	/LSL$IDSY02:/
+
+; descriptor for the terminal's logical name...
+VSDESC:		.ASCID	/LSL$VS/
+
+	CODE_PSECT	VS
+
+; Origin Change
+; currently supports only '-1' version of LDLIB 'ORIGIN'
+ 
+.ENTRY	VSORGN,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R7
+	MOVF	@8(AP),R9
+	BSBB	VS$ORIG
+	RET
+ 
+VS$ORIG:MOVAB	VSRDOX,R10
+	MOVF	R7,(R10)+		; preserve display values
+	MOVF	R9,(R10)+
+	MOVF	VSSCF,R6		; current scale
+VSSETUO:DIVF3	R6,R7,(R10)+		; user values
+	DIVF3	R6,R9,(R10)+
+ 
+; move to new origin
+	CLRF	R7
+	CLRF	R9
+	JSB	VS$MTO
+
+; and move the cursor to be correct relative to that origin -
+; what we want is that the cursor shall not appear to have moved,
+; but that its current position, when read, shall be of where it
+; is in the new space
+	MOVF	VSHCSX,R7		; get the pixel posn of the cursor
+	MOVF	VSHCSY,R9
+	SUBF2	VSCEN,R7		; subtract pixel centering
+	SUBF2	VSCEN,R9
+	DIVF2	VSTRX,R7		; transform into user units
+	DIVF2	VSTRY,R9
+	SUBF2	VSRUOX,R7		; and subtract user origin
+	SUBF2	VSRUOY,R9
+;
+	JSB	VS$CSWT			; position the cursor there
+	RSB
+ 
+ 
+ 
+; Units Change
+ 
+.ENTRY	VSUNIT,^M<R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVF	@4(AP),R6
+	BSBB	VS$UNIT
+	RET
+ 
+VS$UNIT:MOVF	R6,VSSCF		; preserve new scale
+	MULF3	VSBSTRX,R6,VSTRX	; derive VSTR = BASETR * VSSCF
+	MULF3	VSBSTRY,R6,VSTRY	; for both axes
+	MOVAB	VSRDOX,R10		; adjust user origin to new units
+	MOVF	(R10)+,R7
+	MOVF	(R10)+,R9
+	BRW	VSSETUO
+ 
+
+
+; VSSIZE( X, Y )	returns screen extent in basic user units (ie at scale
+; of 1.0 ... in centimetres). Call only after VSINIT
+
+.ENTRY	VSSIZE,^M<R6>
+	ADDL3	#1,VSEXT,R6		; max pixel+1 -> pixel size (1024)
+	CVTLF	R6,R6
+	DIVF3	VSBSTRX,R6,@4(AP)	; get the X size
+	DIVF3	VSBSTRY,R6,@8(AP)	; and the Y size
+	RET
+
+; VSDEF(N,NUMBER,BASE)	Args specific routine to set a group of planes
+; to be picture N (1 or 2).
+; NUMBER is the number of consecutive planes
+; BASE is the first one (in range 0-31)
+
+.ENTRY	VSDEF,^M<R2,R3,R4,R5,R6,R8,R9>
+	MOVZWL	@4(AP),R6		; first argument
+	DECL	R6
+	BICL2	#MASK1,R6		; mask to 1 bit
+	MOVZWL	@8(AP),R1		; number of planes
+	DECL	R1
+	BICW2	#MASK5,R1		; range 0-31
+	CLRL	R2
+	BICW3	#MASK5,@12(AP),R2	; base plane, range 0-31
+	SUBW3	R2,#31,R0		; max possible number
+	CMPW	R1,R0
+	BLEQ	5$			; number OK
+	MOVW	R0,R1			; reduce into range
+
+; construct ZSR argument word
+5$:	MOVW	R2,R3			; base
+	INSV	R1,#8,#5,R3		; number-1
+	MOVW	R3,ZSR1[R6]		; store away
+
+; construct bit mask
+	INCL	R1			; number of planes
+	BLBS	R6,10$
+	CLRL	PLANE1
+	INSV	#-1,R2,R1,PLANE1
+	BRB	20$
+10$:	CLRL	PLANE2
+	INSV	#-1,R2,R1,PLANE2
+
+; check if we have re-defined the current picture
+20$:	INCL	R6			; picture number
+	CMPB	R6,SGWHCH		; current?
+	BNEQ	50$			; no
+	BSBW	VS$PIC			; yes, so reset it (VSPIC)
+50$:	RET
+
+ 
+; VSCOL(N)	Colour Selection Change
+; 		colour range (N) is 0 -> 15 (all values for ARGS)
+ 
+.ENTRY	VSCOL,^M<R4,R5,R6>
+	MOVL	@4(AP),R6
+	BSBB	VS$COL
+	RET
+ 
+VS$COL:	MOVL	#3,R0			; room for 3 words
+	JSB	$VSCHKBF
+	MOVW	#SIGZDI2,R4		; Z data input instruction
+	JSB	$VSBFW
+	EXTZV	#16,#16,R6,R4		; high word
+	JSB	$VSBFW
+	MOVW	R6,R4			; low word
+	JSB	$VSBFW
+	RSB
+ 
+ 
+ 
+; VSCLR(N)  	Clear Image Memory
+; 		N=1,2,3		( 3 => both)
+ 
+.ENTRY	VSCLR,^M<R4,R5,R6,R8,R9>
+	MOVZWL	@4(AP),R6
+	BSBB	VS$CLR
+	RET
+ 
+VS$CLR:	BICL2	#MASK2,R6		; mask to 2 bits
+	BEQL	VSC30			; check some operation specified
+
+; clear for a Sigma ARGS display...
+	MOVL	#5,R0
+	JSB	$VSCHKBF
+	BSBW	VS$ZSR32		; set ZSR to all 32 planes
+	MOVW	#SIGCLS2,R4		; CLEAR instruction
+	JSB	$VSBFW			; buffer it
+	CLRL	R8
+	BLBC	R6,10$			; not picture 1
+	BISL2	PLANE1,R8		; add in picture 1 bits
+10$:	BBC	#1,R6,20$		; not picture 2
+	BISL2	PLANE2,R8		; add in picture 2 bits
+20$:	EXTZV	#16,#16,R8,R4		; high word
+	JSB	$VSBFW
+	MOVW	R8,R4			; low word
+	JSB	$VSBFW			; buffer it
+	BSBW	VS$ZSR			; restore ZSR
+	JSB	$VFLUSH			; flush out main display file
+$VSFCA::BISL2	#VFLG_M_FRCABS,VSFLAG	; force to absolute just in case
+VSC30:	RSB
+ 
+ 
+ 
+; VSPIC(N)	defines the image memory to receive the pixel data
+;		N = 1,2  	illegal arguments default to 1 (& warning)
+ 
+.ENTRY	VSPIC,^M<R4,R5,R6,R8,R9>
+	MOVZWL	@4(AP),R6
+	BSBB	VS$PIC
+	RET
+ 
+VS$PIC:	BICL2	#MASK2,R6		; mask to 2 bits
+	CMPW	R6,#1			; check in range
+	BEQL	10$
+	CMPW	R6,#2
+	BEQL	10$
+	MOVL	#SS$_BADPARAM ,R0		; output warning message
+	XORL2	#^O6,R0			; reduce severity to warning
+	JSB	VSERRSIG
+	MOVL	#1,R6			; default to N=1
+10$:	MOVB	R6,SGWHCH		; remember which it was
+	BSBW	VS$ZSR			; set ZSR appropriately
+	MOVL	#3,R0			; room for 3 words
+	JSB	$VSCHKBF
+	MOVW	#SIGZWE2,R4		; write enable instruction
+	JSB	$VSBFW
+	MNEGW	#1,R4			; all ones
+	JSB	$VSBFW			; for all planes	
+	JSB	$VSBFW			; and the other 16
+	RSB
+ 
+ 
+; VSSEL(N)	selects which image memories are to be displayed
+;		N=0,1,2,3		( 0 => none, 3 => both)
+ 
+.ENTRY	VSSEL,^M<R4,R5,R6,R8,R9>
+	MOVZWL	@4(AP),R6
+	BSBB	VS$SEL
+	RET
+ 
+VS$SEL:	BICL2	#MASK2,R6		; mask to 2 bits
+	CLRL	R8
+	BLBC	R6,10$			; not picture 1
+	BISL2	PLANE1,R8		; add in picture 1 bits
+10$:	BBC	#1,R6,20$		; not picture 2
+	BISL2	PLANE2,R8		; add in picture 2 bits
+20$:	BRB	VS$ZDO
+
+;
+; VSZDO(I)	performs a 32 bit Z data out instruction using
+;		I as a bit mask. Similar to VSSEL but more versatile.
+ 
+.ENTRY	VSZDO,^M<R4,R5,R6,R8,R9>
+	MOVL	@4(AP),R8
+	BSBB	VS$ZDO
+	RET
+
+VS$ZDO:	MOVL	#5,R0
+	JSB	$VSCHKBF
+	BSBW	VS$ZSR32		; set ZSR to all 32 planes
+	MOVW	#SIGZDO2,R4		; Z DATA OUT instruction
+	JSB	$VSBFW			; buffer it
+	EXTZV	#16,#16,R8,R4		; high word
+	JSB	$VSBFW
+	MOVW	R8,R4			; low word
+	JSB	$VSBFW			; buffer it
+	BSBW	VS$ZSR			; restore ZSR
+	JSB	$VFLUSH			; obey it right now
+	RSB
+
+
+; Sigma specific routine - called by VS$SEL, VS$CLR, VSCROL & VSZOOM
+; Set the ZSR so that we address all 8 planes
+VS$ZSR32: MOVW	#SIGZSR,R4
+	JSB	$VSBFW			; buffer it
+	MOVW	#^X1F00,R4		; 32 planes starting at 0
+	JSB	$VSBFW			; buffer it
+	RSB
+
+; Sigma routine to reset the ZSR according to the value (1 or 2)
+; in SGWHCH
+VS$ZSR:	MOVL	#2,R0
+	JSB	$VSCHKBF		; check space for 2 words
+	MOVW	#SIGZSR,R4
+	JSB	$VSBFW
+	BBC	#0,SGWHCH,18$		; branch if want picture 2
+	MOVW	ZSR1,R4
+	BRB	20$
+18$:	MOVW	ZSR2,R4
+20$:	JSB	$VSBFW
+	RSB
+ 
+ 
+; VSCROL(N,xs,ys)
+; set scroll registers
+; N is 1 for plane 1, 2 for plane 2, 3 for both
+; xs and ys are the scroll amounts in x and y, positive values
+; displacing upwards and to the left
+
+.ENTRY	VSCROL,^M<R4,R5,R6,R8,R9>
+	MOVZWL	@4(AP),R0		; N argument
+	BICL2	#MASK2,R0		; mask to 2 bits
+	BNEQ	10$			; anything to do?
+	BRW	30$			; no
+10$:	CLRL	R6
+	BBC	#0,R0,15$		; is the picture a 1 or a 3?
+	BISL2	PLANE1,R6		; picture 1 bits
+15$:	BBC	#1,R0,16$		; is it a 2 or a 3?
+	BISL2	PLANE2,R6		; picture 2 bits
+16$:	MOVL	#10,R0
+	JSB	$VSCHKBF		; check if room for 10 words
+	BSBW	VS$ZSR32		; set ZSR to all 32 planes
+	MOVW	#SIGSXR2,R4		; set x scroll instruction
+	JSB	$VSBFW
+	EXTZV	#16,#16,R6,R4		; high word
+	JSB	$VSBFW
+	MOVW	R6,R4			; low word
+	JSB	$VSBFW
+	MOVW	@8(AP),R4		; x scroll
+	JSB	$VSBFW
+	MOVW	#SIGSYR2,R4		; set y scroll instruction
+	JSB	$VSBFW			; buffer complete instruction
+	EXTZV	#16,#16,R6,R4		; high word
+	JSB	$VSBFW
+	MOVW	R6,R4			; low word
+	JSB	$VSBFW
+	MOVW	@12(AP),R4		; y scroll
+	JSB	$VSBFW
+	JSB	$VFLUSH			; flush it
+	BSBW	VS$ZSR			; restore ZSR
+30$:	RET
+
+; VSZOOM(type,xf,yf)
+; set zoom type, factors xf and yf (0-15) in x and y respectively
+; low order bit of yf ignored on interlaced system
+; type 0 - top left, 1 - pen position, 8 - cursor position
+
+.ENTRY	VSZOOM,^M<R4,R5,R6,R8,R9>
+	MOVL	#4,R0
+	JSB	$VSCHKBF		; check space for 4 words
+	BSBW	VS$ZSR32		; set ZSR to all 32 planes
+	MOVW	#SIGZOM,R4		; zoom instruction
+	INSV	@4(AP),#SGBYT1,#SGBYSZ,R4	; insert type
+	JSB	$VSBFW			; buffer it
+	CLRW	R4
+	INSV	@8(AP),#0,#4,R4		; insert x factor
+	INSV	@12(AP),#8,#4,R4	; insert y factor
+	JSB	$VSBFW			; buffer it
+	JSB	$VFLUSH			; flush
+	BSBW	VS$ZSR			; restore ZSR
+	RET
+
+
+; VSZPA(dot,z)
+; assign a dot store module to a z axis bit
+
+.ENTRY	VSZPA,^M<R4,R5,R6,R8,R9>
+	MOVL	#2,R0
+	JSB	$VSCHKBF		; check space for 2 words
+	MOVW	#SIGZPA1,R4		; ZPA instruction for one plane
+	JSB	$VSBFW			; buffer it
+	CLRW	R4
+	INSV	@4(AP),#0,#5,R4		; insert dot store number
+	INSV	@8(AP),#8,#5,R4		; insert z bit number
+	JSB	$VSBFW			; buffer it
+	RET
+ 
+
+; VSGEN		flush out display file to the current image memory
+ 
+.ENTRY	VSGEN,^M<R4,R5>
+	JSB	$VFLUSH			; flush the buffer
+	RET
+ 
+
+ 
+; VSINIT(SW)	initialise display
+;
+; SW coded bitwise
+; d0 = 0 => complete drawing, disable, detach display
+;    = 1 => attach, enable display, decode other bits
+; d1 = 1 => clear both image memories
+; d2 = 1 => set default scale and origin
+; d3 = 1 => for Sigma only, set up AST to sample TB/FBs every so often
+; ( d0 = 1 also does a VSSEL(3) and VSPIC(1) )
+ 
+; string to compare device name with (to see if we're a uVAX XA device)
+XA.STR:		.ASCII	/XA/		; string
+XA.STRLEN=.-XA.STR			; length
+
+.ENTRY	VSINIT,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVW	@4(AP),R6
+	BLBS	R6,1$
+	BRW	VSOFF			; if d0=0 - switch off
+1$:	MOVW	R6,-(SP)
+	TSTB	VSENBL			; VS11/Sigma ARGS already on ?
+	BEQL	2$
+	BRW	VSONOK			; if not equal, enabled already
+ 
+
+; get event flags for input and output
+2$:	PUSHAL	VI.EFN			; place to put it
+	CALLS	#1, G^LIB$GET_EF	; get event flag no
+	BLBS	R0,3$
+	JSB	VSERRSIG		; signal any errors
+3$:	PUSHAL	VO.EFN			; place to put it
+	CALLS	#1, G^LIB$GET_EF	; get event flag no
+	BLBS	R0,4$
+	JSB	VSERRSIG		; signal any errors
+
+;allocate device, and assign a channel
+4$:	$ALLOC_S	DEVNAM=VSDESC
+	BLBS	R0,8$
+	JSB	VSERRSIG
+8$:	$ASSIGN_S	DEVNAM=VSDESC,-
+			CHAN=VO.CHAN
+	BLBS	R0,10$
+	JSB	VSERRSIG		; signal any errors
+ 
+10$:	MOVW	VO.CHAN,VI.CHAN		; same channel for i/p and o/p
+	MOVW	VO.CHAN,TBR.CHAN	; for if we use the Sigma
+	MOVW	VO.CHAN,TBW.CHAN	;  when we need TB channels
+
+; set up address constants in QIO DPBs
+; do here to avoid problems in shareble images with .ADDRESS data
+; in macro common block
+	MOVAL	VSSTATUS,VO.IOSB
+	MOVAW	VSBUF,VO.HDR
+	MOVAL	VSSTATUS,VI.IOSB
+	MOVAW	VSBUF,VI.BUF1
+	MOVAL	SGSTATUS,TBR.IOSB
+	MOVAW	SGTBHDR,TBR.P1		; primary (instn) buffer
+	MOVAW	SGHDR3,TBR.P3		; secondary (data) buffer
+	MOVAL	SGSTATUS,TBW.IOSB
+	MOVAW	SGTBHDR,TBW.P1		; header block
+	MOVAW	SGTBINST,TBW.P3		; the buffer with instns
+
+	DECB	VSENBL			; display now thought to be on
+	CLRB	TBISON			; but TB reading is not
+
+; decide if we have a VS11 or a something else display
+; first get the real device name
+	$GETDVIW_S	CHAN=VO.CHAN,ITMLST=DVILST
+	BLBS	R0,12$
+	JSB	VSERRSIG		; signal any errors
+ 
+12$:	MATCHC	#XA.STRLEN,XA.STR,DEVLEN,DEVNAM		; look for 'VS'
+	BNEQ	VSONOK					; jump if not found
+	BISL2	#VFLG_M_XA,VSFLAG			; set 'is a XA' bit
+ 
+VSONOK:	JSB	$VSSET			; set buffer ptr to 'zero'
+	MOVAB	2*VSBFSZ+VSBUF,VSBFLIM	; address of end of buffer
+
+; initial setup for a Sigma ARGS... (provided we don't mind clearing the
+; screen)
+; firstly, we do a RESET operation - send a 3 to the DMA interface Status
+; Register, which resets the Sigma and the interface with the VAX, so that
+; we don't hang for no reason
+	BBCW	#1,(SP),5$			; may hang interface!
+	MOVZWL	#IO$_WRITEVBLK,VO.FUNC		; write
+	BBS	#VFLG_V_XA,VSFLAG,3$		; it's an XA device
+	INSV	#3,#IRP$V_FMOD,#IRP$S_FMOD,VO.FUNC	; reset things
+	CLRL	VO.LEN
+	CLRL	VO.LEN2				; no output in buffers
+	$QIOW_G	VO.DPB				; do the QIO
+	BLBS	R0,1$				; sucess??
+	JSB	VSERRSIG
+1$:	CMPV	#SGERRPS,#SGERRSZ,VSSTATUS+4,#SGERR	; did it work?
+	BNEQ	5$					; yes
+	JSB	ERRVS					; no, give error
+	BRW	60$					; and return
+
+; reset XA device
+3$:	BISL2	#IO$M_SETFNCT,VO.FUNC		; add function modifier
+	MOVL	#2,VO.LEN			; dummy length
+	CLRL	VO.START			; default timeout
+	MOVL	#2,VO.LEN2			; reset function
+	$QIOW_G	VO.DPB				; do the QIO
+	BLBS	R0,4$				; sucess??
+	JSB	VSERRSIG
+4$:	BLBS	VSSTATUS,5$			; success??
+	JSB	ERRVS					; no, give error
+	BRW	60$					; and return
+;
+; this piece of code sets up the Sigma QIO, the VSRs,; and the VTT.
+; set up the standard QIO we shall use for the rest of the session...
+;
+5$:	MOVZWL	#IO$_WRITEVBLK,VO.FUNC	; write
+	BBS	#VFLG_V_XA,VSFLAG,6$	; it's an XA device
+;
+; set up ID device QIO
+	MOVL	#SGHDRL,VO.LEN		; length of header (4)
+	MOVAW	VSBUF,VO.HDR		; set up the required header
+	MOVAW	SGBUF1,VO.START		; start of primary buffer
+	BRW	7$
+;
+; set up XA device QIO's
+6$:	BISL2	#IO$M_SETFNCT,VO.FUNC	; add function modifier
+	MOVAW	SGBUF1,VO.HDR		; start of primary buffer
+	CLRL	VO.START		; not used
+	CLRL	VO.LEN2			; WRITE function code (0)
+	BISL2	#IO$M_SETFNCT,VI.FUNC	; add function modifier
+	MOVL	#4,VI.LEN2		; READ function code (0)
+	BISL2	#IO$M_SETFNCT,TBW.FUNC	; add function modifier
+	MOVAW	SGTBINST,TBW.P1		; start of output buffer
+	MOVL	#2*SGTBWTL,TBW.P2	; length (bytes)
+	CLRL	TBW.P3			; not used
+	CLRL	TBW.P4			; WRITE function code (0)
+	BISL2	#IO$M_SETFNCT,TBR.FUNC	; add function modifier
+	MOVAW	SGBUF3,TBR.P1		; start of input buffer
+	MOVL	#2*<SGTBLEN-4>,TBR.P2	; length (bytes)
+	CLRL	TBR.P3			; not used
+	MOVL	#4,TBR.P4		; READ function code (4)
+;
+7$:	MOVL	#6,R0			; about to output 6 words...
+	JSB	$VSCHKBF		; make sure enough room in buffer
+	MOVW	#SIGVSR,R4		; load Video Status Regs instn
+	JSB	$VSBFW			; buffer the instn
+	MOVZWL	SGREG1,R4		; set up Video Status Register 1
+	JSB	$VSBFW
+	MOVZWL	SGREG2,R4		; VSR 2 next
+	JSB	$VSBFW
+	MOVZWL	SGREG3,R4		; and now VSR 3
+	JSB	$VSBFW
+; and now reset the graphics status word (in case we were doing anything
+; funny before entering VSLIB)
+	MOVW	#SIGLSW,R4		; load graphics status word
+	JSB	$VSBFW
+	MOVW	#^X8000,R4		; just cursor scroll bit set
+	JSB	$VSBFW
+; and read the system constants file - sets up the colour table
+; from the standard file LSL$IDSY02
+	PUSHAQ	VSIDSY_DSC		; the string argument
+	CALLS	#1,G^VS_GET_SYSC	; call the read & setup routine
+	BLBS	R0,9$			; branch if no error
+	JSB	VSERRSIG		; signal the error & then carry on
+; clear our memory of the function button lights on the trackerball...
+9$:	CLRW	SGSAVFB
+
+; and set up the screen descriptive values -
+	MOVF	#SGBSTRX,VSBSTRX	; transformation at scale 1.0
+	MOVF	#SGBSTRY,VSBSTRY	; for both axes
+	MOVF	#SGCEN,VSCEN		; screen centre
+	MOVL	#SGEXT,VSEXT		; screen extent
+;
+; and do we need to start up the trackerball watching??
+190$:	BBC	#3,(SP),10$		; skip if not
+	CALLS	#0,G^VSTBON		; set up the trackerball AST, etc
+;
+; both displays in common again...
+10$:	BBC	#1,(SP),20$
+	MOVL	#3,R6
+	BSBW	VS$CLR			; clear both image memories
+20$:	BBC	#2,(SP)+,30$
+	MOVF	#^F1.0,R6
+	BSBW	VS$UNIT			; set default scale
+	CLRF	R7
+	CLRF	R9
+	BISL2	#VFLG_M_FRCABS,VSFLAG	; set absolute move to origin
+	BSBW	VS$ORIG			; set default origin
+30$:	MOVL	#3,R6
+	BSBW	VS$SEL			; display both image memories
+	MOVL	#1,R6
+	BSBW	VS$PIC			; picture for image memory 1
+	MOVL	#15,R6
+	BSBW	VS$COL			; set default colour (white!)
+	CLRF	R7
+	CLRF	R9
+	JSB	VS$CSWT			; default cursor position to origin
+; if we have a second argument to VSINIT, then we want to return 0
+; since never now a VS11
+	CMPB	(AP), #2		; compare no of args with 2
+	BLSS	60$			; branch if fewer
+	CLRL	@8(AP)			; clear the argument (ie not VS11)
+60$:	RET
+ 
+; to switch VS11 off
+VSOFF:	BLBC	TBISON,20$		; TB is not on
+; cancel the timer requests which cause the TB to be inspected.
+	CLRB	TBISON			; note that the TB is no longer on
+	$CANTIM_S	REQIDT=IDAST	; cancel any timer requests
+20$:	TSTB	VSENBL			; already off ?
+	BEQL	VSOFFOK			; yes
+	JSB	$VFLUSH			; flush out last
+	CLRB	VSENBL			; display off
+ 
+VSOFFOK:$DASSGN_S	CHAN=VO.CHAN	; deassign channel
+	$DALLOC_S	DEVNAM=VSDESC
+	PUSHAL	VI.EFN			; free the i/o event flags
+	CALLS	#1, G^LIB$FREE_EF
+	PUSHAL	VO.EFN
+	CALLS	#1, G^LIB$FREE_EF
+	RET
+
+	.END

@@ -1,0 +1,214 @@
+	SUBROUTINE POLY_EDIT(IN_COORDS,IN_NPTS,OUT_COORDS,OUT_NPTS)
+C
+***	MODULE	POLY_EDIT
+***	IDENT	05AP89
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid -  from DTE code by ACM
+C
+C 	Created					MWSR    05-Jan-1988
+C
+C finds coordinates of DTI pixels enclosed by the input polygon
+C
+	IMPLICIT NONE
+C
+C commons
+	INCLUDE	'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE	'LSL$CMNROVER:DTICMN.CMN'
+	INCLUDE	'LSL$CMNROVER:ROVCMN.CMN'
+	INCLUDE	'LSL$CMNROVER:RASTED.CMN'
+C
+C arguments
+	INTEGER*4	IN_NPTS			! no of input coords
+	INTEGER*4	IN_COORDS(2,IN_NPTS)	! input coords
+	INTEGER*4	OUT_COORDS(2,MAXEDT)	! output coords
+	INTEGER*4	OUT_NPTS		! no of output coords
+C
+C
+C Local Variables
+	INTEGER	X1,Y1		! DTI coord I-1
+	INTEGER	X2,Y2		! DTI coord I
+	INTEGER	DX1,DY1,DX2,DY2	! consecutive edge vectors
+	INTEGER	I0,I1,I2	! indices of 3 consecutive vertices
+	INTEGER	XMIN,XMAX	! intersection X range over along YLINE
+	INTEGER	YMIN,YMAX	! Y for bottom/top scan line
+	INTEGER	I_YMIN		! index of vertex with lowest Y coord
+	INTEGER	YLINE		! Y for current scan line
+	LOGICAL	EDGE(MAXEDT)
+C				! scan line intersection X's
+	LOGICAL	ONN(MAXEDT)
+C				! pixel part of openning boundary?
+	LOGICAL	OFF(MAXEDT)
+C				! pixel part of closing boundary?
+	LOGICAL	HADONN,HADOFF	! boundary thickness had open/close?
+	LOGICAL	WOZ_EDGE	! previous pixel int. by edge?
+	INTEGER	XLEFT,XRIGHT	! single "intersection" X range
+	INTEGER	I,X,Y,XA,XB	! working integers
+	REAL	RX,DX,DY,G	! working reals
+	LOGICAL	IN		! inside polygon?
+	LOGICAL	CLW		! polygon clockwise?
+C
+	IF(IN_NPTS.EQ.1)THEN
+	  GOTO 70		! return
+	END IF
+C
+C initialise count
+	OUT_NPTS  = 0
+C
+C get polygon X and Y DTI ranges
+	XMIN = IN_COORDS(1,1)
+	XMAX = XMIN
+	YMIN = IN_COORDS(2,1)
+	YMAX = YMIN
+	I_YMIN = 1
+C
+	DO 10 I = 1,IN_NPTS
+	   IF (IN_COORDS(1,I).LT.XMIN) THEN
+	      XMIN = IN_COORDS(1,I)
+	   ELSE IF (IN_COORDS(1,I).GT.XMAX) THEN
+	      XMAX = IN_COORDS(1,I)
+	   END IF
+	   IF (IN_COORDS(2,I).LT.YMIN) THEN
+	      YMIN = IN_COORDS(2,I)
+	      I_YMIN = I
+	   ELSE IF (IN_COORDS(2,I).GT.YMAX) THEN
+	      YMAX = IN_COORDS(2,I)
+	   END IF
+10	CONTINUE
+C
+C find whether polygon is clockwise or anti-clockwise by finding the
+C sign of the vector co-product of two consecutive polygon edges (not
+C both horizontal) whose join vertex is known to be a Y-minimum
+	I2 = I_YMIN
+	Y2 = IN_COORDS(2,I2)
+15	I1 = I2
+	I2 = I1+1
+	IF (I2.GT.IN_NPTS-1) I2 = 1	! modular addition
+	Y1 = Y2
+	Y2 = IN_COORDS(2,I2)
+	DY2 = Y2-Y1
+	IF (DY2.EQ.0) THEN		! flat polygon?
+	  IF (I2.EQ.I_YMIN) GOTO 16
+	  GOTO 15
+	END IF
+	I0 = I1-1
+	IF (I0.LE.0) I0 = IN_NPTS-1	! modular subtraction
+	DX1 = IN_COORDS(1,I1)-IN_COORDS(1,I0)
+	DY1 = IN_COORDS(2,I1)-IN_COORDS(2,I0)
+	DX2 = IN_COORDS(1,I2)-IN_COORDS(1,I1)
+	CLW = DX2*DY1.GT.DY2*DX1
+16	CONTINUE
+C
+C initialise EDGE, MULT and INTO arrays
+	DO 20 X = XMIN,XMAX
+	   EDGE(X) = .FALSE.
+	   ONN(X) = .FALSE.
+	   OFF(X) = .FALSE.
+20	CONTINUE
+C
+C find all intersections of scan line with polygon edges for each
+C scan line  -there may be > 1 intersecting element per "intersection"
+	DO 60 YLINE = YMIN,YMAX
+C
+C set elements of EDGE .TRUE. for DTI elements intersecting
+C the scan line with each of the edges of the polygon
+	   XMIN = X_EXTENT(DTICHAN)
+	   XMAX = 1
+C
+	   DO 40 I = 2,IN_NPTS
+	      Y1 = IN_COORDS(2,I-1)
+	      Y2 = IN_COORDS(2,I)
+	      IF(YLINE.LT.Y1.AND.YLINE.LT.Y2)GOTO 40 ! above scan line?
+	      IF(YLINE.GT.Y1.AND.YLINE.GT.Y2)GOTO 40 ! below scan line?
+C
+	      X1 = IN_COORDS(1,I-1)
+	      X2 = IN_COORDS(1,I)
+	      DX = X2-X1
+	      DY = Y2-Y1
+C
+C find left and right-most elements in intersection
+	      IF (DX.EQ.0) THEN
+	         XLEFT = X1
+	         XRIGHT = X2
+	      ELSE IF (DY.EQ.0) THEN
+	         XLEFT = MIN0(X1,X2)
+	         XRIGHT = MAX0(X1,X2)
+	      ELSE
+C
+C "G" is (real) X dist betw ints of line L12 (thro P1 and P2) with
+C scan-row top line (Y = YLINE + 0.5) and bot line (Y = YLINE - 0.5)
+	         G = DX/DY
+C
+C "RX" is (real) X coord of int betw L12 and the scan-row bot line
+	         RX = X1 + (YLINE-0.5-Y1)*G
+C
+C "XA" is DTI X coord of DTI element containing real point (RX,YLINE)
+C "XB" is DTI X coord of DTI element containing (RX+G,YLINE)
+	        IF (G.GT.0) THEN
+	           XA = NINT(RX)			! round up
+	           XB = NINT(RX+G-0.001)		! round down
+	        ELSE
+	            XA = NINT(RX-0.001)			! round down
+	            XB = NINT(RX+G)			! round up
+	        END IF
+C
+C "XLEFT" and "XRIGHT" are the DTI X coords of the left- and right-most
+C DTI elements which are intersected by L12 BETWEEN P1 and P2,not beyond
+	        XLEFT = MAX0(MIN0(XA,XB),MIN0(X1,X2))
+	        XRIGHT= MIN0(MAX0(XA,XB),MAX0(X1,X2))
+	     END IF
+C
+C set all elements from XLEFT to XRIGHT in DTI row array EDGE to .TRUE.,
+C and keep note of the minimum and maximum X
+	     XMIN = MIN0(XMIN,XLEFT)
+	     XMAX = MAX0(XMAX,XRIGHT)
+C
+	     DO 30 X = XLEFT,XRIGHT
+	        EDGE(X) = .TRUE.
+	        IF (CLW) THEN
+	  	   IF (DY.GT.0) ONN(X) = .TRUE.
+	  	   IF (DY.LT.0) OFF(X) = .TRUE.
+		ELSE
+	  	   IF (DY.LT.0) ONN(X) = .TRUE.
+	  	   IF (DY.GT.0) OFF(X) = .TRUE.
+	        END IF
+30	     CONTINUE
+C
+40	   CONTINUE	  	! loop for next edge
+C
+C edit this line
+	   IN = .FALSE.
+	   WOZ_EDGE = .FALSE.
+	   HADONN = .FALSE.
+	   HADOFF = .FALSE.
+C
+	   DO 50 X = XMIN,XMAX
+	      IF (EDGE(X)) THEN
+	         IF (ONN(X)) HADONN = .TRUE.
+	         IF (OFF(X)) HADOFF = .TRUE.
+	      ELSE IF (WOZ_EDGE) THEN
+	  	 IF (.NOT.(HADONN.AND.HADOFF)) IN = HADONN
+	         HADONN = .FALSE.
+	  	 HADOFF = .FALSE.
+	      END IF
+	      IF (IN.OR.EDGE(X)) THEN
+		 OUT_NPTS = OUT_NPTS+1
+	         IF (OUT_NPTS .GT. MAXEDT) THEN
+	            CALL WRITEF('%S Reached EDIT buffer limit',WBELL)
+		    OUT_NPTS = MAXEDT
+		    GOTO 70
+		 ENDIF
+	         OUT_COORDS(1,OUT_NPTS) = X 
+	         OUT_COORDS(2,OUT_NPTS) = YLINE 
+	      END IF
+	      ONN(X) = .FALSE.
+	      OFF(X) = .FALSE.
+	      WOZ_EDGE = EDGE(X)
+	      EDGE(X) = .FALSE.
+50	   CONTINUE
+C
+60	CONTINUE		! loop for next scan row
+C
+70	RETURN
+	END

@@ -1,0 +1,267 @@
+	LOGICAL FUNCTION OPEN_DTI(LUN)
+C
+***	MODULE	OPEN_DTI
+***	IDENT	08FE89
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C 	Created 					TJH 12-May-1988
+CMOD	DTI_DTED replaced by parameter DTI_TED4         DRC 18-Aug-1988
+CMOD	Sets output DTI header length using input
+C	DTI file length, rather than explicit 1024.
+C	LSLA file origin offset from projection record 
+C	used if available				TJH 08-Feb-1989
+C
+C Opens the DTI file, and sets everything up ready for us to read
+C the data.
+C
+C The function value is .TRUE. if we succeed.
+C
+	IMPLICIT NONE
+C
+C Argument:
+	INTEGER		LUN		! LUN of file to open
+C
+C Parameters
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNDTIBLEND:PARAMS.PAR'
+	INCLUDE 'LSL$CMNDTI:DTIPAR.PAR'
+	INCLUDE 'LSL$CMNDTI:DTIDEF.PAR'
+C
+C Common
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIPROJ.CMN'
+	INCLUDE 'LSL$CMNDTIBLEND:COMMAND.CMN'
+	INCLUDE 'LSL$CMNDTIBLEND:FILES.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C W/s
+	CHARACTER*128	TMP_NAME	! temp DTI file-spec
+	INTEGER		TMP_NAME_LENGTH ! its length
+	LOGICAL	   	IERR,OK		! error returns
+	INTEGER		I
+C
+C Column of DTI data
+	LOGICAL*4	COLUMN(MAX_ROW)		!dummy column vector
+	REAL*4		RCOL(MAX_ROW)		!real
+	INTEGER*2	WCOL(MAX_ROW)		!word
+	INTEGER*4	LCOL(MAX_ROW)		!longword
+C
+	EQUIVALENCE (COLUMN,RCOL,WCOL,LCOL) 
+C
+C Functions
+	LOGICAL	  DTI_COPY_HEADER	! copy header of DTI file
+	LOGICAL	  DTI_CLOSE		! close DTI file
+	LOGICAL	  DTI_OPEN		! open/read header of DTI file
+	LOGICAL	  DTI_COPY_DATA		! copy DTI data
+	LOGICAL	  DTI_CREATE		! create DTI file
+	LOGICAL	  DTI_PRINT_HEADER	! print DTI header
+	LOGICAL	  DTI_UNITS		! determine DTI units
+	LOGICAL	  FLRSTR		! read record from file
+	LOGICAL	  REALIN		! reads real numbers
+	LOGICAL	  RDREAL		! reads a lat. lon. coordinate
+	LOGICAL	  READLL		! reads a lat. lon. coordinate
+	LOGICAL	  TTRSTR		! read from tt:
+C
+C ......................................................................
+C
+	OPEN_DTI=.TRUE.			! assume success
+C
+C Attempt to open the DTI file according to the access specified in
+C DTI_ACCESS(LUN) - (readonly, modify or write). Due to the way
+C in which the access control array is built up, it is possible to 
+C use the LUN'th-1 file to get the characteristics for a file
+C that is being created for write access.
+C
+C 1) O P E N   R E A D O N L Y
+	IF (DTI_ACCESS(LUN).EQ.1.OR.DTI_ACCESS(LUN).EQ.2) THEN
+	   OK=DTI_OPEN(LUN,	! LUN
+     &		DTI_NAME(LUN),		! name
+     &		DTI_NAME_LENGTH(LUN),	! name length
+     &		.FALSE.,		! no write access
+     &		IERR,			! error return
+     &		.TRUE.)			! forbid non standard order
+C
+C 2) C R E A T E   F O R    W R I T E
+	ELSEIF (DTI_ACCESS(LUN).EQ.3) THEN
+	   DATA_TYPE(LUN)=DATA_TYPE(LUN-1)	! data type
+	   X_EXTENT(LUN)=X_EXTENT(LUN-1)	! number of cols
+	   Y_EXTENT(LUN)=Y_EXTENT(LUN-1)	! number of rows
+	   X_OFFSET(LUN)=X_OFFSET(LUN-1)
+	   Y_OFFSET(LUN)=Y_OFFSET(LUN-1)
+	   X_GRID(LUN)=X_GRID(LUN-1)
+	   Y_GRID(LUN)=Y_GRID(LUN-1)
+	   MIN_RVALUE(LUN)=MIN_RVALUE(LUN-1)
+	   MAX_RVALUE(LUN)=MAX_RVALUE(LUN-1)
+	   MIN_WVALUE(LUN)=MIN_WVALUE(LUN-1)
+	   MAX_WVALUE(LUN)=MAX_WVALUE(LUN-1)
+	   MIN_LVALUE(LUN)=MIN_LVALUE(LUN-1)
+	   MAX_LVALUE(LUN)=MAX_LVALUE(LUN-1)
+	   OK=DTI_CREATE(LUN,		! lun
+     &		DTI_NAME(LUN),		! file-spec
+     &		DTI_NAME_LENGTH(LUN),	! file-spec length
+     &		HEADER_TYPE(LUN-1),	! header type
+     &	        DATA_OFFSET(LUN-1),	! header length
+     &		DATA_TYPE(LUN),		! data type
+     &		X_EXTENT(LUN),		! number of cols
+     &		Y_EXTENT(LUN),		! number of rows
+     &		IERR)			! error return
+C
+C 3)  O P E N   F O R   R E A D   A N D   W R I T E
+	ELSEIF (DTI_ACCESS(LUN).EQ.4) THEN
+	   OK=DTI_OPEN(LUN,		! LUN
+     &		DTI_NAME(LUN),		! name
+     &		DTI_NAME_LENGTH(LUN),	! name length
+     &		.TRUE.,			! read and write access
+     &		IERR,			! error return
+     &		.TRUE.)			! forbid non standard order
+	ENDIF
+C
+C Unless this is a TED4 DTI, now get the differences between the
+C origin and the bottom l.h. corner of the bounding rectangle, so
+C that the offset of the data can be calculated.
+	IF (OK) THEN
+	   IF (DTI_ACCESS(LUN).EQ.3) THEN
+C
+C Copy the DTI header (ACC and DSI if present) if the file has been
+C created for output
+	      IF (HEADER_TYPE(LUN-1).EQ.HEADER_TYPE(LUN))THEN
+	         OK=DTI_COPY_HEADER(LUN-1,LUN,IERR)
+	         IF (.NOT.OK) THEN
+	           CALL LSL_PUTMSG(OK)
+	           CALL LSL_ADDMSG(IERR)
+	           GOTO 30	        
+	         ENDIF
+	      ENDIF
+
+C
+C Now copy the data from input to output file, column by column
+	      DO 10 I=1,X_EXTENT(LUN)
+	         OK=DTI_COPY_DATA(
+     &		 LUN-1,			! LUN
+     &		 COLUMN,		! a column of data
+     &		 .FALSE.,		! copy from file to array
+     &		 I,			! start col
+     &		 1,			! start row
+     &		 1,			! number of cols
+     &		 Y_EXTENT(LUN-1),	! number of rows
+     &		 IERR)			! system error
+	         IF (.NOT.OK) THEN
+	            CALL LSL_PUTMSG(OK)
+	            CALL LSL_ADDMSG(IERR)
+	            GOTO 30	        ! close file and return
+	         ENDIF
+	         OK=DTI_COPY_DATA(
+     &		 LUN,			! LUN
+     &		 COLUMN,		! a column of data
+     &		 .TRUE.,		! copy from array to file
+     &		 I,			! start col
+     &		 1,			! start row
+     &		 1,			! number of cols
+     &		 Y_EXTENT(LUN-1),	! number of rows
+     &		 IERR)			! system error
+	         IF (.NOT.OK) THEN
+	            CALL LSL_PUTMSG(OK)
+	            CALL LSL_ADDMSG(IERR)
+	            GOTO 30	        ! close file and return
+	         ENDIF
+10	      CONTINUE
+C
+C Now close the DTI file used to copy to the current lun.
+	      OK=DTI_CLOSE(LUN-1,.FALSE.,.FALSE.,IERR)	
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         OPEN_DTI=.FALSE.
+	         GOTO 40		! return unhappy
+	      ENDIF
+	   ELSE
+	      IF (HEADER_TYPE(LUN).EQ.DTI_TED4
+     &		.OR.(HEADER_TYPE(LUN).EQ.DTI_LSLA
+     &				.AND.HAD_PROJ_RECORD(LUN))) THEN
+		  IF (HEADER_TYPE(LUN).EQ.DTI_LSLA
+     &				.AND.HAD_PROJ_RECORD(LUN)) THEN
+		     X_OFFSET(LUN)=DTIPROJ_ORIGIN(1,LUN)
+		     Y_OFFSET(LUN)=DTIPROJ_ORIGIN(2,LUN)
+	          ENDIF
+	      ELSE
+	         CALL WRITEF(
+     &			'Please enter the coordinates of the '//
+     &			'bottom left-hand corner')
+	         CALL WRITEF(
+     &			'of %S',DTI_NAME(LUN)(1:DTI_NAME_LENGTH(LUN)))
+	         IF (TTIN) THEN
+	            CALL BSCH
+	            OK=REALIN('East then North (X then Y) ')
+	            IF (.NOT.OK) GOTO 20
+	            IF (CMDRCT.NE.2) THEN
+	               GOTO 20
+	            ELSE
+	               X_OFFSET(LUN)=REALAR(1)
+	               Y_OFFSET(LUN)=REALAR(2)
+	            ENDIF
+	         ELSE
+	            OK=FLRSTR(,,IERR)	! read from command file
+	            IF (OK) THEN
+	               CALL BSLN
+	               IF (RDREAL(X_OFFSET(LUN))) GOTO 20
+	               IF (RDREAL(Y_OFFSET(LUN))) GOTO 20
+	            ELSE
+	               CALL LSL_PUTMSG(OK)
+	               CALL LSL_ADDMSG(IERR)
+	               GOTO 20
+	            ENDIF
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	   IF (HEADER_TYPE(LUN).EQ.DTI_MIKE) THEN
+	      OK=DTI_PRINT_HEADER(LUN,UNITS_MET)
+	   ELSEIF (HEADER_TYPE(LUN).EQ.DTI_TED4) THEN
+	      OK=DTI_PRINT_HEADER(LUN,UNITS_SEC)
+	   ELSE
+	      UNITS=0
+	      OK=DTI_UNITS(LUN,UNITS)
+	      IF (OK) THEN
+	         OK=DTI_PRINT_HEADER(LUN,UNITS)
+	      ENDIF
+	   ENDIF
+	   IF (OK) THEN
+	      OPEN_DTI=.TRUE.
+	   ELSE
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	   ENDIF
+	ELSE
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	ENDIF
+	IF (OPEN_DTI) THEN
+	   GOTO 40		! return happy
+	ELSE
+	   GOTO 30		! close DTI file (if open), return sad
+	ENDIF
+C
+C If OPEN_DTI is false some form of error has occurred. Check if the DTI
+C file was opened before the error occurred. If it is open close it
+C again and tell the user.
+20	CALL WRITEF('%S reading DTI offset',ERROR)
+	CALL WRITEF('You must specify both the X and the'//
+     &					' Y origin offset')
+30	IF (DTILUN_INUSE(LUN)) THEN
+	   TMP_NAME=DTI_NAME(LUN)
+	   TMP_NAME_LENGTH=DTI_NAME_LENGTH(LUN)
+	   OK=DTI_CLOSE(LUN,.FALSE.,.TRUE.,IERR)	
+	   IF (OK) THEN
+	      CALL WRITEF(
+     &		'DTI file %S is now closed. Please respecify the '
+     &	    //'BLEND command',TMP_NAME(1:TMP_NAME_LENGTH))
+	      DTI_ACCESS(LUN)=0
+	      DTI_LUN=DTI_LUN-1
+	   ELSE
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	   ENDIF
+	ENDIF
+40	RETURN
+	END

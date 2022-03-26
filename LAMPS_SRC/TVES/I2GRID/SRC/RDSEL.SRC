@@ -1,0 +1,212 @@
+	LOGICAL FUNCTION RDSEL(SELCMD,SAVE)
+C
+***	MODULE	RDSEL
+***	IDENT	07MR91
+C
+C Copyright Laser Scan Laboratories Limited, Cambridge, England
+C Author R.Daly.
+C
+CMOD	Version modified from ROVER		MWSR 	19-Jan-1989
+CMOD	SPR1053 - More FRTLIB group space	PGH	 7-Mar-1991
+C
+C Function to read in and check a feature code select or
+C deselect command. The command line is checked for correct
+C syntax and then either (depending on SAVE):-
+C   - put into a buffer until the group definitions are known.
+C   - used to update the bit-map.
+C Function returns TRUE  if error occurs.
+C
+	IMPLICIT NONE
+C
+	LOGICAL*1 SELCMD	! TRUE is SEL cmd, FALSE if DES cmd.
+	LOGICAL*1 SAVE		! store away the command until group
+C				! names are known.
+C
+	INCLUDE	'LSL$CMNI2GRID:BELLS.PAR'
+	INCLUDE	'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE	'LSL$CMNFRT:FRTGRP.CMN'
+	INCLUDE	'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE	'LSL$CMNI2GRID:SELECT.CMN'
+C
+C
+C W/s.
+	INTEGER	CMD		! command number
+	INTEGER I		! loop controls.
+	INTEGER GRPNUM		! number of group in group name table.
+	INTEGER*4 TMPMAP(FCMAX)	! temporary bit-map holding 1's for the
+				! selected/deselected bits for SEL/DES
+				! commands respectively.
+	INTEGER*2 STRPOS,ENDPOS ! start/end positions of argument list.
+	BYTE COMMA		! ASCII constant
+	PARAMETER	(COMMA=44)
+	BYTE CHR
+	INTEGER	COUNT
+C
+C Functions.
+	INTEGER RDCOMM
+	LOGICAL*1 RDRANG,RDCHS,RDCH
+	INTEGER GRPFCT		! FRTLIB
+C
+C***********************************************************************
+C
+C Initialise.
+	RDSEL=.FALSE.
+	COUNT = 0
+C
+C Clear the temporary bit-map.
+	CALL VIOCLR(TMPMAP,FCMAX*4)
+C
+C If saving the command then remember the start position.
+	IF (.NOT.SAVE) GOTO 10
+	IF (RDCHS(CHR)) GOTO 100
+	CALL BSCH
+	STRPOS=DCPTR
+C
+C***********************************************************************
+C
+C Read all the groups and ranges given with this command before
+C updating the bit-map (since don't want to change anything if
+C there is an error). Set up a temporary bit-map to be OR'd or
+C AND NOT'd with the real bit-map when the whole command is decoded
+C (depending on whether it is a select or deselect command).
+10	IF (RDCHS(CHR)) GOTO 50
+	COUNT = COUNT+1
+	IF ((CHR.GE.48).AND.(CHR.LE.57)) GOTO 20	! 0 - 9
+	IF (((CHR.GE.65).AND.(CHR.LE.90)).OR.		! A - Z
+     &	    ((CHR.GE.97).AND.(CHR.LE.122))) GOTO 30	! a - z
+	CALL BSCH	! assume it is the next command.
+	GOTO 94
+C
+C***********************************************************************
+C
+C Got an explicit ft code or range of ft codes.
+20	IF (RDRANG(PAIRS(1,1),PAIRS(2,1))) GOTO 100
+	IF ((PAIRS(1,1).LT.0).OR.(PAIRS(1,1).GT.MAXFC)) GOTO 97
+	IF ((PAIRS(2,1).LT.0).OR.(PAIRS(2,1).GT.MAXFC)) GOTO 98
+	IF (SAVE) GOTO 10
+C Mark up the temporary bit-map.
+	DO 25 I=PAIRS(1,1),PAIRS(2,1)
+	   WORD=I/32
+	   OFFSET=I-WORD*32
+	   CALL LIB$INSV(1,OFFSET,1,TMPMAP(WORD+1))
+25	CONTINUE
+	GOTO 10
+C
+C***********************************************************************
+C
+C Got a group name.
+C Do we want to do anything with it other than check the syntax ?
+30	IF (.NOT.SAVE) GOTO 35
+C Skip through the group name to check the syntax.
+31	IF (RDCH(CHR)) GOTO 50
+	IF (((CHR.GE.65).AND.(CHR.LE.90)).OR.		! A - Z
+     &	    ((CHR.GE.97).AND.(CHR.LE.122))) GOTO 31	! a - z
+	IF ((CHR.GE.48).AND.(CHR.LE.57)) GOTO 31	! 0 - 9
+	IF (CHR.EQ.COMMA) GOTO 10	! check the delimiter.
+	CALL BSCH
+	IF (RDCHS(CHR)) GOTO 50
+	IF (CHR.EQ.COMMA) GOTO 10
+	CALL BSCH
+	GOTO 10
+C Is it a known group name ?
+35	CALL BSCH
+	IF (GRPCNT.LE.0) GOTO 95	! no groups defined for FRT
+	GRPNUM=RDCOMM(%VAL(GRPCMT_LOC))
+	IF (GRPNUM.LE.0) GOTO 99	! bad group name
+	DO 48 I=1,FCMAX
+	   TMPMAP(I)=TMPMAP(I).OR.GRPFCT(I,GRPNUM)
+48	CONTINUE
+	IF (RDCHS(CHR)) GOTO 50
+	IF (CHR.EQ.COMMA) GOTO 10	! check the delimiter.
+	CALL BSCH
+	GOTO 10
+C
+C***********************************************************************
+C
+C We have now finished checking the syntax of the command.
+C Do we want to just save the command until the group definitions
+C are known or do we want to actually update the real bit-map.
+C The updating is done by ORing or AND NOTing the temporary bit-map
+C with the real bit-map (depending on whether it is a SEL or DES
+C command and whether the real bit-map is in select or deselect mode).
+50	IF (COUNT .EQ. 0) GOTO 94
+	IF (SAVE) GOTO 80
+C
+C Update the real bit-map with the contents of the temporary bit-map.
+	IF (SELCMD) GOTO 60
+C Deselecting.
+	DO 55 I=1,FCMAX
+	   FCMAP(I)=FCMAP(I).AND..NOT.TMPMAP(I)
+55	CONTINUE
+	GOTO 1000
+C Selecting - if currently in deselect mode then change to select mode.
+60	IF (FCSMOD) GOTO 70
+	FCSMOD=.TRUE.		! setting to select mode.
+	CALL VIOMV3(TMPMAP,FCMAX*4,FCMAP)
+	GOTO 1000
+70	DO 75 I=1,FCMAX
+	   FCMAP(I)=FCMAP(I).OR.TMPMAP(I)
+75	CONTINUE
+	GOTO 1000
+C
+C***********************************************************************
+C
+C Put the command into a buffer so that it can be accessed later
+C when the group names are defined.
+80	ENDPOS=DCPTR		! position of the end of command.
+	IF (SELPTR.GE.SELMAX) GOTO 96
+	SELPTR=SELPTR+1
+	SELDES(SELPTR)=SELCMD	! remember which command it is.
+	DO 90 I=1,ENDPOS-STRPOS	! store the argument list.
+	   SELBUF(I,SELPTR)=TXTBUF(I+STRPOS-1)
+90	CONTINUE
+	GOTO 1000
+C
+C***********************************************************************
+C
+C Errors.
+94	IF(SELCMD)THEN
+	   CALL WRITEF('%S Specifying command SELECT FC',ERRBELL)
+	ELSE
+	   CALL WRITEF('%S Specifying command DESELECT FC',ERRBELL)
+	ENDIF
+	CALL WRITEF('Unable to read FC value')
+	GOTO 100
+95	IF (SELCMD) THEN
+	   CALL WRITEF('%S Specifying command SELECT FC',ERRBELL)
+	ELSE
+	   CALL WRITEF('%S Specifying command DESELECT FC',ERRBELL)
+	ENDIF
+	CALL WRITEF('No groups have been defined in the FRT.')
+	GOTO 100
+96	IF (SELCMD) THEN
+	   CALL WRITEF('%S Specifying command SELECT FC',ERRBELL)
+	ELSE
+	   CALL WRITEF('%S Specifying command DESELECT FC',ERRBELL)
+	ENDIF
+	CALL WRITEF('Max number of SEL/DES commands allowed exceeded.')
+	GOTO 1000
+97	IF (SELCMD) THEN
+	   CALL WRITEF('%S Specifying command SELECT FC',ERRBELL)
+	ELSE
+	   CALL WRITEF('%S Specifying command DESELECT FC',ERRBELL)
+	ENDIF
+	CALL WRITEF('Illegal feature code %^L%N.',PAIRS(1,1))
+	GOTO 100
+98	IF (SELCMD) THEN
+	   CALL WRITEF('%S Specifying command SELECT FC',ERRBELL)
+	ELSE
+	   CALL WRITEF('%S Specifying command DESELECT FC',ERRBELL)
+	ENDIF
+	CALL WRITEF('Illegal feature code %^L%N.',PAIRS(2,1))
+	GOTO 100
+99	IF (SELCMD) THEN
+	   CALL WRITEF('%S Specifying command SELECT FC',ERRBELL)
+	ELSE
+	   CALL WRITEF('%S Specifying command DESELECT FC',ERRBELL)
+	ENDIF
+	CALL WRITEF('Bad group name ''%S''',CMDNST)
+100	RDSEL=.TRUE.		! reject the rest of the command line.
+1000	RETURN
+C
+	END

@@ -11,7 +11,8 @@ $!  Laser-Scan VAX/VMS Operators Command File
 $!
 $!  Copyright (c) 1985 :  Laser-Scan Labs Ltd., Cambridge, England
 $!
-$!  Version for LKB (without [Dis]Mount		RWR	 2-Sep-1986
+$!  Add Day command				WJJ	31-Aug-1989
+$!  Add Secure stuff				WJJ	21-Jun-1988
 $!  [Dis]Mount command added		V2.1	PWD	12-Dec-1985
 $!  Recoded				V2.0	PWD	 8-Nov-1985
 $!
@@ -29,6 +30,25 @@ $	cpu_type = f$getsyi("CPU")
 $	no_ocom = 0
 $	this_time = f$time()
 $!
+$! Issue a reminder that there is something in the SECURE queue(s)?
+$!
+$	sec_queue=f$file_attributes("lsl$secure:archdir.dat","EOF")
+$	if sec_queue .ne. 0 then goto secure_message
+$	sec_queue=f$file_attributes("lsl$secure:restdir.dat","EOF")
+$	if sec_queue .eq. 0 then goto no_secure
+$!
+$ secure_message:
+$ 	write sys$output ""
+$	type sys$input
+
+  --------------------------------------------------------------------------
+  |  There is something in one of the SECURE queues. Can someone from the  |
+  |  Bureau please perform the SECURE magtape procedure.                   |
+  --------------------------------------------------------------------------
+
+$ no_secure:
+$!
+$!
 $! Top level help (print this when they logon too)...
 $!
 $OPER$C_help:
@@ -39,16 +59,21 @@ $	Type sys$input:
 
 Commands:  EMergency	-	Stop the processor quickly
 	   SHUtdown	-	Shutdown the processor gently
+	   Console	-	Connect the system console device
 
 	   Queue	-	Enter Queue Management sub-procedure
 	   Terminal	-	Enter Terminal management sub-procedure
 
 	   Archive	-	Archive a disk
+	   Secure	-	Secure/restore some files
+	   MOUnt	-	Mount facility sub-procedure (Mount)
+	   Dismount	-	Mount facility sub-procedure (Dismount)
 
 	   Monitor	-	Monitor the system
 	   Show		-	Monitor the system
 	   Who		-	Show the current users (Interactive only)
 	   Broadcast	-	Send a message to interactive users
+	   Day		-	Amend message of the day
 
 	   Help		-	Print this list
 	   Exit		-	Logoff
@@ -76,16 +101,18 @@ $!
 $! NB Order in this list IS significant...
 $	If f$locate(scom, "ARCHIVE") .eq. 0 then fcom = "ARCHIVE"
 $	If f$locate(scom, "BROADCAST") .eq. 0 then fcom = "BROADCAST"
-$!	If f$locate(scom, "CONSOLE") .eq. 0 then fcom = "CONSOLE"
-$!	If f$locate(scom, "DISMOUNT") .eq. 0 then fcom = "DISMOUNT"
+$	If f$locate(scom, "CONSOLE") .eq. 0 then fcom = "CONSOLE"
+$	If f$locate(scom, "DAY") .eq. 0 then fcom = "DAY"
+$	If f$locate(scom, "DISMOUNT") .eq. 0 then fcom = "DISMOUNT"
 $	If f$locate(scom, "EMERGENCY") .eq. 0 then fcom = "EMERGENCY"
 $	If f$locate(scom, "EXIT") .eq. 0 then fcom = "EXIT"
 $	If f$locate(scom, "GREMLIN") .eq. 0 then fcom = "GREMLIN"
 $	If f$locate(scom, "HELP") .eq. 0 then fcom = "HELP"
 $	If f$locate(scom, "LOGOFF") .eq. 0 then fcom = "LOGOFF"
-$!	If f$locate(scom, "MOUNT") .eq. 0 then fcom = "MOUNT"
+$	If f$locate(scom, "MOUNT") .eq. 0 then fcom = "MOUNT"
 $	If f$locate(scom, "MONITOR") .eq. 0 then fcom = "MONITOR"
 $	If f$locate(scom, "QUEUE") .eq. 0 then fcom = "QUEUE"
+$	If f$locate(scom, "SECURE") .eq. 0 then fcom = "SECURE"
 $	If f$locate(scom, "SHUTDOWN") .eq. 0 then fcom = "SHUTDOWN"
 $	If f$locate(scom, "SHOW") .eq. 0 then fcom = "SHOW"
 $	If f$locate(scom, "TERMINAL") .eq. 0 then fcom = "TERMINAL"
@@ -102,18 +129,20 @@ $!
 $! The Gremlin command...
 $!
 $OPER$C_gremlin:
-$	If ocom .nes. "GREMLIN" then Goto bad_com
+$	If scom .nes. "GREMLIN" then Goto bad_com
 $	If disable_gremlin then Goto OPER$_nogremlin
+$	If ocom .nes. "GREMLIN 42" then Goto OPER$_nogremlin
 $	If savver then set verify ! 'f$verify("0")'
 $	Exit
 $!
 $OPER$_nogremlin:	
-$	Write sys$output "%OPER-E-NOGREMLIN The Gremlin has been liquidated"
+$	Write sys$output "%OPER-E-NOGREMLIN The Gremlin will not help you today"
 $	Goto bad_com
 $!
 $! The EXIT command...
 $!
 $OPER$C_exit:		If f$environment("CAPTIVE") then Logout/brief
+$			logout/brief
 $			If savver then set verify ! 'f$verify("0")'
 $			Exit
 $!
@@ -138,6 +167,13 @@ $			SHOW ERROR
 $			@sys$system:shutdown
 $			Goto get_com
 $!
+$! The console command...
+$!
+$OPER$C_console:	Run sys$system:sysgen
+		Connect console
+		Exit
+$			Goto get_com
+$!
 $! The Monitor & Show commands...
 $!
 $!	Note that these are unusual - if they are followed by text then
@@ -152,6 +188,27 @@ $	mcom = f$edit(mcom, "TRIM")
 $	On control_y then continue
 $	If mcom .eqs. "" then monitor/norecord/nosummary processes
 $	If mcom .nes. "" then 'ocom'
+$	Goto get_com
+$!
+$! The Mount command...
+$!
+$!	Beware, an inappropriate mount command can cause the process to hang.
+$!
+$OPER$C_mount:
+$	Write sys$output "%OPER-I-MOUNTREQ  Please complete the following Mount command ..."
+$	Write sys$output "-OPER-I-MOREMOUNT NB All parameters must be provided on the command line"
+$	Write sys$output "-OPER-I-WARNMOUNT NB An inappropriate mount command can hang the process"
+$	Read/error=get_com/timeout=255/prompt="MOUNT> Mount/noassist" sys$command mount_com
+$	Mount/noassist'mount_com'
+$	Goto get_com
+$!
+$! The Dismount command...
+$!
+$OPER$C_dismount:
+$	Write sys$output "%OPER-I-DISMOUNTREQ Please complete the following Dismount command"
+$	Write sys$output "-OPER-I-MOREMOUNT   NB All parameters must be provided on the command line"
+$	Read/error=get_com/timeout=255/prompt="DISMOUNT> Dismount/nounload" sys$command mount_com
+$	Dismount/nounload'mount_com'
 $	Goto get_com
 $!
 $! The who command...
@@ -172,25 +229,35 @@ $		message = message-"""
 $		Reply/user/bell "''message'"
 $		Goto get_com
 $!
+$! The Day command
+$! Control message of the day
+$!
+$OPER$C_day:
+$		@lsl$system_root:[com]welcome
+$		Goto get_com
+$!
 $! The Archive command...
 $! Wait up to 4 minutes for a disk name...
 $!
 $OPER$C_archive:
 $	On error then goto get_com
-$	disk = "0"
-$	Read/error=get_com/timeout=255/prompt="Archive which disk (0,1,2,3 or 4) ? " sys$command disk
+$	Read/error=get_com/timeout=255/prompt="Archive which disk (0-8) ? " -
+			sys$command disk
 $	disk = f$edit(disk, "TRIM")
 $	If disk .eqs. "0" then goto got_disk
 $	If disk .eqs. "1" then goto got_disk
 $	If disk .eqs. "2" then goto got_disk
 $	If disk .eqs. "3" then goto got_disk
 $	If disk .eqs. "4" then goto got_disk
+$	If disk .eqs. "5" then goto got_disk
+$	If disk .eqs. "6" then goto got_disk
 $	If disk .eqs. "7" then goto got_disk
+$	If disk .eqs. "8" then goto got_disk
 $!
 $	Write sys$output "%OPER-E-BADDISK ''disk' is not a valid disk number"
 $	Goto get_com
 $!
-$got_disk:	@sys$sysdevice:[oper]archive 'disk'
+$got_disk:  @lsl$system_root:[com]archive 'disk'
 $		Goto get_com
 $!
 $! The Terminal command... this is lifted from TERMINAL.COM...
@@ -489,6 +556,12 @@ $! Come here if there isn't a queue selected
 $!
 $noq_sel:	Write sys$output "%QUEUE-E-NOQ No queue has been selected yet"
 $		Goto get_qcom
+$!
+$! Secure procedure
+$!
+$OPER$C_secure:
+$		@LSL$COM:SECURE
+$		Goto get_com
 $!
 $! Main timeout exit...
 $!

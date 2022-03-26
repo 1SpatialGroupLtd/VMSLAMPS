@@ -1,0 +1,193 @@
+	SUBROUTINE INTCMD(NXTADR,NXTCHS,NXTPTR,NXTINP,NXTARGL,NXTARG,
+     &					EPTR,GOT,NOSAVE)
+C
+***	IDENT	09MY96
+***	MODULE	INTCMD
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RJH	09-NOV-1984
+C
+C LITES2 command interface - interpret command.
+C
+C Entered with auxiliary buffer set onto command (by ASTYPE).
+C The routine interprets the line and exits with an auxiliary buffer
+C set back onto the original line ready for ASTYPE to read up to
+C the next separator (#).
+C
+C (1) Check for a label and step over it
+C (2) If line cannot be parsed (because of un-substituted variables) then
+C nothing is done.
+C (3) Check for command file directive (@) and process filename.
+C (4) If no escape character (%), try to read macro name.
+C (5) Otherwise try for primitive command.
+C
+C First six arguments are stack values for current line. These may
+C be modified.
+C Other arguments are a pointer to the end of the command, a flag
+C to indicate the command reading is complete (GOT), and another flag
+C (NOSAVE) to indicate whether current line details can be saved on the
+C stack after return.
+C
+	IMPLICIT NONE
+C
+***     PARAMETER/CMN:CHARS/		! character constants
+***     PARAMETER/CMN:MACMEN/		! macros, menus and puck buttons
+***     PARAMETER/CMN:MERPAR/		! macro error constants
+***     PARAMETER/CMN:MOANMESS/		! moan constants
+C
+***	COMMON/CMN:DMACRD/		! macro reading results
+***     COMMON/CMN:DVAR/		! command decoding variables
+***     COMMON/CMN:GLOBAL/		! global variables
+***     COMMON/CMN:MACRO/		! macro variables
+***     COMMON/LSL$CMNLSL:TXTC/
+C
+C Arguments
+C
+	INTEGER*4	NXTADR		! buffer address
+	INTEGER*4	NXTCHS		! buffer length
+	INTEGER*4	NXTARGL		! argument string length
+	INTEGER*2	NXTPTR		! buffer decode pointer
+	INTEGER*2	EPTR		! pointer to end of command
+	INTEGER*4	NXTINP		! input line external ?
+	LOGICAL		GOT		! finished reading ?
+	LOGICAL		NOSAVE		! stack not to be pushed ?
+	CHARACTER*(*)	NXTARG		! argument string
+C
+C Functions
+C
+	INTEGER		LIB$EXTV
+	INTEGER*4	FINMAC		! finds macro name
+	LOGICAL		STORE		! store command in a macro ?
+	LOGICAL		SPECH		! special character found ?
+	LOGICAL		RSPINP		! 2nd. level interactive input ?
+	LOGICAL		RDCHS		! read next sig char
+	INTEGER		GETLAB
+	INTEGER*2	GET_VARWORD
+	INTEGER*4	GET_VARLONG
+C
+C Local Parameters
+C
+	INTEGER*4	OVRIDE		! override code
+	PARAMETER	(OVRIDE = -999)
+C
+C Local variables
+C
+	INTEGER*4	CODE		! macro read return code
+	INTEGER*2	SAVDP		! saved decode pointer
+	BYTE		CH
+C
+C Initialisation
+C
+	CODE = OVRIDE			! assume override macro reading
+	GOT = .FALSE.			! not got anything yet
+	NOSAVE = .FALSE.		! assume can save line details
+C
+C Check for the special character denoting a label, and if found,
+C process the label.
+C 
+	IF (SPECH(DOT)) THEN
+	   TXTPTR = TXTLIM
+	   TXTPTR = GETLAB(TXTDSC,.TRUE.)
+	   IF (MOANED) THEN
+	      GOT = .TRUE.
+	      GOTO 999
+	   ENDIF
+C
+C Check for something else on line
+	   IF (RDCHS(CH)) THEN		! nothing
+	      DNPARS = .TRUE.		! don't try further parsing
+	      DIGN = .NOT.STORE()	! ignore command unless macro
+	   ELSE
+	      CALL BSCH
+	   ENDIF
+	ENDIF
+C
+C If line cannot be parsed, (defining a macro and line has quotes in it)
+C just skip to end of it
+C
+	IF (DNPARS) THEN
+	   GOT = .TRUE.			! got everything
+C
+C Check for the special character denoting a command file, and if found,
+C process the filename.
+C 
+	ELSEIF (SPECH(AT)) THEN
+	   IF (RSPINP()) THEN		! 2nd. level interactive input
+	      CALL MOAN(MSG_CMDFILFORBID)
+	   ELSE				! command file allowed
+	      CALL PROFIL
+	   ENDIF
+	   GOT = .TRUE.
+	ELSE
+C
+C Check for escape character, and if not found, attempt to read as
+C a macro, otherwise clear DMACN to signal no macro
+C
+	   IF (.NOT. SPECH(ESC)) THEN
+	      CALL DCPSAV(SAVDP)	! save pointer
+	      CODE = FINMAC(.TRUE.)
+	   ELSE
+	      DMACN = 0
+	   ENDIF
+C
+C If the name was found in the table, check that length not zero.
+C If non-zero, and a macro is not being defined, the details of the
+C current line are saved, and the macro just found becomes the
+C current line.
+C
+	   IF (CODE .EQ. 0) THEN		! got macro name
+	      IF (GET_VARWORD(%VAL(MACDSW_ADDR),1,DMACN)
+     &	                          .LE. 0) THEN	! length of macro
+		 GOT = .TRUE.			! got everything
+		 DIGN = .NOT.STORE()		! ignore macro
+	      ELSE
+		 IF (STORE()) THEN		! defining macro
+		    GOT = .TRUE.		! got all we need
+		 ELSE				! executing macro
+		    CALL PSHSTK(NXTADR,NXTCHS,EPTR,NXTINP,NXTARGL,NXTARG)
+		    NOSAVE = MOANED
+		    IF (.NOT. MOANED) THEN
+		       NXTADR = GET_VARLONG(%VAL(MACDSL_ADDR),2,DMACN)
+		       NXTCHS = GET_VARWORD(%VAL(MACDSW_ADDR),1,DMACN) 
+C
+C get encrypted flag (0 or -1)
+C if set (-1) then use flag -2 (negative, but bottom bit not set)
+	               NXTINP = LIB$EXTV(DMACN-1,1,%VAL(MACENC_ADDR))
+	               IF (NXTINP.LT.0) THEN
+	                  NXTINP = -2
+CCC	                  JOUFCE = .TRUE.
+CCC	                  CALL JOUCMD	! journal MACRO call
+CCC	                  JOUFCE = .FALSE.
+	               ENDIF
+	               NXTARGL = DMARGL			! argument length
+	               IF (NXTARGL.GT.0) NXTARG(:NXTARGL) = DMARG(:NXTARGL)
+		       CALL SETAUX(%VAL(NXTADR),NXTCHS)	! new buffer
+		       CALL STAFST(NXTPTR)		! to 1st. cmd
+	               GOTO 1000	! exit with this buffer
+		    ENDIF
+		 ENDIF
+	      ENDIF
+C
+C If the name was not found in the table, or if the macro reading
+C override mechanism has been used, read the name as a command
+C
+	   ELSE IF ((CODE .EQ. MERUXS) .OR. (CODE .EQ. OVRIDE)) THEN
+	      IF (CODE .NE. OVRIDE) CALL DCPSET(SAVDP)
+	      CALL PROCMD		! process command
+	      GOT = .TRUE.		! got everything
+C
+C If there was an error reading the name as a macro, output the 
+C appropriate message
+C
+	   ELSE
+	      CALL ERRMAC(CODE,'macro')		! output message
+	   ENDIF
+	ENDIF
+C
+C reset the auxiliary buffer
+999	CALL SETAUX(%VAL(NXTADR),NXTCHS)
+	CALL DCPSET(EPTR)
+C
+1000	RETURN
+	END

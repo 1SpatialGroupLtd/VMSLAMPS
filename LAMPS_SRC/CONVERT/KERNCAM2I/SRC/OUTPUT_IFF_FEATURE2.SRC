@@ -1,0 +1,457 @@
+	SUBROUTINE OUTPUT_IFF_FEATURE
+C
+***	IDENT	09AP96
+***	MODULE	OUTPUT_IFF_FEATURE
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author J Barber 14 Sep 1988 for KERNCAM2I
+C
+CMOD    revisions for extend format             		JDB 28-Oct-1988
+C
+CMOD    Single point line features deleted      		JDB 11-Nov-1988
+C
+CMOD    Prevent FSN from overflowing by resetting		ST  09-Apr-1996
+C       it to zero after each 32767. Mod 1537
+C
+C This routine creates the IFF features whenever called in 
+C   READ_KERN_MAIN at any coordinate string encountered with
+C   values in XVALUE, YVALUE, ZVALUE or PEN UP/DOWN encountered
+C
+C KERN CAM normal linear feature consists of:
+C
+C    descriptive
+C      lines
+C    CHANGE TO PEN UP
+C    X Y Z
+C    CHANGE TO PEN DOWN
+C    X Y Z
+C     ..
+C    X Y Z
+C
+C certain deviations from this norm can be coped with, others will
+C   eg. create line features with only point
+C
+C if no IFF feature present, start one
+C
+	IMPLICIT NONE
+C
+C common blocks...
+C
+***     PARAMETER/HERE:KERNCAM2IMSG/
+***     COMMON/LSL$CMNFRT:FRTACD/
+***     COMMON/LSL$CMNIFF:IFFHAN/
+***     COMMON/LSL$CMNIFF:MD2DES/
+***     COMMON/HERE:BUFFER/
+***	COMMON/HERE:DESCR/
+***     COMMON/HERE:PARAMS/
+C
+C  functions
+C
+        LOGICAL           ACDFND_NAME
+        LOGICAL           READ_COORD_LINE
+        INTEGER           READ_LINE
+C
+C  workspace...
+C
+        INTEGER           RETVAL
+        INTEGER*2         FSN
+        INTEGER*2         NPTS
+        INTEGER*2         NPT,IEND          ! for single extra point
+        INTEGER*2         ZERO
+        INTEGER*2         ISTAT(4)
+        INTEGER*2         ACTYPE
+        INTEGER*2         ACLEN
+C
+        REAL              ACSCALE           ! real ver of SCALE
+        REAL              ZSBUF(3,200)
+C
+C  stored coordinates for comparisons within the same feature
+C
+        REAL*8            LAST_COORD(3)
+        LOGICAL           LAST_COORD_SET
+        REAL*8            DIFF(3)
+C
+        BYTE              ACTEXT(80)        ! bytes for AC text
+C
+        DATA              ISTAT/0,0,0,0/
+C
+C **********************************************************
+C  not had coordinates output to ZS yet
+C
+        LAST_COORD_SET = .FALSE.
+C
+C  if not the first coordinate, skip the first IFF entries
+C
+4       IF (INFTR) GOTO 10
+C
+C  first coordinates for new feature so create the collected 
+C    entries so far
+C
+5       COUNT = COUNT + 1
+C
+C  store NF position for HAD_NETWORK repositioning
+C
+        LPOSNF = LPOSE
+C
+C Make sure the FSN does not overflow a 2-byte INTEGER
+C
+	IF (MOD(COUNT,65536).EQ.0) COUNT= 0
+        ZERO = 0
+        CALL IFFNF (count, ZERO)
+C
+        INFTR = .TRUE.
+C
+C  set feature code
+C
+        LPOSFS = LPOSE
+C
+        ISTAT(1) = IFC
+        ISTAT(3) = 0
+C
+        CALL IFFFS (ISTAT)
+C
+C  any AC entries
+C
+        IF (HAD_AC_HOUR) THEN
+C
+           IF (ACDFND_NAME ('Kern_hour', RETVAL)) THEN
+              CALL LSL_PUTMSG (KERN2I__ACDFNDERR, 'Kern_hour')
+           ELSE 
+              ACTYPE = ACD_CODE
+              CALL IFFAC (ACTYPE, HOUR)
+           ENDIF
+        ENDIF
+C
+        IF (HAD_AC_SCALE) THEN
+C
+           ACSCALE = SCALE           ! convert to real
+C
+           IF (ACDFND_NAME ('Kern_scale', RETVAL)) THEN
+              CALL LSL_PUTMSG (KERN2I__ACDFNDERR, 'Kern_scale')
+           ELSE 
+              ACTYPE = ACD_CODE
+              CALL IFFAC (ACTYPE, ACSCALE)
+           ENDIF
+        ENDIF
+C
+        IF (HAD_FC_NAME) THEN
+C
+           IF (ACDFND_NAME ('Kern_FC_name', RETVAL)) THEN
+              CALL LSL_PUTMSG (KERN2I__ACDFNDERR, 'Kern_FC_name')
+           ELSE 
+              ACTYPE = ACD_CODE
+              CALL EXPAND ('%W%S', ACTEXT(1), 
+     &                                     FC_NAME(:FC_NAME_LEN))
+              ACLEN = FC_NAME_LEN
+              CALL IFFAC (ACTYPE, FC_NAME_LEN, ACTEXT, ACLEN)    
+           ENDIF
+        ENDIF
+C
+C   output any coordinate comments/names
+C
+        IF (HAD_ZS_NAME) THEN
+C
+           IF (ACDFND_NAME ('Kern_ZS_name', RETVAL)) THEN
+              CALL LSL_PUTMSG (KERN2I__ACDFNDERR, 'Kern_ZS_name')
+           ELSE 
+              ACTYPE = ACD_CODE
+              CALL EXPAND ('%W%S', ACTEXT(1), 
+     &                                     ZS_NAME(:ZS_NAME_LEN))
+              ACLEN = ZS_NAME_LEN
+              CALL IFFAC (ACTYPE, ZS_NAME_LEN, ACTEXT, ACLEN)    
+           ENDIF
+        ENDIF
+C
+C  if no last pen instruction, or only PEN DOWN, ie no PEN UP, then 
+C    we must create a first ZS entry with a single coordinate equal 
+C    to the last coordinate of the last feature and with a pen up 
+C    flag set
+C
+        IF (.NOT.PEN_UP .AND. LAST_ZS_COORD_SET) THEN
+           IEND = 0
+           NPT  = 1
+C
+           ZSBUF(1,1) = LAST_ZS_COORD(1)
+           ZSBUF(2,1) = LAST_ZS_COORD(2)
+           ZSBUF(3,1) = LAST_ZS_COORD(3)
+C
+           CALL IFFZS (ZSBUF, NPT, IEND)
+           TPTS = TPTS + NPT
+           STCNT = 0
+C
+C  pretend that there was a PEN UP at the beginning of the feature
+C    for next coordinate line encountered
+C
+           PEN_UP = .TRUE.
+C
+C  set pen down for next ZS
+C
+           IENDS = 1
+        ENDIF
+C
+C  initialise point counters
+C
+9       STCNT = 0                
+C
+C  next the coordinates
+C  if the coordinate is the same as the last one in the feature, 
+C    then skip over it
+C
+10      IF (LAST_COORD_SET) THEN
+           DIFF(1) = ABS(XVALUE - MD2LOC(1) - LAST_COORD(1))
+           DIFF(2) = ABS(YVALUE - MD2LOC(2) - LAST_COORD(2))
+           DIFF(3) = ABS(ZVALUE - LAST_COORD(3))
+C
+           IF (DIFF(1).LE.0.0005D0 .AND. DIFF(2).LE.0.0005D0 .AND.
+     &         DIFF(3).LE.0.0005D0) GOTO 20
+        ENDIF
+C
+15      STCNT = STCNT + 1
+C
+C  not more than 200 points allowed in ZS block
+C
+        IF (STCNT.EQ.201) THEN
+           NPTS = 200
+           CALL IFFZS (ZSBUF, NPTS, IENDS)
+           TPTS = TPTS + NPTS
+C
+C  start a new block
+C
+           STCNT = 1
+        ENDIF
+C
+        ZSBUF (1,STCNT) = XVALUE - MD2LOC(1)
+        ZSBUF (2,STCNT) = YVALUE - MD2LOC(2)
+        ZSBUF (3,STCNT) = ZVALUE
+C
+C  store last coordinate added to compare with next
+C
+        LAST_COORD(1) = XVALUE - MD2LOC(1)
+        LAST_COORD(2) = YVALUE - MD2LOC(2)
+        LAST_COORD(3) = ZVALUE
+        LAST_COORD_SET = .TRUE.
+C
+C  get next line - allowable lines while in the same feature are
+C     CHANGE TO PEN DOWN or more coordinates
+C  if CHANGE TO PEN UP then start a new feature with existing 
+C     parameters
+C  otherwise RETURN to normal program reading
+C
+20      RETVAL = READ_LINE()
+        IF (.NOT.RETVAL) THEN
+           CALL LSL_PUTMSG (KERN2I__READLINERR)
+           GOTO 999
+        ENDIF
+C
+25      IF (STRING(1:16).EQ.'CHANGE TO PEN UP') THEN
+C
+           PEN_UP   = .TRUE.
+C
+           IF (.NOT.INFTR) GOTO 30
+C
+C   Found an invisible move inside a feature so
+C     finish this current IFF feature, 
+C     and start a new one using existing parameters
+C
+           IF (STCNT.GT.0) THEN
+      	      NPTS = STCNT
+	      CALL IFFZS (ZSBUF, NPTS, IENDS)
+              TPTS = TPTS + NPTS
+              STCNT = 0                     ! reset point count
+           ENDIF
+C
+C  if line feature with only point, delete it
+C
+           IF (TPTS.LE.1) THEN
+              CALL IFFDEL
+              DELETED = .TRUE.
+C
+              LAST_ZS_COORD(1) = LAST_COORD(1)
+              LAST_ZS_COORD(2) = LAST_COORD(2)
+              LAST_ZS_COORD(3) = LAST_COORD(3)
+C
+              COUNT = COUNT - 1
+              GOTO 31
+           ENDIF
+C
+C  if HAD_FC_ARC change the feature accordingly
+C
+           IF (HAD_FC_ARC) CALL OUTPUT_ARC
+C
+	   CALL IFFEF
+C
+31         TPTS = 0
+	   INFTR = .FALSE.
+C
+C  store very last coordinate for next feature if required
+C
+           LAST_ZS_COORD(1) = XVALUE - MD2LOC(1)
+           LAST_ZS_COORD(2) = YVALUE - MD2LOC(2)
+           LAST_ZS_COORD(3) = ZVALUE
+           LAST_ZS_COORD_SET = .TRUE.
+C
+           LAST_COORD_SET = .FALSE.
+C
+C  output the network symbol features if relevent
+C
+           IF (HAD_NETWORK) CALL OUTPUT_NETWORK
+C
+30         IENDS = 0
+C
+C   read next line for coordinates
+C
+           RETVAL = READ_LINE()
+           IF (.NOT.RETVAL) THEN
+              CALL LSL_PUTMSG (KERN2I__READLINERR)
+              GOTO 999
+           ENDIF
+C
+C  if not coordinates, go to main loop to process
+C
+           IF (.NOT.READ_COORD_LINE()) GOTO 25
+C
+C  and start new feature with coordinates
+C
+	   GOTO 5
+C
+        ELSEIF (STRING(1:18).EQ.'CHANGE TO PEN DOWN') THEN
+C
+           PEN_UP   = .FALSE.
+C
+C   read next line for coordinates
+C
+           RETVAL = READ_LINE()
+           IF (.NOT.RETVAL) THEN
+              CALL LSL_PUTMSG (KERN2I__READLINERR)
+              GOTO 999
+           ENDIF
+C
+           IF (.NOT.READ_COORD_LINE()) GOTO 25
+C
+C  coordinates
+C
+           IF (INFTR) THEN
+              GOTO 10             ! add to coordinate block
+           ELSE
+              GOTO 5              ! start new feature
+           ENDIF
+C
+        ELSE
+C
+C   STRING with don't know what - try reading a number
+C
+           IF (.NOT.READ_COORD_LINE()) THEN
+C
+C  not coordinates so return to file reading with STRING in hand
+C    if it is a processable line after outputting existing ZS block
+C    otherwise continue with a new feature with the same parameters
+C
+C  list of processable lines so that END_FEATURE can be used to reset 
+C    everything, otherwise just use IFFEF and start another feature
+C    with the same parameters
+C
+              IF (STRING(1:10).EQ.'CHANGE TO ') THEN
+                 IF (STRING(11:22).EQ.'END HATCHING') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:24).EQ.'START HATCHING') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:18).EQ.'LINETYPE') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:17).EQ.'CONTOUR') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:15).EQ.'CURVE') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:13).EQ.'ARC') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:14).EQ.'HOUR') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:15).EQ.'SCALE') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:25).EQ.'SYMBOL ROTATION') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:23).EQ.'TEXT ROTATION') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:16).EQ.'SYMBOL') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:17).EQ.'NETWORK') THEN
+                    GOTO 999
+                 ELSEIF (STRING(11:16).EQ.'PEN UP') THEN
+                    PEN_UP   = .TRUE.
+                    GOTO 25
+                 ELSEIF (STRING(11:18).EQ.'PEN DOWN') THEN
+                    PEN_UP   = .FALSE.
+                    GOTO 25
+                 ENDIF
+C
+              ELSEIF (STRING(1:4).EQ.'QUIT') THEN
+                 GOTO 999
+              ENDIF
+C
+C  not a processable line, which will be ignored so get next line
+C
+              GOTO 20
+C
+           ELSE
+C
+C  have more coordinates, add them to coordinate block, output 
+C    them to ZS entry
+C
+              GOTO 10
+           ENDIF
+C
+        ENDIF
+C
+C  exit, output any coordinates before leaving
+C
+999     IF (INFTR) THEN
+           IF (STCNT.GT.0) THEN
+              NPTS = STCNT
+              CALL IFFZS (ZSBUF, NPTS, IENDS)
+              TPTS = TPTS + NPTS
+           ENDIF
+C
+C  if line feature with only point, delete it
+C
+           IF (TPTS.LE.1) THEN
+              CALL IFFDEL
+              DELETED = .TRUE.
+C
+              LAST_ZS_COORD(1) = LAST_COORD(1)
+              LAST_ZS_COORD(2) = LAST_COORD(2)
+              LAST_ZS_COORD(3) = LAST_COORD(3)
+C
+              COUNT = COUNT - 1
+              GOTO 1000
+           ENDIF
+C
+C  if HAD_FC_ARC change the feature accordingly
+C
+           IF (HAD_FC_ARC) CALL OUTPUT_ARC
+C
+C  dont wipe out parameters just yet, but output network symbol
+C    features with the same IFF entries as this feature, if 
+C    relevent
+C
+           CALL IFFEF
+C
+1000       TPTS = 0
+           INFTR = .FALSE.
+C
+           IF (HAD_NETWORK) CALL OUTPUT_NETWORK
+        ENDIF
+C
+C  now reset everything
+C
+        CALL END_FEATURE
+C
+C  store very last coordinate for next feature if required
+C
+        LAST_ZS_COORD(1) = XVALUE - MD2LOC(1)
+        LAST_ZS_COORD(2) = YVALUE - MD2LOC(2)
+        LAST_ZS_COORD(3) = ZVALUE
+        LAST_ZS_COORD_SET = .TRUE.
+C
+	RETURN
+	END                  
+C

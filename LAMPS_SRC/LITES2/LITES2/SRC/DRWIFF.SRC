@@ -1,0 +1,300 @@
+	SUBROUTINE DRWIFF
+C
+***	IDENT	26AU92
+***	MODULE	DRWIFF
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England.
+C
+C	Created					VLG	2-Nov-1989
+C
+C	LITES2 cartographic editor DRAW IFF command.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:EFNLUN/
+***     PARAMETER/CMN:MOANMESS/		! moan constants
+C
+***	COMMON/CMN:DOUT/		! command decoder output
+***	COMMON/CMN:DRAWIN/
+***	COMMON/LSL$CMNLSL:FILENAME/	! for maximum length of filename
+***	COMMON/CMN:FILES/		! filename details
+***	COMMON/LSL$CMNFRT:FRTACD/
+***	COMMON/LSL$CMNIFF:IFFHAN/	! IFF library interface
+***	COMMON/CMN:LABELS/
+***	COMMON/CMN:MAPS/		! multiple map details
+***	COMMON/CMN:MASTER/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/LSL$CMNIFF:MHDEF/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:PLOT/
+***	COMMON/CMN:RFCTRL/
+***	COMMON/CMN:SCALES/
+***	COMMON/LSL$CMNFRT:SRISCL/
+C
+C Functions called
+	REAL*4	CURTOL		! calculates curve tolerance
+	LOGICAL	PARFILN		! parses a filename
+C
+C External functions for MSGCMD
+	EXTERNAL	LEARN
+	EXTERNAL	MOAN
+C
+C Local variables
+	LOGICAL		HAD_DISPLAY
+	LOGICAL		HAD_SETANNO
+	LOGICAL		HADRA
+	LOGICAL		HADMD
+	LOGICAL		HADMH
+	LOGICAL		SAV_DISPLAY_HADLIM
+	LOGICAL		SAV_OVERLAYS_INUSE
+	REAL		SAV_DISPLAY_LIMITS(4)
+	REAL		SAV_CIDIFF(2)	! no. of interpolated points
+					! per IFF unit for drawn circles
+	REAL		SAV_SCLFRT	! conversion factor FRT->IFF
+	REAL 		SAV_SCLDIS	! conversion factor screen mm->IFF
+	REAL		SAV_NOMLW
+	INTEGER*2	IECODE,IELEN	! for reading from IFF
+	REAL		IFF_RANGE(4)	! IFF file range entry
+	INTEGER		MAP
+	REAL		DX,DY
+	INTEGER*4	RETCOD		! file parse return code
+	REAL*8		MAPSCALE
+	INTEGER	 	MHORG(2),MHSCL	! scale and origin from MH
+	REAL*8	  	MDSCL		! scale from MD
+C
+C not called SETANNO yet
+	HAD_DISPLAY = .FALSE.
+	HAD_SETANNO = .FALSE.
+	HADRA = .FALSE.
+	HADMD = .FALSE.
+	HADMH = .FALSE.
+	MHORG(1) = 0
+	MHORG(2) = 0
+	MHSCL = 0
+	MDSCL = 0.0
+C
+C Can only draw into displays greater than 3
+	IF (ANNODISP.LE.2) THEN
+	   CALL MOAN(MSG_FILENOTLITESWIN)
+	   CALL LEARN(MSG_USEVIEWCMD,'ANNOTATION DISPLAY')
+	   GOTO 998
+	ENDIF
+	HAD_DISPLAY = .TRUE.
+C
+C save copies of variables, to be reset later
+	SAV_OVERLAYS_INUSE = OVERLAYS_INUSE
+	SAV_DISPLAY_HADLIM = DISPLAY_HADLIM(ANNODISP)
+	CALL CPYPAK(4,DISPLAY_LIMITS(1,ANNODISP),SAV_DISPLAY_LIMITS)
+	CALL CPYPAK(2,CIDIFF,SAV_CIDIFF)	! (CIDIFF(3) is angle)
+	SAV_SCLFRT = SCLFRT
+C
+C sort out overlays
+	OVERLAYS_INUSE = .FALSE.
+C
+C Parse IFF filename
+	RETCOD = PARFILN(DSTR,DSTRL,DSTR(:DSTRL),IFFTEM//';0',.TRUE.) 
+	IF (.NOT.RETCOD) THEN
+	   CALL MOAN(MSG_ERRFILENAME,'IFF')
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 998
+	ENDIF
+C
+C close map that is open on the lun we want to use
+	DO 10 MAP=0,MAPTOP
+	   IF (MAP_EXIST(MAP).AND.MAPLUN(MAP).EQ.INLUN) CALL CLOSIF(MAP)
+10	CONTINUE
+	MAPCUR = -1
+C
+C Open IFF file
+	CALL IFFOPN(INLUN,DSTR(:DSTRL),0)	! read only
+	IF (IERCD .NE. 0) THEN
+	   CALL MOAN(MSG_ERROPIMG,'IFF',DSTR(:DSTRL))
+	   CALL IFFCLO(INLUN)
+	   GOTO 998
+	ENDIF
+	CALL IFFIRV(1)		! input revision level 1, for CB's
+	CALL IFFRLA(.TRUE.)
+C
+C loop to read IFF file
+20	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL MOAN(MSG_UNEXPEIFF)
+	   CALL IFFCLO(INLUN)
+	   GOTO 998
+	ENDIF
+C
+	IF (IECODE.EQ.'RA') GOTO 30
+	IF (IECODE.EQ.'MH') GOTO 40
+	IF (IECODE.EQ.'MD') GOTO 50
+	IF (IECODE.EQ.'NF') GOTO 70
+	GOTO 20
+C
+C Read the range entry
+30	HADRA = .TRUE.
+	CALL EIHRR(IFF_RANGE,4,1)
+C
+C check it
+	IF (IFF_RANGE(1).GE.IFF_RANGE(2) .OR.
+     &	    IFF_RANGE(3).GE.IFF_RANGE(4) ) THEN
+	   CALL MOAN(MSG_IFFRANGE)
+	   CALL IFFCLO(INLUN)
+	   GOTO 998
+	ENDIF
+C
+C Calculate the display limits
+	DISPLAY_HADLIM(ANNODISP) = .TRUE.
+C
+C Create a 5% margin around the displayed IFF file
+	DX = IFF_RANGE(2)-IFF_RANGE(1)
+	DY = IFF_RANGE(4)-IFF_RANGE(3)
+	DISPLAY_LIMITS(1,ANNODISP) = IFF_RANGE(1)-DX*0.05
+	DISPLAY_LIMITS(2,ANNODISP) = IFF_RANGE(2)+DX*0.05
+	DISPLAY_LIMITS(3,ANNODISP) = IFF_RANGE(3)-DY*0.05
+	DISPLAY_LIMITS(4,ANNODISP) = IFF_RANGE(4)+DY*0.05
+	DX = DX*1.1
+	DY = DY*1.1
+	GOTO 20
+C
+C MH - map header information
+40	CALL EIHRI(MHARR,MIN(IELEN,MHLEN),1)	! map header
+	IF (MHDESC(2).EQ.0.OR.MHDESC(2).EQ.2) THEN	! assume OS if unset
+	   CALL OSHEAD(MHSCL,MHORG)
+	ELSEIF (MHDESC(2).EQ.1) THEN
+	   CALL MCEHEA(MHSCL,MHORG)
+	ENDIF
+C
+C NOTE: IGNORE MAP HEADER if TYPE 3 or 4 (new OS types)
+	HADMH = .TRUE.
+	GOTO 20
+C
+C MD - descriptor information - only if type2 and ENABLE DESCRIPTOR
+50	HADMD = .TRUE.
+	IF (IELEN.EQ.MD2LEN) THEN
+	   CALL EIHRI(MD2ARR,MD2LEN,1)
+	   IF (DESOPT) THEN
+	      MDSCL    = MD2SCL
+	   ENDIF
+	ENDIF
+	GOTO 20
+C
+C
+70	CONTINUE
+C
+C check that had RA entry etc
+	IF (.NOT.HADRA) THEN
+	   CALL MOAN(MSG_MISSENT,'RA')
+	   CALL IFFCLO(INLUN)
+	   GOTO 998
+	ENDIF
+	IF (.NOT.HADMD) CALL MOAN(MSG_MISSENT,'MD')
+	IF (.NOT.HADMH) CALL MOAN(MSG_MISSENT,'MH')
+C
+C setup annotation
+	CALL SETANNO(.TRUE.)
+	HAD_SETANNO = .TRUE.
+C
+C sort out scale and origin of this map - use values from MD if they
+C are not zero, otherwise use values from map header if they seem more
+C sensible
+C
+	MAPSCALE = MDSCL
+	IF (MDSCL.LE.0.0.AND.MHSCL.GT.0) THEN
+	   MAPSCALE = MHSCL
+	ENDIF
+C
+C Calculate SCLFRT
+C SCLFRT is such that FRT units (mm) * SCLFRT = IFF units
+C
+	IF (HADSF) THEN
+	   SCLFRT=1/SCAFAC	! use data from SCALE FACTOR
+	ELSEIF (HADSA) THEN
+	   IF (PLOT_ON) THEN
+	      SCLFRT= MAX(DX/(PLOT_VIEW(2)-PLOT_VIEW(1)),
+     &			  DY/(PLOT_VIEW(4)-PLOT_VIEW(3)))/1000.
+	   ELSE
+	      SCLFRT= MAX(DX/DISPLAY_SIZX(ANNODISP),
+     &			  DY/DISPLAY_SIZY(ANNODISP))/1000.
+	   ENDIF
+	ELSEIF (HADSM.AND.HADSS) THEN
+	   SCLFRT=SCASOU/SCAMAP	! (SCAMAP may be default of 1000)
+	ELSEIF (HADSM.AND.EXTOPT.AND.MAPTOP.GE.0.AND.MAPSCL(0).GT.0)THEN
+	   SCLFRT=MAPSCL(0)/SCAMAP
+C
+C when no SCALE commands have been given, but EXTERNAL is enabled
+C use scale of first map and assume IFF units are in metres 
+C (OS case by default)
+C
+	ELSEIF (EXTOPT.AND.MAPTOP.GE.0) THEN
+	   IF (MAPSCL(0).LE.0) THEN
+	      SCLFRT=1
+	      CALL MOAN(MSG_ILLEGLEXTSC,MAPSCL(0))
+	   ELSE
+	      SCLFRT = MAPSCALE/1000.0
+	   ENDIF
+C
+C if all else has failed use scale factor 1
+C
+	ELSE
+	   SCLFRT=1
+	ENDIF
+C
+C Calculate circle and curve tolerances in IFF units
+	CIDIFF(1) = CIDNUM(1)*SCLFRT	! drawn circle
+	CIDIFF(2) = CURTOL(CIDNUM(2),SCLFRT)
+C
+C Calculate SCALDIS
+	SAV_SCLDIS = SCLDIS
+	SAV_NOMLW = NOMLW
+	IF (PLOT_ON) THEN
+	   NOMLW = PLOT_LWIDTH
+	   SCLDIS = MAX(DX/(PLOT_VIEW(2)-PLOT_VIEW(1)),
+     &			 DY/(PLOT_VIEW(4)-PLOT_VIEW(3)))/1000.
+	ELSE
+	   SCLDIS = MAX(DX/DISPLAY_SIZX(ANNODISP),
+     &			 DX/DISPLAY_SIZY(ANNODISP))/1000.
+	ENDIF
+C
+C and undo things that SETANNO has done that we don't want
+	OVCOL = -1			! no overriding colour
+C
+C convey nominal linewidth to FRTLIB
+	CALL SRISLW(NOMLW*SCLDIS/SCLFRT)
+C
+C convey information about units to FRTLIB
+C One screen mm. = SCLDIS world units (IFF units)
+C One sheet mm. = SCLFRT world units (IFF units)
+	CALL SRIUNI(1.0/SCLDIS,SRISCL,SRIROT,1.0/SCLDIS)
+C
+C Draw the IFF file
+	CALL DRWIFFBDY
+C
+C Close the file
+	CALL IFFCLO(INLUN)
+C
+	SCLDIS = SAV_SCLDIS
+	NOMLW = SAV_NOMLW
+C
+	GOTO 999
+C
+998	CALL IGNCMD
+999	CONTINUE
+C
+C return everything to initial state
+C
+C reset variables
+	IF (HAD_DISPLAY) THEN
+	   OVERLAYS_INUSE = SAV_OVERLAYS_INUSE
+	   CALL CPYPAK(4,SAV_DISPLAY_LIMITS,DISPLAY_LIMITS(1,ANNODISP))
+	   CALL CPYPAK(2,SAV_CIDIFF,CIDIFF)
+	   SCLFRT = SAV_SCLFRT 
+	   IF (HAD_SETANNO) THEN
+	      CALL SETANNO(.FALSE.)
+	      OCSXY(1) = CSXY(1)+1.0 ! force refresh re-draw
+	   ENDIF
+	   DISPLAY_HADLIM(ANNODISP) = SAV_DISPLAY_HADLIM 
+	ENDIF
+C
+	RETURN
+	END

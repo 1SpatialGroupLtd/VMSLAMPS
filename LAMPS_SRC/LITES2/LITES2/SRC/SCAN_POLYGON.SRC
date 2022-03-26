@@ -1,0 +1,1020 @@
+	SUBROUTINE SCAN_POLYGON( NPTS, PTS, SIDES, SIDPTR,
+     &			    	    MAXSCT, INTSCT, INTPTS,
+     &			   	    HATCH,  SPACE, ANCHOR,
+     &	                            USER_FUNC,IERR)
+C
+***	MODULE	SCAN_POLYGON
+***	IDENT	10MY96
+C
+	  IMPLICIT NONE
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+C Created by R.W. Russell (after FILL_SIDE by TJI)	12th May 1993
+C
+C *********************************************************************
+C
+C This routine is intended to hatch a polygon feature, which it does
+C by drawing lines across it.
+C
+C *********************************************************************
+C
+C parameters
+C
+	PARAMETER	 X = 1		! X coordinate index
+	PARAMETER	 Y = 2		! Y coordinate index
+	PARAMETER	DX = 3		! delta X index
+	PARAMETER	DY = 4		! delta Y index
+C
+C arguments
+C
+	INTEGER		NPTS				! in
+	REAL		PTS(2,NPTS)			! in
+	REAL		SIDES(4,NPTS-1)			! in
+	INTEGER		SIDPTR(0:NPTS-1)		! in
+	INTEGER		MAXSCT				! in
+	REAL		INTSCT(4,MAXSCT)		! in
+	REAL		INTPTS(MAXSCT)			! in
+	INTEGER		HATCH				! in
+	REAL		SPACE				! in
+	REAL		ANCHOR(2)			! in
+	LOGICAL		USER_FUNC			! in
+C
+	INTEGER		IERR				! out
+C
+C NPTS	  is the number of points in PTS, and is used to determine the
+C	  size of SIDES and SIDPTR
+C
+C PTS	  is the array of points defining this feature
+C	  - the last and first points are assumed to be equal
+C	    (ie the polygon is assumed closed)
+C
+C SIDES	  is the (sorted) array of sides of the polygon
+C	  Note that it has room for NPTS-1 sides
+C
+C	  For each side, the X,Y values of the maximum point are
+C	  stored, and also the delta X and Y values which may be used
+C	  to obtain the other point
+C
+C SIDPTR  is an array of pointers into SIDES, used to point to the
+C	  next side which has its minimum point below VSLICE
+C	  Note that it is dimensioned from 0 to NPTS
+C
+C MAXSCT  is the number of intersections which may be stored - it is
+C	  used for the INTSCT and INTPTS arrays
+C
+C INTSCT  is used to store the sides that are intersected by the
+C	  current slice
+C
+C INTPTS  is used to store the actual intersection points
+C
+C HATCH   is the type of fill to do
+C
+C		1 => horizontal lines		----
+C		2 => vertical lines		||||
+C		3 =>  45 degrees		////
+C		4 => -45 degrees		\\\\
+C		5 => crosshatch vertical	++++
+C		6 => crosshatch 45 degrees	xxxx
+C
+C SPACE  is the gap between adjacent lines
+C
+C ANCHOR is a point through which one scan line would pass
+C
+C USER_FUNC is the function that will be called for each vector being
+C           output it. It returns .TRUE. if it succeeds and .FALSE.
+C           if it fails (when this routine is aborted). Its calling
+C	    pattern is 	
+C
+C	LOGICAL FUNCTION USER_FUNC(N,X,Y)
+C
+C	INTEGER N
+C	REAL	X(N),Y(N)
+C
+C	    When called from this function, N will always be 2
+C
+C IERR	return code
+C       = 0 for success
+C	= 1 Bad argument list
+C	= 2 Error allocating or freeing memory
+C	= 3 Error returned by USER_FUNC
+C
+C Unexpected internal errors may also be written to the screen. These
+C will not stop the routine executing.
+C
+C routines referenced
+C
+	EXTERNAL	SCAN_CF_REAL	! compare two reals
+	EXTERNAL	SCAN_SWAP_REAL	! swap two reals
+	EXTERNAL	SCAN_COPY_SIDE	! copy one to another
+	EXTERNAL	SCAN_SWAP_SIDE	! swap two sides
+	EXTERNAL	SCAN_CF_SIDE	! compare two sides
+C
+	INTEGER*4	LIB$GET_VM
+	INTEGER*4	LIB$FREE_VM
+C
+C *********************************************************************
+C
+C workspace:
+C
+	INTEGER	NSIDES		! the number of sides in the polygon
+C
+	REAL	VMIN,VMAX	! vertical range of points in feature
+C
+	INTEGER	LAST		! last place in SIDES (for SIDPTR use)
+	LOGICAL	INLIMBO		! true if LAST SIDPTR value incorrect
+C
+	REAL	ALPHA		! used in intersection calculation
+	REAL	VSLICE		! current raster line
+	INTEGER	ISLICE		! and as an integer
+	REAL	UTEMP(2)	! vector for GFAIPL
+	REAL	VTEMP(2)	! copies of VSLICE for GFAIPL
+C
+	INTEGER		NSCT	! number of intersections (even)
+	LOGICAL		VTERM	! true if a side terminates on VSLICE
+	LOGICAL		VSORT	! true if need to sort these sides
+C
+	LOGICAL		HORIZ	! fill to be horizontal/vertical
+	LOGICAL		ROTATE	! should the polygon be rotated
+	INTEGER		LHATCH	! local copy of HATCH
+	INTEGER		I,J,K	! DO loop variables
+	INTEGER		OK
+C
+	REAL		ROTANG	! angle of rotation
+	REAL		TPTS(2,2)	! temporary points
+	REAL		ANC(2)	! local anchor point
+C
+	INTEGER		STACK_ADDR	! used for QUICK_SORTing
+	INTEGER		STACK_SIZE,NEW_SIZE
+	INTEGER		STACK_PTS,NEW_PTS
+	DATA		STACK_ADDR,STACK_PTS,STACK_SIZE/3*0/
+	SAVE		STACK_ADDR,STACK_SIZE,STACK_PTS
+C
+C common to define U,V,DU,DV and allow SCAN_CF_SIDE to use them also
+C
+C this common block defines how SCAN_CF_SIDE will compare the sides
+C
+	INTEGER		 U, V	! shield  X and  Y from us
+	INTEGER		DU,DV	! shield DX and DY from us
+C
+	COMMON /SCAN_CF_SIDE_CMN/ U,V,DU,DV
+C
+C *********************************************************************
+C
+C check our arguments
+C
+	IF (	NPTS.LT.4	.OR.		! less than a triangle
+     &		MAXSCT.LT.2	.OR.		! <2 intersections!!
+     &		HATCH.LT.1	.OR.
+     &		HATCH.GT.6	.OR.
+     &		SPACE.LE.0.0			! no line separation
+     &	   ) THEN
+	   IERR = 1
+	   GOTO 9999			! just give up
+	ENDIF
+C
+C check if our sorting stack is large enough
+C
+C To use QUICKSORT, for up to N items, we need 2*LOG2(N+1) longwords
+C
+	NEW_PTS = MAX(NPTS-1,MAXSCT)
+	IF (NEW_PTS.GT.STACK_PTS) THEN
+	   NEW_SIZE = INT(LOG(FLOAT(NEW_PTS+1))/LOG(2.0))
+	   IF (NEW_SIZE.GT.STACK_SIZE) THEN
+	      IF (STACK_SIZE.GT.0) THEN
+	         OK = LIB$FREE_VM(STACK_SIZE*8,STACK_ADDR)
+	         IF (.NOT.OK) THEN
+	            IERR = 2
+	            STACK_ADDR = 0
+	            STACK_PTS = 0
+	            STACK_SIZE = 0
+	            GOTO 9999
+	         ENDIF
+	      ENDIF
+	      OK = LIB$GET_VM(NEW_SIZE*8,STACK_ADDR)
+	      IF (.NOT.OK) THEN
+	         IERR = 2
+	         STACK_ADDR = 0
+	         STACK_PTS = 0
+	         STACK_SIZE = 0
+	         GOTO 9999
+	      ENDIF
+	   ENDIF
+	   STACK_PTS = NEW_PTS
+	   STACK_SIZE = NEW_SIZE
+	ENDIF
+C
+C now, check what sort of hatching is required
+C
+	IF (HATCH.LT.5) THEN
+	   LHATCH = HATCH		! in one direction only
+	ELSEIF (HATCH.EQ.5) THEN
+	   LHATCH = 1			! fill horizontal first
+	ELSE
+	   LHATCH = 3			! fill +45 degrees first
+	ENDIF
+C
+C and thus deduce what we need to do...
+C for horizontal/vertical fill, we don't need to rotate the
+C polygon. If we are doing 45 degree fill, then we rotate the
+C polygon, and choose which direction to fill it in.
+C
+	ROTANG = 0.0
+	IF ( LHATCH.EQ.1 ) THEN
+	   HORIZ  = .TRUE.
+	   ROTATE = .FALSE.
+	ELSEIF ( LHATCH.EQ.2 ) THEN
+	   HORIZ  = .FALSE.
+	   ROTATE = .FALSE.
+	ELSEIF ( LHATCH.EQ.3 ) THEN
+	   HORIZ  = .FALSE.
+	   ROTATE = .TRUE.
+	ELSEIF ( LHATCH.EQ.4 ) THEN
+	   HORIZ  = .TRUE.
+	   ROTATE = .TRUE.
+	ENDIF
+	IF (ROTATE) ROTANG = 3.14159265/4.0	! 45 deg.
+C
+C *********************************************************************
+C
+C and decide on which way round we see our data
+C
+10	IF ( HORIZ ) THEN
+	   U  = X			! horizontal fill
+	   V  = Y
+	   DU = DX
+	   DV = DY
+	ELSE
+	   U  = Y			! vertical fill
+	   V  = X
+	   DU = DY
+	   DV = DX
+	ENDIF
+C
+C *********************************************************************
+C
+C we now assemble our list of sides...
+C
+C each side is stored as U, V, DU, DV
+C
+C where		U,V is the point that has maximum V,
+C		    horizontal lines are not stored
+C
+C where		DU,DV is the value to be added to U,V to give the
+C		      other point
+C
+C if two points are coincident, then we don't store the (null) side,
+C and if a side is 'horizontal', then we don't store it
+C
+C at the same time, get limits between which our points range
+C
+	NSIDES = 0		! no sides yet
+C
+	TPTS(X,2) = PTS(X,1)
+	TPTS(Y,2) = PTS(Y,1)
+	IF (ROTATE) CALL SCAN_ROTATE( ROTANG, TPTS(X,2), TPTS(Y,2) )
+C
+	VMIN = TPTS(V,2)
+	VMAX = TPTS(V,2)
+C
+	DO 11 I = 1,NPTS-1
+	   TPTS(X,1) = TPTS(X,2)
+	   TPTS(Y,1) = TPTS(Y,2)
+	   TPTS(X,2) = PTS(X,I+1)
+	   TPTS(Y,2) = PTS(Y,I+1)
+	   IF (ROTATE) CALL SCAN_ROTATE( ROTANG, TPTS(X,2), TPTS(Y,2) )
+C
+	   IF (TPTS(V,2) .LT. VMIN) VMIN = TPTS(V,2)
+	   IF (TPTS(V,2) .GT. VMAX) VMAX = TPTS(V,2)
+C
+	   IF ( TPTS(V,1).GT.TPTS(V,2) ) THEN
+	      J = 1
+	      K = 2
+	   ELSEIF ( TPTS(V,1).LT.TPTS(V,2) ) THEN
+	      J = 2
+	      K = 1
+	   ELSE
+	      GOTO 11
+	   ENDIF
+C
+	   NSIDES = NSIDES+1
+	   SIDES( U,NSIDES) = TPTS(U,J)
+	   SIDES( V,NSIDES) = TPTS(V,J)
+	   SIDES(DU,NSIDES) = TPTS(U,K) - TPTS(U,J)
+	   SIDES(DV,NSIDES) = TPTS(V,K) - TPTS(V,J)
+11	CONTINUE
+C
+C start raster scan at 'top' of feature
+C
+C if extent is zero, then give up
+C rotate anchor point, find first scan line below or equal to max
+C if this is less than min, then do solitary hatch
+C half way between min and max (ensures that something is drawn)
+C Use integer ISLICE to avoid rounding error from repeated
+C subtraction of SPACE
+C
+	IF (VMAX.EQ.VMIN) GOTO 9999
+	ANC(X) = ANCHOR(X)
+	ANC(Y) = ANCHOR(Y)
+	IF (ROTATE) CALL SCAN_ROTATE( ROTANG, ANC(X), ANC(Y) )
+	ISLICE = INT((VMAX-ANC(V))/SPACE)
+	VSLICE = ANC(V) + ISLICE * SPACE
+	IF (VSLICE.GT.VMAX) THEN
+	   ISLICE = ISLICE-1
+	   VSLICE = ANC(V) + ISLICE * SPACE
+	ENDIF
+	IF (VSLICE.LT.VMIN) VSLICE = (VMAX+VMIN)/2
+C
+C and so we have our sides - we must now sort them into order
+C
+	CALL QUICK_SORT(SIDES,
+     &	                NSIDES,
+     &	                SCAN_CF_SIDE,
+     &	                SCAN_SWAP_SIDE,
+     &	                %VAL(STACK_ADDR))
+C
+C *********************************************************************
+C
+C now set up the SIDPTR array - initially each element points to the
+C 'next' element - note that since our sort actually produces the list
+C of sides 'backwards', we actually chain through the list in reverse
+C
+	DO 12 I = 1,NSIDES
+	   SIDPTR(I) = I-1		! point to previous entry
+12	CONTINUE
+C
+C the zeroth element of SIDPTR then gives us the element to start at
+C
+	SIDPTR(0) = NSIDES
+C
+C *********************************************************************
+C
+C now find which sides are intersected by the slice...
+C
+C if we find a side with its maximum point (U,V) below VSLICE, then
+C all succeeding sides will also have their maximum points above
+C VSLICE, and we can stop searching
+C
+C if we find a side with its minimum point (U+DU,V+DV) above VSLICE,
+C then that side will have its minimum point above all succeeding
+C VSLICEs, since VSLICE is being decreased each iteration. We can
+C thus use SIDPTR to point around this side, so that we ignore it
+C in the future.
+C
+C
+20	NSCT = 0		! no intersected sides yet
+	LAST = 0		! 'last side' is initial pointer
+	INLIMBO = .FALSE.	! list starts off all connected, so OK
+	I = SIDPTR(0)		! start off at 'top' of list
+C
+30	IF (I.LE.0) GOTO 100	! finished all of the list
+C
+	IF ( SIDES(V,I) .LT. VSLICE ) THEN
+C
+C	 this side has its maxV below our slice - it is thus not
+C	 intersected, and nor are any of the sides after this
+C	 (since they all have lesser maxV values)
+C	 If we are in limbo, then we must set the pointer to here
+C	 (since this point is still to be checked), and we may then
+C	 go off to process the intersected sides
+C
+	   IF (INLIMBO) THEN
+	      SIDPTR(LAST) = I	! point to this point
+	   ENDIF
+	   GOTO 100		! got all intersected sides
+C
+	ELSEIF ( SIDES(V,I)+SIDES(DV,I) .GT. VSLICE ) THEN
+C
+C	 this side has its minV above our slice - it is thus
+C	 totally above the slice and may be ignored in all future
+C	 searches. We must thus change the value of SIDPTR(LAST) to
+C	 point around this feature - we need to go into LIMBO state
+C
+	   INLIMBO = .TRUE.
+	   I = SIDPTR(I)	! try the next side in the list
+	   GOTO 30
+C
+	ELSE
+C
+C	 this side is intersected - come out of LIMBO (if we were in
+C	 that state), and store this side in INTSCT
+C
+	   IF (INLIMBO) THEN
+	      SIDPTR(LAST) = I	! point around LIMBO area to this side
+	      INLIMBO = .FALSE.
+	   ENDIF
+C
+	   NSCT = NSCT+1	! insert into next place in INTSCT
+C
+	   IF ( NSCT.GT.MAXSCT ) THEN
+CCC	      CALL WRITEF(
+CCC  &		'SCAN_POLYGON - Too many intersections found - ignored')
+	      IF (INLIMBO) SIDPTR(LAST) = I	! force exit from LIMBO
+	      GOTO 160				! ignore this VSLICE
+	   ENDIF
+C
+C	 copy the data for this side into INTSCT
+C
+	   CALL SCAN_COPY_SIDE( SIDES, I, INTSCT, NSCT )
+C
+C	 and now we want to move onto the next side to be checked
+C
+	   LAST = I		! this will be new LAST side
+	   I = SIDPTR(I)	! and obtain the position of the next
+	   GOTO 30
+C
+	ENDIF
+C
+C *********************************************************************
+C
+C when we reach here, we have found all the sides which are intersected
+C by our slice
+C
+C we can ignore an empty list of intersections, and a single
+C intersection is an error
+C
+C two intersections are common enough that we treat them specially
+C - note that only problem type (1) is relevant to two intersections
+C (see notes below for a description of the problem types)
+C - problem type (2) requires more than 2 intersections
+C
+C for two intersections we don't bother to sort
+C
+100	IF ( NSCT.EQ.1 ) THEN
+C
+CCC	   CALL WRITEF(
+CCC     &		'SCAN_POLYGON - Single intersection side in buffer')
+C
+	ELSEIF ( NSCT.EQ.2 ) THEN
+C
+	   IF (
+     &	      .NOT.(
+     &		   INTSCT(V,1) .EQ. INTSCT(V,2)
+     &		   .AND.
+     &		   INTSCT(V,1) .EQ. VSLICE
+     &		   )
+     &	     .AND.
+     &	      .NOT.(
+     &		   INTSCT(V,1)+INTSCT(DV,1) .EQ.
+     &		   INTSCT(V,2)+INTSCT(DV,2)
+     &		   .AND.
+     &		   INTSCT(V,1)+INTSCT(DV,1) .EQ. VSLICE
+     &		   )
+     &	      ) THEN
+C
+C	    this line is not a case (1), so work out the intersections
+C
+	      DO 130 I = 1,2
+	         ALPHA = (VSLICE-INTSCT(V,I)) / INTSCT(DV,I)
+	         INTPTS(I) =  INTSCT(U,I)*(1-ALPHA) +
+     &			     (INTSCT(U,I)+INTSCT(DU,I))*ALPHA
+130	      CONTINUE
+C
+C	     and now draw the slice - first set up the 'other'
+C	     coordinate we shall use...
+C
+	      VTEMP(1) = VSLICE
+	      VTEMP(2) = VSLICE
+C
+C	     transform back if required
+C
+	      IF ( ROTATE ) THEN
+		 DO 135 I = 1,2
+		    IF (HORIZ) THEN
+		       CALL SCAN_ROTATE(-ROTANG,INTPTS(I),VTEMP(I))
+		    ELSE
+		       CALL SCAN_ROTATE(-ROTANG,VTEMP(I),INTPTS(I))
+		    ENDIF
+135		 CONTINUE
+	      ENDIF
+C
+C	     and do the actual drawing
+C
+	      IF (HORIZ) THEN
+	         IF (.NOT.USER_FUNC(  2, INTPTS(1), VTEMP )) THEN
+	            IERR = 3
+	            GOTO 9999
+	         ENDIF
+	      ELSE
+	         IF (.NOT.USER_FUNC(  2, VTEMP, INTPTS(1) )) THEN
+	            IERR = 3
+	            GOTO 9999
+	         ENDIF
+	      ENDIF
+C
+	   ENDIF
+C
+	ELSEIF ( NSCT.GT.2 ) THEN
+C
+C	 we have a list of intersected sides - check if we should throw
+C	 any of them away
+C
+C	 We look for sides (in our INTSCT list) with a maximum or
+C	 minimum point lying on VSLICE, as follows:
+C
+C	 -----	in the diagrams, the dashed horizontal line is VSLICE,
+C		and passes exactly through the common point of the line
+C		segments shown
+C
+C	  		    /				    /
+C	 ---/\--   or   ---x---   or   --x==x--   or  --x==x--
+C	   /  \		  /		/    \	       /
+C
+C	   (1)		  (2)		 (3)		(4)
+C
+C	 in case (1) both intersections may be discarded, as
+C	 	     they define a null line
+C	 	     - we have VSLICE = maxima or minima of both sides
+C
+C	 in case (2) one of the intersections may be discarded, as
+C	 	     retaining both would yield the wrong result
+C		     - we have VSLICE = maximum of one side, and
+C					minimum of the other side
+C
+C	 in case (3) the line segment parallel to VSLICE has DV zero,
+C	 	     so is ignored, meaning that this case is reduced
+C		     to case (1)
+C
+C	 in case (4) the line segment parallel to VSLICE has DV zero,
+C	 	     so is ignored, meaning that this case is reduced
+C		     to case (2)
+C
+C	 so let us check our intersected sides according to these
+C	 criteria.
+C
+C	 We inspect our list for any sides terminating on VSLICE,
+C	 and ensure that all such sides have their U,V point as the
+C	 point on VSLICE (to make later comparisons easier).
+C	 Note that if we do invert any sides, then we shall need to
+C	 sort the list of intersected sides again.
+C
+C	 Our conditions for type (1) and type (2) are now:
+C
+C	 for type (1) we have
+C			INTSCT(V,I) = INTSCT(V,I+1) = VSLICE
+C			both sides have INTSCT(DV,...) of the
+C			same sign (both sides have the second
+C			point 'below' or 'above' the first)
+C
+C	 for type (2) we have
+C			INTSCT(V,I) = INTSCT(V,I+1) = VSLICE
+C			the sides have INTSCT(DV,...) of a
+C			different sign (one side has its second
+C			point 'above' the first, the other 'below')
+C
+C	 we shall thus have a sequence of type (1) and type (2) all
+C	 together in the list (since their value of V is the same)
+C
+C
+	   VTERM = .FALSE.		! no sides ending on VSLICE yet
+	   VSORT = .FALSE.		! thus no need to sort
+C
+	   DO 140 I = 1,NSCT
+	      IF ( INTSCT(V,I) .EQ. VSLICE ) THEN
+		 VTERM     = .TRUE.
+	      ELSEIF ( INTSCT(V,I)+INTSCT(DV,I) .EQ. VSLICE ) THEN
+		 INTSCT(U,I)  =  INTSCT(U,I)+INTSCT(DU,I)
+		 INTSCT(V,I)  =  INTSCT(V,I)+INTSCT(DV,I)
+		 INTSCT(DU,I) = -INTSCT(DU,I)
+		 INTSCT(DV,I) = -INTSCT(DV,I)
+		 VTERM     = .TRUE.
+		 VSORT     = .TRUE.	! necessitates a re-sort
+	      ENDIF
+140	   CONTINUE
+C
+C	    so, do we have to deal with special cases?
+C
+	   IF ( VTERM ) THEN
+C
+	      IF (VSORT) THEN
+		 CALL QUICK_SORT(INTSCT,
+     &	                         NSCT,
+     &	                         SCAN_CF_SIDE,
+     &	                         SCAN_SWAP_SIDE,
+     &	                         %VAL(STACK_ADDR))
+	      ENDIF
+C
+C	       we intend to copy all the required sides back into
+C	       INTSCT...
+C
+	      I = 0
+	      J = 0
+C
+144	      IF ( I.GE.NSCT ) GOTO 146		! finished all sides
+	      I = I+1				! next side
+C
+	      IF ( INTSCT(V,I).NE.VSLICE ) THEN	! an ordinary side
+C
+C	       for an ordinary side, we simply copy it over
+C
+		 J = J+1
+		 CALL SCAN_COPY_SIDE( INTSCT, I, INTSCT, J )
+C
+	      ELSEIF ( SIGN(1.0,INTSCT(DV,I)) .NE.
+     &		       SIGN(1.0,INTSCT(DV,I+1))  ) THEN
+C
+C	       for case 2, we ignore one of the sides, and
+C	       copy the other
+C
+		 I = I+1		! copy the second side only
+		 J = J+1
+		 CALL SCAN_COPY_SIDE( INTSCT, I, INTSCT, J )
+C
+	      ELSE
+C
+C	       for case 1, we ignore both of the sides
+C
+		 I = I+1
+C
+	      ENDIF
+	      GOTO 144			! inspect the next side
+C
+C	    we now have a new number of sides in our list
+C
+146	      NSCT = J
+C
+	   ENDIF
+C
+C	 does that leave us with anything to do?
+C
+	   IF ( NSCT.EQ.0 ) GOTO 160		! ignore it
+C
+C	 so we can now work out the actual intersections
+C
+	   DO 150 I = 1,NSCT
+C
+C	    calculate the 'height' at which VSLICE intersects
+C	    this side
+C
+	      ALPHA = (VSLICE-INTSCT(V,I)) / INTSCT(DV,I)
+C
+C	    and now calculate the actual intersection position
+C
+	      INTPTS(I) =  INTSCT(U,I)*(1-ALPHA) +
+     &			  (INTSCT(U,I)+INTSCT(DU,I))*ALPHA
+150	   CONTINUE
+C
+C	 sort the list of intersections into order
+C
+	   CALL QUICK_SORT(INTPTS,
+     &	                   NSCT,
+     &	                   SCAN_CF_REAL,
+     &	                   SCAN_SWAP_REAL,
+     &	                   %VAL(STACK_ADDR))
+C
+C	 check that we now have an even number of intersections
+C	 (we always should have by now)
+C
+	   IF ( (NSCT.AND.1).EQ.1 ) THEN
+CCC	      CALL WRITEF(
+CCC     &		'SCAN_POLYGON - odd number of intersections - ignored')
+	      GOTO 160
+	   ENDIF
+C
+C	 and draw the lines between the intersections
+C	 - first set up the 'other' coordinate we shall use...
+C
+	   VTEMP(1) = VSLICE
+	   VTEMP(2) = VSLICE
+C
+C	 and do the actual drawing
+C	 - I is start point, K is end point
+C
+	   I = 1
+C
+C check for zero length bits and don't draw them
+C
+151	   K = I+1
+	   IF (INTPTS(I).EQ.INTPTS(K)) GOTO 156	  ! null visible bit
+152	   IF (K.GE.NSCT) GOTO 153
+	   IF (INTPTS(K).NE.INTPTS(K+1)) GOTO 153 ! finite gap
+	   K = K+2
+	   GOTO 152
+C
+153	   UTEMP(1) = INTPTS(I)
+	   UTEMP(2) = INTPTS(K)
+	      IF (HORIZ) THEN
+C
+		 IF (ROTATE) THEN		! transform back
+		    DO 154 J = 1,2
+		       VTEMP(J) = VSLICE
+		       CALL SCAN_ROTATE(-ROTANG,UTEMP(J),VTEMP(J))
+154		    CONTINUE
+		 ENDIF
+	         IF (.NOT.USER_FUNC( 2, UTEMP, VTEMP )) THEN
+	            IERR = 3
+	            GOTO 9999
+	         ENDIF
+C
+	      ELSE
+C
+		 IF (ROTATE) THEN		! transform back
+		    DO 155 J = 1,2
+		       VTEMP(J) = VSLICE
+		       CALL SCAN_ROTATE(-ROTANG,VTEMP(J),UTEMP(J))
+155		    CONTINUE
+		 ENDIF
+	         IF (.NOT.USER_FUNC(  2, VTEMP, UTEMP )) THEN
+	            IERR = 3
+	            GOTO 9999
+	         ENDIF
+C
+	      ENDIF
+C
+156	   I = K+1
+	   IF (I.LT.NSCT) GOTO 151
+C
+	ENDIF
+C
+C *********************************************************************
+C
+160	ISLICE = ISLICE-1		! ready for next raster line
+	VSLICE = ANC(V) + ISLICE * SPACE
+C
+C if we haven't yet reached the end, then go back for another scan
+C
+	IF (VSLICE.GE.VMIN) GOTO 20
+C
+C and we finally reach here when we have scanned the whole feature
+C - do we need to scan it again?
+C
+	IF (LHATCH.NE.HATCH) THEN
+	   IF (LHATCH.EQ.1.OR.LHATCH.EQ.3) THEN
+	      LHATCH = LHATCH+1		! 'next' sort of hatch
+	      HORIZ  = .NOT.HORIZ	! fill it crosswise
+	      GOTO 10
+	   ENDIF
+	ENDIF
+C
+	IERR = 0
+C
+9999	RETURN
+	END
+
+
+
+
+	SUBROUTINE SCAN_ROTATE(ANGLE,XX,YY)
+C
+***	IDENT	12MY93
+***	MODULE	SCAN_ROTATE
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author CC Brunt, 11 February 1991
+C
+C This subroutine rotates the given X and Y coordinates by ANGLE
+C It replaces the old ROT45
+C
+	IMPLICIT NONE
+C
+C arguments
+C
+	REAL		ANGLE		! angle to rotate by
+	REAL		XX,YY		! coordinates to rotate
+C
+C workspace
+C
+	REAL		OLDANG,SINANG,COSANG
+	SAVE		OLDANG,SINANG,COSANG
+	DATA		OLDANG,SINANG,COSANG/0.0,0.0,1.0/
+	REAL		SAVX		! preserve XX
+C
+C get new SIN and COS if required
+C
+	IF (ANGLE.NE.OLDANG) THEN
+	   OLDANG = ANGLE
+	   SINANG = SIN(OLDANG)
+	   COSANG = COS(OLDANG)
+	ENDIF
+C
+C preserve the original value of XX
+C
+	SAVX = XX
+C
+C now rotate
+C
+	XX = SAVX*COSANG - YY*SINANG
+	YY = SAVX*SINANG + YY*COSANG
+C
+	RETURN
+	END
+
+
+	INTEGER FUNCTION SCAN_CF_REAL( ELE_ONE, INDEX_1, INDEX_2 )
+C
+***	IDENT	12MY93
+***	MODULE	SCAN_CF_REAL
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 7 December 1984
+C This version to suit QUICKSORT	CC Brunt	4 August 1992
+C
+	IMPLICIT NONE
+C
+C SCAN_CF_REAL is a longword function to compare two elements
+C
+C	   eg	SCAN_CF_REAL( TABLE, index1, index2 )
+C
+C	returns	-1 if  element 'index1' < element 'index2'
+C		 0 if			=
+C		+1 if			>
+C
+C Arguments
+C
+	REAL		ELE_ONE(*)
+	INTEGER		INDEX_1		! index into ELE_ONE
+	INTEGER		INDEX_2		! index into ELE_ONE
+C
+C do the comparison
+C
+	IF ( ELE_ONE(INDEX_1) .LT. ELE_ONE(INDEX_2) ) THEN
+	   SCAN_CF_REAL = -1
+	ELSEIF ( ELE_ONE(INDEX_1) .GT. ELE_ONE(INDEX_2) ) THEN
+	   SCAN_CF_REAL = 1
+	ELSE
+	   SCAN_CF_REAL = 0
+	ENDIF
+C
+	RETURN
+	END
+
+	SUBROUTINE SCAN_SWAP_REAL( ELE_ONE, INDEX_1, INDEX_2 )
+C
+***	IDENT	12MY93
+***	MODULE	SCAN_SWAP_REAL
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author CC Brunt, 4 August 1992
+C
+	IMPLICIT NONE
+C
+C SCAN_SWAP_REAL is a subroutine to swap two elements
+C
+C	   eg	SCAN_SWAP_REAL( TABLE, index1, index2 )
+C
+C Arguments
+C
+	REAL		ELE_ONE(*)
+	INTEGER		INDEX_1		! index into ELE_ONE
+	INTEGER		INDEX_2		! index into ELE_ONE
+C
+C Workspace
+C
+	REAL		TEMP
+C
+C do the swap
+C
+	TEMP = ELE_ONE(INDEX_1)
+	ELE_ONE(INDEX_1) = ELE_ONE(INDEX_2)
+	ELE_ONE(INDEX_2) = TEMP
+C
+	RETURN
+	END
+
+	SUBROUTINE	SCAN_COPY_SIDE( FROM, FINDEX, TO, TINDEX )
+C
+***	IDENT	12MY93
+***	MODULE	SCAN_COPY_SIDE
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 2 January 1985
+C
+	IMPLICIT NONE
+C
+C SCAN_COPY_SIDE is a routine to copy a side description in FROM to
+C	    a side description in TO
+C
+C Arguments
+C
+	REAL		FROM(4,*)
+	INTEGER		FINDEX		! index into FROM
+	REAL		TO(4,*)
+	INTEGER		TINDEX		! index into TO
+C
+C workspace
+C
+	INTEGER		I		! DO loop counter
+C
+	DO 10 I = 1,4
+	   TO( I,TINDEX ) = FROM( I,FINDEX )
+10	CONTINUE
+C
+	RETURN
+	END
+
+
+	SUBROUTINE SCAN_SWAP_SIDE( ELE_ONE, INDEX_1, INDEX_2 )
+C
+***	IDENT	12MY93
+***	MODULE	SCAN_SWAP_SIDE
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author CC Brunt, 4 August 1992
+C
+	IMPLICIT NONE
+C
+C SCAN_SWAP_SIDE is a subroutine to swap two elements
+C
+C	   eg	SCAN_SWAP_SIDE( TABLE, index1, index2 )
+C
+C Arguments
+C
+	REAL		ELE_ONE(4,*)
+	INTEGER		INDEX_1		! index into ELE_ONE
+	INTEGER		INDEX_2		! index into ELE_ONE
+C
+C Workspace
+C
+	REAL		TEMP
+	INTEGER		I
+C
+C do the swap
+C
+	DO 10 I=1,4
+	   TEMP = ELE_ONE(I,INDEX_1)
+	   ELE_ONE(I,INDEX_1) = ELE_ONE(I,INDEX_2)
+	   ELE_ONE(I,INDEX_2) = TEMP
+10	CONTINUE
+C
+	RETURN
+	END
+
+
+ 	INTEGER FUNCTION SCAN_CF_SIDE( SIDE_1, IX_1, IX_2 )
+C
+***	IDENT	12MY93
+***	MODULE	SCAN_CF_SIDE
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 2 January 1985
+C
+C This version to suit QUICKSORT	CC Brunt	4 August 1992
+C
+	IMPLICIT NONE
+C
+C SCAN_CF_SIDE is a longword function to compare two side descriptions
+C
+C	   eg	SCAN_CF_SIDE( TABLE, index1, index2 )
+C
+C	returns	-1 if  SIDE 'index1' < SIDE 'index2'
+C		 0 if		     =
+C		+1 if		     >
+C
+C Arguments
+C
+	REAL		SIDE_1(4,*)
+	INTEGER		IX_1		! index into SIDE_1
+	INTEGER		IX_2		! index into SIDE_1
+C
+C Common
+C
+C common to define U,V,DU,DV and allow SCAN_CF_SIDE to use them also
+C
+C this common block defines how SCAN_CF_SIDE will compare the sides
+C
+	INTEGER		 U, V	! shield  X and  Y from us
+	INTEGER		DU,DV	! shield DX and DY from us
+C
+	COMMON /SCAN_CF_SIDE_CMN/ U,V,DU,DV
+C
+C Local
+C
+	INTEGER		CF_S		! result
+C
+C do the comparison
+C
+	IF ( SIDE_1(V,IX_1).GT.SIDE_1(V,IX_2) ) THEN
+	   CF_S = +1
+	ELSEIF ( SIDE_1(V,IX_1).LT.SIDE_1(V,IX_2) ) THEN
+	   CF_S = -1
+	ELSE
+	   IF ( SIDE_1(U,IX_1).LT.SIDE_1(U,IX_2) ) THEN
+	      CF_S = +1
+	   ELSEIF ( SIDE_1(U,IX_1).GT.SIDE_1(U,IX_2) ) THEN
+	      CF_S = -1
+	   ELSE
+	      IF ( SIDE_1(DU,IX_1).LT.SIDE_1(DU,IX_2) ) THEN
+		 CF_S = +1
+	      ELSEIF ( SIDE_1(DU,IX_1).GT.SIDE_1(DU,IX_2) ) THEN
+		 CF_S = -1
+	      ELSE
+		 IF ( SIDE_1(DV,IX_1).GT.SIDE_1(DV,IX_2) ) THEN
+		    CF_S = +1
+		 ELSEIF ( SIDE_1(DV,IX_1).LT.SIDE_1(DV,IX_2) ) THEN
+		    CF_S = -1
+		 ELSE
+		    CF_S = 0
+		 ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	SCAN_CF_SIDE = CF_S
+	RETURN
+	END

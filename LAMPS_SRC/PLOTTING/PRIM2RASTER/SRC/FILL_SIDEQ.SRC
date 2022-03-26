@@ -1,0 +1,596 @@
+	SUBROUTINE FILL_SIDE( NPTS, PTS, SIDES, SIDPTR,
+     &			    	    MAXSCT, INTSCT, INTPTS )
+C
+***	MODULE	FILL_SIDE
+***	IDENT	10AU92
+C
+	  IMPLICIT NONE
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+C Created by TJ Ibbs, 20 December 1984
+C
+CMOD version for I2RASTER		- Clarke Brunt	 4-Feb-1990
+C
+CMOD don't bother messing with horizontal sides, only to ignore them
+CMOD draw through zero length gaps in hatch lines
+CMOD 					- Clarke Brunt	21-Aug-1989
+C
+CMOD add extra argument to PATGPL	- Ron Russell	24-May-1989
+C
+CMOD give up when 'polygon' is line parallel to hatch line, to avoid
+CMOD sorting 0 sides which access violates-Clarke Brunt	25-May-1988
+C
+CMOD suppress zero length hatch segments - usually from invisible
+CMOD connecting lines			- Clarke Brunt	13-Jan-1988
+C
+CMOD initialise SUPCPT and conditionally call PATSET according to it
+CMOD					- Jamie Hulme	04-Feb-1986
+C
+CMOD ADC conditional sections for symbol fill version added, replace 
+CMOD HERE: with CMN:
+CMOD					- Jamie Hulme	10-Dec-1986
+C
+CMOD If extent less than hatch spacing, then do hatch halfway between
+CMOD min and max (to ensure something drawn). Also terminate at
+CMOD VMIN (not VMIN+SPACE/2 - last hatch omitted 50% of time)
+CMOD					- Clarke Brunt 13NO86
+C
+C *********************************************************************
+C
+C		G K S L D L I B    v e r s i o n
+C
+C
+C		   uses GFAIPL instead of GPL
+C
+C *********************************************************************
+C
+C This routine is intended to hatch a polygon feature, which it does
+C by drawing lines across it.
+C
+C NOTE - if a line intersects the feature more than MAXSCT times,
+C	 then the fill will be incorrect on that line. However,
+C	 this is not treated as a true error condition - the function
+C	 will still return FALSE
+C
+C *********************************************************************
+C
+***	COMMON/CMN:CLIP/
+***	COMMON/CMN:PRIM2RASTER/
+C
+C parameters
+C
+	PARAMETER	 X = 1		! X coordinate index
+	PARAMETER	 Y = 2		! Y coordinate index
+	PARAMETER	DX = 3		! delta X index
+	PARAMETER	DY = 4		! delta Y index
+C
+C arguments
+C
+	INTEGER		NPTS
+	REAL		PTS(2,*)	! * = NPTS
+	REAL		SIDES(4,*)	! * = NPTS - 1
+	INTEGER		SIDPTR(0:*)	! * = NPTS - 1
+	INTEGER		MAXSCT
+	REAL		INTSCT(4,*)	! * = MAXSCT
+	REAL		INTPTS(*)	! * = MAXSCT
+C
+C NPTS	  is the number of points in PTS, and is used to determine the
+C	  size of SIDES and SIDPTR
+C
+C PTS	  is the array of points defining this feature
+C	  - the last and first points are assumed to be equal
+C	    (ie the polygon is assumed closed)
+C
+C SIDES	  is the (sorted) array of sides of the polygon
+C	  Note that it has room for NPTS-1 sides
+C
+C	  For each side, the X,Y values of the maximum point are
+C	  stored, and also the delta X and Y values which may be used
+C	  to obtain the other point
+C
+C SIDPTR  is an array of pointers into SIDES, used to point to the
+C	  next side which has its minimum point below VSLICE
+C	  Note that it is dimensioned from 0 to NPTS
+C
+C MAXSCT  is the number of intersections which may be stored - it is
+C	  used for the INTSCT and INTPTS arrays
+C
+C INTSCT  is used to store the sides that are intersected by the
+C	  current slice
+C
+C INTPTS  is used to store the actual intersection points
+C
+C RESOLUTION is the gap between adjacent lines
+C
+C routines referenced
+C
+	EXTERNAL	CF_REALQ	! compare two reals
+	EXTERNAL	SWAP_REALQ	! swap two reals
+	EXTERNAL	COPY_SIDE	! copy one to another
+	EXTERNAL	SWAP_SIDEQ	! swap two sides
+	EXTERNAL	CF_SIDEQ		! compare two sides
+	INTEGER*4	LIB$GET_VM
+	INTEGER*4	LIB$FREE_VM
+C
+C *********************************************************************
+C
+C workspace:
+C
+	INTEGER	NSIDES		! the number of sides in the polygon
+C
+	REAL	DELTAY		! used in working out side
+C
+	INTEGER	LAST		! last place in SIDES (for SIDPTR use)
+	LOGICAL	INLIMBO		! true if LAST SIDPTR value incorrect
+C
+	REAL	ALPHA		! used in intersection calculation
+	REAL	YSLICE		! current raster line
+	INTEGER	YFIRST		! first raster line
+	INTEGER	YLAST		! last raster line
+	INTEGER	NSLICE		! number of raster lines
+	INTEGER	STEP		! current raster line
+C
+	INTEGER		NSCT	! number of intersections (even)
+	LOGICAL		YTERM	! true if a side terminates on YSLICE
+	LOGICAL		YSORT	! true if need to sort these sides
+C
+	INTEGER		I,J,K	! DO loop variables
+	INTEGER		OK
+C
+	REAL		YMAX,YMIN
+C
+	INTEGER		STACK_ADDR	! used for QUICK_SORTing
+	INTEGER		STACK_SIZE,NEW_SIZE
+	INTEGER		STACK_PTS,NEW_PTS
+	DATA		STACK_ADDR,STACK_PTS,STACK_SIZE/3*0/
+	SAVE		STACK_ADDR,STACK_SIZE,STACK_PTS
+C
+C *********************************************************************
+C
+C check our arguments
+C
+	IF (	NPTS.LT.4	.OR.		! less than a triangle
+     &		MAXSCT.LT.2	.OR.		! <2 intersections!!
+     &		RESOLUTION.LE.0.0		! no line separation
+     &	   ) THEN
+	   CALL WRITEF('FILL_SIDE - Bad argument list')
+	   GOTO 9999			! just give up
+	ENDIF
+C
+C check if our sorting stack is large enough
+C
+C To use QUICKSORT, for up to N items, we need 2*LOG2(N+1) longwords
+C
+	NEW_PTS = MAX(NPTS-1,MAXSCT)
+	IF (NEW_PTS.GT.STACK_PTS) THEN
+	   NEW_SIZE = INT(LOG(FLOAT(NEW_PTS+1))/LOG(2.0))
+	   IF (NEW_SIZE.GT.STACK_SIZE) THEN
+	      IF (STACK_SIZE.GT.0) THEN
+	         OK = LIB$FREE_VM(STACK_SIZE*8,STACK_ADDR)
+	         IF (.NOT.OK) THEN
+	            CALL WRITEF('FILL_SIDE - Error freeing memory')
+	            STACK_ADDR = 0
+	            STACK_PTS = 0
+	            STACK_SIZE = 0
+	            GOTO 9999
+	         ENDIF
+	      ENDIF
+	      OK = LIB$GET_VM(NEW_SIZE*8,STACK_ADDR)
+	      IF (.NOT.OK) THEN
+	         CALL WRITEF('FILL_SIDE - Error allocating memory')
+	         STACK_ADDR = 0
+	         STACK_PTS = 0
+	         STACK_SIZE = 0
+	         GOTO 9999
+	      ENDIF
+	   ENDIF
+	   STACK_PTS = NEW_PTS
+	   STACK_SIZE = NEW_SIZE
+	ENDIF
+C
+C *********************************************************************
+C
+C start raster scan at 'top' of feature
+C
+C if extent is zero, then give up
+C if the extent is less than one hatch spacing, then do solitary hatch
+C half way between min and max (ensures that something is drawn)
+C
+C *********************************************************************
+C
+C we now assemble our list of sides...
+C
+C each side is stored as X, Y, DX, DY
+C
+C where		X,Y is the point that has maximum Y,
+C		    horizontal lines are not stored
+C
+C where		DX,DY is the value to be added to X,Y to give the
+C		      other point
+C
+C if two points are coincident, then we don't store the (null) side,
+C and if a side is 'horizontal', then we don't store it
+C
+	NSIDES = 0		! no sides yet
+	YMAX = -1E38
+	YMIN = 1E38
+C
+	DO 11 I = 1,NPTS-1
+	   IF ( PTS(Y,I).GT.PTS(Y,I+1) ) THEN
+	      J = I
+	      K = I+1
+	   ELSEIF ( PTS(Y,I).LT.PTS(Y,I+1) ) THEN
+	      J = I+1
+	      K = I
+	   ELSE
+	      GOTO 11
+	   ENDIF
+C
+C throw out sides not intersecting region of interest
+	   IF (PTS(Y,J).LT.RCLIPLO) GOTO 11
+	   IF (PTS(Y,K).GT.RCLIPHI) GOTO 11
+C
+	   IF (PTS(Y,J).GT.YMAX) YMAX = PTS(Y,J)
+	   IF (PTS(Y,K).LT.YMIN) YMIN = PTS(Y,K)
+	   NSIDES = NSIDES+1
+	   SIDES( X,NSIDES) = PTS(X,J)
+	   SIDES( Y,NSIDES) = PTS(Y,J)
+	   SIDES(DX,NSIDES) = PTS(X,K) - PTS(X,J)
+	   SIDES(DY,NSIDES) = PTS(Y,K) - PTS(Y,J)
+11	CONTINUE
+	IF (NSIDES.EQ.0) GOTO 9999
+	IF (YMAX.GT.RCLIPHI) YMAX = RCLIPHI
+	IF (YMIN.LT.RCLIPLO) YMIN = RCLIPLO
+	YFIRST = NINT(YMAX/RESOLUTION)-1
+	YLAST  = NINT(YMIN/RESOLUTION)
+	NSLICE = YFIRST-YLAST
+	STEP = 0
+C
+C and so we have our sides - we must now sort them into order
+C
+	CALL QUICK_SORT(SIDES,NSIDES,CF_SIDEQ,SWAP_SIDEQ,%VAL(STACK_ADDR))
+C
+C *********************************************************************
+C
+C now set up the SIDPTR array - initially each element points to the
+C 'next' element - note that since our sort actually produces the list
+C of sides 'backwards', we actually chain through the list in reverse
+C
+	DO 12 I = 1,NSIDES
+	   SIDPTR(I) = I-1		! point to previous entry
+12	CONTINUE
+C
+C the zeroth element of SIDPTR then gives us the element to start at
+C
+	SIDPTR(0) = NSIDES
+C
+C *********************************************************************
+C
+C now find which sides are intersected by the slice...
+C
+C if we find a side with its maximum point (X,Y) below YSLICE, then
+C all succeeding sides will also have their maximum points below
+C YSLICE, and we can stop searching
+C
+C if we find a side with its minimum point (X+DX,Y+DY) above YSLICE,
+C then that side will have its minimum point above all succeeding
+C YSLICEs, since YSLICE is being decreased each iteration. We can
+C thus use SIDPTR to point around this side, so that we ignore it
+C in the future.
+C
+C
+20	YSLICE = ((YFIRST-STEP)+0.5)*RESOLUTION
+	IF (YSLICE.GT.YMAX) YSLICE = YMAX
+	IF (YSLICE.LT.YMIN) YSLICE = YMIN
+	NSCT = 0		! no intersected sides yet
+	LAST = 0		! 'last side' is initial pointer
+	INLIMBO = .FALSE.	! list starts off all connected, so OK
+	I = SIDPTR(0)		! start off at 'top' of list
+C
+30	IF (I.LE.0) GOTO 100	! finished all of the list
+C
+	IF ( SIDES(Y,I) .LT. YSLICE ) THEN
+C
+C	 this side has its maxY below our slice - it is thus not
+C	 intersected, and nor are any of the sides after this
+C	 (since they all have lesser maxY values)
+C	 If we are in limbo, then we must set the pointer to here
+C	 (since this point is still to be checked), and we may then
+C	 go off to process the intersected sides
+C
+	   IF (INLIMBO) THEN
+	      SIDPTR(LAST) = I	! point to this point
+	   ENDIF
+	   GOTO 100		! got all intersected sides
+C
+	ELSEIF ( SIDES(Y,I)+SIDES(DY,I) .GT. YSLICE ) THEN
+C
+C	 this side has its minY above our slice - it is thus
+C	 totally above the slice and may be ignored in all future
+C	 searches. We must thus change the value of SIDPTR(LAST) to
+C	 point around this feature - we need to go into LIMBO state
+C
+	   INLIMBO = .TRUE.
+	   I = SIDPTR(I)	! try the next side in the list
+	   GOTO 30
+C
+	ELSE
+C
+C	 this side is intersected - come out of LIMBO (if we were in
+C	 that state), and store this side in INTSCT
+C
+	   IF (INLIMBO) THEN
+	      SIDPTR(LAST) = I	! point around LIMBO area to this side
+	      INLIMBO = .FALSE.
+	   ENDIF
+C
+	   NSCT = NSCT+1	! insert into next place in INTSCT
+C
+	   IF ( NSCT.GT.MAXSCT ) THEN
+	      CALL WRITEF(
+     &		'FILL_SIDE - Too many intersections found - ignored')
+	      IF (INLIMBO) SIDPTR(LAST) = I	! force exit from LIMBO
+	      GOTO 160				! ignore this YSLICE
+	   ENDIF
+C
+C	 copy the data for this side into INTSCT
+C
+	   CALL COPY_SIDE( SIDES, I, INTSCT, NSCT )
+C
+C	 and now we want to move onto the next side to be checked
+C
+	   LAST = I		! this will be new LAST side
+	   I = SIDPTR(I)	! and obtain the position of the next
+	   GOTO 30
+C
+	ENDIF
+C
+C *********************************************************************
+C
+C when we reach here, we have found all the sides which are intersected
+C by our slice
+C
+C we can ignore an empty list of intersections, and a single
+C intersection is an error
+C
+C two intersections are common enough that we treat them specially
+C - note that only problem type (1) is relevant to two intersections
+C (see notes below for a description of the problem types)
+C - problem type (2) requires more than 2 intersections
+C
+C for two intersections we don't bother to sort
+C
+100	IF ( NSCT.EQ.1 ) THEN
+C
+	   CALL WRITEF(
+     &		'FILL_SIDE - Single intersection side in buffer')
+C
+	ELSEIF ( NSCT.EQ.2 ) THEN
+C
+CCC Try without this test - it results in nothing being drawn in the
+CCC case when we have two vertical sides ending on VSLICE
+CCC	   IF (
+CCC     &	      .NOT.(
+CCC     &		   INTSCT(Y,1) .EQ. INTSCT(Y,2)
+CCC     &		   .AND.
+CCC     &		   INTSCT(Y,1) .EQ. YSLICE
+CCC     &		   )
+CCC     &	     .AND.
+CCC     &	      .NOT.(
+CCC     &		   INTSCT(Y,1)+INTSCT(DY,1) .EQ.
+CCC     &		   INTSCT(Y,2)+INTSCT(DY,2)
+CCC     &		   .AND.
+CCC     &		   INTSCT(Y,1)+INTSCT(DY,1) .EQ. YSLICE
+CCC     &		   )
+CCC     &	      ) THEN
+C
+C	    this line is not a case (1), so work out the intersections
+C
+	      DO 130 I = 1,2
+	         ALPHA = (YSLICE-INTSCT(Y,I)) / INTSCT(DY,I)
+	         INTPTS(I) =  INTSCT(X,I)*(1-ALPHA) +
+     &			     (INTSCT(X,I)+INTSCT(DX,I))*ALPHA
+130	      CONTINUE
+C
+C	     and now draw the slice - first set up the 'other'
+C	     coordinate we shall use...
+C
+C	     and do the actual drawing
+C
+	      CALL GFAIPL( INTPTS(1), INTPTS(2), YSLICE )
+C
+CCC	   ENDIF
+C
+	ELSEIF ( NSCT.GT.2 ) THEN
+C
+C	 we have a list of intersected sides - check if we should throw
+C	 any of them away
+C
+C	 We look for sides (in our INTSCT list) with a maximum or
+C	 minimum point lying on YSLICE, as follows:
+C
+C	 -----	in the diagrams, the dashed horizontal line is YSLICE,
+C		and passes exactly through the common point of the line
+C		segments shown
+C
+C	  		    /				    /
+C	 ---/\--   or   ---x---   or   --x==x--   or  --x==x--
+C	   /  \		  /		/    \	       /
+C
+C	   (1)		  (2)		 (3)		(4)
+C
+C	 in case (1) both intersections may be discarded, as
+C	 	     they define a null line
+C	 	     - we have YSLICE = maxima or minima of both sides
+C
+C	 in case (2) one of the intersections may be discarded, as
+C	 	     retaining both would yield the wrong result
+C		     - we have YSLICE = maximum of one side, and
+C					minimum of the other side
+C
+C	 in case (3) the line segment parallel to YSLICE has DY zero,
+C	 	     so is ignored, meaning that this case is reduced
+C		     to case (1)
+C
+C	 in case (4) the line segment parallel to YSLICE has DY zero,
+C	 	     so is ignored, meaning that this case is reduced
+C		     to case (2)
+C
+C	 so let us check our intersected sides according to these
+C	 criteria.
+C
+C	 We inspect our list for any sides terminating on YSLICE,
+C	 and ensure that all such sides have their X,Y point as the
+C	 point on YSLICE (to make later comparisons easier).
+C	 Note that if we do invert any sides, then we shall need to
+C	 sort the list of intersected sides again.
+C
+C	 Our conditions for type (1) and type (2) are now:
+C
+C	 for type (1) we have
+C			INTSCT(Y,I) = INTSCT(Y,I+1) = YSLICE
+C			both sides have INTSCT(DY,...) of the
+C			same sign (both sides have the second
+C			point 'below' or 'above' the first)
+C
+C	 for type (2) we have
+C			INTSCT(Y,I) = INTSCT(Y,I+1) = YSLICE
+C			the sides have INTSCT(DY,...) of a
+C			different sign (one side has its second
+C			point 'above' the first, the other 'below')
+C
+C	 we shall thus have a sequence of type (1) and type (2) all
+C	 together in the list (since their value of Y is the same)
+C
+C
+	   YTERM = .FALSE.		! no sides ending on YSLICE yet
+	   YSORT = .FALSE.		! thus no need to sort
+C
+	   DO 140 I = 1,NSCT
+	      IF ( INTSCT(Y,I) .EQ. YSLICE ) THEN
+		 YTERM     = .TRUE.
+	      ELSEIF ( INTSCT(Y,I)+INTSCT(DY,I) .EQ. YSLICE ) THEN
+		 INTSCT(X,I)  =  INTSCT(X,I)+INTSCT(DX,I)
+		 INTSCT(Y,I)  =  INTSCT(Y,I)+INTSCT(DY,I)
+		 INTSCT(DX,I) = -INTSCT(DX,I)
+		 INTSCT(DY,I) = -INTSCT(DY,I)
+		 YTERM     = .TRUE.
+		 YSORT     = .TRUE.	! necessitates a re-sort
+	      ENDIF
+140	   CONTINUE
+C
+C	    so, do we have to deal with special cases?
+C
+	   IF ( YTERM ) THEN
+C
+	      IF (YSORT) THEN
+		 CALL QUICK_SORT(
+     &			INTSCT,NSCT,CF_SIDEQ,SWAP_SIDEQ,%VAL(STACK_ADDR))
+	      ENDIF
+C
+C	       we intend to copy all the required sides back into
+C	       INTSCT...
+C
+	      I = 0
+	      J = 0
+C
+144	      IF ( I.GE.NSCT ) GOTO 146		! finished all sides
+	      I = I+1				! next side
+C
+	      IF ( INTSCT(Y,I).NE.YSLICE ) THEN	! an ordinary side
+C
+C	       for an ordinary side, we simply copy it over
+C
+		 J = J+1
+		 CALL COPY_SIDE( INTSCT, I, INTSCT, J )
+C
+	      ELSEIF ( SIGN(1.0,INTSCT(DY,I)) .NE.
+     &		       SIGN(1.0,INTSCT(DY,I+1))  ) THEN
+C
+C	       for case 2, we ignore one of the sides, and
+C	       copy the other
+C
+		 I = I+1		! copy the second side only
+		 J = J+1
+		 CALL COPY_SIDE( INTSCT, I, INTSCT, J )
+C
+	      ELSE
+C
+C	       for case 1, we ignore both of the sides
+C
+		 I = I+1
+C
+	      ENDIF
+	      GOTO 144			! inspect the next side
+C
+C	    we now have a new number of sides in our list
+C
+146	      NSCT = J
+C
+	   ENDIF
+C
+C	 does that leave us with anything to do?
+C
+	   IF ( NSCT.EQ.0 ) GOTO 160		! ignore it
+C
+C	 so we can now work out the actual intersections
+C
+	   DO 150 I = 1,NSCT
+C
+C	    calculate the 'height' at which YSLICE intersects
+C	    this side
+C
+	      ALPHA = (YSLICE-INTSCT(Y,I)) / INTSCT(DY,I)
+C
+C	    and now calculate the actual intersection position
+C
+	      INTPTS(I) =  INTSCT(X,I)*(1-ALPHA) +
+     &			  (INTSCT(X,I)+INTSCT(DX,I))*ALPHA
+150	   CONTINUE
+C
+C	 sort the list of intersections into order
+C
+	   CALL QUICK_SORT(
+     &			INTPTS,NSCT,CF_REALQ,SWAP_REALQ,%VAL(STACK_ADDR))
+C
+C	 check that we now have an even number of intersections
+C	 (we always should have by now)
+C
+	   IF ( (NSCT.AND.1).EQ.1 ) THEN
+	      CALL WRITEF(
+     &		'FILL_SIDE - odd number of intersections - ignored')
+	      GOTO 160
+	   ENDIF
+C
+C	 and do the actual drawing
+C	 - I is start point, K is end point
+C
+	   I = 1
+C
+C check for zero length bits and don't draw them
+C
+151	   K = I+1
+	   IF (INTPTS(I).EQ.INTPTS(K)) GOTO 156	  ! null visible bit
+152	   IF (K.GE.NSCT) GOTO 153
+	   IF (INTPTS(K).NE.INTPTS(K+1)) GOTO 153 ! finite gap
+	   K = K+2
+	   GOTO 152
+C
+153	   CALL GFAIPL( INTPTS(I), INTPTS(K), YSLICE )
+C
+156	   I = K+1
+	   IF (I.LT.NSCT) GOTO 151
+C
+	ENDIF
+C
+C *********************************************************************
+C
+160	STEP = STEP+1
+C
+C if we haven't yet reached the end, then go back for another scan
+C
+	IF (STEP.LE.NSLICE) GOTO 20
+C
+9999	RETURN
+	END

@@ -1,0 +1,323 @@
+	PROGRAM I2OSTF
+C
+***	MODULE	I2OSTF
+***	IDENT	06DE90
+C
+C Main program for IFF to OSTF conversion
+C
+C Original author: Susan Manning
+C Adapted from DMB to DMC: Tony J Ibbs
+C Adapted to output new OSTF format:			RWR	Sep-1984
+C Adapted to output various OSTF/DMC formats		TJI	May-1986
+C Adapted to use LSLLIB					TJI	Jun-1986
+C
+C Copyright: Laser-Scan Laboratories Ltd.,Cambridge,England
+C Written: 09/04/80
+C
+C Mods now documented in .UPD file
+C - previous mod lists now in UPDATES.MOD_LISTS
+C
+	IMPLICIT	NONE
+C
+***	COMMON/HERE:BUF/			! output buffer
+***	COMMON/HERE:COMMANDS/			! command line stuff
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/		! IFF errors, etc
+***	COMMON/LSL$CMNIFF:MHDMB/		! map header common
+***	COMMON/LSL$CMNLSL:MTOVCM/		! magtape errors, etc
+C
+	INCLUDE	'LSL$CMNIFF:MHOSGB.CMN'		! New OS map header
+	INCLUDE	'LSL$CMNOSMH:OSMH_NEW_MH.CMN'	! New map header variables
+	INCLUDE	'LSL$CMNOSMH:OSMH_NEW.PAR'	! Header field definitions
+	INCLUDE	'LSL$CMNLSL:RDYES.PAR'		! ASSUME_xxx
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'	! error numbers
+C
+	INCLUDE	'HERE:I2OSTFMSG.PAR'		! program messages
+	INCLUDE	'HERE:LUN.PAR'			! luns for i/o files
+C                         
+C Functions called:
+C - LSLLIB functions
+C
+	LOGICAL		MTONIT		! initialise mag tape
+	LOGICAL		MTOEOF		! write tapemark
+	LOGICAL		MTORWD		! rewind tape
+    	LOGICAL		FLWOPN		! open disk file
+	LOGICAL		FLWCLO		! and close it again
+	LOGICAL		RDYES		! yes/no question
+C
+C - LSLLIB IFF handling functions
+C
+	INTEGER*4	IFFOPEN		! open IFF file
+	INTEGER*4	IFFRWD		! rewind IFF file
+C
+C - FRTLIB functions
+C
+	LOGICAL		FRTINI		! read FRT file
+C
+C - local functions
+C
+	LOGICAL		CMDLINE		! read the command line
+	LOGICAL		FIND_CODES	! find attribute codes
+	LOGICAL		PROCFILE	! process an IFF file
+	LOGICAL		GET_MH_INFO	! extract MH type and E,N and Scale
+C
+C Workspace:
+C
+	LOGICAL		OK,ERROR	! function returns
+	INTEGER*4	IERR		! secondary error code
+	INTEGER*2	IELEN		! length of IFF entry
+	INTEGER*4	DUMMY1(2),	! dummy quad words
+     &			DUMMY2(2)
+	INTEGER*2	NREV		! no of times file modified
+	INTEGER		I		! for DO loops
+C
+C an index of the sheets to go to the output file
+C
+	INTEGER*4	MAP_INDEX(4,INMAX)	! coords of map-corners
+C
+C and file IDs and full names for each IFF file
+C
+	INTEGER*4	FID(7,INMAX)
+	INTEGER*2	FULEN(INMAX)	! lengths of...
+	CHARACTER*256	FUFILE(INMAX)	! input IFF file full names
+C
+C **********************************************************************
+C initialise the LSLLIB library
+C
+	CALL LSL_INIT
+C
+C and IFFLIB error handling
+C
+	CALL IFFTDY
+C
+C set various initial states
+C
+	BLKCNT = 0		! no blocks yet
+	BLKPTR = 0		! & first one is empty
+	RECPTR = 0		! as is first record
+C
+C and create a descriptor for the output record
+C - this is needed if we have to translate the output into EBCDIC
+C
+	RECDSC(2) = %LOC(RECBUF)
+C
+C read and interpret the command line
+C
+	IF ( CMDLINE() ) GOTO 9999
+	IF (AUTO_PLUS) THEN
+C
+C Open IFF files to check revision level.
+C
+	PLUS = .FALSE.
+	DO 50 I = 1, INCOUNT
+	   IF (.NOT. IFFOPEN( IFFLUN, INFILE(I)(:INLEN(I)) )) GOTO 9999
+	   IF (ORVLEV.EQ.1) THEN
+	      PLUS = .TRUE.
+	   ENDIF
+50	CONTINUE
+C
+C	 and close the file again
+C
+	   CALL IFFCLO( IFFLUN )
+	ENDIF
+C
+C check we have OSTF-3 for OSTF+
+C
+	IF (PLUS .AND. (OSTF_VERSION .LT. 3)) THEN
+	   CALL LSL_PUTMSG(I2OSTF__NEEDOSTF3)
+	   GOTO 9999
+	ENDIF
+C
+C now for the FRT if it was requested
+C
+	IF (HAD_FRT) THEN
+	   IF (FRTINI(FRTFILE(1:FRTLEN))) THEN
+	      CALL LSL_PUTMSG(I2OSTF__READFRT,FRTFILE(1:FRTLEN))
+	      GO TO 9999
+	   ENDIF
+C
+C otherwise set up the standard ACD definitions
+C
+	ELSE
+	   CALL FRT_ACDINI
+	ENDIF
+C
+C and set up the attribute codes
+C
+	IF (FIND_CODES()) GOTO 9999
+C
+C now set the blocksize we are to output
+C
+	IF ( BLOCKSIZE.LE.MAX_BLKLEN ) THEN
+	   BLKLEN = BLOCKSIZE
+	ELSE
+	   CALL LSL_PUTMSG( I2OSTF__BLKSIZE, BLOCKSIZE, MAX_BLKLEN )
+	   GOTO 9999
+	ENDIF
+C
+C **********************************************************************
+C
+	MHINIT = .FALSE.                 ! we haven't called OSMH_NEW_INI yet
+C
+C for each IFF file, open it (read-only) and read its map header
+C
+	DO 200 I = 1, INCOUNT
+C
+C	 open the file, and if we can't do that, then give up
+C
+	   IF (.NOT. IFFOPEN( IFFLUN, INFILE(I)(:INLEN(I)) )) GOTO 9999
+C
+C	 get the file ID for the file, so that we can guarantee to open
+C	 the same one later...
+C
+	   CALL IFFID( FID(1,I) )
+C
+C	 and also its full name
+C
+	   CALL IFFINQ( FUFILE(I), FULEN(I), DUMMY1, DUMMY2, NREV )
+C                           
+C	 get the map header information we need for the index
+C
+	   CALL IFFNXC('MH',IELEN)
+C
+C	 check that it's there
+C
+	   IF (IELEN.EQ.-1) THEN
+	      CALL LSL_PUTMSG( I2OSTF__NOMH, INFILE(I)(:INLEN(I)) )
+	      GOTO 9999
+	   ENDIF
+C
+C Read E,N and Scale from appropriate map header
+C
+	   IF ( GET_MH_INFO(IELEN) ) GOTO 9999
+C
+	   MAP_INDEX(1,I) = MHMRCE
+	   MAP_INDEX(2,I) = MHMRCN
+	   MAP_INDEX(3,I) = MHMRCE+10*MHBGI
+	   MAP_INDEX(4,I) = MHMRCN+10*MHBGI
+C
+C	 and close the file again
+C
+	   CALL IFFCLO( IFFLUN )
+C
+C	 and if we have had the /ASK_IF_SIM switch, ask them
+C
+	   IF ( ASK_IF_SIM ) THEN
+C
+	      OK = RDYES( 'Is '//INFILE(I)(:INLEN(I))//' SIM',
+     &			  SIM(I), ASSUME_NO, IERR )
+C
+	      IF ( .NOT.OK ) THEN
+		 CALL LSL_PUTMSG( OK )
+		 IF ( OK.EQ.LSL__SYSERR ) CALL LSL_ADDMSG( IERR )
+		 GOTO 9999
+	      ENDIF
+C
+	   ENDIF
+C
+200	CONTINUE
+C            
+C **********************************************************************
+C open our output medium
+C
+	IF ( IS_MAGTAPE ) THEN
+C
+C	 - if this is magnetic tape, then use the required density
+C	   (TRUE means use 1600 bpi), and rewind the tape (ie FALSE)
+C	 - if this is a SERIAL magtape, then tell the routine as much
+C
+	   IF ( SERIAL_MAGTAPE ) THEN
+	      OK = MTONIT( OUTFILE(:OUTLEN), DENSITY.EQ.1600, .FALSE., 1 )
+	   ELSE
+	      OK = MTONIT( OUTFILE(:OUTLEN), DENSITY.EQ.1600, .FALSE., 0 )
+	   ENDIF
+C
+	   IF ( .NOT.OK ) THEN
+	      CALL LSL_PUTMSG( I2OSTF__OUTOPEN, OUTFILE(:OUTLEN) )
+	      CALL LSL_ADDMSG( OK )
+	      IF ( OK.EQ.LSL__SYSERR ) CALL LSL_ADDMSG( MTOERR )
+	      GOTO 9999
+	   ENDIF
+C
+	ELSE
+C
+C	 - if this is a disk file, then open the file for write
+C            
+	   OK = FLWOPN( OUTLUN, OUTFILE(:OUTLEN), IERR )
+C
+	   IF ( .NOT.OK ) THEN
+	      CALL LSL_PUTMSG( I2OSTF__OUTOPEN, OUTFILE(:OUTLEN) )
+	      CALL LSL_ADDMSG( OK )
+	      IF ( OK.EQ.LSL__SYSOPEN ) CALL LSL_ADDMSG( IERR )
+	      GOTO 9999
+	   ENDIF
+C
+	ENDIF
+C
+C **********************************************************************
+C report on what we are doing
+C
+	CALL REPORT
+C
+C unless we are writing OSTF-0, or the user has given the /NOINDEX
+C switch, we start off the output by writing the index
+C
+	IF ( OSTF_VERSION.NE.0 .AND. OUTPUT_INDEX ) THEN
+	   WRITING = .TRUE.
+	   CALL WRTINDEX( INCOUNT, MAP_INDEX )
+	ENDIF
+C
+C and now process each of the IFF files in turn
+C
+	DO 400 I = 1,INCOUNT
+C
+	   ERROR = PROCFILE( I, FID(1,I), FUFILE(I)(:FULEN(I)) )
+	   IF ( ERROR ) GOTO 9999
+C
+	   CALL ENDBLK( I.EQ.INCOUNT )         
+C
+400	CONTINUE
+C
+C **********************************************************************
+C so we have output all of the IFF files - 'close' the output file
+C
+	IF ( IS_MAGTAPE ) THEN
+C
+C	 if it is a magnetic tape, then output some tapemarks
+C	 and rewind the thing
+C
+	   OK = MTOEOF()			! the first tapemark
+	   IF ( .NOT.OK ) GOTO 9000
+	   OK = MTOEOF()			! the second
+	   IF ( .NOT.OK ) GOTO 9000
+	   OK = MTORWD()			! and rewind the tape
+	   IF ( .NOT.OK ) GOTO 9000
+C
+	ELSE
+C
+C	 if is a disk file, then close it
+C
+	   OK = FLWCLO( OUTLUN, IERR )
+C
+	   IF ( .NOT.OK ) THEN
+	      CALL LSL_PUTMSG( I2OSTF__ENDFILE )
+	      CALL LSL_ADDMSG( OK )
+	      IF ( OK.EQ.LSL__SYSCLOSE ) CALL LSL_ADDMSG( IERR )
+	   ENDIF
+C
+	ENDIF
+	GOTO 9999
+C
+C **********************************************************************
+C - error in finishing off the magnetic tape
+C
+9000	CALL LSL_PUTMSG( I2OSTF__ENDTAPE )
+	CALL LSL_ADDMSG( OK )
+	IF ( OK.EQ.LSL__SYSERR ) CALL LSL_ADDMSG( MTOERR )
+	GOTO 9999
+C
+C **********************************************************************
+C and finish off neatly
+C
+9999	CALL LSL_EXIT
+	END

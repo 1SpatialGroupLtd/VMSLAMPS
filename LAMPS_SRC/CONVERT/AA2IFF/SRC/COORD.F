@@ -1,5 +1,5 @@
 	SUBROUTINE COORD( X, Y, Z )
-CDEC$	IDENT	'11AP91'
+CDEC$	IDENT	'19AP91'
 C
 C Copyright (C) Laser-Scan Ltd, Cambridge, England
 C
@@ -35,8 +35,8 @@ C
 C
 C subtract the origin offset
 C
-	XNEW = X - XOFF
-	YNEW = Y - YOFF
+	XNEW = X*SCALE_FACTOR - XOFF
+	YNEW = Y*SCALE_FACTOR - YOFF
 	ZNEW = Z - ZOFF
 C
 C Use first coordinate to start off the range

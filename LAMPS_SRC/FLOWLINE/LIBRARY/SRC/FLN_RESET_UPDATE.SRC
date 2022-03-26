@@ -1,0 +1,404 @@
+	INTEGER*4 FUNCTION FLN_RESET_UPDATE(NUM_TASK,TASK,
+     &  NUM_JOB,JOB,NUM_WIRE,WIRE,JOB_ID,ELEMENT,NUM_ELEMENT,NEW_TASK)
+C
+C
+***	MODULE	FLN_RESET_UPDATE
+***	IDENT	30AP92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    25-Apr-1988
+C
+C A rather large routine to do all the database updating for job 
+C resetting in a single transaction for flowline database consistency
+C returns SS$_NORMAL if all is well - otherwise an RDB return code
+C JOBs, TASKS are archived and given a special void status
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$CMNFLOWLINE:FLOW.PAR'
+	INCLUDE	'LSL$CMNFLOWLINE:FLOWLINEMSG.PAR'
+	INTEGER*4	SS$_NORMAL
+	EXTERNAL	SS$_NORMAL
+C
+C Arguments - all input
+	INTEGER*4	NUM_TASK
+	INTEGER*4	TASK(FLN_MAX_TASK)	! tasks to archive
+	INTEGER*4	NUM_JOB
+	INTEGER*4	JOB(FLN_MAX_JOB)	! jobs to archive
+	INTEGER*4	NUM_WIRE
+	CHARACTER*(*)	WIRE(FLN_MAXWIRE)	! wires to delete
+	INTEGER*4	JOB_ID		! JOB_ID
+	CHARACTER*(*)	ELEMENT(FLN_MAX_ELEMENT) ! elements to set up
+	INTEGER*4	NUM_ELEMENT
+	LOGICAL		NEW_TASK		! set up new tasks? 
+C
+C RDB return codes
+	INTEGER*4	RDB$_DEADLOCK
+	EXTERNAL	RDB$_DEADLOCK
+C
+C function
+	INTEGER*4	FLN_SETUP_TASKS
+C
+C Local Variables
+	INTEGER*4	DAY
+	INTEGER*4	TIME
+	INTEGER*4	NUM_ERR
+	INTEGER*4	I
+C
+&RDB&   DATABASE FILENAME  'LSL$FLN_DATABASE:FLOWLINE'
+C
+C assume success
+	FLN_RESET_UPDATE= %LOC(SS$_NORMAL)
+C
+C get the current time
+	CALL FLN_GET_DAY_TIME(DAY,TIME)
+C
+	NUM_ERR = 0
+20	CONTINUE
+&RDB&   START_TRANSACTION READ_WRITE WAIT RESERVING JOB, JOB_HISTORY,
+&RDB&   WIRE_ACTIVE, TASK,TASK_HISTORY, SESSION, SESSION_HISTORY,TASKID,
+&RDB&   PARAMETER,PARAMETERID
+&RDB&   FOR PROTECTED WRITE, WIRE FOR SHARED READ
+&RDB&	ON ERROR
+	   NUM_ERR = NUM_ERR+1
+	   IF (NUM_ERR .GT. 5) THEN
+	      FLN_RESET_UPDATE = RDB$STATUS
+	      GOTO 999
+	   ENDIF
+C
+C try again - probably deadlock
+	   CALL LIB$WAIT(FLN_PSE)
+	   GOTO 20
+&RDB&	END_ERROR
+C
+C
+	DO 40 I = 1,NUM_JOB 
+&RDB&      FOR J IN JOB WITH J.JOB_ID = JOB(I)
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_RESET_UPDATE = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C try again - probably deadlock
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+C
+C now store it in JOB_HISTORY
+&RDB&         STORE JH IN JOB_HISTORY USING 
+C
+C if its a deadlock then retry after waiting
+&RDB&            ON ERROR
+	            NUM_ERR = NUM_ERR+1
+	            IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	            .AND. NUM_ERR .LT. 10)THEN
+	               CALL LIB$WAIT(FLN_PSE)
+&RDB&	               ROLLBACK
+	               GOTO 20
+	            ELSE
+	               FLN_RESET_UPDATE= RDB$STATUS
+&RDB&	               ROLLBACK
+	               GOTO 999
+	            ENDIF
+&RDB&	         END_ERROR
+&RDB&            JH.JOB_ID = J.JOB_ID;
+&RDB&            JH.PROJECT_ID = J.PROJECT_ID;
+&RDB&            JH.JOB_NAME = J.JOB_NAME;
+&RDB&            JH.START_TIME = J.START_TIME;
+&RDB&            JH.START_DATE = J.START_DATE;
+&RDB&            JH.FINISH_TIME = TIME;
+&RDB&            JH.FINISH_DATE = DAY;
+&RDB&            JH.OUTER_TASK_ID = J.OUTER_TASK_ID;
+&RDB&            JH.PRIORITY = J.PRIORITY;
+&RDB&            JH.INITIATOR_ID = J.INITIATOR_ID;
+&RDB&            JH.FLOWLINE_ID = J.FLOWLINE_ID;
+&RDB&         END_STORE
+C
+C now that its safely copied - delete the record from JOB
+C
+&RDB&         ERASE J
+C if its a deadlock then retry after waiting
+&RDB&         ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	         .AND. NUM_ERR .LT. 10)THEN
+	            CALL LIB$WAIT(FLN_PSE)
+&RDB&	            ROLLBACK
+	            GOTO 20
+	         ELSE
+	            FLN_RESET_UPDATE= RDB$STATUS
+&RDB&	            ROLLBACK
+	            GOTO 999
+	         ENDIF
+&RDB&	      END_ERROR
+&RDB&      END_FOR
+C
+C now rattle through JOB_HISTORY and set the status to show the job
+C has been voided
+&RDB&      FOR JH IN JOB_HISTORY WITH JH.JOB_ID  = JOB(I)
+&RDB&                             AND JH.JOB_STATUS NE 'Void'
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_RESET_UPDATE = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C try again - probably deadlock
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+&RDB&         MODIFY JH USING
+&RDB&         ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	         .AND. NUM_ERR .LT. 10)THEN
+	            CALL LIB$WAIT(FLN_PSE)
+&RDB&	            ROLLBACK
+	            GOTO 20
+	         ELSE
+	            FLN_RESET_UPDATE= RDB$STATUS
+&RDB&	            ROLLBACK
+	            GOTO 999
+	         ENDIF
+&RDB&	      END_ERROR
+&RDB&         JH.JOB_STATUS = "Void";
+&RDB&         END_MODIFY
+&RDB&      END_FOR
+C
+C delete active wires for this job 
+C
+&RDB&      FOR W IN WIRE_ACTIVE WITH W.JOB_ID = JOB(I) 
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 10) THEN
+		    FLN_RESET_UPDATE = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C only possible error is deadlock 
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+C
+&RDB&         ERASE W
+C
+C if its a deadlock then retry after waiting
+&RDB&         ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	         .AND. NUM_ERR .LT. 10)THEN
+	            CALL LIB$WAIT(FLN_PSE)
+&RDB&	            ROLLBACK
+	            GOTO 20
+	         ELSE
+	            FLN_RESET_UPDATE= RDB$STATUS
+&RDB&	            ROLLBACK
+	            GOTO 999
+	         ENDIF
+&RDB&	      END_ERROR
+&RDB&      END_FOR
+
+40	CONTINUE
+C
+C similarly for the tasks
+	DO 50 I = 1,NUM_TASK
+&RDB&      FOR T IN TASK WITH T.TASK_ID = TASK(I) 
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_RESET_UPDATE = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C try again - probably deadlock
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+C
+C now store it in TASK_HISTORY
+&RDB&         STORE TH IN TASK_HISTORY USING 
+C
+C if its a deadlock then retry after waiting
+&RDB&            ON ERROR
+	            NUM_ERR = NUM_ERR+1
+	            IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	            .AND. NUM_ERR .LT. 10)THEN
+	               CALL LIB$WAIT(FLN_PSE)
+&RDB&	               ROLLBACK
+	               GOTO 20
+	            ELSE
+	               FLN_RESET_UPDATE= RDB$STATUS
+&RDB&	               ROLLBACK
+	               GOTO 999
+	            ENDIF
+&RDB&	         END_ERROR
+&RDB&            TH.TASK_ID  = T.TASK_ID;
+&RDB&            TH.JOB_ID  = T.JOB_ID;
+&RDB&            TH.ELEMENT_ID = T.ELEMENT_ID;
+&RDB&         END_STORE
+C
+C now that its safely copied - delete the record from TASK
+C
+&RDB&         ERASE T
+&RDB&      END_FOR
+C
+C now rattle through TASK_HISTORY and set the status to show the TASK
+C has been voided
+&RDB&      FOR TH IN TASK_HISTORY WITH TH.TASK_ID= TASK(I)
+&RDB&                              AND TH.TASK_STATUS NE 'Void'
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_RESET_UPDATE = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C try again - probably deadlock
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+&RDB&         MODIFY TH USING
+&RDB&            ON ERROR
+	            NUM_ERR = NUM_ERR+1
+	            IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	            .AND. NUM_ERR .LT. 10)THEN
+	               CALL LIB$WAIT(FLN_PSE)
+&RDB&	               ROLLBACK
+	               GOTO 20
+	            ELSE
+	               FLN_RESET_UPDATE= RDB$STATUS
+&RDB&	               ROLLBACK
+	               GOTO 999
+	            ENDIF
+&RDB&	         END_ERROR
+&RDB&            TH.TASK_STATUS = "Void";
+&RDB&         END_MODIFY
+&RDB&      END_FOR
+C
+C archive sessions associated with the tasks aswell
+&RDB&      FOR S IN SESSION WITH S.TASK_ID = TASK(I)
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_RESET_UPDATE = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C try again - probably deadlock
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+C
+C now store it in SESSION_HISTORY
+&RDB&         STORE SH IN SESSION_HISTORY USING 
+C
+&RDB&            ON ERROR
+	            NUM_ERR = NUM_ERR+1
+	            IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	            .AND. NUM_ERR .LT. 10)THEN
+	               CALL LIB$WAIT(FLN_PSE)
+&RDB&	               ROLLBACK
+	               GOTO 20
+	            ELSE
+	               FLN_RESET_UPDATE= RDB$STATUS
+&RDB&	               ROLLBACK
+	               GOTO 999
+	            ENDIF
+&RDB&	         END_ERROR
+&RDB&            SH.TASK_ID  = S.TASK_ID;
+&RDB&            SH.SESSION_ID  = S.SESSION_ID;
+&RDB&            SH.OPERATOR_ID= S.OPERATOR_ID;
+&RDB&            SH.WORKSTATION_ID = S.WORKSTATION_ID;
+&RDB&            SH.START_TIME = S.START_TIME;
+&RDB&            SH.FINISH_TIME = S.FINISH_TIME;
+&RDB&            SH.START_DATE = S.START_DATE;
+&RDB&            SH.FINISH_DATE = S.FINISH_DATE;
+&RDB&            SH.CPU_TIME = S.CPU_TIME;
+&RDB&            SH.SESS_STATUS = S.SESS_STATUS;
+&RDB&         END_STORE
+C
+C now that its safely copied - delete the record from SESSION
+C
+&RDB&         ERASE S
+&RDB&      END_FOR
+C
+50	CONTINUE
+C
+C create new tasks for the specified elements
+	IF (NEW_TASK) THEN
+	   FLN_RESET_UPDATE= FLN_SETUP_TASKS(ELEMENT,NUM_ELEMENT,JOB_ID)
+	   IF(.NOT. FLN_RESET_UPDATE) THEN
+	      NUM_ERR = NUM_ERR+1
+	      IF(FLN_RESET_UPDATE .EQ. %LOC(RDB$_DEADLOCK)
+     &	       .AND. NUM_ERR .LT. 10)THEN
+	          CALL LIB$WAIT(FLN_PSE)
+&RDB&	          ROLLBACK
+	          GOTO 20
+	       ELSE
+&RDB&	          ROLLBACK
+	          GOTO 999
+	       ENDIF
+	   ENDIF
+	ENDIF
+C
+C
+C lastly (phew) delete all the specified wires
+C delete active wires for this job 
+C
+	DO 60 I = 1,NUM_WIRE
+&RDB&      FOR W IN WIRE_ACTIVE WITH W.JOB_ID = JOB_ID 
+&RDB&      AND W.WIRE_ID = WIRE(I)
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_RESET_UPDATE = RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C try again - probably deadlock
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+C
+&RDB&         ERASE W
+C if its a deadlock then retry after waiting
+&RDB&            ON ERROR
+	            NUM_ERR = NUM_ERR+1
+	            IF(RDB$STATUS .EQ. %LOC(RDB$_DEADLOCK)
+     &	            .AND. NUM_ERR .LT. 10)THEN
+	               CALL LIB$WAIT(FLN_PSE)
+&RDB&	               ROLLBACK
+	               GOTO 20
+	            ELSE
+	               FLN_RESET_UPDATE= RDB$STATUS
+&RDB&	               ROLLBACK
+	               GOTO 999
+	            ENDIF
+&RDB&	         END_ERROR
+&RDB&      END_FOR
+60	CONTINUE
+&RDB&   COMMIT
+C
+999	RETURN
+	END

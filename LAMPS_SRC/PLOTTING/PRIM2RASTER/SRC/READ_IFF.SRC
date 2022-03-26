@@ -1,0 +1,254 @@
+ 	INTEGER	FUNCTION READ_IFF(COORDS)
+C
+**	MODULE	READ_IFF
+**	IDENT	13MR92
+C
+C Copyright Laser-Scan Labs., Ltd., Cambridge, England.
+C
+C Author J.H.Rees
+C
+C	Part of the IFF-to-Raster conversion program
+C
+C	 - reads the Primitive IFF-file and acts accordingly.
+C
+C	(NB. Primitive IFF-files do NOT have CB entries, as they are meant to
+C	    be a 'stroked' version of a normal, more complex, IFF-file.)
+C
+C	First pass through the IFF-file is to build-up a sector-list of
+C	features verses scan-lines.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***	PARAMETER/CMN:PRIM2RASTERMSG/
+***	COMMON/CMN:COORD/
+***	COMMON/CMN:PRIM2RASTER/
+***	COMMON/PRIM_CMN:MH_IFF_PRIMITIVE/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+C
+C arguments:
+	REAL*4		COORDS(2,*)
+C
+C Functions:
+	INTEGER*4	SWATHE_HIT		! performs swathe/feature
+						!  intercept.
+	INTEGER*4	SETUP_BUFFERS
+C
+C w/s:
+	INTEGER		I
+	INTEGER*2 	IECODE			! IFF entry read in
+	INTEGER*2 	IELEN			! length of entry read in
+	INTEGER*4	ST_POS(2)		! ST-position in IFF-file.
+	INTEGER*2	F_WORD(2)		! feature data
+	BYTE		F_BYTE(2)
+	EQUIVALENCE	(ST_POS(2),F_WORD,F_BYTE)
+	INTEGER*4	FT_PTS			! No of coords in current ST.
+	INTEGER*2	PTS			! points in ST
+	INTEGER*2	IENDS			! bit-pattern.
+	REAL*4		WIDTH			! line-width of the current
+						!  feature.
+	INTEGER*4	TOTAL_NF		! the total number of features
+						!  we have sectored - for
+						!  informational purposes only!
+	INTEGER*2	FSARR(3)
+	REAL		Y_MIN,Y_MAX		! extent of feature
+	INTEGER		NCOORD
+	REAL		COORD1(2)		! save for first point
+	LOGICAL		AREA,CLOSED
+	INTEGER		CAP,JOIN
+	REAL		PROJ
+C
+	READ_IFF	= LSL__NORMAL		! assume success
+	TOTAL_NF	= 0			! no features yet.
+C
+	IF ( LOGGING )  CALL WRITEF('Starting to sector the data...')
+C
+C loop round the features - ignore NS/NO etc., but check in the Map Header that
+C this is indeed a Primitive Iff-file. (ie. created by FPPIFF).
+C
+10	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1)  THEN			! IFF file EOF ??
+	  READ_IFF = P2R__UNEXPEOF		! moan...
+	  GOTO 999
+	ENDIF
+C...New Feature.
+
+	IF (IECODE.EQ.'NF')  THEN
+	  TOTAL_NF = TOTAL_NF + 1
+	  NCOORD = 0				! reset feature-coord-count.
+	  ST_POS(1) = 0				! no ST position
+	  F_WORD(1) = 1				! default colour
+	  F_WORD(2) = 0				! default width 
+	  FSARR(1) = 0				! default GT
+	  AREA = .FALSE.
+	  CLOSED = .FALSE.
+	  CAP = 0
+	  JOIN = 0
+	  Y_MIN = 1E38
+	  Y_MAX = -1E38
+
+C...Coordinates of the feature.
+
+	ELSEIF (IECODE.EQ.'ST')  THEN
+	  IF (ST_POS(1).EQ.0) ST_POS(1) = LPOSH	! remember position
+	  CALL EIHRS(PTS, IENDS)		! get the number of coords in
+	  FT_PTS = PTS				!  this ST.
+	  CALL EIHRR(COORDS, 2*FT_PTS, 1)	! ...and read them.
+C
+C save first point for closed test
+	  IF (NCOORD.EQ.0) THEN
+	    COORD1(1) = COORDS(1,1)
+	    COORD1(2) = COORDS(2,1)
+	  ENDIF
+C
+C use subroutine (below) to get min/max
+	  CALL COORD_MM(COORDS,FT_PTS,Y_MIN,Y_MAX)
+	  NCOORD = NCOORD + FT_PTS		! update feature-coord-count
+
+C...deal with FS entry for this feature
+
+	ELSEIF ( IECODE .EQ. 'FS' )  THEN		! thickness
+	  CALL EIHRI(FSARR,3,1)
+	  F_WORD(1) = FSARR(3).AND.255			! colour index
+	  IF (FSARR(1).EQ.100) THEN
+	    AREA = .TRUE.				! solid area
+	  ELSEIF (FSARR(1).LT.100) THEN			! not an area
+	    CAP = FSARR(1)				! cap and join style
+	    JOIN = CAP/10
+	    CAP = CAP-JOIN*10
+	    IF (CAP.GT.2) CAP = 0
+	    IF (JOIN.GT.2) JOIN = 0
+	    F_BYTE(2) = 10*JOIN + CAP
+	  ENDIF
+
+C...deal with TH entry for this feature
+
+	ELSEIF ( IECODE .EQ. 'TH' )  THEN		! thickness
+	  CALL EIHRI(F_WORD(2),1,1)
+	  WIDTH = FLOAT(F_WORD(2))/1000.0		! microns -> mm
+	  IF (WIDTH.LT.RESOLUTION) WIDTH = RESOLUTION	! minimum thickness
+
+C...End of Feature.
+
+	ELSEIF (IECODE.EQ.'EF')  THEN
+C
+C check whether closed and flag as such
+	  IF (COORD1(1).EQ.COORDS(1,FT_PTS) .AND.
+     &	      COORD1(2).EQ.COORDS(2,FT_PTS) ) THEN
+	    CLOSED = .TRUE.
+	    F_BYTE(2) = F_BYTE(2)-128
+	  ENDIF
+C
+C If an area code, then unless too many points flag as an area.
+C If too many points, then it will be drawn as a line
+C
+	  IF (AREA) THEN
+	    IF ( NCOORD .GE. GFAMAX )  THEN
+	      AREA = .FALSE.
+	      CALL LSL_PUTMSG(P2R__MAXCOORD,GFAMAX-1)
+	    ELSE
+	      F_WORD(2) = -1		! flag as area
+	    ENDIF
+	  ENDIF
+C
+C amend the extents by the start point, and allow for line thickness
+C PROJ is the factor by which to multiply width/2 to get the maximum
+C extra projection of the feature
+	  PROJ = 0.0			! areas do not project
+	  IF (.NOT.AREA) THEN
+	    PROJ = 1.0				! lines at least by 1
+	    IF (JOIN.EQ.0) PROJ = MITER_LIMIT	! always >1
+	    IF (.NOT.CLOSED.AND.CAP.EQ.2) PROJ = MAX(PROJ,SQRT(2.0))
+						! proj caps by root 2
+	  ENDIF
+	  Y_MIN = Y_MIN - RANGE(3) - PROJ*WIDTH/2.0
+	  Y_MAX = Y_MAX - RANGE(3) + PROJ*WIDTH/2.0
+	  READ_IFF =  SWATHE_HIT(Y_MIN, Y_MAX, ST_POS)
+	  IF ( .NOT. READ_IFF )  GOTO 999	! error from SWATHE_HIT
+
+C...Map Header.
+
+	ELSEIF (IECODE.EQ.'MH')  THEN		! check PRIMITIVE-IFF
+	  CALL EIHRI(MHARR,MIN(IELEN,MHLEN),1)
+	  IF (  PRIM(1) .NE. 'P'  .AND.
+     &	  	PRIM(2) .NE. 'R'  .AND.
+     &	  	PRIM(3) .NE. 'I'  .AND.
+     &	  	PRIM(4) .NE. 'M' )  THEN
+	    READ_IFF = P2R__NOTPRIM		! not a PRIMITIVE file - moan
+	    GOTO 999
+	  ENDIF
+	  IF ( PRIM_VER .NE. 1) THEN		! current version 1
+	    READ_IFF = P2R__WRONGVER
+	    GOTO 999
+	  ENDIF
+
+C...RAnge.
+
+	ELSEIF (IECODE.EQ.'RA')  THEN		! get the extent of the data.
+	  CALL EIHRR(RANGE,4,1)
+C
+C amend the range to allow for border
+	  RANGE(1) = -BORDER
+	  RANGE(2) = RANGE(2)+BORDER
+	  RANGE(3) = -BORDER
+	  RANGE(4) = RANGE(4)+BORDER
+	  LINE_END	= NINT((RANGE(2)-RANGE(1))/RESOLUTION)+1
+	  COLUMN_END    = NINT((RANGE(4)-RANGE(3))/RESOLUTION)+1
+	  READ_IFF = SETUP_BUFFERS(LINE_END,COLUMN_END)
+	  IF (.NOT.READ_IFF) GOTO 999
+	  IF (LOGGING) CALL WRITEF(
+     &'Image is %N by %N pixels, divided into %N swathe%m of %N line%m',
+     &	LINE_END,COLUMN_END,MAX_SWATHE,LINES_PER_SWATHE)
+
+C...End of Job.
+
+	ELSEIF (IECODE.EQ.'EJ')  THEN
+	  GOTO 900
+	ENDIF
+
+C...Get next entry.
+
+	GOTO 10
+C
+C end:
+C
+900	IF (LOGGING) THEN
+	  CALL WRITEF(
+     &'%F0.3 megabytes memory allocated for sectors',NGETVM/2048.0)
+	  CALL WRITEF(
+     &		'Finished sectoring - %N features sectored',TOTAL_NF)
+	ENDIF
+C
+999	RETURN
+	END
+C
+	SUBROUTINE	COORD_MM(COORDS,N,Y_MIN,Y_MAX)
+C
+**	MODULE	COORD_MM
+**	IDENT	26FE92
+C
+C Copyright Laser-Scan Labs., Ltd., Cambridge, England.
+C
+C Author C.C. Brunt
+C
+C	Part of the IFF-to-Raster conversion program
+C
+C	 - amend y min and max of some coordinates
+C
+	IMPLICIT NONE
+C
+C arguments
+	REAL	COORDS(2,*)
+	INTEGER	N
+	REAL	Y_MIN,Y_MAX
+C
+C workspace
+	INTEGER	I
+C
+	DO 100 I = 1, N
+	  IF ( COORDS(2,I) .LT. Y_MIN ) Y_MIN = COORDS(2,I)
+	  IF ( COORDS(2,I) .GT. Y_MAX ) Y_MAX = COORDS(2,I)
+100	CONTINUE
+C
+	RETURN
+	END

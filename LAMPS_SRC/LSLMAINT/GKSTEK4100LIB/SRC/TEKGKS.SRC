@@ -1,0 +1,438 @@
+C Replacement subroutines for GKSLDLIB for TEK4100
+C The workstation transformation is communicated to the display.
+C Only the world transformation is done in software.
+C
+C Common (CMN) obtained from LSL$SOURCE_ROOT:[LSLMAINT.GKSLDLIB.NEW1]
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSWKWN(WKID,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSWKWN
+**	IDENT	13DE89
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					RD	27-Oct-1983
+C
+C SET WORKSTATION WINDOW
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/CMN:GKSDAT1/
+***	COMMON/CMN:GKSESL/
+C
+	GKSERR = 0
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	IF (XMIN .LT. 0.0 .OR. XMAX .GT. 1.0 .OR.
+     &	    YMIN .LT. 0.0 .OR. YMAX .GT. 1.0) GOTO 30
+	WSWIN(1) = XMIN
+	WSWIN(2) = XMAX
+	WSWIN(3) = YMIN
+	WSWIN(4) = YMAX
+C
+C set the window
+	CALL WSWKWN(WKID,XMIN,XMAX,YMIN,YMAX)
+C
+C and fix up the workstation viewport to same aspect ratio
+	CALL GFWKVP(WSVIEW(1),WSVIEW(2),WSVIEW(3),WSVIEW(4))
+	GOTO 9999
+C
+20	GKSERR	= 51	! rectangle definition is invalid
+	GOTO 9999
+30	GKSERR	= 53	! workstation window not within NDC unit square
+C
+9999	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSWKVP(WKID,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSWKVP
+**	IDENT	27OC83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					RD	27-Oct-1983
+C
+C SET WORKSTATION VIEWPORT
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/CMN:GKSDAT1/
+***	COMMON/CMN:GKSESL/
+C
+C segment visibility
+	INTEGER	GVISI,GINVIS
+	PARAMETER (GINVIS=0)		! invisible
+	PARAMETER (GVISI=1)		! visible
+C
+	REAL	W1,W2,V1,V2		! temporaries
+	INTEGER	FLAG			! call flag
+	DATA	FLAG/0/
+	SAVE	FLAG
+C
+	GKSERR = 0
+C
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	IF (((XMAX-XMIN) .GT. DCMAXX) .OR.
+     &	    ((YMAX-YMIN) .GT. DCMAXY)) GOTO 30
+	WSVIEW(1) = XMIN
+	WSVIEW(2) = XMAX
+	WSVIEW(3) = YMIN
+	WSVIEW(4) = YMAX
+C
+C force to same aspect ratio as workstation window
+	ENTRY GFWKVP(XMIN,XMAX,YMIN,YMAX)
+C
+C zap first two calls (one from GOPWK, other from GSWKWN), as they
+C both fail in this TEK implementation
+	IF (FLAG.LT.2) THEN
+	   FLAG = FLAG+1
+	   GOTO 9999
+	ENDIF
+C
+	V1=XMAX-XMIN
+	V2=YMAX-YMIN
+	W1=WSWIN(2)-WSWIN(1)
+	W2=WSWIN(4)-WSWIN(3)
+	IF (V1/W1.GT.V2/W2) THEN
+	   V1=XMIN+V2*W1/W2
+	   V2=YMAX
+	ELSE
+	   V2=YMIN+V1*W2/W1
+	   V1=XMAX
+	ENDIF
+C
+C give up if we are about to set a degenerate viewport
+	IF (XMIN.EQ.V1.OR.YMIN.EQ.V2) GOTO 9999
+C
+C the stuff commented out here is to clear the old viewport, when
+C shape changes - remove it for now since the extra redraw takes
+C ages on the TEK 4207 - find another way of clearing...
+C
+CCC	CALL WSFXUP(0)		! prevent implicit updating
+CCC	CALL WSVIS(-1,GINVIS)	! set all segments invisible
+CCC	CALL WRSGWK(1)		! redraw, to clear old viewport
+	CALL WSWKVP(WKID,XMIN/DCMAXX,V1/DCMAXX,YMIN/DCMAXX,V2/DCMAXX)
+CCC	CALL WDCCM(0,1,3)	! all except limbo (1) and invisible (3)
+CCC	CALL WSVIS(-3,GVISI)	! set visible
+CCC	CALL WSFXUP(6)		! back to maximum fixup
+	GOTO 9999
+C
+20	GKSERR = 51	! rectangle definition invalid
+	GOTO 9999
+30	GKSERR = 54	! workstation viewport not within display space
+C
+9999	RETURN
+C
+C provide an entry point for CLSWK to reset our frig flag
+	ENTRY	GKSRST
+	FLAG = 0
+	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+C	GKSLDLIB UTILITIES
+C	==================
+C
+	SUBROUTINE GUPTRN
+C
+***	MODULE	GUPTRN
+***	IDENT	19SE84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	19-Sep-1984
+C
+C Update the tranformation
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:GKSDAT1/		! GKS data structures
+C
+C Work out the scaling factor and offset for WC to NDC transformation.
+C Effective formula for transforming a coord is:-
+C	XN = XVMIN + (XW-XWMIN) * ((XVMAX-XVMIN)/(XWMAX-XWMIN))
+C	YN = YVMIN + (YW-YWMIN) * ((YVMAX-YVMIN)/(YWMAX-YWMIN))
+C
+C This formula needs to be put into the form:-
+C	XN = (XW*SCALEX) + OFFX
+C	YN = (YW*SCALEY) + OFFY
+C
+	SCALEX = (VIEWPT(2,TRNCUR)-VIEWPT(1,TRNCUR))
+     &		/(WINDOW(2,TRNCUR)-WINDOW(1,TRNCUR))
+	SCALEY = (VIEWPT(4,TRNCUR)-VIEWPT(3,TRNCUR))
+     &		/(WINDOW(4,TRNCUR)-WINDOW(3,TRNCUR))
+	OFFX = VIEWPT(1,TRNCUR) - (WINDOW(1,TRNCUR)*SCALEX)
+	OFFY = VIEWPT(3,TRNCUR) - (WINDOW(3,TRNCUR)*SCALEY)
+C
+C Work out the clipping limits.
+C Logical variable CLPALL is set if there is no overlap.
+	CLPALL = .FALSE.
+C
+C Define the clipping limits in WC
+	CLIPLO(1) = WINDOW(1,TRNCUR)		! W
+	CLIPHI(1) = WINDOW(2,TRNCUR)		! E
+	CLIPLO(2) = WINDOW(3,TRNCUR)		! S
+	CLIPHI(2) = WINDOW(4,TRNCUR)		! N
+C
+C the transformation is now up to date
+20	UPTRN = .FALSE.
+	RETURN
+	END
+C
+C***********************************************************************
+C Replacement GOPWK calling GKSCOL to read colour table
+C
+	SUBROUTINE	GOPWK(WKID,CONID,WTYPE)
+C
+**	MODULE	GOPWK
+**	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-Jul-1983
+C Add initialise fill area update		TJI	27-Nov-1984
+C
+C OPEN WORKSTATION   - sets up World Coordinates and Normalised Device
+C			  Coordinates to be 1 metre on the film with the
+C			  origin at the bottom left hand corner
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CONID			! connection-identifier
+	INTEGER	WTYPE			! workstation type
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+***	COMMON/THKPAR/			! LDLIB common block
+C
+C Local variables
+	REAL NULL
+C
+	GKSERR	= 0			! no errors
+C
+C set up correct device units (mm or cm)
+	CALL GKSUNI
+C
+20	WKIDS = WKID
+	DEFER = GASTI	! deferral mode is At Some TIme
+	REGEN = GSUPPD	! implicit regeneration suppressed
+	UPTRN = .TRUE.	! update transformation
+	UPLIN = .TRUE.	! update polyline attributes
+	UPFA  = .TRUE.	! update fill area attributes
+C
+C LDLIB (or WOSPLIB etc. device). Pass CONID and WTYPE in case useful.
+	CALL	LDINIT(INIARG,CONID,WTYPE)
+C
+C Make sure that MSPOT and MSEP in common /THKPAR/ have non-zero values
+C (they should have been set by LDLIB)
+C If preset, MSPOT is the line thickness and MSEP is the line
+C separation to give solid fill in device units (cm, mm, or whatever,
+C according to DCUNIT). If unset, then we set them to be 0.0001 metres
+	IF (MSPOT.LE.0.0) MSPOT = DCUNIT*0.0001
+	IF (MSEP .LE.0.0) MSEP  = MSPOT
+C
+C Get the size of the available film area in device units.
+C Device units are considered to be mms, so if they are, for example,
+C cms (such as on the BENSON plotter) then the plot will be 10 times
+C too large
+	CALL LDFPPM(4,NULL,DCMAXX,DCMAXY)
+C
+C use -1 version of ORIGIN (device units), this is what WOSPLIB does
+	CALL ORIGIN(-DCMAXX/2,-DCMAXY/2,-1)
+	CALL UNITS(DCUNIT)
+C
+	GNOMLW  = MSPOT
+	GNOMSEP = MSEP
+C
+C Convert to metres
+	DCMAXX  = DCMAXX/DCUNIT
+	DCMAXY  = DCMAXY/DCUNIT
+	GNOMLW  = GNOMLW/DCUNIT
+	GNOMSEP = GNOMSEP/DCUNIT
+C
+C Set workstation viewport to entire area
+	CALL GSWKVP(WKID,0.0,DCMAXX,0.0,DCMAXY)
+C
+C Try to read a colour table
+	CALL GKSCOL('LSL$TEK_COLOUR')
+C
+999	RETURN
+	END
+C
+C Subroutine to read colour table
+C
+	SUBROUTINE GKSCOL(FILENAME)
+C
+***	IDENT	03MA87
+***	MODULE	GKSCOL
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author Clarke Brunt				17-Mar-1986
+C
+C To read a colour table file for TEK 4100 display
+C Table has same format as for Sigma ARGS just for compatibility
+C See [LIB.VSLIB]RDSYSC.SRC
+C All blink stuff is ignored (and need not be present)
+C
+C The system constants file has the following format...
+C
+C    <colour_number>     [; <comment>]
+C                                                             N
+C  { <red>   <green>   <blue>   [<blink>|;]      [<comment>] }
+C
+C where a line is in curly brackets ( { and } ) it is repeated the
+C number of times given by the superscript. A parameter in square
+C brackets ( [ and ] ) is optional.
+C
+C spaces and tabs are equivalent, and serve merely as field separators-
+C they are otherwise ignored.
+C
+C N is equal to the <colour_number>
+C
+C Comment lines are preceded by a semi-colon, and may be interspersed
+C at will.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+C
+C argument
+	CHARACTER*(*)	FILENAME	! filename or logical name
+C
+C functions used
+	LOGICAL		FLROPN
+	LOGICAL		FLRCLO
+	INTEGER*4	FLRLIN
+	LOGICAL		RDCHS
+	LOGICAL		RDLONG
+	LOGICAL		RDLHEX
+	LOGICAL*4	LIB$GET_LUN
+	LOGICAL*4	LIB$FREE_LUN
+C
+	LOGICAL*4	OK
+	INTEGER		I			! count variable
+	BYTE		CH			! character read
+	INTEGER*4	CNUM			! number of colours
+	INTEGER*4	LUN
+	INTEGER		LINTYP			! type of line
+	INTEGER		INDEX			! colour index
+	INTEGER		CVAL(3)			! colour values
+C
+C set the TEK to RGB mode
+	CALL WSCMOD(1)
+C
+C get a LUN to read the file on
+	OK = LIB$GET_LUN(LUN)
+	IF (.NOT.OK) THEN		! failed
+	   CALL LSL_PUTMSG(OK)
+	   GOTO 10000
+	ENDIF
+C
+C open up the file (just give up on error)
+	OK = FLROPN(LUN,FILENAME)	! open file
+	IF (.NOT.OK) GOTO 999
+C
+	LINTYP = 1			! want number of colours
+	INDEX = 0			! start with colour 0
+C
+50	OK = FLRLIN()		 	! read into TXTBUF
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) GOTO 998		! end of file
+	   CALL LSL_PUTMSG(OK)			! moan
+	   GOTO 999
+	ENDIF
+C
+C we have a line - what is it ?
+	CALL BSLN				! start of line
+	IF (RDCHS(CH)) GOTO 50			! empty line
+	IF (CH.EQ.';') GOTO 50			! comment line
+	CALL BSCH
+C
+	GOTO (1000,2000) LINTYP
+C
+C the first line contains a single integer which says how many colours
+C are being defined
+1000	IF (RDLONG(CNUM) ) GOTO 998	! read the (decimal) number
+	IF (CNUM.LE.0.OR.CNUM.GT.256) GOTO 998	! out of range
+	LINTYP = LINTYP+1
+	GOTO 50				! next line
+C
+C data lines are 3 hex numbers, specifying Red, Green, Blue values in
+C the video transformation table, optionally followed by a 4th hex
+C value defining the blink byte in the table (which is zero by default)
+C
+2000	CONTINUE
+C
+	DO 2010 I = 1,3
+	   IF (RDLHEX(CVAL(I))) GOTO 998
+	   IF (CVAL(I).LT.0.OR.CVAL(I).GT.255) GOTO 998
+2010	CONTINUE
+	IF (INDEX.LT.CNUM) THEN
+C
+C set the colour table
+	   CALL WSCR(1,INDEX,CVAL(1),CVAL(2),CVAL(3))
+	   INDEX = INDEX+1		! next colour index
+	   GOTO 50
+	ENDIF
+C
+C Ignore blink generator stuff
+998	OK = FLRCLO(LUN)
+	IF (.NOT.OK) CALL LSL_PUTMSG(OK)
+C
+999	OK = LIB$FREE_LUN(LUN)	! free LUN
+	IF (.NOT.OK) CALL LSL_PUTMSG(OK)
+C
+10000	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GCLRWK(WKID,COFL)
+C
+**	MODULE	GCLRWK
+**	IDENT	29FE84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					RD	14-Nov-1983
+C
+C CLEAR WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER COFL			! control flag
+C
+***	COMMON/CMN:GKSDAT1/
+***	COMMON/CMN:GKSESL/
+C
+	GKSERR = 0
+	CALL WSFXUP(0)
+	CALL WDSG(-1)
+	CALL WSFXUP(6)
+	CALL WRSGWK(WKID,-1)
+	RETURN
+	END
+C
+C***********************************************************************
+C

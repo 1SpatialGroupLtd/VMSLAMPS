@@ -1,0 +1,1120 @@
+	.TITLE	EXPAND
+ 	.IDENT	/09MY94/
+ 
+; Copyright Laser-Scan Laboratories, Ltd., Cambridge, England
+ 
+	$GBLINI
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;Modifications:
+;
+;	fix trunc of zeros in %G when buffer full	CCB	 6-Mar-1989
+;	and remove ^F on D_FLOAT constants
+;	add %DD and %DT					RWR	19-Oct-1987
+;	use .ENTRY for EXPAND and APPEND		CCB	10-Sep-1987
+;	use .ASCII rather than .ASCID for		CCB	10-Sep-1987
+;	PRC_CH, PRC_A_CH, and UPA_CH
+;	change default %A,%S size to be 255, not 80	TJI	17-Mar-1987
+;	fix bug in spotting ^T,^P			WJJ	13-Jan-1987
+;	call of CHECK_INIT added to EXPAND		TJI	19-May-1986
+;	%Gf.d (general floating point) added		CCB	22-Jan-1986
+;	%E now works for numbers near power of 10
+;	%E rounds double number properly
+;	%F0.0 doesn't leave spurious char in buffer	CCB	18-Jan-1986
+;	now part of LSLLIB				TJI/RJH	 6-Jul-1985
+;	now places null AFTER the EXPMAXth byte if
+;	buffer full (so can output full 80 chars)	TJI	29-Apr-1982
+;	PSECT usage standardised			PGH	22-Mar-1982
+;	BUFRST Added, and R5s changed to R9s		AJW	15-Mar-1982
+;	.PSECT added, and comments about registers
+;	and MOVTUC, etc.				AJW	15-Mar-1982
+;	never puts null last byte past EXPMAX		AJW	01-Feb-1982
+;	%RZ & %5Z added					MCF	30-Oct-1980
+;	line length comment added			MCF	20-Oct-1980
+;	space filling of %WS buffers			SCM	29-Sep-1980
+;	Created						RF
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ 
+; define control register layout
+GBL... = 0
+	_VIELD	EXPF,0,<-	; flags in R11
+		<IDSIZ,2,M>,-	; integer data size (log(2) no. of bytes)
+		<UNSGN,,M>,-	; unsigned integer marker
+		<FDSIZ,2,M>,-	; floating data size (reserve for expansion)
+		<,3>,-		; 3 spare
+		<NSTD,7,M>,-	; nesting depth
+		<NSTDG,,M>,-	; guard bit for nesting depth field
+		<,6>,-		; 6 spare
+		<FLPAD,,M>,-	; pad floating point output
+		<BUFPAD,,M>,-	; %WS in operation => space fill empty bytes
+		<PAD,8,M>,-	; pad character for integer expansion
+		<DUMMY>-	; for size check
+	>
+ 
+ASSUME	EXPF_V_DUMMY, EQ, 32
+ 
+EXPF_K_NSTCT = 1@EXPF_V_NSTD	; counter for nesting depth field
+ 
+EXPF_K_MOD_BYTE = 0		; integer mode - byte
+EXPF_K_MOD_WORD = 1		;	       - word
+EXPF_K_MOD_LONG = 2		;	       - long
+EXPF_K_MOD_QUAD = 3		;	       - quad
+ 
+EXPF_K_MOD_SNGL = 0		; real mode - single
+EXPF_K_MOD_DBLE = 1		;	    - double
+EXPF_K_MOD_GRND = 2		;	    - grand
+EXPF_K_MOD_HUGE = 3		;	    - huge
+ 
+EXPF_K_INIT = <<EXPF_K_MOD_LONG>@EXPF_V_IDSIZ>!- ; initial value for mode word
+	      <<EXPF_K_MOD_SNGL>@EXPF_V_FDSIZ>!- ; initial value for mode single
+	      <<^A/ />@EXPF_V_PAD>
+ 
+TAB=9				; define the tab character
+ 
+; execute definition macros
+	$DSCDEF
+ 
+; macro for using CASE instruction
+	.MACRO	.CASE, SELECTOR, FST, ?LST, DISPLS, ?STLBL
+	CASEW	SELECTOR, #FST, #LST
+LST..	=	0
+STLBL:	.IRP	DISPL, <DISPLS>
+	.WORD	DISPL-STLBL
+LST..	=	LST..+1
+	.ENDR
+LST	=	FST+LST..-1
+	.ENDM	.CASE
+ 
+; macro to adjust length of string to be written to EXPBUF
+; (prevents overflow)
+	.MACRO	ADJ_LENGTH	REG,?LAB
+	SUBL3	R9,BUFEND,R4	; get number of holes left
+	CMPL	R4,REG
+	BGEQ	LAB
+	MOVL	R4,REG		; and minimise with number asked for
+LAB:	CLRL	R4
+	.ENDM	ADJ_LENGTH
+ 
+ 
+; macro to prevent overflow of EXPBUF by character moves
+	.MACRO	MVCH	CHAR,?LAB
+	CMPL	R9,BUFEND
+	BGEQU	LAB
+	MOVB	CHAR,(R9)+
+LAB:
+	.ENDM	MVCH
+ 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ 
+	DATA_PSECT	LSL
+ 
+FLTNUM:	.DOUBLE	0		; double precision floating number
+ 
+BUFEND:	.BLKL	1		; address of one byte beyond current buffer
+BUFRST:	.BLKL	1		; address of first byte in buffer
+
+DLEN:	.BLKL	1		; length of date/time as string
+DDESC:	.BLKW	1		; descriptor of string
+	.BYTE	DSC$K_DTYPE_T
+	.BYTE	DSC$K_CLASS_S
+	.BLKL	1
+
+DARGS:	.LONG	3		; argument list for conversion routines
+	.BLKL	1
+	.ADDRESS DLEN
+	.ADDRESS DDESC 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	CONST_PSECT	LSL
+
+; table of permitted escape characters
+PRC_CH:	.ASCII	#DGW5RET NIOX^()[]PUFSAMmC%#
+PRC_LEN = .-PRC_CH
+ 
+PRC_A_CH: .ASCII /CDZ/
+PRC_A_LEN = .-PRC_A_CH
+ 
+; table to translate digit values to characters
+DIGITAB: .ASCII	/0123456789ABCDEF/
+ 
+; table of permitted %^ escape characters
+UPA_CH:	.ASCII	/TPDFLWB/
+UPA_LEN = .-UPA_CH
+ 
+; table of permitted %D escape characters
+D_CH:	.ASCII	/TD/
+D_LEN = .-D_CH
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ 
+	CODE_PSECT	LSL
+ 
+; EXPAND	expand arguments as defined by argument string
+;		create output string in EXPBUF in COMMON/LSL_EXPC/
+;		returns number of chars expanded in buffer
+;
+; APPEND	expand argments as defined by argument string,
+;		putting them at the end of what's already in EXPBUF
+;
+;* *	%An	Ascii string - as %AZ
+;* *	%ACn	Ascii string - byte array, first byte count (max length n, default 255)
+;* *	%ADn	Ascii string, from descriptor (as %S)
+;* *	%AZn	Ascii string - byte array, terminated by zero byte (max length n, default 255)
+;* *	%C	two chars from a word (one only if m.s. zero)
+;* *	%Ff.d	Floating decimal (default field 9.3)
+;***	%In	decimal Integer (default field 6)
+;  *	%M	Multiplicity of last integer (upper case)
+;  *	%m	Multiplicity of last integer (lower case)
+;***	%Nn	decimal Number (default field 0)
+;***+	%On	Octal number (default field 0)
+;++	%Pc	set integer output Pad character to c (default is space)
+;* *	%Sn	Ascii String, from descriptor (max length n, default 255)
+;+	%U	set Unsigned output of next data word
+;***+	%Xn	heXadecimal number (default field 0)
+;	%^	decode next character for mode control; facilities:
+;++	%^B	set Byte mode
+;++	%^L	set Long mode
+;++	%^W	set Word mode (default state, set at EXPAND)
+;++	%^F	set single precision floating point mode (default)
+;++	%^D	set double precision flt.pt mode
+;++	%^P	set to pad %F floating output with trailing 0s
+;++	%^T	set to truncate trailing 0s from %F floating output
+;+	%(n	open repetition (default count 1)
+;+	%[	open repetition, count from (word) argument
+;+	%)	close repetition
+;+	%]	close repetition
+;  *	%%	%
+;  *	%<unexpected character>  transmitted as ?<unexpected character>
+;  *	%^<unexpected character>  transmitted as %^<unexpected character>
+;	%	%space is ignored and can terminate numbers
+;  *	%T	Tab
+;* *	%Ed	real Number with d digits (default 4)
+;* *	%R,%5	3 RAD50 characters
+;* *	%RZ,%5Z	as %R but trailing blanks suppressed
+;*	%W	change to user specified buffer
+;		arg is address of byte array - no overflow checking
+;*	%WS	as above - arg is address of string descriptor
+;			   overflow checking enabled - buffer space filled
+;* *	%Gf.d	General floating point (default field 9.3)
+;* *	%DD	date string
+;* *	%DT	time string
+;
+;*..	takes argument from argument string
+;.*.	sets value for %M,%m
+;..*	produces output
+;
+;+.	sets flag
+;.+	flag is 'permanent'
+;...+	sets 'unsigned' internally
+ 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Register use:		(see also documentation of MOVTUC,MOVC3)
+;  R4	max no of chars able to be output without overflow
+;  R6	advances along string: taken from AP initially
+;  R7	points to current position in control string
+;  R8	characters remaining in control string
+;  R9	pointer to last char in output string
+; R10	last integer expanded (for %M,%m)
+; R11	control: format described by VIELD EXPF
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	.ENTRY	APPEND,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVZWL	EXPLEN, R9		; no. of chars already in output string
+	MOVL	EXPCTF, R11		; recover flags longword
+	BRB	APPEND_I		; join EXPAND
+ 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	.ENTRY	EXPAND,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	TSTW	EXPMAX			; avoid wasteful call to CHECK_INIT
+	BGTR	10$
+ 	CALLS	#0, G^CHECK_INIT	; check that LSL_INIT has been called
+10$:	CLRL	R9			; nothing in buffer yet
+	MOVL	#EXPF_K_INIT, R11	; initial value for flags
+ 
+APPEND_I:				; APPEND joins
+	TSTL	(AP)			; any args ?
+	BEQL	NOARG			; no, so reset
+	MOVAL	4(AP), R6		; argument pointer
+	TSTL	(R6)			; will be zero if argument missing
+	BNEQ	APP1
+
+NOARG:	CLRW	EXPLEN			; no args - set buffer empty
+	BRW	EXT
+
+APP1:	MOVL	(R6)+, R7		; 1st arg is descriptor of string
+	MOVZWL	DSC$W_LENGTH(R7), -	; length of string
+		R8			; to R8, whence we will use it
+	MOVAQ	@DSC$A_POINTER(R7), -	; pointer to contents of string
+		R7			; to R7, whence we will use it
+	MOVZWL	EXPMAX,R0		; stretch size for address calcs
+	ADDL3	EXPPTR,R0,BUFEND	; calc end of buffer for o/flow checking
+	ADDL2	EXPPTR, R9		; pointer to next character to put in
+	MOVL	EXPPTR,BUFRST		; start of buffer
+	MOVL	#1, R10			; 'last integer expanded' is singular
+ 
+FINDPC:	SUBL3	R9,BUFEND,R4	; R4 = max length able to output before o/flow
+
+	BLEQ	DONE		; no space left in output
+	TSTL	R8
+	BLEQ	DONE		; no chars left in input
+10$:	CMPB	(R7), #^A/%/	; check for escape
+	BEQL	FOUNDPC		; yes
+	MOVB	(R7)+, (R9)+
+	DECL	R4		; one less space in output
+	BLEQ	DONE		; so done (nb R8 not required)
+	DECL	R8		; one less char in input
+	BGTR	10$		; round again
+ 
+DONE:	SUBL3	BUFRST,R9,R0		; calculate number of chars in buffer
+					; for function value return
+	CMPL	BUFRST,EXPPTR		; is the current buffer EXPBUF
+	BNEQ	5$			; branch if not
+	CLRB	EXPBUF[R0]		; add terminating null (after last char)
+	CVTLW	R0, EXPLEN		; preserve length
+5$:	BBCC	#EXPF_V_BUFPAD,R11,EXT	; skip if don't have to space fill
+					; only fill if %WS
+ 
+; R4 = no. of bytes remaining in destination string
+; R9 = address of next byte in destination string
+
+	TSTL	R4			; any bytes to space fill ?
+	BEQL	EXT			; if EQL, no
+7$:	MVCH	<#^A/ />		; pad
+	SOBGTR	R4,7$			; repeat as necessary
+ 
+EXT:	BICL2	#EXPF_M_NSTD, R11 	; clear nesting depth
+	MOVL	R11, EXPCTF		; save flags in case of later APPENDs
+	RET				; done
+ 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+FOUNDPC:				; found a percent-sign
+	SUBL2	#2, R8			; number of characters REALLY left
+	BLSS	DONE			; none left (includes % as last char)
+	INCL	R7			; R7 = new string pointer
+	LOCC	(R7)+, -		; look up next character of string
+		#PRC_LEN, 	-	; length of permitted char string
+		PRC_CH			; permitted chars
+				 	; R0 is now number of bytes remaining
+	.CASE	R0, 0,,		-	; decode switch:
+	<	PRC_UNX,	-	; unexpected
+		PRC_PRC,	-	; transmit %
+		PRC_C,		-	; one or two characters
+		PRC_MM,		-	; multiplicity, lower case
+		PRC_M,		-	; multiplicity
+		PRC_A,		-	; ascii string, various types
+		PRC_S,		-	; string
+		PRC_F,		-	; floating decimal
+		PRC_U,		-	; next to expand unsigned
+		PRC_P,		-	; integer pad character
+		PRC_KET,	-	; close repeat
+		PRC_SQB,	-	; open repeat <arg> times
+		PRC_KET,	-	; close repeat
+		PRC_BRA,	-	; open repeat
+		PRC_UPA,	-	; set data mode
+		PRC_X,		-	; hex
+		PRC_O,		-	; octal
+		PRC_I,		-	; decimal (as N - compatibility with other ancient machines)
+		PRC_N,		-	; decimal
+		PRC_SP,		-	; %space ignored
+		PRC_TAB,	-	; transmit tab
+		PRC_E,		-	; real number
+		PRC_R,		-	; transmits 3 RAD50 characters
+		PRC_FIV,	-	; as %R
+		PRC_W,		-	; change to user buffer
+		PRC_G,		-	; general floating point
+		PRC_D >		 	; date and time
+	BRW	PRC_UNX			; unexpected fall through
+ 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; service routines
+ 
+GET_FIELD:			; read field for output operation to R2
+				; expects default in R0, destroys R0, R1
+	TSTL	R8		; any chars left in input string?
+	BEQL	20$		; none - default willl do
+	CMPB	(R7), #^A/0/	; first
+	BLSS	20$		;  is
+	CMPB	(R7), #^A/9/	;   a
+	BGTR	20$		;    digit?
+	CLRL	R0		; field to build
+10$:	MOVZBL	(R7), R2	; next character of string
+	SUBL2	#^A/0/, R2	; reduce to digit value
+	CMPL	R2, #9		; is it a digit?
+	BGTRU	20$		; no
+	INCL	R7		; move string pointer
+	EMUL	R0, #10, R2, R0	; build up integer
+	SOBGTR	R8, 10$		; loop, counting characters
+20$:	MOVL	R0, R2		; answer where it should be
+	RSB			; back
+ 
+ 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; expansion routines
+ 
+;-------------------------------------------------------------------------------
+; %A - various sorts of string - decode next char to decide which
+ 
+PRC_A:	TSTL	R8			; any chars left in control string?
+	BLEQ	PRC_AZ			; if LEQ, no - treat as %AZ
+	DECL	R8			; count down
+	LOCC	(R7)+, -		; look up next character
+		#PRC_A_LEN,-
+		PRC_A_CH
+					; R0 is now number of bytes remaining
+	.CASE	R0, 0,,		-	; decode switch
+	<	PRC_A0,		-	; unknown - treat as %AZ
+		PRC_AZ,		-	; zero-terminated
+		PRC_AD,		-	; from descriptor
+		PRC_AC	>		; counted string
+ 
+;...............................................................................
+; %A<unknown> backspace over character (which may be digit) and treat as %AZ
+ 
+PRC_A0:	DECL	R7		; backspace pointer
+	INCL	R8		; un-count character
+				; and fall into %AZ
+ 
+;...............................................................................
+; %AZ - ascii string, terminated by zero character
+ 
+PRC_AZ:	MOVL	#255, R0	; default 255
+	BSBB	GET_FIELD	; get field (i.e. max allowable string length)
+	ADJ_LENGTH	R2
+	
+	TSTL	R2
+	BLEQ	20$
+	MOVL	(R6)+, R1	; argument string
+10$:	TSTB	(R1)
+	BEQL	20$		; stop at zero byte
+	MOVB	(R1)+, (R9)+
+	DECL	R2
+	BGTR	10$
+20$:	BRW	FINDPC
+ 
+;...............................................................................
+; %AC - string with count byte at front
+ 
+PRC_AC:	MOVL	#255, R0	; default 255
+	BSBW	GET_FIELD	; get field (max allowable sting length)
+	MOVAB	@(R6)+, R1	; get string address
+	MOVZBL	(R1)+, R0	; strip off count
+	BRB	COPSTR		; join %AD
+ 
+;...............................................................................
+; %S (or %AD) - string
+ 
+PRC_AD:
+PRC_S:	MOVL	#255, R0		; default 255
+	BSBW	GET_FIELD		; get field to R2
+	MOVAQ	@(R6)+, R1		; string descriptor
+	MOVZWL	DSC$W_LENGTH(R1),-	; length of string
+		R0			; to R0
+	MOVAB	@DSC$A_POINTER(R1),-	; address of string
+		R1			; to R1
+COPSTR:	CMPL	R0, R2			; form
+	BLSS	10$			;  minimum
+	MOVL	R2, R0			;   of R0, R2
+10$:	ADJ_LENGTH	R0
+	MOVC3	R0, (R1),-		; copy
+		(R9)			; to EXPBUF
+					; SETS R1, R3 and CLEARS R0,R2,R4,R5
+	MOVL	R3, R9	       		; recover output ptr
+	BRW	FINDPC			; back for next %
+ 
+;-------------------------------------------------------------------------------
+; integer numbers
+
+;...............................................................................
+; %X - hex
+ 
+PRC_X:	MOVL	#16, R5		; base 16
+	BRB	EXPUINT		; join %O
+ 
+;...............................................................................
+; %O - octal
+ 
+PRC_O:	MOVL	#8, R5			; base 8
+EXPUINT: BISW2	#EXPF_M_UNSGN, R11	; intrinsically unsigned
+	BRB	DEFMIN			; join %N
+ 
+;...............................................................................
+; %I - integer
+ 
+PRC_I:	MOVL	#1,R1		; mark %I so get correct default field
+	MOVL	#10,R5		; base 10
+	BRB	EXPINT		; join %N
+ 
+;...............................................................................
+; %N - decimal
+ 
+PRC_N:	MOVL	#10,R5			; base 10
+DEFMIN:	CLRL	R1			; mark default field 0 (ie. minimum)
+EXPINT:	BICL3	#^C<EXPF_M_IDSIZ>,-	; get data
+		R11, R0		    	; size field
+	.CASE	R0, 0,,	-		; switch on data size
+	<	N_BYTE,		-	; byte mode
+		N_WORD,		-	; word mode
+		N_LONG	>		;  long mode
+ 
+; get byte-mode operand
+ 
+N_BYTE:	BBS	#EXPF_V_UNSGN, R11, 10$	; if BS, unsigned extract
+	CVTBL	@(R6)+, R3     		; get signed data
+	BRB	EXPL
+
+10$:	MOVZBL	@(R6)+, R3		; get unsigned data
+	BRB	EXPL
+ 
+; get word-mode operand
+ 
+N_WORD:	BBS	#EXPF_V_UNSGN, R11, 10$	; if BS, unsigned extract
+	CVTWL	@(R6)+, R3		; get signed data
+	BRB	EXPL
+
+10$:	MOVZWL	@(R6)+, R3		; get unsigned data
+	BRB	EXPL
+ 
+; get longword-mode operand
+ 
+N_LONG:	MOVL	@(R6)+, R3	; no distinction between signed and unsigned
+EXPL:	MOVL	R1, R0		; zero if minimum field
+	BEQL	5$
+	MOVL	#6, R0		; default for %I
+5$:	BSBW	GET_FIELD	; establish field to expand into
+	MOVL	SP, R1		; preserve stack pointer for output
+	CLRB	R0		; default no sign
+	MOVL	R3, R10		; preserve this as 'last integer'
+	BBSC	#EXPF_V_UNSGN, R11, 10$	; skip all this niddle noddle if to be unsigned
+	BGEQ	10$		; positive (not 'signed', then)
+	MOVB	#^A/-/, R0	; keep sign character
+	MNEGL	R3, R3		; and flip sign
+10$:	CLRL	R4		; no high-order 32 bits
+	EDIV	R5, R3, R3, R4	; divide
+	MOVB	DIGITAB[R4], -(SP) ; translate to character, and stick on stack
+	TSTL	R3		; finished yet?
+	BNEQ	10$		; no, loop
+	TSTB	R0		; sign to add?
+	BEQL	30$		; no
+	MOVB	R0, -(SP)	; sign to stack buffer
+30$:	SUBL3	SP, R1,R5	; effective field found
+	SUBL2	R5, R2		; vs. allowed field
+	BLEQ	50$		; filled or overfilled field (=> minimum width output)
+	EXTZV	#EXPF_V_PAD,-	; get pad
+		#EXPF_S_PAD,-	; character
+		R11, R0		; from control register to R0
+40$:	MVCH	R0		; add pad(s) at start to fill field
+	SOBGTR	R2, 40$		; (repeat until enough)
+50$:	MOVL	SP,R0		; save address for output
+	BICL2	#3, SP		; long align stack
+	PUSHL	R1		; save 'proper' position for stack pointer
+	ADJ_LENGTH	R5
+	MOVC3	R5, (R0), (R9)	; copy expanded characters to output string
+				; SETS R1, R3 and CLEARS R0,R2,R4,R5
+	MOVL	R3, R9		; recover string pointer
+	MOVL	(SP), SP	; recover stack space
+	BRW	FINDPC		; back for next
+ 
+;-------------------------------------------------------------------------------
+; %^ - decode next character of control string to give mode
+ 
+PRC_UPA: DECL	R8			; any characters left?
+	BGEQ	UPA_2			; if GEQ, yes
+UPA_1:	BRW	DONE			; end of conversion
+UPA_2:	LOCC	(R7)+,-			; look up next character
+		#UPA_LEN,-
+		UPA_CH
+					; R0 is now number of bytes remaining
+	.CASE	R0, 0,,		-	; decode switch
+	<	UPA_UNX,	-	; unexpected character
+		UPA_B,		-	; set byte integer data mode
+		UPA_W,		-	; set word integer data mode
+		UPA_L,		-	;  set long integer data mode
+		UPA_F,		-	; set single precision flt. pt. mode
+		UPA_D,		-	; set double precision flt. pt. mode
+		UPA_P,		-	; set floating trailing 0 pad
+		UPA_T	>	 	; set floating trailing 0 truncate
+ 
+;...............................................................................
+; unexpected character after %^
+ 
+UPA_UNX: MVCH	#^A/%/		; %^ to output
+	MVCH	#^A/^/
+	BRW	ADD_UNX		; then unexpected character
+ 
+;...............................................................................
+; %^L - data type long
+ 
+UPA_L:	INSV	#EXPF_K_MOD_LONG,-	; set mode long
+		#EXPF_V_IDSIZ,-		; into appropriate
+		#EXPF_S_IDSIZ,-		; field
+		R11			; of flags register
+	BRW	FINDPC
+ 
+;...............................................................................
+; %^W - data type word
+ 
+UPA_W:	INSV	#EXPF_K_MOD_WORD, -	; insert 'word' control value
+		#EXPF_V_IDSIZ,	-	; into appropriate
+		#EXPF_S_IDSIZ,	-	; field of
+		R11			; control register
+	BRW	FINDPC
+ 
+;...............................................................................
+; %^B - data type byte
+ 
+UPA_B:	BICW2	#EXPF_M_IDSIZ, R11 	; clearing field is rather easier!
+	BRW	FINDPC
+ 
+;...............................................................................
+; %^F - data type single precision floating
+ 
+UPA_F:	INSV	#EXPF_K_MOD_SNGL,-	;set mode single precision
+		#EXPF_V_FDSIZ,	-	;  into appropriate
+		#EXPF_S_FDSIZ,	-	;   field
+		R11			;   of flags register
+	BRW	FINDPC
+ 
+;...............................................................................
+; %^D - data type double precision floating
+ 
+UPA_D:	INSV	#EXPF_K_MOD_DBLE,-	;   set mode double precision
+		#EXPF_V_FDSIZ,	 -	;   into appropriate
+		#EXPF_S_FDSIZ,	 -	;   field
+		R11			;   of flags register
+	BRW	FINDPC
+ 
+;...............................................................................
+; %^P - set floating trailing zero pad
+ 
+UPA_P:	BISL2	#EXPF_M_FLPAD, R11	; set up marker bit
+	BRW	FINDPC
+ 
+;...............................................................................
+; %^T - set floating trailing zero truncate
+ 
+UPA_T:	BICL2	#EXPF_M_FLPAD, R11	; remove marker bit
+	BRW	FINDPC
+ 
+;-------------------------------------------------------------------------------
+; %P<char> - set integer padding to <char>
+ 
+PRC_P:	DECL	R8			; any left in control string?
+	BLEQW	UPA_1			; no - ignore
+	MOVB	(R7)+, R0		; get pad character
+	INSV	R0, #EXPF_V_PAD,-	; insert
+		#EXPF_S_PAD,	-	; in control
+		R11			; register
+	BRW	FINDPC			; back for next
+ 
+;-------------------------------------------------------------------------------
+; repetitions
+
+;...............................................................................
+; %(<count> -, set repetition counter
+ 
+PRC_BRA:MOVL	#1, R0		; default count 1
+	BSBW	GET_FIELD	; get repetition count
+ 
+; %[ joins
+PRC_EBR: ADDL	#EXPF_K_NSTCT, R11	; deepen nesting
+	BBSC	#EXPF_V_NSTDG, R11, -	; on overflow,
+		10$			; sillify
+	PUSHL	R8			; preserve count for control string
+	PUSHL	R7			; and preserve pointer
+	PUSHL	R2			; preserve count
+	BRW	FINDPC			; back for next
+ 
+; moan about nesting overflow
+10$:	MVCH	#^A/%/		; put jolly marker into output
+	MVCH	#^A/</
+	MVCH	#^A/*/
+	MVCH	#^A/>/
+	BRW	FINDPC
+ 
+;...............................................................................
+; %) or %] - end of repetition field
+ 
+PRC_KET: BITL	#EXPF_M_NSTD, R11	; are we bracket-nested?
+	BEQL	PRC_UNX			; if EQL, no - treat as unexpected
+	SUBL3	#1, (SP)+, R2		; decrement count to R2
+	BEQL	10$			; iF EQL, count exhausted
+	MOVL	(SP), R7		; restore control string pointer...
+	MOVL	4(SP), R8		; and count to start of loop
+	PUSHL	R2	       		; preserve count
+	BRW	FINDPC
+ 
+10$:	ADDL	#8, SP		; junk control string pointer, count for start of loop
+	BRW	FINDPC
+ 
+;...............................................................................
+; %[ - repeat <arg> times
+ 
+PRC_SQB: CVTWL	@(R6)+, R2	; get argument
+	BGTR	PRC_EBR		; if GTR, accept it
+	MOVL	#1, R2		; else force to 1
+	BRB	PRC_EBR		; and accept that instead
+ 
+;-------------------------------------------------------------------------------
+; %U - next to be unsigned
+ 
+PRC_U:	BISL2	#EXPF_M_UNSGN, R11	; set marker bit
+	BRW	FINDPC
+ 
+;-------------------------------------------------------------------------------
+; multiplicity
+
+;...............................................................................
+; %m - multiplicity, lower case
+ 
+PRC_MM:	MOVB	#^A/s/, R0	; multiplicity character to use
+	BRB	MPCTY		; join %M
+ 
+;...............................................................................
+; %M - multiplicity, upper case
+ 
+PRC_M:	MOVB	#^A/S/, R0	; multiplicity character to use
+MPCTY:	CMPL	R10, #1		; only 1?
+	BEQL	10$		; yes
+	MVCH	R0		; set into output
+10$:	BRW	FINDPC		; back for next
+ 
+;-------------------------------------------------------------------------------
+; oddments
+
+;...............................................................................
+; %% - transmit %
+ 
+PRC_PRC: MVCH	#^A/%/		; simple!
+	BRW	FINDPC		; back for next
+ 
+;...............................................................................
+; %space - ignored
+ 
+PRC_SP:	BRW	FINDPC		; back for next
+ 
+;...............................................................................
+; %T - transmit tab
+ 
+PRC_TAB: MVCH	#TAB		; output tab
+	BRW	FINDPC		; back for next
+ 
+;...............................................................................
+; %<unknown>
+ 
+PRC_UNX: MVCH	#^A/?/		; ? to output
+ADD_UNX: MVCH	-1(R7)		; then unexpected character
+	BRW	FINDPC		; back for next %
+ 
+;-------------------------------------------------------------------------------
+; %C - 1,2,3 or 4 characters from a byte/word/long argument
+ 
+PRC_C:	BICL3	#^C<EXPF_M_IDSIZ>,-	; get data
+		R11,R0			;    size field
+	.CASE	R0,0,,		-	; switch on data size
+	<	C_BYTE,		-	; byte mode
+		C_WORD,		-	; word mode
+		C_LONG	>		; long mode
+ 
+C_BYTE:	MOVZBL	@(R6)+,R0		; get byte argument
+	MOVL	#1,R2			; 1 character
+	BRB C_1
+ 
+C_WORD:	MOVZWL	@(R6)+,R0		; get word argument
+	MOVL	#2,R2			; 1-2 characters
+	BRB	C_1
+ 
+C_LONG:	MOVL	@(R6)+,R0		; get long argument
+	MOVL	#4,R2			; 1-4 characters
+ 
+C_1:	CLRL	R3			; offset from start of field
+5$:	EXTZV	R3,#8,R0,R1		; extract byte from longword
+	BEQL	10$			; end of characters (null)
+	MVCH	R1			; move char to buffer
+	ADDL2	#8,R3			; increment offset to next byte
+	SOBGTR	R2,5$			; back for next char, if more
+10$:	BRW	FINDPC			; back for next %
+ 
+ 
+;-------------------------------------------------------------------------------
+; %R (or %5) - up to 3 RAD50 characters
+;	R0 - word for conversion
+;	R1 - extracted character
+;	R2 - extraction loop count
+;	R3 - output loop count
+ 
+PRC_R:
+PRC_FIV: MOVZWL	@(R6)+,R0
+	MOVL	#3,R2
+	MOVL	#4, R3		; position of last space in triplet
+5$:	CLRL	R1
+	EDIV	#^O50,R0,R0,R1	; R0 is quotient, R1 remainder
+	TSTL	R1
+	BNEQ	10$		; convert to ASCII
+	MOVB	#^A/ /,-(SP)	; deal with space
+	MOVL	R2, R3		; note where space was
+	BRB	40$
+; non-space
+10$:	SUBL2	#^O33,R1
+	BEQL	20$		; $
+	BGTR	30$		; . or digit
+	ADDL2	#^O67,R1	; letter
+20$:	SUBL2	#^O11,R1
+30$:	ADDL2	#^O55,R1
+	MOVB	R1,-(SP)	; chars emerge backwards
+40$:	SOBGTR	R2,5$		; for next char
+; reset counts
+	MOVL	#3, R2
+	SUBL3	R3, #4, R3
+; do we want to suppress trailing zeroes ?
+	DECL	R8
+	CMPB	(R7)+, #^A/Z/	; was it %RZ ?
+	BEQL	50$		; j if it was
+; no - set count to 3 characters
+	CLRL	R3
+	DECL	R7		; backspace format format
+	INCL	R8		; uncount
+; unpeel characters
+50$:	CMPL	R2, R3
+	BGTR	55$
+	INCL	SP		; lose this ch
+	BRB	60$
+; use character
+55$:	MVCH	(SP)+
+60$:	SOBGTR	R2, 50$
+	BRW	FINDPC		; back for next %
+
+;-------------------------------------------------------------------------------
+; floating point numbers 
+ 
+;...............................................................................
+; %G - general floating decimal
+ 
+;  FLTNUM - number being converted
+;  R0:R1  - rounding factor
+;  R1     - spare space in field
+;  R2     - decimal places
+;  R3     - field
+;  R4     - digit count
+;  R5     - sign
+ 
+PRC_G:	EXTZV	#EXPF_V_FDSIZ,#EXPF_S_FDSIZ,-	; get data
+		R11,R0			 	; size field
+	.CASE	R0,0,,			-	; switch on data size
+	<	G_SNGL,			-	; single precision
+		G_DBLE  >		 	; double precision
+ 
+; get single precision operand
+ 
+G_SNGL:	CVTFD	@(R6)+,FLTNUM	; clear buffer
+	BRB	G_1
+ 
+; get double precision operand
+ 
+G_DBLE:	MOVD	@(R6)+,FLTNUM	; load double precision operand
+ 
+G_1:	MOVL	#9, R0		; default field
+	BSBW	GET_FIELD	; get field width
+	MOVL	R2, R3		; preserve field
+	TSTL	R8		; end of control string?
+	BEQL	10$		; yes - get default decimal places count
+	CMPB	(R7), #^A/./	; field separator?
+	BNEQ	10$		; no - default field
+	INCL	R7		; move character pointer over '.'
+	DECL	R8		; count characters
+10$:	MOVL	#3, R0		; default three
+	BSBW	GET_FIELD	; number of decimal digits
+	CLRL	R5		; sign
+	TSTD	FLTNUM		; is number to explode +ve?
+	BNEQ	15$
+	BRW	F_2		; if zero join %F
+15$:	BGTR	20$		; it's positive
+	DECL	R5		; make sign marker
+	MNEGD	FLTNUM, FLTNUM	; ensure operand +ve
+20$:	CMPD	FLTNUM, #0.1	; 
+	BLSS	50$		; <0.1 so join %E instead
+	MOVD	FLTNUM, -(SP)	; save number
+	MOVL	R2, R4		; save number of dp's
+30$:	CMPD	FLTNUM, #1.0
+	BGEQ	40$		; still >=1
+	MOVD	(SP)+, FLTNUM	; recover original number
+	BRB	F_2		; and do %F with amended dp's (R2)
+40$:	DIVD2	#10.0, FLTNUM	; divide by 10
+	DECL	R2		; one less digit after point
+	BGEQ	30$		; still >=0 though
+	MOVL	R4, R2		; recover original dp's
+	MOVD	(SP)+, FLTNUM	; and original number
+
+; ready to join %E
+50$:	MOVB	#^A/E/,-(SP)	; mark exponent representation
+	BRW	E_2		; and join %E
+
+;...............................................................................
+; %F - floating decimal
+ 
+;  FLTNUM - number being converted
+;  R0:R1  - rounding factor
+;  R1     - spare space in field
+;  R2     - decimal places
+;  R3     - field
+;  R4     - digit count
+;  R5     - sign
+ 
+PRC_F:	EXTZV	#EXPF_V_FDSIZ,#EXPF_S_FDSIZ,-	; get data
+		R11,R0			 	; size field
+	.CASE	R0,0,,			-	; switch on data size
+	<	F_SNGL,			-	; single precision
+		F_DBLE  >		 	; double precision
+ 
+; get single precision operand
+ 
+F_SNGL:	CVTFD	@(R6)+,FLTNUM		; clear buffer
+	BRB	F_1
+ 
+; get double precision operand
+ 
+F_DBLE:	MOVD	@(R6)+,FLTNUM	; load double precision operand
+ 
+F_1:	MOVL	#9, R0		; default field
+	BSBW	GET_FIELD	; get field width
+	MOVL	R2, R3		; preserve field
+	TSTL	R8		; end of control string?
+	BEQL	10$		; yes - get default decimal places count
+	CMPB	(R7), #^A/./	; field separator?
+	BNEQ	10$		; no - default field
+	INCL	R7		; move character pointer over '.'
+	DECL	R8		; count characters
+10$:	MOVL	#3, R0		; default three
+	BSBW	GET_FIELD	; number of decimal digits
+	CLRL	R5		; sign
+	TSTD	FLTNUM		; is number to explode +ve?
+	BGEQ	F_2		; it's positive
+	DECL	R5		; make sign marker
+	MNEGD	FLTNUM, FLTNUM	; ensure operand +ve
+
+; %G joins here
+F_2:	MOVD	#0.5, R0	; rounding factor
+	MOVL	R2, R4		; number of decimal digits
+	BLEQ	40$		; none (?)
+30$:	DIVD2	#10.0, R0	; move rounding down below l.s. digit
+	SOBGTR	R4, 30$		; (one division for each decimal digit)
+40$:	ADDD2	R0, FLTNUM	; round
+	MOVL	R2, R4		; provisional digit count (number of dp)
+	INCL	R2		; +1 for dot position
+	SUBL2	R2, R3		; subtract from total field
+50$:	DIVD2	#10.0, FLTNUM	; bring into range
+	DECL	R3		; one less space
+	INCL	R4		; one more digit (always one before dot)
+	CMPD	#1.0, FLTNUM	; REPEATUNTIL
+	BLEQ	50$		;  FLTNUM <1.0
+	MOVL	R3, R1		; preserve as trailing zero marker
+60$:	SOBGTR	R3, 70$		; add leading spaces if required
+	BRB	75$
+70$:	MVCH	<#^A/ />
+	BRB	60$
+75$:	BLBC	R5,80$		; sign +ve
+	MVCH	#^A/-/		; -ve - add - sign
+	BRB	85$
+80$:	TSTL	R1		; +ve - minimum width?
+	BLEQ	90$		; yes
+	MVCH	<#^A/ />	; otherwise add leading space
+85$:	DECL	R1		; one space less
+90$:	BSBB	EXPFL		; expand the number
+	BRW	FINDPC		; back for next
+ 
+; expand FLTNUM as a mantissa
+;  number of digits in R4
+;  a '.' output after R2th digit (counting down from R4:
+;	R2=R4+1 => a '.' before the first digit)
+;  if R1<0, field was minimal, so (maybe) truncate trailing zeros
+;  even if we do truncate, leave one digit after the '.'
+ 
+EXPFL:	CLRL	R5		; trailing zero marker
+	INCL	R4		; in case dot before number (%E)
+	BRB	30$
+
+;;;Eliminate EMODD because slow on ALPHA AXP and some VAX also
+;;;10$:	EMODD	FLTNUM,#0,#10.0,R3,FLTNUM	; extract one digit
+10$:	MULD2	#10.0,FLTNUM			; extract one digit
+	CVTDL	FLTNUM,R3
+	CVTLD	R3,-(SP)
+	SUBD2	(SP)+,FLTNUM
+
+	TSTL	R3				; zero digit extracted?
+	BEQL	20$				; yes
+	MOVL	R9, R5		; position of trailing non-zero digit
+20$:	ADDB2	#^A/0/, R3	; convert to character
+	MVCH	R3		; add one byte to output
+30$:	CMPL	R4, R2		; time for a dot?
+	BNEQ	40$		; not yet
+	MOVL	R9, R5		; position of dot
+	MVCH	#^A/./		; add dot
+	CMPL	R4, #1		; any more digits to do?
+	BLEQ	45$		; no
+	INCL	R5		; ignore trailingness of first digit after dot
+40$:	SOBGTR	R4, 10$		; loop to convert whole number
+45$:	BBS	#EXPF_V_FLPAD,R11,50$ 	; if BS, not to truncate trailing 0s
+	TSTL	R5			; trailing zero marker
+	BEQL	50$			; no fraction digits
+	TSTL	R1			; minimal field?
+	BGEQ	50$			; no
+	CMPL	R5, R9			; past end of buffer?
+	BGEQ	50$			; yes
+	MOVAB	1(R5), R9		; trim off trailing zero(s)
+50$:	RSB
+ 
+;...............................................................................
+; %E - real number (registers as %F)
+ 
+PRC_E:	EXTZV	#EXPF_V_FDSIZ,#EXPF_S_FDSIZ,-
+		R11,R0			; get data size field
+	.CASE	R0,0,,		-	; switch on data size
+	<	E_SNGL,		-	; single precision
+		E_DBLE	>		;  double precision
+ 
+; get single precision operand
+E_SNGL:	CVTFD	@(R6)+,FLTNUM
+	BRB	E_1
+ 
+; get double precision operand
+E_DBLE:	MOVD	@(R6)+,FLTNUM
+ 
+E_1:	MOVL	#4, R0		; default
+	BSBW	GET_FIELD	; get field width
+	CLRL	R5		; sign
+	TSTD	FLTNUM
+	BGEQ	E_2		; it's positive
+	DECL	R5		; make sign marker
+	MNEGD	FLTNUM,FLTNUM	; ensure operand positive
+
+; %G joins here
+E_2:	MOVF	#1.0,R4		; initialise exponent
+	CLRL	R0		; flag not rounded yet
+30$:	SUBF2	#1.0,R4		; decrement exponent
+	CMPD	#1.0,FLTNUM
+	BLEQ	40$
+	MULD2	#10.0,FLTNUM	; bring into range
+	BEQL	50$		; zero is special case
+	BRB	30$
+40$:	DIVD2	#10.0,FLTNUM	; bring into range
+	ADDF2	#1.0,R4		; increment exponent
+45$:	CMPD	#1.0,FLTNUM
+	BLEQ	40$
+	BLBS	R0,70$		; rounding already done
+50$:	MOVD	#0.5,R0		; rounding factor
+	MOVL	R2,R3		; no of decimal digits
+60$:	DIVD2	#10.0,R0	; move rounding down below 1 s.d.
+	SOBGTR	R3,60$
+	ADDD2	R0,FLTNUM	; round
+	MNEGL	#1,R0		; mark now rounded
+	BRB	45$		; check in case now > 1.0
+70$:	PUSHL	R4		; save exponent
+	MOVL	R2,R4		; digit count
+	INCL	R2		; dot position
+	BLBC	R5,80$		; sign +ve
+	MVCH	#^A/-/		; -ve
+	BRB	90$
+80$:	MVCH	<#^A/ />	; +ve
+90$:	CLRL	R1		; indicate non-minimal field to EXPFL
+	BSBW	EXPFL		; expand mantissa
+	CLRL	R5		; sign of exponent
+	CVTFD	(SP)+,FLTNUM	; recover exponent
+	BGEQ	100$
+	DECL	R5		; make sign marker
+	MNEGD	FLTNUM,FLTNUM	; ensure operand +ve
+100$:	DIVD2	#999.5,FLTNUM	; convert to a mantissa & round
+	MOVL	#3,R4		; want 3 digits
+	CLRL	R2		; and no decimal point
+	MVCH	#^A/E/		; insert subscript specifier
+	BLBC	R5,110$		; sign +ve
+	MVCH	#^A/-/		; -ve
+	BRB	120$
+110$:	MVCH	<#^A/ />	; +ve
+120$:	BSBW	EXPFL		; expand exponent
+	BRW	FINDPC		; back for next
+
+;-------------------------------------------------------------------------------
+; buffers
+
+;...............................................................................
+; %W - change to user specified buffer
+;      %W   - arg is address of byte array (overflow checking disabled)
+;      %WS  - arg is address of string descriptor (overflow checking enabled)
+ 
+PRC_W:	CMPB	(R7),#^A/S/	;  %WS?
+	BEQL	PRC_WS		;  yes
+ 
+; %W
+	MOVL	(R6)+,R9		; R9 contains address of byte array
+	MOVL	#999,R4			; set length and end of buffer so
+	ADDL3	#999,R9,BUFEND		; that overflow check disabled
+	MOVL	R9,BUFRST		; start of buffer
+	BICL2	#EXPF_M_BUFPAD,R11	; don't space fill
+	BRW	FINDPC
+ 
+;...............................................................................
+; %WS
+ 
+PRC_WS:	INCL	R7			;  move over 'S' of '%WS'
+	DECL	R8			; adjust count of number of chars left
+	MOVQ	@(R6)+,R0		;  R0,R1 hold user buffer descriptor
+	MOVL	R1,R9			; R9 contains buffer address
+	MOVL	R1,BUFRST
+	MOVZWL	R0,R4			; R4  = length of buffer
+	ADDL3	R9,R4,BUFEND		; for checking overflow
+	BISL2	#EXPF_M_BUFPAD,R11	; buffer will need space filling
+	BRW	FINDPC
+ 
+;-------------------------------------------------------------------------------
+; %D - convert integer to date or time string
+ 
+PRC_D:	DECL	R8			; any characters left?
+	BGEQ	D_2			; if GEQ, yes
+D_1:	BRW	DONE			; end of conversion
+D_2:	LOCC	(R7)+,-			; look up next character
+		#D_LEN,-
+		D_CH
+					; R0 is now number of bytes remaining
+	.CASE	R0, 0,,		-	; decode switch
+	<	D_UNX,		-	; unexpected character
+		D_D,		-	; date
+		D_T	>	 	; time
+ 
+;...............................................................................
+; unexpected character after %D
+ 
+D_UNX:	MVCH	#^A/%/		; %D to output
+	MVCH	#^A/D/
+	BRW	ADD_UNX		; then unexpected character
+ 
+;...............................................................................
+; %DD - date - convert from a day number (since 17-NOV-1858) to a string
+ 
+D_D:	MOVAL	@(R6)+,DARGS+4		; get binary days
+	SUBL3	R9,BUFEND,R0		; get number of holes left
+	BLEQ	10$
+	MOVW	R0,DDESC		; length in descriptor
+	MOVAB	(R9),DDESC+4		; address of buffer
+	CALLG	DARGS,CVT_DAY_STR	; convert to string
+	BLBC	R0,10$			; error in subroutine
+	ADDL2	DLEN,R9			; update pointer
+10$:	BRW	FINDPC
+ 
+;...............................................................................
+; %DT - time - convert from a time (in 10 milliseconds) to a string
+ 
+D_T:	MOVAL	@(R6)+,DARGS+4		; get number of time units
+	SUBL3	R9,BUFEND,R0		; get number of holes left
+	BLEQ	20$
+	MOVW	R0,DDESC		; length in descriptor
+	MOVAB	(R9),DDESC+4		; address of buffer
+	CALLG	DARGS,CVT_TIME_STR	; convert to string
+	BLBC	R0,20$			; error in subroutine
+	ADDL2	DLEN,R9			; update pointer
+20$:	BRW	FINDPC
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	.PSECT
+	.END

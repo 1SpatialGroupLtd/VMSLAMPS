@@ -1,0 +1,428 @@
+        SUBROUTINE MERGER
+C
+***	IDENT	06SE88
+***	MODULE	MERGER
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author J Barber, 6 July 1988
+C
+C This subroutine merges the FEAture and SEGment intermediate files
+C    into the current main IFF file for each feature in the FEAture
+C    IFF file
+C It first reads the FEA file and copies the relevant entries, and 
+C   then the SEG file copying the coordinates.
+C If the point (symbol string) feature expects several point 
+C   coordinates, these are merged (in SEG_MERGE) into the output ST/
+C   ZS entries for the final IFF file, otherwise SEG_MERGE or SEGCPY 
+C   copies the ST/ZS entries, after reversing the point order if 
+C   required
+C
+C Contents of the files:
+C
+C FEAture:
+C
+C    NF   FSN = no of segments (1-999), ISN
+C    FS   Istat (FC: P,L,A)
+C    AC's attribs
+C    ..
+C    ..
+C    ST   segment ID's, directions
+C    ..
+C    ..
+C    EF
+C
+C SEGment:
+C
+C    NF   FSN = no of ST/ZS entries, ISN
+C    ST/ZS   coordinates
+C     ..
+C     ..
+C    EF
+C
+	IMPLICIT NONE
+C
+***     PARAMETER/HERE:CEDD2IMSG/
+***     COMMON/LSL$CMNIFF:IFFHAN/
+***     COMMON/HERE:SCRIPT/
+***     COMMON/HERE:DESCR/
+***	COMMON/HERE:PARAMS/	        ! for DIAG
+C
+C function
+C
+        LOGICAL         SEGCPY          ! copy segments
+        LOGICAL         SEG_MERGE       ! merge segments
+C
+C workspace
+C
+        INTEGER*2       I               ! loop counter
+        INTEGER*2       ZERO
+        INTEGER*2       ONE  
+        INTEGER*2       IFC             ! feature code
+        INTEGER*2       FSN,ISN         ! for NF
+        INTEGER*2       SEGNUM          ! no. of segments
+        INTEGER*2       STCNT           ! segment count
+        INTEGER*2       NPTS, IENDS     ! for EIHRS, ST entries
+        INTEGER*2       NWRDS, NSTRT    ! for EIHWL
+        INTEGER*2       IECODE,IELEN    ! for IFFPKE
+C
+        INTEGER         SEGIDN          ! segment ID number
+        INTEGER         INT_SEGDIR      ! segment direction
+        INTEGER         COUNT           ! no of features copied
+        INTEGER         MISSED          ! no of features abandoned
+        INTEGER         DIFF  
+C
+        REAL            SEGARRY(2)      ! segment ID's, directions
+C                                       !    in ST's
+        REAL            CPTS(4,4)       ! corner points for CP
+        REAL            STBUF(2,4)      ! for RANGE update
+C
+        LOGICAL         HAD_AC
+        LOGICAL         COPIED          ! segment copied?
+        LOGICAL         MISFTR          ! feature to be deleted?
+C
+C  *************************************************************
+        COUNT  = 0
+        MISSED = 0
+        DIFF   = 0
+C
+        CALL IFFSEL (IFFLUN)            ! open main IFF
+C
+        CALL OUTLAY(1)                  ! open layer 1 for features
+C
+C  loop for each feature in the FEA temporary IFF file
+C
+100     COUNT = COUNT + 1               ! count them
+C
+        INFTR    = .FALSE.
+        MISFTR   = .FALSE.
+        MERGED_NPTS = 0
+C
+        ZERO = 0
+        FSN = COUNT
+        CALL IFFNF (FSN, ZERO)          ! new feature in main IFF
+        INFTR = .TRUE.
+C
+        CALL IFFSEL (FEALUN)            ! open feature IFF
+C
+        CALL IFFNXC ('NF', IELEN)       ! find next NF entry
+C
+        IF (IELEN.EQ.-1) THEN           ! run out of features
+           CALL WRITEF
+           COUNT = COUNT - 1
+           CALL WRITEF 
+     &  (' Feature copying terminated at the %Nth feature', COUNT)
+           CALL WRITEF
+           CALL IFFSEL (IFFLUN)         ! back to main
+           CALL IFFDEL                  ! get rid of feature started
+           INFTR = .FALSE.
+           GOTO 999                     ! end
+        ENDIF
+C
+        CALL EIHR (SEGNUM, 1, 1)        ! read FSN as no. of segments
+C                                       !   belonging to feature
+        CALL EIHR (ISN, 1, 2)           ! read ISN
+C
+        IF (DIAG) CALL WRITEF ('.Processing new feature no. %N
+     & with %^W%N segments',                         COUNT, SEGNUM)     
+C
+200     CALL IFFNXT (IECODE, IELEN)
+C
+        IF (IELEN.EQ.-1) THEN
+           CALL LSL_PUTMSG (CEDD2I__FEANXTEOF, ISN)
+           CALL IFFSEL (IFFLUN)         ! back to main
+           CALL IFFDEL                  ! get rid of it
+           COUNT = COUNT - 1
+           MISSED = MISSED + 1
+           CALL WRITEF 
+     &  (' Feature copying terminated at the %Nth feature', COUNT)
+           INFTR = .FALSE.
+           GOTO 999
+        ENDIF
+C
+        IF (IECODE.EQ.'FS') THEN
+C
+C   read feature code
+C
+           CALL EIHR (IFC, 1, 1)
+C
+           CALL EIHCPY (IFFLUN)         ! copy FS to main IFF
+        ELSE
+C
+C  unexpected entry
+C
+           CALL LSL_PUTMSG (CEDD2I__FSREPOSERR, IECODE, ISN)
+C
+           IF (IECODE.EQ.'EF') THEN     ! give up feature if FS 
+              CALL IFFSEL (IFFLUN)      !        not found
+              CALL IFFDEL               ! get rid of it
+              COUNT = COUNT - 1
+              CALL WRITEF 
+     &  (' Feature copying terminated at the %Nth feature', COUNT)
+              INFTR = .FALSE.
+              MISSED = MISSED + 1
+              CALL LSL_PUTMSG (CEDD2I__FSMISSING, ISN)
+              CALL LSL_PUTMSG (CEDD2I__MISFEATURE, ISN)              
+              GOTO 100
+           ENDIF
+C
+           GOTO 200
+        ENDIF
+C
+C  had the FS, next the AC entries
+C
+        HAD_AC = .FALSE.
+C
+300     CALL IFFNXT (IECODE, IELEN)
+C
+        IF (IELEN.EQ.-1) THEN
+           CALL LSL_PUTMSG (CEDD2I__FEANXTEOF, ISN)
+           CALL IFFSEL (IFFLUN)         ! back to main
+           CALL IFFDEL                  ! get rid of it
+           COUNT = COUNT - 1
+           CALL WRITEF 
+     &  (' Feature copying terminated at the %Nth feature', COUNT)
+           INFTR = .FALSE.
+           MISSED = MISSED + 1
+           GOTO 999
+        ENDIF
+C
+        IF (IECODE.EQ.'AC') THEN
+           HAD_AC = .TRUE.
+           CALL EIHCPY (IFFLUN)         ! copy AC to main IFF
+           GOTO 300
+        ELSEIF (IECODE.EQ.'ST') THEN
+           IF (.NOT.HAD_AC) CALL LSL_PUTMSG (CEDD2I__ACMISSING, ISN)
+           GOTO 400
+        ELSE
+           IF (.NOT.HAD_AC) CALL LSL_PUTMSG (CEDD2I__ACREPOSERR, 
+     &                                                  IECODE, ISN)
+           IF (HAD_AC) CALL LSL_PUTMSG (CEDD2I__IDREPOSERR, 
+     &                                                  IECODE, ISN)
+           IF (IECODE.EQ.'EF') THEN     ! give up feature if AC
+              CALL IFFSEL (IFFLUN)      !   or ST not found
+              CALL IFFDEL               ! get rid of it
+              COUNT = COUNT - 1
+              CALL WRITEF 
+     &  (' Feature copying terminated at the %Nth feature', COUNT)
+              INFTR = .FALSE.
+              CALL LSL_PUTMSG (CEDD2I__IDMISSING, ISN)
+              CALL LSL_PUTMSG (CEDD2I__MISFEATURE, ISN)
+              MISSED = MISSED + 1
+              GOTO 100
+           ENDIF
+           GOTO 300
+        ENDIF
+C
+C  ST entry encountered with segment ID's, directions
+C
+400     STCNT = 0
+        COPIED = .FALSE.
+C
+C  initialise the last points of the first ST/ZS block to an 
+C     impossible value
+C
+        ENDSTX = -1.0
+        ENDSTY = -1.0
+        ENDSTZ = -1.0
+C
+450     CALL EIHRS (NPTS, IENDS)        ! read ST header for no.
+C                                       !   of ID's in this block
+        DO 500 I = 1, NPTS              ! extract segment ID's
+C
+        STCNT = STCNT + 1
+C
+        CALL EIHRR (SEGARRY, 2, 4*I-3)   ! to get I'th real pair
+C                                        !   pos'n measured in words
+        SEGIDN     = NINT (SEGARRY(1))   ! convert to integer ID
+        INT_SEGDIR = NINT (SEGARRY(2))   !   and direction
+C
+        IF (SEGIDN.LE.0) THEN
+           MISFTR = .TRUE.
+        ELSE
+           IF (NFADDR (SEGIDN).LE.0) THEN
+              MISFTR = .TRUE.
+           ELSE
+C
+C  if feature is a symbol string (points), then merge segments,
+C     if more than one of them, on copying across to final IFF 
+C     file ST/ZS entries 
+C
+              IF (IFC.EQ.SYMSTR) THEN
+                 IF (STCNT.EQ.SEGNUM) THEN    ! last segment for ftr
+                    COPIED = SEG_MERGE (SEGIDN, .TRUE.)
+                 ELSE
+                    COPIED = SEG_MERGE (SEGIDN, .FALSE.)
+                 ENDIF
+C
+C   transfer this segment's points to main IFF, reversing the points
+C      if required
+C
+              ELSE
+                 IF (STCNT.EQ.1) THEN         ! first segment for ftr
+                    COPIED = SEGCPY (SEGIDN, INT_SEGDIR, .TRUE.)
+                 ELSE
+                    COPIED = SEGCPY (SEGIDN, INT_SEGDIR, .FALSE.)
+                 ENDIF
+              ENDIF
+C
+           ENDIF
+        ENDIF
+C
+        IF (STCNT.GT.SEGNUM) THEN
+           CALL LSL_PUTMSG (CEDD2I__TOOMNYSTS)
+           GOTO 550
+        ENDIF
+C
+500     CONTINUE
+C
+550     CALL IFFNXT (IECODE, IELEN)     ! get next entry
+C
+C                                       ! segments not forthcoming
+        IF (IELEN.EQ.-1) THEN           !   end of file instead
+           CALL LSL_PUTMSG (CEDD2I__FEANXTEOF, ISN)
+           GOTO 999
+        ENDIF
+C
+        IF (IECODE.EQ.'ST') THEN
+           IF (STCNT.GE.SEGNUM) THEN
+              CALL LSL_PUTMSG (CEDD2I__TOOMNYSTS)
+              GOTO 550
+           ELSE
+              GOTO 450
+           ENDIF
+        ELSEIF (IECODE.EQ.'EF') THEN
+           IF (STCNT.LT.SEGNUM) CALL LSL_PUTMSG 
+     &                              (CEDD2I__IDMISSING, ISN)
+           GOTO 600                     ! finish feature
+        ELSE
+           CALL LSL_PUTMSG (CEDD2I__IDREPOSERR, IECODE, ISN)
+           GOTO 550
+        ENDIF
+C
+C  back to main IFF
+C
+600     CALL IFFSEL (IFFLUN)
+C
+        IF (MISFTR .OR. .NOT.COPIED) THEN   ! no segments copied
+           CALL IFFDEL                      !  get rid of feature
+           INFTR = .FALSE.
+           COUNT = COUNT - 1
+           CALL LSL_PUTMSG (CEDD2I__MISFEATURE, ISN)
+           MISSED = MISSED + 1
+           GOTO 100
+        ENDIF           
+C
+        IF (INFTR) CALL IFFEF               ! finish feature in main IFF
+C
+950     GOTO 100
+C
+999     IF (INLAY(1)) CALL ENDLAY(1)    ! end layer 1
+C
+        CALL WRITEF
+        CALL WRITEF (' %N features successfully copied', COUNT)
+        CALL WRITEF (' %N features abandoned', MISSED)
+C
+C        IF (TOTFTR.GT.0 .AND. TOTFTR.NE.COUNT) THEN
+C           DIFF = TOTFTR - COUNT
+C           CALL LSL_PUTMSG (CEDD2I__FTRMISSED, DIFF)
+C           CALL WRITEF
+C        ENDIF
+C
+C  while in main IFF, update header entries
+C  first the Range RA
+C
+        CALL IFFPKE (IECODE, IELEN, LPOSRA)
+C
+        IF (IECODE.NE.'RA') THEN
+           CALL LSL_PUTMSG (CEDD2I__RAREPOSERR, IECODE, LPOSRA)
+           GOTO 1100
+        ELSEIF (IELEN.EQ.-1) THEN                ! unexpected IFF end
+           CALL LSL_PUTMSG (CEDD2I__RAREPOSNEOF, LPOSRA)
+           GOTO 1100
+        ENDIF
+C
+        NWRDS = 4
+        NSTRT = 1
+        CALL EIHWR (RANGE, NWRDS, NSTRT)         ! insert correct RANGE
+C
+        IF (DIAG) CALL WRITEF ('Range entry RA updated in main IFF')
+C
+C  the corner points in the CP entry
+C
+        CPTS(1,1) = RANGE(1)
+        CPTS(2,1) = RANGE(4)
+        CPTS(1,2) = RANGE(1)
+        CPTS(2,2) = RANGE(3)
+C
+        CPTS(1,3) = RANGE(2)
+        CPTS(2,3) = RANGE(3)
+        CPTS(1,4) = RANGE(2)
+        CPTS(2,4) = RANGE(4)
+C
+        DO 1000 I = 1,4
+           CPTS(3,I) = CPTS(1,I)
+           CPTS(4,I) = CPTS(2,I)
+1000    CONTINUE
+C
+        CALL IFFPKE (IECODE, IELEN, LPOSCP)
+C
+        IF (IECODE.NE.'CP') THEN
+           CALL LSL_PUTMSG (CEDD2I__CPREPOSERR, IECODE, LPOSCP)
+           GOTO 1100
+        ELSEIF (IELEN.EQ.-1) THEN                ! unexpected IFF end
+           CALL LSL_PUTMSG (CEDD2I__CPREPOSNEOF, LPOSCP)
+           GOTO 1100
+        ENDIF
+C
+        NWRDS = 16
+        NSTRT = 1
+        CALL EIHWR (CPTS, NWRDS, NSTRT)
+C
+        IF (DIAG) CALL WRITEF ('Corner Points CP updated in main IFF')
+C
+C  finally the dummy area feature in layer0 containing the header 
+C    information, put equal to the Range
+C
+        STBUF(1,1) = RANGE(1)
+        STBUF(2,1) = RANGE(3)
+        STBUF(1,2) = RANGE(1)
+        STBUF(2,2) = RANGE(4)
+C
+        STBUF(1,3) = RANGE(2)
+        STBUF(2,3) = RANGE(4)
+        STBUF(1,4) = RANGE(2)
+        STBUF(2,4) = RANGE(3)
+C
+        CALL IFFPKE (IECODE, IELEN, LPOSST)
+C
+        IF (IECODE.NE.'ST') THEN
+           CALL LSL_PUTMSG (CEDD2I__DFREPOSERR, IECODE, LPOSST)
+           GOTO 1100
+        ELSEIF (IELEN.EQ.-1) THEN                ! unexpected IFF end
+           CALL LSL_PUTMSG (CEDD2I__DFREPOSNEOF, LPOSST)
+           GOTO 1100
+        ENDIF
+C
+        CALL EIHRS (NPTS, IENDS)                 ! read ST header
+C
+        NWRDS = 8
+        NSTRT = 1
+        CALL EIHWR (STBUF, NWRDS, NSTRT)         ! insert correct RANGE
+C
+        IF (DIAG) THEN
+           CALL WRITEF
+           CALL WRITEF ('.Layer 0 dummy entry updated in main IFF')
+        ENDIF
+C
+1100    CALL ENDIFF (IFFLUN)                     ! close main IFF file
+C
+        CALL IFFSEL (FEALUN)        
+        CALL ENDIFF (FEALUN)
+C
+        CALL IFFSEL (SEGLUN)        
+        CALL ENDIFF (SEGLUN)
+C
+        RETURN
+        END
+C

@@ -1,0 +1,1697 @@
+	LOGICAL FUNCTION PROCFILE( WHICH, FID, FULL )
+C
+***	MODULE	PROCFILE
+***	IDENT	21FE97
+C
+C Copyright: Laser-Scan Laboratories Ltd.,Cambridge,England
+C
+C amended for LSLLIB	TJ Ibbs	20 June 1986
+C
+CMOD	make Survey Dates and Contractor ID	ST	13-Jul-1990
+C	have correct defaults
+CMOD	clear NEWF flag on TS entry to allow	RWR	27-Feb-1989
+C	CB code to save coords for texts	
+CMOD	use HAD2PT to check that we have 	RJH	07-Nov-1988
+C	output an orientation record
+CMOD	check (I.EQ.2) before output of 	RJH	07-Nov-1988
+C	DUPPTS message
+C
+C Subroutine to process file for IFF to OSTF conversion
+C
+C Returns TRUE if we fail, FALSE otherwise
+C
+	IMPLICIT	NONE
+C
+C arguments
+C
+C IFFLUN is now in LUN.PAR
+C
+C	INTEGER		IFFLUN		! unit to read IFF file on
+C
+	INTEGER		WHICH		! which file
+	INTEGER		FID(7)		! file ID for file
+	CHARACTER*(*)	FULL		! full input filename
+C                        
+	INCLUDE	'LSL$CMNIFF:CB.STR'	! record structure definition
+C
+	INCLUDE	'HERE:I2OSTFMSG.PAR'	! error numbers
+	INCLUDE	'HERE:LUN.PAR'		! luns for i/o files
+C
+***	COMMON/HERE:BUF/		! for RECBUF, etc
+***	COMMON/HERE:OSPTSZ/		! for translation of point sizes
+***	COMMON/HERE:COMMANDS/		! for command line data
+***	COMMON/HERE:ATTRIBUTES/		! for attribute codes
+C
+***	COMMON/LSL$CMNLSL:TXTC/		! for TXTBUF, etc
+***	COMMON/LSL$CMNFRT:FRTACD/	! for ACD_NAME
+***	COMMON/LSL$CMNIFF:IFFHAN/	! for IFFLIB errors
+***	COMMON/LSL$CMNIFF:IFFSTR/	! for SIMPLE_xxx
+***	COMMON/LSL$CMNIFF:MHDMB/	! map header buffer
+***	COMMON/LSL$CMNIFF:MD2DES/	! map descriptor buffer
+***	COMMON/LSL$CMNIFF:MHOSGB/		! New OS map header
+***	COMMON/LSL$CMNOSMH:OSMH_NEW_MH/		! New map header variables
+C
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'	! error numbers
+	INCLUDE	'LSL$CMNOSMH:OSMH_NEW.PAR'	! header fields
+C
+	REAL		PI, TWOPI
+	PARAMETER	(   PI = 3.141592654)
+	PARAMETER	(TWOPI = PI*2)
+C
+	BYTE		BLANK
+	PARAMETER	(BLANK = ' ')
+C
+C Functions:
+C
+	INTEGER*4	IFFOPEN		! open IFF file
+	LOGICAL		OSMH_UPGRADE	! upgrades map header
+C	LOGICAL		OSMH_CID_ZERO	! checks for zero contractors ID
+	LOGICAL		OSMH_NEW_PUTINT	! Insert integer into type 3 header
+	LOGICAL		GET_MH_INFO	! Read map header info
+	LOGICAL		SET_DATE_ATT	! checks and sets a date
+	LOGICAL		FLWDEL		! delete output file
+	LOGICAL		CHECK_FEATURE	! checks a feature, returns true if
+C					! okay, false otherwise
+C
+C Workspace:
+C
+C - IFFLIB routine general arguments
+C
+ 	INTEGER*2	IECODE	! entry name as 2 ASCII characters
+	INTEGER*2	IELEN	! entry length (-1 => end-of-file)
+C
+C - FSN and associated data
+C - note that since the FSN is in the range 0-65535 we must look
+C   at it as a longword, to save getting spurious negatives
+C
+	INTEGER*2	NFNUM	! feature number from IFFLIB
+	INTEGER*4	FSN	! and as a longword
+	EQUIVALENCE	(FSN,NFNUM)
+C
+	INTEGER*4	LASTNF	! last FSN, for checking order
+	LOGICAL		NF0	! remember if FSN is zero
+C
+C - feature status data
+C
+	INTEGER		FSPOSN	! address of FS entry
+	INTEGER*2	FTCODE	! feature code part of FS entry
+ 	INTEGER*2	TXTDAT	! text data/process code part of same
+	INTEGER		CATEG	! name category (from TXTDAT)
+	INTEGER		STYLE	! type style    (from TXTDAT)
+	LOGICAL		TEXTF	! true if text feature
+	LOGICAL		SYMBF	! true if symbol feature
+C
+C - ancillary codes
+C
+	LOGICAL		FRSTAC		! TRUE if not had 1st AC yet
+	LOGICAL		GOTNXT		! TRUE if found 2nd of AC pair
+	INTEGER*2	ACTYPE		! type of AC
+	INTEGER*2	TYPE1,TYPE2	! for boundary AC pairs
+	INTEGER*4	ACCODE		! code of AC
+	INTEGER*4	CODE1,CODE2	! for boundary AC pairs
+	INTEGER		TEXT1,TEXT2	! for ordering AC pairs
+	BYTE		ACTEXT(82,2)	! for the AC pair texts
+	INTEGER		LENGTH(2)	! and their lengths
+C
+C - point data
+C
+	LOGICAL		NEWF		! at start of feature
+	LOGICAL		CHUCKED_OUT	! chucked out attributes ?
+	INTEGER		PREV_PTS	! no. of points in previous ST's
+	INTEGER		STPTR		! number of points in current ST
+	INTEGER		STCOL(2)	! column headers for points
+ 	REAL		STBUF(2,200)	! buffer for points
+ 	REAL		ZBUF(200)	! buffer for heights
+ 	REAL		DZBUF(200)	! buffer for height differences
+ 	INTEGER		CXYBUF(200)	! buffer for plan capture
+ 	INTEGER		CZBUF(200)	! buffer for height capture
+	REAL		X,Y			! individual point
+	REAL		Z,DZ			! its heights
+	INTEGER		CAPXY,CAPZ		! and capture methods
+	REAL		SAV_X,SAV_Y		! saved first point
+	REAL		SAV_Z,SAV_DZ		! its heights
+	INTEGER		SAV_CAPXY,SAV_CAPZ	! and capture methods
+	INTEGER		CAPINT			! capture method output
+	BYTE		CAPCH			! the same as a byte
+	EQUIVALENCE	(CAPINT,CAPCH)
+C
+	RECORD	/IFF_CBH/ CBH		! CB header part
+	RECORD	/IFF_CBD/ CBD		! CB data part
+C
+C - grid squares
+C
+	REAL*4		BGI		! basic grid interval
+	INTEGER		CGX,CGY		! current grid square
+	INTEGER		NGX,NGY		! new grid square
+	INTEGER		OGX,OGY		! grid square offsets
+	INTEGER		GD_SQ_IND	! grid square flag (-9 or -14)
+C
+C - calculating line angle
+C
+	INTEGER		GX1,GY1,GX2,GY2	! grid squares
+	INTEGER		OX1,OY1,OX2,OY2	! grid square offsets
+	
+C
+C - angles and sizes
+C
+	LOGICAL		HAD2PT		! true iff text/symbol has 2 pts
+	LOGICAL		HADRO		! true iff had RO entry
+	REAL		ROT		! RO angle of feature
+	REAL		DX,DY		! delta X,Y - ie X-SAV_X, etc
+	INTEGER		DIST		! size of scaled symbol
+	INTEGER		DEG		! angle in degrees/10
+C
+C - text
+C
+	BYTE		CHRS(80)	! text buffer
+	INTEGER*2	TH		! from TH entry - text size
+	INTEGER		TXTPOS		! position text was dig in
+	REAL		TEMP		! calculating posn 0 of text
+	REAL		HEIGHT		! height in mm/10
+	REAL		HEIGHT_100	! height in mm/100
+C
+C - composite texts
+C
+	INTEGER*4	EXTRA		! extra text features created
+	LOGICAL		FRSTTS		! TRUE if not had 1st TS yet
+	LOGICAL		COMP_TEXT	! is this a composite text ?
+C
+C - feature history
+C
+	LOGICAL		DO_HIST		! output feature history ?
+	BYTE		DATREC(8)	! OSTF+ date record
+	INTEGER		CHA_TYPE	! change type
+	BYTE		CHA_CH		! the same as a byte
+	EQUIVALENCE	(CHA_TYPE,CHA_CH)
+C
+C - technical security
+C
+	LOGICAL		SECURE		! output technical security ?
+C
+C - feature test
+C
+	LOGICAL		ORIENT		! feature orientated ?
+	LOGICAL		IGNORE		! ignore feature ?
+	LOGICAL		NOTNF		! not NF record ?
+	LOGICAL		BADFEATURE	! bad IFF feature records
+C
+C - other things
+C
+	INTEGER		DAY,MTH,YEAR	! day, month, year
+	INTEGER		YEAR1,YEAR2	! multiple years
+	BYTE		EMSN,EMSE	! edge match status
+	BYTE		EMSS,EMSW	! and more of them
+	INTEGER		IERR		! error return
+	INTEGER		I		! for DO loops
+	REAL		R1		! temporary real
+	INTEGER		N		! temporary integer
+	INTEGER		NUMZEROS	! no. of zeros in field
+	INTEGER		HEADLEN		! length of header in bytes
+	LOGICAL		OK		! success/failure of some calls
+	INTEGER*4	BCDUMMY		! Dummy byte count
+	INTEGER*4	BCOUNT		! Result of byte count
+C
+C - a longword for 'stretching' arguments
+C
+	INTEGER		LONGWORD
+	DATA		LONGWORD /0/
+C
+C **********************************************************************
+C assume that we fail (pessimist)
+C
+	PROCFILE = .TRUE.
+C
+C If we have /BYTE_COUNT (the default) then the first pass is NOT WRITING
+C COUNTING = TRUE when -1 is encountered and FALSE after -2
+C
+C Note: COUNTING <> .NOT. WRITING since you may be not writing and not counting
+C	at the same time.
+C
+	COUNTING = .FALSE.
+	WRITING = .NOT.BYTE_COUNT	! if had BYTE_COUNT then we are not
+C					! writing (for the first time)
+C
+C Come back to here after counted file, for second pass to write file
+C
+10	CONTINUE
+C
+C and set various initial states
+C
+	LASTNF = -1		! make previous NF smaller than next
+	CGX    = 1000		! illegal limits to force change of
+	CGY    = 1000		! basic grid square data unit
+	NF0    = .FALSE.	! last NF was not an NF 0
+	DEG    =  0		! default angle is horizontal
+	DIST   = -999		! unset symbol size
+	HAD2PT = .FALSE.	! not had ANY points yet, let alone 2
+	HADRO  = .FALSE.	! nor an RO entry yet
+	EXTRA  = 0		! no extra texts yet
+	CHUCKED_OUT = .FALSE.	! no attributes thrown away yet
+C
+C re-open the IFF file and set the input revision level to 1
+C
+C
+C Open file once (the first time, when not writing)
+C
+	IF (( WRITING.AND..NOT.BYTE_COUNT ).OR.
+     &       (.NOT.WRITING.AND.BYTE_COUNT))  THEN
+	   CALL WRITEF('Processing file: %S',INFILE(WHICH)(:INLEN(WHICH)) )
+	   IF (.NOT. IFFOPEN( IFFLUN, FULL, FID )) GOTO 9999
+C
+	   CALL IFFIRV(1)
+C
+C if the file is already revision 1, i.e. it contains CB's and AC's for
+C OSTF+, make sure we have an FRT
+C
+	   IF ((ORVLEV .EQ. 1) .AND. .NOT. HAD_FRT) THEN
+	      CALL LSL_PUTMSG(I2OSTF__NEEDFRT)
+	      GOTO 9999
+	   ENDIF
+	ENDIF
+C
+C **********************************************************************
+C move through the IFF file, inspecting each entry
+C
+130	CALL IFFNXT(IECODE,IELEN)
+C
+135	IF (IELEN.EQ.-1) GOTO 430		! end of file
+	IF (IECODE .EQ. 'MD') GOTO 140
+	IF (IECODE .EQ. 'MH') GOTO 150
+	IF (IECODE .EQ. 'NF') GOTO 160        
+	IF (IECODE .EQ. 'FS') GOTO 180
+	IF (IECODE .EQ. 'AC') GOTO 200
+	IF (IECODE .EQ. 'TS') GOTO 240
+	IF (IECODE .EQ. 'TH') GOTO 250
+	IF (IECODE .EQ. 'RO') GOTO 260
+	IF (IECODE .EQ. 'CB') GOTO 290
+	IF (IECODE .EQ. 'TX') GOTO 360
+	IF (IECODE .EQ. 'EF') GOTO 390
+	IF (IECODE .EQ. 'NO') GOTO 410
+	IF (IECODE .EQ. 'EO') GOTO 400
+	IF (IECODE .EQ. 'EM' .OR.
+     &      IECODE .EQ. 'EJ') GOTO 440
+C
+C ignore anything else
+C
+	GOTO 130
+C
+C **********************************************************************
+C MD entry - check if MD entires are different to the MH entries
+C
+140	IF ( MH_CHECK ) THEN
+C
+C Read MD entry into MD2ARR
+C
+	   CALL EIHRI( MD2ARR,MIN(MD2LEN,IELEN),1 )
+C
+C Test if everything is OK. If it is get next IFF entry
+C
+	   IF (MHTYPE.EQ.3) THEN
+	      IF (( NINT(MD2LOC(1)) .EQ. MHMRCE ).AND.
+     &            ( NINT(MD2LOC(2)) .EQ. MHMRCN ).AND.
+     &            ( NINT(MD2SCL) .EQ. MHSCSC )) GOTO 130
+C
+C The MD and MH entries are different. Give and error message, delete the OSTF
+C file and close the IFF file.
+C
+	      CALL LSL_PUTMSG( I2OSTF__MHMDDIFF )
+C
+	      OK = FLWDEL( OUTLUN,IERR )
+C
+C Check that the deletion worked
+C
+	      IF ( .NOT.OK ) THEN
+	         CALL LSL_PUTMSG( I2OSTF__OUTDEL, OUTFILE(:OUTLEN) )
+	         CALL LSL_ADDMSG( OK )
+	         IF ( OK.EQ.LSL__SYSCLOSE ) CALL LSL_ADDMSG( IERR )
+	      ENDIF
+C
+C Go and close the IFF file
+C
+	      GOTO 450
+	   ENDIF
+	ENDIF
+C
+	GOTO 130
+C
+C **********************************************************************
+C MH entry - produce map header data (& control file data)
+C
+C Read header into correct common block and acquire E,N and Scale
+C
+150	IF (GET_MH_INFO(IELEN)) GOTO 450              ! close IFF file & give up
+C
+C Do different things according to the MH type...
+C
+	IF ( MHTYPE.EQ.2 .OR. MHTYPE.EQ.0 ) THEN
+C
+C upgrade the map header to the new format
+C
+	   IERR = OSMH_UPGRADE()
+C
+C and check it worked
+C
+	   IF (.NOT. IERR) THEN
+	      CALL LSL_PUTMSG(I2OSTF__MHUPGRADE)
+	      CALL LSL_ADDMSG(IERR)
+	      CALL LSL_ADDMSG( I2OSTF__USEZERO )
+	   ENDIF
+	ELSE
+C
+C Insert byte count into header, at position specified in translation table,
+C LSL$OS_MH_TABLE. Only do this on second pass (ie when writing)
+C
+	   IF ( WRITING ) THEN
+	        IF ( .NOT.OSMH_NEW_PUTINT( MH_BYTE_COUNT, BCOUNT ) ) 
+     &			GOTO 9999
+	   ENDIF
+C
+C Write header every 8 bytes from MH2BYTE.
+C Header length (in bytes) is number of words * 2, -4 for MH2DESC
+C
+	   HEADLEN = (MIN(MH2LEN,IELEN) * 2 - 4)
+	   I = 1
+5555	   CALL PUTCHR( MH2BYTE(I) )
+	   I = I + 1
+	   IF ( I.LE.HEADLEN ) GOTO 5555
+C
+	ENDIF
+C
+	BGI = MHBGI
+C
+C check that we have found sensible values in the map header (for both types)
+C
+	IF ( MHBGI .LE.0 .OR. MHSCSC.LT.0 .OR.
+     &	     MHMRCE.LT.0 .OR. MHMRCN.LT.0 ) THEN
+	   CALL LSL_PUTMSG( I2OSTF__MHERR )
+	   CALL LSL_ADDMSG( I2OSTF__MHVAL, MHBGI, MHSCSC, MHMRCN, MHMRCE )
+	   GOTO 450		! close IFF file & give up
+	ENDIF
+C
+C For type 3, go back to dispatch table and get next entry
+C
+	IF (MHTYPE.EQ.3) GOTO 130
+C
+C Otherwise, process a normal type 2 map header
+C
+C NOTE: OS now require four spaces ("    ") to be the default Contractors ID.
+C	A CID of "0000" will be converted into "     " later. 16/8/91
+C
+C
+C if we are OSTF version 3 or higher then the contractor's ID number is 
+C required, otherwise it will be ignored if it was given
+C
+C	IF ( OSTF_VERSION.GE.3 .AND. .NOT.HAD_CONT ) THEN
+C	   IF ( OSMH_CID_ZERO( MHCID ) ) THEN
+C	      CALL LSL_PUTMSG( I2OSTF__NOCONTRACTOR )
+C	      GOTO 450
+C	   ENDIF
+C	ENDIF
+C
+C now start sheet, as SIM if necessary
+C
+	IF ( SIM(WHICH) .AND. OSTF_VERSION.GT.0 ) THEN
+	   CALL FORMB(-1,1)
+	ELSE
+	   CALL FORMB(-1,0)
+	ENDIF
+C
+	CALL FORMF(MHMRCE)			! NG northing
+	CALL FORMF(MHMRCN)			! NG easting of map
+	CALL FORMF(MHBGI)			! basic grid interval
+	CALL FORMF(MHSCSC)			! scale
+C
+C if version of OSTF/DMC is <3 then skip the rest of -1 entry
+C
+	IF ( OSTF_VERSION.GE.3 ) THEN
+	   CALL FORMF(PCJOBN)			! arbitrary job number
+	   CALL FORMF(MHDGSC)			! digitising scale
+	ENDIF
+C
+C additional header - skip this if version of OSTF/DMC is 0
+C
+	IF ( OSTF_VERSION.EQ.0 ) GOTO 130
+C
+C start the additional header
+C
+	IF ( OSTF_VERSION.GE.4 ) THEN
+	   CALL FORMB(-20,1)			! start header
+	ELSE
+	   CALL FORMZ(-20)			! start header
+	ENDIF
+C
+C output date of initial databanking
+C
+	CALL PUTBIN(MHDIDB,.TRUE.,'MHDIDB')
+C
+C and other data
+C
+	CALL GETCHR(CHRS,MHEDTN,12)		! edition -- 12 chars
+	DO 151,	I=1,12
+	   CALL PUTCHR(CHRS(I))
+151	CONTINUE
+C
+	CALL GETCHR(CHRS,MHSURT,4)		! survey type -- 4 chars
+	DO 152,	I=1,4
+	   CALL PUTCHR(CHRS(I))
+152	CONTINUE
+C
+	IF ( OSTF_VERSION.GE.4 ) THEN
+	   CALL GETCHR(CHRS,MHCIND,8)		! content indicator
+	   DO 153, I=1,8			! -- 8 chars
+	      CALL PUTCHR(CHRS(I))
+153	   CONTINUE
+	ELSE
+	   CALL OSMH_GETMY(MHSURD,MTH,YEAR)	! survey date
+	   CALL FORMB(MTH,YEAR)			! (zero)
+	ENDIF
+C
+	CALL OSMH_GETMY(MHREVD,MTH,YEAR)	! revision date
+	CALL FORMB(MTH,YEAR)
+	CALL FORMB(MHLEVD(1),MHLEVD(2))		! levelling dates
+	CALL OSMH_GETMY(MHBOUD,MTH,YEAR)	! boundary date
+	CALL FORMB(MTH,YEAR)
+C
+	IF ( OSTF_VERSION.GE.4 ) THEN
+	   CALL PUTBIN(MHSDUP,.TRUE.,'MHSDUP')	! digital update date
+	   CALL PUTBIN(MHSTRD,.TRUE.,'MHSTRD')	! structure date
+C
+	   CALL GETCHR(CHRS,MHCVAL,8)		! check values
+C Label 666 out of sequence because current labels ascends in steps of 1.
+C Renumbering these would cause problems with gotos to 150 and 160.
+	   NUMZEROS = 0
+	   DO 666, I=1,8
+	      IF (CHRS(I).EQ.'0') NUMZEROS = NUMZEROS + 1
+666	   CONTINUE
+	   DO 154, I=1,8			! -- 8 chars
+	      IF (NUMZEROS.EQ.8) CHRS(I)=' '
+	      CALL PUTCHR(CHRS(I))
+154	   CONTINUE
+	   IF ( WRITING ) THEN
+	      CALL FORMF(BCOUNT)		! byte count
+	   ELSE
+	      CALL FORMF(BCDUMMY)		! dummy byte count
+	   ENDIF
+	   CALL FORMB(MHUNSS(1),MHUNSS(2))	! unspecified (short)
+	   CALL GETCHR(CHRS,MHFLAG,8)		! update flags
+	   DO 155, I=1,8			! -- 8 chars
+	      CALL PUTCHR(CHRS(I))
+155	   CONTINUE
+	   CALL FORMB(MHSTRC,MHBNUM)		! structure category, batch no.
+	   CALL OSMH_GETMY(MHQCD,MTH,YEAR)	! quality control date
+	   CALL FORMB(MTH,YEAR)
+C
+	   CALL OSMH_GETMY(MHOSUR(1),MTH,YEAR)	! original survey dates
+	   YEAR = MOD(YEAR, 100)
+	   CALL EXPAND('%P0%W%I2%I2',RECBUF(1),MTH,YEAR)
+	   CALL OSMH_GETMY(MHOSUR(2),MTH,YEAR)
+	   YEAR = MOD(YEAR, 100)
+	   CALL EXPAND('%P0%W%I2%I2',RECBUF(5),MTH,YEAR)
+	   RECPTR=8
+	   NUMZEROS=0
+	   DO 667 I=1,4
+	      IF (RECBUF(I).EQ.'0') NUMZEROS = NUMZEROS + 1
+667	   CONTINUE
+	   IF (NUMZEROS.EQ.4) THEN
+	      RECBUF(1)=' '
+	      RECBUF(2)=' '
+	      RECBUF(3)=' '
+	      RECBUF(4)='0'
+	   END IF
+	   NUMZEROS=0
+	   DO 668 I=5,8
+	      IF (RECBUF(I).EQ.'0') NUMZEROS = NUMZEROS + 1
+668	   CONTINUE
+	   IF (NUMZEROS.EQ.4) THEN
+	      RECBUF(5)=' '
+	      RECBUF(6)=' '
+	      RECBUF(7)=' '
+	      RECBUF(8)='0'
+	   END IF
+	   CALL PUTREC
+	ELSE
+	   CALL PUTBIN(MHSDUP,.FALSE.,'MHSDUP')	! digital update date 1
+	   DO 156, I=1,5
+	      CALL FORMB(0,0)			! remaining 5 zero
+156	   CONTINUE
+	   CALL FORMB(MHHWMD,MHLWMD)		! HWM/LWM dates
+	   CALL OSMH_GETMY(MHSRVD,MTH,YEAR)	! selected revision date
+	   CALL FORMB(MTH,YEAR)			! (zero)
+	   CALL OSMH_GETMY(MHOSUR(1),MTH,YEAR1)	! original survey dates
+	   CALL OSMH_GETMY(MHOSUR(2),MTH,YEAR2)
+	   CALL FORMB(YEAR1,YEAR2)		! as multi year date
+	ENDIF
+C
+	CALL FORMB(MHCPYD,MHCVI)		! copyright date/
+						! contour interval
+	CALL EXPAND('%P0%W%I8',RECBUF,MHMSPC)	! map spec. number
+	RECPTR=8
+	CALL PUTREC
+	CALL IDATE(MTH,DAY,YEAR)		! date of conversion
+	CALL EXPAND('%P0%W%I2/%I2/%I2',RECBUF,DAY,MTH,YEAR)
+	RECPTR=8
+	CALL PUTREC
+C
+	EMSN=BLANK				! edge match status
+	EMSE=BLANK
+	EMSS=BLANK
+	EMSW=BLANK
+	IF (MHEMSN.NE.0) EMSN='N'
+	IF (MHEMSE.NE.0) EMSE='E'
+	IF (MHEMSS.NE.0) EMSS='S'
+	IF (MHEMSW.NE.0) EMSW='W'
+	CALL EXPAND('%W%^B %C %C %C %C',RECBUF,EMSN,EMSE,EMSS,EMSW)
+	RECPTR=8
+	CALL PUTREC
+C
+C if the version of OSTF/DMC is 1, then we stop here
+C
+	IF ( OSTF_VERSION.EQ.1 ) GOTO 130
+C
+C otherwise, carry on
+C
+	CALL OSMH_GETHALVES(MHMHWM,YEAR1,YEAR2)	! multi year HWM date
+	CALL FORMB(YEAR1,YEAR2)
+	CALL OSMH_GETHALVES(MHMLWM,YEAR1,YEAR2)	! multi year LWM date
+	CALL FORMB(YEAR1,YEAR2)
+C
+C if the version of OSTF/DMC is 2, then we stop here
+C
+	IF ( OSTF_VERSION.LE.2 ) GOTO 130
+C
+C but for version 3 or higher, we finish with the rest
+C
+	IF (HAD_CONT) THEN			! contractors identity
+	   CALL EXPAND('%W%S',CHRS,CONTRACTOR)	! from qualifier
+	ELSE
+	   CALL GETCHR(CHRS,MHCID,4)		! from header
+C	   IF ( OSTF_VERSION.EQ.3 ) THEN
+C	      CHRS(1) = ' '			! convert leading zeros
+C	      CHRS(2) = ' '			! to spaces
+C	      IF ( CHRS(3).EQ.'0' ) CHRS(3) = ' '
+C	   ENDIF
+	ENDIF
+C Primary Contractor ID
+	   IF ( CHRS(1).EQ.'0'.AND.CHRS(2).EQ.'0' ) THEN
+	      CHRS(1) = ' '
+	      CHRS(2) = ' '
+	   ENDIF
+C Secondary Contractor ID
+	   IF ( CHRS(3).EQ.'0'.AND.CHRS(4).EQ.'0' ) THEN
+	      CHRS(3) = ' '
+	      CHRS(4) = ' '
+	   ENDIF
+	IF ( OSTF_VERSION.GE.4 ) THEN
+	   CALL EXPAND('%W%I4',CHRS(5),MHHUC)	! plus house unit count
+	ELSE
+	   CALL EXPAND('%W   0',CHRS(5))	! plus filler
+	ENDIF
+	CALL FORMD(CHRS)
+C
+	CALL GETCHR(CHRS,MHWI1D,80)		! wards in 1 district
+	DO 157,	I=1,80
+	   CALL PUTCHR(CHRS(I))
+157	CONTINUE
+C
+	CALL GETCHR(CHRS,MHWI2D,80)		! wards in 2 district
+	DO 158,	I=1,80
+	   CALL PUTCHR(CHRS(I))
+158	CONTINUE
+C
+	CALL GETCHR(CHRS,MHEDIC,80)		! electoral division
+	DO 159,	I=1,80				! in county
+	   CALL PUTCHR(CHRS(I))
+159	CONTINUE
+C
+	
+	IF ( OSTF_VERSION.GE.4 ) THEN
+	   CALL FORMB(MHDUPC,MHPLUS)	! digital update count and 
+	   				! OSTF+ indicator
+	ELSE
+	   CALL FORMB(MHDUPC,MHNSUP)	! digital update count and
+C					! number of set up points
+	ENDIF
+C
+	GOTO 130
+C
+C **********************************************************************
+C NF entry - produce start of feature data unit
+C
+160	FSN = 0				! zero high half of FSN
+	CALL EIHRI(NFNUM,1,1)		! read into low half
+C
+C check for an FSN of zero
+C - if it is, then see if it contains any data
+C - if the feature is empty, ignore it, but otherwise output a
+C   warning message and continue
+C
+	IF ( FSN.EQ.0 ) THEN
+	   CALL IFFNXT(IECODE,IELEN)
+	   IF (IECODE.EQ.'EF') GOTO 130		! ignore empty NF 0'S
+	   CALL LSL_PUTMSG( I2OSTF__FSNZERO )
+	   NF0 = .TRUE.
+	ENDIF
+C
+C and check whether the FSN is within our output range
+C
+	IF ( OSTF_VERSION.LT.3 ) THEN
+	   IF ( FSN.GT.9999 ) THEN
+	      CALL LSL_PUTMSG( I2OSTF__BIGFSN, FSN, 9999 )
+	      FSN = MOD(FSN,9999)
+	      CALL LSL_ADDMSG( I2OSTF__USEFSN, FSN )
+	   ENDIF
+	ELSE
+	   IF (FSN.GT.19999) THEN
+	      CALL LSL_PUTMSG( I2OSTF__BIGFSN, FSN, 19999 )
+	      FSN = MOD(FSN,19999)
+	      CALL LSL_ADDMSG( I2OSTF__USEFSN, FSN )
+	   ENDIF
+	ENDIF
+C
+C and check that the features have been sorted into order
+C
+ 	IF (FSN.LE.LASTNF) THEN
+	   CALL LSL_PUTMSG( I2OSTF__NOTSORTED, LASTNF, NFNUM )
+	ENDIF
+C
+C remember this FSN for next time's check
+C
+ 	LASTNF = FSN
+C
+C test the feature for orientation data. If the feature is not a degenerate
+C line (i.e. a point), and has no associated orientation, then issue a fatal
+C error message and exit the routine. If the feature is bad, i.e. certain
+C records could not be found, issue a warning and exit the routine. If the
+C feature is ignorable, i.e. line degenerated to a point, empty feature,
+C goto get the next record (CHECK_FEATURE will have repositioned to the
+C EF record of the feature
+C
+	IF(.NOT.CHECK_FEATURE(ORIENT,IGNORE,NOTNF,BADFEATURE)) THEN
+	   IF ( NOTNF.OR.BADFEATURE ) THEN		! if not orientation
+	      CALL LSL_PUTMSG(I2OSTF__BADFEATURE,NFNUM)	! problem, issue extra
+	   ENDIF					! message
+	   GOTO 9999					! terminate processing
+	ELSEIF ( IGNORE ) THEN
+	   GOTO 130					! ignore feature
+	ENDIF
+C
+C
+C and we have started a new feature...
+C
+ 	NEWF   = .TRUE.			! start of feature
+	FRSTAC = .TRUE.			! no ACs yet
+	FRSTTS = .TRUE.			! no TSs yet
+	COMP_TEXT = .FALSE.		! not a composite text
+	PREV_PTS  = 0			! no points yet
+C
+C and output the feature number to the output file
+C - note that, because of the check above, entry -44 should only occur
+C   if OSTF_VERSION is 3
+C - also note that we have to take account of the number of extra 
+C   features created from composite texts, so the feature number output 
+C   is incremented by that amount
+C
+	IF (FSN.LT.10000) THEN
+	   CALL FORMB(-4,FSN+EXTRA)
+	ELSE
+	   CALL FORMB(-44,FSN-10000+EXTRA)
+    	ENDIF
+C
+	IF ( NF0 ) THEN
+	   NF0 = .FALSE.	! clear now 
+	   GOTO 135		! already got next entry in hand
+	ELSE
+	   GOTO 130		! go and get next entry
+	ENDIF
+C
+C **********************************************************************
+C FS entry - produce feature code (line/text) data unit
+C          - for OSTF+, first produce technical security and feature 
+C            history records if required
+C
+180	CALL EIHRI(FTCODE,1,1)		! read the FC entry
+	CALL EIHRI(TXTDAT,1,3)		! and the text bits
+C
+C decide whether it is a line, text or symbol
+C
+	IF ( (TXTDAT.AND.'C000'X) .EQ. 0 ) THEN
+	   SYMBF = .FALSE.		! not a symbol feature
+	   TEXTF = .FALSE.		! nor a text   feature
+	ELSE
+	   SYMBF = (TXTDAT.AND.'4000'X) .NE. 0
+	   TEXTF = .NOT.SYMBF
+	ENDIF
+C
+C assume there will be no OSTF+ records
+C
+	SECURE = .FALSE.
+	DO_HIST = .FALSE.
+C
+C note where we are in the file
+C
+	FSPOSN = LPOSH
+C
+C produce the OSTF+ records no matter the revision level of the IFF file
+C
+	IF (PLUS) THEN
+	   DO_HIST = .TRUE.			! flag to output OSTF+ records
+	   CHA_CH = '0'				! assume unknown
+	   CALL EXPAND('%W        ',DATREC)	! start with blanks
+C
+C get next entry
+C
+182	   CALL IFFNXT(IECODE,IELEN)
+C
+C if it is an AC, we need to look at it, so read the details
+C
+	   IF (IECODE .EQ. 'AC') THEN
+	      CALL EIHRI(ACTYPE,1,1)
+	      CALL EIHRL(ACCODE,1,2)
+C
+C survey date - convert to the format required for a -23 record
+C
+	      IF ((ACTYPE .EQ. CODE_SURV_DATE) .AND. 
+     &					(ACCODE .NE. 0)) THEN
+	         CALL SET_DATE_ATT(ACCODE,RNGE_SURV_DATE,'SURVEY_DATE',
+     &	                          FSN,DATREC(1))
+C
+C change date - convert to the format required for a -23 record
+C
+	      ELSEIF ((ACTYPE .EQ. CODE_CHA_DATE) .AND.
+     &					(ACCODE .NE. 0)) THEN
+	         CALL SET_DATE_ATT(ACCODE,RNGE_CHA_DATE,'CHANGE_DATE',
+     &	                          FSN,DATREC(5))
+C
+C change type - just set it
+C
+	      ELSEIF (ACTYPE .EQ. CODE_CHA_TYPE) THEN
+	         CHA_TYPE = ACCODE
+	         CALL CHECK_CHAR_ATT(CHA_TYPE,RNGE_CHA_TYPE,
+     &	                             'CHANGE_TYPE',FSN)
+C
+C security marker - just note if we have it
+C
+	      ELSEIF (ACTYPE .EQ. CODE_SEC) THEN
+	         SECURE = (ACCODE .EQ. 1)
+	      ENDIF
+C
+C go back to get next entry
+C
+	      GOTO 182
+C
+C note if we have a composite text (for later)
+C
+	   ELSEIF (IECODE .EQ. 'TS') THEN
+	      COMP_TEXT = .TRUE.
+	   ENDIF
+C
+C if not producing OSTF+, we still need to look ahead within texts to 
+C find out if there is a TS
+C
+	ELSEIF (TEXTF) THEN
+184	   CALL IFFNXT(IECODE,IELEN)
+	   IF (IECODE .EQ. 'AC') THEN
+	      GOTO 184
+	   ELSEIF (IECODE .EQ. 'TS') THEN
+	      COMP_TEXT = .TRUE.
+	   ENDIF
+	ENDIF
+C
+C if we did any of that, move back to FS
+C
+	IF (PLUS .OR. TEXTF) THEN
+	   CALL IFFPKE(IECODE,IELEN,FSPOSN)
+	   IF (IECODE .NE. 'FS') THEN
+	      CALL LSL_PUTMSG(I2OSTF__NOTFOUND,'FS',IECODE)
+	      GOTO 9999
+	   ENDIF
+	ENDIF
+C
+C **********************************************************************
+C now output the records - first the -25 and -23 records if necessary
+C
+	IF (SECURE) CALL FORMZ(-25)
+	IF (DO_HIST) CALL FORMG(-23,CHA_CH,DATREC)
+C
+C only output the feature code for ordinary texts just now - if it is a 
+C composite text, wait for the TS to output the feature code
+C
+	IF (TEXTF) THEN
+	   IF (.NOT. COMP_TEXT) THEN
+	      TXTPOS = TXTDAT.AND.'000F'X   ! remember the text position
+	      CALL FORMB(-8,FTCODE+LONGWORD)
+	   ENDIF
+C
+C output the symbol feature code
+C
+	ELSEIF (SYMBF) THEN
+	   CALL FORMB(-8,FTCODE+LONGWORD)
+C
+C otherwise, output the feature code for a line
+C
+	ELSE
+	   CALL FORMB(-7,FTCODE+LONGWORD)
+C
+C and check for a process code - if we are outputting OSTF-0 we
+C don't want it, but otherwise it can be output.
+C It will be suppressed by default (/NOPROCESS_CODES)
+C
+	   IF ( (OSTF_VERSION.GT.0) .AND.
+     &	        ((TXTDAT.AND.'0FFF'X).GT.0).AND.
+     &	        (PROCESS_CODES .EQ. .TRUE.) )
+     &	            CALL FORMB(-16,TXTDAT.AND.'0FFF'X)
+	ENDIF
+C
+	GOTO 130
+C
+C **********************************************************************
+C AC entry - ancillary code can be type CONTOUR     = contour height
+C		     			LH_boundary = LH boundary text
+C					RH_boundary = RH boundary text
+C
+C Note that only type CONTOUR is supported by OSTF version 0,
+C and that only types CONTOUR, LH_boundary  and RH_boundary are 
+C supported by any OSTF other than OSTF+
+C
+200	CALL EIHRI(ACTYPE,1,1)
+	CALL EIHRL(ACCODE,1,2)
+ 	IF ( ACTYPE.EQ.CODE_CONT ) GOTO 220	! split contours off
+C
+C check for the AC type - if we have already dealt with the OSTF+ ones,
+C i.e. outputting to an OSTF+ file, issue a warning if the input file is
+C revision 0 (such AC's should only occur in revision 1). If the output
+C file is not OSTF+, issue a warning that OSTF+ type AC's are being skipped
+C
+	IF ( (ACTYPE.NE.CODE_LH) .AND. (ACTYPE.NE.CODE_RH) ) THEN
+	   IF ( (ACTYPE .EQ. CODE_SEC) .OR. 
+     &	        (ACTYPE .EQ. CODE_SURV_DATE) .OR.
+     &	        (ACTYPE .EQ. CODE_CHA_DATE) .OR.
+     &	        (ACTYPE .EQ. CODE_CHA_TYPE) ) THEN	! OSTF+ type AC types
+	      IF ( ORVLEV.EQ.0 ) THEN			! revision level 0
+		 CALL ACDFND(ACTYPE)
+		 CALL LSL_PUTMSG( I2OSTF__PLUSAC,
+     &			ACD_NAME(1:ACD_NAME_LEN), NFNUM )
+	      ENDIF
+	      IF (.NOT. PLUS) THEN			! output not OSTF+
+	         CALL ACDFND(ACTYPE)
+	         CALL LSL_PUTMSG( I2OSTF__SKIPAC,
+     &			ACD_NAME(1:ACD_NAME_LEN), NFNUM )
+	      ENDIF
+	   ELSE						! not OSTF+ AC types
+	      CALL ACDFND(ACTYPE)
+	      CALL LSL_PUTMSG( I2OSTF__BADAC, 
+     &			ACD_NAME(1:ACD_NAME_LEN), NFNUM )
+	   ENDIF
+	   GOTO 130
+	ELSEIF ( OSTF_VERSION.EQ.0 ) THEN
+ 	   CALL LSL_PUTMSG( I2OSTF__ILLBOUND )
+	   GOTO 130
+	ENDIF
+	GOTO 230			! LH_boundary or RH_boundary
+C
+C **********************************************************************
+C Contour height value - output it
+C
+220	CALL FORMB(-17,ACCODE)
+	FRSTAC=.FALSE.
+ 	GOTO 130
+C
+C **********************************************************************
+C Got a boundary AC
+C
+C Boundary ACs are always output in pairs, a left followed by a right
+C If an AC is missing, then a dummy (with blank text) will be output
+C
+C NOTE the assumptions that
+C
+C	1) all ACs occur after the FS entry
+C	2) boundary texts that belong together will be adjacent
+C
+230	IF ( ACTYPE.EQ.CODE_LH ) THEN	! left hand boundary first
+	   TEXT1=1			! so they come in order
+	   TEXT2=2
+	ELSE				! right hand boundary first
+	   TEXT1=2			! so they are reversed
+	   TEXT2=1
+	ENDIF
+C
+C fill the AC text buffers with spaces
+C
+	DO 233 I=1,82
+	   ACTEXT(I,1)=BLANK
+ 	   ACTEXT(I,2)=BLANK
+233	CONTINUE
+C
+	LENGTH(1)=8			! if empty, output 8 spaces
+ 	LENGTH(2)=8
+C
+C and note that we don't have the next entry in hand yet
+C
+	GOTNXT=.FALSE.
+C
+C and take a copy of the data
+C
+	TYPE1 = ACTYPE
+	CODE1 = ACCODE
+C
+C if this is the first AC in the feature, and the feature code does
+C not match the primary feature code (ie the one found in the FS entry),
+C then go and output a dummy pair of ACs
+C - because we have set GOTNXT, we will come back here (with FRSTAC
+C   false) immediately afterwards
+C
+ 	IF ( FRSTAC .AND. (ACCODE.NE.FTCODE) ) THEN
+	   GOTNXT = .TRUE.
+	   GOTO 236
+	ENDIF
+C
+C read the AC text into the appropriate part of the buffer
+C
+	CALL EIHRI(ACTEXT(1,TEXT1),IELEN-3,4)
+C
+C and adjust the length - note that this is in words, not bytes
+C
+	LENGTH(TEXT1)=IELEN-3
+C
+C See if there is another AC with the same code
+C - if the next entry is not an AC, then go and output our AC pair
+C   as it stands
+C
+ 	CALL IFFNXT(IECODE,IELEN)
+	GOTNXT = .TRUE.
+C
+ 	IF (IECODE.NE.'AC') GOTO 236
+C
+C otherwise, read the AC data into our second set of items
+C
+	CALL EIHRI(TYPE2,1,1)
+	CALL EIHRL(CODE2,1,2)
+C
+C is it the same type? if its of a different type, then output a
+C pair of ACs, with one side dummy
+C
+	IF ((TYPE2.NE.4).AND.(TYPE2.NE.5)) GOTO 236
+	IF (CODE2.NE.CODE1) GOTO 236
+C
+C check for the same side of the boundary being given twice !
+C
+	IF (TYPE2.EQ.TYPE1) THEN
+	   CALL LSL_PUTMSG( I2OSTF__BADACPAIR, NFNUM )
+	   GOTO 135
+	ENDIF
+C
+C Read the second text or leave it set to null if there isn't one
+C
+234	CALL EIHRI(ACTEXT(1,TEXT2),IELEN-3,4)
+	LENGTH(TEXT2)=IELEN-3
+C
+C join here to output the pair of texts
+C - if this is not the first AC pair, then we will need to output
+C   a new 'FC' value
+C
+236	IF (.NOT.FRSTAC) CALL FORMB(-7,ACCODE)
+	FRSTAC=.FALSE.
+C
+	DO 237 I=1,2
+	   CALL FORMB(-19,0)
+	   N = LENGTH(I)*2
+	   IF (ACTEXT(N,I).EQ.BLANK) N = N-1
+	   CALL OUTTXT(ACTEXT(1,I),N)
+237	CONTINUE
+C
+	IF (GOTNXT) THEN
+	   GOTO 135		! already have next entry in hand
+	ELSE
+	   GOTO 130		! go and read the next entry
+	ENDIF
+C
+C **********************************************************************
+C TS entry - if already had a TS, produce end of feature data unit 
+C            followed by start of feature data unit
+C          - produce feature code (text) data unit
+C
+C we are breaking up composite texts into individual text features, so 
+C first output the "end of feature" code if this is not the first TS
+C
+240	IF (.NOT. FRSTTS) THEN
+	   CALL FORMZ(-5)
+	   CGX = 1000		! illegal limits to force change of 
+	   CGY = 1000		! basic grid square for next feature
+	   DEG =  0		! unset text angle
+	   HAD2PT = .FALSE.  	! not had ANY points yet
+	   HADRO  = .FALSE.	! nor an RO entry
+	   NEWF   = .TRUE.	! like a new feature
+C
+C and output the new feature number to the output file - we are adding 
+C an extra feature so take account of that
+C note that entry -44 should only occur if OSTF_VERSION is 3
+C
+	   EXTRA = EXTRA + 1	! increment no of extra features created
+	   IF (FSN.LT.10000) THEN
+	      CALL FORMB(-4,FSN+EXTRA)
+	   ELSE
+	      CALL FORMB(-44,FSN-10000+EXTRA)
+	   ENDIF
+C
+C if this is the first TS, cancel the flag
+C
+	ELSE
+	   FRSTTS = .FALSE.
+	ENDIF
+C
+C now we can read the feature code and text position
+C
+	CALL EIHRI(FTCODE,1,1)		! read the FC entry
+	CALL EIHRI(TXTDAT,1,3)		! and the text bits
+	TXTPOS = TXTDAT.AND.'000F'X	! remember the text position
+C
+C and output the feature code
+C
+	CALL FORMB(-8,FTCODE+LONGWORD)
+	GOTO 130
+C
+C **********************************************************************
+C TH entry - prepare text description data unit
+C	     for output before 1st text content data unit
+C
+250	CALL EIHRI(TH,1,1)
+C
+	IF (.NOT.TEXTF) GOTO 130	! ignore it if we're not text
+C
+C The procedure for setting the OS text description data unit depends on the
+C OSTF mode (0STF_VERSION = 0 - text to be in point sizes, otherwise in tenths
+C of a mm), and on the scale of the IFF text heights (IFF_POINTSIZE = .TRUE. -
+C IFF text heights in point sizes, otherwise in hundredths of a mm)
+C
+	IF ( IFF_POINTSIZE) THEN	! IFF text heights in point sizes
+C
+C the size must be a valid point size
+C
+	   IF ( TH.LT.1 .OR. TH.GT.24 ) THEN
+	      CALL LSL_PUTMSG( I2OSTF__BADPTSIZ, TH, NFNUM )
+	      TH = 24
+	   ENDIF
+C
+C OK - it's feasible - does that point size actually exist?
+C
+	   HEIGHT = OSPTSZ(TH)		! look it up
+	   IF (HEIGHT.EQ.0.0) THEN
+	      CALL LSL_PUTMSG( I2OSTF__BADPTSIZ, TH, NFNUM )
+	      TH = 24
+	      HEIGHT = OSPTSZ(TH)
+	   ENDIF
+	   HEIGHT = HEIGHT*10.0		! convert to tenths of a mm
+C
+C if we are in OSTF-0, then we output the text height as a point size,
+C but otherwise it is output as tenths of a millimetre
+C
+	   IF ( OSTF_VERSION.GT.0 ) TH = HEIGHT
+C
+	ELSE				! IFF text sizes in hundredths of a mm
+C
+C if OSTF mode 0, convert IFF text sizes into point sizes
+C if the OSTF mode is not zero, then IFF text sizes are just rescaled in units
+C of a tenth of a mm
+C
+	   IF ( OSTF_VERSION.GT.0 ) THEN	! rescale to tenths of a mm
+C
+	      TH = NINT(FLOAT(TH)/10.0)
+C
+	   ELSE				! convert to point size, OSTF mode 0
+C
+C The acceptable height band for point size I is OSPTSZ(I)-0.05 to
+C OSPTSZ(I)+0.05 mm (note IFF heights in mm/100). If OSPTSZ(I) is zero, the 
+C point size is not supported. If a valid point size is not obtained, a
+C complaint is made and a point size of 24 is used
+C
+	      HEIGHT_100 = TH
+	      DO 500 I = 1,24
+C
+		 IF ( OSPTSZ(I).GT.0.0 ) THEN
+		    IF ( HEIGHT_100.GE.100.0*OSPTSZ(I)-5.0 .AND.
+     &			 HEIGHT_100.LE.100.0*OSPTSZ(I)+5.0 ) THEN
+		       TH = I
+		       GOTO 550
+		    ENDIF
+		 ENDIF
+C
+500	      CONTINUE
+C
+	      CALL LSL_PUTMSG( I2OSTF__BADMMSIZ, TH, NFNUM)	! bad txt size
+	      TH = 24						! use pt size 24
+C
+550	      CONTINUE
+C
+	   ENDIF
+C
+	ENDIF
+C
+   	GOTO 130
+C
+C **********************************************************************
+C RO entry - produce orientation data unit
+C - we assume that texts and symbols will have two points, but no
+C   rotation
+C
+260	IF ( (SYMBF.OR.TEXTF) .AND. HAD2PT ) THEN
+	   CALL LSL_PUTMSG( I2OSTF__DISTANG, NFNUM )
+	   CALL LSL_ADDMSG( I2OSTF__IGNANG )
+	ENDIF
+C
+	CALL EIHRR(ROT,1,1)
+C
+	HADRO = .TRUE.			! had an RO now
+C
+C convert the angle to tenths of degrees, between 0 and 3600
+C
+261	IF ( ROT.GE.0.0 ) GOTO 270	! if -ve rads, convert to +ve
+	ROT = ROT + TWOPI		! by adding 2 pi
+	GOTO 261
+C
+270	DEG = ROT*180.0/PI*10+0.5	! radns to deg*10 & round
+	DEG = MOD(DEG,3600)		! mod full circle
+	GOTO 130			! don't output yet
+C
+C **********************************************************************
+C CB entry - produce co-ord data units
+C	   - basic grid square data unit if changed
+C	   - invisible line flag data unit if pen up
+C          - height data unit if changed
+C          - and subsequent string in feature
+C
+290	CALL EIHRCB_HEAD(CBH)
+	CALL EIHRCB_DATA(CBD)
+C
+C if this is not the start of a feature, and we have the pen up flag,
+C then output an invisible line flag
+C
+	IF ( ((CBH.FLAGS.AND.1).EQ.0) .AND. .NOT.NEWF) CALL FORMZ(-13)
+C
+C read the points into buffers for convenience
+C
+	STCOL(1) = CODE_X
+	STCOL(2) = CODE_Y
+	STPTR = CBH.NROW
+C
+C if it's an empty entry (which should never happen!) ignore it
+C
+	IF (STPTR.EQ.0) THEN
+	   CALL LSL_PUTMSG(I2OSTF__NOPTS,FSN)
+	   GOTO 130
+	ENDIF
+C
+	CALL IFS_CB_READ(CBH,CBD,STBUF,2,STCOL,1,STPTR)
+C
+	IF (PLUS) THEN
+	   CALL IFS_CB_READ(CBH,CBD,ZBUF,1,CODE_Z,1,STPTR)
+	   CALL IFS_CB_READ(CBH,CBD,DZBUF,1,CODE_DZ,1,STPTR)
+	   CALL IFS_CB_READ(CBH,CBD,CXYBUF,1,CODE_CAPXY,1,STPTR)
+	   CALL IFS_CB_READ(CBH,CBD,CZBUF,1,CODE_CAPZ,1,STPTR)
+	ELSEIF (.NOT. (SIMPLE_XY .OR. CHUCKED_OUT)) THEN
+	   CALL LSL_PUTMSG(I2OSTF__CHUCKED)
+	   CHUCKED_OUT = .TRUE.
+	ENDIF
+C
+C remember the first point of the feature (for texts and symbols)
+C
+	IF (NEWF) THEN
+	   SAV_X     = STBUF(1,1)
+	   SAV_Y     = STBUF(2,1)
+	   SAV_Z     = ZBUF(1)
+	   SAV_DZ    = DZBUF(1)
+	   SAV_CAPXY = CXYBUF(1)
+	   SAV_CAPZ  = CZBUF(1)
+	ENDIF
+C
+C process each pair of co-ordinates
+C (note that text and symbol coordinates are not output here, although
+C  angle calculations, etc, may be done)
+C
+	DO 350 I = 1,STPTR
+C
+C get the next point in hand
+C
+	  X     = STBUF(1,I)
+	  Y     = STBUF(2,I)
+	  Z     = ZBUF(I)
+	  DZ    = DZBUF(I)
+	  CAPXY = CXYBUF(I)
+	  CAPZ  = CZBUF(I)
+	  CAPCH = BLANK
+C
+C check whether we have only just had the first point
+C - if we are a text or symbol, then skip straight away to look for the 
+C   next point
+C - if we are a line, just output the point
+C
+	  IF (I.EQ.1) THEN
+	     IF (TEXTF.OR.SYMBF) GOTO 350	! get next point
+	     IF (NEWF) GOTO 330			! output point
+	  ENDIF
+C
+C we need to know the displacement over the first 2 points, in order
+C to calculate an angle...
+C for lines, we also need to know the displacement over the previous 
+C and current points, in order to check for duplicates...
+C - if it is a line then we want to calculate the angle in terms of the 
+C   OSTF output coordinates, rather than the input IFF coordinates...
+C
+ 	  IF ( .NOT.SYMBF .AND. .NOT.TEXTF ) THEN
+	     CALL CNVTOS(SAV_X,SAV_Y,BGI,GX1,GY1,OX1,OY1)
+	     CALL CNVTOS(    X,    Y,BGI,GX2,GY2,OX2,OY2)
+	     DX = BGI*( (GX2+OX2/1000.0) - (GX1+OX1/1000.0) )
+	     DY = BGI*( (GY2+OY2/1000.0) - (GY1+OY1/1000.0) )
+C
+C - if it is a symbol or text, we use the input IFF coordinates to 
+C   ensure we get an angle even when the OSTF coordinates are 
+C   duplicated, since we only output one point
+C
+	  ELSE
+	     DX = X - SAV_X
+	     DY = Y - SAV_Y
+	  ENDIF
+C
+C if the displacement is 0, then complain, and ignore the current
+C point (in an appropriate manner)
+C
+	  IF ( (DX.EQ.0.0) .AND. (DY.EQ.0.0) ) THEN
+	     CALL LSL_PUTMSG( I2OSTF__DUPPTS, NFNUM, PREV_PTS+I )
+	     IF (NEWF .AND. I.EQ.2) THEN
+	        CALL LSL_PUTMSG( I2OSTF__FIRST2, NFNUM )
+	     ENDIF
+	     IF (.NOT.SYMBF) GOTO 350
+	     X     = SAV_X		! why do we do this ?
+	     Y     = SAV_Y		! (they should be the same)
+	     Z     = SAV_Z
+	     DZ    = SAV_DZ
+	     CAPXY = SAV_CAPXY
+	     CAPZ  = SAV_CAPZ
+	     GOTO 330			! goes to 350 anyway
+	  ENDIF
+C
+C once we have the first two valid points, we can find the angle of the 
+C thing, otherwise (i.e. for subsequent points) just output them
+C
+	  IF (HAD2PT) GOTO 330		! just output the point
+C
+C now we use DX,DY to compute an angle for any feature with two
+C or more points
+C
+	  ROT = ATAN2(DY,DX)
+C
+	  IF (ROT.LT.0.0) ROT = ROT+TWOPI	! make +ve by adding 2 pi
+	  DEG = (ROT*180.0/PI)*10		! angle in degrees*10
+	  DEG = MOD(DEG,3600)			! mod full circle
+	  HAD2PT = .TRUE.			! & thus we had 2 pts
+C
+C if this is a text feature, get the next point at once
+C if this is a symbol, then if we are here it is a scaled symbol
+C
+	  IF (TEXTF) GOTO 350			! only output lines
+C
+C if it is a symbol, then it is scaled - calculate the magnitude
+C (distance). If it is not a symbol, just output the angle
+C
+	  IF (SYMBF) THEN
+	     R1 = SQRT(DX*DX + DY*DY)		! real distance
+	     R1 = AMOD(R1,BGI)*(1000/BGI)	! into basic grid units
+	     IF (R1.LT.0.0) R1 = R1+1000	! ensure positive
+	     DIST = R1 + 0.5			! round to integer
+ 	     GOTO 350				! and end this loop
+	  ELSE
+	     CALL FORMB(-12, DEG)		! output angle
+	  ENDIF					! and output point
+C
+C-------------------------------------------------------------------------
+C - come here to output the actual X,Y coordinate
+C - the position is output as the grid square we are in, and the position
+C   (in 1/1000 of the BGI) within the grid square. This latter value is in
+C   the range 0 - 999 (note that 1000 is NOT a legal value)
+C - note that squares 0 to 9 are obviously in the map, but if we are at 0
+C   in square 10 we are still 'in'
+C
+330	  IF (TEXTF.OR.SYMBF) GOTO 350		! only output lines
+C
+	  CALL CNVTOS(X,Y,BGI,NGX,NGY,OGX,OGY)	! convert coords to
+C						! OS format
+C check for an extreme grid square value, and warn them (but transmit
+C it regardless). Note that if we are in grid 10, then we are only in 
+C the map if OGx is zero.
+C
+	  IF (  NGX.GT.10 .OR.
+     &		NGX.LT. 0 .OR.
+     &		NGY.GT.10 .OR.
+     &		NGY.LT. 0 .OR.
+     &	       (NGX.EQ.10 .AND. OGX.NE.0) .OR.
+     &	       (NGY.EQ.10 .AND. OGY.NE.0)
+     &	     ) THEN
+	      CALL LSL_PUTMSG( I2OSTF__PTOUTSIDE, NGX, NGY, NFNUM )
+	   ENDIF
+C
+C for OSTF+, we may need to output a height record
+C
+	  IF (PLUS) THEN
+C
+C This code is WRONG
+C
+C
+C if the basic grid square has changed, then output a new grid square
+C followed by a height record
+C
+C	     IF ( (NGX.NE.CGX) .OR. (NGY.NE.CGY) ) THEN
+C	        CALL FORMC(-9,NGX,NGY)
+C	        CALL OUTHT(Z,DZ,CAPZ,FSN)
+C
+C Output a height record if this is the first point in a 
+C new feature or anything in it has changed
+C
+C	     ELSEIF ((NEWF .AND. (I .EQ. 1)) .OR.      ! condition redundant
+C     &	             (Z .NE. SAV_Z) .OR.
+C     &	             (DZ .NE. SAV_DZ) .OR.
+C     &	             (CAPZ .NE. SAV_CAPZ)) THEN
+C	        CALL OUTHT(Z,DZ,CAPZ,FSN)
+C	     ENDIF
+C
+C NOTE: CGX and CGY are set to silly values (1000) to force a -9 at the
+C beginning of every feature.
+C
+	     IF ( (NGX.NE.CGX) .OR. (NGY.NE.CGY) ) THEN
+	        CALL FORMC(-9,NGX,NGY)
+	     ENDIF
+C
+C Notes SPR 1178 by S.Townrow 14/5/91
+C ===================================
+C
+C I2OSTF failed (until now) to output a -24 if a point changed a grid square -
+C ONLY WHEN THERE WAS A CHANGE IN HEIGHT. It used to ALWAYS output a points
+C after a new grid square because of the case when a -24 is needed at the START
+C of every OSTF+ feature. This problem was address by SPR 993 but was fixed
+C incorrectly.
+C
+C
+C Output a height record if this is the first point in a 
+C new feature or anything in it has changed
+C
+	     IF ((NEWF .AND. (I .EQ. 1)) .OR.	! Output first -24 of feature.
+     &	         (Z .NE. SAV_Z) .OR.		! And thereafter, only when
+     &	         (DZ .NE. SAV_DZ) .OR.		! there is a change of height.
+     &	         (CAPZ .NE. SAV_CAPZ)) THEN
+	        CALL OUTHT(Z,DZ,CAPZ,FSN)
+	     ENDIF
+C
+C set the plan capture method
+C
+	     CAPINT = CAPXY
+	     CALL CHECK_CHAR_ATT(CAPINT,RNGE_CAPXY,'CAPTURE_XY',FSN)
+C
+C for ordinary OSTF, its quite simple -
+C if the basic grid square has changed, then output a new grid square
+C
+	  ELSE
+	     IF ( (NGX.NE.CGX) .OR.
+     &	          (NGY.NE.CGY) ) CALL FORMC(-9,NGX,NGY)
+	  ENDIF
+C
+C and output the coordinate offset in the current grid square
+C
+	  CALL FORMA(CAPCH,OGX,OGY)
+C
+C and remember the status quo (ie our new current grid square)
+C
+	  CGX = NGX
+	  CGY = NGY
+C
+C save the current point
+C
+	   SAV_X     = X
+	   SAV_Y     = Y
+	   SAV_Z     = Z
+	   SAV_DZ    = DZ
+	   SAV_CAPXY = CAPXY
+	   SAV_CAPZ  = CAPZ
+C
+350	CONTINUE
+C
+	NEWF = .FALSE.		! no longer a new feature
+	PREV_PTS = PREV_PTS + STPTR
+	GOTO 130
+C
+C **********************************************************************
+C TX entry - produce text context data unit
+C
+360	N = IELEN*2		! number of characters
+	IF ( N.GT.80 ) THEN
+	   CALL LSL_PUTMSG( I2OSTF__TXTTOOLNG, N, NFNUM )
+	   IELEN = 40
+	   N = 80
+	ENDIF
+C
+C read the text in
+C
+	CALL EIHRI(CHRS,IELEN,1)
+	IF (CHRS(N).EQ.0) N = N-1	! remove padding null at end?
+C
+C if the text is not digitised at position 0 (bottom left) then
+C OSTF needs to know where position 0 is
+C
+C (note that for OSTF-0, the format assumes that texts are at position
+C  zero, but for the other forms, we output the text at position zero
+C  and add a -18 entry to say where it was actually digitised)
+C
+C compute coords of position 0 of text if required
+C
+	IF ( TXTPOS.NE.0 ) THEN
+C
+C convert the text height from mm/10 on map to metres on ground
+C
+	   TEMP=HEIGHT*MHSCSC/10000.0
+C
+C and 'move' to position 0
+C
+	   CALL NEWSTART(SAV_X,SAV_Y,X,Y,TXTPOS,ROT,TEMP,N,CHRS)
+C
+ 	ELSE
+	   X = SAV_X		! otherwise, use the first point
+	   Y = SAV_Y		! for this text
+	ENDIF
+C
+C output coordinates
+C
+	CALL CNVTOS(X,Y,BGI,NGX,NGY,OGX,OGY)	! convert coords to
+C						! OS format
+C
+C check for an extreme grid square value, and warn them (but transmit
+C it regardless). Note that if we are in grid 10, then we are only in 
+C the map if OGX is zero.
+C Note that use of -14 is not valid for OSTF version 0
+C
+	GD_SQ_IND=-9
+	IF (  NGX.GT.10 .OR.
+     &	      NGX.LT. 0 .OR.
+     &	      NGY.GT.10 .OR.
+     &	      NGY.LT. 0 .OR.
+     &	     (NGX.EQ.10 .AND. OGX.NE.0) .OR.
+     &	     (NGY.EQ.10 .AND. OGY.NE.0)
+     &     ) THEN
+C
+	   IF (OSTF_VERSION.EQ.0) THEN
+ 	      CALL LSL_PUTMSG( I2OSTF__TXOUTSIDE, NGX,NGY,NFNUM )
+	   ELSE
+C
+	      GD_SQ_IND=-14
+	      IF (  NGX.GT.11 .OR.
+     &	            NGX.LT.-1 .OR.
+     &	            NGY.GT.11 .OR.
+     &	            NGY.LT.-1 .OR.
+     &	           (NGX.EQ.11 .AND. OGX.NE.0) .OR.
+     &	           (NGY.EQ.11 .AND. OGY.NE.0)
+     &           ) THEN
+C
+ 	         CALL LSL_PUTMSG( I2OSTF__TXOUTSIDE, NGX,NGY,NFNUM )
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C output grid square indicator
+C             
+	CALL FORMC(GD_SQ_IND,NGX,NGY)
+C
+	IF (PLUS) THEN
+C
+C SPR 1178 S.Townrow 15/4/91
+C A -24 height record is now output for text (and symbols) as per the OS
+C Mod 7C spec.
+C
+	   CALL OUTHT(Z,DZ,CAPZ,FSN)
+C
+C set the plan capture method
+C
+	   CAPINT = SAV_CAPXY
+	   CALL CHECK_CHAR_ATT(CAPINT,RNGE_CAPXY,'CAPTURE_XY',FSN)
+	ENDIF
+C
+C and output coordinate offset
+C
+	CALL FORMA(CAPCH,OGX,OGY)
+C
+C output position that text was digitised in
+C
+	CALL CNVTOS(SAV_X,SAV_Y,BGI,NGX,NGY,OGX,OGY)
+C
+C output digitised position indicator, grid squares & offsets
+C (but only if version is not 0)
+C
+	IF ( OSTF_VERSION.NE.0 ) THEN
+	   CALL FORMB(-18,TXTPOS)
+	   CALL FORMA(BLANK,NGX,NGY)
+	   CALL FORMA(CAPCH,OGX,OGY)
+	ENDIF
+C
+C output an orientation
+C            
+	CALL FORMB(-12,DEG)
+C
+C but also complain if we had no angle...
+C
+	IF ( .NOT.HADRO .AND. .NOT.HAD2PT ) THEN
+	   CALL LSL_PUTMSG( I2OSTF__TXNOANG, NFNUM )
+	ENDIF
+C
+C now output the text
+C
+	STYLE = ISHFT(TXTDAT,-4) .AND. "3  ! type style - 2 bits
+	CATEG = ISHFT(TXTDAT,-6) .AND. "77 ! name category - 6 bits
+	CALL FORME(-10,CATEG,STYLE,TH+LONGWORD)
+	CALL OUTTXT(CHRS(1),N)
+	GOTO 130
+C
+C **********************************************************************
+C EF entry - produce end of feature data unit
+C                                               
+390	IF (SYMBF) THEN			! output symbol data
+C
+	   CALL CNVTOS(SAV_X,SAV_Y,BGI,NGX,NGY,OGX,OGY)	! convert to
+C			     				! OS format
+C
+C check for an extreme grid square value, and warn them (but transmit
+C it regardless). Note that if we are in grid 10, then we are only in 
+C the map if OGxy is zero.
+C
+	   IF ( NGX.GT.10 .OR.
+     &	        NGX.LT. 0 .OR.
+     &	        NGY.GT.10 .OR.
+     &	        NGY.LT. 0 .OR.
+     &	       (NGX.EQ.10 .AND. OGX.NE.0) .OR.
+     &	       (NGY.EQ.10 .AND. OGY.NE.0)
+     &	      ) THEN
+   	      CALL LSL_PUTMSG( I2OSTF__SYMOUTSIDE, NGX,NGY,NFNUM )
+	   ENDIF
+C               
+C output grid square indicator
+C
+	   CALL FORMC(-9,NGX,NGY)
+C
+	   IF (PLUS) THEN
+C
+C SPR 1178 S.Townrow 15/4/91
+C A -24 height record is now output for symbols (and text) as per the OS
+C Mod 7C spec.
+C
+	      CALL OUTHT(Z,DZ,CAPZ,FSN)
+C
+C set the plan capture method
+C
+	      CAPINT = SAV_CAPXY
+	      CALL CHECK_CHAR_ATT(CAPINT,RNGE_CAPXY,'CAPTURE_XY',FSN)
+	   ENDIF
+C
+C and output coordinate offset
+C
+	   CALL FORMA(CAPCH,OGX,OGY)
+C
+C output scaled distance, if one has been computed
+C
+	   IF (DIST.GT.0) CALL FORMB(-15,DIST)
+C
+C---output orientation
+C              
+	   CALL FORMB(-12,DEG)
+C
+C warn about one point lines
+C
+	ELSEIF (.NOT. TEXTF) THEN
+	   IF (.NOT. HAD2PT) CALL LSL_PUTMSG( I2OSTF__ONEPTLINE, NFNUM )
+	ENDIF 
+C
+C---now output the "end of feature" code
+C
+	CALL FORMZ(-5)
+	CGX = 1000		! illegal limits to force change of 
+	CGY = 1000		! basic grid square for next feature
+	DEG =  0		! unset text angle
+	DIST= -999		! unset distance for symbols
+	HAD2PT = .FALSE.  	! not had ANY points yet
+	HADRO  = .FALSE.	! nor an RO entry
+	GOTO 130
+C
+C **********************************************************************
+C EO - end overlay
+C
+400	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN .EQ. -1) GOTO 430		! end of file
+	IF (IECODE .EQ. 'EM' .OR.
+     &      IECODE .EQ. 'EJ') GOTO 440		! end of sheet/data
+	IF (IECODE .EQ. 'NO') GOTO 410		! new overlay
+C
+	CALL LSL_PUTMSG( I2OSTF__UNEXPENTRY, IECODE, LPOSH )
+	GOTO 400
+C
+C **********************************************************************
+C NO - new overlay
+C
+410	CALL EIHRI(I,1,1)
+ 	IF (I .EQ.  1) GOTO 130		! layer 1 is correct
+	IF (I .EQ.  0) GOTO 420		! ignore layer 0
+	IF (I .EQ. 11) GOTO 420		!    and layer 11
+	IF (I .EQ. 32) GOTO 420		!    and layer 32
+C
+	CALL LSL_PUTMSG( I2OSTF__UNEXPLYR, I )
+C
+420	CALL IFFNXC('EO',IELEN)		! find the end of the layer
+	IF (IELEN.EQ.-1) GOTO 430	!    end of file
+	GOTO 400			! or end of layer
+C
+C **********************************************************************
+C Unexpected end of file, moan and treat as EJ
+C
+430	CALL LSL_PUTMSG( I2OSTF__UNEXPEOF )
+C
+C **********************************************************************
+C EM,EJ,EO entry - produce end of map data unit
+C
+440	CALL FORMZ(-2)		! end of sheet (map)
+C
+C and that counts as a succesful ending, so report as much
+C
+	PROCFILE = .FALSE.
+C
+C **********************************************************************
+C End of file. Finish or go round again and write the file out.
+C
+	IF ( .NOT. WRITING ) THEN
+	   WRITING = .TRUE.
+	   BCOUNT = MHBYTC
+C
+C Do not flush buffer on first pass but throw contents away by reseting pointer
+C
+	   BLKPTR = 0
+	   CALL IFFRWD
+	   GOTO 10
+	ENDIF
+C
+450	CALL IFFCLO( IFFLUN )
+C
+C **********************************************************************
+C
+9999	RETURN
+	END

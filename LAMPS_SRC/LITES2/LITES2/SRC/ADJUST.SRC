@@ -1,0 +1,280 @@
+	SUBROUTINE ADJUST(OW,VIEW)
+C
+***	MODULE	ADJUST
+***	IDENT	10JA96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	26-Jan-1987
+C
+C To adjust window size and calculate workstation viewport so that
+C vector and raster data overlay correctly
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:EFNLUN/
+C
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:PLOT/
+***	COMMON/CMN:WORKS/
+C
+C argument
+	INTEGER	OW		! overlay workstation id (1 or 2)
+	REAL	VIEW(4)		! returned workstation viewport
+C
+C w/s
+	INTEGER	IM,OV
+	REAL	SCW2D
+	INTEGER	PIXWIN(4)
+	INTEGER	PIXSCR(4)
+	LOGICAL	GOT
+	REAL*8	ORG(2)
+	INTEGER	MAX_VIEW
+	INTEGER	ROWS,COLS
+	LOGICAL	ZOOM16			! restrict zoom to x16
+	LOGICAL	VIEW2			! restrict views to 2**n
+	REAL	PSIZ(2),SIZ(2)
+	EQUIVALENCE (SIZ,PIXELSIZE)		! abbreviation
+	REAL	ZOOM
+	INTEGER	NPIX
+C
+C determine which images are selected to be drawn
+	ZOOM16 = .FALSE.	! unrestricted zoom
+	VIEW2 = .FALSE.		! unrestricted reduced views
+	DO 3 IM=1,MAXIMAGE
+	   IMAGE_DRAW(IM) = .FALSE.
+3	CONTINUE
+	DO 5 OV=1,MAXOVER
+	   IF (.NOT.OVERLAY_IMAGE(OV)) GOTO 5
+	   DO 4 IM=1,MAXIMAGE
+	      IF (IMAGE_TYPE(IM).NE.0.AND.O_IMSEL(IM,OV)
+     &					) IMAGE_DRAW(IM) = .TRUE.
+4	   CONTINUE
+5	CONTINUE
+C
+C reject any with non-matching origin/pixelsize, and determine maximum
+C reduced view present in all images to be drawn
+	GOT = .FALSE.
+	DO 6 IM=1,MAXIMAGE
+	   IF (IMAGE_DRAW(IM)) THEN
+	      IF (.NOT.GOT) THEN
+	         ORG(1) = IMAGE_ORIGIN(1,IM)
+	         ORG(2) = IMAGE_ORIGIN(2,IM)
+	         PSIZ(1) = IMAGE_PIXELSIZE(1,IM)
+	         PSIZ(2) = IMAGE_PIXELSIZE(2,IM)
+	         MAX_VIEW = IMAGE_VIEWS(IM)
+	         GOT = .TRUE.
+	      ELSE
+	         IF (IMAGE_PIXELSIZE(1,IM).NE.PSIZ(1).OR.
+     &		     IMAGE_PIXELSIZE(2,IM).NE.PSIZ(2) ) THEN
+	            IMAGE_DRAW(IM) = .FALSE.
+	         ELSE
+	            MAX_VIEW = MIN(MAX_VIEW,IMAGE_VIEWS(IM))
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	   IF (IMAGE_DRAW(IM)) THEN
+	      IF (IMAGE_TYPE(IM).NE.TYPE_DTI) ZOOM16 = .TRUE.
+	      IF (IMAGE_TYPE(IM).EQ.TYPE_LSI) VIEW2 = .TRUE.
+	   ENDIF
+6	CONTINUE
+C
+C if no images to draw, set default viewport and pixelsize
+	IF (.NOT.GOT) THEN		! no images to draw
+	   VIEW(1) = WKVSWX(OW)*SCRSZX(OW)
+	   VIEW(2) = WKVNEX(OW)*SCRSZX(OW)
+	   VIEW(3) = WKVSWY(OW)*SCRSZY(OW)
+	   VIEW(4) = WKVNEY(OW)*SCRSZY(OW)
+	   SIZ(1) = 1.0
+	   SIZ(2) = 1.0
+	   GOTO 9999
+	ENDIF
+C
+	ZOOM = 1.0
+	IMAGE_ZOOM = 1
+	IMAGE_VIEW = 1			! start with non-reduced view
+	SIZ(1) = PSIZ(1)
+	SIZ(2) = PSIZ(2)
+C
+C If we are plotting, then we assume the the pixel size of the
+C plotter is adjustable, so we don't need all this stuff
+	IF (PLOT_ON) GOTO 15
+C
+C Get screen pixel numbers corresponding to corners of viewport.
+C Pixel 0 is in bottom left corner, pixel RASTSX/Y-1 in top right
+	PIXSCR(1) = RASTSX(OW)*WKVSWX(OW)
+	PIXSCR(2) = RASTSX(OW)*WKVNEX(OW)-0.001
+	PIXSCR(3) = RASTSY(OW)*WKVSWY(OW)
+	PIXSCR(4) = RASTSY(OW)*WKVNEY(OW)-0.001
+C
+C now work out a zoom factor
+10	CONTINUE
+C
+C check for ZOOM [n] IMAGE command
+	IF (ZOOM_IMAGE.GT.0) THEN
+	   IF (ZOOM_IMAGE.GE.1.0) THEN
+	      IMAGE_ZOOM = NINT(ZOOM_IMAGE)
+	      ZOOM = IMAGE_ZOOM
+	   ELSE
+	      IMAGE_ZOOM = 0
+	      IF (IMAGE_VIEW.GE.NINT(1.0/ZOOM_IMAGE)) IMAGE_ZOOM = 1
+	   ENDIF
+	ELSE
+	   ZOOM = MIN(
+     &(PIXSCR(2)-PIXSCR(1)+1.)/MAX(1,INT((WINDOW(2)-WINDOW(1))/SIZ(1))),
+     &(PIXSCR(4)-PIXSCR(3)+1.)/MAX(1,INT((WINDOW(4)-WINDOW(3))/SIZ(2))))
+	   IMAGE_ZOOM = ZOOM			! integerise
+	ENDIF
+C
+	   IF (IMAGE_ZOOM.EQ.0) THEN
+C
+C won't fit, so try for a reduced view
+	      IF (IMAGE_VIEW.LT.MAX_VIEW) THEN
+	         IF (VIEW2) THEN
+	            IMAGE_VIEW = IMAGE_VIEW*2	! try next view
+	         ELSE
+	            IMAGE_VIEW = IMAGE_VIEW+1	! try next view
+	         ENDIF
+	         SIZ(1) = PSIZ(1)*IMAGE_VIEW	! new pixelsize
+	         SIZ(2) = PSIZ(2)*IMAGE_VIEW
+	         GOTO 10			! try again
+	      ENDIF
+	      IMAGE_ZOOM = 1
+	   ENDIF
+C
+C Check if we are unfortunately attempting to zoom in on a reduced view -
+C if so use the previous view which must have not quite fitted
+	   IF (IMAGE_VIEW.GT.1.AND.IMAGE_ZOOM.EQ.2) THEN
+	      IMAGE_VIEW = IMAGE_VIEW/2
+	      IMAGE_ZOOM = 1
+	      ZOOM = ZOOM/2.0
+	      SIZ(1) = PSIZ(1)*IMAGE_VIEW	! new pixelsize
+	      SIZ(2) = PSIZ(2)*IMAGE_VIEW
+	   ENDIF
+C
+C Restrict zoom factor for tiled files - otherwise tends to draw so much
+C stuff lying off the screen that takes ages
+	   IF (ZOOM16.AND.IMAGE_ZOOM.GT.16) IMAGE_ZOOM = 16
+C
+C adjust WINDOW to fill screen
+	   NPIX = PIXSCR(2)-PIXSCR(1)+1
+	   IF (NAROPT.AND.ZOOM_IMAGE.EQ.0.0) THEN
+	      NPIX = MIN(NPIX,
+     &		NINT((WINDOW(2)-WINDOW(1))*IMAGE_ZOOM/SIZ(1)))
+	   ELSE
+     	      WINDOW(1) = (WINDOW(1)+WINDOW(2))/2.0 -
+     &			NPIX/IMAGE_ZOOM*SIZ(1)/2.0
+	   ENDIF
+	   PIXWIN(1) = NINT((WINDOW(1)+LITES2ORG(1)-ORG(1))/SIZ(1))
+	   WINDOW(1) = (PIXWIN(1)-0.5)*SIZ(1) - LITES2ORG(1) + ORG(1)
+	   WINDOW(1) = MAX( LIMITS(1), WINDOW(1) )
+	   WINDOW(2) = WINDOW(1)+NPIX*SIZ(1)/IMAGE_ZOOM
+	   WINDOW(2) = MIN( LIMITS(2), WINDOW(2) )
+C
+	   NPIX = PIXSCR(4)-PIXSCR(3)+1
+	   IF (NAROPT.AND.ZOOM_IMAGE.EQ.0.0) THEN
+	      NPIX = MIN(NPIX,
+     &		NINT((WINDOW(4)-WINDOW(3))*IMAGE_ZOOM/SIZ(2)))
+	   ELSE
+	      WINDOW(3) = (WINDOW(3)+WINDOW(4))/2.0 - 
+     &			NPIX/IMAGE_ZOOM*SIZ(2)/2.0
+	   ENDIF
+	   PIXWIN(3) = NINT((WINDOW(3)+LITES2ORG(2)-ORG(2))/SIZ(2))
+	   WINDOW(3) = (PIXWIN(3)-0.5)*SIZ(2) - LITES2ORG(2) + ORG(2)
+	   WINDOW(3) = MAX( LIMITS(3), WINDOW(3) )
+	   WINDOW(4) = WINDOW(3)+NPIX*SIZ(2)/IMAGE_ZOOM
+	   WINDOW(4) = MIN( LIMITS(4), WINDOW(4) )
+C
+C Get image pixel numbers corresponding to corners of window.
+C Pixel zero has centre at ORG
+15	PIXWIN(1) = NINT((WINDOW(1)+LITES2ORG(1)-ORG(1))/SIZ(1)+0.5)
+	PIXWIN(2) = NINT((WINDOW(2)+LITES2ORG(1)-ORG(1))/SIZ(1)-0.5)
+	PIXWIN(3) = NINT((WINDOW(3)+LITES2ORG(2)-ORG(2))/SIZ(2)+0.5)
+	PIXWIN(4) = NINT((WINDOW(4)+LITES2ORG(2)-ORG(2))/SIZ(2)-0.5)
+C
+C if plotting, then attempt not to draw too many pixels by selecting
+C a reduced view as required
+	IF (PLOT_ON) THEN
+	   IF (MAX(PIXWIN(2)-PIXWIN(1),PIXWIN(4)-PIXWIN(3)).GE.
+     &						PLOT_PIXELS) THEN
+C
+C won't fit, so try for a reduced view
+	      IF (IMAGE_VIEW.LT.MAX_VIEW) THEN
+	         IF (VIEW2) THEN
+	            IMAGE_VIEW = IMAGE_VIEW*2	! try next view
+	         ELSE
+	            IMAGE_VIEW = IMAGE_VIEW+1	! try next view
+	         ENDIF
+	         SIZ(1) = PSIZ(1)*IMAGE_VIEW	! new pixelsize
+	         SIZ(2) = PSIZ(2)*IMAGE_VIEW
+	         GOTO 15			! try again
+	      ENDIF
+	   ENDIF
+	ELSE
+C
+C will fit at given zoom factor, so just get corners of viewport so that
+C the raster pixels map onto the screen pixels
+C world	   (PIXWIN(1)-0.5)*SIZ(1)+ORG(1)-LITES2ORG(1)
+C ->scr	   PIXSCR(1)*SCRSZX(OW)/RASTSX(OW)
+	   SCW2D = (IMAGE_ZOOM*SCRSZX(OW))/(SIZ(1)*RASTSX(OW))
+	   VIEW(1) = PIXSCR(1)*SCRSZX(OW)/RASTSX(OW) +
+     &		(WINDOW(1)-((PIXWIN(1)-0.5)*SIZ(1)+ORG(1)-LITES2ORG(1)))
+     &								*SCW2D
+	   VIEW(1) = MAX(VIEW(1),0.0)
+	   VIEW(2) = VIEW(1) + (WINDOW(2)-WINDOW(1)) * SCW2D
+	   VIEW(2) = MIN(VIEW(2),SCRSZX(OW))
+C
+C final adjustment of window to match
+	   WINDOW(2) = WINDOW(1) + (VIEW(2)-VIEW(1)) / SCW2D
+	   WINDOW(2) = MIN(WINDOW(2),LIMITS(2))
+	   SCW2D = (IMAGE_ZOOM*SCRSZY(OW))/(SIZ(2)*RASTSY(OW))
+	   VIEW(3) = PIXSCR(3)*SCRSZY(OW)/RASTSY(OW) +
+     &		(WINDOW(3)-((PIXWIN(3)-0.5)*SIZ(2)+ORG(2)-LITES2ORG(2)))
+     &								*SCW2D
+	   VIEW(3) = MAX(VIEW(3),0.0)
+	   VIEW(4) = VIEW(3) + (WINDOW(4)-WINDOW(3)) * SCW2D
+	   VIEW(4) = MIN(VIEW(4),SCRSZY(OW))
+C
+C final adjustment of window to match
+	   WINDOW(4) = WINDOW(3) + (VIEW(4)-VIEW(3)) / SCW2D
+	   WINDOW(4) = MIN(WINDOW(4),LIMITS(4))
+	ENDIF
+C
+C set which pixels to draw for each image (numbers start at 1 here)
+	DO 20 IM=1,MAXIMAGE
+	   IF (.NOT.IMAGE_DRAW(IM)) GOTO 20
+C
+C calculate number of rows and columns in the reduced view to be used
+	   COLS = IMAGE_COLUMNS(IM)/IMAGE_VIEW
+	   ROWS = IMAGE_ROWS(IM)/IMAGE_VIEW
+C
+C CCB 30AU89 - allow extra pixel all round just to ensure it covers
+C the screen
+	   IMAGE_SWPIX(1,IM) = MAX(1,
+     &		PIXWIN(1)-NINT((IMAGE_ORIGIN(1,IM)-ORG(1))/SIZ(1)))
+	   IMAGE_SWPIX(2,IM) = MAX(1,
+     &		PIXWIN(3)-NINT((IMAGE_ORIGIN(2,IM)-ORG(2))/SIZ(2)))
+	   IF (IMAGE_SWPIX(1,IM).GT.COLS.OR.
+     &	       IMAGE_SWPIX(2,IM).GT.ROWS) THEN
+	      IMAGE_DRAW(IM) = .FALSE.
+	      GOTO 20
+	   ENDIF
+	   IMAGE_NEPIX(1,IM) = MIN(COLS,
+     &		PIXWIN(2)+2-NINT((IMAGE_ORIGIN(1,IM)-ORG(1))/SIZ(1)))
+	   IMAGE_NEPIX(2,IM) = MIN(ROWS,
+     &		PIXWIN(4)+2-NINT((IMAGE_ORIGIN(2,IM)-ORG(2))/SIZ(2)))
+	   IF (IMAGE_NEPIX(1,IM).LE.0.OR.IMAGE_NEPIX(2,IM).LE.0) THEN
+	      IMAGE_DRAW(IM) = .FALSE.
+	      GOTO 20
+	   ENDIF
+20	CONTINUE
+C
+	IF (DIAOPT) CALL WRITEF(
+     & 'Image view %N, zoomed by %N (%F0.3)',IMAGE_VIEW,IMAGE_ZOOM,ZOOM)
+C
+9999	RETURN
+	END

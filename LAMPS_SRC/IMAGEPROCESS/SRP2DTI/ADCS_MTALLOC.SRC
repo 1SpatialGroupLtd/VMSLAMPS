@@ -1,0 +1,179 @@
+	LOGICAL FUNCTION ADCS_MTALLOC(RET_CODE)
+C
+***	MODULE	ADCS_MTALLOC
+***	IDENT	17AU87
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,Cambridge,England
+C 	Author: A.Stevens
+C
+C	Routine for ADCS to allocate and mount a tape
+C
+	IMPLICIT NONE
+C
+C Common blocks
+C
+	INCLUDE 'HERE:SRP2DTIMSG.PAR'		! message files
+	INCLUDE 'HERE:LSL_TAPE.CMN'		! common block
+	INCLUDE 'LSL$CMNLSL:MTIVCM.CMN'		! tape input common
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'	! LSLLIB error messages
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'		! LSL common
+	INCLUDE '($SYSSRVNAM)'			! system service declares
+	INCLUDE '($SSDEF)'			! return code defs.
+	INCLUDE '($DVIDEF)'			! device item codes $DVI
+	INCLUDE '($MNTDEF)'			! mount symbols	
+C
+C Arguments
+	INTEGER*4	RET_CODE	
+C
+C sytem services
+	INTEGER		LIB$GETDVI,LIB$WAIT
+C
+C Functions
+C
+	INTEGER*4	TRNALL		! get logical name
+C
+C Local
+C
+	INTEGER*4	IERR		! function return
+	INTEGER*4	ERROR		! system error code
+C
+	LOGICAL		OK,STATUS	! error flags
+	INTEGER*4	DEV_STATUS	! magtape status return
+C
+	INTEGER		UCB$M_ONLINE    ! since $ucbdef not available
+	PARAMETER	(UCB$M_ONLINE = '10'X)
+C
+C...locals for item list
+	INTEGER*2	ITEM_CODE_LEN(2)
+	INTEGER*4	ITEM_LIST(7)
+	BYTE		TAPE_DEV(80)
+C	DATA		TAPE_DEV 
+C     &                  /'L','S','L','$','A','D','C','S','_',
+C     &			'T','A','P','E'/
+	INTEGER*4	CODE_LENGTH
+	INTEGER*4	BUFFER_ADDR
+	INTEGER*4	RETL_ADDR
+	INTEGER*4	FLAG_VAR
+	EQUIVALENCE (ITEM_CODE_LEN(1), CODE_LENGTH)
+C
+	INTEGER*4	MOUNT_ERROR,ALLOC_ERROR,OFF_ERROR
+	PARAMETER	(ALLOC_ERROR = -5)
+	PARAMETER	(MOUNT_ERROR = -6)
+	PARAMETER	(OFF_ERROR = -7)
+C
+C...mounting error codes
+	INTEGER		MOUN$_OFFLINE			! set up err cde
+	PARAMETER	(MOUN$_OFFLINE = '72811C'X)
+	INTEGER		MOUN$_MEDIUMOFF			! set up err cde
+	PARAMETER	(MOUN$_MEDIUMOFF = '7201A4'X)
+	INTEGER		MOUN$_VOLINV
+	PARAMETER	(MOUN$_VOLINV = '720254'X)
+C
+C--------------------------------------------------------------------
+C
+C..Set up in the beginning
+C
+	STATUS = SS$_NORMAL			! if I exit without error
+	ADCS_MTALLOC =.TRUE.			! set to signal success
+C
+C---------------------------------------------------------------------
+C
+C... Try to allocate the tape drive to this process
+C
+C	NTRY = 0				! count attempts
+	OK = SYS$ALLOC(MTNAME,,,,)		! allocate tape
+	IF (.NOT.OK) THEN			! no can do
+C
+C... try deallocating it (as it might be allocated here)
+C
+	  OK = SYS$DALLOC(MTNAME,)
+	  IF (.NOT.OK) THEN
+	    IF (OK.EQ.SS$_DEVNOTALLOC) THEN
+	      OK = -1				! ignore unallocated 
+	    ELSE
+	      STATUS = OK			! other problem
+	    ENDIF
+	  ENDIF
+C
+C... either way have another go at allocation
+C
+	  OK = SYS$ALLOC(MTNAME,,,,)		! allocate tape
+	  IF (.NOT.OK) THEN			! all efforts failed
+	    RET_CODE = ALLOC_ERROR		! allocation error
+	    GOTO 999				! exit with error
+	  ENDIF
+C
+	ENDIF					! not ok after alloc	
+C
+C---------------------------------------------------------------------
+C
+C Set up the item list for use with SYS$MOUNT
+C
+C...first, specify the device name
+	ITEM_CODE_LEN(2)= MNT$_DEVNAM			! ask to mount 
+C	ITEM_CODE_LEN(1)= 13				! buffer length
+	ITEM_CODE_LEN(1)= LEN(MTNAME)
+	BUFFER_ADDR     = %LOC(MTNAME)
+C			= %LOC(TAPE_DEV)		! buffer address
+	ITEM_LIST(1)    = CODE_LENGTH
+	ITEM_LIST(2)    = BUFFER_ADDR
+	ITEM_LIST(3)	= RETL_ADDR
+C
+C...secondly, specify some useful flags
+C
+	CODE_LENGTH     = 0				! clear previous
+	FLAG_VAR 	= 0				! clear
+	FLAG_VAR        = FLAG_VAR .OR. MNT$M_FOREIGN
+	FLAG_VAR        = FLAG_VAR .OR. MNT$M_NOWRITE
+	FLAG_VAR	= FLAG_VAR .OR. MNT$M_NOASSIST
+C
+	ITEM_CODE_LEN(2)= MNT$_FLAGS
+	ITEM_CODE_LEN(1)= 4				! 4 bytes flags
+	BUFFER_ADDR     = %LOC(FLAG_VAR)
+	ITEM_LIST(4)    = CODE_LENGTH
+	ITEM_LIST(5)    = BUFFER_ADDR
+	ITEM_LIST(6)	= RETL_ADDR
+	ITEM_LIST(7)    = 0				! terminator
+C
+C Now we try to mount the tape
+C
+	OK = SYS$MOUNT(ITEM_LIST)
+	IF (.NOT.OK) THEN
+	   IF (OK .EQ. MOUN$_OFFLINE 	.OR.
+     &	       OK .EQ. MOUN$_MEDIUMOFF 	.OR.
+     &	       OK .EQ. MOUN$_VOLINV) 	THEN
+	     RET_CODE = OFF_ERROR
+	     GOTO 899 
+	   ENDIF
+C
+	   STATUS = OK
+	   RET_CODE = MOUNT_ERROR
+	   IF (OK.EQ.SS$_NOGRPNAM .OR.
+     &	      OK.EQ.SS$_NOSYSNAM .OR.
+     &	      OK.EQ.SS$_NOOPER   .OR.
+     &	      OK.EQ.SS$_NOPRIV)  THEN		! no privilege to mount
+	      CALL LSL_PUTMSG(SRP2DTI__MTNOPRIV)
+	      CALL LSL_PUTMSG(MTIERR)
+	      CALL LSL_ADDMSG(OK)
+	      STATUS = OK
+	  ENDIF
+	  GOTO 899
+	ENDIF
+C
+C---------------------------------------------------------------------
+C
+	RETURN				! success
+899	OK = SYS$DALLOC(MTNAME,)
+	IF (.NOT.OK) THEN
+	  IF (OK.EQ.SS$_DEVNOTALLOC) THEN
+	    OK = -1				! ignore unallocated 
+	  ELSE
+	    STATUS = OK			! other problem
+	  ENDIF
+	ENDIF
+C
+999	ADCS_MTALLOC = .FALSE.		! problem
+	RETURN			
+C
+	END
+C--------------------------------------------------------------------

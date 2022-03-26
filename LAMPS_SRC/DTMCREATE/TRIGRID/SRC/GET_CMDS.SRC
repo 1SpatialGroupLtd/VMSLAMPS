@@ -1,0 +1,410 @@
+	LOGICAL FUNCTION GET_CMDS()
+C
+***	MODULE	GET_CMDS
+***	IDENT	27JA89
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C	Get the commands from the user. If using all the start-up
+C	defaults TRIGRID requires that only 4 commands be issued:
+C
+C		1) FILEIN
+C		2) FILEOUT
+C		3) WINDOW
+C		4) SIZE (or SIDELENGTH)
+C
+C
+C 	Function returns true if all is well
+C
+	IMPLICIT NONE
+C
+C W/s
+	BYTE		CH	! for use with RDCHS
+	INTEGER		CMD     ! decoded command number
+	INTEGER		I,J 	! temp loop vars.
+	INTEGER		IERR	! error return
+	LOGICAL		HAD_FILEIN ! for GO command
+	LOGICAL		HAD_FILEOUT ! for GO command
+	LOGICAL		OK	! function return
+	CHARACTER*128	DCLSTR	! for SPAWN command
+	CHARACTER*128	INDFILE	! indirect command file name
+	CHARACTER*100	DEFNAM	! default device/directory for filename
+	INTEGER		INDLEN	! length of indirect file-spec
+	LOGICAL		AMBIG	! had an ambiguous file name ?
+	LOGICAL		SIGCHS	! gets # significant characters
+	REAL		TEMP_NCOL,TEMP_NROW	! temp storage
+C
+C Define command table
+	EXTERNAL	TRIGRID_CMD_TABLE
+	INTEGER*4	TRIGRID_CMD_TABLE
+C
+C Functions:
+	LOGICAL         DATA_TYPE_CMD	! sets DTM data type
+	LOGICAL		DISABLE_CMD	! decode disable keywords
+	LOGICAL		ENABLE_CMD	! decode enable keywords
+	LOGICAL		FILEIN_CMD	! get input file-spec
+	LOGICAL		FILEOUT_CMD	! get and open output files
+	INTEGER         FLRSTR		! read record from file
+	INTEGER         FLROPN		! open file for LSLLIB FILEO	
+	LOGICAL		GETFILNAM	! read file-spec
+	LOGICAL         HEADER_TYPE_CMD	! sets DTM header type
+	LOGICAL		HELP_CMD	! give help
+	LOGICAL		LIMITS_CMD	! get interpolation limits
+	LOGICAL  	RDCHS		! read character from line
+	LOGICAL  	RDCH		! read character from line
+	LOGICAL 	RDCOMM  	! read command from line
+	INTEGER		RDFILN		! reads and parses a filename
+	LOGICAL         REALIN  	! to prompt for and get reals
+	LOGICAL         SIDELENGTH_CMD	! sets DTM cell side length
+	LOGICAL         SIZE_CMD	! sets DTM size
+	LOGICAL         SHOW_CMD	! show status
+	LOGICAL         SPAWN_CMD	! for DCL SPAWN
+	LOGICAL	 	TRIANGLE_LIMITS_CMD
+C					! get triangle limits
+	INTEGER		TTRSTR  	! read line from terminal
+	LOGICAL		UNITS_CMD	! get units for window cmd
+	LOGICAL		WAIT_CMD	! wait for specified time
+	LOGICAL		WINDOW_CMD	! get WINDOW command args
+C
+C Parameters
+	INCLUDE	'LSL$DTMCREATESYS:GRIDPARAMS.PAR'
+	INCLUDE	'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'LSL$CMNDTI:DTIPAR.PAR'
+C
+C Common blocks:
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:DTMDET.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:CONTRL.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:FINDIT.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFDEV.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:TPOLGY.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:DTMJPI.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:STORIT.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:TRYVAR.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:ZONVAR.CMN'
+C
+C ......................................................................
+C
+	GET_CMDS=.TRUE.			! assume success
+C
+C Get an input line from the terminal
+10	TXTPTR=80
+	IF (TTIN) THEN
+	   OK=TTRSTR(,,'TRIGRID> ',IERR)
+	ELSE
+	   CALL FLRSEL(INDLUN)
+	   OK=FLRSTR(,,IERR)
+	ENDIF
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      IF (TTIN) THEN
+	         GOTO 210		! end of file = return .F.
+	      ELSE
+	         CALL WRITEF('%S Unexpected end of indirect command '//
+     &			'file detected',WARNING)
+	         CALL WRITEF('                RETURN command assumed '//
+     &				'- returning to terminal input')
+	         GOTO 40		! close indirect file etc.
+	      ENDIF
+	   ENDIF
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 20
+	ENDIF
+C
+C echo and decode the line
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('TRIGRID> ')
+	   CALL APPEND(TXTDSC) ! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+	CALL BSLN
+C
+C Look for comment
+	IF (RDCHS(CH)) GOTO 10	! substantially empty line
+	IF (CH.EQ.'!') GOTO 10	! comment!
+C
+C Look for indirect file start
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 20
+	      ELSE
+	         CALL BSCH
+	      ENDIF
+	      DEFNAM='SYS$DISK:[]'
+	      OK=GETFILNAM(INDFILE,INDLEN,
+     &		DEFNAM(1:SIGCHS(DEFNAM))//'.COM;0',.TRUE.,%REF('!'))
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	      OK=FLROPN(INDLUN, INDFILE(:INDLEN), IERR)
+	      IF (OK) THEN
+	         CALL WRITEF('Command input now being read from %S'
+     &					,INDFILE(:INDLEN))
+	         TTIN=.FALSE.
+	         GOTO 10
+	      ELSE
+	         CALL WRITEF('%S Can''t open indirect command file %S'
+     &			  ,WARNING,INDFILE(:INDLEN))
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+	CALL BSCH			! un-read non-'@'
+C
+	CMD=RDCOMM(TRIGRID_CMD_TABLE)
+	GOTO (	20,
+     &		120,			! data_type
+     &		60,			! disable
+     &		50,			! enable
+     &		140,			! filein
+     &		150,			! fileout
+     &		160,			! go
+     &		170,			! header_type
+     &		70,			! help
+     &		190,			! pause
+     &		210,			! quit
+     &		30,			! return
+     &		80,			! show
+     &		110,			! sidelength
+     &		90,			! size
+     &		180,			! spawn
+     &		185,			! triangle_limits
+     &		186,			! units
+     &		200,			! wait
+     &		100,			! window
+     &		130			! zlimits
+     &	      		), CMD+1
+C
+C command number out of range
+	CALL WRITEF('Command not yet implemented')
+C
+C close indirect input following disaster
+20	IF (.NOT.TTIN) THEN
+	   TTIN=.TRUE.
+	   CALL FLRCLO(INDLUN)
+	   CALL WRITEF
+	   CALL WRITEF('%S Indirect file error - returning to '//
+     &			'terminal input',WARNING)
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C RETURN - return to terminal input
+C
+30	IF (TTIN) THEN
+	   CALL WRITEF(
+     &		'RETURN command ignored - command '//
+     &			'input is already from terminal')
+	ELSE
+	   CALL WRITEF(
+     &		'RETURN command detected - returning to terminal input')
+	ENDIF
+40	IF (.NOT.TTIN) CALL FLRCLO(INDLUN)
+	TTIN=.TRUE.
+	GOTO 10
+C
+C
+C ......................................................................
+C Enable 'sub-command'
+C
+50	IF (.NOT.ENABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C Disable 'sub-command'
+C
+60	IF (.NOT.DISABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C
+C ......................................................................
+C HELP
+70	IF (.NOT.HELP_CMD()) GOTO 20
+	GOTO 10
+C
+C
+C ......................................................................
+C SHOW
+80	IF (.NOT.SHOW_CMD()) GOTO 20
+	GOTO 10
+C ......................................................................
+C
+C SIZE - number of rows, number of cols
+C
+90	IF (.NOT.SIZE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C
+C WINDOW -  geographical extent of DTM
+C
+100	IF (.NOT.WINDOW_CMD(XMIN,YMIN,SMAX,TMAX,TTIN,UNITS)) GOTO 20
+	GEOEXT = .TRUE.		! we have defined a geog. extent
+C 
+C If SIDE is set calculate number of rows and columns to cover
+C  completely (possibly with some overlap) the specified area
+	IF (SIDE) THEN
+	   TEMP_NROW=(TMAX-YMIN)/SIDEY+1.5
+	   TEMP_NCOL=(SMAX-XMIN)/SIDEX+1.5
+	   IF (TEMP_NCOL.GT.DTI_MAX_COLUMNS.OR.
+     &			TEMP_NROW.GT.DTI_MAX_ROWS) THEN
+	      CALL WRITEF(WARNING//
+     &		'Maximum DTM size is %N rows and %N columns',
+     &			DTI_MAX_ROWS,DTI_MAX_COLUMNS)
+	      CALL WRITEF('                Either re-specify the '//
+     &				'WINDOW or change the SIZE or')
+	      CALL WRITEF('                SIDELENGTH.')
+	      GOTO 20
+	   ELSE
+	      NROW=TEMP_NROW
+	      NCOL=TEMP_NCOL
+	   ENDIF
+	ENDIF
+	IF (GRIDEF) THEN	! calc. SIDEX & SIDEY and display result
+	   SIDEY=(TMAX-YMIN)/(NROW-1)
+	   SIDEX=(SMAX-XMIN)/(NCOL-1)
+	   SIDE=.TRUE.	! record that side is defined
+	ENDIF
+C
+	IF (SIDE) THEN
+	   XMAX=XMIN+(NCOL-1)*SIDEX
+	   YMAX=YMIN+(NROW-1)*SIDEY
+	   CALL WRITEF
+C
+C Show triangulation coverage
+	   CALL SHOW_WINDOW(VMIN(1),VMAX(1),VMIN(2),VMAX(2),UNITS,GEOEXT,
+     &			.TRUE.,OPNDTA)
+C
+C Show window
+	   CALL SHOW_WINDOW(XMIN,XMAX,YMIN,YMAX,UNITS,GEOEXT,
+     &			.FALSE.,OPNDTA)
+	   CALL WRITEF
+	   CALL WRITEF(
+     &   	'Which with a side length of %F9.3 in X and %F9.3 in Y',
+     &                                  SIDEX,         SIDEY)
+	   CALL WRITEF (
+     &	 	'gives %N rows and %N columns in the dtm',
+     &            NROW,        NCOL)
+	   CALL WRITEF
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C "SIDELENGTH" - Get dtm cell side length
+C
+110	IF (.NOT.SIDELENGTH_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C DATA_TYPE type
+C
+120	IF (.NOT.DATA_TYPE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C ZLIMITS
+C
+130	IF (.NOT.LIMITS_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C FILEIN file-spec 
+C
+140	IF (HAD_FILEIN) THEN
+	   CALL WRITEF(WARNING//'The input files are already open')
+	ELSE
+	   IF (.NOT.FILEIN_CMD()) GOTO 20
+	   HAD_FILEIN=.TRUE.
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C FILEOUT file-spec 
+C
+150	IF (FILEOUT_CMD()) THEN
+	   IF (HAD_FILEOUT) THEN
+	      CALL WRITEF(WARNING//
+     &		'Overriding previous output DTI file selection')
+	   ENDIF
+	   HAD_FILEOUT=.TRUE.
+	ELSE
+	   GOTO 20
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C GO
+C
+160	IF (.NOT.GEOEXT
+     &	    .OR..NOT.SIDE
+     &	    .OR..NOT.HAD_FILEIN
+     &	    .OR..NOT.HAD_FILEOUT) THEN   ! moan
+	   CALL WRITEF
+	   CALL WRITEF(WARNING//'The following commands must be given')
+	   CALL WRITEF('                before processing can begin:')
+	   CALL WRITEF('                1) WINDOW')
+	   CALL WRITEF('                2) SIZE (or SIDELENGTH)')
+	   CALL WRITEF('                3) FILEIN')
+	   CALL WRITEF('                4) FILEOUT')
+	   CALL WRITEF
+	   GOTO 20
+	ENDIF
+	GOTO 220
+C
+C ......................................................................
+C HEADER_TYPE
+C
+170	IF (.NOT.HEADER_TYPE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SPAWN DCL process - primarily designed for file management
+C
+180	IF (.NOT.SPAWN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C TRIANGLE_LIMITS
+C
+185	IF (.NOT.TRIANGLE_LIMITS_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C UNITS
+C
+186	IF (.NOT.UNITS_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C PAUSE
+C
+190	CALL PAUSE(TTIN)
+	GOTO 10
+C
+C ......................................................................
+C WAIT
+C
+200	IF (.NOT.WAIT_CMD(TTIN)) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C QUIT
+210	GET_CMDS=.FALSE.
+C
+C ......................................................................
+C
+220	RETURN
+	END

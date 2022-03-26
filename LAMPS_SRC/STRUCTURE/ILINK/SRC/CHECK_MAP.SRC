@@ -1,0 +1,433 @@
+	LOGICAL*4 FUNCTION CHECK_MAP(
+     &		IMAP,IVEC,VECFTR,XNEW,YNEW,
+     &		NEW_PRI,NEW_SQ_DIST,
+     &		PT,PRV,NXT,NEAREST,MINSQDIST,MAXPTS)
+
+***	MODULE	CHECK_MAP
+***	IDENT	11MR91
+
+C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
+
+CMOD	Pass error code from INSERT_PT to here, and exit 
+C	if disastrous ASAP				    JB 11-Mar-1991
+CMOD	Check that (new) INSERT_PT has made a new point	   WJJ 15-Jan-1991
+CMOD	Stopped access violation due to attempt to access
+C	point before start of line. Also added INTRNLERR
+C	message to catch any such error in future.	   ACM 18-Aug-1987
+CMOD	Made a function					   TJH 28-May-1987
+C
+C	Created   : ACM					          Dec 1986
+C 
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+
+C Data in/out
+	INTEGER*4	MAXPTS
+	INTEGER*4	NEAREST(MAXPTS)
+	INTEGER*4	PRV(MAXPTS)
+	INTEGER*4	NXT(MAXPTS)
+	INTEGER*4	IMAP			! index of pt to be mapd
+	INTEGER*4	VECFTR,IVEC		! ftr to be mapped onto
+	INTEGER*4	NEW_PRI			! priority of new map
+
+	REAL*4		PT(2,MAXPTS)
+	REAL*4		MINSQDIST(MAXPTS)
+	REAL*4		XNEW,YNEW		! new pt to map to
+	REAL*4		NEW_SQ_DIST		! sq dist to new map pt
+
+C Workspace
+	INTEGER*4	INEW			! index of pt inserted
+	INTEGER*4	IOLD			! index of old map pt
+	INTEGER*4	IVTX			! index of old vertex pt
+	INTEGER*4	IPRV,INXT		! pt indices
+	INTEGER*4	OLD_PRI			! priority of old map
+	INTEGER*4	IEND1,IEND2		! for VECINT
+
+	REAL*4		OLD_SQ_DIST		! dist to old map pt
+	REAL*4		P1X,P1Y,P2X,P2Y		! vector P end pts
+	REAL*4		Q1X,Q1Y,Q2X,Q2Y		! vector Q end pts
+	REAL*4		E1X,E1Y,E2X,E2Y		! for VECINT
+	REAL*4		XINT,YINT
+
+	REAL*8		PF,QF			! for VECINT
+
+	LOGICAL*4	MAP			! make new map?
+	LOGICAL*4	NEW_IS_VERTEX		! new map pt a vertex?
+	LOGICAL*4	OLD_IS_VERTEX		! old map pt a vertex?
+
+	LOGICAL*1	CUTS,CUTS_PRV,CUTS_NXT	! does mapping cut vec?
+	LOGICAL*1	INTERSECTION		! for VECINT
+	LOGICAL*1	PARALLEL		! for VECINT
+	LOGICAL*1	INT_ON_PVEC,INT_ON_QVEC	! for VECINT
+
+C Functions
+	LOGICAL*4	BOXINT			! do boxes intersect?
+	LOGICAL*4	VECINT			! do vectors intersect?
+	LOGICAL*4	INSERT_PT
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Checks to see whether or not to map ftr end pt IMAP to new
+C	candidate at X,Y on vector from pt IVEC, and then maps if
+C	required.
+C
+C	Ends which would join to pts along other end vectors which are
+C	within joining tolerance of the ftr end are left unjoined, as
+C	ftr end joining is best left to PPJOIN.
+C
+C	The line from a ftr end pts' orig pos to its' final pos will
+C	never intersect any other vector.
+C
+C	However, there can be no guarantee that an end vector whose
+C	end is moved onto a vertex or nearest-pt, rather than being
+C	projected or truncated, will not sweep out an area as it
+C	rotates that contains other non-end vectors - though this is
+C	generally unlikely.
+C
+C	Rules used to decide whether to update the record of the best
+C	candidate for joining to so far (mapping) are as follows:
+C
+C	If (pt not mapped) then
+C	  map = true
+C	else if (not(new_is_vertex or old_is_vertex)) then
+C	  if (new_pri = old_pri) then
+C	    map = new_sq_dist < old_sq_dist
+C	  else
+C	    map = new_pri > old_pri
+C	  end if
+C	else if (new_is_vertex and old_is_vertex) then
+C	  if (seg from pt to old vertex cuts vec into or out from
+C	  new vertex) then
+C	    map = true
+C	  else if (seg from pt to new vertex cuts vec into or out from
+C	  old vertex) then
+C	    map = false
+C	  else
+C	    map = new_sq_dist < old_sq_dist
+C	  end if
+C	else if (new_is_vertex) then
+C	  if (seg from pt to new vertex cuts seg containing old join)
+C	  then
+C	    map = false
+C	  else
+C	    map = new_pri > old_pri
+C	  end if
+C	else
+C	  if (seg from pt to old vertex cuts seg containing new join)
+C	  then
+C	    map = true
+C	  else
+C	    map = new_pri > old_pri
+C	  end if
+C	end if
+C
+C	if (map) map
+C	    
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C Assume success
+
+	CHECK_MAP = SS$_NORMAL
+
+C If (pt not mapped) then
+C   map = true
+
+	IOLD = NEAREST(IMAP)
+	IF (IOLD.EQ.NIL) THEN
+	  MAP = .TRUE.
+	  GOTO 10
+	END IF
+
+C Find new_pri, new_sq_dist, new_is_vertex, and same for old_...
+
+	OLD_SQ_DIST = MINSQDIST(IMAP)
+	OLD_IS_VERTEX = IOLD.LE.N_ORIG_PTS
+
+	IF (OLD_IS_VERTEX) THEN
+	  IF (OLD_SQ_DIST.GT.0) THEN
+	    OLD_PRI = PROJ_PRI
+	  ELSE
+	    OLD_PRI = VRTX_PRI
+	  END IF
+	ELSE IF (OLD_SQ_DIST.GT.0) THEN
+	  OLD_PRI = PROJ_PRI
+	ELSE
+	  OLD_PRI = PERP_PRI
+	END IF
+
+	OLD_SQ_DIST = ABS(OLD_SQ_DIST)
+
+	NEW_IS_VERTEX = NEW_PRI.EQ.VRTX_PRI
+
+C If (not(new_is_vertex or old_is_vertex)) then
+C   if (new_pri = old_pri) then
+C     map = new_sq_dist < old_sq_dist
+C   else
+C     map = new_pri > old_pri
+C   end if
+
+	IF (.NOT.(NEW_IS_VERTEX.OR.OLD_IS_VERTEX)) THEN
+	  IF (NEW_PRI.EQ.OLD_PRI) THEN
+	    MAP = NEW_SQ_DIST.LT.OLD_SQ_DIST
+	  ELSE
+	    MAP = NEW_PRI.GT.OLD_PRI
+	  END IF
+	  GOTO 10
+	END IF
+
+C If (new_is_vertex and old_is_vertex) then
+C   if (seg from pt to old vertex cuts vec into or out from
+C   new vertex) then
+C     map = true
+C   else if (seg from pt to new vertex cuts vec into or out from
+C   old vertex) then
+C     map = false
+C   else
+C     map = new_sq_dist < old_sq_dist
+C   end if
+
+	IF (NEW_IS_VERTEX.AND.OLD_IS_VERTEX) THEN
+	  P1X = PT(1,IMAP)
+	  P1Y = PT(2,IMAP)
+
+	  P2X = PT(1,IOLD)
+	  P2Y = PT(2,IOLD)
+
+	  IF (XNEW.EQ.PT(1,IVEC).AND.YNEW.EQ.PT(2,IVEC)) THEN
+	    IVTX = IVEC
+	  ELSE
+	    IVTX = IVEC+1
+	  END IF
+
+	  Q1X = PT(1,IVTX)
+	  Q1Y = PT(2,IVTX)
+
+	  IPRV = PRV(IVTX)
+	  INXT = NXT(IVTX)
+
+	  IF (IPRV.EQ.NIL) THEN
+	    CUTS_PRV = .FALSE.
+	  ELSE
+	    Q2X = PT(1,IPRV)
+	    Q2Y = PT(2,IPRV)
+	    IF (.NOT.BOXINT(P1X,P1Y,P2X,P2Y,Q1X,Q1Y,Q2X,Q2Y,COORD_TOL))
+     &	    THEN
+	      CUTS_PRV = .FALSE.
+	    ELSE
+	      INTERSECTION = VECINT(	P1X,P1Y,P2X,P2Y,
+     &					Q1X,Q1Y,Q2X,Q2Y,
+     &					PF,QF,XINT,YINT,
+     &					CUTS_PRV,
+     &					PARALLEL,
+     &					IEND1,IEND2,
+     &					E1X,E1Y,E2X,E2Y,COORD_TOL)
+	    END IF
+	  END IF
+
+	  IF (INXT.EQ.NIL) THEN
+	    CUTS_NXT = .FALSE.
+	  ELSE
+	    Q2X = PT(1,INXT)
+	    Q2Y = PT(2,INXT)
+	    IF (.NOT.BOXINT(P1X,P1Y,P2X,P2Y,Q1X,Q1Y,Q2X,Q2Y,COORD_TOL))
+     &	    THEN
+	      CUTS_NXT = .FALSE.
+	    ELSE
+	      INTERSECTION = VECINT(	P1X,P1Y,P2X,P2Y,
+     &					Q1X,Q1Y,Q2X,Q2Y,
+     &					PF,QF,XINT,YINT,
+     &					CUTS_NXT,
+     &					PARALLEL,
+     &					IEND1,IEND2,
+     &					E1X,E1Y,E2X,E2Y,COORD_TOL)
+	    END IF
+	  END IF
+
+	  IF (CUTS_PRV.OR.CUTS_NXT) THEN
+	    MAP = .TRUE.
+	    GOTO 10
+	  END IF
+
+	  P2X = PT(1,IVTX)
+	  P2Y = PT(2,IVTX)
+
+	  Q1X = PT(1,IOLD)
+	  Q1Y = PT(2,IOLD)
+
+	  IPRV = PRV(IOLD)
+	  INXT = NXT(IOLD)
+
+	  IF (IPRV.EQ.NIL) THEN
+	    CUTS_PRV = .FALSE.
+	  ELSE
+	    Q2X = PT(1,IPRV)
+	    Q2Y = PT(2,IPRV)
+	    IF (.NOT.BOXINT(P1X,P1Y,P2X,P2Y,Q1X,Q1Y,Q2X,Q2Y,COORD_TOL))
+     &	    THEN
+	      CUTS_PRV = .FALSE.
+	    ELSE
+	      INTERSECTION = VECINT(	P1X,P1Y,P2X,P2Y,
+     &					Q1X,Q1Y,Q2X,Q2Y,
+     &					PF,QF,XINT,YINT,
+     &					CUTS_PRV,
+     &					PARALLEL,
+     &					IEND1,IEND2,
+     &					E1X,E1Y,E2X,E2Y,COORD_TOL)
+	    END IF
+	  END IF
+
+	  IF (INXT.EQ.NIL) THEN
+	    CUTS_NXT = .FALSE.
+	  ELSE
+	    Q2X = PT(1,INXT)
+	    Q2Y = PT(2,INXT)
+	    IF (.NOT.BOXINT(P1X,P1Y,P2X,P2Y,Q1X,Q1Y,Q2X,Q2Y,COORD_TOL))
+     &	    THEN
+	      CUTS_NXT = .FALSE.
+	    ELSE
+	      INTERSECTION = VECINT(	P1X,P1Y,P2X,P2Y,
+     &					Q1X,Q1Y,Q2X,Q2Y,
+     &					PF,QF,XINT,YINT,
+     &					CUTS_NXT,
+     &					PARALLEL,
+     &					IEND1,IEND2,
+     &					E1X,E1Y,E2X,E2Y,COORD_TOL)
+	    END IF
+	  END IF
+
+	  IF (CUTS_PRV.OR.CUTS_NXT) THEN
+	    MAP = .FALSE.
+	  ELSE
+            MAP = NEW_SQ_DIST.LT.OLD_SQ_DIST
+	  END IF
+
+	  GOTO 10
+	END IF
+
+C If (new_is_vertex) then
+C   if (seg from pt to new vertex cuts seg containing old join)
+C   then
+C     map = false
+C   else
+C     map = new_pri > old_pri
+C   end if
+
+	IF (NEW_IS_VERTEX) THEN
+	  P1X = PT(1,IMAP)
+	  P1Y = PT(2,IMAP)
+	  P2X = XNEW
+	  P2Y = YNEW
+
+	  IPRV = PRV(IOLD)
+	  INXT = NXT(IOLD)
+
+	  IF (IPRV.EQ.NIL.OR.INXT.EQ.NIL) THEN
+	    CHECK_MAP = ILINK__INTRNLERR
+	    CALL LSL_PUTMSG(CHECK_MAP,1,'CHECK_MAP')
+	    GOTO 20				! return
+	  END IF
+
+	  Q1X = PT(1,IPRV)
+	  Q1Y = PT(2,IPRV)
+	  Q2X = PT(1,INXT)
+	  Q2Y = PT(2,INXT)
+
+	  IF (.NOT.BOXINT(P1X,P1Y,P2X,P2Y,Q1X,Q1Y,Q2X,Q2Y,COORD_TOL))
+     &	  THEN
+	    CUTS = .FALSE.
+	  ELSE
+	    INTERSECTION= VECINT(	P1X,P1Y,P2X,P2Y,
+     &					Q1X,Q1Y,Q2X,Q2Y,
+     &					PF,QF,XINT,YINT,
+     &					CUTS,
+     &					PARALLEL,
+     &					IEND1,IEND2,
+     &					E1X,E1Y,E2X,E2Y,COORD_TOL)
+	  END IF
+
+	  IF (CUTS) THEN
+	    MAP = .FALSE.
+	  ELSE
+            MAP = NEW_PRI.GT.OLD_PRI
+	  END IF
+
+	  GOTO 10
+	END IF
+
+C else old_is_vertex :
+
+C if (seg from pt to old vertex cuts seg containing new join) then
+C   map = true
+C else
+C  map = new_pri > old_pri
+C end if
+
+	P1X = PT(1,IMAP)
+	P1Y = PT(2,IMAP)
+	P2X = PT(1,IOLD)
+	P2Y = PT(2,IOLD)
+
+	IPRV = IVEC
+	INXT = NXT(IVEC)
+
+	IF (IPRV.EQ.NIL.OR.INXT.EQ.NIL) THEN
+	  CHECK_MAP = ILINK__INTRNLERR
+	  CALL LSL_PUTMSG(CHECK_MAP,2,'CHECK_MAP')
+	  GOTO 20				! return
+	END IF
+
+	Q1X = PT(1,IPRV)
+	Q1Y = PT(2,IPRV)
+	Q2X = PT(1,INXT)
+	Q2Y = PT(2,INXT)
+
+	IF (.NOT.BOXINT(P1X,P1Y,P2X,P2Y,Q1X,Q1Y,Q2X,Q2Y,COORD_TOL))
+     &	THEN
+	  CUTS = .FALSE.
+	ELSE
+	  INTERSECTION = VECINT(P1X,P1Y,P2X,P2Y,
+     &				Q1X,Q1Y,Q2X,Q2Y,
+     &				PF,QF,XINT,YINT,
+     &				CUTS,
+     &				PARALLEL,
+     &				IEND1,IEND2,
+     &				E1X,E1Y,E2X,E2Y,COORD_TOL)
+	END IF
+
+	IF (CUTS) THEN
+	  MAP = .TRUE.
+	ELSE
+          MAP = NEW_PRI.GT.OLD_PRI
+	END IF
+
+C If MAP is TRUE then map pt IMAP onto pt INEW
+
+10	IF (MAP) THEN
+
+	  CHECK_MAP = INSERT_PT(XNEW,YNEW,VECFTR,IVEC,INEW,.FALSE.)
+	  IF (.NOT.CHECK_MAP) GOTO 20
+
+	  IF (INEW.NE.0) THEN		! check that point was inserted
+	    NEAREST(IMAP) = INEW
+	    IF (NEW_PRI.EQ.PROJ_PRI) THEN
+C Ensure mapping has a non-zero dist to prevent it later being
+C misinterpreted as a vertex-join rather than a projection-join
+	      MINSQDIST(IMAP) = MAX(COORD_TOL,NEW_SQ_DIST)
+	    ELSE
+	      MINSQDIST(IMAP) = -NEW_SQ_DIST
+	    END IF
+	  END IF
+	END IF
+
+20	IF (CHECK_MAP) CHECK_MAP = SS$_NORMAL
+	RETURN
+	END
+

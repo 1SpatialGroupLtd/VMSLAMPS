@@ -1,0 +1,259 @@
+	SUBROUTINE PLOT_SYMBOL(FC,XPOINT,YPOINT,IFF_COORDS,
+     &		CLEAR_PLOT,SYM_NUM)
+C
+***	MODULE	PLOT_SYMBOL
+***	IDENT	30NO88
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Created   : 10DE85
+C	Author    : D R Catlow
+C
+CMOD	Fix bug in symbol redrawing.			30-Nov-1988
+C	Set up default symbol scale factor
+C	Modified  : DRC 				31-Oct-1988
+C		    SYM_NUM = -1 indicates symbol is not a symbol
+C		    that is being interactively positioned.
+C
+C	Modified  : ALB					18-July-1988
+C		    To support plotting & deletion of user specified symbols 
+C		    using DEFINE SYMBOL & CLEAR SYMBOL commands.
+C		    Also include fog capability.
+C 
+C	Modified  : DRC                                 Jan-1988
+C                   To use DTILIB functions
+C
+C	Routine to test if point is visible and plot symbol
+C
+C--------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/HERE:CULTRE/
+***	COMMON/HERE:VIEW/
+***	COMMON/HERE:MODEL/
+***	COMMON/HERE:DTICMN/
+***	COMMON/HERE:TAB/
+***	COMMON/HERE:TRANS/
+***	COMMON/HERE:DEVICE/
+***	COMMON/HERE:DRCTRL/
+***	COMMON/HERE:GKSCMN/
+***	COMMON/HERE:USER_SYMBOLS/
+***	COMMON/HERE:FOG/
+C
+C	Arguments
+	INTEGER*4	FC		!feature code
+	REAL		XPOINT		!X location in IFF units or table units
+	REAL		YPOINT		!Y location in IFF units or table units
+	LOGICAL		IFF_COORDS	!input is IFF coordinates
+	LOGICAL		CLEAR_PLOT	!undraw plotted symbol
+	INTEGER*4	SYM_NUM		!symbol number
+C
+C	Local
+	REAL		X,Y,Z		!untransformed coords
+	REAL		XX,YY		!plot (transfromed) coords
+	REAL		SYMBOL_SCALE	!symbol scale
+	INTEGER*4	RETVAL		!DTILIB function return
+	INTEGER*4	COL		!colour index of symbol
+	INTEGER*4	X_DTI		!DTM
+	INTEGER*4	Y_DTI		!coordinate
+	BYTE		CELL		!visibility status
+	INTEGER*2	ISEQ		!internal seq number
+	INTEGER*2	ISTAT(4)	!feature status
+	INTEGER*2	IENDS		!pen status
+	REAL		RANGEX
+	REAL		RANGEY
+C
+	CHARACTER*6	BELL
+	PARAMETER	(BELL	= CHAR(7)//CHAR(7)//' ')
+C
+C	Functions
+	INTEGER*4	DTI_READ_WORD_DATA
+	INTEGER*4	DTI_READ_BYTE_DATA
+C
+	LOGICAL		SRIPLT		!get symbol coordinates
+C
+C**************************************************************************
+C
+C
+C set up default symbol scale factor
+	IF (.NOT. HADSF) THEN
+C
+	  IF(PRIMARY)THEN
+	    SYMSF = MAX(X_EXTENT(1)/SCRNDX(1),Y_EXTENT(1)/SCRNDX(1))
+	  ENDIF
+C
+	  IF(SECONDARY)THEN
+	    SYMSF = MAX(X_EXTENT(1)/SCRNDX(2),Y_EXTENT(1)/SCRNDX(2))
+	  ENDIF
+	ENDIF
+C
+C
+C	Transform into DTM coordinate system
+	IF(IFF_COORDS) THEN		! in IFF units
+	   SYMX=(DTI_WINDOW_SWX(1)-1) 
+     &     + NINT( (XPOINT-WIND(1,1)) *IFF_DTI(1,1) )
+	   SYMY=(DTI_WINDOW_SWY(1)-1)
+     &     + NINT( (YPOINT-WIND(1,2)) *IFF_DTI(1,2) )
+	   SYMX=MAX ( DTI_WINDOW_SWX(1), MIN(DTI_WINDOW_NEX(1),SYMX) )
+	   SYMY=MAX ( DTI_WINDOW_SWY(1), MIN(DTI_WINDOW_NEY(1),SYMY) )
+	ELSE
+C
+	   SYMX = NINT(XPOINT) 	! convert real matrix x values to integer
+	   SYMY = NINT(YPOINT) 	! convert real matrix x values to integer
+C
+	   IF(DEBUG) CALL WRITEF('Matrix x coord: %I0 y coord %I0',
+     &	   SYMX,SYMY)
+C
+C Check whether position is within the defined window
+C
+	   IF(SYMX.LT.DTI_WINDOW_SWX(1).OR.SYMX.GT.DTI_WINDOW_NEX(1)
+     &	   .OR.SYMY.LT.DTI_WINDOW_SWY(1).OR.SYMY.GT.DTI_WINDOW_NEY(1)
+     &     .AND. (.NOT. CLEAR_PLOT))
+     &	   THEN
+	      CALL WRITEF('%S Position outside of '//
+     &	      'active DTI window',BELL)
+	      IF(DEBUG) CALL WRITEF('Window SWX : %I10  SWY : %I10',
+     &	      DTI_WINDOW_SWX,DTI_WINDOW_SWY)
+	      IF(DEBUG) CALL WRITEF('       NEX : %I10  NEY : %I10',
+     &	      DTI_WINDOW_NEX,DTI_WINDOW_NEY)
+	      SYMBOL_LDATA(8,SYM_NUM) = .FALSE.
+	      GOTO 999
+	   ENDIF 	
+	   SYMBOL_LDATA(8,SYM_NUM) = .TRUE.
+	ENDIF
+C
+C	Test if the point is visible or invisible
+	X_DTI=SYMX-DTMOFX
+	Y_DTI=SYMY-DTMOFY
+	IF(X_DTI.LT.1.OR.X_DTI.GT.X_EXTENT(2).OR.
+     &     Y_DTI.LT.1.OR.Y_DTI.GT.Y_EXTENT(2))THEN
+	   CELL=0
+	ELSE
+	   RETVAL=DTI_READ_BYTE_DATA(2,CELL,X_DTI,Y_DTI)
+	   IF(.NOT.RETVAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     GOTO 999
+	   ENDIF
+	ENDIF
+C
+	IN_FOG = .FALSE.
+	IF(CELL.EQ.0)THEN
+	  IF(DEBUG)CALL WRITEF('Point not visible')
+	  IF(SYM_NUM.NE.-1) SYMBOL_LDATA(7,SYM_NUM) = .FALSE.
+	  GOTO 999
+	ELSEIF(CELL.EQ.2)THEN
+	  IF(SYM_NUM.NE.-1) SYMBOL_LDATA(7,SYM_NUM) = .FALSE.
+	  IN_FOG = .TRUE.
+	ELSE
+	  IF(SYM_NUM.NE.-1) SYMBOL_LDATA(7,SYM_NUM) = .TRUE.
+	ENDIF
+C
+C	Retrieve height of terrain surface at symbol position
+	RETVAL=DTI_READ_WORD_DATA(1,SYMHGT,SYMX,SYMY)
+	IF(.NOT.RETVAL)THEN
+	  CALL LSL_PUTMSG(RETVAL)
+	  GOTO 999
+	ENDIF
+C
+C	Get position of symbol in model sapce
+C
+	IF(DIRECT.EQ.1)THEN			!west
+	  Z = FLOAT((SYMX-1)-DTMOFX)  * ZSCALE
+	  X = FLOAT(SYMY-DTMOFY)  * XSCALE
+	ENDIF
+C
+	IF(DIRECT.EQ.3)THEN			!east (reverse of west)
+	  Z = FLOAT(NLINES-(SYMX-DTMOFX))  * ZSCALE
+	  X = FLOAT((NPTS+1)-(SYMY-DTMOFY))  * XSCALE
+	ENDIF
+C	  
+	IF(DIRECT.EQ.2)THEN			!south
+	  Z = FLOAT((SYMY-1)-DTMOFY)  * ZSCALE
+	  X = FLOAT(NLINES-((SYMX-1)-DTMOFX))  * XSCALE
+	ENDIF
+C
+	IF(DIRECT.EQ.4)THEN			!north
+	  Z = FLOAT(NPTS-(SYMY-DTMOFY))  * ZSCALE
+	  X = FLOAT(SYMX-DTMOFX)  * XSCALE
+	ENDIF
+C
+	Y = FLOAT(SYMHGT) * DEFZSC		!and multiply by
+C						!vertical exaggeration
+C	Transform .....
+	CALL CORDTF(X,Y,Z,XX,YY)
+C
+	IF (CLEAR_PLOT) THEN
+C
+	   IF (DEBUG)
+     &	   CALL WRITEF('Clear plot position X: %F Y: %F',XX,YY)
+	   CALL GSPLCI(0)		!set colour index to black
+	ELSE
+C
+	   IF (DEBUG)
+     &	   CALL WRITEF('Symbol plot position X: %F Y: %F',XX,YY)
+	   IF(HAD_FOG.AND.PRSPVW) THEN
+	      IF(IN_FOG) THEN
+		 CALL SRICOL(0)		! force colour to black
+	         COL = 0
+	      ELSE
+	         COL=MIN(FRTCOL,OVERLAY_COLOURS)	!use colour in FRT
+	      ENDIF
+	   ELSE 
+	      COL=MIN(FRTCOL,OVERLAY_COLOURS)	!use colour in FRT
+	   ENDIF
+	   CALL GSPLCI(COL)		!set colour index
+	ENDIF
+C
+	IF(PRIMARY.OR.SECONDARY)THEN
+C	Call SRIPLT  to plot symbol at transformed coordinate point
+	  IF (PLOT_IFF)ACTIVE_IFF=.FALSE.
+C
+	  IF(CLEAR_PLOT) THEN
+	     SYMBOL_SCALE = SYMBOL_RDATA(9,SYM_NUM)	! use old scale
+	  ELSE 
+	    SYMBOL_SCALE = SYMSF
+	    IF(SYM_NUM.NE.-1)THEN
+              SYMBOL_RDATA(9,SYM_NUM) = SYMBOL_SCALE	
+	    ENDIF
+	  ENDIF
+C
+C give FRT a size which if none in FRT
+	  IF (FRTSIZ .EQ. 0) FRTSIZ = 1.0
+	  IF (SRIPLT(FRTSC,XX,YY,FRTSIZ*SYMBOL_SCALE,0.0)) GOTO 999
+	  IF (PLOT_IFF.AND.IFF_COORDS) ACTIVE_IFF=.TRUE.
+C
+C reset colour if symbol was in fog
+C
+	  IF(HAD_FOG.AND.PRSPVW) THEN
+	     IF(IN_FOG) THEN
+		CALL SRICOL(-1)		! allow FRTCOL to control
+	     ENDIF
+	  ENDIF
+	ENDIF
+C
+	IF(PLOT_IFF.AND.SYM_NUM.NE.-1)THEN
+	  IF(INFT)CALL FLUSH
+	  CALL IFFSEL(1)
+	  ISEQ=0
+	  CALL IFFNF(FTNUM,ISEQ)
+	  FTNUM=FTNUM+1
+	  ISTAT(1)=FC
+	  ISTAT(2)=0
+	  ISTAT(3)=0
+	  ISTAT(4)=0
+	  CALL IFFFS(ISTAT)
+	  IENDS=0
+	  VRTX(1,1)=XX
+	  VRTX(2,1)=YY
+	  CALL IFFST(VRTX,1,IENDS)
+	  CALL IFFEF
+	ENDIF
+C
+C************************************************************************
+C
+999	RETURN
+C
+	END

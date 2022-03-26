@@ -1,0 +1,466 @@
+	LOGICAL FUNCTION SIDFIL()
+C
+***	MODULE	SIDFIL
+***	IDENT	12MR97
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD    "Tracing string ...." message only output if DIAG 
+C	selected. 					TJH  08-Jul-1986
+CMOD	Test for IMAGINARY neighbours added to up/down hill
+C	side of line test and call to SIDERR made to pass
+C	IPNODE as well as IBEGIN.			ATT  26-Jun-1986
+CMOD	IBEGIN initialised to 0 instead of 1 so we don't
+C 	miss out the first node.			ATT  13-Jun-1986
+C	Created 					TJH  30-MAY-1986
+C
+C Trace along each string in turn. Get the neighbours of each node on 
+C the string and determine from them which side of the string is 
+C "up-hill" and which is "down-hill". We may have to go some way along
+C the string before we get neighbour information good enough to 
+C decide on this. Bad neighbours for the side of line test are when:
+C
+C 1) any imaginary or break or cliffline point is present in the 
+C    neighbour list, 
+C 2) any 3d string (the whole of which is flagged as "unknown" as a 
+C    matter of course),
+C 3) any set of neighbours which contains conflicting height 
+C    information,
+C 4) any set of neighbours where there are none on one side of the line
+C    and all on the other side. 
+C
+C When a good neighbour set is found we go back to the start of string 
+C and then go along its entire length flagging neighbours in JFREES
+C to indicate "up-hill"/"down-hill" status.
+C
+C Function returns SS$_NORMAL if all is well
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 'LSL$CMNTRIGRID:TRIGRIDMSG.PAR'
+	INCLUDE 'LSL$DTMCREATESYS:GRIDPARAMS.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C Common:
+	INCLUDE 'LSL$DTMCREATESYS:CONTRL.CMN'
+	INCLUDE 'here:trigrid_DATQ.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:FINDIT.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:STORIT.CMN'
+C
+C Integer:
+	INTEGER	 IBEGIN		! start node of string
+	INTEGER	 IEND		! end node of string
+	INTEGER	 NTEM(NTMSIZ)	! list of neighbours
+	INTEGER  LINSID(NTMSIZ)	! neighbour side up-hill/down-hill flags
+	INTEGER  LTEM(NTMSIZ)	! list of LHS and RHS nodes
+	INTEGER	 KEM		! number of ...
+	INTEGER	 IPNODE,ISET	! nodes on the string
+	INTEGER	 IPNOD1		! next node on the string
+	INTEGER	 IPPREV		! previous node on the string
+	INTEGER	 LASAGN		! last string sign
+	INTEGER  ISTRNG		! string counter
+	INTEGER  IBEGHT		! height of node at start of string
+	INTEGER	 ITHREE		! 1 = 3d string 0 = 2d string
+	INTEGER	 ILEFT		! -1 = lower to left of string
+C				!  1 = higher to left of string
+	INTEGER	 IRIGHT		! -1 = lower to right of string
+C				!  1 = higher to right of string
+	INTEGER	 IDIFF		! the node no. at which diff. ht found
+	INTEGER	 I,J,K,L,M	! loop variables
+	INTEGER	 IPOS,LPOS,NPOS	! positions within NTEM()
+	INTEGER	 KHT		! difference in height between nodes
+	INTEGER	 NUMBER		! number of nodes in list
+C
+C
+C ......................................................................
+C
+	SIDFIL=SS$_NORMAL
+C
+C Open the random scratch file that is to hold the neighbour
+C up-hill/down-hill information ready for use  as needed. This
+C file (and memory if available has EXACTLY the same layout as 
+C the neighbour file/memory (IFREES) set up in GETSID). Thus if
+C there is enough room in memory for the data set, then the
+C system automatically dispenses with the random file. If there is
+C not enough room im memory then the whole of memory is used, and then
+C whatever disk space is needed. 
+	IF (NFREES.LE.NP) THEN
+	   OPEN(UNIT=LGC8,FILE='SIDFIL.TMP',STATUS='SCRATCH',
+     1		ACCESS='DIRECT',FORM='UNFORMATTED',RECL=11,ERR=210)
+	   DISKFL=.TRUE.
+	ENDIF
+	ISTRNG=0
+	IBEGIN=0
+C
+C Get the start of a line string (unless we have reached NP)
+10	IBEGIN=IBEGIN+1
+	IF(IBEGIN.LT.NP) THEN
+C
+C Get sign of this string (LASAGN) and find the end of the string (IEND)
+	   LASAGN=ISIGN(1,MD(4,IBEGIN))
+C
+C Note start of string height
+	   IBEGHT=IABS(MD(3,IBEGIN))
+	   ITHREE=0
+	   DO 20 IEND=IBEGIN,NP
+	      IF(LASAGN.NE.ISIGN(1,MD(4,IEND))) GOTO 30
+C
+C Check as we go that we are not dealing with a 3d string. 3d strings
+C will muck us up as they will almost certainly be rivers and ridges
+C which will NOT obey the rules of contours and will bifurcate and 
+C braid, intersect with other strings etc!
+	      IF (IABS(MD(3,IEND)).NE.IBEGHT) ITHREE=1
+20	   CONTINUE
+	   IEND=NP+1
+C
+C Reset flags for this string
+30	   ILEFT=0
+	   IRIGHT=0	  
+	   IDIFF=0
+	   ISTRNG=ISTRNG+1
+	   IF (DEBUG) CALL WRITEF
+     &	      ('Tracing string %N from node %N to %N'
+     &			  ,ISTRNG,              IBEGIN,IEND-1)
+C
+C Then check for string with more than one node
+	   IEND=IEND-1
+	   IF (IEND-IBEGIN.GT.0) THEN
+C
+C Check that we do not have a loathsome (OED - loathsome; causing 
+C nausea or disgust) 3d string. If so set all its up-hill/down-hill
+C neighbour information to "unknown"
+	      IF (ITHREE.EQ.1) THEN
+	         DO 40 K=1,NTMSIZ
+		    LINSID(K)=2
+40	         CONTINUE
+	         IPNODE=IBEGIN-1
+50	         IPNODE=IPNODE+1
+	         IF (IPNODE.LE.IEND) THEN 
+	            CALL GETNAY(IPNODE,NTEM,NTMSIZ,NUMBER)
+		    CALL PUTSID(IPNODE,LINSID,NTMSIZ,NUMBER)
+		    GOTO 50
+	         ENDIF
+	         IBEGIN=IEND
+	         GOTO 10	
+	      ELSE
+C For every point in the string, get next node on string which must be
+C one of the neighbours
+	         IPNODE=IBEGIN-1
+60	         IPNODE=IPNODE+1
+	         IPPREV=IPNODE-1
+	         IPNOD1=IPNODE+1
+	         IF (IPNODE.LE.IEND) THEN 
+	            CALL GETNAY(IPNODE,NTEM,NTMSIZ,NUMBER)
+C
+C Beware of 1st point on string and last point on string. We cannot 
+C determine the side of line for some of the neighbours of these.
+C Therefore just flag all the neighbours of these special case points as
+C being "unknown" (LINSID=2) 
+	            IF (IPNODE.EQ.IBEGIN) THEN
+	               DO 70 K=1,NUMBER
+		          LINSID(K)=2
+70		       CONTINUE
+C
+C Determine the position of IPNOD1 in NTEM and flag this a "same height"
+		       CALL FINPOS(IPNOD1,NTEM,NTMSIZ,NUMBER,NPOS)
+	               CALL LINKCK(IPNODE,IPNOD1,IEND,
+     &						    NTEM,NUMBER,NPOS)
+C
+C Found the node OK? If not LINKCK will set the "up-hill"/
+C "down-hill" neighbours of the present thru MIN(IEND,IPNODE+2) nodes in
+C the string to "unknown" (LINSID=2) and bump IPNODE by 2
+		       IF (NPOS.EQ.0) THEN	! try another node
+			  GOTO 60
+		       ENDIF
+		       LINSID(NPOS)=0
+	               CALL PUTSID(IPNODE,LINSID,NTMSIZ,NUMBER)
+		       GOTO 60
+	            ELSEIF (IPNODE.EQ.IEND) THEN
+	               DO 80 K=1,NUMBER
+		          LINSID(K)=2
+80		       CONTINUE
+C
+C Determine the position of IPPREV in NTEM and flag this a "same height"
+		       CALL FINPOS(IPPREV,NTEM,NTMSIZ,NUMBER,NPOS)
+	               CALL LINKCK(IPNODE,IPPREV,IEND,
+     &						    NTEM,NUMBER,NPOS)
+C
+C Found the node OK? If not LINKCK will set the "up-hill"/
+C "down-hill" neighbours of IPNODE thru MIN(IEND,IPNODE+2) nodes
+C in the string to "unknown" (LINSID=2) and bump IPNODE by 2
+		       IF (NPOS.EQ.0) THEN	! try another node
+			  GOTO 60
+		       ENDIF
+		       LINSID(NPOS)=0
+	               CALL PUTSID(IPNODE,LINSID,NTMSIZ,NUMBER)
+		       GOTO 60
+	            ELSE
+C
+C Determine the position of the string previous node (IPPREV), and
+C the next node (IPNOD1) within NTEM.
+	               CALL FINPOS(IPPREV,NTEM,NTMSIZ,NUMBER,LPOS)
+	               CALL LINKCK(IPNODE,IPPREV,IEND,
+     &						    NTEM,NUMBER,LPOS)
+C
+C Found the node OK? If not LINKCK will set the "up-hill"/
+C "down-hill" neighbours of IPNODE thru MIN(IEND,IPNODE+2) nodes
+C in the string to "unknown" (LINSID=2) and bump IPNODE by 2
+		       IF (LPOS.EQ.0) THEN	! try another node
+			  GOTO 60
+		       ENDIF
+	               CALL FINPOS(IPNOD1,NTEM,NTMSIZ,NUMBER,NPOS)
+	               CALL LINKCK(IPNODE,IPNOD1,IEND,
+     &						    NTEM,NUMBER,NPOS)
+C
+C
+C Found the node OK? If not LINKCK will as usual set the "up-hill"/
+C "down-hill" neighbours of IPNODE thru MIN(IEND,IPNODE+2) nodes
+C in the string to "unknown" (LINSID=2) and bump IPNODE by 2
+		       IF (NPOS.EQ.0) THEN	! try another node
+			  GOTO 60
+		       ENDIF
+C
+C If we have determined the up-hill/down-hill side of line for this
+C string trust it and apply the ILEFT and IRIGHT values to IPNODEs
+C neighbours
+		       IF (IDIFF.NE.0) GOTO 145
+C
+C Get the left side links. The list returned as LTEM always contains 
+C at least two nodes (IPPREV and IPNOD1).
+	  	       CALL GTLINK(LPOS,NPOS,NTEM,NTMSIZ,
+     &							NUMBER,LTEM,KEM)
+C
+C Go through left hand side neighbours now held in LTEM and see
+C which (if any) of them has a height which is different to that of
+C IPNODE. Don't bother if there are no nodes to the left of the 
+C string (KEM=2 ie on-string points only). 
+		       IF (KEM.EQ.2) THEN
+			  ILEFT=0
+			  IRIGHT=0
+			  GOTO 60
+		       ENDIF
+		       DO 110 K=1,KEM
+C
+C Do not consider imaginary points, breakline points or cliff points
+C in our up-hill/down-hill side of line test.
+		          IF (MD(3,LTEM(K)).LT.0) GOTO 110 ! breaklines
+			  IF (LTEM(K).LE.LIMPOL) GOTO 110  ! imag'ry pts
+C
+C Calc. difference in height between IPNODE and this neighbour
+		          KHT=IABS(MD(3,LTEM(K)))-IBEGHT
+		          IF (KHT) 100,110,90
+90		          IF (ILEFT.NE.0.AND.ISIGN(1,KHT).NE.ILEFT) THEN
+		             ILEFT=0
+		             IRIGHT=0
+		             GOTO 60	! get next node
+		          ENDIF
+		          ILEFT=1
+	                  GOTO 110
+100		          IF (ILEFT.NE.0.AND.ISIGN(1,KHT).NE.ILEFT) THEN
+		             ILEFT=0
+		             IRIGHT=0
+		             GOTO 60	! get next node
+		          ENDIF
+		          ILEFT=-1
+110		       CONTINUE
+C
+C If ILEFT is still 0 then no height difference found. Now get the right
+C side links. As with the left hand side links the list returned 
+C as LTEM always contains at least two nodes (IPPREV and IPNOD1).
+	  	       CALL GTLINK(NPOS,LPOS,NTEM,NTMSIZ,
+     &							NUMBER,LTEM,KEM)
+C
+C Go through right hand side neighbours now held in LTEM and see
+C which (if any) of them has a height which is different to that of
+C IPNODE. Don't bother if there are no nodes to the left of the 
+C string (KEM=2 ie on-string points only). 
+		       IF (KEM.EQ.2) THEN
+			  ILEFT=0
+			  IRIGHT=0
+			  GOTO 60
+		       ENDIF
+		       DO 140 K=1,KEM
+C
+C Do not consider imaginary points, breakline points or cliff points
+C in our up-hill/down-hill side of line test.
+		          IF (MD(3,LTEM(K)).LT.0) GOTO 140 ! breaklines
+			  IF (LTEM(K).LE.LIMPOL) GOTO 140  ! imag'ry pts
+C
+C Calc. difference in height between IPNODE and this neighbour
+		          KHT=IABS(MD(3,LTEM(K)))-IBEGHT
+		          IF (KHT) 130,140,120
+120		          IF (IRIGHT.NE.0
+     &				      .AND.ISIGN(1,KHT).NE.IRIGHT) THEN
+		             ILEFT=0
+		             IRIGHT=0
+		             GOTO 60	! get next node
+		          ENDIF
+		          IRIGHT=1
+	                  GOTO 140
+130		          IF (IRIGHT.NE.0
+     &				      .AND.ISIGN(1,KHT).NE.IRIGHT) THEN
+		             ILEFT=0
+		             IRIGHT=0
+		             GOTO 60	! get next node
+		          ENDIF
+		          IRIGHT=-1
+140		       CONTINUE
+C
+C Check that both sides of the string do not share the same up or down 
+C flag!
+		       IF ((IRIGHT.NE.0.AND.ILEFT.NE.0)
+     &				.AND.
+     &		       (ISIGN(1,IRIGHT).EQ.ISIGN(1,ILEFT))) THEN
+		          ILEFT=0
+		          IRIGHT=0
+		          GOTO 60	! get next node
+		       ENDIF
+C
+C We must branch here if all of IPNODEs neighbours are at the same 
+C height as IPNODE. This is only a problem if we have not yet determined
+C which side of the string is the downside. 
+		       IF (ILEFT.EQ.0.AND.IRIGHT.EQ.0) GOTO 60
+		       GOTO 146
+C
+C ......................................................................
+C
+C We jumped to label 145 if we have we already set ILEFT and IRIGHT and 
+C have modified the neighbour lists up to IPNODE-1
+C
+C Get right hand side neighbours
+145		       CALL GTLINK(NPOS,LPOS,NTEM,NTMSIZ,
+     &					             NUMBER,LTEM,KEM)
+C
+C We have the RIGHT hand side neighbours im LTEM.
+146		       IF (IDIFF.NE.0) THEN
+		          DO 150 K=1,NUMBER
+		             LINSID(K)=-ISIGN(1,IRIGHT)
+150		          CONTINUE
+C
+C Determine the position of each of the right hand side nodes within the
+C original neighbour list NTEM and set LINSID to indicate "side"
+		          DO 160 K=1,KEM
+	                     CALL FINPOS(LTEM(K),NTEM,NTMSIZ,
+     &							NUMBER,IPOS)
+		             LINSID(IPOS)=IRIGHT
+160	                  CONTINUE
+C
+C Flag the nodes which are actually on the string as being of equal 
+C height and then write the IPNODE record in the node-neighbour 
+C up-hill/down-hill memory (JFREES) or random access file 
+		          LINSID(NPOS)=0
+	 	          LINSID(LPOS)=0
+	                  CALL PUTSID(IPNODE,LINSID,NTMSIZ,NUMBER)
+		          GOTO 60
+		       ENDIF
+C
+C Record in IDIFF the node number at which the first difference in ht.
+C between IPNODE and a neighbour was detected. 
+		       IDIFF=IPNODE
+		       IF (IRIGHT.GT.0) ILEFT=-1		      
+		       IF (IRIGHT.LT.0) ILEFT=1		      
+		       IF (ILEFT.LT.0) IRIGHT=1		      
+		       IF (ILEFT.GT.0) IRIGHT=-1
+C
+C ......................................................................
+C
+C Go through all the string nodes again now from IBEGIN to IPNODE 
+C setting the side of line height flags as appropriate
+C
+	               ISET=IBEGIN
+190			  ISET=ISET+1
+			  IF (ISET.GT.IDIFF) GOTO 60
+	                  CALL GETNAY(ISET,NTEM,NTMSIZ,NUMBER)
+C
+C Determine the position of the string previous node (ISET-1), and
+C the next node (ISET+1) within NTEM.
+	                  CALL FINPOS(ISET-1,NTEM,NTMSIZ,NUMBER,LPOS)
+	                  CALL LINKCK(ISET,ISET-1,IEND,
+     &						    NTEM,NUMBER,LPOS)
+C
+C Found the node OK? If not LINKCK will set the "up-hill"/
+C "down-hill" neighbours of the present and present+1 nodes in the 
+C string to "unknown" (LINSID=2) and bump ISET by 2
+		          IF (LPOS.EQ.0) THEN	! try another node
+			     GOTO 190
+		          ENDIF
+	                  CALL FINPOS(ISET+1,NTEM,NTMSIZ,NUMBER,NPOS)
+	                  CALL LINKCK(ISET,ISET+1,IEND,
+     &						NTEM,NUMBER,NPOS)
+C
+C
+C Found the node OK? If not LINKCK will set the "up-hill"/
+C "down-hill" neighbours of the present and present+1 nodes in the 
+C string to "unknown" (LINSID=2) and bump ISET by 2
+		          IF (NPOS.EQ.0) THEN	! try another node
+			     GOTO 190
+		          ENDIF
+C
+C Get the left side links. The list returned as LTEM always contains 
+C at least two nodes (ISET-1) and (ISET+1).
+	  	          CALL GTLINK(LPOS,NPOS,NTEM,NTMSIZ,NUMBER,
+     &							     LTEM,KEM)
+		          DO 170 K=1,NUMBER
+		             LINSID(K)=-ISIGN(1,ILEFT)
+170		          CONTINUE
+C
+C Determine the position of each of the left hand side nodes within the
+C original neighbour list NTEM and set LINSID to indicate "down-side"
+		          DO 180 K=1,KEM
+	                     CALL FINPOS(LTEM(K),NTEM,NTMSIZ,
+     &							NUMBER,IPOS)
+		             LINSID(IPOS)=ILEFT
+180	                  CONTINUE
+C
+C Flag the nodes which are actually on the string as being of equal 
+C height and then write the ISET'th record to the node-neighbour 
+C up-hill/down-hill memory (JFREES) or random access file 
+		          LINSID(NPOS)=0
+		          LINSID(LPOS)=0
+	                  CALL PUTSID(ISET,LINSID,NTMSIZ,NUMBER)
+		       GOTO 190
+C
+C ......................................................................
+C
+	            ENDIF
+		 ELSEIF (IDIFF.EQ.0) THEN
+C
+C Did we go along the entire string without getting any consistent 
+C side of line information? Use SIDERR to tell the user and to set the
+C whole strings up-hill/down-hill flags to "unknown" (2) 
+		    CALL SIDERR(IBEGIN,IEND,IPNODE-1)
+	         ENDIF
+	      ENDIF
+	   ELSE
+C
+C Single point string. Flag all its neighbour up-hill/down-hill entries
+C as "unknown"
+	      CALL GETNAY(IBEGIN,NTEM,NTMSIZ,NUMBER)
+	      DO 200 K=1,NUMBER
+	         LINSID(K)=2
+200	      CONTINUE
+	      CALL PUTSID(IBEGIN,LINSID,NTMSIZ,NUMBER)
+	   ENDIF
+	   IBEGIN=IEND
+	   GOTO 10
+	ENDIF
+	GOTO 220	! return
+C
+C ......................................................................
+C
+C File handling errors.
+210	CALL WRITEF(' ')
+	SIDFIL=TRIGRID__OPNSCR
+	CALL LSL_GETMSG(SIDFIL,MESSAGE,MESLEN)
+	CALL WRITEF(MESSAGE(1:MESLEN)//' - SIDFIL.TMP')
+	CALL ERRSNS(,I,J)		! find out what the problem is
+	IF (J.EQ.0) J=I
+	CALL LSL_GETMSG(J,MESSAGE,MESLEN)
+	J=INDEX(MESSAGE,'!') - 1	! (ignore any FAO stuff)
+	IF (J.LT.0) J=MESLEN
+	CALL WRITEF('%S',MESSAGE(:J))
+220	RETURN
+	END

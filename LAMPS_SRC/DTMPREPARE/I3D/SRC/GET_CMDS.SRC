@@ -1,0 +1,393 @@
+	LOGICAL FUNCTION GET_CMDS()
+C
+***	MODULE	GET_CMDS
+***	IDENT	01MR91
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C created by 				ALB	28-Apr-1988
+C
+C I3D command processor.  This function is the main controlling
+C work horse for module.   
+C 
+	IMPLICIT NONE
+C
+C Parameters :
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+C
+C Common blocks :
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+ 	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C
+C Workspace:
+	INTEGER		I		! loop counter
+	BYTE		CH		! for use with RDCHS
+	INTEGER		CMD    		! decoded command number
+	LOGICAL		OK		! function return
+	LOGICAL		RUN_OK		! function return
+	INTEGER		IERR		! error code
+C
+C Define command tables:
+	EXTERNAL	I3D_CMD_TABLE
+	INTEGER		I3D_CMD_TABLE
+C
+C Functions:
+	LOGICAL		CHECKPLOT_CMD	! specify checkplot IFF file spec
+	LOGICAL		CLOSE_CMD	! close or simulate close
+	LOGICAL		DESELECT_CMD	! deselect IFF checking level
+	LOGICAL		DISABLE_CMD	! disable parameters
+	LOGICAL		ENABLE_CMD	! enable parameters
+	LOGICAL		GO_CMD		! do processing
+	LOGICAL		HELP_CMD	! give help information
+	LOGICAL		FILEIN_CMD	! specify in IFF file-spec and open
+	LOGICAL		FILEOUT_CMD	! specify in IFF file-spec 
+	LOGICAL		LITES_CMD	! specify LITES2 file_spec
+	LOGICAL		LOOKUP_CMD	! specify lookup file open & load
+	LOGICAL		PAUSE_CMD	! await for user response
+	LOGICAL		QUIT_CMD	! quit from command processor
+	LOGICAL		SELECT_CMD	! select IFF checking level
+	LOGICAL		SET_CMD		! set parameters
+	LOGICAL         SHOW_CMD	! show status
+	LOGICAL		SPAWN_CMD	! DCL spawn command
+	LOGICAL		TERRAIN_CMD	! specify in terrain IFF file-spec
+	LOGICAL		WAIT_CMD	! wait for specified time
+C
+	INTEGER		FLRCLO		! close file
+	INTEGER         FLRSTR		! read record from file
+	INTEGER         FLROPN		! open file for LSLLIB FILEO	
+	LOGICAL		GETFILNAM	! read file-spec
+	LOGICAL  	RDCHS		! read character from line
+	LOGICAL  	RDCH		! read character from line
+	LOGICAL 	RDCOMM  	! read command from line
+	INTEGER		RDFILN		! reads and parses a filename
+	INTEGER		TTRSTR  	! read line from terminal
+C
+C ......................................................................
+C Assume 
+C
+	GET_CMDS = SS$_NORMAL
+	OK       = LSL__NORMAL
+	RUN_OK   = .TRUE.
+C
+C Get an input line from the terminal or the input file, TTIN = TRUE
+C
+10	TXTPTR=80
+	IF (TTIN) THEN
+	   OK=TTRSTR(,,'I3D> ',IERR)
+	ELSE
+	   CALL FLRSEL(IND_LUN)		! input file selected
+	   OK=FLRSTR(,,IERR)
+	ENDIF
+C
+C Check that input line read correctly
+C
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+C
+	   IF (OK.EQ.LSL__EOF) THEN
+	      OK = LSL__NORMAL		! not an error
+	      IF (TTIN) THEN
+		 GOTO 1000		! ctrl-z = exit
+	      ELSE
+		 OK = FLRCLO(IND_LUN, IERR)
+		 IF (.NOT.OK) THEN
+		    CALL WRITEF('%S Closing indirect file %S',
+     &			ERROR, IND_FNAME(:IND_LEN))
+	   	    CALL LSL_PUTMSG(OK)
+	   	    CALL LSL_ADDMSG(IERR)
+		 ENDIF
+		 TTIN = .TRUE.
+		 GOTO 10		! end of file -
+	      ENDIF			! close any indirect input
+	   ENDIF
+	ENDIF
+C
+C echo and decode the line
+C
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('I3D> ')
+	   CALL APPEND(TXTDSC)		! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+C
+C Reset decoding pointer
+C
+	CALL BSLN
+C
+C Read first character. Look for comment or empty line
+C
+	IF (RDCHS(CH)) GOTO 10		! substantially empty line
+	IF (CH.EQ.'!') GOTO 10		! comment!
+C
+C Look for indirect file start
+C
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 10
+	      ELSE
+	         CALL BSCH		! Move back to start of name
+	      ENDIF
+C
+C Get indirect file name from command line
+C
+	      OK=GETFILNAM(IND_FNAME,IND_LEN,
+     &				'SYS$DISK:[].COM;0',.TRUE.,%REF('!'))
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 10
+	      ENDIF
+C
+C and open indirect file, informing user and checking for errors
+C
+	      OK=FLROPN(IND_LUN, IND_FNAME(:IND_LEN), IERR)
+C
+	      IF (OK) THEN
+	         CALL WRITEF('Command input now being read from %S'
+     &					,IND_FNAME(:IND_LEN))
+	         TTIN=.FALSE.		! not reading from terminal
+	         GOTO 10		! start reading from file
+	      ELSE
+	         CALL WRITEF('%S Cannot open indirect command file %S'
+     &			  ,ERROR,IND_FNAME(1:IND_LEN))
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 10
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+C
+	CALL BSCH			! un-read non-'@'
+C
+C Now deal with first command, looking it up in table.
+C
+	CMD=RDCOMM(I3D_CMD_TABLE)
+C
+	GOTO (	20,	! a unrecognised command
+     &		30,	! checkplot
+     &		40,	! close
+     &		60,	! deselect
+     &		80,	! disable
+     &		100,	! enable
+     &		120,	! filein
+     &		140,	! fileout
+     &		160,	! go 	
+     &		180,	! help
+     &		220,	! lites
+     &		240,	! lookup		
+     &		260,	! pause
+     &		280,	! quit (non function command)		
+     &		300,	! return (non function command)		
+     &		320,	! select
+     &		340,    ! set
+     &		360,	! show
+     &		380,	! spawn
+     &		400,	! terrain
+     &		420	! wait		
+     &	      		), CMD+1
+C
+C command number out of range
+C
+	CALL WRITEF('Command not yet implemented')
+	GOTO 10
+C
+C unrecognised command
+C
+20	IF (TTIN) THEN
+	   GOTO 10
+	ELSE
+	   RUN_OK = .FALSE.
+	   GOTO 800
+	ENDIF
+C
+C ......................................................................
+C CHECKPLOT [file spec]
+C
+30	IF (.NOT.CHECKPLOT_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C CLOSE 'sub-command' 
+C
+40	IF (.NOT.CLOSE_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C DESELECT 'sub-command'
+C
+60	IF (.NOT.DESELECT_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C DISABLE 'sub-command'
+C
+80	IF (.NOT.DISABLE_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C ENABLE 'sub-command'
+C
+100	IF (.NOT.ENABLE_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C FILEIN [filespec]
+C
+120	IF (.NOT.FILEIN_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C FILEOUT [filespec]
+C
+140	IF (.NOT.FILEOUT_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C Go : do checking, and exit I3D
+C
+160	RUN_OK = GO_CMD()
+C
+C If error in mode FLOW, use just as signal for heighting to be done
+C
+	IF (MODE_FLOW) RUN_OK = .TRUE.		! always
+C
+	IF (TTIN .AND. RUN_OK) GOTO 1000	! success, direct input
+	IF (RUN_OK) GOTO 900			! success, indirect input
+C
+	GOTO 800				! failure
+C
+C ......................................................................
+C HELP
+C
+180	IF (.NOT.HELP_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C LITES [filespec]
+C
+220	IF (.NOT.LITES_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C LOOKUP [filespec]
+C
+240	IF (.NOT.LOOKUP_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C PAUSE
+C
+260	IF (.NOT.PAUSE_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C QUIT - quit out of program
+C
+280	IF (TTIN) THEN
+	   GOTO 1000
+	ELSE
+	   GOTO 900
+	ENDIF
+C
+C ......................................................................
+C RETURN - return to terminal input
+C
+300	IF (TTIN) THEN
+	   CALL EXPAND('RETURN command ignored - ')
+	   CALL WRITAP('input is already from terminal.')
+	   GOTO 10
+	ENDIF
+C
+C Indirect input
+C
+	CALL EXPAND('RETURN command received ') 
+	CALL WRITAP('- returning to terminal input')
+C
+	OK = FLRCLO(IND_LUN, IERR)
+	IF (.NOT.OK) THEN
+	   CALL WRITEF('%S Closing indirect file %S',
+     &			ERROR, IND_FNAME(:IND_LEN))
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	ENDIF
+	TTIN = .TRUE.
+	GOTO 10
+C
+C ......................................................................
+C SELECT 'sub-command'
+C
+320	IF (.NOT.SELECT_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C SET 'sub-command'
+C
+340	IF (.NOT.SET_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C SHOW
+C
+360	IF (.NOT.SHOW_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C SPAWN
+C
+380	IF (.NOT.SPAWN_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C TERRAIN [file-spec]
+C
+400	IF (.NOT.TERRAIN_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C WAIT
+C
+420	IF (.NOT.WAIT_CMD(TTIN)) GOTO 800
+	GOTO 10
+C
+C ----------------------------------------------------------------------
+C Error exits
+C
+800	IF (TTIN .AND. RUN_OK) GOTO 10
+C
+	IF (TTIN) THEN					! fail in GO
+	   CALL WRITEF ('ERROR - exit from I3D')
+	   GET_CMDS = SS$_ABORT
+	   GOTO 1001
+	ENDIF
+C
+C close any indirect input following disaster
+C
+	CALL WRITEF ('ERROR in indirect file - exit from I3D')
+	GET_CMDS = SS$_ABORT
+C
+900	TTIN = .TRUE.
+	OK = FLRCLO(IND_LUN, IERR)
+	IF (.NOT.OK) THEN
+	   CALL WRITEF ('%S Closing indirect file %S',
+     &			ERROR, IND_FNAME(:IND_LEN))
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	ENDIF
+C
+C prepare to exit
+C
+	IF (.NOT.GET_CMDS) GOTO 1001
+C
+1000	GET_CMDS = SS$_NORMAL
+C
+1001	RETURN
+	END
+C

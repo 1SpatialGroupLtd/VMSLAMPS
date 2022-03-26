@@ -14,9 +14,9 @@ $type sys$input:
 Kits have names in the format facvvu, where fac is the facility name,
 vv is the major version number, and u is the update number.
 $ask p1 "Which kit would you like to build: "
-$m5: facility = f$ext(0,f$len(p1)-3,p1)
-$version = 'f$ext(f$len(p1)-3,2,p1)
-$update = 'f$ext(f$len(p1)-1,1,p1)
+$m5: facility = f$ext(0,f$len(p1)-4,p1)
+$version = 'f$ext(f$len(p1)-4,2,p1)
+$update = 'f$ext(f$len(p1)-2,2,p1)
 $dest = p2
 $if dest .eqs. "" then ask dest "On which device is the kit to be built: "
 $if f$loc(":",dest) .eq. f$len(dest) then dest = dest + ":"

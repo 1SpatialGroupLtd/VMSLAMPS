@@ -1,0 +1,213 @@
+	SUBROUTINE R_FS
+C
+***	IDENT	13FE91
+***	MODULE	R_FS
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C
+C Author :  Paul Pan, 5 September 1989
+C
+C Purpose:  Reads an IFF file to decide various important feature 
+C              for later use
+C
+        IMPLICIT NONE
+C
+C Messages:
+C
+	INCLUDE	 'HERE:I2DXFMSG.PAR'
+C
+C Common Blocks:
+C
+        INCLUDE  'LSL$CMNFRT:FRTCOM.CMN'        ! added on 15 August 89
+        INCLUDE  'HERE:FEATURE.CMN'
+        INCLUDE  'HERE:LAYER.CMN'
+        INCLUDE  'HERE:POINT.CMN'
+        INCLUDE  'HERE:SYMBOL.CMN'
+C
+C Functions:
+C
+        LOGICAL     FRTFND              ! read each frt item
+C
+C Workspace:
+C
+	INTEGER     II			! DO loop counter
+	INTEGER*2   IELEN		! end of file/entry length
+        INTEGER*2   IECODE   
+        INTEGER*2   FSTAT( 4 )          ! storing FCode
+        INTEGER     TEMP_COUNTER
+        INTEGER     LOCAL_TEMP_COUNT
+        INTEGER     SYMBOL_COUNT,CURR_S_COUNT           ! added on 22/08
+	INTEGER	    LAYER_COUNT				! added on 17/10
+        INTEGER     LOCAL_TEMP2
+        INTEGER     FEAT_COUNT
+        INTEGER     LOOP_COUNT
+        LOGICAL     IS_DETECTED
+C
+C please note that the IFF file required has already opened
+C    at this point
+C moreover, the FRT file is also ready for use
+C----------------------------------------------------------------
+C now to detect the total number of feature code used
+C    please bear in mind that not all the feature codes
+C    in FRT file will be used
+C
+C initialiation
+C
+        FINAL_COUNT = 0
+        FEAT_COUNT = 0
+        TEMP_COUNTER = 0
+C 
+C now start to read the IFF records
+C
+C scan the whole IFF file, extract the distinctive feature codes
+C    and store them in an array
+C
+2102    CONTINUE
+        IS_DETECTED = .FALSE.
+C
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 301	! If there are none left
+C
+        TEMP_COUNTER = TEMP_COUNTER + 1
+C
+        IF ( IECODE.EQ.'FS' ) THEN          ! only pick up those FS
+           CALL EIHR( FSTAT,4,1 )           ! extract feature status
+           IF ( TEMP_COUNTER.EQ.1 ) THEN
+              FEAT_COUNT = 1
+              FEAT_ARRAY( 1 ) = FSTAT( 1 )
+           ELSE
+              DO 3001 LOOP_COUNT = 1,FEAT_COUNT
+                 IF ( FEAT_ARRAY( LOOP_COUNT ).EQ.FSTAT( 1 ) ) THEN
+                    IS_DETECTED = .TRUE.
+                    GOTO 201
+                 END IF
+3001          CONTINUE
+              IF ( .NOT.IS_DETECTED ) THEN
+                 FEAT_COUNT = FEAT_COUNT + 1
+                 FEAT_ARRAY( FEAT_COUNT ) = FSTAT( 1 )
+              END IF   
+           END IF
+        ENDIF
+C
+201     CONTINUE
+        GOTO 2102
+C
+C no more records found. now output the Counts
+C    it's stored as FINAL_COUNT
+C
+301     CONTINUE
+        FINAL_COUNT = FEAT_COUNT
+        IF ( HAD_LOG ) 
+     &     CALL LSL_PUTMSG( I2DXF__FEANOUSED,FINAL_COUNT )
+C
+C the first scanning of IFF file now finished 
+C
+C----------------------------------------------------------------
+C
+C now scan the FRT file to determine the number of Colors 
+C    and Symbols used by the features
+C    they will then be stored as NO_OF_LAYER & NO_OF_SYMBOL
+C    respectively
+C    maximum Color count = 16 
+C
+        LOCAL_TEMP_COUNT = 0
+        LOCAL_TEMP2  = 0
+        SYMBOL_COUNT = 0
+C
+        DO 2004 TEMP_COUNTER = 1,FINAL_COUNT
+C
+C now extract the characteristics of each feature from its
+C    corresponding FRT file
+C
+           IF ( FRTFND( FEAT_ARRAY( TEMP_COUNTER ) ) ) THEN
+C
+C detect if the feature is in the FRT file
+C
+              CALL LSL_PUTMSG( I2DXF__NONEXIFC,
+     &           FEAT_ARRAY( TEMP_COUNTER ) )
+           ELSE
+C 
+C now extracting the graphics characteristics of each feature
+C
+              LOCAL_TEMP_COUNT = LOCAL_TEMP_COUNT + 1
+              IF ( HAD_LOG ) CALL LSL_PUTMSG( I2DXF__FEAGRACON,
+     &                          FEAT_ARRAY( TEMP_COUNTER ),
+     &                          FRTGT,FRTCOL,FRTWID )
+              FRTGT_ARRAY( TEMP_COUNTER ) = FRTGT
+              FRTCOL_ARRAY( TEMP_COUNTER ) = FRTCOL
+              FRTWID_ARRAY( TEMP_COUNTER ) = FRTWID
+C
+C now comparing and storing the characteristics of different
+C    colour layers. The data extracted here will be used in
+C    the definition of DXF TABLES section.
+C
+              IF ( LOCAL_TEMP_COUNT.EQ.1 ) THEN
+                 LAYER_COUNT = 1
+                 LAYER_COL_ARRAY( LAYER_COUNT ) = FRTCOL
+                 LAYER_LOOKUP( TEMP_COUNTER ) = LAYER_COUNT
+              ELSE
+                 DO 2005 II = 1,LAYER_COUNT
+                    IF ( LAYER_COL_ARRAY( II ).EQ.FRTCOL ) THEN
+                       LAYER_LOOKUP( TEMP_COUNTER ) = II
+                       GOTO 2006
+                    ENDIF
+2005             CONTINUE
+C
+C if there is more than 16 colours being used in the IFF feature file,
+C    only the first different 16 colours will be used.
+C    Any feature which got a higher colour number will automatically
+C    assign a number of 16.
+C 
+		 IF ( LAYER_COUNT.EQ.16 ) THEN
+                    LAYER_LOOKUP( TEMP_COUNTER ) = 16
+                 ELSE				
+                    LAYER_COUNT = LAYER_COUNT + 1
+                    LAYER_COL_ARRAY( LAYER_COUNT ) = FRTCOL
+                    LAYER_LOOKUP( TEMP_COUNTER ) = LAYER_COUNT
+		 ENDIF
+              END IF
+C
+C if the Graphical Type equal to 8 (ORITYP) or 9 (SCATYP), the 
+C    corresponding feature represent an oriented symbol. The graphics 
+C    characteristics will then be stored in an array for symbols. 
+C    The data extracted here will be used to establish the BLOCKS 
+C    section of the DXF file
+C  
+2006          CONTINUE
+              IF ( FRTGT.EQ.ORITYP .OR. FRTGT.EQ.SCATYP ) THEN
+                 LOCAL_TEMP2 = LOCAL_TEMP2 + 1
+                 IF ( LOCAL_TEMP2.EQ.1 ) THEN
+                    CURR_S_COUNT = 1
+                    SYMBOL_L_PTER( CURR_S_COUNT ) = 
+     &                 LAYER_LOOKUP( TEMP_COUNTER )
+                    SYMBOL_PTER( TEMP_COUNTER ) = CURR_S_COUNT
+                 ELSE
+                    DO 2010 II = 1,CURR_S_COUNT
+                       IF ( SYMBOL_L_PTER( SYMBOL_PTER( II ) ).EQ.
+     &                       LAYER_LOOKUP( TEMP_COUNTER )  ) THEN
+                          SYMBOL_PTER( TEMP_COUNTER ) = II
+                          GOTO 2011
+                       ENDIF
+2010                CONTINUE
+                    CURR_S_COUNT = CURR_S_COUNT + 1
+                    SYMBOL_L_PTER( CURR_S_COUNT ) = 
+     &                 LAYER_LOOKUP( TEMP_COUNTER )
+                    SYMBOL_PTER( TEMP_COUNTER ) = CURR_S_COUNT
+2011                CONTINUE
+                 END IF
+              END IF
+           END IF
+2004    CONTINUE
+        NO_OF_LAYER  = LAYER_COUNT
+        NO_OF_SYMBOL = CURR_S_COUNT
+C
+C the scanning of records on FRT file now finished 
+C----------------------------------------------------------------
+C rewind the file for later use
+C
+        CALL IFFRWD
+C
+C Exit
+        RETURN
+	END
+C

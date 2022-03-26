@@ -1,0 +1,187 @@
+	.TITLE	TDDC
+	.IDENT	/19SE85/
+ 
+ 
+; Copyright Laser Scan Laboratories Ltd., Cambridge, England
+; Author Susan Manning from originals by R.Fairbairns
+; Coded April 1980
+ 
+; Dot/dash/chain generation interface for Tektronix 4014, etc., display
+ 
+; Assemble with
+;	THKPAR (for spot size MSEP)
+;	TKDDCP (for fortran interface, etc)
+;	TKHD02 (header)
+;	TKWS02 (for $DIVRF)
+;	TKVW02 (for FLAGW etc.)
+ 
+	CODE_PSECT	TKW
+ 
+; entry CHAIN(N)
+ 
+; set pattern dash=8N spots, gap=4N spots, dot=4 spots
+ 
+ .ENTRY		CHAIN,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	MOVW	#4,R4		; dot fixed
+	BSBB	DTCH
+	RET
+ 
+; entry DOTTED(N)
+ 
+; set pattern dash=gap=8N spots (no 'dot')
+ 
+ .ENTRY		DOTTED,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	CLRW	R4		; no dot
+	BSBB	DTCH
+	RET
+ 
+; DOTTED and CHAIN - convert to DASHED-like parameters
+DTCH:	TSTW	$DIVRF			; are we in refresh?
+	BEQL	1$			; no, so we can carry on
+	RSB				; in refresh, don't do any more
+
+1$:	CVTWF	R4,R8
+	BICW3	#^O177770,@4(AP),R10	; get arg and get into range
+	BEQL	$PTNOF		; value zero - switch pattern off
+	CVTWF	R10,R7	; pattern value to float for dash
+	MULF2	MSEP,R7		; convert to centimetres on screen
+	MULF3	#4.0,R7,R6	; convert to correct size and put in gap
+	MULF2	#8.0,R7		; convert
+	MULF2	MSEP,R8		; convert dot
+	BRB	SETLST		; go to set line style on
+ 
+; cancel pattern
+$PTNOF:: TSTB	PTNON		; pattern in fact now on?
+	BEQL	1$		; if EQ , no
+	JSB	$MOVB0		; flush out backlog
+	BICL2	#FLAG_M_IFTHK!FLAG_M_THKD, FLAGW ; restore 'thick line' diversion
+	CLRB	PTNON		; pattern no longer on
+1$:	RSB
+ 
+ 
+; entry DASHED(N,D,D1,D2)
+ 
+ .ENTRY		DASHED,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+	BSBB	DSH		; simply convert
+	RET
+ 
+; 'internal' call for DASHED
+DSH:	TSTW	$DIVRF		; are we in refresh?
+	BEQL	4$		; no, carry on
+	RSB			; in refresh, so just return
+
+4$:	MOVZWL	@4(AP),R10	; N
+	BEQL	$PTNOF		; N=0 - set pattern off
+	BGTR	1$
+	MNEGW	R10,R10		; absolute value R10
+1$:	MOVF	@8(AP),R6	; pattern size (D)
+	MOVF	@12(AP),R7	; major on (D1)
+	CMPW	R10,#1		; is it code 1 (dashed, rather than chain)
+	BNEQ	2$		; if NE, no
+	CLRF	R8		; suppress minor on
+	BRB	3$
+2$:	MOVF	@16(AP),R8	; chain-type - minor on (D2)
+3$:	SUBF2	R7,R6		; take major on from pattern
+	SUBF2	R8,R6		;   and minor on
+				; leaving allowance for gap
+	BLEQ	$PTNOF		; none! - switch pattern off
+	MULF2	#0.5,R6	; divide gap into two constituents
+; and fall through to set line style on
+ 
+; set line style on
+SETLST: CLRW	R10
+ 
+; set pattern on
+; R6 = gap
+; R7 = major on
+; R8 = minor on
+; R10 =0 => 'line style'
+;      =1 => 'scrub'
+ 
+$SETPTN:: MOVW	R10,-(SP)	; preserve pattern type
+	PUSHL	R8		; preserve registers
+	PUSHL	R6		; (NB order, for later)
+	PUSHL	R7
+	JSB	$MOVB0		; tidy every outstanding performance
+	TSTB	PTNON		; pattern already on?
+	BNEQ	1$		; if NE, yes
+	BISL2	#FLAG_M_IFTHK!FLAG_M_THKD, FLAGW ; enable 'thick' diversion
+	DECB	PTNON		; pattern now deemed on
+1$:	MOVAB	DDCMAJ,R1
+	MOVF	(SP)+,(R1)+	; copy common values to common block
+	MOVF	(SP)+,(R1)+
+	MOVF	(SP)+,(R1)+
+	MOVW	(SP)+,(R1)
+; and now clear the pattern generator stuff -
+	MOVC5	#0,B^1$,#0,#12,DREPCT
+;		above clears from DREPCT to DSUBSL in /TKDDCP/
+	CLRW	DDCPTR		; no buffered points yet
+	CLRF	DDCRES		; no residue yet
+	MOVW	#4,DDCSTG	; stage 4 forces major on first
+	CLRW	DREPOS		; don't repeat
+	JSB	$MOVB0		; get to start of line
+	RSB
+ 
+ 
+; entry to buffer one point
+ 
+; input:
+;  R10      =0  => invisible
+;        non-0  => visible
+; R7,R9 hold (X,Y) of endpoint of move
+ 
+T.DDC::	TSTW	R10
+	BEQL	INVIS
+ 
+; visible - buffer
+	INCW	DDCPTR		; up pointer
+2$:	MOVZWL	DDCPTR,R10	; set index
+	MOVF	R7,DDCX[R10]	; preserve in buffer
+	MOVF	R9,DDCY[R10]
+	CMPL	R10,#9		; filled buffer
+	BLSS	1$		; no
+	CLRW	R1		; (not calling because of move)
+	BSBW	CALGEN		; call generator and
+	BRB	2$		; back again to buffer this point again at start
+ 
+; return, having buffered point to caller of $LINTO etc.
+1$:	MOVF	R7,TKRUX
+	MOVF 	R9,TKRUY
+	RSB
+ 
+; invisible
+INVIS:	MOVB	#-1,R1		; (calling because of move)
+	BSBW	CALGEN		; call generator
+1$:	MOVF	R7,DDCX		; put this endpoint into buffer
+	MOVF	R9,DDCY		;  as start of next sequence
+	CLRW	R10		; restore 'invisible' marker
+	JMP	NOTHK		; back to TKBS where invisible move
+				; will be generated
+ 
+ 
+; call, from the above, to the generator
+ 
+; preserves R7,R9
+ 
+CALGEN:	PUSHL	R7
+	PUSHL	R9
+	BICL2	#FLAG_M_IFTHK, FLAGW ; suppress thick line diversion
+	INCW	DDCPTR		; convert to FORTRAN index
+	MOVB	R1,MOVFLS	; remember whether call because of move
+	CALLS	#0,TKDDCG	; generate dot, dash, or chain lines
+				; if wan't something else, use FLAGW & BBC etc!
+	BISL2	#FLAG_M_IFTHK!FLAG_M_THKD, FLAGW ; restore 'thick line' diversion
+	MOVF	(SP)+,R9
+	MOVF	(SP)+,R7
+	CLRW	DDCPTR		; now nothing significant in buffer
+	RSB
+ 
+; divert to call user-supplied substitution routine
+.ENTRY		TKSBST,^M<>
+	CALLG	(AP), @SUBRTN	; destination supplied by call to DSUBST
+				; (default SUBSTT if no routine supplied
+				; in call to DSUBST)
+	RET
+
+	.PSECT
+	.END

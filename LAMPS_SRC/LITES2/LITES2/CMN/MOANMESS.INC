@@ -1,5 +1,5 @@
 C Moan message parameter definitions
-C Created by MOANGEN on  3-JUL-97 at 13:26:56
+C Created by MOANGEN on 10-DEC-97 at 13:11:06
 C
 	PARAMETER	MSG_NEWSTATE =    1
 	PARAMETER	MSG_CMDFILCOMPL =    2

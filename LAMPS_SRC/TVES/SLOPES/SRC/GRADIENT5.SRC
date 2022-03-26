@@ -1,0 +1,313 @@
+	SUBROUTINE GRADIENT5
+C
+***	MODULE GRADIENT5
+***	IDENT  06MR89
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C	Author: 	D R Catlow
+C
+C	Modifications:
+C	Add PERCENT command			MWSR	27-Feb-89
+C
+C	This routine implements a fifth slope algorithm for the
+C	LSL SLOPES program.  The algorithm derives a measure of
+C	maximum slope.
+C
+C	The algorithm takes a matrix of 9 points and calculates
+C	the normals of the facets formed by the matrix points:
+C	facet 1 = IDB
+C	facet 2 = IHF
+C	facet 3 = IHB
+C	facet 4 = IFD
+C	
+C
+C		C-----D-----E
+C		|     |     |
+C               |     |     |
+C	        B-----I-----F
+C               |     |     |
+C               |     |     |
+C		A_____H_____G
+C
+C
+C	The maximum of the four slope values is then taken as the
+C	maximum slope value for the matrix point I
+C	
+C	Note that unlike the other gradient algorithms we also derive
+C	slope estimates for the first and last columns and rows of
+C	the matrix, rather than inserting null values.
+C	
+C-------------------------------------------------------------------------
+C
+ 	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/LSL$CMNLSL:EXPC/
+***	COMMON/HERE:SLPCMN/
+***	COMMON/HERE:DISCMN/	
+C
+C	GKS common block etc.
+***	COMMON/HERE:GKS/
+***	PARAMETER/HERE:GKSPAR/
+C
+C--------------------------------------------------------------------------
+C
+C	Locals:
+	REAL		X_NORMAL(4)	!X component of normal
+	REAL		Y_NORMAL(4)	!Y component of normal
+	REAL		Z_NORMAL	!Z component of normal
+C					!east grid * north grid values
+	REAL		Z_NORMAL_SQ	!Z component of normal squared
+	REAL		MAG_NORMAL(4)	!magnitude of normals for 2 facets
+	REAL		ANG_NORMAL(4)	!angle formed by the normals for
+C					!the 2 facets
+	INTEGER*2	Z(5)		!Z values for corners of grid cell
+	INTEGER*4	IERR		!function return
+	INTEGER*4	COL		!cell colour index
+	INTEGER*4	X_COUNT,Y_COUNT	!counters
+	INTEGER*4	J,I,N		!counters
+	INTEGER*4	LOWX,LOWY	!limits of calculated
+	INTEGER*4	HIGHX,HIGHY	!slope area
+	REAL		X(2),Y(2)	! for fill rectangle
+C
+C	Parameters:
+	PARAMETER	PI=3.141592654	!for RAD to degrees conversion
+C
+C	Functions:
+	INTEGER*4	VIO$CLOSE_SEC	!to unmap and close a file
+	INTEGER*4	ICOL		!set SIGMA colour
+	INTEGER*2	DTI_HGT		!retrieve 1 DTI cell height
+	LOGICAL		HADCTRLC	!test if we've had CTRLC
+C
+C***********************************************************************
+C
+C	Initialise various things
+	COLMNS = 0		!column number
+C
+C	Minimum and maximum values in output slope matrix
+	MINHGT(2)=10000	
+	MAXHGT(2)=0
+C
+C-----------------------------------------------------------------------
+C	Set up Z component of the normals (constant for all cells)
+C
+	Z_NORMAL    = EAST_GRID(1)*NORTH_GRID(1)
+	Z_NORMAL_SQ = Z_NORMAL**2		!squared
+C
+C-----------------------------------------------------------------------
+C
+C	Do things to the SIGMA if it is selected.
+C
+	IF (GRAPHICS)THEN
+C	Clear any text in picture 2
+	   CALL LSG_PLANE_SELECT(WKID,.NOT.(PLANE_MASK))
+	   CALL LSG_PLANE_OFFSET(WKID,NOPLNS)
+	   CALL GSFACI(0)		! fill area colour 0 (background)
+	   CALL GSFAIS(GSOLID)		! solid fill
+	   X(1) = 0.0
+	   X(2) = RASTSZ(1)-1
+	   Y(1) = 0.0
+	   Y(2) = RASTSZ(2)-1
+	   CALL LSG_FILL_RECTANGLE(X,Y)
+	   CALL GUWK(WKID,GSUPP)
+C
+C	Clear picture 1 as well?
+	   IF(CLEAR)THEN
+	     CALL LSG_PLANE_SELECT(WKID,PLANE_MASK)
+	     CALL LSG_PLANE_OFFSET(WKID,0)
+	     CALL GSFACI(0)		! fill area colour 0 (background)
+	     CALL GSFAIS(GSOLID)		! solid fill
+	     X(1) = 0.0
+	     X(2) = RASTSZ(1)-1
+	     Y(1) = 0.0
+	     Y(2) = RASTSZ(2)-1
+	     CALL LSG_FILL_RECTANGLE(X,Y)
+	     CALL GUWK(WKID,GSUPP)
+	   ENDIF
+C
+C	Work out SW corner of the image on the display device.
+C	The image is always positioned about the centre of the
+C	screen.  The image is scaled by an integer to fit as
+C	much of the image area as possible.
+C
+	   DIS_SIZE(1)=RASTSZ(1)-200
+	   DIS_SIZE(2)=RASTSZ(2)-200
+	   DISPLAY_SWX = 150.0
+	   DISPLAY_SWY = 150.0
+	   DISPLAY_NEX = DISPLAY_SWX+DIS_SIZE(1)
+	   DISPLAY_NEY = DISPLAY_SWY+DIS_SIZE(2)
+C
+C	can we show a legend and text?
+	   BIGMAT=.FALSE.
+	   IF(MATSIZ(1).GT.DIS_SIZE(1).OR.
+     &        MATSIZ(2).GT.DIS_SIZE(2))BIGMAT=.TRUE.
+C
+	   IF (BIGMAT) THEN          
+	      SIGSWX=( (RASTSZ(1)*0.5) - (MATSIZ(1)*0.5) )
+	      SIGSWY=( (RASTSZ(2)*0.5) - (MATSIZ(2)*0.5) )
+	      SF=1
+	   ELSE
+C
+C	Calculate magnification factor
+	      SF=1			!no enlargement
+	      DO 50 N=2,32
+	         IF((MATSIZ(1)*N).GT.DIS_SIZE(1))GOTO 60
+	         IF((MATSIZ(2)*N).GT.DIS_SIZE(2))GOTO 60
+	         SF=SF+1
+50	      CONTINUE
+C
+60	      SIGSWX=150 +( (DIS_SIZE(1)*0.5)-
+     &               ( (MATSIZ(1)*SF)*0.5) )	!place in centre
+	      SIGSWY=150 +( (DIS_SIZE(2)*0.5)-
+     &               ( (MATSIZ(2)*SF)*0.5) )	!of screen
+C
+	   ENDIF
+C
+	   IF(RECENT)THEN
+C	Ensure display is recentred and zoom at mimimum before
+C	each draw
+	     ZOOMX=RASTSZ(1)/2 
+	     ZOOMY=RASTSZ(2)/2
+	     ZOOMF=0
+	     CALL LSG_ZOOM_IMAGE(WKID,ZOOMX,ZOOMY,ZOOMF)
+	     IF(.NOT.BIGMAT)CALL LEGEND(1)	!generate legend
+	     IF(.NOT.BIGMAT)CALL TEXT(1)	!output border text
+	   ENDIF
+C
+	   XPOS = SIGSWX		!initial x drawing position
+	   YPOS = SIGSWY
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C	Calculate the gradient values...
+C
+	DO 500 X_COUNT= WINDOW(1,1),WINDOW(2,1)
+C
+  	   PIXADD=0		!initialise pixel count
+C
+C	Check if CTRL/C been pressed
+	   IF (HADCTRLC()) GOTO 999	!yes, so exit
+C
+C	So that we can estimate slope values for the first column,
+C	last column, first row and last row, interpolate a series 
+C	of heights around the matrix if necessary.
+C
+	   DO 400 Y_COUNT= WINDOW(1,2),WINDOW(2,2)
+C
+C	   Retrieve 5 heights rquired
+	      Z(1) = DTI_HGT(X_COUNT-1,Y_COUNT  ,%VAL(FIRST_HGT(1)))
+	      Z(2)  =DTI_HGT(X_COUNT  ,Y_COUNT+1,%VAL(FIRST_HGT(1)))
+	      Z(3) = DTI_HGT(X_COUNT+1,Y_COUNT  ,%VAL(FIRST_HGT(1)))
+	      Z(4) = DTI_HGT(X_COUNT  ,Y_COUNT-1,%VAL(FIRST_HGT(1)))
+	      Z(5) = DTI_HGT(X_COUNT,  Y_COUNT  ,%VAL(FIRST_HGT(1)))
+C
+ 	      PIXADD=PIXADD+1		!update pixel count
+C
+C----------------------------------------------------------------------------
+C	Test for special cases.  The 'gradient' values set for these
+C	cases are interpreted by ICOL so that the correct colour is set
+C	prior to display.
+C
+C	Check for null heights ie below -32766
+C	If any of the 5 heights are null, then treat gradient as though
+C	outside range
+C
+	      IF      (Z(1).LE.-32766.OR.Z(2).LE.-32766.OR.
+     &                 Z(3).LE.-32766.OR.Z(4).LE.-32766.OR.
+     &                 Z(5).LE.-32766)THEN
+	               GRAD(PIXADD)=-3		!set value to -3 for ICOL
+	               GOTO 400			!get next height
+C
+C	Sea level?
+	      ELSE IF (Z(5).EQ.0)THEN
+	               GRAD(PIXADD)=-1		!set value to -1 for ICOL
+	               GOTO 400			!get next height
+C
+C	Test if inside the height range
+	      ELSE IF (Z(5).LT.HLOWER.OR.Z(5).GT.HUPPER)THEN
+		       GRAD(PIXADD)=-2		!set value to -2 for ICOL
+	               GOTO 400			!get next height
+C
+	      ENDIF
+C
+C----------------------------------------------------------------------------
+C	Calculate the normals for the four facets
+C	Facet 1
+ 	   X_NORMAL(1)=(NORTH_GRID(1)*(Z(1)-Z(5)))**2
+	   Y_NORMAL(1)=(EAST_GRID(1) *(Z(2)-Z(5)))**2
+C	Facet 3
+	   X_NORMAL(2)=(NORTH_GRID(1)*(Z(5)-Z(3)))**2
+	   Y_NORMAL(2)=(EAST_GRID(1) *(Z(5)-Z(4)))**2
+C	   
+	   MAG_NORMAL(1)=SQRT(X_NORMAL(1)+Y_NORMAL(1)+Z_NORMAL_SQ)
+	   MAG_NORMAL(2)=SQRT(X_NORMAL(2)+Y_NORMAL(2)+Z_NORMAL_SQ)
+	   MAG_NORMAL(3)=SQRT(X_NORMAL(1)+Y_NORMAL(2)+Z_NORMAL_SQ)
+	   MAG_NORMAL(4)=SQRT(X_NORMAL(2)+Y_NORMAL(1)+Z_NORMAL_SQ)
+C
+	   ANG_NORMAL(1)=ACOS(Z_NORMAL/MAG_NORMAL(1))
+	   ANG_NORMAL(2)=ACOS(Z_NORMAL/MAG_NORMAL(2))
+	   ANG_NORMAL(3)=ACOS(Z_NORMAL/MAG_NORMAL(3))
+	   ANG_NORMAL(4)=ACOS(Z_NORMAL/MAG_NORMAL(4))
+C
+C---------------------------------------------------------------------------
+C	Take the maximum of these 4 values
+	   GRAD(PIXADD)=ANG_NORMAL(1)
+	   DO 300 I=2,4
+	      IF(GRAD(PIXADD).LT.ANG_NORMAL(I))GRAD(PIXADD)=ANG_NORMAL(I)
+300	   CONTINUE
+C
+	   IF(HAD_PERCENT)THEN
+	     GRAD(PIXADD) = TAN(GRAD(PIXADD))
+	     GRAD(PIXADD) = MIN((GRAD(PIXADD)*100),100.0) ! percentage
+	   ELSE
+C
+	      GRAD(PIXADD)=GRAD(PIXADD)*180.0/PI	! in degrees
+	   ENDIF
+C
+C----------------------------------------------------------------------------
+C	Test if inside the gradient range
+	  IF(GRAD(PIXADD).LT.GLOWER.OR.GRAD(PIXADD).GT.GUPPER)THEN
+	  GRAD(PIXADD)=-4		!set value to -4 for ICOL
+	  GOTO 400
+	ENDIF
+C
+C
+400	CONTINUE
+C
+C----------------------------------------------------------------------------
+C
+C	Ouput this row of gradients
+	DO 450 I=1,PIXADD
+	  IF(GRAPHICS) THEN
+	    COL=ICOL(GRAD(I))		!set to appropriate colour
+            IF(COL.LE.60)COL=COLTAB(COL)
+	    BRIGHT(I)=COL
+	  ENDIF
+450	CONTINUE
+C
+	COLMNS=COLMNS+1
+	NUMBER_PIXELS=PIXADD
+C
+	IF (GRAPHICS) THEN
+	   CALL SHDRAW		!output to SIGMA
+	ENDIF
+	IF (PLOT_DTI) THEN
+	   CALL PUTROW(GRAD,2,1)
+	ENDIF
+C
+C***************************************************************************
+C
+500	CONTINUE
+C
+	IF (PLOT_DTI)THEN
+	  CALL PUT_WORD(MAXHGT(2),%VAL(SEC_ADDR(2)+HMAX_OFFSET))
+	  CALL PUT_WORD(MINHGT(2),%VAL(SEC_ADDR(2)+HMIN_OFFSET))
+	  IERR=VIO$CLOSE_SEC(2)
+	  PLOT_DTI= .FALSE.
+	ENDIF
+C
+C***************************************************************************
+C
+999	RETURN
+C
+	END

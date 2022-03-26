@@ -1,0 +1,307 @@
+	PROGRAM LAMPSCONTROL
+C
+***	MODULE LAMPSCONTROL
+***	IDENT 28JA93
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C Author: J.M. Billing			13 April 1988
+C
+C Flowline control utility, to manipulate flowline control database
+C It will be executed by a caller (e.g command procedure, interactive 
+C user) to :
+C
+C	Find the next task to perform (in terms of project/job/task)
+C
+C	Notify the utility to update the database with a task's outcome
+C
+C	Cause particular flowline management function to be carried out
+C
+C	Generate a report on some aspect of a flowline's operation
+C
+C The LAMPSCONTROL utility will pass back a DCL command procedure and
+C a number of logical names depending on the outcome of the service
+C which it has performed.
+C
+C For example, in the case of a caller requesting a next task to
+C perform, the command procedure will carry out this task, and the
+C logical names will indicate (probably) the command procedure's
+C file specification, and any other files required for its completion.
+C
+C In the case where no actual command procedure operations are required,
+C a 'null' procedure will be passed back, with appropriate logical names
+C setup
+C
+C Similarly, the LAMPSCONTROL utility will pass back an appropriate 
+C command file and logical names in cases where an error has occured or
+C a request cannot be met (e.g. there is no task currently available for
+C this user/workstation to perform)
+C
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$LAMPSCONTROL:QUALIFIERS.CMN'
+	INCLUDE 'LSL$LAMPSCONTROL:NEXT_FUNCTION.CMN'
+	INCLUDE 'LSL$LAMPSCONTROL:FILES.CMN'
+	INCLUDE 'LSL$LAMPSCONTROL:CURRENT_ITEMS.CMN'
+	INCLUDE 'LSL$LAMPSCONTROL:LAMPSCONTROLMSG.PAR'
+	INCLUDE 'SYS$LIBRARY:FORSYSDEF($JPIDEF)'
+	INCLUDE	'($LNMDEF)/NOLIST'
+	INCLUDE '($SSDEF)'
+C
+C w/s
+	INTEGER STATUS
+	INTEGER I,J			! counters
+	INTEGER IDAY			! day integer
+	INTEGER IMONTH			! month integer
+	INTEGER PID			! process id
+	CHARACTER*20   	USER_AUTH_KEY	! encrypted authorisation strings
+	CHARACTER*20    USER_AUTH
+C
+C functions
+	INTEGER	LIB$SET_LOGICAL		! create a logical name
+	INTEGER	TRNALL			! translate logical name
+	INTEGER LAMPSCONTROL_INIT	! General initialisation
+	INTEGER	SETUP_EXIT_HANDLER	! Set up exit handler
+	INTEGER TITLE_PAGE		! Put up a title page
+	INTEGER LAMPSCONTROL_CLOSEDOWN	! Finish doing LAMPSCONTROL
+	INTEGER GET_COMMAND		! Read command line
+	INTEGER CHECK_AUTHORISATION	! Check user/workstation 
+					! allowed to do what command
+					! line requests
+	INTEGER NOTIFY_STATUS		! Deal with /NOTIFY of outcome
+	INTEGER CONTROL_MENU		! Top level control menu
+	INTEGER REQUEST_MENU		! Request task/job/project
+	INTEGER	NON_INTERACTIVE_REQUEST	! (Batch) automatic task select
+	INTEGER MANAGE_MENU		! Management functions menu
+	INTEGER NON_INTERACTIVE_CREATE_JOB ! Create job (eg on sub fln)
+	INTEGER REPORT_MENU		! Report functions menu
+	INTEGER SETUP_DCL		! Set up command file and
+					! any INTEGER names or symbols
+	INTEGER EXCEPTION_HANDLER	! deal with program exceptions
+	INTEGER LIB$GETJPI
+	INTEGER SIGCHS
+C
+C Assume success
+C
+	STATUS = SS$_NORMAL
+C
+C initialise user authorisation flag
+	HAD_USER_AUTH = .FALSE.
+C
+C Carry out general initialisation of LAMPSCONTROL 
+C workspace, libraries used etc
+C
+	STATUS = LAMPSCONTROL_INIT()
+	IF (.NOT.STATUS) GOTO 900
+C
+C Read command line, qualifiers etc
+C
+	STATUS = GET_COMMAND()
+	IF (.NOT.STATUS) GOTO 900
+C
+C Create encrypted user authorisation key using (PID + day + month ) * 20
+C
+	IF (HAD_FAST) THEN
+	   CALL IDATE(IDAY,IMONTH,I)
+	   STATUS = LIB$GETJPI(JPI$_PID,,,PID)
+	   I = (PID + IDAY + IMONTH) / 20
+	   WRITE(USER_AUTH_KEY,'(I8)') I
+	ENDIF
+C
+C Before we start to initialise FMS, tamper with the terminal setup,
+C or play with RDB, set up the program's exit handler, which will
+C neatly reset the terminal and shutdown FMS etc when the program
+C is exited (normally or eg with CONTROL C).
+C
+	STATUS = SETUP_EXIT_HANDLER()
+	IF (.NOT.STATUS) GOTO 900
+C
+C If using menus, put up a title page
+C
+	IF (MENU) THEN
+	   STATUS = TITLE_PAGE()
+	   IF (.NOT.STATUS) GOTO 900
+	ENDIF
+C
+C See if logical name for user authorisation is defined.
+C If so check that its translation matches the encryption code.
+	STATUS = TRNALL('LSL$FLN_USER_AUTH',USER_AUTH)
+	IF (STATUS.AND.HAD_FAST) THEN
+	   I = SIGCHS(USER_AUTH)
+	   J = SIGCHS(USER_AUTH_KEY)
+	   IF ((USER_AUTH(:I).EQ.USER_AUTH_KEY(:J))) THEN
+	      HAD_USER_AUTH = .TRUE.
+	      IF (MENU) 
+     &		CALL FDV$PUT('Using previous authorisations...','PREV_AUTH')
+	   ELSE
+	      IF (MENU) 
+     &		CALL FDV$PUT('Previous authorisation no longer valid - '//
+     &		'checking again...','PREV_AUTH')
+	   ENDIF
+	ENDIF
+C
+C Check if the user/workstation is authorised to carry out the operation
+C requested by the command line just read
+C Routine also sets up operator id and workstation id variables in
+C common block
+C
+10	STATUS = CHECK_AUTHORISATION()
+	IF (.NOT.STATUS) GOTO 900
+C
+C Define user authorisation logical name with encryption code
+C
+	IF (HAD_FAST) THEN
+	   J = SIGCHS(USER_AUTH_KEY)
+	   STATUS = LIB$SET_LOGICAL('LSL$FLN_USER_AUTH',USER_AUTH_KEY(:J),
+     &					'LNM$PROCESS')
+	ENDIF
+C
+C Determine which operation the caller has requested, and carry it out
+C Possible operations determined by presence of one of:
+C /REQUEST, /NOTIFY, /MANAGE, /REPORT, or absence of all of them
+C
+C If /REQUEST, then caller is requesting next project/task/job
+C determine whether to user menu (interactive) or automatic 
+C (non-interactive) task selection mechanism
+C
+	IF (REQUEST) THEN
+	   IF (MENU) THEN
+	      STATUS = REQUEST_MENU()
+	      IF (.NOT.STATUS) GOTO 900
+	   ELSE
+	      STATUS = NON_INTERACTIVE_REQUEST()
+	      IF (.NOT.STATUS) GOTO 900
+	      GOTO 999
+	   ENDIF
+C
+C If /NOTIFY, then caller is notifying database of the outcome of a
+C session or of the initiation of a job
+C i.e. possible change in status of job or task
+C
+	ELSEIF (NOTIFY) THEN
+	   STATUS = NOTIFY_STATUS()
+	   IF (.NOT.STATUS) GOTO 900
+C
+C If /MANAGE, then caller wants access to management functions
+C
+	ELSEIF (MANAGE) THEN
+C
+C Check if want non-interactive job creation option
+C
+	   IF (CREATE_JOB) THEN
+	      STATUS = NON_INTERACTIVE_CREATE_JOB()
+C
+C Do the ordinary management menu, if menus were requested
+C by command line
+C
+	   ELSEIF (MENU) THEN
+	      STATUS = MANAGE_MENU()
+C
+C Otherwise, warn user that doing nothing because menus not
+C request and do nothing
+C
+	   ELSE
+	      CALL LCONT_PUTMSG(LSC__NOMENU,0)
+	      NEXT_FUNCTION = DO_NOTHING
+	   ENDIF
+C
+	   IF (.NOT.STATUS) GOTO 900
+C
+C If /REPORT, then caller wants system statistical report menu,
+C if menus were requested by command line.
+C
+	ELSEIF (REPORT) THEN
+	   IF (MENU) THEN
+	      STATUS = REPORT_MENU()
+C
+C Otherwise, warn user that doing nothing because menus not
+C request and do nothing
+C
+	   ELSE
+	      CALL LCONT_PUTMSG(LSC__NOMENU,0)
+	      NEXT_FUNCTION = DO_NOTHING
+	   ENDIF
+C
+	   IF (.NOT.STATUS) GOTO 900
+C
+C If no qualifier, then give top level control menu, if menu
+C were requested by command line.
+C
+	ELSE
+	   IF (MENU) THEN
+	      STATUS = CONTROL_MENU()
+C
+C Otherwise, warn user that doing nothing because menus not
+C request and do nothing
+C
+	   ELSE
+	      CALL LCONT_PUTMSG(LSC__NOMENU,0)
+	      NEXT_FUNCTION = DO_NOTHING
+	   ENDIF
+C
+	   IF (.NOT.STATUS) GOTO 900
+	ENDIF
+C
+C If the command file option is required:
+C Have now finished the caller's required operation, so can
+C construct any DCL command procedure file required to perform
+C the required choice.
+C This command file and the logical names will be used by the caller
+C command procedure to actually do actions specified by LAMPSCONTROL
+C after examination of the database:
+C e.g. peform a task, launch a job on a flowline...
+C Some operations, e.g. reporting database statistics, will be done
+C by LAMPSCONTROL, so the command procedure passed back will be 
+C essentially a null operation.
+C
+	IF (WANT_COMFIL) STATUS = SETUP_DCL()
+	IF (.NOT.STATUS) GOTO 900
+C
+C Check if need to repeat LAMPSCONTROL
+C
+	IF (NEXT_FUNCTION.EQ.DO_REPEAT) GOTO 10
+C
+C Now closedown LAMPSCONTROL
+C
+	STATUS = LAMPSCONTROL_CLOSEDOWN()
+	IF (.NOT.STATUS) GOTO 900
+C
+C Can now exit from LAMPSCONTROL, signalling successful completion
+C
+	STATUS = SS$_NORMAL
+	GOTO 999
+C
+C Take care of any exception which have arisen, this includes
+C constructing appropriate DCL command procedures and logical names
+C to pass back to the caller
+C
+C Check first if just want to restart LAMPSCONTROL
+C
+900	IF (NEXT_FUNCTION.EQ.DO_REPEAT) GOTO 10
+C
+C Call special handling routine
+C
+	CALL EXCEPTION_HANDLER(STATUS)
+C
+C Check if any particular action required
+C
+C Repeat entire run of LAMPSCONTROL
+C
+	IF (NEXT_FUNCTION.EQ.DO_REPEAT) THEN
+	   GOTO 10
+C
+C Check for requirement to construct special error command file
+C
+	ELSEIF (NEXT_FUNCTION.EQ.DO_ERROR) THEN
+	   CALL SETUP_DCL()
+	   CALL LAMPSCONTROL_CLOSEDOWN()
+	ENDIF
+C
+C Otherwise just exit with abort
+C
+	STATUS = SS$_ABORT
+C
+C Exit
+C
+999	CALL LSL_EXIT(STATUS)
+	END

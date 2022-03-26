@@ -1,0 +1,676 @@
+C
+C Cell array functions
+C ====================
+C
+C *********************************************************************
+C
+C	PIXEL IMAGE PRIMITIVE
+C	=====================
+C
+C
+	SUBROUTINE	LSG_PIXEL_ARRAY(
+     &		PX,PY,NX,NY,VX1,VX2,VY1,VY2,SCX,SCY,PXARR)
+C
+**	MODULE	LSG_PIXEL_ARRAY
+**	IDENT	21FE92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+	IMPLICIT NONE
+C
+***	COMMON/GFABUF/
+C
+C Arguments:
+C
+	REAL	PX			! X coord (w.c.)
+	REAL	PY			! Y coord
+	INTEGER	NX,NY			! size of array, and direction
+	INTEGER	VX1,VX2,VY1,VY2		! portion of array
+	INTEGER	SCX,SCY			! scale factors
+	BYTE	PXARR(*)		! array of pixels
+C
+C Functions
+	LOGICAL	GKS_INIT_FILL_MEM
+C
+C first time through, get the memory
+	IF (MEMORY_FAIL) GOTO 999
+C
+	IF (GFAMAX .EQ.0) THEN
+	   MEMORY_FAIL = GKS_INIT_FILL_MEM()
+	   IF (MEMORY_FAIL) GOTO 999
+	ENDIF	      
+C
+C call the actual routine to do the work, passing it a byte buffer to
+C use
+C
+	CALL LSG_PIXEL_ARRAY_SUB(
+     &		PX,PY,NX,NY,VX1,VX2,VY1,VY2,SCX,SCY,PXARR,
+     &	        BMAX,%VAL(B_ADDR))
+
+C
+999	RETURN
+	END
+C
+C
+	SUBROUTINE	LSG_PIXEL_ARRAY_SUB(
+     &		PX,PY,NX,NY,VX1,VX2,VY1,VY2,SCX,SCY,PXARR,BMAX,B)
+C
+**	MODULE	LSG_PIXEL_ARRAY_SUB
+**	IDENT	12FE92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:UISUSRDEF'
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	REAL	PX			! X coord (w.c.)
+	REAL	PY			! Y coord
+	INTEGER	NX,NY			! size of array, and direction
+	INTEGER	VX1,VX2,VY1,VY2		! portion of array
+	INTEGER	SCX,SCY			! scale factors
+	BYTE	PXARR(*)		! array of pixels
+	INTEGER	BMAX			! size of workspace
+	BYTE	B(BMAX)			! workspace
+C
+C Functions
+	INTEGER	LIB$EXTZV
+C
+C Workspace
+	INTEGER	DEV
+	REAL	DX,DY,DX1,DY1		! device coordinate
+	REAL	SX,SY			! size
+	INTEGER	REPX,REPY		! replication factors
+	INTEGER	START
+	INTEGER	TEMP
+	INTEGER	NCOLS,NROWS,ROWS
+	INTEGER	XSHIFT,YSHIFT
+	INTEGER	XSTEP,YSTEP
+	INTEGER	PIND,XIND,YIND
+	INTEGER	I,J,K
+	LOGICAL	DIRECT,DIRECTX,DIRECTY
+	LOGICAL	FLUSH
+	INTEGER*4 BLOC
+	INTEGER	NCOLI
+	INTEGER*4	PIXL
+	BYTE		PIXB
+	EQUIVALENCE	(PIXL,PIXB)
+C
+	GKSERR	= 0			! no error (yet!)
+C
+C check arguments
+	IF (NX.EQ.0.OR.NY.EQ.0) GOTO 999
+	IF (VX1.LT.1.OR.VX2.GT.ABS(NX).OR.VX1.GT.VX2) GOTO 999
+	IF (VY1.LT.1.OR.VY2.GT.ABS(NY).OR.VY1.GT.VY2) GOTO 999
+	IF (SCX.LE.0.OR.SCY.LE.0) GOTO 999
+C
+C draw the pixel array on the workstations
+	DO 200 DEV = 1,WSMAX
+C
+C is this workstation active? - if not ignore it
+	IF (.NOT.WSACT(DEV)) GOTO 200
+C
+C ensure that our transformation is up to date
+	IF (UPTRN(DEV)) CALL GUPTRN(DEV)	! update it
+C
+C is everything clipped (ie nothing visible)
+	IF (CLPALL(DEV)) GOTO 200
+C
+C work out starting points
+	NCOLS = VX2-VX1+1
+	NROWS = VY2-VY1+1
+	XSTEP = SIGN(1,NX)
+	YSTEP = -SIGN(NX,NY)
+	REPX = SCX
+	REPY = SCY
+	START = VX1 + (VY1-1)*ABS(NX)
+	XSHIFT = 0
+	IF (NX.LT.0) THEN
+	   START = START+NCOLS-1
+	   XSHIFT = 1-NCOLS*REPX
+	ENDIF
+	YSHIFT = 0
+	IF (NY.GT.0) THEN
+	   START = START+ABS(NX)*(NROWS-1)
+	   YSHIFT = NROWS*REPY-1
+	ENDIF
+C
+C rotate if required
+	IF (PIXROT(DEV)) THEN
+	   START = START+(NCOLS-1)*XSTEP
+	   TEMP = NCOLS
+	   NCOLS = NROWS
+	   NROWS = TEMP
+	   TEMP = REPX
+	   REPX = REPY
+	   REPY = TEMP
+	   TEMP = XSTEP
+	   XSTEP = YSTEP
+	   YSTEP = -TEMP
+	   TEMP = XSHIFT
+	   XSHIFT = -YSHIFT
+	   YSHIFT = TEMP+NROWS*REPY-1
+	ENDIF
+C
+C work out size of pixels
+	SX = DCMAXX(DEV)/RASTX(DEV)
+	SY = DCMAXY(DEV)/RASTY(DEV)
+C
+C Convert world position to device coordinate
+	CALL GKSW2D(WKIDS(DEV),PX,PY,DX,DY)
+C
+C and shift to obtain top left of array
+	DX = DX+XSHIFT*SX
+	DY = DY+(YSHIFT+1)*SY
+C
+	DX1 = DX+(NCOLS*REPX+0.25)*SX	! x coord of top right (+ a bit)
+C
+C can we output original data without copying?
+	DIRECT = .FALSE.	! data not altered
+	DIRECTX = .FALSE.	! output single rows unaltered?
+	DIRECTY = .FALSE.	! multiple rows?
+C
+	IF (PACK(DEV).EQ.1) THEN
+	   DIRECT = .TRUE.	! bit mode data never shifted
+	ELSEIF ((PSEL(DEV).AND.USED_PLANESB(1,DEV)).EQ.
+     &			       USED_PLANESB(1,DEV).AND.	! all planes
+     &				POFF(DEV).EQ.0 ) THEN	 ! no offset
+	   DIRECT = .TRUE.
+	ENDIF
+C
+C are data rows contiguous in original array (but don't bother when
+C rows only have a single pixel, better in this case to copy)
+	IF (XSTEP.EQ.1.AND.NCOLS.GT.1) DIRECTX = .TRUE.
+C
+C are successive rows contiguous (allow single pixel rows this time)
+	IF (((YSTEP.EQ.NCOLS.OR.NROWS.EQ.1).AND.
+     &			(DIRECTX.OR.NCOLS.EQ.1))) DIRECTY = .TRUE.
+C
+C but not if in bit mode and start point not byte aligned
+	IF (PACK(DEV).EQ.1.AND.MOD(START-1,8).NE.0) DIRECTY = .FALSE.
+	YIND = START
+	ROWS = 0
+	PIND = 1
+	BLOC = %LOC(B)
+	DO 20 J=1,NROWS
+C
+C if whole array is contiguous, then perform entire thing in one go
+C from original array
+	   IF (DIRECT.AND.DIRECTY) THEN
+	      IF (PACK(DEV).EQ.8) THEN
+	         BLOC = %LOC(PXARR(START))
+	      ELSE
+	         BLOC = %LOC(PXARR((START-1)/8+1))
+	      ENDIF
+	      ROWS = NROWS
+	      FLUSH = .TRUE.
+	   ELSE
+	      XIND = 0
+	      ROWS = ROWS+1
+C
+C if rows are contiguous, then get address of start of row
+	      IF (DIRECT.AND.DIRECTX.AND.
+     &		(PACK(DEV).EQ.8.OR.MOD(YIND-1,8).EQ.0)) THEN
+	         IF (PACK(DEV).EQ.8) THEN
+	            BLOC = %LOC(PXARR(YIND))
+	         ELSE
+	            BLOC = %LOC(PXARR((YIND-1)/8+1))
+	         ENDIF
+	         FLUSH = .TRUE.
+	      ELSE
+	         IF (PACK(DEV).EQ.8) THEN
+	            DO 10 I=1,NCOLS
+	               PIXL = 0
+	               PIXB = PXARR(XIND+YIND)
+	               IF (POFF(DEV).NE.0) PIXL = ISHFT(PIXL,POFF(DEV))
+	               B(PIND) = PIXB.AND.PSEL(DEV)	  ! apply mask
+	               PIND = PIND+1
+	               XIND = XIND+XSTEP
+10	            CONTINUE
+	         ELSE
+	            DO 11 I=1,NCOLS
+	               CALL LIB$INSV( LIB$EXTZV(XIND+YIND-1,1,PXARR),
+     &						     PIND-1,1,B)
+
+	               PIND = PIND+1
+	               XIND = XIND+XSTEP
+11	            CONTINUE
+	         ENDIF
+	         FLUSH = .FALSE.
+	      ENDIF
+	   ENDIF
+C
+C Check if: we are performing direct output, or
+C	    we have finished, or the array is full - if so output it
+	   IF (FLUSH.OR.
+     &		J.EQ.NROWS.OR.BMAX*8/PACK(DEV)-PIND.LT.NCOLS) THEN
+C
+	      DY1 = DY+0.25*SY		! y coord of top right (+ a bit)
+	      DY = DY-ROWS*REPY*SY	! y coord of bottom left
+C
+C If writing to all planes, then use COPY (which is set already),
+C otherwise use BIC mode to clear the area, then BIS mode
+C to set the required bits.
+	      IF ((PSEL(DEV).AND.USED_PLANESB(1,DEV)).NE.
+     &				 USED_PLANESB(1,DEV)) THEN
+C
+	         NCOLI = PSEL(DEV).AND.USED_PLANES(DEV)
+	         IF (NCOLI.GT.MAXCOL(DEV)) THEN
+	            NCOLI = (.NOT.NCOLI).AND.USED_PLANES(DEV)
+	            CALL UIS$SET_WRITING_MODE(
+     &				DCB(DEV),5,5,UIS$C_MODE_BICN)
+	         ELSE
+	            CALL UIS$SET_WRITING_MODE(
+     &				DCB(DEV),5,5,UIS$C_MODE_BIC)
+	         ENDIF
+	         CALL UIS$SET_WRITING_INDEX(DCB(DEV),5,5,NCOLI)
+C
+C n.b. clearing using 1 bit/pixel seems much faster than 8, but seems
+C to be a bug with the extent, so we have so subtract off a pixel.
+C Also, when trying to clear a single row of pixels, subtract off a
+C further 1, otherwise it clears 2 rows
+	         IF (DX1-DX.LT.2.0*SX.OR.DY1-DY.LT.2.0*SY) THEN
+	            CALL UIS$PLOT(
+     &			DCB(DEV),5,DX,DY,DX1-1.25*SX,DY1-1.25*SY)
+	         ELSE
+	            CALL UIS$IMAGE(
+     &			DCB(DEV),5,DX,DY,DX1-SX,DY1-SY,1,1,1,-1)
+	         ENDIF
+C
+	         IF (PACK(DEV).EQ.8) THEN
+	            CALL UIS$SET_WRITING_MODE(
+     &				DCB(DEV),5,5,UIS$C_MODE_BIS)
+	         ELSE
+	            NCOLI = 1
+	            IF (POFF(DEV).NE.0) NCOLI = ISHFT(NCOLI,POFF(DEV))
+	            NCOLI = NCOLI.AND.PSEL(DEV).AND.USED_PLANES(DEV)
+	            IF (NCOLI.GT.MAXCOL(DEV)) THEN
+	               NCOLI = (.NOT.NCOLI).AND.USED_PLANES(DEV)
+	               CALL UIS$SET_WRITING_MODE(
+     &					DCB(DEV),5,5,UIS$C_MODE_BISN)
+	            ELSE
+	               CALL UIS$SET_WRITING_MODE(
+     &					DCB(DEV),5,5,UIS$C_MODE_BIS)
+	            ENDIF
+	            CALL UIS$SET_WRITING_INDEX(DCB(DEV),5,5,NCOLI)
+	         ENDIF
+	      ENDIF
+	      CALL UIS$IMAGE(
+     &		DCB(DEV),5,DX,DY,DX1,DY1,NCOLS,ROWS,PACK(DEV),%VAL(BLOC))
+	      ROWS = 0
+	      PIND = 1
+	   ENDIF
+	   IF (DIRECT.AND.DIRECTY) GOTO 200
+	   YIND = YIND+YSTEP
+20	CONTINUE
+C
+200	CONTINUE
+C
+999	RETURN
+	END
+C
+	SUBROUTINE	LSG_FILL_RECTANGLE(PX,PY)
+C
+**	MODULE	LSG_FILL_RECTANGLE
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:UISUSRDEF'
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	REAL	PX(2)			! X coords
+	REAL	PY(2)			! Y coords
+C
+C Workspace
+	INTEGER	DEV,I
+	REAL	X(4),Y(4)
+	INTEGER	NCOLI
+	LOGICAL*1	SAVACT(WSMAX)	! save of WSACT
+C
+	GKSERR	= 0			! no error (yet!)
+C
+C draw the rectangle on the workstations
+	DO 200 DEV = 1,WSMAX
+C
+C is this workstation active? - if not ignore it
+	IF (.NOT.WSACT(DEV)) GOTO 200
+C
+C ensure that our transformation is up to date
+	IF (UPTRN(DEV)) CALL GUPTRN(DEV)	! update it
+C
+C is everything clipped (ie nothing visible)
+	IF (CLPALL(DEV)) GOTO 200
+C
+C ensure that our fill area attributes are up to date
+	IF (UPFA(DEV)) CALL GUPFA(DEV)
+C
+C if it's anything other than solid fill, let GFA do it
+	IF (CFASTY(DEV).NE.GSOLID) THEN
+	   X(1) = PX(1)
+	   Y(1) = PY(1)
+	   X(3) = PX(2)
+	   Y(3) = PY(2)
+	   X(2) = X(1)
+	   Y(2) = Y(3)
+	   X(4) = X(3)
+	   Y(4) = Y(1)
+C
+C deactivate other workstations
+	   DO 5 I=1,WSMAX
+	      SAVACT(I) = WSACT(I)
+	      IF (I.NE.DEV) WSACT(I) = .FALSE.
+5	   CONTINUE
+	   CALL GFA(4,X,Y)
+C
+C restore activations
+	   DO 6 I=1,WSMAX
+	      WSACT(I) = SAVACT(I)
+6	   CONTINUE
+	   GOTO 200
+	ENDIF
+C
+C Convert world positions to device coordinates
+	CALL GKSW2D(WKIDS(DEV),PX(1),PY(1),X(1),Y(1))
+	CALL GKSW2D(WKIDS(DEV),PX(2),PY(2),X(3),Y(3))
+	X(2) = X(1)
+	Y(2) = Y(3)
+	X(4) = X(3)
+	Y(4) = Y(1)
+C
+C If writing to all planes, use COPY mode (which we set by default),
+	IF ((PSEL(DEV).AND.USED_PLANESB(1,DEV)).EQ.
+     &			   USED_PLANESB(1,DEV)) THEN
+	   CALL UIS$SET_WRITING_INDEX(DCB(DEV),4,4,CCOLI(DEV))
+	   CALL UIS$PLOT_ARRAY(DCB(DEV),4,4,X,Y)
+	ELSE
+C
+C If not writing to all planes, use BIS mode to just set the
+C desired bits, then invert the selected bits and use BIC mode
+C to clear them
+	   IF (CCOLI(DEV).NE.0) THEN
+	      CALL UIS$SET_WRITING_INDEX(DCB(DEV),4,4,CCOLI(DEV))
+	      CALL UIS$SET_WRITING_MODE(DCB(DEV),4,4,UIS$C_MODE_BIS)
+	      CALL UIS$PLOT_ARRAY(DCB(DEV),4,4,X,Y)
+	   ENDIF
+C
+	   NCOLI = (.NOT.CCOLI(DEV)).AND.PSEL(DEV).AND.USED_PLANES(DEV)
+	   IF (NCOLI.NE.0) THEN
+	      IF (NCOLI.GT.MAXCOL(DEV)) THEN
+	         NCOLI = (.NOT.NCOLI).AND.USED_PLANES(DEV)
+	         CALL UIS$SET_WRITING_MODE(DCB(DEV),4,4,UIS$C_MODE_BICN)
+	      ELSE
+	         CALL UIS$SET_WRITING_MODE(DCB(DEV),4,4,UIS$C_MODE_BIC)
+	      ENDIF
+	      CALL UIS$SET_WRITING_INDEX(DCB(DEV),4,4,NCOLI)
+	      CALL UIS$PLOT_ARRAY(DCB(DEV),4,4,X,Y)
+	   ENDIF
+	ENDIF
+C
+200	CONTINUE
+	RETURN
+	END
+C
+	SUBROUTINE	LSG_PLANE_SELECT(WKID,MASK)
+C
+**	MODULE	LSG_PLANE_SELECT
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Set plane selection mask
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:UISUSRDEF'
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	BYTE	MASK			! plane selection mask
+C
+C workspace
+	INTEGER DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	PSEL(DEV) = MASK
+C
+C If all planes selected, then set our writing modes back to normal
+	IF ((PSEL(DEV).AND.USED_PLANESB(1,DEV)).EQ.
+     &			   USED_PLANESB(1,DEV)) THEN
+	   CALL UIS$SET_WRITING_MODE(DCB(DEV),1,1,UIS$C_MODE_OVER)!line
+	   CALL UIS$SET_WRITING_MODE(DCB(DEV),3,3,UIS$C_MODE_OVER)!text
+	   CALL UIS$SET_WRITING_MODE(DCB(DEV),4,4,UIS$C_MODE_COPY)!area
+	   CALL UIS$SET_WRITING_MODE(DCB(DEV),5,5,UIS$C_MODE_COPY)!pixel
+	ENDIF
+	UPLIN(DEV) = .TRUE.		! need to update line attributes
+	UPFA(DEV) = .TRUE.		! and areas
+9999	RETURN
+	END
+C
+	SUBROUTINE	LSG_PLANE_OFFSET(WKID,OFFSET)
+C
+**	MODULE	LSG_PLANE_OFFSET
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Specify bit offset (shift) for writing index
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	INTEGER	OFFSET			! plane offset
+C
+C workspace
+	INTEGER DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	POFF(DEV) = OFFSET
+	UPLIN(DEV) = .TRUE.		! need to update line attributes
+	UPFA(DEV) = .TRUE.		! and areas
+9999	RETURN
+	END
+C
+	SUBROUTINE	LSG_PACKING_MODE(WKID,MODE)
+C
+**	MODULE	LSG_PACKING_MODE
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Specify packing mode for pixel array (1 or 8 for bit/byte)
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	INTEGER	MODE			! packing mode
+C
+C workspace
+	INTEGER DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	IF (MODE.EQ.1.OR.MODE.EQ.8) PACK(DEV) = MODE
+9999	RETURN
+	END
+C
+	SUBROUTINE	LSG_ROTATION_MODE(WKID,ROT)
+C
+**	MODULE	LSG_ROTATION_MODE
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Set rotation mode for pixel arrays
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	INTEGER		WKID			! unused
+	LOGICAL*1	ROT			! rotate?
+C
+C workspace
+	INTEGER DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	PIXROT(DEV) = ROT
+9999	RETURN
+	END
+C
+	SUBROUTINE	LSG_PLANE_VISIBLE(WKID,MASK)
+C
+**	MODULE	LSG_PLANE_VISIBLE
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Set plane visibility mask
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	BYTE	MASK			! visibility mask
+C
+C workspace
+	INTEGER	CI,NCI,COL
+	INTEGER DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	PVIS(DEV) = MASK
+C
+	IF ((PVIS(DEV).AND.USED_PLANESB(1,DEV)).EQ.
+     &			   USED_PLANESB(1,DEV)) THEN ! all visible
+	   CALL UIS$SET_COLORS(	DCB(DEV),0,MAXCOL(DEV)+1,
+     &		RGB(0,1,1,DEV),RGB(0,2,1,DEV),RGB(0,3,1,DEV))
+	ELSE
+	   DO 20 CI=0,MAXCOL(DEV)
+	      NCI = CI.AND.PVIS(DEV).AND.USED_PLANES(DEV)
+	      DO 10 COL=1,3
+	         RGB(CI,COL,2,DEV) = RGB(NCI,COL,1,DEV)
+10	      CONTINUE
+20	   CONTINUE
+	   CALL UIS$SET_COLORS(	DCB(DEV),0,MAXCOL(DEV)+1,RGB(0,1,2,DEV),
+     &		RGB(0,2,2,DEV),RGB(0,3,2,DEV))
+	ENDIF
+9999	RETURN
+	END
+C
+	SUBROUTINE	LSG_ZOOM_IMAGE(WKID,PX,PY,ZF)
+C
+**	MODULE	LSG_ZOOM_IMAGE
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Zoom image
+C
+	IMPLICIT NONE
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	REAL	PX,PY			! position (w.c.)
+	INTEGER	ZF			! zoom factor
+C
+	RETURN
+	END
+C
+	SUBROUTINE	LSG_SET_CURSOR(WKID,PX,PY,ON)
+C
+**	MODULE	LSG_SET_CURSOR
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Set cursor position and visibility
+C
+	IMPLICIT NONE
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	REAL	PX,PY			! position (w.c.)
+	LOGICAL*1	ON		! visible?
+C
+	CALL GUIS_RFSTOP
+	CALL GUIS_CSWT(PX,PY)
+	CALL GUIS_CURSEL(0,ON,.FALSE.)	! small, ON, non-blinking
+	IF (ON) CALL GUIS_REFRSH
+C
+	RETURN
+	END

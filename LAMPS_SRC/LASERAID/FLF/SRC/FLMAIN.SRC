@@ -1,0 +1,432 @@
+	PROGRAM LASERAID
+C
+***	MODULE	LASERAID
+***	IDENT	23JL86
+C
+C This dummy root is to reduce the time needed to initialise DEBUG.
+C
+	CALL FLMAIN
+	END
+C
+	SUBROUTINE FLMAIN
+C
+***	MODULE	FLMAIN
+***	IDENT	23JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Authors: Martin Fulford & Paul Hardy
+C
+CMOD	Don't do fid check if NFIDNF is zero	 DM	16-Jul-1986
+CMOD	PAINT has extra argument		 DM	15-Jul-1986
+CMOD	Corner points are now control points	 DM	14-Jul-1986
+CMOD	Converged; tidied			 DM	30-May-1986
+CMOD	TH entry no longer output by FLMAIN	 DM	29-Apr-1986
+CMOD	HOLE/WOOD question now INSIDE/OUTSIDE	 DM	29-Nov-1985
+CMOD	Inverse polarity line sets bit in FS	 DM	07-Nov-1985
+CMOD	PNTPND added; MIDDLE removed; tidied	 DM	18-Oct-1985
+CMOD	Clear screen before WINDUP if Tek4105	 DM	11-Sep-1985
+CMOD	Light FB8 (GNF) if JNCTN; tidied	 DM	10-Sep-1985
+CMOD
+CMOD	*** OLD UPDATES NOW IN FLF.UPD ***	 DM	30-May-1986
+CMOD
+CMOD	Created					MCF/PGH	       1976
+C
+C LASERAID main program.
+C Waits for selection of new feature or exit.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C parameters:
+***	PARAMETER/PARAMS/
+C
+	INTEGER*4 SS$_NORMAL
+	EXTERNAL  SS$_NORMAL
+C
+C common blocks:
+***	COMMON/DIGC/
+***	COMMON/EXPC/
+***	COMMON/GUIDE/
+***	COMMON/IFFHAN/
+***	COMMON/IFFJUN/
+***	COMMON/JCRCOM/
+***	COMMON/JNCLST/
+***	COMMON/LKFOLL/
+***	COMMON/LKPARM/
+***	COMMON/MAINC/
+***	COMMON/MASTER/
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+***	COMMON/TERMNL/
+***	COMMON/TIMING/
+***	COMMON/TXTC/
+C
+C workspace:
+	INTEGER   CWD			! command word
+	INTEGER   EC,RC			! entry and return codes
+	INTEGER   FCODE			! feature code set by LINK
+	INTEGER   III,JJJ		! general
+	INTEGER   IECODE,IELEN		! returns from IFFNXT
+	INTEGER   ISQ			! internal sequence number
+	INTEGER   ISTAT(4)		! feature status
+	INTEGER   NNF      		! feature numbers for fid check
+	INTEGER   NOUGHT		! for coercion
+	INTEGER   NUMABO          	! no of successive FB16 presses
+	INTEGER*4 IERR
+	INTEGER*4 LFPOS			! position to paint-out from
+	INTEGER*4 LSTPOS		! start of current feature
+	INTEGER*4 LSTFS         	! position of last FS
+	LOGICAL*1 FIDERR        	! TRUE if fid check failed
+	LOGICAL*1 ICH			! one character
+C
+C functions:
+	INTEGER   CLKWIS
+	INTEGER   EXPAND
+	INTEGER   PRECOM
+	INTEGER   RDCOMM
+	INTEGER*4 EXCEPT		! exception handler
+	INTEGER*4 LDWNDP		! and for LDLIB
+	INTEGER*4 SYS$SETPRI
+	LOGICAL   PEND
+	LOGICAL	  RDREAL
+C
+	EXTERNAL  EXCEPT
+	EXTERNAL  LDWNDP
+C
+C command table:
+	INTEGER  HOLECM
+	EXTERNAL HOLECM
+C
+C data:
+	DATA NOUGHT/0/
+	DATA NUMABO/0/,NNF/0/
+C
+C ......................................................................
+C
+	STARTM=SECNDS(0.0)
+	CALL NEWTIM(TSTART)
+	CALL NEWTIM(TINIT)
+C
+C nasty way of getting the current priority.
+	IERR=SYS$SETPRI(,,%VAL(4),DPRIO)
+	IF (IERR.NE.%LOC(SS$_NORMAL)) CALL LIB$SIGNAL(%VAL(IERR))
+	IERR=SYS$SETPRI(,,%VAL(DPRIO),)
+	IF (IERR.NE.%LOC(SS$_NORMAL)) CALL LIB$SIGNAL(%VAL(IERR))
+	WPRIO=DPRIO			! so we don't go to 0 in INIT
+	FPRIO=DPRIO
+C
+C set up a condition handler ...
+	CALL LIB$ESTABLISH(EXCEPT)
+C
+C and an error handler for LDLIB.
+	CALL LDERDV(LDWNDP)
+C
+C initialise IFF & Fastrak/Lasertrak.
+	CALL INIT
+	CALL LINK(1,RC,.FALSE.,FCODE)	! initialise
+C
+C get sensible values for priorities.
+	DO 10 III=1,3
+	  IF ((PRIOAR(III).LE.0).OR.
+     &        (PRIOAR(III).GT.10)) PRIOAR(III)=DPRIO
+10	CONTINUE
+C
+C set current priority to FPRIO.
+C this either requires a SYSUAF priority of FPRIO or greater,
+C or ALTPRI privilege.
+	IERR=SYS$SETPRI(,,%VAL(FPRIO),)	! pidadr,prcnam,pri,prvpri
+	IF (IERR.NE.%LOC(SS$_NORMAL)) CALL LIB$SIGNAL(%VAL(IERR))
+	CALL WRITEF('Initialisation completed')
+	CALL NEWTIM(TMAIN)		! timing main now
+C
+C abort button - reset
+20	NUMABO=NUMABO+1
+	IF (NUMABO.GE.2) CALL CSWT(0.0,0.0)
+	JCRPOI=0
+	ITGUD=-1
+C
+C general reset
+30	PAINTO=.FALSE.
+	REVRSE=.FALSE.
+	ISTAT(3)=0
+	ISTAT(4)=0
+	IF (WIZARD.GT.0) WIZARD=0
+40	DCPTR=-1
+	TXTPTR=-2
+C
+C redisplay
+50	CALL FBWT16("160377)
+	IF (ITGUD.LT.0) GO TO 60
+	CALL FBWT16("160210)
+	CALL FBWT(ITGUD,1)
+60	CALL FBWT(9,POSUPR+NOUGHT)
+	CALL FBWT(10,DOFIND+NOUGHT)
+	CALL FBWT(11,OSSQU+NOUGHT)
+	CALL FBWT(12,NOUGHT-REVRSE)
+	CALL FBWT(13,OPEN+NOUGHT)
+C
+	IF (.NOT.HADLDI) GO TO 160
+	CALL DISMOD(1)
+	CALL CURSOR
+C
+C create character string to right of cursor.
+C if no corner points or layer selected display "?"
+	IF (HTMODE) 70,80,130
+C
+C feature number.
+70	IF (OVRNUM.LE.0) GO TO 140
+	CALL EXPAND('  %N',FNUM(OVRNUM))
+	GO TO 150
+C
+C display height (real number).
+80	IF (.NOT.HADHGT.OR.OVRNUM.LE.0) GO TO 140
+	CALL EXPAND('  %F0.7',HTREAL+SIGN(HTREAL*1.0E-7,HTREAL))
+C
+C don't display more than is necessary/justified.
+	III=2
+	JJJ=0
+90	III=III + 1			! III is position in EXPBUF
+	   ICH=EXPBUF(III)
+	   IF (ICH.EQ.'-') GO TO 90	! ignore sign
+	   IF (ICH.EQ.'.') GO TO 100
+	   JJJ=JJJ + 1			! JJJ is number of sig. figs
+	   IF (JJJ.LE.7) GO TO 90	! (max is 7 for real*4)
+	   EXPBUF(III)='0'		! don't output random gunk
+	GO TO 90
+C
+C found decimal point - deal with decimals.
+100	III=III + 1
+	   JJJ=JJJ + 1
+	   IF (JJJ.GT.7) GO TO 110	! check we're still significant
+	   IF (III.EQ.EXPLEN) GO TO 120
+	GO TO 100
+110	EXPBUF(III)='0'			! don't output random gunk
+C
+C now lose trailing zeros (III points to last character).
+120	III=III - 1
+	IF (EXPBUF(III+1).EQ.'0'.AND.EXPBUF(III).NE.'.') GO TO 120
+	EXPBUF(III+2)=0			! zero terminate string
+	GO TO 150
+C
+C display height (integer).
+130	IF (.NOT.HADHGT.OR.OVRNUM.LE.0) GO TO 140
+	CALL EXPAND('  %^L%N',HTLONG)
+	GO TO 150
+C
+140	CALL EXPAND('  ?')
+C
+C create the character string.
+150	CALL CHARZ(EXPBUF)
+C
+C get next command.
+160	IF (.NOT.USEGUD) GO TO 190
+C
+C pre-digitised command wanted.
+170	IF (.NOT.GUDOPN) GO TO 180	! but not available
+	CWD=PRECOM()
+	IF (CWD.GT.0) GO TO 210
+	GO TO (40,190,40),CWD+3
+C
+C no guidance file open.
+180	FASTEF=.FALSE.
+	USEGUD=.FALSE.
+	ITGUD =-1
+C
+C read next command from FBs or KB.
+190	CWD=RDCOMM(MAINCM(1),.FALSE.)
+	IF (CWD) 220,200,210
+C
+C end of args or error.
+200	IF (DCPTR.LT.0) GO TO 190
+	USEGUD=.FALSE.
+	GO TO 30
+C
+C despatch table for commands.
+210	IF (CWD.NE.16) NUMABO=0
+	IF (CWD.GT.16) GO TO 260
+	GO TO (280,280,280,270,
+     &         280,280,280,260,
+     &         260,260,260,260,
+     &         260,260,260, 20),CWD
+	USEGUD=.FALSE.
+	GO TO 30				! strange command
+C
+C just number- treat as 'NF' or HTD/HTI command.
+220	IF (HTMODE) 230,240,250
+230	CWD=FLMNF
+	GO TO 260
+240	CWD=FLMHTD
+	CALL BSLN			    ! 'rewind' the line
+	NUMINT=0
+	NUMREL=0
+	IF (.NOT.RDREAL(REALA1)) NUMREL=1   ! re-read number as a real
+	GO TO 260
+250	CWD=FLMHTI
+	NUMINT=1
+C
+C process command with a routine (enables overlaying).
+260	IF (CWD.GE.FLMLOC) GO TO (430,440,170),CWD-FLMLOC+1
+	IF (CWD.GE.FLMPNT.AND.CWD.LT.FLMMCF) GO TO 270
+	CALL FLSUB(CWD)
+	GO TO 50
+C
+C deal with paint-out separately.
+270	CALL FPAINT(CWD)
+	GO TO 50
+C
+C new feature selected.
+280	CONTINUE
+C
+**	IF RASTER
+	GO TO 30
+**	ENDC
+C
+285	IF (PEND(3)) GO TO 50
+	ITYPE=ITFTAB(CWD)		! set up for track type
+	LTYPE=TYFTAB(CWD)
+	ELF=-1				! enable auto-setting of ELF
+	CALL PARIO(4,LTYPE)
+	IF (ELF.LT.0) ELF=IMOD.XOR.1
+C
+C mark position of start of feature, and initialise /JNCLST/.
+	IF (POUTD) LSTPOS=LPOSE		! save position for paint out
+	LPOSNF=LPOSW
+	JLNJP=0
+	NJUNC=0
+C
+	ISQ=0				! create NF entry
+	CALL IFFNF(FNUM(OVRNUM),ISQ)
+	LSTFS=LPOSE
+C
+	ISTAT(1)=ITYPE			! create FS entry
+	ISTAT(2)=0
+	IF (.NOT.ELF) ISTAT(2)=2	! line mode
+	IF (INVPOL) ISTAT(2)=ISTAT(2).OR.64
+	CALL IFFFS(ISTAT)
+	FCODE=0
+C
+	IF (SACSET) CALL IFFAC(SACTYP,SACVAL,SACTXT)	! standing AC ?
+	IF (HTMODE) 310,300,290				! height AC ?
+290	IF (HADHGT) CALL IFFAC(HTMODE+1,HTLONG)
+	GO TO 310
+300	IF (HADHGT) CALL IFFAC(3,HTREAL)
+310	IF (CWD.EQ.6) GO TO 320   	! point feature
+C
+C line or small feature.
+	THPEND=.TRUE.			! TH still to be output
+	III=3				! LINK's command - normal or ...
+	IF (CWD.EQ.7) III=5		! ... small feature
+	CALL NEWTIM(THELP)  		! time help from now on
+	CALL LINK(III,RC,DOFIND,FCODE)  ! now follow it
+	CALL NEWTIM(TMAIN)  		! back to main
+	GO TO 330
+C
+C point feature.
+320	RC=CWD
+	RSEOFF(X)=0			! in case last thing was a jnctn
+	RSEOFF(Y)=0
+	CALL NEWTIM(TPOINT)
+	CALL POINT(RC)
+	CALL NEWTIM(TMAIN)
+C
+C did we get anything ?
+330	IF (RC.GE.0) GO TO 340
+C
+C rejected.
+	CALL IFFDEL
+	EFPEND=.FALSE.
+	THPEND=.FALSE.
+	USEGUD=.FALSE.
+	IF (.NOT.BRIEF) CALL WRITEF('Abandoned')
+	GO TO 30
+C
+C check the fiducial if necessary.
+340	IF (PNTPND.EQ.0) NNF=NNF + 1
+	FIDERR=.FALSE.
+	IF (NFIDNF.EQ.0.OR.NNF.LT.NFIDNF) GO TO 350
+	NNF=0
+	CALL NEWTIM(TCORN)
+	CALL CHKFID(FIDERR,.FALSE.)
+	CALL NEWTIM(TMAIN)
+	IF (.NOT.FIDERR) GO TO 350
+	CALL WRITEF(
+     &'Type "CAN" to delete feature, and re-measure control points%C',7)
+	CPDONE=.FALSE.			! force re-measure
+350	IF (POUTD) LFPOS=LSTPOS
+	POUTD=.NOT.POSUPR
+	IF (POSUPR.OR.FIDERR) GO TO 360
+C
+C accepted, so paint out.
+	CALL NEWTIM(TPAINT)
+	CALL PAINT(LFPOS,.FALSE.,THKPNT,.FALSE.,0.0,NHATCH,.FALSE.)
+	CALL NEWTIM(TMAIN)
+C
+C re-write feature status.
+360	ISTAT(2)=ISTAT(2).OR.RC
+	IF (FCODE.NE.0) ISTAT(1)=FCODE		! FC command used ?
+C
+	IF (ELF.AND..NOT.OPEN) THEN		! get dirn of closed ftr
+	   CALL IFFPKE(IECODE,IELEN,LSTFS)	! (for CLKWIS)
+	   III=CLKWIS()
+C
+C choose polarity, and try to decide.
+	   REVRSE=(III.GT.0).XOR.(TRKPOL.LT.0)
+	   IF (III.NE.0.AND.TRKPOL.NE.0) GO TO 390
+C
+C couldn't decide - ask operator.
+370	   CALL WRITEF(' ')
+	   CALL TXWT(EXPBUF,EXPAND('Inside or Outside ? '))
+	   CALL FBWT16(0)
+380	   CWD=RDCOMM(HOLECM,.FALSE.)
+	   REVRSE=CWD.EQ.1
+	   IF (CWD.GT.0) GO TO 390		! valid answer
+	   IF (DCPTR.LT.0) GO TO 380		! blank line
+	   GO TO 370				! error
+C
+C here with polarity decided.
+390	   IF (REVRSE) CALL WRITEF('%CReversed feature',7)
+	ENDIF
+	IF (REVRSE.AND.(JLNJP.GT.0)) THEN
+	   CALL WRITEF('*** Cannot reverse junction feature',7)
+	   REVRSE=.FALSE.
+	ENDIF
+C
+C patch feature status.
+	IF (REVRSE) ISTAT(2)=ISTAT(2).OR.4
+	IF (PAINTO) ISTAT(2)=ISTAT(2).OR.16
+	IF (OSSQU)  ISTAT(2)=ISTAT(2).OR.32
+	IF (POSUPR) ISTAT(2)=ISTAT(2).OR.TOPBIT
+	CALL IFFPKE(IECODE,IELEN,LSTFS)
+	CALL EIHWI(ISTAT,4,1)
+C
+C tidy up.
+	EFPEND=.TRUE.
+	PNDNUM=FNUM(OVRNUM)
+C
+C prepare for next feature.
+	FNUM(OVRNUM)=FNUM(OVRNUM)+AUTNFI
+	IF (HTMODE) 420,400,410
+400	HTREAL=HTREAL + AUTHGT
+	GO TO 420
+410	HTLONG=HTLONG + INT(AUTHGT)
+C
+420	ITGUD=-1
+	IF (.NOT.FIDERR) USEGUD=FASTEF
+	IF (PNTPND.EQ.0) GO TO 30	! any point features pending ?
+	CWD=6				! yes - dummy up a POInt command
+	GO TO 280
+C
+C enter system adjust mode.
+430	CALL NEWTIM(THELP)
+	CALL LINK(4,RC,.FALSE.,FCODE)
+	CALL NEWTIM(TMAIN)
+	GO TO 30
+C
+C save at End Of Session.
+440	IF (TERTYP.EQ.1) CALL TXCLR	! clear the Tek screen
+	CALL WINDUP
+C
+	RETURN				! (but we never do !)
+	END

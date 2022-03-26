@@ -1,0 +1,314 @@
+	SUBROUTINE DOPARA
+C
+***	IDENT   09MY96
+***	MODULE  DOPARA
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written                                 RWR	 Oct-1987
+C
+C	LITES2 cartographic editor PARAGRAPH command.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CHARS/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNFRT:FRTTRI/
+***	COMMON/CMN:CTXS/
+***	COMMON/CMN:DEFINE/
+***	COMMON/CMN:DOUT/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:MODIFY/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:PARA/
+***	COMMON/CMN:STATE/
+C
+C w/s
+	EXTERNAL	MOAN,NASTY
+C
+	REAL		SAV_JSTPROP
+	INTEGER		LOCAT		! text location point
+	INTEGER		THISLOC
+	REAL		X,XX,Y
+	REAL		AUX(AUXLEN)	! auxiliary array
+	REAL		PREVXY(2),THISXY(2)
+	REAL		LLXY(2),LRXY(2)
+	REAL		WIDTH
+	REAL		HEIGHT
+C
+C functions called
+	LOGICAL	THISCTX
+	LOGICAL	NEXTCTX
+	LOGICAL	COIDLE
+	LOGICAL	GENAUX
+	LOGICAL	PARAJUST
+	LOGICAL	PARAFILL
+	LOGICAL	PARANORM
+	LOGICAL NEWPARALINE
+C
+C set JSTPROP to 0, as we want GENAUX to calculate the true length
+C of texts. This is reset at the end of the routine
+	SAV_JSTPROP = JSTPROP
+	JSTPROP = 0
+	OVERHANG = .FALSE.
+C
+C also want true size of text for calculating positions (rather than
+C size on screen)
+	IGNORE_BIT_14 = .TRUE.	
+C
+C don't operate on symbols
+	IF (SINDEX.EQ.STATE_MODIFY.AND.COIPAK(PAKGT).NE.TEXTYP) THEN
+	   CALL MSGCMD(MOAN,MSG_CMDONLYTEXT)
+	   GOTO 998
+	ENDIF
+C
+C only valid if COMOPT has been enabled
+C
+	IF (.NOT.COMOPT) THEN
+	   CALL MSGCMD(MOAN,MSG_ONLYWITHCOMP)
+	   GOTO 998
+	ENDIF
+C
+C only allow positive distances
+	IF (DNREA.GT.0.AND.DREALS(1).LE.0.0) THEN
+	   CALL MOAN(MSG_NEGARGS)
+	   GOTO 998
+	ENDIF
+C
+C and positive 'spaces' on PARA NORM
+	IF (DNINT.GT.0.AND.DINTS(1).LT.0) THEN
+	   CALL MOAN(MSG_NEGARGS)
+	   GOTO 998
+	ENDIF
+C
+C if not in MODIFY state, get into it
+	IF (SINDEX.EQ.STATE_TEXT) THEN
+	   IF (COIDLE(.TRUE.)) GOTO 998		! (deleting original)
+	ENDIF
+C
+C        INITALISE
+C===============================
+C 
+C make sure PARA_CTXD is empty
+	CALL VIOCLR(PARA_CTXD,CTXDLEN*4)
+C
+C get first CTX in COICTXD, and fill CTXBUF
+	COICTXD(CTXD_CUR) = COICTXD(CTXD_FSTCTX)
+	IF (THISCTX(COICTXD)) THEN
+	   CALL NASTY(MSG_INTERNALERROR)
+	   GOTO 998
+	ENDIF
+C
+C get current locating coordinate, CC ,TH,
+C
+	PARA_CURRXY(1) = CTXBUFR(CTX_L_X)
+	PARA_CURRXY(2) = CTXBUFR(CTX_L_Y)
+	PARA_CURRCC    = CTXBUFW(CTX_W_TS1)		! note: I*2
+	PARA_CURRSIZE  = CTXBUFR(CTX_L_AUX4)
+	PARA_CURRTH    = CTXBUFL(CTX_L_TH)
+	PARA_DUMPAK(PAKFC) = PARA_CURRCC
+	PARA_LINE_HEIGHT = CTXBUFR(CTX_L_AUX4)
+C
+C angle of text
+	PARA_SINANG = CTXBUFR(CTX_L_AUX3)
+	PARA_COSANG = CTXBUFR(CTX_L_AUX2)
+C
+	LOCAT     = CTXBUFW(CTX_W_TS3).AND.'F'X	! get text location
+	IF (LOCAT.GT.8) LOCAT=0			! in range 0-8
+	PARA_DX=LOCAT/3				! integer division
+	PARA_DY=MOD(LOCAT,3)
+C
+C if requiring heights, get height of first subtext
+	PARA_Z_REQD = ZOPT
+	IF (ZOPT) CALL GETZ_LIST(PARA_Z_VALUE,CTXBUFL(CTX_L_ATTR))
+C
+C work out length of first line in paragraph
+C
+C first save some values
+	PREVXY(1) = CTXBUFR(CTX_L_X)
+	PREVXY(2) = CTXBUFR(CTX_L_Y)	
+	HEIGHT = CTXBUFR(CTX_L_AUX4)
+	WIDTH  = CTXBUFR(CTX_L_AUX6) - CTXBUFR(CTX_L_AUX5)
+C
+C now work out LL of first text
+	X = WIDTH/2.0*PARA_DX
+	Y = HEIGHT/2.0*PARA_DY
+	LLXY(1) = PREVXY(1) - X*PARA_COSANG + Y*PARA_SINANG
+	LLXY(2) = PREVXY(2) - X*PARA_SINANG - Y*PARA_COSANG
+C
+	XX = X
+C
+C now look at each subtext, till end of line is reached, or locating
+C point changes
+10	CONTINUE
+	IF (NEXTCTX(COICTXD,.FALSE.)) GOTO 20	! last ctx
+	THISXY(1) = CTXBUFR(CTX_L_X)
+	THISXY(2) = CTXBUFR(CTX_L_Y)
+	THISLOC = CTXBUFW(CTX_W_TS3).AND.'F'X
+	IF (NEWPARALINE(PREVXY,THISXY,WIDTH)) GOTO 20	! new line
+	IF (THISLOC.NE.LOCAT) GOTO 20		! changed location
+	PREVXY(1) = THISXY(1)
+	PREVXY(2) = THISXY(2)
+	HEIGHT = CTXBUFR(CTX_L_AUX4)
+	WIDTH  = CTXBUFR(CTX_L_AUX6) - CTXBUFR(CTX_L_AUX5)
+C
+C feature has not yet been genauxed with 0 justification, so add it
+C manually
+	WIDTH  = WIDTH + SIGN(SAV_JSTPROP,WIDTH)*HEIGHT
+C
+C and any overhang
+	IF (FRTSC.LT.0) THEN
+	   WIDTH = WIDTH - ABS(TRIA2)*HEIGHT
+	ENDIF
+	GOTO 10
+C
+C now we can calculate LR of first line of paragraph
+20	CONTINUE
+	X = WIDTH/2.0*(2-PARA_DX)
+	Y = HEIGHT/2.0*PARA_DY
+	LRXY(1) = PREVXY(1) + X*PARA_COSANG + Y*PARA_SINANG
+	LRXY(2) = PREVXY(2) + X*PARA_SINANG - Y*PARA_COSANG
+	WIDTH = (LRXY(1)-LLXY(1))*PARA_COSANG +
+     &		(LRXY(2)-LLXY(2))*PARA_SINANG
+C
+C what is distance of virtual locating point of line from LL
+C
+	X = WIDTH/2.0*PARA_DX
+C
+C offset is difference from this and same for first subtext
+	PARA_OFFDST_X = X - XX
+C
+C get back to first CTX
+	COICTXD(CTXD_CUR) = COICTXD(CTXD_FSTCTX)
+	IF (THISCTX(COICTXD)) THEN
+	   CALL NASTY(MSG_INTERNALERROR)
+	   GOTO 998
+	ENDIF
+C
+C get rid of any point attributes
+	CALL DELDEF(CTXBUFL(CTX_L_ATTR))
+C
+C get width to fill to (in IFF units) - for PARARGRAPH JUSTIFY
+C and PARARGRAPH FILL ONLY
+	IF (DSECN.EQ.1.OR.DSECN.EQ.2) THEN
+	   IF (DNREA.GT.0) THEN
+	      PARA_FILL_WIDTH = DREALS(1)
+	      CALL TSTUNT(.FALSE.,1,PARA_FILL_WIDTH)	! expecting mms
+	      PARA_FILL_WIDTH = PARA_FILL_WIDTH * SCLFRT
+	   ELSE
+	      PARA_FILL_WIDTH = ABS(WIDTH)
+C
+C add a bit to avoid rounding error with first sub-text (1/10th of
+C character width), if filling
+	      IF (DSECN.EQ.1) 
+     &	         PARA_FILL_WIDTH = PARA_FILL_WIDTH + PARA_CURRSIZE*0.1
+	   ENDIF
+	ENDIF
+C
+C initialise line counts
+	PARA_LINE_ADDR = 0			! don't have a CTX yet
+	PARA_LINE_LEN  = 0.0
+C
+	PARA_FIRST_LINE = .TRUE.		! use current location
+C
+C offset distance is height of first line, plus a proportion
+	PARA_OFFDST_Y = PARA_LINE_HEIGHT + ABS(OFFPROP)*PARA_LINE_HEIGHT
+	IF (OFFPROP.LT.0)
+     &	            PARA_OFFDST_Y = -PARA_OFFDST_Y! move above original
+C
+C get the length of a blank for this TCC and size
+C NOTE: this will be constant for the whole paragraph
+	IF (GENAUX(1,PARA_CURRXY,		! XY not used
+     &	          AUX,
+     &	          BLANK,
+     &	          CTXBUFL(CTX_L_RO),
+     &	          PARA_CURRTH,
+     &	          PARA_DUMPAK,
+     &	          %VAL(COICTXD(CTXD_CUR)+CTX_O_TS))) THEN
+	   CALL MOAN(MSG_FTABANDONED)
+	   CALL ABANDN
+	   GOTO 998
+	ENDIF
+	PARA_BLANK_LEN = AUX(MAXXI) - AUX(MINXI)
+C
+C*******************************************************************
+C
+C despatch on secondary command
+C
+	GOTO (100,200,300) DSECN
+C
+C Secondary command number out of range
+	CALL MSGCMD(NASTY,MSG_ERRSECIND)
+	GOTO 998
+C
+C==================================================================
+C
+C PARAGRAPH FILL
+C
+100	IF (PARAFILL()) THEN
+	   GOTO 998		! failure
+	ELSE
+	   GOTO 900
+	ENDIF
+C
+C==================================================================
+C
+C PARAGRAPH JUSTIFY
+C
+200	IF (PARAJUST(SAV_JSTPROP)) THEN
+	   GOTO 998		! failure
+	ELSE
+	   GOTO 900
+	ENDIF
+C
+C
+C==================================================================
+C
+C PARAGRAPH NORMAL
+C
+300	IF (DNINT.LE.0) DINTS(1) = 1
+	IF (PARANORM(DINTS(1))) THEN
+	   GOTO 998		! failure
+	ELSE
+	   GOTO 900
+	ENDIF
+C
+C==================================================================
+C
+C success exit
+900	CONTINUE
+C
+C now the whole text is in PARA_CTXD, copy it to COICTXD
+	CALL FREECTX(COICTXD)
+	CALL CPYPAK(CTXDLEN,PARA_CTXD,COICTXD)
+C
+C make first text home
+	COICTXD(CTXD_CUR) = COICTXD(CTXD_FSTCTX)
+	CALL THISCTX(COICTXD)		
+C
+C load COI variables, and update cursor
+	CALL LOADCOI(.TRUE.)
+C
+C not in subtext state any more
+	SUBTXT = .FALSE.
+	CALL VTSTAT				! update status line
+	MODMOD = .TRUE.				! update on screen
+	FLG_GEOCHANGE = .TRUE.			! geometrical change
+	GOTO 999
+C
+998	CALL IGNCMD
+C
+999	JSTPROP = SAV_JSTPROP
+	OVERHANG = .TRUE.
+	IGNORE_BIT_14 = .FALSE.
+	RETURN
+	END

@@ -1,0 +1,519 @@
+	SUBROUTINE FLUSH(ACTION)
+C
+***	MODULE	FLUSH
+***	IDENT	09JN94
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To sector (one ST's worth of) an item, points in COIXY(,2...)
+C
+C ACTION = 0 -> initialise (first call for every feature)
+C ACTION = 1 -> normal mid-feature call
+C ACTION = 2 -> terminate feature (must be final call)
+C
+C When a new pack is needed, ADDPAK(COIPAK,SECTOR) is called.
+C ACTION should be 1 for all except the last bit.
+C If OIDRAW in /OIIH/ is true, call STDRAW to draw the item
+C
+C If USEINP is true, then the IFF address of the ST concerned should
+C be in OIPST.
+C If false, then the position is taken from LPOSE, and the ST plus any
+C RO and TX entries are added to the file.
+C
+	IMPLICIT NONE
+C
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:GKSPAR/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:SECTOR/
+***	PARAMETER/CMN:PACK/
+C
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:SECMAP/
+***	COMMON/CMN:SEGMNT/
+***	COMMON/CMN:STRIKE/
+***	COMMON/CMN:WORKS/
+C
+C arguments
+	INTEGER		ACTION		! what to do
+C
+C functions called
+	INTEGER		SECTOR, LISECS, CISECS
+	LOGICAL		ADDPAK, FRTFND
+	INTEGER		GETARR
+	LOGICAL		GEOG_TRANS_ARRAY
+	LOGICAL		RUBISH
+	LOGICAL		TSTSEG
+C
+	EXTERNAL	DELPAK
+	EXTERNAL	FLUSH_SCANLINE
+C
+C w/s
+	INTEGER		IND		! index on COIXY for linear
+C					! sector counter for symbols
+	INTEGER		I,J		! loops
+	INTEGER		NSECS		! number of sectors passed thru
+	INTEGER		VRT		! vertex number
+	INTEGER		PST		! temporary ST pointer
+	REAL		LENGTH,HEIGHT	! of symbols and texts
+	REAL		SCOS, SSIN	! cos and sin of angle
+	REAL		X1,Y1,X2,Y2	! coords for text and symbols
+	REAL		DX,DY		! vector for text and symbols
+	REAL		XXYY(2,2)	! temporaries
+	LOGICAL*1	LAST		! ACTION=2 (final FLUSH)
+	LOGICAL*1	EMPTY		! no points passed to us?
+	INTEGER		SEC1,SEC2
+	INTEGER		DUMMY
+	INTEGER		IERR
+C
+C Is it an initialise call?
+	IF (ACTION.EQ.0) THEN
+	   COIFST = .TRUE.		! await first bit of feature
+	   COIIND = 1			! buffer empty
+	   COINATT = 0			! no attributes
+	   COIOVR = .FALSE.		! attributes not overflowed
+	   COILST = 0			! no points FLUSHed
+	   COIXY(1,1) = 1E38		! silly value for ADCORD
+	   SCAN_NUM_PTS = 0		! no points added to scan_polygon
+	   GOTO 9999
+	ENDIF
+C
+C Set local variable to indicate final FLUSH
+	LAST = (ACTION.EQ.2)
+C
+C If no points, then do nothing unless final FLUSH, in which case
+C duplicate the previous point, but set EMPTY to indicate that no ST
+C is to be produced.
+	EMPTY = .FALSE.
+	IF (COIIND.LT.2) THEN
+	   IF (.NOT.LAST) GOTO 9999	! really do nothing
+	   EMPTY = .TRUE.
+	   COIXY(1,2) = COIXY(1,1)
+	   COIXY(2,2) = COIXY(2,1)
+	   COIIND = 2
+	ENDIF
+C
+	IF (COIFST) THEN
+C
+C get a segment number (very simple for now) if not got already
+	   IF (COIPAK(PAKSEG).EQ.0) THEN
+	      SEGLST = SEGLST+1
+	      IF (SEGLST.GT.SEGFUL) THEN
+C
+C only treat this as an error if on a segmented display
+	         IF (TSTSEG()) THEN
+	            CALL MOAN(MSG_NOMORESEG)
+	            CALL LEARN(MSG_DONTUSESEG)
+	         ENDIF
+	         SEGLST = 1		! fix up for now
+	      ENDIF
+	      COIPAK(PAKSEG) = SEGLST
+	   ENDIF
+C
+C mark item not to be found in spiral search
+	   IF (FSHCTR) THEN		! use externally computed flag
+	      COIPAK(PAKFLG) = COIPAK(PAKFLG).OR.OTHFLG
+	   ELSE				! don't find ends again
+	      COIPAK(PAKFLG) = COIPAK(PAKFLG).OR.FINFLG
+	   ENDIF
+C
+C mark item as in segment store
+C unless called from IFFBDY, and primary screen suppressed (only
+C significant for segmented displays)
+	   IF (WKAC(1).OR.WKAC(2).AND.USESEG) THEN
+	      COIPAK(PAKFLG) = COIPAK(PAKFLG).OR.SEGFLG
+	   ENDIF
+C
+C open the segment
+	   IF (OIDRAW) CALL LCRSG(COIPAK)
+C
+C set the segment invisible, if we are creating a limbo feature
+	   IF (IAND(COIPAK(PAKFLG),LIMFLG).NE.0) THEN
+	      IF (OIDRAW) CALL LSVIS(COIPAK,GINVIS)
+C
+C and clear SEARCH LAST candidate for safety
+	      LASPAK = 0
+	   ENDIF
+C
+C ensure that first ST has a 'pen up' ENDS word
+	   OIENDS = IAND(OIENDS,NOT(1))
+	ENDIF
+C
+C Ensure that feature code set up
+	IF (FRTFND(COIPAK(PAKFC))) THEN
+	   CALL NASTY(MSG_BADCODE,COIPAK(PAKFC))
+	   CALL COLAPS(101)
+	   GOTO 9999
+	ENDIF
+C
+C select output map (even if not writing - to ensure current projection
+C parameters are set up)
+	CALL SELIF(COIPAK(PAKMAP))
+C
+C if flush was called from IFFBDY and we are doing transformations
+C on the fly - make a copy of the coordinates so that FLUCB can use
+C the untransformed coordinates, and then transform them into
+C LITES2 coordinate space
+	IF (FROM_IFFBDY .AND. DO_FLY_TRANS) THEN
+	   DO 2222, I = 2,COIIND
+	      COPY_COIXY(1,I) = COIXY(1,I)
+	      COPY_COIXY(2,I) = COIXY(2,I)
+2222	   CONTINUE
+	      IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,
+     &	                            CURR_PARAMS,CURR_UNIT,CURR_ORG,
+     &	                            LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                            LITES2UNIT,LITES2ORG,
+     &	                            COIIND-1,COIXY(1,2))) GOTO 9999
+	      IF (FRTARC.OR.FRTSYM) THEN
+	         CALL GENAUX(COIIND-1,COIXY(1,2),COIAUX,COIDSC,COIANG,
+     &	                     DUMMY,COIPAK,COIFS)
+C
+C check for points out of range
+	      ELSEIF (.NOT. RANGE_PROBLEM) THEN
+	         DO 2224, I = 2,COIIND
+	             IF (RUBISH(COIXY(1,I))) RANGE_PROBLEM = .TRUE.
+2224	         CONTINUE
+	      ENDIF
+	ENDIF
+C
+C draw feature if required
+	IF (OIDRAW) CALL STDRAW(
+     &		COIIND-1,COIXY(1,2),
+     &		COINATT,OIH_MAX_ATTR,COIATTC,COIATTV(1,2),
+     &		COIAUX,COIDSC,COIFST,LAST,OIENDS,OILOOP,COIPAK,COIFS)
+C
+	GOTO(100,200,200,200,200,100,700,700,700,700,100,90),FRTGT
+C
+C 12 - area
+C if sectoring the inside of fill areas, then add these points to
+C our polygon
+90	CONTINUE
+	IF (ENCOPT) THEN
+	   DO 92, I = 2,COIIND
+	      IF (SCAN_NUM_PTS .LT. SCAN_MAXPTS) THEN
+	         CALL CPYPAK(2,COIXY(1,I),
+     &	                     %VAL(SCAN_PTS_ADDR + SCAN_NUM_PTS*8))
+	         SCAN_NUM_PTS = SCAN_NUM_PTS + 1
+	      ENDIF
+92	   CONTINUE
+	ENDIF
+C
+C 1 - line segment
+C 6 - higher-order curve
+C 11 - symbol string
+C
+C The strategy here is that whenever the line changes sector, we add
+C packs for the sector it has left, and any it passes through, but NOT
+C YET for the one it has just landed in. The end one is only added
+C if LAST is TRUE.
+C
+C The first point of an ST is always in COIXY(,2), the first
+C element being used to preserve the last point of the previous one
+C
+100	IF (.NOT.USEINP) OIPST = LPOSE	! get address of ST
+	IND = 2
+	CALL PUTARR(LSTSEC,%VAL(SECTRS),1)	! don't rely on the SECTRS array
+	SEC2 = SECTOR(COIXY(1,2),COIXY(2,2))
+C***********fix up for now, force valid sector
+	IF (SEC2.LE.0.OR.SEC2.GT.TOPSEC) SEC2 = 1
+C***********
+	CALL PUTARR(SEC2,%VAL(SECTRS),2)
+C
+	IF (COIFST) THEN		! first FLUSH for this feature
+	   COIFST = .FALSE.
+C
+C shuffle down first sector
+	   CALL PUTARR(SEC2,%VAL(SECTRS),1)
+	   COIPAK(PAKFLG) = IOR(COIPAK(PAKFLG),FSTFLG)! first point flag
+	   COIPAK(PAKPST) = OIPST	! where ST will go
+	   COIPAK(PAKVRT) = 1
+	   GOTO 60
+	ENDIF
+C
+C Not first bit, so if our first point is in a different sector
+C to the one the last bit ended in, we may need to LISECS
+	IF (SEC2.NE.LSTSEC) THEN
+C
+C If this bit starts invisible or its a symbol string, no LISECS
+	   IF (IAND(OIENDS,1).EQ.0 .OR. FRTGT.EQ.STRTYP) GOTO 10
+C Visible, so we will need one or more packs pointing to the last
+C vertex of the previous ST, so...
+	   PST = LSTPST			! previous ST
+	   VRT = LSTVRT			! its last vertex
+	   GOTO 8			! go do LISECS
+	ENDIF
+C So if we get here, it isn't first bit, but sector hasn't
+C changed, so step on to next point
+	GOTO 60
+C
+C top of loop stepping through points
+5	SEC2 = SECTOR(COIXY(1,IND),COIXY(2,IND))
+C***********fix up for now, force valid sector
+	IF (SEC2.LE.0.OR.SEC2.GT.TOPSEC) SEC2 = 1
+C***********
+	CALL PUTARR(SEC2,%VAL(SECTRS),2)
+	IF (SEC2.EQ.GETARR(%VAL(SECTRS),1)) 
+     &	                        GOTO 60 !sector unchanged-step on
+	IF (FRTGT.EQ.STRTYP) GOTO 10
+C
+C Set up our pack stuff for a visible line
+	PST = OIPST			! where ST will go
+	VRT = IND-2			! offset of previous vertex
+8	NSECS=LISECS(COIXY(1,IND-1))
+C***********fix up for now, force valid sector
+	IF (NSECS.LE.0) THEN
+	   NSECS = 1
+	   CALL PUTARR(1,%VAL(SECTRS),1)
+	ENDIF
+C***********
+	GOTO 20
+C
+C here for invisible or symbol string
+10	NSECS = 2			! two sectors
+	PST = OIPST			! where ST will go
+	VRT = IND-1			! offset of this vertex
+C
+C do the first pack, with the old COIPAK values
+20	SEC1 = GETARR(%VAL(SECTRS),1)
+	IF (ADDPAK(COIPAK,SEC1)) GOTO 9998
+C
+C Now update the pack for any subsequent sectors
+	COIPAK(PAKFLG) = IAND(COIPAK(PAKFLG),NOT(FSTFLG)) ! clear flag
+	COIPAK(PAKPST) = PST
+	COIPAK(PAKVRT) = VRT
+C
+C ready to loop adding packs for our sectors - except last one
+	DO 50 I=2,NSECS-1
+	   IF (ADDPAK(COIPAK,GETARR(%VAL(SECTRS),I))) GOTO 9998
+50	CONTINUE
+C
+C remember last sector
+	CALL PUTARR(GETARR(%VAL(SECTRS),NSECS),%VAL(SECTRS),1)
+C
+C step on to next point
+60	IND = IND+1
+	IF (IND.LE.COIIND) GOTO 5	! loop
+C
+	LSTSEC = GETARR(%VAL(SECTRS),1)	! preserve for next call
+	LSTPST = OIPST			! last ST for next call
+	LSTVRT = COIIND-1		! last vertex for next call
+	COILST = COILST+LSTVRT		! total number of points
+	IF (EMPTY) COILST = COILST-1	! one less for empty CB
+C
+C preserve our last vertex in case it is needed for a LISECS
+C when FLUSH is next called
+	COIXY(1,1) = COIXY(1,COIIND)
+	COIXY(2,1) = COIXY(2,COIIND)
+C
+	IF (.NOT.USEINP.AND..NOT.EMPTY) CALL FLUCB	! flush CB entry
+C
+C Do last pack if required
+	IF (LAST) THEN
+C
+C if sectoring the inside of the fill areas, than scan the polygon
+C now. Note that the routine FLUSH_SCANLINE keeps LSTSEC up to date
+C and unsets the PST pointer in COIPAK
+C
+CMod1279 skip this if still first pack this feature (implies all area boundary
+C lay in one sector) PGH 17/8/93
+	   IF (FRTARE) THEN
+	      IF (ENCOPT.AND.(IAND(COIPAK(PAKFLG),FSTFLG).EQ.0)) THEN
+C
+C close polygon if necessary
+	         CALL CPYPAK(2,%VAL(SCAN_PTS_ADDR),XXYY(1,1))
+	         CALL CPYPAK(2,%VAL(SCAN_PTS_ADDR + (SCAN_NUM_PTS-1)*8),
+     &	                     XXYY(1,2))
+	         IF (XXYY(1,1).NE.XXYY(1,2).OR.
+     &               XXYY(2,1).NE.XXYY(2,2)) THEN
+	            IF (SCAN_NUM_PTS.LT.SCAN_MAXPTS)
+     &	                SCAN_NUM_PTS = SCAN_NUM_PTS + 1
+	            CALL CPYPAK(2,XXYY(1,1),
+     &	                     %VAL(SCAN_PTS_ADDR + (SCAN_NUM_PTS-1)*8))
+	         ENDIF
+C
+C set up anchor point (half way up a sector)
+	         XXYY(1,1) = XOFF
+	         XXYY(2,1) = YOFF + YSECTW/2.0
+	         CALL SCAN_POLYGON(SCAN_NUM_PTS,
+     &	                           %VAL(SCAN_PTS_ADDR),
+     &	                           %VAL(SCAN_SIDES_ADDR),
+     &	                           %VAL(SCAN_SIDPTR_ADDR),
+     &	                           SCAN_MAXSCT,
+     &	                           %VAL(SCAN_INTSCT_ADDR),
+     &	                           %VAL(SCAN_INTPTS_ADDR),
+     &	                           1,			! horizontal scan
+     &	                           YSECTW,
+     &	                           XXYY,		! anchor
+     &	                           FLUSH_SCANLINE,
+     &	                           IERR)		! ignore for now
+	      ENDIF
+	   ENDIF
+C
+	   COIPAK(PAKFLG) = IOR(COIPAK(PAKFLG),LSTFLG)	! last bit flag
+	   CALL ADDPAK(COIPAK,LSTSEC)
+	   GOTO 9998
+	ENDIF
+C
+	COIIND = 1			! reset fill index
+	GOTO 9998
+C
+C 2,3,4 and 5 - circles and arcs
+C
+200	CONTINUE
+	HADRO = .FALSE.			! don't want an RO
+	HADTX = .FALSE.			! or a TX
+	IND = CISECS(COIAUX,%VAL(VSECS))! number of sectors
+	GOTO 1045			! output the packs
+C
+C 7,8,9 and 10 - symbols and texts
+700	CONTINUE
+C
+C insert sector of defining point
+	IND = 0			! no entries in VSECS yet
+	CALL ADDSN(%VAL(VSECS),IND,SECTOR(COIXY(1,2),COIXY(2,2)))
+	SCOS = COIAUX(COSI)
+	SSIN = COIAUX(SINI)
+	LENGTH = COIAUX(MAXXI) - COIAUX(MINXI)
+	HEIGHT = COIAUX(MAXYI) - COIAUX(MINYI)
+C
+C get lower left point
+	X1 = COIXY(1,2)+COIAUX(MINXI)*SCOS-COIAUX(MINYI)*SSIN
+	Y1 = COIXY(2,2)+COIAUX(MINXI)*SSIN+COIAUX(MINYI)*SCOS
+C
+C text and symbols all join here
+C calculate lower right point, and set DX, DY to be the 'up vector'
+	X2 = X1 + LENGTH*SCOS
+	Y2 = Y1 + LENGTH*SSIN
+	DX = -HEIGHT*SSIN
+	DY = HEIGHT*SCOS
+C
+C now sector the box
+	DO 1040 I=1,4
+	   GOTO (1031,1032,1033,1034), I
+C
+C bottom edge of box
+1031	   XXYY(1,1) = X1
+	   XXYY(2,1) = Y1
+	   XXYY(1,2) = X2
+	   XXYY(2,2) = Y2
+	   GOTO 1035
+C
+C right-hand side
+1032	   XXYY(1,1) = X2+DX
+	   XXYY(2,1) = Y2+DY
+	   GOTO 1035
+C
+C top edge
+1033	   XXYY(1,2) = X1+DX
+	   XXYY(2,2) = Y1+DY
+	   GOTO 1035
+C
+C left-hand side
+1034	   XXYY(1,1) = X1
+	   XXYY(2,1) = Y1
+C
+C get sectors through which this now passes, and add 'em in
+1035	   NSECS = LISECS(XXYY)
+	   DO 1038 J = 1,NSECS
+	      CALL ADDSN(%VAL(VSECS), IND, GETARR(%VAL(SECTRS),J))
+1038	   CONTINUE
+1040	CONTINUE
+C
+C output the packs
+C set first flag for the first one
+1045	CONTINUE
+C***********fix up for now, force valid sector
+	IF (IND.LE.0) THEN
+	   IND = 1
+	   CALL PUTARR(1,%VAL(VSECS),1)
+	ENDIF
+C***********
+C
+C for composite texts, set COIPAK(PAKFC) back to the feature code
+C for the whole feature (PUTCTX puts the component code in it, so
+C that is can be checked at top of FLUSH, above)
+	IF (COMTXT) COIPAK(PAKFC) = COIFC
+C
+	IF (.NOT.COMTXT) COIPAK(PAKPST) = -1	! flag value for
+	COIPAK(PAKVRT) = -1			! the time being
+	DO 1050 I=1,IND
+C
+C set first flag for first pack, and unset for all others
+C
+	   IF (COIFST) THEN
+	      COIPAK(PAKFLG) = IOR(COIPAK(PAKFLG),FSTFLG)
+	      COIFST = .FALSE.		! no longer first pack
+	   ELSE
+	      COIPAK(PAKFLG) = IAND(COIPAK(PAKFLG),NOT(FSTFLG))
+	   ENDIF
+C
+C set last flag for final one
+C
+	   IF (I.EQ.IND.AND.LAST)
+     &	         COIPAK(PAKFLG) = IOR(COIPAK(PAKFLG),LSTFLG)
+C
+	   IF (ADDPAK(COIPAK,GETARR(%VAL(VSECS),I))) GOTO 9998
+1050	CONTINUE
+C
+	LSTVRT = COIIND-1		! number of points
+	COILST = COILST+LSTVRT		! total number of points
+	IF (.NOT.USEINP) THEN
+	   CALL FLUCB			! flush out CB entry
+	   IF (HADRO) CALL IFFRO(COIANG)
+	   IF (HADTX) CALL IFFTX(COIBUF,COILEN)
+	ENDIF
+C
+9998	CONTINUE
+	IF (LAST) THEN
+C
+C check for too many attributes
+	   IF (COIOVR) CALL MOAN(MSG_ATTLOST,COIPAK(PAKFSN))
+C
+C add EF entry
+	   IF (.NOT.USEINP) CALL IFFEF
+C
+C set pointer to a pack for this feature in SEGPAK
+CCCC This array is not used at present (and doesn't exist)
+CCCC	   SEGPAK(COIPAK(PAKSEG)) = COIPAK(PAKLNK)
+C
+C and close the segment
+	   IF (OIDRAW) CALL LCLSG
+C
+C this feature to be candidate for SEARCH LAST
+	   IF (IAND(COIPAK(PAKFLG),LIMFLG).EQ.0) LASPAK=COIPAK(PAKLNK)
+	   NOFEAT = NOFEAT+1		! increment feature count
+C
+C forbid linear features with one point
+	   IF (COILST.LE.1) THEN	! one point
+	      IF (FRTLIN.OR.FRTCUR.OR.FRTARE) THEN	! linear
+C
+C if we have just drawn the thing, then remove it again
+	         IF (OIDRAW) CALL LDSG(
+     &			COIPAK,IAND(COIPAK(PAKFLG),LIMFLG).EQ.0)
+C
+C If using input file (READ of INSITU on read-in) then just remove
+C  packs,otherwise (IFF on read-in, or normal editing) remove
+C feature also
+	         IF (USEINP) THEN
+	            CALL SCNFTR(COIPAK(PAKLNK),DELPAK)	! remove packs
+	            NOFEAT = NOFEAT-1	! decrement feature count
+	         ELSE
+	            CALL DELFT(COIPAK,LPOSE)
+	         ENDIF
+	         LASPAK = 0
+	         COILST = 0		! flag for ENDFT
+	         CALL MOAN(MSG_ONEPOINTLINE,COIPAK(PAKFSN))
+	      ENDIF
+	   ENDIF
+	ENDIF
+9999	RETURN
+C
+	END

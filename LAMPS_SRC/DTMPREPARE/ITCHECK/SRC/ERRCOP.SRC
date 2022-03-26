@@ -1,0 +1,267 @@
+	LOGICAL FUNCTION ERRCOP()
+C
+***	MODULE ERRCOP
+***	IDENT 01JN92
+C
+C	Copyright Laser Scan Laboratories, Cambridge, England
+C	Author:   D Catlow
+C	Created:  26 November 1984
+C
+C Modified from ERRCOP in module TCHECK			by ALB 29-FEB-1988
+C
+C Subroutine for ITCHECK to copy items in error into a
+C specified OVERLAY.
+C
+	IMPLICIT NONE
+C
+C common blocks
+C	
+        INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNITCHECK:CONTROL.CMN'
+	INCLUDE 'LSL$CMNITCHECK:ERROR.CMN'
+	INCLUDE 'LSL$CMNITCHECK:SHEET.CMN'
+C
+C structures
+C
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+C
+C w/s
+C
+	REAL		DATA_BUFF(2,IFF_MAXCBROW) !buffer passed to CBINOUT
+	INTEGER		NUM_XY			!number of xy coord in CB
+	INTEGER*2	FROM
+	INTEGER*2	LUN			!input IFF LUN
+	INTEGER*2	OLUN			!output IFF LUN
+	INTEGER*4	HADERR(2,10000)
+	INTEGER*4	TOTPTS
+	INTEGER*2	NPTS
+	INTEGER*2	IENDS
+	INTEGER*4	I			!counter
+	INTEGER*4	EOPTR
+	INTEGER*4	PNTNO
+	INTEGER*2	IELEN
+	INTEGER*2	IECODE
+	INTEGER*4	ISEQ
+	INTEGER*4	ISQ
+	LOGICAL		PTWRIT
+	LOGICAL		OK			!return code
+C
+C functions
+C
+	LOGICAL		IFFOPEN			!open a IFF file
+	LOGICAL		IFFCREATE		!create a IFF file
+C
+C**********************************************************************
+C
+	ERRCOP	=	.TRUE.		! assume success
+	PTWRIT=.FALSE.
+C
+C**********************************************************************
+C
+C Don't report error if outside window
+C
+	IF((HAD_WINDOW).AND.(NUMERR.NE.0)) THEN
+	   IF(.NOT.((XERR1.GE.WINDOW(1,1)).AND.
+     &     (XERR1.LE.WINDOW(1,2)).AND.
+     &	   (YERR1.GE.WINDOW(2,1)).AND.
+     &	   (YERR1.LE.WINDOW(2,2)))) GOTO 1000 ! outside window
+	ENDIF
+C
+C
+C**********************************************************************
+C get LUN for input and output IFF files
+C
+	LUN = IFFIN_LUN			! input IFF LUN
+	OLUN = IFFOUT_LUN		! output IFF LUN
+C
+	IF(NUMERR.EQ.0)GOTO 500 	!finish off overlay and file
+C
+C
+C ************************** open and initialise ************************** 
+C
+C re-open IFF file using file ID
+C
+	IF(FILE.NE.LAST_IFFIN) THEN
+	   IF(OPEN_IFFIN) THEN
+	      CALL IFFCLO(LUN)
+	      OPEN_IFFIN = .FALSE.
+	   ENDIF
+C
+	   OK=IFFOPEN(LUN,IFFIN_FNAME(FILE),
+     &				IFFIN_FID(1,FILE),,1)
+	   IF(.NOT.OK) THEN		
+	      CALL LSL_PUTMSG(OK,
+     &			IFFIN_FNAME(FILE)(1:IFFIN_LEN(FILE)))
+	      ERRCOP = .FALSE.
+	      GOTO 999
+	   ENDIF
+	   OPEN_IFFIN = .TRUE.
+	   LAST_IFFIN = FILE
+	ENDIF
+C
+C open output IFF file
+C
+	IF(.NOT.OPEN_OUTPUT) THEN
+	   OK=IFFCREATE(OLUN,IFFOUT_FNAME,,,,1)
+	   IF(.NOT.OK) THEN		
+	      CALL LSL_PUTMSG(OK)
+	      ERRCOP = .FALSE.
+	      GOTO 999
+	   ENDIF
+	   OPEN_OUTPUT = .TRUE.
+	ENDIF
+C
+C select input IFF file 
+C
+	CALL IFFSEL(LUN)		! select input IFF file	
+C
+C Copy up to first overlay
+C
+	IF(.NOT.COPYRA)THEN
+	   CALL IFFRWD
+C
+60	   CONTINUE
+	   CALL IFFSEL(LUN)
+	   CALL IFFNXT( IECODE, IELEN )
+  	   IF (IELEN.EQ.-1) GOTO 70 		! normal end of file
+	   IF (IECODE.EQ.'VO') GOTO 60		! skip voids
+C
+	   IF (IECODE.EQ.'CP') THEN		! write min max corner points
+	      CALL IFFSEL(OLUN)
+	      CALL IFFCP(CORNERS)
+	      GOTO 60
+	   ENDIF
+C
+	   IF (IECODE.NE.'NO') THEN
+	      CALL EIHCPY(OLUN)
+	      GOTO 60
+	   ENDIF
+	   COPYRA=.TRUE.
+	ENDIF
+C
+C Create new overlay?
+C
+70	CONTINUE
+	IF(.NOT.NEWOVR)THEN
+	   IF(ERRWRT)THEN	!finish off previous one
+	      CALL IFFSEL(OLUN)
+	      CALL IFFPKE(IECODE,IELEN,PNTNO)
+	      CALL EIHWL(LPOSE,1,3)
+	      CALL IFFEO
+	      GOTO 50
+	   ENDIF
+C	  	    
+50	   CONTINUE
+	   CALL IFFSEL(OLUN)
+	   EOPTR=0	!not yet known
+	   PNTNO=LPOSE
+	   CALL IFFNO (OVERNO,0,EOPTR)!write new overlay entry
+	   NEWOVR=.TRUE. !record fact
+C
+C Initialise error table	
+C
+	   DO 90 I=1,NUM_FC
+	      HADERR(1,I)=0
+	      HADERR(2,I)=0
+90	   CONTINUE
+C
+	   ERRPNT=1
+	   ERRWRT=.TRUE.
+	ENDIF
+C
+C	Position pointer
+	CALL IFFSEL(LUN)
+	CALL IFFPKE(IECODE,IELEN,RDPOS)	!positioned at NF
+	ISQ=0
+	ISEQ = 0			! clear longword
+	CALL EIHRI(ISEQ,1,1)
+C
+C	Check if item has already been copied to this overlay
+C
+	DO 95 I=1,ERRPNT	
+	  IF(HADERR(1,I).EQ.RDPOS
+     &	     .AND.HADERR(2,I).EQ.VECERR)GOTO 1000	!don't copy
+95	CONTINUE
+C
+	ERRPNT=ERRPNT+1
+	HADERR(1,ERRPNT)=RDPOS
+	HADERR(2,ERRPNT)=VECERR
+C
+	CALL IFFSEL(OLUN)			!output
+	CALL IFFNF(ISEQ,ISQ)
+	CALL IFFSEL(LUN)
+C
+100	CONTINUE
+C
+	CALL IFFNXT(IECODE,IELEN)
+C
+C Just copy up to NUM_ERR_PTS points of CB entry.
+C First NUM_ERR_PTS unless VECERR greater than 1.
+C
+	IF(IECODE.EQ.'CB')THEN
+	   IF(PTWRIT)GOTO 100 
+	   IF(VECERR.GT.1)THEN
+	      CALL IFFSEL(OLUN)
+	      NUM_XY = NUM_ERR_PTS
+	      CALL CBINOUT(POINTS(1,1),.TRUE.,NUM_XY)
+	      CALL IFFSEL(LUN)
+	      PTWRIT=.TRUE.
+	      GOTO 100
+	   ENDIF
+C
+	   CALL EIHRS(NPTS,IENDS)
+	   IF(NPTS.LE.NUM_ERR_PTS)THEN
+	      CALL EIHCPY(OLUN)
+	      PTWRIT=.TRUE.
+	      GOTO 100
+	   ELSE
+	      CALL CBINOUT(DATA_BUFF(1,1),.FALSE.,NUM_XY)
+	      CALL IFFSEL(OLUN)
+	      NUM_XY = NUM_ERR_PTS
+	      CALL CBINOUT(DATA_BUFF(1,1),.TRUE.,NUM_XY)
+	      CALL IFFSEL(LUN)
+	      PTWRIT=.TRUE.
+	      GOTO 100
+	   ENDIF
+C
+	ENDIF
+C	
+	IF(IECODE.EQ.'EF')GOTO 300
+	CALL EIHCPY(OLUN)
+	GOTO 100
+C
+C	EF found
+C
+300	CONTINUE
+	CALL IFFSEL(OLUN)
+	CALL IFFEF
+	GOTO 1000
+C
+C**************************************************************************
+C
+C	Correctly finish off overlay and file
+C
+500	CONTINUE
+	CALL IFFSEL(OLUN)
+        CALL IFFPKE(IECODE,IELEN,PNTNO)
+        CALL EIHWL(LPOSE,1,3)
+        CALL IFFEO		!write EO
+	CALL IFFEM
+	CALL IFFEJ
+C
+	CALL IFFCLO(OLUN)
+	COPYRA = .FALSE.
+	ERRWRT = .FALSE.
+	OPEN_OUTPUT = .FALSE.
+C
+	GOTO 1000
+C
+C**************************************************************************
+C
+999	CONTINUE
+1000	CONTINUE
+	CALL IFFSEL(LUN)
+	RETURN
+C
+	END
+

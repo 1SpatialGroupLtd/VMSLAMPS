@@ -1,0 +1,336 @@
+	SUBROUTINE FOLLOW1
+C
+***	IDENT	21AP86
+***	MODULE	FOLLOW1
+C
+C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
+C	Created   : ACM					Feb 1985
+C
+	IMPLICIT NONE
+C
+***	COMMON/HERE:VEC/
+C
+C workspace
+	BYTE		EDG(4)		! right,up,left,down edges?
+	INTEGER*2	IEDGE		! EDG index
+	INTEGER*2	NEDGES		! No of edges from a point
+	INTEGER*2	IDIR,LASTDIR	! 1 for right ... 4 for down
+	INTEGER*2	PX,PY		! sector coords for raster scan
+	INTEGER*2	IX,IY		! sector coords for following
+	INTEGER*2	DIR(2,4)	! right, left, up & down vecs
+	INTEGER*2	OPP(4)		! opposite direction mapping
+	INTEGER*2	DX,DY
+	INTEGER*2	LASTDX,LASTDY
+	INTEGER*2	XNODE,YNODE	! node position
+	INTEGER*2	INODE,STANOD	! a node index
+	INTEGER		STARTPT
+	INTEGER		N_CELLS
+	INTEGER		IXLEFT,IYLEFT,IXRIGHT,IYRIGHT
+	INTEGER		LEN
+	INTEGER		I,J,K
+C	LOGICAL*1	NEWPOINT
+	INTEGER		PTR
+	REAL		PCENT,LPCENT,PCF! % process completion
+C
+C functions
+	INTEGER*2	NODEINDEX
+C			returns node index of given node point, adding
+C			node to node list if it is not already there
+C
+	INTEGER*2	WHICHWAY
+C			which way to go at the crossroads?
+C
+	DATA DIR/1,0,0,1,-1,0,0,-1/
+	DATA OPP/3,4,1,2/
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C Finds all links and nodes in current sector
+C
+C Each link is noted by a pointer to the start & end of a list of points
+C held in PT(2,MAXPTS). Each link points to the nodes at its start and
+C end with LINKENDS(2,MAXLINKS). The link points in PT include the link
+C end points, though no point in the PT array is shared by more than
+C one link, so that where several links meet at a single node, the
+C corresponding point in PT is duplicated. 
+C
+C Each node also points to all the links entering or leaving it (up to
+C four possible), with NDAT(AM_NDAT), with the link index +'ve for links
+C leaving the node and -'ve for links entering. 
+C
+C Links are exhaustively traversed by raster scanning the EDGE matrix
+C over the current sector until a pixel top or right edge is found to be
+C an area boundary element. The right edge is followed first until a
+C junction node is found or the line goes off the sector and a break
+C node is introduced, then the top edge is followed similarly, and then
+C the raster scan continues until it is finnished. 
+C
+C Exits on fatal error
+C
+C *** FOLLOW1 is identical to FOLLOW except that all pixel-corners
+c traversed are included in the link, whereas in FOLLOW only the link
+c corner points and end point are included.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+	N_CELLS = (PXUR-1)*(PYUR-1)
+C
+	PCF = 100.0/(PYUR-1)
+	PCENT = 0
+	LPCENT = 0
+	WRITE(*,'(1X,F6.2,''%'')')PCENT
+C
+	DO 110 PY = 1,PYUR-1
+	  DO 100 PX = 1,PXUR-1
+	    IF (EDGE(1,PX,PY).NE.-1) GOTO 95
+	    IDIR = 2
+	    EDGE(1,PX,PY) = 1			! edge now a was-edge
+20	    IX = PX
+	    IY = PY
+	    N_LINKS = N_LINKS+1			! start new link
+	    IF (N_LINKS.GT.MAXLINKS) THEN
+	      CALL EXPAND
+     &	           ('*** FATAL ERROR : TOO MANY LINKS ***')
+	      CALL FLWLIN()
+	      CALL TTWLIN()
+	      CALL EXIT
+	    END IF
+	    STARTPT = N_PTS			! note PT index
+	    DX = DIR(1,IDIR)
+	    DY = DIR(2,IDIR)
+	    INODE = NODEINDEX(IX+DXPW-DX,IY+DYPW-DY)
+	    LINKENDS(1,N_LINKS) = INODE		! point link to node
+C
+C place start node into PT array
+	    N_PTS = N_PTS+1
+	    IF (N_PTS.GT.MAXPTS) THEN
+	      CALL EXPAND
+     &	          ('*** FATAL ERROR : TOO MANY VECTOR END POINTS ***')
+	      CALL FLWLIN()
+	      CALL TTWLIN()
+	      CALL EXIT
+	    END IF
+	    PT(1,N_PTS) = NPOS(1,INODE)
+	    PT(2,N_PTS) = NPOS(2,INODE)
+	    NEAREST(N_PTS) = NIL
+C
+C add arm to a node INODE (arms are not sorted at this stage, but they
+C can be sorted later in a separate pass)
+C
+C set up new ARM record
+	    N_ARMS = N_ARMS+1
+	    IF (N_ARMS.GT.MAXARMS) THEN
+	      CALL EXPAND
+     &	           ('*** FATAL ERROR : MAXARMS EXCEEDED ***')
+	      CALL FLWLIN()
+	      CALL TTWLIN()
+	      CALL EXIT
+	    END IF
+	    ARM(LI_ARM,N_ARMS) = N_LINKS
+	    ARM(AM_ARM,N_ARMS) = NIL
+C
+C append ARM record to ARM list
+	    PTR = NDAT(AM_NDAT,INODE)
+	    IF (PTR.EQ.NIL) THEN
+	      NDAT(AM_NDAT,INODE) = N_ARMS
+	    ELSE
+25	      IF (ARM(AM_ARM,PTR).NE.NIL) THEN
+	        PTR = ARM(AM_ARM,PTR)
+	        GOTO 25
+	      END IF
+	      ARM(AM_ARM,PTR) = N_ARMS
+	    END IF
+C
+	    LINKPOS(1,N_LINKS) = N_PTS		! first PT in link
+C	    NEWPOINT = .FALSE.
+	    GOTO 36
+C
+C look around to see which edge to follow next
+30	    LASTDIR = IDIR			! this IS needed!
+	    LASTDX = DX
+	    LASTDY = DY
+	    IF (IX.EQ.0.OR.IY.EQ.0) THEN	! left or bottom edge?
+	      GOTO 220
+	    ELSE IF (IX.EQ.PXUR) THEN		! right edge?
+	      IX = IX-1
+C	      IF (NEWPOINT) N_PTS = N_PTS-1
+	      N_PTS = N_PTS-1
+	      GOTO 220
+	    ELSE IF (IY.EQ.PYUR) THEN		! top edge?
+	      IY = IY-1
+C	      IF (NEWPOINT) N_PTS = N_PTS-1
+	      N_PTS = N_PTS-1
+	      GOTO 220
+	    END IF
+C
+C count No. of edges connected to this point
+36	    EDG(1) = EDGE(2,IX+1,IY)
+	    EDG(2) = EDGE(1,IX,IY+1)
+	    EDG(3) = EDGE(2,IX,IY)
+	    EDG(4) = EDGE(1,IX,IY)
+	    LASTDIR = IDIR
+	    LASTDX = DX
+	    LASTDY = DY
+	    NEDGES = 0
+	    IDIR = 0
+	    DO 40 IEDGE = 1,4
+	      IF (EDG(IEDGE)) 38,40,39
+38	      IDIR = IEDGE		! direction of edge to follow
+39	      NEDGES = NEDGES+1
+40	    CONTINUE
+C
+	    IF (IDIR.EQ.0) GOTO 220	! must be a node
+	    DX = DIR(1,IDIR)
+	    DY = DIR(2,IDIR)
+C
+C what happens next depends on how many edges connect to current point
+	    GOTO(200,210,220,230) NEDGES
+C
+C should never get to here - all pixel boundaries are  closed
+200	    CALL EXPAND
+     &	         ('*** FATAL ERROR IN FOLLOW LOGIC ***')
+	    CALL FLWLIN()
+	    CALL TTWLIN()
+	    CALL EXIT
+C
+C note new point in link if it is at a corner
+C210	    NEWPOINT = DX.NE.LASTDX.OR.DY.NE.LASTDY
+C	    IF (NEWPOINT) THEN
+210	      N_PTS = N_PTS+1
+	      IF (N_PTS.GT.MAXPTS) THEN
+	        CALL EXPAND
+     &	            ('*** FATAL ERROR : TOO MANY VECTOR END POINTS ***')
+	        CALL FLWLIN()
+	        CALL TTWLIN()
+	        CALL EXIT
+	      END IF
+	      PT(1,N_PTS) = IX+DXPW
+	      PT(2,N_PTS) = IY+DYPW
+	      NEAREST(N_PTS) = NIL
+C	    END IF
+C
+C and mark edge traversed
+	    GOTO (50,60,70,80) IDIR
+50	    EDGE(2,IX+1,IY) = 1
+	    GOTO 90
+60	    EDGE(1,IX,IY+1) = 1
+	    GOTO 90
+70	    EDGE(2,IX,IY) = 1
+	    GOTO 90
+80	    EDGE(1,IX,IY) = 1
+90	    CONTINUE
+C
+C and move to end of edge found
+	    IX = IX+DX
+	    IY = IY+DY
+	    GOTO 30
+C
+C end of current pixel edge is a node
+220	    INODE = NODEINDEX(IX+DXPW,IY+DYPW)	! link end node index
+	    LINKENDS(2,N_LINKS) = INODE
+C
+C place end node into PT array
+	    N_PTS = N_PTS+1
+	    IF (N_PTS.GT.MAXPTS) THEN
+	      CALL EXPAND
+     &	          ('*** FATAL ERROR : TOO MANY VECTOR END POINTS ***')
+	      CALL FLWLIN()
+	      CALL TTWLIN()
+	      CALL EXIT
+	    END IF
+	    PT(1,N_PTS) = NPOS(1,INODE)
+	    PT(2,N_PTS) = NPOS(2,INODE)
+	    NEAREST(N_PTS) = NIL
+	    LINKPOS(2,N_LINKS) = N_PTS		! last PT in link
+C
+C find left/right codes for this link
+C
+C form a vector (DX,DY) which lies along this link (all links have
+C .GE. two points including node-points)
+	    XNODE = PT(1,N_PTS)			! position of end node
+	    YNODE = PT(2,N_PTS)
+	    DX = XNODE-PT(1,N_PTS-1)
+	    DY = YNODE-PT(2,N_PTS-1)
+C
+	    LEN = ABS(DX)+ABS(DY)
+	    DX = DX/LEN				! unit vec for last seg
+	    DY = DY/LEN
+C
+	    IF (DX.GT.0) THEN
+	      IXLEFT = XNODE
+	      IYLEFT = YNODE+1
+	      IXRIGHT = XNODE
+	      IYRIGHT = YNODE
+	    ELSE IF (DX.LT.0) THEN
+	      IXLEFT = XNODE+1
+	      IYLEFT = YNODE
+	      IXRIGHT = XNODE+1
+	      IYRIGHT = YNODE+1
+	    ELSE IF (DY.GT.0) THEN
+	      IXLEFT = XNODE
+	      IYLEFT = YNODE
+	      IXRIGHT = XNODE+1
+	      IYRIGHT = YNODE
+	    ELSE
+	      IXLEFT = XNODE+1
+	      IYLEFT = YNODE+1
+	      IXRIGHT = XNODE
+	      IYRIGHT = YNODE+1
+	    END IF
+C
+	    LR(LEFT,N_LINKS) = AREAINDEX(IXLEFT-DXPW,IYLEFT-DYPW)
+	    LR(RIGHT,N_LINKS) = AREAINDEX(IXRIGHT-DXPW,IYRIGHT-DYPW)
+C
+C add arm to node INODE
+	    N_ARMS = N_ARMS+1
+	    IF (N_ARMS.GT.MAXARMS) THEN
+	      CALL EXPAND
+     &	           ('*** FATAL ERROR : MAXARMS EXCEEDED ***')
+	      CALL FLWLIN()
+	      CALL TTWLIN()
+	      CALL EXIT
+	    END IF
+	    ARM(LI_ARM,N_ARMS) = -N_LINKS	! set up new ARM record
+	    ARM(AM_ARM,N_ARMS) = NIL
+	    PTR = NDAT(AM_NDAT,INODE)		! append record to list
+	    IF (PTR.EQ.NIL) THEN
+	      NDAT(AM_NDAT,INODE) = N_ARMS
+	    ELSE
+666	      IF (ARM(AM_ARM,PTR).NE.NIL) THEN
+	        PTR = ARM(AM_ARM,PTR)
+	        GOTO 666
+	      END IF
+	      ARM(AM_ARM,PTR) = N_ARMS
+	    END IF
+	    GOTO 95
+C
+C four arms requires special attention to avoid "chequer" nodes
+230	    IDIR = WHICHWAY(IX,IY,LASTDIR)
+	    IF (IDIR.EQ.0) GOTO 220		! got a true node
+	    DX = DIR(1,IDIR)
+	    DY = DIR(2,IDIR)
+	    GOTO 210				! got a chequer node
+C
+95	    IF (EDGE(2,PX,PY).NE.-1) GOTO 100
+	    IDIR = 1
+	    EDGE(2,PX,PY) = 1			! edge now a was-edge
+	    GOTO 20
+100	  CONTINUE
+C
+C show progress
+	  PCENT = PY*PCF
+	  IF (PCENT-LPCENT.GT.1) THEN
+	    WRITE(*,'(1H+,F6.2)')PCENT!don't WRITE too often
+	    LPCENT = PCENT
+	  END IF
+C
+110	CONTINUE
+C
+C check for the only node in this sector possibly not yet be detected
+	IF (EDGE(1,PXUR-1,PYUR).EQ.-1)
+     &	  INODE = NODEINDEX(PXUR-1+DXPW,PYUR-1+DYPW)
+C
+	PCENT = 100
+	WRITE(*,'(1H+,F6.2)')PCENT
+C
+	END

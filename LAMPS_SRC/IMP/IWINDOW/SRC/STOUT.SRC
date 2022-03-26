@@ -1,0 +1,225 @@
+	LOGICAL FUNCTION STOUT
+C
+***	IDENT	07MY91
+***	MODULE	STOUT
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+CMOD844 Remove exit via LSL_EXIT from here	JB	16-Feb-1990
+CMOD	Check to see if there are any points in
+C	the buffer to output                    DRC     31-Oct-1988
+CMOD	copied from old ICLIP and amended	RJH	11-Jul-1986
+CMOD	Max NF up to 6555			ACM	26-Mar-1985
+CMOD	Now copies TC and CH entries.		RD	11-Jan-1984
+C	Created.				TJI	02-Jan-1982
+C
+C to output an ST from OUTBUF, optionally preceded by NF, and so on
+C - note that this routine can cause the program to exit on error
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+C
+	INCLUDE 	'($SSDEF)/NOLIST'
+C
+***	PARAMETER/LSL$CMNIWIN:IWINMSG/	! message definitions
+***	PARAMETER/LSL$CMNIWIN:LUN/	! unit numbers
+***	PARAMETER/LSL$CMNIWIN:MAX/	! maximum things
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/	! LSLLIB message definitions
+C
+C Common Blocks
+C
+***	COMMON/LSL$CMNIWIN:COPY/	! transfer for output
+***	COMMON/LSL$CMNIWIN:PARAMS/	! control parameters
+***	COMMON/LSL$CMNFRT:FRTCOM/	! FRT common block
+***	COMMON/LSL$CMNIFF:IFFHAN/	! current position in IFF file
+***	COMMON/LSL$CMNLSL:STATUS/	! LSLLIB status flag
+C
+C Functions called
+C
+	LOGICAL		LCM_POSN	! add position to LITES2 file
+	INTEGER*4	FLWCLO		! closes a file for writing
+C
+C Workspace
+C
+	INTEGER*2	IECODE, IELEN
+	INTEGER*4	NFNUM		! number of input NF
+	INTEGER*4	ISQ		! internal sequence number
+	INTEGER*4	CURPOS		! current LPOSH (on entry)
+	INTEGER*4	ERRCOD		! LSLLIB error code
+	INTEGER*4	RETCOD		! system error code
+	INTEGER*4	I		! counter
+C
+	RECORD	/IFF_CBH/ CBH_OUT	! header for output CB
+	RECORD	/IFF_CBD/ CBD_OUT	! data for output CB
+C
+	STOUT = SS$_NORMAL
+C
+C check to see if there are any points to output
+C
+	IF (CURRNT.LE.0)GOTO 800	! no, so return
+C
+C first we may want to put out a message
+C
+	IF (DEBUG) CALL WRITEF('.outputting %^W%N points, IENDS=%N',
+     &					    CURRNT, 	     TENDS)
+C
+C if we have already output something from OUTBUF for this (input) NF,
+C and we are not starting a new NF (after leaving the clipping region),
+C then we jump further down to simply output from OUTBUF
+C
+	IF (DONOUT.AND..NOT.NONF) GOTO 30	! easy, really
+C
+C here, we wish to create a feature in the output file, so let's align
+C with the feature in the input file, so we can copy from it
+C
+	CURPOS = LPOSH				! remember where we are
+C
+C Copy any TC and CH entries.
+	IF (.NOT.HADTC) GOTO 5
+	CALL IFFPKE(IECODE,IELEN,TCPOS)
+4	IF (IELEN.EQ.-1) GOTO 98
+	IF (IECODE.EQ.'NF') GOTO 6
+	CALL EIHCPY(OUTLUN)
+	CALL IFFNXT(IECODE,IELEN)
+	GOTO 4
+C
+C Now read up until the NF.
+5	CALL IFFPKE(IECODE,IELEN,NFPOS)		! goto NFPOS in file
+	IF (IECODE.NE.'NF') GOTO 90		! WRONG!!
+	IF (IELEN.EQ.-1) GOTO 98		! unexpected file end
+C
+C so we have the NF entry in hand - read it in & write it out, now
+C
+6	CALL EIHR(NFNUM,1,1)			! read the feature no.
+	NFNUM = IAND(NFNUM,65535)		! cnvrt to unsgnd lngwrd
+	IF (.NOT.NONF) GOTO 10			! use that feature no.
+C
+C but if NONF (( => this is not the first NF for this (input) feature,
+C but is the beginning of a re-entry to the clipped area)) then we want
+C to count it, and may want to use a dummy feature number, which we
+C will come back and update later
+C
+	CRECNT = CRECNT+1	! next place in array, total number
+C				! of features created
+	IF (CRECNT.GT.MAXCRE) GOTO 99
+	SPLIT = SPLIT+1		! another split for the feature -
+C				! ie another feature created from it
+	CRENF(LAYIND) = CRENF(LAYIND)+1
+C				! another feature created in this layer
+C
+C do we in fact wish to retain the old feature number, or do we want to
+C insert a dummy one which we will overwrite at the end of the program?
+C
+	IF (.NOT.RETAIN) NFNUM = -1	! dummy feature number
+C
+C if necessary, add a position to the LITES2 command file
+C
+	IF (HADLCM) THEN
+	   IF (.NOT. LCM_POSN( OUTBUF(X,1), (CRECNT .EQ. 1) )) GOTO 999
+	ENDIF
+C
+C and now create our new feature in the output file
+C
+10	ISQ = 0				! default internal sequence no.
+	CALL IFFSEL(OUTLUN)
+	IF (NONF) THEN
+	   FEATUR(CRECNT) = LPOSE	! remember where we write
+	   FEATIND(CRECNT) = LAYIND	! and an index for the layer
+	ENDIF
+	CALL IFFNF(NFNUM, ISQ)		! make a new feature entry
+	CALL IFFSEL(INLUN)
+C
+C now we copy over anything between the NF and the first CB entry
+C
+20	CALL IFFNXT(IECODE,IELEN)	! get next thing
+	IF (IELEN.EQ.-1) GOTO 98	! unexpected file end
+	IF (IECODE.EQ.'CB') GOTO 25	! found the (first?) CB
+	CALL EIHCPY(OUTLUN)		! copy the thing to output
+	GOTO 20				! get next thing
+C
+C having found the CB entry in the input file, we have copied over
+C everything we need to put inside the feature before the CB.
+C Thus we make sure we are at the same place in the input file we were
+C at when we entered STOUT (to allow for having found the first of
+C several CBs, but having actually been in a later one).
+C
+25	IF (LPOSH.NE.CURPOS) CALL IFFPKE(IECODE,IELEN,CURPOS)
+C
+C and now output a CB entry
+C
+30	CALL IFFSEL(OUTLUN)
+C
+C first set up the header
+C
+	CBH_OUT.FLAGS   = TENDS
+	IF (FOUND_FC) THEN		! easy if it's in the FRT
+	   CBH_OUT.GTYPE = FRTGT
+	ELSE				! otherwise use the last one
+	   CBH_OUT.GTYPE = GTYPE
+	ENDIF
+	CBH_OUT.NROW    = CURRNT
+	CBH_OUT.NCOL    = 3 + OUTNATT
+	CBH_OUT.COLH(1) = IFF_C_X
+	CBH_OUT.COLH(2) = IFF_C_Y
+	CBH_OUT.COLH(3) = IFF_C_Z
+	DO 35 I=4,CBH_OUT.NCOL
+	   CBH_OUT.COLH(I) = OUTATTC(I-3)
+35	CONTINUE
+	CBH_OUT.NATT    = 0
+C
+C and then set up tha data
+C
+	CALL IFS_CB_WRITE(CBH_OUT,CBD_OUT,
+     &	                  OUTBUF(X,1),2,CBH_OUT.COLH(1),1,CBH_OUT.NROW)
+	CALL IFS_CB_WRITE(CBH_OUT,CBD_OUT,
+     &	                  HTBUF,1,CBH_OUT.COLH(3),1,CBH_OUT.NROW)
+	IF (CBH_OUT.NCOL .GT. 3) THEN
+	   DO 36 I=1,CBH_OUT.NROW
+	      CALL IFS_CB_WRITE(CBH_OUT,CBD_OUT,OUTATT(1,I),
+     &	                        CBH_OUT.NCOL-3,CBH_OUT.COLH(4),I,I)
+36	   CONTINUE
+	ENDIF
+C
+C compress the CB
+C
+	CALL IFS_CB_COMPRESS(CBH_OUT,CBD_OUT)
+C
+C and finally write it out
+C
+	CALL IFFCB(CBH_OUT,CBD_OUT)
+C
+C reselect the input file
+C
+	CALL IFFSEL(INLUN)
+C
+C and now reset various variables
+C
+	OUTBUF(X,0) = OUTBUF(X,CURRNT)	! copy of last x
+	OUTBUF(Y,0) = OUTBUF(Y,CURRNT)	! copy of last y
+	CURRNT = 0			! OUTBUF empty now
+	DONOUT = .TRUE.			! have output in this NF
+	HADST = .TRUE.			! obviously we read in an ST
+	NONF = .FALSE.			! we are in an NF
+	TENDS = PENDWN			! assume line to continue
+C					! with the pen down
+C normal return
+C
+800	GOTO 1000
+C
+C ------------------------------------------------------------------
+C error exit
+C
+90	CALL LSL_PUTMSG(IWIN__NOINPNF)
+	GOTO 999
+C
+98	CALL LSL_PUTMSG(IWIN__EOICPYFEAT)
+	GOTO 999
+C
+99	CALL LSL_PUTMSG(IWIN__TOOMANYFEAT,MAXCRE)
+C
+999	STOUT = SS$_ABORT
+C
+1000	RETURN
+	END
+C

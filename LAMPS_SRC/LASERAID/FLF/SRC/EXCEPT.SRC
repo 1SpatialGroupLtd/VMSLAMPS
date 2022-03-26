@@ -1,0 +1,214 @@
+	INTEGER*4 FUNCTION EXCEPT(SIGARGS,MECHARGS)
+C
+***	MODULE	EXCEPT
+***	IDENT	22JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	SYS$TRNLNM used, not SYS$TRNLOG		 DM	22-Jul-1986
+CMOD	MTH$_INVARGMAT added; tidied		 DM	10-Mar-1986
+CMOD	just SSDEF , not SYS$LIBRARY:...	AJW	09-Feb-1983
+CMOD	Bug fix					AJW	22-Dec-1982
+CMOD	handles arithmetic faults as well as
+CMOD	traps, by calling LIB$SIM_TRAP		PGH/AJW	21-Dec-1982
+CMOD	$SSDEF, $MTHDEF from SYS$LIBRARY:FORSYSDEF,
+CMOD	and MY$_DEBUG now supplied by DEC	AJW	01-Oct-1982
+CMOD	If logical name FLF$DBG set up, drops
+CMOD	into DEBUG at the slightest provocation	AJW	15-Jun-1982
+CMOD	Comments organised			AJW	07-Jun-1982
+CMOD	Outputs message to error file		AJW	18-Nov-1981
+CMOD	Test for DEBUG (not defined)		AJW	17-Nov-1981
+CMOD	FLDSST taken out			AJW	 9-Jan-1980
+CMOD	Created 				AJW	11-Dec-1980
+C
+C Condition handler for VAX Laseraid.
+C If an exception occurs, this is called as a subroutine.
+C If the exception was a reserved operand error, it resets the
+C operand, so it contains 1.0, rather than the reserved operand.
+C If the exception was an arithmetic error, it continues.
+C Otherwise, it resignals the error
+C
+	IMPLICIT NONE
+C
+C parameters:
+	INCLUDE '($LNMDEF)'
+	INCLUDE '($MTHDEF)'
+	INCLUDE '($SSDEF)'
+C
+C arguments:
+	INTEGER*4 SIGARGS(*)
+	INTEGER*4 MECHARGS(5)
+C
+C workspace:
+	INTEGER*4 III
+	INTEGER*4 SAV1
+C
+C functions:
+	INTEGER*4 ERROUT
+	INTEGER*4 LIB$FIXUP_FLT
+	INTEGER*4 LIB$MATCH_COND
+	INTEGER*4 SYS$TRNLNM
+C
+	EXTERNAL  ERROUT
+C
+C ......................................................................
+C
+C if it is a floating point fault, LIB$SIM_TRAP will return to the
+C point whence we came and magically transform the fault into a trap,
+C after which EXCEPT will be called again and this time we will be
+C able to handle it.
+C if it returns, it isn't a floating point fault and the status is
+C always SS$_RESIGNAL.
+	CALL LIB$SIM_TRAP(SIGARGS,MECHARGS)
+C
+C are we in programmers debug mode (not operators dumbo mode) ?
+	SAV1=SIGARGS(1)			! save SIGARGS
+	IF (SIGARGS(2).GE.'10000'X) SIGARGS(1)=SIGARGS(1)-2  ! no PC/PSL
+C
+	III=SYS$TRNLNM(,'LNM$DCL_LOGICAL','FLF$DBG',,)
+	IF (III.NE.SS$_NOLOGNAM) THEN
+	   CALL SYS$PUTMSG(SIGARGS,,,)
+	   SIGARGS(1)=SAV1		! recover SIGARGS
+	   SIGARGS(2)=SS$_DEBUG
+	   EXCEPT=SS$_RESIGNAL
+	ELSE
+C
+C write the error message out to the log file.
+	   CALL SYS$PUTMSG(SIGARGS,ERROUT,,)
+	   SIGARGS(1)=SAV1
+C
+C do we recognise the error ?
+	   III=LIB$MATCH_COND(SIGARGS(2), SS$_FLTDIV,
+     &					  SS$_FLTOVF,
+     &					  SS$_FLTUND,
+     &					  SS$_INTOVF,
+     &					  SS$_INTDIV,
+     &					 MTH$_INVARGMAT,
+     &					 MTH$_FLOOVEMAT,
+     &					 MTH$_FLOUNDMAT,
+     &					  SS$_ROPRAND,
+     &                                    SS$_DEBUG)
+C
+	   IF ((III.GE.1).AND.(III.LE.8)) THEN
+C
+C it's an arithmetic error, so return.
+	      EXCEPT=SS$_CONTINUE
+	   ELSEIF (III.EQ.9) THEN
+C
+C it's a reserved operand error, so zap it.
+	      EXCEPT=LIB$FIXUP_FLT(SIGARGS,MECHARGS,1.0D0)
+	   ELSEIF (III.EQ.10) THEN
+	      EXCEPT=SS$_RESIGNAL
+	   ELSE
+C
+C we don't know what to do with it, so change the severity to error, and
+C resignal it.
+	      CALL LIB$INSV(2,		! insert its value ...
+     &			    0,		! its position ...
+     &			    3,		! and its size ...
+     &			    SIGARGS(2))	! into here
+	      EXCEPT=SS$_RESIGNAL
+	   ENDIF
+	ENDIF
+	RETURN
+	END
+C
+	INTEGER*4 FUNCTION ERROUT(LINE)
+C
+***	MODULE	ERROUT
+***	IDENT	25JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	User- and Lasertrak device name in log	 DM	22-Jul-1986
+CMOD	Error log file now called LASERAID.LOG	 DM	29-May-1986
+CMOD	Tidied					 DM	10-Mar-1986
+CMOD	Process name also entered in error log	 DM	17-Oct-1983
+CMOD	/DEBUG/ and IDTEXT added		AJW	15-Jan-1982
+C	Created					AJW	18-Nov-1981
+C
+C Writes out an error message to error logging file.
+C Called via SYS$PUTMSG.
+C
+	IMPLICIT NONE
+C
+C argument:
+	CHARACTER*(*) LINE
+C
+C common block:
+***	COMMON/DEBUG/
+C
+C local workspace:
+	CHARACTER*23 DAYTIME
+C
+C ......................................................................
+C
+C if fail to write file - write to SYS$OUTPUT
+	ERROUT=1
+	OPEN (99,STATUS='UNKNOWN',ACCESS='APPEND',ERR=10,
+     &	      CARRIAGECONTROL='LIST',NAME='LSL$ERR:LASERAID.LOG')
+C
+	CALL SYS$ASCTIM(,DAYTIME,,)
+	WRITE (99,1000,ERR=10) IDTEXT(1:INDEX(IDTEXT,CHAR(0))-1),
+     &			       PRCNAM(:PRCLEN),USRNAM(:USRLEN),DAYTIME,
+     &			       HRDNAM(:HRDLEN),MCNNUM(:MCNLEN)
+1000	FORMAT (A,', ',A,A,'on ',A,' using ',A,A)
+	WRITE (99,2000,ERR=10) LINE
+2000	FORMAT (A)
+	CLOSE (99)
+	ERROUT=0		! don't write to SYS$OUTPUT as well
+10	RETURN
+	END
+C
+	INTEGER*4 FUNCTION FLF$SIG_TO_RET_NOARITH(SIGARGS,MECHARGS)
+C
+***	MODULE	FLF$SIG_TO_RET_NOARITH
+***	IDENT	22JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Explicit INTEGER*4 declarations		 DM	22-Jul-1986
+CMOD	Tidied					 DM	10-Mar-1986
+CMOD	Created					AJW	03-May-1983
+C
+C This can be declared as an exception handler.
+C Check against integer and floating overflow and divide by zero,
+C and floating underflow. If the error is one of these, unwind to the
+C subroutine that declared us, pretending that the subroutine that was
+C called has returned with an error.
+C For DECs explanation see the Run Time Library Users Guide.
+C
+	IMPLICIT NONE
+C
+C parameters:
+	INCLUDE '($SSDEF)'
+C
+C arguments:
+	INTEGER*4 SIGARGS(*),MECHARGS(*)
+C
+C local workspace:
+	INTEGER*4 JJJ
+C
+C functions:
+	INTEGER*4 LIB$MATCH_COND
+	INTEGER*4 LIB$SIG_TO_RET
+C
+C ......................................................................
+C
+	JJJ=LIB$MATCH_COND(SIGARGS(2),SS$_INTOVF,
+     &                                SS$_INTDIV,
+     &                                SS$_FLTOVF_F,
+     &                                SS$_FLTUND_F,
+     &                                SS$_FLTDIV_F)
+	IF (JJJ.EQ.0) THEN
+C
+C no match - re-signal it.
+	   FLF$SIG_TO_RET_NOARITH=SS$_RESIGNAL
+	ELSE
+C
+C return to whoever established us (unless SIG_TO_RET fails, in which
+C case we use that error instead).
+	   FLF$SIG_TO_RET_NOARITH=LIB$SIG_TO_RET(SIGARGS,MECHARGS)
+	ENDIF
+	RETURN
+	END

@@ -1,0 +1,521 @@
+	LOGICAL*4 FUNCTION REMOVE_2NODES(
+     &			NXT,PRV,FTR_START,
+     &			FTR_PTS,FTR_NDS,FTR_DAT,
+     &			HEADSHR,SHR,
+     &			FTR_ORIG_PR_FTR,PNT_FTR,
+     &			HEADARM,ARM,
+     &			MAXPTS,MAXOUTFTRS,MAXNODES,MAXARMS,MAXSHRS)
+C
+***	MODULE	REMOVE_2NODES
+***	IDENT	06DE93
+C
+C	Copyright: Laser-Scan Ltd., Cambridge, England
+C
+CMOD1319 Use MAXOUTFTRS to dimension FTR_START, not MAXPTS
+C	 Do not jump to the closing CONTINUE label (1050, 1110) of 
+C	 a DO loop as the results are unpredictable, but instead 
+C	 create labels 1051 and 1111			 JB 01-Dec-1993
+C
+CMOD	Made to take features deleted by prev mod into remaining
+C	sharing feature, so that a full correspondence is maintained
+C	between sharing features, for the purpose of reassembling
+C	features on output from the CBs corresponding to their
+C	base-ftr					ACM 14-Jun-1988
+CMOD	Made to delete features which are sharing with the link being
+C	taken into the other link as a 	redundant 2-node is being
+C	deleted.					ACM 20-Aug-1987
+CMOD	Changed to use INT_RIPPLESORT in place of IRIPPLESORT, so that
+C	this can be called from LSLLIB when/if INT_RIPPLESORT is
+C	standardised.					ACM 12-Aug-1987
+CMOD	Made a function					TJH 28-May-1987
+
+C	Created   : ACM					      July 1986
+
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINKCHAR.CMN'
+
+C Data in
+	INTEGER*4	MAXPTS,MAXOUTFTRS,MAXNODES,MAXARMS,MAXSHRS
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_NDS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_DAT(2,MAXOUTFTRS)
+	INTEGER*4	HEADSHR(MAXOUTFTRS)
+	INTEGER*4	FTR_ORIG_PR_FTR(MAXOUTFTRS)
+	INTEGER*4	FTR_START(MAXOUTFTRS)
+	INTEGER*4	NXT(MAXPTS),PRV(MAXPTS)
+
+	INTEGER*4	HEADARM(MAXNODES)
+	INTEGER*4	ARM(2,MAXARMS)
+	INTEGER*4	SHR(2,MAXSHRS)
+
+	LOGICAL*1	PNT_FTR(MAXOUTFTRS)
+
+C Workspace
+	INTEGER*4	I,J,K
+	INTEGER*4	PR_FTR,SHFTR1,SHFTR2	! feature indices
+	INTEGER*4	IFTR,JFTR,IFTR1,IFTR2	! more ftr indices
+	INTEGER*4	ISHR			! SHR index
+	INTEGER*4	N_SHFTRS		! SHR ftr count
+	INTEGER*4	OFTR1,OFTR2		! orig ftr indices
+	INTEGER*4	IPT,JPT,KPT		! pt indices
+	INTEGER*4	INODE,JNODE		! node indices
+	INTEGER*4	IARM,JARM		! arm indices
+	INTEGER*4	ARM1,ARM2		! arms
+	INTEGER*4	TEMP			! temp INT*4
+	INTEGER*4	TEMPS(MAXSHR)
+	INTEGER*4	SHR_FTR_SET_1(MAXSHR)
+	INTEGER*4	SHR_FTR_SET_2(MAXSHR)
+	INTEGER*4	ORIG_FTR_SET_1(MAXSHR)
+	INTEGER*4	ORIG_FTR_SET_2(MAXSHR)
+	INTEGER*4	INDEX(MAXSHR)		! for INT_RIPPLESORT
+
+	REAL*4		PCENT,LPCENT,PCF	! % process completion
+
+	LOGICAL*4	IS_POINT,IS_SHARE,DELETED
+	LOGICAL*4	IFTR1_SHARED,IFTR2_SHARED
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Removes any invalid degree-2 nodes which may have arisen
+C	during the LLJOIN process so far.
+C
+C	A node is an "invalid 2-node" if it has 2 arms and joins
+C	only parts of the same feature (or features if both arms
+C	are of links which are shared by one or more other links).
+C
+C	A node is "deleted" by appending the two links together into
+C	the second, and deleting the first.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	REMOVE_2NODES = SS$_NORMAL
+
+	PCF = 100.0/N_NODES
+	PCENT = 0
+	LPCENT = 0
+
+C Mark all features which are shared by other features by FTR_DAT(1) = 1
+
+	DO 10 IFTR = 1,N_PR_FTRS
+	  FTR_DAT(1,IFTR) = 0		
+
+	  IF (HEADSHR(IFTR).NE.NIL .AND. FTR_PTS(1,IFTR).NE.NIL) THEN
+		FTR_DAT(1,IFTR) = 1
+	  ENDIF
+10	CONTINUE
+
+	IF (HAD_MONITOR) WRITE(*,'(1X,F6.1,''%'')') PCENT
+
+	DO 140 INODE = 1,N_NODES		! for each node do
+
+C Put indices of all arms ending at this node into an array
+
+	  IARM = HEADARM(INODE)			! index of 1st arm
+20	  IF (IARM.EQ.NIL) THEN
+	     GOTO 140				! no arms
+	  ENDIF
+
+	  ARM1 = ARM(ARM_FTR,IARM)		! first arm
+	  IFTR1 = ABS(ARM1)
+	  IS_POINT = PNT_FTR(IFTR1)
+	  IS_SHARE = FTR_PTS(1,IFTR1).EQ.NIL
+	  IF (IS_POINT.OR.IS_SHARE) THEN	! ignore pt/shr-ftrs
+	    IARM = ARM(ARM_NXT,IARM)		! move along arm list
+	    GOTO 20
+	  ENDIF
+
+	  IARM = ARM(ARM_NXT,IARM)		! move along arm list
+30	  IF (IARM.EQ.NIL) THEN
+	     GOTO 140				! only 1 arm
+	  ENDIF
+
+	  ARM2 = ARM(ARM_FTR,IARM)		! second arm
+	  IFTR2 = ABS(ARM2)
+	  IS_POINT = PNT_FTR(IFTR2)
+	  IS_SHARE = FTR_PTS(1,IFTR2).EQ.NIL
+	  IF (IS_POINT.OR.IS_SHARE) THEN	! ignore pt/shr-ftrs
+	    IARM = ARM(ARM_NXT,IARM)		! move along arm list
+	    GOTO 30
+	  ENDIF
+
+40	  IARM = ARM(ARM_NXT,IARM)		! move along arm list
+	  IF (IARM.NE.NIL) THEN
+	    IFTR = ABS(ARM(ARM_FTR,IARM))
+	    IS_POINT = PNT_FTR(IFTR)
+	    IS_SHARE = FTR_PTS(1,IFTR).EQ.NIL
+	    IF (IS_POINT.OR.IS_SHARE) GOTO 40
+	  ENDIF
+
+	  IF (IARM.NE.NIL) THEN
+	     GOTO 140				! > 2 proper arms
+	  ENDIF
+
+	  IF (ARM1.EQ.-ARM2) THEN
+	     GOTO 140				! anchor node
+	  ENDIF
+
+	  IFTR1 = ABS(ARM1)			! ftr indices
+	  IFTR2 = ABS(ARM2)
+
+C If ftrs are not from the same orig ftr, then do not join 
+
+	  OFTR1 = FTR_ORIG_PR_FTR(IFTR1)	! orig ftr indices
+	  OFTR2 = FTR_ORIG_PR_FTR(IFTR2)
+
+	  IF (OFTR1.NE.OFTR2) THEN
+	     GOTO 140				! 2-node is valid
+	  ENDIF
+
+C If one ftr is shared and the other not, then do not join
+
+	  IFTR1_SHARED = FTR_DAT(1,IFTR1).NE.0
+	  IFTR2_SHARED = FTR_DAT(1,IFTR2).NE.0
+
+	  IF (IFTR1_SHARED.NEQV.IFTR2_SHARED) THEN
+	     GOTO 140
+	  ENDIF
+
+C If both are shared, then join only if they both share (parts of) the
+C same original features.
+
+	  IF (IFTR1_SHARED.AND.IFTR2_SHARED) THEN
+
+C Form a list of all the links which share IFTR1
+
+	    ISHR = HEADSHR(IFTR1)
+	    I = 0
+	    GOTO 60
+
+50	    ISHR = SHR(SHR_NXT,ISHR)
+	    IF (ISHR.EQ.NIL) GOTO 70
+
+60	    IF (I.GE.MAXSHR) THEN
+	      REMOVE_2NODES = ILINK__TOOMNYSHFTRS
+	      CALL LSL_PUTMSG(REMOVE_2NODES,MAXSHR)
+	      GOTO 150
+	    ENDIF
+
+	    I = I+1
+	    SHR_FTR_SET_1(I) = SHR(SHR_FTR,ISHR)
+	    PR_FTR = ABS(SHR_FTR_SET_1(I))
+	    ORIG_FTR_SET_1(I) = FTR_ORIG_PR_FTR(PR_FTR)
+	    GOTO 50
+
+C Form a list of all the links which share IFTR2
+
+70	    ISHR = HEADSHR(IFTR2)
+	    J = 0
+	    GOTO 90
+
+80	    ISHR = SHR(SHR_NXT,ISHR)
+	    IF (ISHR.EQ.NIL) GOTO 100
+
+90	    IF (J.GE.MAXSHR) THEN
+	      REMOVE_2NODES = ILINK__TOOMNYSHFTRS
+	      CALL LSL_PUTMSG(REMOVE_2NODES,MAXSHR)
+	      GOTO 150
+	    ENDIF
+
+	    J = J+1
+	    SHR_FTR_SET_2(J) = SHR(SHR_FTR,ISHR)
+	    PR_FTR = ABS(SHR_FTR_SET_2(J))
+	    ORIG_FTR_SET_2(J) = FTR_ORIG_PR_FTR(PR_FTR)
+	    GOTO 80
+
+C Compare these lists,
+C sorting sharing ftr indices into corresponding order given by INDEX
+
+100	    IF (I.NE.J) GOTO 140
+	    N_SHFTRS = I
+
+	    CALL INT_RIPPLESORT(ORIG_FTR_SET_1,INDEX,N_SHFTRS,.TRUE.)
+
+	    DO 102 I = 1,N_SHFTRS
+	      TEMPS(I) = SHR_FTR_SET_1(INDEX(I))
+102	    CONTINUE
+
+	    DO 104 I = 1,N_SHFTRS
+	      SHR_FTR_SET_1(I) = TEMPS(I)
+104	    CONTINUE
+
+	    CALL INT_RIPPLESORT(ORIG_FTR_SET_2,INDEX,N_SHFTRS,.TRUE.)
+
+	    DO 106 I = 1,N_SHFTRS
+	      TEMPS(I) = SHR_FTR_SET_2(INDEX(I))
+106	    CONTINUE
+
+	    DO 108 I = 1,N_SHFTRS
+	      SHR_FTR_SET_2(I) = TEMPS(I)
+108	    CONTINUE
+
+	    DO 110 K = 1,I
+	      IF (ORIG_FTR_SET_1(K).NE.ORIG_FTR_SET_2(K)) GOTO 140
+110	    CONTINUE
+
+	  ENDIF
+
+C 2-node is invalid, so remove it
+
+C One arm should be coming into the node, and the other going out.
+C If this is not the case then complain and exit
+
+	  IF ((ARM1.GT.0) .EQV. (ARM2.GT.0)) THEN
+	    REMOVE_2NODES = ILINK__BADJNSTR
+	    CALL LSL_PUTMSG(REMOVE_2NODES)
+	    GOTO 150
+	  ENDIF
+
+C Make IFTR1 the incoming ftr
+
+	  IF (ARM1.GT.0) THEN
+	    TEMP  = IFTR1
+	    IFTR1 = IFTR2
+	    IFTR2 = TEMP
+	    DO 2000 I = 1,N_SHFTRS
+	      TEMP = SHR_FTR_SET_1(I)
+	      SHR_FTR_SET_1(I) = SHR_FTR_SET_2(I)
+	      SHR_FTR_SET_2(I) = TEMP
+2000	    CONTINUE
+	  ENDIF
+
+C Join links together
+
+	  JPT = FTR_PTS(2,IFTR1)		! pt at end of IFTR1
+	  IPT = PRV(JPT)			! pt before JPT
+	  KPT = FTR_PTS(1,IFTR2)		! pt at start of IFTR2
+
+	  NXT(IPT) = KPT			! link IPT with KPT
+	  PRV(KPT) = IPT
+	  PRV(JPT) = -1				! delete JPT
+
+	  HEADARM(INODE) = NIL			! delete node INODE
+
+	  IF (IFTR1.LT.IFTR2) THEN
+
+C Take IFTR2 into IFTR1 and delete IFTR2
+
+	    FTR_NDS(2,IFTR1) = FTR_NDS(2,IFTR2)	! update FTR_NDS
+	    FTR_PTS(2,IFTR1) = FTR_PTS(2,IFTR2)	! update FTR_PTS
+
+	    FTR_PTS(1,IFTR2) = NIL		! delete IFTR2
+	    FTR_PTS(2,IFTR2) = NIL
+
+C Take any links SHFTR2 which share IFTR2 into the corresponding links
+C SHFTR1 which share IFTR1 and derive from the same original feature,
+C and delete SHFTR2
+
+	    HEADSHR(IFTR2) = NIL		! delete list of shrs
+
+	    IF (.NOT.IFTR2_SHARED) THEN
+	       GOTO 1051			! not 1050 - bug fix
+	    ENDIF
+
+	    DO 1050 I = 1,N_SHFTRS
+	      SHFTR1 = SHR_FTR_SET_1(I)
+	      SHFTR2 = SHR_FTR_SET_2(I)
+	      IF ((SHFTR1.GT.0).NEQV.(SHFTR2.GT.0)) THEN
+	        REMOVE_2NODES = ILINK__INTRNLERR
+	        CALL LSL_PUTMSG(REMOVE_2NODES,1,'REMOVE_2NODES')
+	        GOTO 1050
+	      ENDIF
+
+	      IF (SHFTR1.GT.0) THEN
+	        FTR_NDS(2,SHFTR1) = FTR_NDS(2,SHFTR2)
+	        FTR_PTS(2,SHFTR2) = NIL		! delete ftr SHFTR2
+
+C Find end pt of SHFTR1 and start pt of SHFTR2
+
+	        JPT = FTR_START(SHFTR1)		! pt at end of SHFTR1
+1000	        IF (NXT(JPT).NE.NIL) THEN
+	          JPT = NXT(JPT)
+	          GOTO 1000
+	        ENDIF
+
+	        IPT = PRV(JPT)			! pt before JPT
+	        KPT = FTR_START(SHFTR2)		! pt at start of SHFTR2
+1010	        DELETED = PRV(KPT).EQ.-1
+
+	        IF (.NOT.DELETED) GOTO 1040
+	        IF (NXT(KPT).EQ.NIL) GOTO 1050	! error -just skip case
+	        KPT = NXT(KPT)
+	        GOTO 1010
+
+	      ELSE
+	        FTR_NDS(1,SHFTR2) = FTR_NDS(1,SHFTR1)
+	        FTR_PTS(2,SHFTR1) = NIL		! delete ftr SHFTR1
+
+C Find end pt of SHFTR2 and start pt of SHFTR1
+
+	        JPT = FTR_START(SHFTR2)		! pt at end of SHFTR2
+1020	        IF (NXT(JPT).NE.NIL) THEN
+	          JPT = NXT(JPT)
+	          GOTO 1020
+	        END IF
+
+	        IPT = PRV(JPT)			! pt before JPT
+	        KPT = FTR_START(SHFTR1)		! pt at start of SHFTR1
+
+1030	        DELETED = PRV(KPT).EQ.-1
+	        IF (.NOT.DELETED) GOTO 1040
+	        IF (NXT(KPT).EQ.NIL) GOTO 1050	! error -just skip case
+	        KPT = NXT(KPT)
+	        GOTO 1030
+	      ENDIF
+
+1040	      NXT(IPT) = KPT			! link IPT with KPT
+	      PRV(KPT) = IPT
+	      PRV(JPT) = -1			! delete JPT
+
+1050	    CONTINUE
+
+1051	    CONTINUE				! ACM should die!
+
+C Replace arm ref to IFTR2 with ref to IFTR1
+
+	    JNODE = FTR_NDS(2,IFTR2)		! node at far end of ftr
+
+C Find arm JARM at node JNODE which corresponds to IFTR2
+
+	    JARM = HEADARM(JNODE)
+120	    IF (JARM.EQ.NIL) THEN
+	      REMOVE_2NODES = ILINK__BADJNSTR
+	      CALL LSL_PUTMSG(REMOVE_2NODES)
+	      GOTO 150
+	    ENDIF
+
+	    IF (ARM(ARM_FTR,JARM).NE.-IFTR2) THEN
+	      JARM = ARM(ARM_NXT,JARM)
+	      GOTO 120
+	    ENDIF
+
+	    ARM(ARM_FTR,JARM) = -IFTR1
+
+	  ELSE
+
+C Take IFTR1 into IFTR2 and delete IFTR1
+
+	    FTR_NDS(1,IFTR2) = FTR_NDS(1,IFTR1)	! update FTR_NDS
+	    FTR_PTS(1,IFTR2) = FTR_PTS(1,IFTR1)	! update FTR_PTS
+
+	    FTR_PTS(1,IFTR1) = NIL		! delete IFTR1
+	    FTR_PTS(2,IFTR1) = NIL
+
+C Take any links SHFTR1 which share IFTR1 into the corresponding links
+C SHFTR2 which share IFTR2 and derive from the same original feature,
+C and delete SHFTR1
+
+	    HEADSHR(IFTR1) = NIL		! delete list of shrs
+
+	    IF (.NOT.IFTR1_SHARED) THEN
+	      GOTO 1111				! not 1110 - bug fix
+	    ENDIF
+
+	    DO 1110 I = 1,N_SHFTRS
+	      SHFTR1 = SHR_FTR_SET_1(I)
+	      SHFTR2 = SHR_FTR_SET_2(I)
+
+	      IF ((SHFTR1.GT.0) .NEQV. (SHFTR2.GT.0)) THEN
+	        REMOVE_2NODES = ILINK__INTRNLERR
+	        CALL LSL_PUTMSG(REMOVE_2NODES,2,'REMOVE_2NODES')
+	        GOTO 1110
+	      ENDIF
+
+	      IF (SHFTR2.GT.0) THEN
+	        FTR_NDS(2,SHFTR2) = FTR_NDS(2,SHFTR1)
+	        FTR_PTS(2,SHFTR1) = NIL		! delete ftr SHFTR1
+
+C Find end pt of SHFTR2 and start pt of SHFTR1
+
+	        JPT = FTR_START(SHFTR1)		! pt at end of SHFTR2
+1060	        IF (NXT(JPT).NE.NIL) THEN
+	          JPT = NXT(JPT)
+	          GOTO 1060
+	        ENDIF
+
+	        IPT = PRV(JPT)			! pt before JPT
+	        KPT = FTR_START(SHFTR2)		! pt at start of SHFTR2
+1070	        DELETED = PRV(KPT).EQ.-1
+
+	        IF (.NOT.DELETED) GOTO 1100
+	        IF (NXT(KPT).EQ.NIL) GOTO 1110	! error -just skip case
+	        KPT = NXT(KPT)
+	        GOTO 1070
+
+	      ELSE
+	        FTR_NDS(1,SHFTR1) = FTR_NDS(1,SHFTR2)
+	        FTR_PTS(2,SHFTR2) = NIL		! delete ftr SHFTR2
+
+C Find end pt of SHFTR1 and start pt of SHFTR2
+
+	        JPT = FTR_START(SHFTR1)		! pt at end of SHFTR1
+1080	        IF (NXT(JPT).NE.NIL) THEN
+	          JPT = NXT(JPT)
+	          GOTO 1080
+	        ENDIF
+
+	        IPT = PRV(JPT)			! pt before JPT
+	        KPT = FTR_START(SHFTR1)		! pt at start of SHFTR1
+
+1090	        DELETED = PRV(KPT).EQ.-1
+	        IF (.NOT.DELETED) GOTO 1100
+
+	        IF (NXT(KPT).EQ.NIL) GOTO 1110	! error -just skip case
+	        KPT = NXT(KPT)
+	        GOTO 1090
+	      ENDIF
+
+1100	      NXT(IPT) = KPT			! link IPT with KPT
+	      PRV(KPT) = IPT
+	      PRV(JPT) = -1			! delete JPT
+
+1110	    CONTINUE
+
+1111	    CONTINUE				! ACM should die!
+
+C Replace arm ref to IFTR1 with ref to IFTR2
+
+	    JNODE = FTR_NDS(1,IFTR1)		! node at start of ftr
+
+C Find arm JARM at node JNODE which corresponds to IFTR1
+
+	    JARM = HEADARM(JNODE)
+
+130	    IF (JARM.EQ.NIL) THEN
+	      REMOVE_2NODES = ILINK__BADJNSTR
+	      CALL LSL_PUTMSG(REMOVE_2NODES)
+	      GOTO 150
+	    ENDIF
+
+	    IF (ARM(ARM_FTR,JARM).NE.IFTR1) THEN
+	      JARM = ARM(ARM_NXT,JARM)
+	      GOTO 130
+	    ENDIF
+
+	    ARM(ARM_FTR,JARM) = IFTR2
+	  ENDIF
+
+C Show percentage completion
+
+	  IF (.NOT.HAD_MONITOR) GOTO 140
+
+	  PCENT = INODE*PCF
+	  IF (PCENT-LPCENT.GT.0.1) THEN
+	    WRITE(*,'(1H+,F6.1)')PCENT		! don't WRITE too often
+	    LPCENT = PCENT
+	  ENDIF
+140	CONTINUE				! go on to next node
+
+	PCENT = 100
+	IF (HAD_MONITOR) WRITE(*,'(1H+,F6.1)') PCENT
+
+150	RETURN
+	END
+

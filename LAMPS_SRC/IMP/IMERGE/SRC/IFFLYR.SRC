@@ -1,0 +1,306 @@
+	LOGICAL*4 FUNCTION IFFLYR()
+C
+***	MODULE	IFFLYR
+***	IDENT	02DE87
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Now sets input revision level to 1 to deal
+C	with new CB entries				TJH  02-Dec-1987
+CMOD	Now output "not type 2 MD" message rather than
+C	"unset" when a non type 2 MD found, also reads
+C	and buffers contents of each file's MD2PAR	TJH  29-Sep-1987
+CMOD	IFF file opened using new IFFOPEN function	TJH  04-Nov-1986
+CMOD	Output hex addresses as %P0 and %X8		TJI  31-Oct-1986
+C	Author						TJH  23-Jan-1986
+C
+C All results are returned in /COMMAND/, /OVRS/ and /OVLST/
+C
+C Function returns one of 8 condition codes:
+C
+C	SS$_NORMAL		-   all is well
+C	IMERGE__IFFNOLYRS	-   no layers in the IFF file (!)
+C	IMERGE__EONOTFND	-   end layer entry not found
+C				    (probably duff EO address in NO 
+C				    entry)
+C	IMERGE__MERNOLYRS	-   no layers to merge from IFF file 
+C	IMERGE__MERNOSPLYRS	-   no layers to merge from IFF file
+C                                   for /SPLIT
+C	IMERGE__UNEXPEOF	-   unexpected end of IFF file.
+C	LSL__IFFPARSE           -   IFFOPEN unable to parse file-spec
+C	LSL__IFFOPEN            -   IFFOPEN failed to open file
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL
+	INCLUDE		'LSL$CMNIMERGE:PARAMS.PAR'
+	INCLUDE		'LSL$CMNIMERGE:IMERGEMSG.PAR'
+C
+C Common:
+	INCLUDE   	'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE   	'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE		'LSL$CMNIMERGE:COMMAND.CMN'
+	INCLUDE		'LSL$CMNIMERGE:DESCK.CMN'
+	INCLUDE		'LSL$CMNIMERGE:OVLST.CMN'
+	INCLUDE		'LSL$CMNIMERGE:OVRS.CMN'
+	INCLUDE 	'LSL$CMNLSL:STATUS.CMN'
+C
+	INTEGER*2    I		! loop counter
+	INTEGER*2    IECODE	! entry code for the entry-in-hand
+	INTEGER*2    IELEN	! length of the entry-in-hand
+C
+	CHARACTER*258 CINFIL	! current input file
+C
+	INTEGER	     CINLEN	! length of current infile-spec
+	INTEGER	     IRET	! for SKPOVR function return
+	INTEGER	     IFIL	! current input file number
+	INTEGER	     NFILYR	! no. of layers in file
+	INTEGER	     NXTOVP	! the pointer to the next EO entry
+	INTEGER	     MERLYR	! no. of layers to be merged from file
+	INTEGER	     RESLYR	! no. of rest layers to be merged from 
+C                               ! file
+	REAL*4       CPTS(4,4)	! the control points
+C
+C Functions:
+	INTEGER	     ADDOV_SEL	! adds found layer to central table,
+C				! if that layer was selected
+	INTEGER	     ADDOV_REST	! adds found layer to central table,
+C				! for the rest of layers that are left
+C				! after selection
+	INTEGER	     IFFOPEN	! open IFF file
+	INTEGER	     SKPOVR	! skip found layer?
+C
+C EIHPHI's output routine argument
+	EXTERNAL     FLWSTR
+C
+C ......................................................................
+C
+C Assume the best
+	IFFLYR=%LOC(SS$_NORMAL)
+C
+C Assume that we are to deal with modern type 2 MDs for which
+C sensible compatibility checks can be made between input files.
+	MDTYPE=2
+C
+C Init. total number layers counter
+	NOVL=0  
+C
+C Init. total number of rest layers counter
+	RESLYR=0
+C
+C Loop through each input file in turn. By scanning through the file 
+C we can find all the layer parts
+	DO 40 IFIL=1,NUMPAR
+	   CINFIL=INFILE(IFIL)
+	   CINLEN=LENFIL(IFIL)
+C
+C Open the IFIL'th input file
+	   IFFLYR=IFFOPEN(INLUN,CINFIL(:CINLEN),,HAD_LOG)
+C
+C Did it open OK?
+	   IF (.NOT.IFFLYR) GOTO 90
+C
+C Yes. Set "file is open" flag
+	   INIFO=.TRUE.
+C
+C And dragoon the IFF input revision level to 1 - treat all CB, ST and
+C ZS entries as if they are CBs 
+	   CALL IFFIRV(1)
+C
+C And inquire file identification.
+	   CALL IFFID(FID(1,IFIL))
+	    IF (HAD_LST) THEN
+	      CALL FLWRTF
+     &		('******************************************'//
+     &		 '**************************************')
+	      CALL FLWRTF
+     &	        ('Input file #%^L%N is %S',IFIL,CINFIL(:CINLEN))
+	    ENDIF
+C
+C Determine the presence of an HI entry
+	    CALL IFFNXC('HI',IELEN)
+	    IF (IELEN.LT.0) THEN
+	      CALL LSL_PUTMSG(IMERGE__NOIFFHI)
+	      IF (HAD_LST) CALL FLWRTF('File has no IFF HI entry.')
+	      CALL IFFRWD
+	    ELSE
+C
+C Even if only one of the input files has a HI entry the user must have
+C an IMP generation IFF environment and is not running IMERGE on DAMP 
+C generation files only, (thus expecting no HI entry in the IFF file.)
+C Flag that we have had a HI entry in at least one of the input files
+C and when the time comes put a new HI entry in the output file(s).
+C
+	      HISTRY=.TRUE.
+	      IF (HAD_LST) THEN
+		CALL FLWRTF
+		CALL FLWRTF('File history:')
+		CALL EIHPHI(FLWSTR)
+	      ENDIF
+	   ENDIF	  
+C
+C Next we must get the Map Descriptor in case it is a new type MD with 
+C an origin offset. We must of course take this into account while 
+C merging
+	   CALL IFFNXC('MD',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      CALL LSL_PUTMSG(IMERGE__NOMD,CINFIL(:CINLEN))
+	      CALL IFFRWD
+	   ELSE
+C
+C Check that entry is long enough for type 2 MD
+              IF (IELEN.NE.MD2LEN) THEN
+	         CALL LSL_PUTMSG(IMERGE__NOV2MD,CINFIL(:CINLEN))
+	         MDTYPE=1			! type 1 MD
+	      ELSE				! it is,
+	         CALL EIHR(MD2ARR,MD2LEN,1)	! read it
+	         IF (MATV2.EQ.2) THEN		! MD 2 found - good
+C
+C Transfer the origin offset to our origin offset array OFFSET()
+		   OFFSET(1,IFIL)=MD2LOC(1)
+	 	   OFFSET(2,IFIL)=MD2LOC(2)
+C
+C If we have a new type Map Descriptor we can check that the different 
+C files have common spheroid, units, and projection and MD2PAR data.
+C Collect these data.
+	           FLPROJ(IFIL)=MD2PRJ
+		   FLUNIT(IFIL)=MD2UNT
+		   FLSPHE(IFIL)=MD2SPH
+		   DO 5 I=1,15
+	              FLPAR(IFIL,I)=MD2PAR(I)
+5		   CONTINUE
+	         ELSEIF (MATV2.EQ.-1) THEN
+	           CALL LSL_PUTMSG(IMERGE__UNSETMD,CINFIL(:CINLEN))
+	         ELSE
+	           CALL LSL_PUTMSG(IMERGE__NOV2MD,CINFIL(:CINLEN))
+	           MDTYPE=1			! type 1 MD
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C
+C If /OUTPUT was specified output to list file the current infile CP 
+C entry
+	   IF (HAD_LST) THEN
+	      CALL IFFNXC('CP',IECODE,IELEN)	! find CP entry
+	      IF (IELEN.LT.0) GOTO 85		! OK?
+	      CALL EIHRR(CPTS,16,1)		! read it
+	      CALL PRINCP(CPTS)			! and list it out
+	      CALL FLWRTF
+	      CALL FLWRTF('Origin offset:')
+	      CALL FLWRTF('X = %^D%F  Y = %F '
+     &			   ,OFFSET(1,IFIL),OFFSET(2,IFIL))
+	   ENDIF
+C
+C Init. number of layers in file.
+	   NFILYR=0
+C
+C Init. the number of layers to be merged from this file
+	   MERLYR=0
+C
+C Init. address of EO just in case file doesn't have NO pointers
+	   NXTOVP=0
+C
+C Now get to the next NO entry. Use the NO pointers if they are
+C present in this file.
+10	   IF (NXTOVP.GT.0) THEN
+	      CALL IFFPKE(IECODE,IELEN,NXTOVP)	! find next EO
+	      IF (IECODE.NE.'EO') GOTO 80
+	   ENDIF
+	   CALL IFFNXC('NO',IELEN)		! find next NO
+	   IF(IELEN.EQ.-1) GOTO 20		! end of file
+C
+C Read the value of the pointer to the next EO if present.
+	   NXTOVP=0
+	   IF (IELEN.EQ.4) THEN
+	      CALL EIHRI(NXTOVP,2,3)
+	   ENDIF
+	   NFILYR=NFILYR+1
+	   CALL EIHRI(NOVR,1,1)			! layer number
+C
+C Skip this layer?
+	   IRET=SKPOVR(IFIL)
+	   IF (IRET.EQ.IMERGE__USELAY) THEN
+C
+C Accumulate the number of selected layers to be merged
+	     MERLYR=MERLYR+1
+	     IF (DEBUG) CALL WRITEF
+     &		('Selected layer %^W%N, File %N (%S), Address %^L%P0%X8'
+     &			       ,NOVR  ,IFIL ,CINFIL(:CINLEN) ,LPOSH)
+C
+	     IFFLYR=ADDOV_SEL(IFIL,LPOSH,NOVR)
+C
+C Too many layer parts?
+	     IF (IFFLYR.NE.%LOC(SS$_NORMAL)) GOTO 90
+C
+C Accumulate the number of layers not selected if /SPLIT was specified
+	   ELSEIF (IRET.EQ.IMERGE__SKIPLAY.AND.HAD_SPLIT) THEN
+C
+C Accumulate the number of rest layers to be merged
+	     RESLYR=RESLYR+1
+	     IF (DEBUG) CALL WRITEF
+     &		('Rest layer %^W%N, File %N (%S), Address %^L%P0%X8'
+     &			       ,NOVR  ,IFIL ,CINFIL(:CINLEN) ,LPOSH)
+C
+	     IFFLYR=ADDOV_REST(IFIL,LPOSH,NOVR)
+C
+C Too many layer parts?
+	     IF (IFFLYR.NE.%LOC(SS$_NORMAL)) GOTO 90
+	   ENDIF
+	   GOTO 10
+C
+C If SPECAL is set .T. we only have one input file. Don't bother to
+C close it, but just rewind.
+20	   IF (SPECAL) GOTO 30
+C
+C Close the IFIL'th input file
+	   CALL IFFCLO(INLUN)
+	   INIFO=.FALSE.
+C
+C No layers in file? (Either bad IFF or an old style file).
+	   IF (NFILYR.EQ.0) GOTO 60  
+C
+C No selected layers to merge?
+	   IF (MERLYR.EQ.0) GOTO 70  
+	   GOTO 40
+C
+C Rewind the file
+30	   CALL IFFRWD
+40	CONTINUE
+C
+C No rest layers to merge, ie all input layers have been selected?
+	IF (RESLYR.EQ.0.AND.HAD_SPLIT) GOTO 75
+	GOTO 90
+C
+C ......................................................................
+C 
+C Something went wrong.
+C
+C
+C error - file has no layers
+60	IFFLYR=IMERGE__IFFNOLYRS
+	CALL LSL_PUTMSG(IFFLYR,CINFIL(:CINLEN))
+	GOTO 90
+C
+C error - no selected layers to merge
+70	IFFLYR=IMERGE__MERNOLYRS
+	CALL LSL_PUTMSG(IFFLYR,CINFIL(:CINLEN))
+	GOTO 90
+C
+C error - no rest layers to merge
+75	IFFLYR=IMERGE__MERNOSPLYRS
+	CALL LSL_PUTMSG(IFFLYR)
+	GOTO 90
+C
+C error - EO not found where expected
+80	IFFLYR=IMERGE__EONOTFND
+	CALL LSL_PUTMSG(IFFLYR,CINFIL(:CINLEN))
+	GOTO 90
+C
+C Error - unexpected end of input IFF file
+85	IFFLYR=IMERGE__UNEXPEOF
+	CALL LSL_PUTMSG(IFFLYR,CINFIL(:CINLEN))
+C
+90	RETURN
+	END

@@ -1,0 +1,546 @@
+	LOGICAL FUNCTION PROCESS
+C
+C
+***	IDENT	27FE90
+***	MODULE	PROCESS
+C
+C	Copyright Laser Scan Ltd., Cambridge, England
+C
+C Author S G Hancock September 1985
+C Based on DMC2IMAP version by TJ Ibbs
+C
+CMod for I2IMAP 			R J Hulme,	22-Sep-1987
+CMod for DEC/BGAS			A D Trigg,	03-Feb_1989
+CMod DEC/BGAS error count handling by	S G Hancock,	17-Feb-1989
+CMod to to take away default clipping	A D Trigg,	06-Mar-1989 
+CMod to correctly handle text justif.	A D Trigg,	17-Mar-1989
+CMOD to set attribute annotation flags	S Gupta		16-Jun-1992
+C
+	IMPLICIT NONE
+C
+C Processes the IFF data, calling routines to output it to Informap
+C
+C Returns FALSE if it fails, TRUE otherwise
+C
+C *********************************************************************
+C
+C parameter files, etc.
+C
+	INCLUDE 'CMN:CHECK.PAR'		! input checks
+	INCLUDE 'CMN:I2IMAPMSG.PAR'	! message definitions
+	INCLUDE	'LSL$CMNIFF:CB.STR'	! record structure definition
+C
+C local parameters
+C
+	BYTE		BLANK
+	PARAMETER	(BLANK = ' ')
+C
+C common blocks
+C
+	INCLUDE	'CMN:CAINT.CMN'
+	INCLUDE	'CMN:CALOG.CMN'
+	INCLUDE	'CMN:CAREAL.CMN'
+	INCLUDE	'CMN:INFACE.CMN'
+	INCLUDE 'CMN:FILES.CMN'
+	INCLUDE 'CMN:ATTRIBUTES.CMN'
+C
+C functions
+C
+	LOGICAL		COORD
+	LOGICAL		STAPRO
+	INTEGER*4	FC_IND
+	INTEGER*4	ATTR_IND
+	LOGICAL		IS_ANNOTATION
+C
+C *********************************************************************
+C
+C local workspace
+C
+	INTEGER		JJUST(0:8)	! text justification
+	INTEGER*2	IFF_HT		! text height from IFF file
+	INTEGER		I		! DO loop variable
+	INTEGER		THIS_IND	! current FC index
+	INTEGER		THIS_ATTR	! current attribute table index
+	INTEGER		LAST_ATTR	! last attribute table index
+	LOGICAL		HAD_ENDMAP	! true if end of file legal
+	LOGICAL		IN_FEATURE	! true if inside a feature
+	LOGICAL		SKIP_FTR	! true if skipping feature
+	LOGICAL		HAD_RO		! true if had RO in feature
+	LOGICAL		USE_DEF		! true if using default parameters
+C
+C IFF stuff
+C
+	INTEGER*2	TPTS		! total no of points in feature
+	INTEGER*2	NPTS		! no of points in ST
+	INTEGER*2	NCOORD		! twice no of points in ST
+	INTEGER*2	IENDS		! pen up/down marker
+	INTEGER*2	IECODE		! entry code
+	INTEGER*2	IELEN		! length of entry code
+	INTEGER*2	FSTAT(4)	! FC etc
+	INTEGER*2	LAYER		! layer number
+	REAL		Z(2,200)	! coordinates
+	REAL*8		DBL_Z(2,200)	! coordinates with offset
+	REAL		CPARR(16)	! holds cp entry info
+C
+	INTEGER*2	ACTYPE		! type of AC
+	RECORD	/IFF_CBITEM/	ACVAL	! value of AC
+	BYTE		ACTEXT(80)	! text of AC
+	INTEGER*4	ACTLEN		! and its length
+C
+	DATA JJUST/'0'O,'4'O,'10'O,'1'O,'5'O,'11'O,'2'O,'6'O,'12'O/
+C	'0'O = lower left
+C	'4'O = center left
+C	'10'O= upper left
+C	'1'O = lower centre
+C	'5'O = centre centre
+C	'11'O= upper centre
+C	'2'O = lower right
+C	'6'O = centre right
+C	'12'O= upper right
+C *********************************************************************
+C
+	PROCESS = .TRUE.			! assume success
+	HAD_ENDMAP = .FALSE.			! haven't ended a map yet
+	IN_FEATURE = .FALSE.			! haven't started a feature yet
+	USE_DEF = .FALSE.			! assume aren't using a default
+	IFCODE = -1				! unset 'current' feature code
+	NUNKFC = 0				! unknown FC counter
+	NINVCO = 0				! features outside map boundary
+						! counter
+C
+C-------------------------------------------------------------------------------
+C
+10	CALL IFFNXT( IECODE, IELEN )		!get next IFF entry
+	IF( IELEN .LT. 0 ) GOTO 500		! end of input
+C
+C-------------------------------------------------------------------------------
+C	ST - coordinate string
+C
+	IF(IECODE .EQ. 'ST')THEN
+C
+	   CALL EIHRS( NPTS, IENDS)
+	   TPTS = TPTS+NPTS
+	   NCOORD=NPTS*2
+	   CALL EIHRR(Z,NCOORD,1)
+	   DO 15 I=1,NPTS
+	      DBL_Z(1,I) = Z(1,I)+XOFF
+	      DBL_Z(2,I) = Z(2,I)+YOFF
+15	   CONTINUE
+	   IF (FC_TYP .EQ. OUT_LIN) THEN
+C
+C check for pen up
+C
+	      IF(MOD(IENDS,2).EQ.0) CURR_BUTN = GREEN
+	      DO 400 I=1,NPTS
+	        IF ( .NOT. COORD(DBL_Z(1,I),DBL_Z(2,I)) ) GOTO 9999
+C						! process coordinate
+400	      CONTINUE
+	   ENDIF
+C
+C...............................................................................
+C	NF - start of feature
+C
+	ELSE IF(IECODE .EQ. 'NF')THEN
+C
+	   IFSN = 0				! clear top word
+	   CALL EIHR(IFSN, 1, 1)		! extract feature no
+	   IN_FEATURE	= .TRUE.		! now inside a feature
+	   HAD_RO	= .FALSE.
+	   TPTS		= 0			! total points in feature
+C
+	   HAD_SX	= .FALSE.		! no startx found in feature
+	   HAD_SY	= .FALSE.		! no starty found in feature
+	   HAD_EX	= .FALSE.		! no endx found in feature
+	   HAD_EY	= .FALSE.		! no endy found in feature
+C
+C	........................................................................
+C	FS - feature status
+C
+	ELSE IF(IECODE .EQ. 'FS')THEN
+C
+	   CALL EIHR(FSTAT, 4, 1)		! extract feature status
+C
+C check here for an undefined code:
+C if the feature code doesn't appear in the array up to the last
+C position set in RDFDT, it wasn't in the FDT
+C
+	   I=FC_IND(FSTAT(1))
+	   IF (I .LT. 0 .OR. I .GT. NUM_FC_FDT)NUNKFC = NUNKFC + 1
+C
+C find out what type of feature it is
+C
+	   IS_CRV = .FALSE.		! assume not a curve for now
+	   FC_TYP = OUT_LIN		! the default
+	   IF ((FSTAT(3) .AND. '4000'X) .NE. 0) FC_TYP = OUT_SYM
+	   IF ((FSTAT(3) .AND. '8000'X) .NE. 0) FC_TYP = OUT_TEX
+C
+C set annotation justification bits for PUTANO
+C
+	   IF(FC_TYP . EQ. OUT_TEX)THEN
+	      IJUST=JJUST(MIN(IBITS(FSTAT(3),0,4),8))
+	      TXTCAT=IIBITS(FSTAT(3),6,6)		! category
+	   ENDIF
+	   IF ( FSTAT(1) .NE. IFCODE ) THEN
+C
+C this is not the same feature code as the last
+C
+	      IFCODE=FSTAT(1)		! feature code
+	      THIS_IND = FC_IND(IFCODE)
+C
+C check that we know about it
+C
+	      IF (THIS_IND .LT. 0) THEN
+		 IF (( FC_TYP.EQ.OUT_TEX.AND.HAD_DEF_TEXT ) .OR.
+     &	             ( FC_TYP.EQ.OUT_LIN.AND.HAD_DEF_LINE ) .OR.
+     &		     ( FC_TYP.EQ.OUT_SYM.AND.HAD_DEF_SYMBOL )) THEN
+C
+C If we dont know about it but we have a default setting that we can 
+C apply - then apply it. Also make sure that we update the standard 
+C array in case the immediately following features have the same FC and 
+C expect the array to contain the relevant values 
+C
+		    NUM_FC = NUM_FC + 1
+		    SKIP_FTR = .FALSE.
+		    USE_DEF = .TRUE.
+		    LFEDES(1,NUM_FC) = 1	! mark FC as selected
+		    LFEDES(2,NUM_FC) = IFCODE	! overwrite default FC
+						! with the current one
+		    IF ( FC_TYP.EQ.OUT_TEX ) THEN
+		       DO 200 I=3,5
+		          LFEDES(I,NUM_FC) = DEF_TEXT(I)
+		          LFCENT(I) = DEF_TEXT(I)
+200		       CONTINUE
+		       THIS_IND = NUM_FC	! set to its new value
+	            ELSEIF ( FC_TYP.EQ.OUT_LIN ) THEN
+		       DO 201 I=3,5
+	                  LFEDES(I,NUM_FC) = DEF_LINE(I)
+		          LFCENT(I) = DEF_LINE(I)
+201		       CONTINUE
+		    ELSEIF ( FC_TYP.EQ.OUT_SYM ) THEN
+		       DO 202 I=3,5
+	                  LFEDES(I,NUM_FC) = DEF_SYMBOL(I)
+		          LFCENT(I) = DEF_SYMBOL(I)
+202		       CONTINUE
+	            ENDIF
+	         ELSEIF (.NOT. QUIET_FC) THEN
+	            CALL LSL_PUTMSG(I2IMAP__UNKFC,IFCODE,IFSN)
+	            SKIP_FTR = .TRUE.
+	         ELSE
+	            SKIP_FTR = .TRUE.
+	         ENDIF
+C
+C and that it is selected
+C
+	      ELSEIF (LFEDES(1,THIS_IND) .EQ. 0) THEN
+	         SKIP_FTR = .TRUE.
+C
+C now set up the details for the new feature code
+C
+	      ELSE
+	         SKIP_FTR = .FALSE.
+	         DO 210 I = 1,LFEDES_SIZ
+	            LFCENT(I) = LFEDES(I,THIS_IND)
+210	         CONTINUE
+	      ENDIF
+C
+C if the new FC is the same as the last and the feature is undefined,
+C output a warning
+C
+	   ELSEIF (SKIP_FTR) THEN
+	      IF ((THIS_IND .LT. 0) .AND. .NOT. QUIET_FC) THEN
+	         CALL LSL_PUTMSG(I2IMAP__UNKFC,IFCODE,IFSN)
+	      ENDIF
+C
+C otherwise (the new FC is the same as the last) we have to make sure 
+C we have set up the details for the first occurence in the parameter 
+C table
+C
+	   ELSE
+	      THIS_IND = FC_IND(IFCODE)
+	      DO 220 I = 1,LFEDES_SIZ
+	         LFCENT(I) = LFEDES(I,THIS_IND)
+220	      CONTINUE
+	   ENDIF
+C
+C skip the feature if necessary
+C
+	   IF(SKIP_FTR)THEN
+	      CALL IFFNXC('EF',IELEN)
+	      IN_FEATURE = .FALSE.
+	      GOTO 10
+C
+C otherwise set things up for this particular line feature or symbol -
+C we can't do texts yet because we haven't decided what datatype to 
+C output to, but we have to do the others because we might have
+C attributes to transfer
+C
+	   ELSEIF ( FC_TYP.NE.OUT_TEX ) THEN
+	      IF (.NOT. STAPRO(LFCENT(LF_DT))) GOTO 9999
+	   ENDIF
+C
+C...............................................................................
+C	TH - text/symbol height
+C
+	ELSE IF(IECODE .EQ. 'TH')THEN
+	   CALL EIHR(IFF_HT,1,1)
+	   HEIGHT = IFF_HT
+C
+C...............................................................................
+C	TX - text string
+C
+	ELSE IF(IECODE .EQ. 'TX')THEN
+	   NCHARS = IELEN*2		! number of characters
+	   CALL EIHR(LBTEXT,IELEN,1)	! read entry
+	   IF(LBTEXT(NCHARS).EQ.0)NCHARS=NCHARS-1   ! remove null byte
+C
+C...............................................................................
+C	RO - rotation
+C
+	ELSE IF(IECODE .EQ. 'RO')THEN
+	   HAD_RO	= .TRUE.
+	   CALL EIHRR(ANGLE,1,1)
+C
+C...............................................................................
+C	EF - end of feature
+C	needs to be modified to output Annotation points
+C
+	ELSE IF(IECODE .EQ. 'EF')THEN
+C
+	   IN_FEATURE	= .FALSE.
+C
+C	   ....................................................................
+C	   check out any secondary annotation
+C
+	   IF (DO_ANNOTATION) THEN
+	     IF (HAD_SX.AND.HAD_SY) THEN
+		IF (.NOT.(HAD_EX.AND.HAD_EY)) THEN
+		   ENDX = STARTX
+		   ENDY = STARTY
+		ENDIF
+		CALL PROCESS_ANNOTATION()
+	     ENDIF
+	   ENDIF
+C
+C	   ....................................................................
+C	   if it was a line feature, then we need do no more
+C
+	   IF ( FC_TYP .EQ. OUT_LIN ) GOTO 10
+C
+C	  ....................................................................
+C	  texts and symbols need to have their angle set
+C
+	   IF(TPTS.EQ.1)THEN
+	      IF(.NOT.HAD_RO)ANGLE=0.0
+	   ELSE IF(TPTS.EQ.2)THEN
+	      ANGLE=ATAN2(Z(2,1)-Z(1,1),Z(2,2)-Z(2,1))
+	   ELSE
+	      CALL LSL_PUTMSG(I2IMAP__TOOMANYPTS,TPTS,IFSN)
+	      GOTO 10
+	   ENDIF
+C
+C	  ....................................................................
+C	  for texts, we have to find the correct index in the table
+C
+	   IF (FC_TYP .EQ. OUT_TEX) THEN
+	      I = THIS_IND - 1
+300	      I = I + 1
+	      IF (LFEDES(LF_FC,I) .EQ. IFCODE) THEN
+	         IF (LFEDES(LF_CAT,I) .EQ. TXTCAT) THEN
+	            IF ((LFEDES(LF_LOW,I) .LE. IFF_HT) .AND.
+     &	                (IFF_HT .LE. LFEDES(LF_HIGH,I))) THEN
+	               THIS_IND = I
+	               I = NUM_FC
+	            ENDIF
+	         ENDIF
+	      ENDIF
+	      IF (I .LT. NUM_FC) GOTO 300
+C
+C	  ....................................................................
+C	  set up details for the correct occurence of the feature code in the 
+C	  parameter table
+C
+	      DO 310 I = 1,LFEDES_SIZ
+	         LFCENT(I) = LFEDES(I,THIS_IND)
+310	      CONTINUE
+C
+C and set things up for this particular text - we've already done it
+C for lines and symbols
+C
+	      IF (.NOT. STAPRO(LFCENT(LF_DT))) GOTO 9999
+	   ENDIF
+C
+C	  ....................................................................
+C	  now output the feature
+C
+	   IF ( .NOT. COORD( DBL_Z(1,1), DBL_Z(2,1))) GOTO 9999
+C
+C...............................................................................
+C	AC - ancillary code
+C
+	ELSE IF(IECODE .EQ. 'AC')THEN
+C
+C
+C	   .....................................................................
+C	   check that AC is not in a text feature
+C
+	   IF ( FC_TYP.EQ.OUT_TEX ) THEN
+	     CALL LSL_PUTMSG(I2IMAP__TEXTATT)
+	     CALL LSL_ADDMSG(I2IMAP__IFFINFO,IECODE,IFSN,IFCODE)
+C
+C	   .....................................................................
+C	   check for a facility datatype
+C
+	   ELSEIF ( DATKND.NE.4 .AND. DATKND.NE.5 ) THEN
+	     CALL LSL_PUTMSG(I2IMAP__NONFACILITY)
+	     CALL LSL_ADDMSG(I2IMAP__IFFINFO,IECODE,IFSN,IFCODE)
+C
+C
+C	   .....................................................................
+C	   get the AC type and see if it is defined
+C
+	   ELSE
+	     CALL EIHRI(ACTYPE,1,1)				!get AC code
+C
+C	     ..................................................................
+C	     treat Annotation ACs differently
+C	     
+	     IF (IS_ANNOTATION(ACTYPE)) THEN
+		CALL EIHRR(ACVAL.R,1,2)
+		IF (ACTYPE.EQ.ATTR_SX) THEN
+		  HAD_SX = .TRUE.
+		  STARTX = ACVAL.R + XOFF
+		ELSEIF (ACTYPE.EQ.ATTR_SY) THEN
+		  HAD_SY = .TRUE.
+		  STARTY = ACVAL.R + YOFF
+		ELSEIF (ACTYPE.EQ.ATTR_EX) THEN
+		  HAD_EX = .TRUE.
+		  ENDX = ACVAL.R + XOFF
+		ELSEIF (ACTYPE.EQ.ATTR_EY) THEN
+		  HAD_EY = .TRUE.
+		  ENDY = ACVAL.R + YOFF
+		ENDIF
+C
+C	     ..................................................................
+C	     A normal AC, put it through the works.
+C
+	     ELSE
+C
+		THIS_ATTR = ATTR_IND(0,ACTYPE,LFCENT(LF_DT))	!is AC defined
+C
+		IF (THIS_ATTR .LT. 0) THEN			!AC not defined
+		  IF (.NOT. QUIET_FC) THEN
+	            CALL LSL_PUTMSG(I2IMAP__UNKATT,ACTYPE,LFCENT(LF_DT))
+	            CALL LSL_ADDMSG(I2IMAP__IFFINFO,IECODE,IFSN,IFCODE)
+		  ENDIF
+C
+		ELSE						!AC is defined
+		  CALL EIHRL(ACVAL.I,1,2)			!get AC value
+C
+		  DO 410 I=1,80					!init buffer
+		    ACTEXT(I) = BLANK
+410		  CONTINUE
+C
+		  ACTLEN = 2*(IELEN-3)			!calculate text length
+C
+		  IF (ACTLEN .GT. 0) THEN		!do we have text
+		    CALL EIHRI(ACTEXT,IELEN-3,4)	! read into buffer
+C
+		    IF (ACTEXT(ACTLEN) .EQ. 0) THEN	! odd num of characters
+		      ACTEXT(ACTLEN) = BLANK		! adjust length
+		      ACTLEN = ACTLEN - 1
+		    ENDIF
+		  ELSE					!no text
+		    ACTLEN = 1				! make text a blank
+		  ENDIF
+C
+C		  ..............................................................
+C		  put a bit of AC data into the INFORMAP non-graphic record
+C
+420		  CALL NONGRA(THIS_ATTR,ACVAL,ACTEXT,ACTLEN,
+     &					LFCENT(LF_DT),IECODE,IFSN,IFCODE)
+C
+C		  ............................................................
+C		  check if there was another definition of this attribute.
+C		  if there was call the above line as many times as needed
+C
+		  LAST_ATTR = THIS_ATTR
+		  THIS_ATTR= ATTR_IND(LAST_ATTR,ACTYPE,LFCENT(LF_DT))  !next
+C
+		  IF (THIS_ATTR .GT. 0) GOTO 420		!repeat process
+
+	        ENDIF
+	      ENDIF
+C	      ..................................................................
+	   ENDIF
+C
+C...............................................................................
+C	NO - new layer
+C
+	ELSE IF(IECODE .EQ. 'NO')THEN
+C
+C note & mention the overlay number
+C
+	   CALL EIHR(LAYER,1,1)		! get layer number
+	   IF (HAD_LOG) CALL LSL_PUTMSG(I2IMAP__LAYER,LAYER)
+C
+C...............................................................................
+C	EM - end of map
+C
+	ELSE IF(IECODE .EQ. 'EM')THEN
+C
+	   HAD_ENDMAP = .TRUE.
+	   GOTO 9000		! just return, having finished
+C
+C...............................................................................
+C	RA - coordinate range
+C
+	ELSE IF(IECODE .EQ. 'RA')THEN
+C
+C set 'start of input' stuff here 
+C
+	   HAD_ENDMAP = .FALSE.
+	   IN_FEATURE = .FALSE.
+C
+C...............................................................................
+C	control point stuff
+C
+	ELSE IF(IECODE .EQ. 'CP')THEN
+C
+C extract control point information and assume that these specify the extents
+C against which we test for invalid coordinates
+C
+	   CALL EIHRR (CPARR(1),4,1)
+	   CALL EIHRR (CPARR(5),4,9)
+	   CALL EIHRR (CPARR(9),4,17)
+	   CALL EIHRR (CPARR(13),4,25)
+	   MAP_XMIN = CPARR(5)
+	   MAP_XMAX = CPARR(13)
+	   MAP_YMIN = CPARR(6)
+	   MAP_YMAX = CPARR(14)
+	ENDIF
+C
+C...............................................................................
+C
+	GOTO 10						!bottom of IFFNXT loop
+C
+C-------------------------------------------------------------------------------
+C come here when we read end of file
+C
+500	IF ( .NOT.HAD_ENDMAP ) CALL LSL_PUTMSG(I2IMAP__ENDINMAP)
+	GOTO 9000					!success
+C
+C	........................................................................
+C	failure return
+C
+9999	PROCESS = .FALSE.
+C
+C	........................................................................
+C	success exit joins here
+C
+9000	CALL TIDYWT				!tidy after a WTGREL (what dat?)
+	IF(HAD_INVALID) CALL FLWCLO(INVLUN) 	!close any invalid coord files
+C
+C-------------------------------------------------------------------------------
+C
+	RETURN
+	END

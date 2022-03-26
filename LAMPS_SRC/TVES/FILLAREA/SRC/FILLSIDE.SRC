@@ -1,0 +1,690 @@
+	LOGICAL FUNCTION FILL_SIDE( NPTS, PTS, SIDES, SIDPTR,
+     &			    	    MAXSCT, INTSCT, INTPTS,
+     &			   	    HATCH,  SPACE,
+     &				    DEVICE, FREQ )
+C
+***	MODULE	FILL_SIDE
+***	IDENT	11JA85
+C
+	  IMPLICIT NONE
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+C Created by TJ Ibbs, 20 December 1984
+C
+C *********************************************************************
+C
+C This function is intended to hatch a polygon feature, which it does
+C by drawing lines across it.
+C
+C It returns FALSE if it fills the polygon (see NOTE below), and TRUE
+C if it was passed bad arguments
+C - note that an error in filling does not abort the fill, but only
+C   returns a message
+C
+C NOTE - if a line intersects the feature more than MAXSCT times,
+C	 then the fill will be incorrect on that line. However,
+C	 this is not treated as a true error condition - the function
+C	 will still return FALSE
+C
+C *********************************************************************
+C
+C parameters
+C
+	PARAMETER	 X = 1		! X coordinate index
+	PARAMETER	 Y = 2		! Y coordinate index
+	PARAMETER	DX = 3		! delta X index
+	PARAMETER	DY = 4		! delta Y index
+C
+C arguments
+C
+	INTEGER*2	NPTS
+	REAL		PTS(2,NPTS)
+	REAL		SIDES(4,NPTS-1)
+	INTEGER		SIDPTR(0:NPTS-1)
+	INTEGER*2	MAXSCT
+	REAL		INTSCT(4,MAXSCT)
+	REAL		INTPTS(MAXSCT)
+	LOGICAL		HATCH
+	REAL		SPACE
+	INTEGER		DEVICE
+	INTEGER		FREQ
+C
+C NPTS	  is the number of points in PTS, and is used to determine the
+C	  size of SIDES and SIDPTR
+C
+C PTS	  is the array of points defining this feature
+C	  - the last and first points are assumed to be equal
+C	    (ie the polygon is assumed closed)
+C
+C SIDES	  is the (sorted) array of sides of the polygon
+C	  Note that it has room for NPTS-1 sides
+C
+C	  For each side, the X,Y values of the maximum point are
+C	  stored, and also the delta X and Y values which may be used
+C	  to obtain the other point
+C
+C SIDPTR  is an array of pointers into SIDES, used to point to the
+C	  next side which has its minimum point below VSLICE
+C	  Note that it is dimensioned from 0 to NPTS
+C
+C MAXSCT  is the number of intersections which may be stored - it is
+C	  used for the INTSCT and INTPTS arrays
+C
+C INTSCT  is used to store the sides that are intersected by the
+C	  current slice
+C
+C INTPTS  is used to store the actual intersection points
+C
+C HATCH   is the type of fill to do
+C
+C		1 => horizontal lines		----
+C		2 => vertical lines		||||
+C		3 =>  45 degrees		////
+C		4 => -45 degrees		\\\\
+C		5 => crosshatch vertical	++++
+C		6 => crosshatch 45 degrees	xxxx
+C
+C SPACE  is the gap between adjacent lines
+C
+C DEVICE  which workstation to update
+C
+C FREQ	  how often (in lines drawn) to update the workstation
+C
+C routines referenced
+C
+	EXTERNAL	CF_REAL		! compare two reals
+	EXTERNAL	COPY_REAL	! copy one to another
+	EXTERNAL	CF_SIDE		! compare two sides
+	EXTERNAL	COPY_SIDE	! copy one to another
+C
+C *********************************************************************
+C
+C workspace:
+C
+	INTEGER	NSIDES		! the number of sides in the polygon
+C
+	REAL	VMIN,VMAX	! range of points in the feature
+	REAL	VLIM		! limit for VSLICE
+	REAL	DELTAV		! used in working out side
+C
+	INTEGER	LAST		! last place in SIDES (for SIDPTR use)
+	LOGICAL	INLIMBO		! true if LAST SIDPTR value incorrect
+C
+	REAL	ALPHA		! used in intersection calculation
+	REAL	VSLICE		! current raster line
+	REAL	VTEMP(2)	! copies of VSLICE for GPL
+C
+	INTEGER		NSCT	! number of intersections (even)
+	LOGICAL		VTERM	! true if a side terminates on VSLICE
+	LOGICAL		VSORT	! true if need to sort these sides
+C
+	LOGICAL		HORIZ	! fill to be horizontal/vertical
+	LOGICAL		ROTATE	! should the polygon be rotated
+	INTEGER		LHATCH	! local copy of HATCH
+	INTEGER		I,J,K	! DO loop variables
+C
+	INTEGER		LINOUT	! count of intersections output
+C
+	REAL		STORE(1,4)	! used for HEAP_SORTing
+C
+C common to define U,V,DU,DV and allow CF_SIDE to use them also
+C
+***	COMMON/HERE:SIDE/
+C
+C *********************************************************************
+C
+C check our arguments
+C
+	IF (	NPTS.LT.4	.OR.		! less than a triangle
+     &		MAXSCT.LT.2	.OR.		! <2 intersections!!
+     &		HATCH.LT.1	.OR.
+     &		HATCH.GT.6	.OR.
+     &		SPACE.LE.0.0	.OR.		! no line separation
+     &		DEVICE.LT.0	.OR.		! invalid workstation
+     &		FREQ.LE.0			! no frequency
+     &	   ) THEN
+	   CALL WRITEF('FILL_SIDE - Bad argument list')
+	   FILL_SIDE = .TRUE.
+	   GOTO 9999			! just give up
+	ENDIF
+C
+C haven't output any lines to the device yet
+C
+	LINOUT = 0
+C
+C now, check what sort of hatching is required
+C
+	IF (HATCH.LT.5) THEN
+	   LHATCH = HATCH		! in one direction only
+	ELSEIF (HATCH.EQ.5) THEN
+	   LHATCH = 1			! fill horizontal first
+	ELSE
+	   LHATCH = 3			! fill +45 degrees first
+	ENDIF
+C
+C and thus deduce what we need to do...
+C for horizontal/vertical fill, we don't need to rotate the
+C polygon. If we are doing 45 degree fill, then we rotate the
+C polygon, and choose which direction to fill it in.
+C
+	IF ( LHATCH.EQ.1 ) THEN
+	   HORIZ  = .TRUE.
+	   ROTATE = .FALSE.
+	ELSEIF ( LHATCH.EQ.2 ) THEN
+	   HORIZ  = .FALSE.
+	   ROTATE = .FALSE.
+	ELSEIF ( LHATCH.EQ.3 ) THEN
+	   HORIZ  = .FALSE.
+	   ROTATE = .TRUE.
+	ELSEIF ( LHATCH.EQ.4 ) THEN
+	   HORIZ  = .TRUE.
+	   ROTATE = .TRUE.
+	ENDIF
+C
+C *********************************************************************
+C
+C now, if we need to rotate our polygon, then we proceed to do so
+C - ROT45 rotates the polygon by 45 degrees (first arg .TRUE. to
+C rotate it, and .FALSE. to get it back again)
+C
+	IF ( ROTATE ) THEN
+C
+	   DO 5 I = 1,NPTS
+	      CALL ROT45( .TRUE., PTS(X,I), PTS(Y,I) )
+5	   CONTINUE
+C
+	ENDIF
+C
+C *********************************************************************
+C
+C and decide on which way round we see our data
+C
+10	IF ( HORIZ ) THEN
+	   U  = X			! horizontal fill
+	   V  = Y
+	   DU = DX
+	   DV = DY
+	ELSE
+	   U  = Y			! vertical fill
+	   V  = X
+	   DU = DY
+	   DV = DX
+	ENDIF
+C
+C *********************************************************************
+C
+C horizontal or vertical fill - we must determine the range
+C
+	VMIN = PTS(V,1)
+	VMAX = PTS(V,1)
+C
+C get limits between which our points range
+C
+	DO 25 I = 2, NPTS
+	   IF (PTS(V,I) .LT. VMIN) VMIN = PTS(V,I)
+	   IF (PTS(V,I) .GT. VMAX) VMAX = PTS(V,I)
+25	CONTINUE
+C
+C start raster scan at 'top' of feature
+C
+	VSLICE = VMAX-SPACE/2	! half line thickness below top
+	VLIM   = VMIN+SPACE/2	! stop when reach this level
+C
+C *********************************************************************
+C
+C we now assemble our list of sides...
+C
+C each side is stored as U, V, DU, DV
+C
+C where		U,V is the point that has maximum V, or if equal V
+C		    then minimum U (for horizontal scan, it is the
+C		    highest point of the pair, or for a horizontal
+C		    line it is the leftmost point).
+C
+C where		DU,DV is the value to be added to U,V to give the
+C		      other point
+C
+C if two points are coincident, then we don't store the (null) side,
+C and if a side is 'horizontal', then we don't store it
+C
+	NSIDES = 0		! no sides yet
+C
+	DO 11 I = 1,NPTS-1
+	   IF ( PTS(V,I).GT.PTS(V,I+1) ) THEN
+	      J = I
+	      K = I+1
+	   ELSEIF ( PTS(V,I).LT.PTS(V,I+1) ) THEN
+	      J = I+1
+	      K = I
+	   ELSE
+	      IF ( PTS(U,I).LT.PTS(U,I+1) ) THEN
+		 J = I
+		 K = I+1
+	      ELSEIF ( PTS(U,I).GT.PTS(U,I+1) ) THEN
+		 J = I+1
+		 K = I
+	      ELSE
+		 GOTO 11		! ignore a null side
+	      ENDIF
+	   ENDIF
+C
+C	 we ignore any 'horizontal' sides - only accept the side
+C	 if it has a non-zero deltaV
+C
+	   DELTAV = PTS(V,K) - PTS(V,J)
+	   IF ( DELTAV.NE.0.0 ) THEN
+	      NSIDES = NSIDES+1
+	      SIDES( U,NSIDES) = PTS(U,J)
+	      SIDES( V,NSIDES) = PTS(V,J)
+	      SIDES(DU,NSIDES) = PTS(U,K) - PTS(U,J)
+	      SIDES(DV,NSIDES) = DELTAV
+	   ENDIF
+11	CONTINUE
+C
+C and so we have our sides - we must now sort them into order
+C
+	CALL HEAP_SORT( SIDES, NSIDES, CF_SIDE, COPY_SIDE, STORE )
+C
+C *********************************************************************
+C
+C now set up the SIDPTR array - initially each element points to the
+C 'next' element - note that since our sort actually produces the list
+C of sides 'backwards', we actually chain through the list in reverse
+C
+	DO 12 I = 1,NSIDES
+	   SIDPTR(I) = I-1		! point to previous entry
+12	CONTINUE
+C
+C the zeroth element of SIDPTR then gives us the element to start at
+C
+	SIDPTR(0) = NSIDES
+C
+C *********************************************************************
+C
+C now find which sides are intersected by the slice...
+C
+C if we find a side with its maximum point (U,V) below VSLICE, then
+C all succeeding sides will also have their maximum points above
+C VSLICE, and we can stop searching
+C
+C if we find a side with its minimum point (U+DU,V+DV) above VSLICE,
+C then that side will have its minimum point above all succeeding
+C VSLICEs, since VSLICE is being decreased each iteration. We can
+C thus use SIDPTR to point around this side, so that we ignore it
+C in the future.
+C
+C
+20	NSCT = 0		! no intersected sides yet
+	LAST = 0		! 'last side' is initial pointer
+	INLIMBO = .FALSE.	! list starts off all connected, so OK
+	I = SIDPTR(0)		! start off at 'top' of list
+C
+30	IF (I.LE.0) GOTO 100	! finished all of the list
+C
+	IF ( SIDES(V,I) .LT. VSLICE ) THEN
+C
+C	 this side has its maxV below our slice - it is thus not
+C	 intersected, and nor are any of the sides after this
+C	 (since they all have lesser maxV values)
+C	 If we are in limbo, then we must set the pointer to here
+C	 (since this point is still to be checked), and we may then
+C	 go off to process the intersected sides
+C
+	   IF (INLIMBO) THEN
+	      SIDPTR(LAST) = I	! point to this point
+	   ENDIF
+	   GOTO 100		! got all intersected sides
+C
+	ELSEIF ( SIDES(V,I)+SIDES(DV,I) .GT. VSLICE ) THEN
+C
+C	 this side has its minV above our slice - it is thus
+C	 totally above the slice and may be ignored in all future
+C	 searches. We must thus change the value of SIDPTR(LAST) to
+C	 point around this feature - we need to go into LIMBO state
+C
+	   INLIMBO = .TRUE.
+	   I = SIDPTR(I)	! try the next side in the list
+	   GOTO 30
+C
+	ELSE
+C
+C	 this side is intersected - come out of LIMBO (if we were in
+C	 that state), and store this side in INTSCT
+C
+	   IF (INLIMBO) THEN
+	      SIDPTR(LAST) = I	! point around LIMBO area to this side
+	      INLIMBO = .FALSE.
+	   ENDIF
+C
+	   NSCT = NSCT+1	! insert into next place in INTSCT
+C
+	   IF ( NSCT.GT.MAXSCT ) THEN
+	      CALL WRITEF(
+     &		'FILL_SIDE - Too many intersections found - ignored')
+	      IF (INLIMBO) SIDPTR(LAST) = I	! force exit from LIMBO
+	      GOTO 160				! ignore this VSLICE
+	   ENDIF
+C
+C	 copy the data for this side into INTSCT
+C
+	   CALL COPY_SIDE( SIDES, I, INTSCT, NSCT )
+C
+C	 and now we want to move onto the next side to be checked
+C
+	   LAST = I		! this will be new LAST side
+	   I = SIDPTR(I)	! and obtain the position of the next
+	   GOTO 30
+C
+	ENDIF
+C
+C *********************************************************************
+C
+C when we reach here, we have found all the sides which are intersected
+C by our slice
+C
+C we can ignore an empty list of intersections, and a single
+C intersection is an error
+C
+C two intersections are common enough that we treat them specially
+C - note that only problem type (1) is relevant to two intersections
+C (see notes below for a description of the problem types)
+C - problem type (2) requires more than 2 intersections
+C
+C for two intersections we don't bother to sort
+C
+100	IF ( NSCT.EQ.1 ) THEN
+C
+	   CALL WRITEF(
+     &		'FILL_SIDE - Single intersection side in buffer')
+C
+	ELSEIF ( NSCT.EQ.2 ) THEN
+C
+	   IF (
+     &	      .NOT.(
+     &		   INTSCT(V,1) .EQ. INTSCT(V,2)
+     &		   .AND.
+     &		   INTSCT(V,1) .EQ. VSLICE
+     &		   )
+     &	     .AND.
+     &	      .NOT.(
+     &		   INTSCT(V,1)+INTSCT(DV,1) .EQ.
+     &		   INTSCT(V,2)+INTSCT(DV,2)
+     &		   .AND.
+     &		   INTSCT(V,1)+INTSCT(DV,1) .EQ. VSLICE
+     &		   )
+     &	      ) THEN
+C
+C	    this line is not a case (1), so work out the intersections
+C
+	      DO 130 I = 1,2
+	         ALPHA = (VSLICE-INTSCT(V,I)) / INTSCT(DV,I)
+	         INTPTS(I) =  INTSCT(U,I)*(1-ALPHA) +
+     &			     (INTSCT(U,I)+INTSCT(DU,I))*ALPHA
+130	      CONTINUE
+C
+C	     and now draw the slice - first set up the 'other'
+C	     coordinate we shall use...
+C
+	      VTEMP(1) = VSLICE
+	      VTEMP(2) = VSLICE
+C
+C	     transform back if required
+C
+	      IF ( ROTATE ) THEN
+		 DO 135 I = 1,2
+		    IF (HORIZ) THEN
+		       CALL ROT45(.FALSE.,INTPTS(I),VTEMP(I))
+		    ELSE
+		       CALL ROT45(.FALSE.,VTEMP(I),INTPTS(I))
+		    ENDIF
+135		 CONTINUE
+	      ENDIF
+C
+C	     and do the actual drawing
+C
+	      IF (HORIZ) THEN
+	         CALL GPL( 2, INTPTS(1), VTEMP )
+	      ELSE
+	         CALL GPL( 2, VTEMP, INTPTS(1) )
+	      ENDIF
+C
+C	    count this line as having been output
+C
+	      LINOUT = LINOUT+1
+C
+	   ENDIF
+C
+	ELSEIF ( NSCT.GT.2 ) THEN
+C
+C	 we have a list of intersected sides - check if we should throw
+C	 any of them away
+C
+C	 We look for sides (in our INTSCT list) with a maximum or
+C	 minimum point lying on VSLICE, as follows:
+C
+C	 -----	in the diagrams, the dashed horizontal line is VSLICE,
+C		and passes exactly through the common point of the line
+C		segments shown
+C
+C	  		    /				    /
+C	 ---/\--   or   ---x---   or   --x==x--   or  --x==x--
+C	   /  \		  /		/    \	       /
+C
+C	   (1)		  (2)		 (3)		(4)
+C
+C	 in case (1) both intersections may be discarded, as
+C	 	     they define a null line
+C	 	     - we have VSLICE = maxima or minima of both sides
+C
+C	 in case (2) one of the intersections may be discarded, as
+C	 	     retaining both would yield the wrong result
+C		     - we have VSLICE = maximum of one side, and
+C					minimum of the other side
+C
+C	 in case (3) the line segment parallel to VSLICE has DV zero,
+C	 	     so is ignored, meaning that this case is reduced
+C		     to case (1)
+C
+C	 in case (4) the line segment parallel to VSLICE has DV zero,
+C	 	     so is ignored, meaning that this case is reduced
+C		     to case (2)
+C
+C	 so let us check our intersected sides according to these
+C	 criteria.
+C
+C	 We inspect our list for any sides terminating on VSLICE,
+C	 and ensure that all such sides have their U,V point as the
+C	 point on VSLICE (to make later comparisons easier).
+C	 Note that if we do invert any sides, then we shall need to
+C	 sort the list of intersected sides again.
+C
+C	 Our conditions for type (1) and type (2) are now:
+C
+C	 for type (1) we have
+C			INTSCT(V,I) = INTSCT(V,I+1) = VSLICE
+C			both sides have INTSCT(DV,...) of the
+C			same sign (both sides have the second
+C			point 'below' or 'above' the first)
+C
+C	 for type (2) we have
+C			INTSCT(V,I) = INTSCT(V,I+1) = VSLICE
+C			the sides have INTSCT(DV,...) of a
+C			different sign (one side has its second
+C			point 'above' the first, the other 'below')
+C
+C	 we shall thus have a sequence of type (1) and type (2) all
+C	 together in the list (since their value of V is the same)
+C
+C
+	   VTERM = .FALSE.		! no sides ending on VSLICE yet
+	   VSORT = .FALSE.		! thus no need to sort
+C
+	   DO 140 I = 1,NSCT
+	      IF ( INTSCT(V,I) .EQ. VSLICE ) THEN
+		 VTERM     = .TRUE.
+	      ELSEIF ( INTSCT(V,I)+INTSCT(DV,I) .EQ. VSLICE ) THEN
+		 INTSCT(U,I)  =  INTSCT(U,I)+INTSCT(DU,I)
+		 INTSCT(V,I)  =  INTSCT(V,I)+INTSCT(DV,I)
+		 INTSCT(DU,I) = -INTSCT(DU,I)
+		 INTSCT(DV,I) = -INTSCT(DV,I)
+		 VTERM     = .TRUE.
+		 VSORT     = .TRUE.	! necessitates a re-sort
+	      ENDIF
+140	   CONTINUE
+C
+C	    so, do we have to deal with special cases?
+C
+	   IF ( VTERM ) THEN
+C
+	      IF (VSORT) THEN
+		 CALL HEAP_SORT(INTSCT,NSCT,CF_SIDE,COPY_SIDE,STORE)
+	      ENDIF
+C
+C	       we intend to copy all the required sides back into
+C	       INTSCT...
+C
+	      I = 0
+	      J = 0
+C
+144	      IF ( I.GE.NSCT ) GOTO 146		! finished all sides
+	      I = I+1				! next side
+C
+	      IF ( INTSCT(V,I).NE.VSLICE ) THEN	! an ordinary side
+C
+C	       for an ordinary side, we simply copy it over
+C
+		 J = J+1
+		 CALL COPY_SIDE( INTSCT, I, INTSCT, J )
+C
+	      ELSEIF ( SIGN(1.0,INTSCT(DV,I)) .NE.
+     &		       SIGN(1.0,INTSCT(DV,I+1))  ) THEN
+C
+C	       for case 2, we ignore one of the sides, and
+C	       copy the other
+C
+		 I = I+1		! copy the second side only
+		 J = J+1
+		 CALL COPY_SIDE( INTSCT, I, INTSCT, J )
+C
+	      ELSE
+C
+C	       for case 1, we ignore both of the sides
+C
+		 I = I+1
+C
+	      ENDIF
+	      GOTO 144			! inspect the next side
+C
+C	    we now have a new number of sides in our list
+C
+146	      NSCT = J
+C
+	   ENDIF
+C
+C	 does that leave us with anything to do?
+C
+	   IF ( NSCT.EQ.0 ) GOTO 160		! ignore it
+C
+C	 so we can now work out the actual intersections
+C
+	   DO 150 I = 1,NSCT
+C
+C	    calculate the 'height' at which VSLICE intersects
+C	    this side
+C
+	      ALPHA = (VSLICE-INTSCT(V,I)) / INTSCT(DV,I)
+C
+C	    and now calculate the actual intersection position
+C
+	      INTPTS(I) =  INTSCT(U,I)*(1-ALPHA) +
+     &			  (INTSCT(U,I)+INTSCT(DU,I))*ALPHA
+150	   CONTINUE
+C
+C	 sort the list of intersections into order
+C
+	   CALL HEAP_SORT( INTPTS, NSCT, CF_REAL, COPY_REAL, STORE )
+C
+C	 check that we now have an even number of intersections
+C	 (we always should have by now)
+C
+	   IF ( (NSCT.AND.1).EQ.1 ) THEN
+	      CALL WRITEF(
+     &		'FILL_SIDE - odd number of intersections - ignored')
+	      GOTO 160
+	   ENDIF
+C
+C	 and draw the lines between the intersections
+C	 - first set up the 'other' coordinate we shall use...
+C
+	   VTEMP(1) = VSLICE
+	   VTEMP(2) = VSLICE
+C
+C	 and do the actual drawing
+C
+	   DO 155 I = 1, NSCT-1, 2
+C
+	      IF (HORIZ) THEN
+C
+		 IF (ROTATE) THEN		! transform back
+		    DO 153 J = 1,2
+		       VTEMP(J) = VSLICE
+		       CALL ROT45(.FALSE.,INTPTS(I+J-1),VTEMP(J))
+153		    CONTINUE
+		 ENDIF
+	         CALL GPL( 2, INTPTS(I), VTEMP )
+C
+	      ELSE
+C
+		 IF (ROTATE) THEN		! transform back
+		    DO 154 J = 1,2
+		       VTEMP(J) = VSLICE
+		       CALL ROT45(.FALSE.,VTEMP(J),INTPTS(I+J-1))
+154		    CONTINUE
+		 ENDIF
+	         CALL GPL( 2, VTEMP, INTPTS(I) )
+C
+	      ENDIF
+C
+155	   CONTINUE
+C
+C	 count this line as having been output
+C
+	   LINOUT = LINOUT+1
+C
+	ENDIF
+C
+C *********************************************************************
+C
+160	VSLICE = VSLICE-SPACE	! ready for next raster line
+C
+	IF (LINOUT.GE.FREQ) THEN
+	   CALL GUWK(DEVICE,0)		! force the lines out
+	   LINOUT = 0			! restart the count
+	ENDIF
+C
+C if we haven't yet reached the top, then go back for another scan
+C
+	IF (VSLICE.GE.VLIM) GOTO 20
+C
+C and we finally reach here when we have scanned the whole feature
+C - do we need to scan it again?
+C
+	IF (LHATCH.NE.HATCH) THEN
+	   IF (LHATCH.EQ.1.OR.LHATCH.EQ.3) THEN
+	      LHATCH = LHATCH+1		! 'next' sort of hatch
+	      HORIZ  = .NOT.HORIZ	! fill it crosswise
+	      GOTO 10
+	   ENDIF
+	ENDIF
+C
+C no, so check that we have output all lines required
+C
+	IF (LINOUT.NE.0) CALL GUWK(DEVICE,0)
+C
+C so we have successfully filled a polygon (or so we assume)
+C
+	FILL_SIDE = .FALSE.
+C
+9999	RETURN
+	END

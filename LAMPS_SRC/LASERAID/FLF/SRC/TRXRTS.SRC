@@ -1,0 +1,273 @@
+	INTEGER*4 FUNCTION TRXSET(CC,CP,FCOEF,BCOEF)
+C
+***	MODULE	TRXSET
+***	IDENT	14JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Establish FLF$SIG_TO_RET_NOARITH as a condition handler, and 
+C then call a local TRXSET. If an arithmetic error occurs anywhere down
+C the chain, the local TRXSET will appear to return that code.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C arguments:
+	REAL      CC(10,2)	! input bicubic coeffs
+	REAL      CP(4,4)	! input control point array
+	REAL      FCOEF(10,2)	! output forward bicubic (to map space)
+	REAL      BCOEF(10,2)	! output backward bicubic (to m/c space)
+C
+C functions:
+	EXTERNAL  FLF$SIG_TO_RET_NOARITH
+	INTEGER*4 TRXSET_LOCAL
+C
+C ......................................................................
+C
+	CALL LIB$ESTABLISH(FLF$SIG_TO_RET_NOARITH)
+	TRXSET=TRXSET_LOCAL(CC,CP,FCOEF,BCOEF)
+	CALL LIB$REVERT
+	RETURN
+	END
+C
+	INTEGER*4 FUNCTION TRXSET_LOCAL(CC,CP,FCOEF,BCOEF)
+C
+***	MODULE	TRXSET_LOCAL
+***	IDENT	14JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Corner points are now control points	 DM	14-Jul-1986
+CMOD	Retain precision in reverse transform	 DM	15-Sep-1983
+CMOD	FIT now more tolerant (allow odd CPs)	 DM	20-Jun-1983
+CMOD	CPSET and (new) CPTEST now functions,
+CMOD	returns 42 if CPs duff			 DM	06-Jun-1983
+CMOD	Returns a value of 40 if FIT fails	 DM	02-Jun-1983
+CMOD	TRSFRMs corner points			AJW/WJJ	29-Oct-1982
+CMOD	Created					WJJ	21-Oct-1982
+C
+C Given a bicubic coefficient array CC, and a control point array CP, we
+C compute a bicubic FCOEF which does the combined job and a bicubic
+C BCOEF which does it backwards.
+C We transform a mesh of points over the screen into map space using the
+C given CC and CP, and then fit bicubics in both directions.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C parameters:
+***	PARAMETER/PARAMS/
+C
+C arguments:
+	REAL	  CC(10,2)	! input bicubic coeffs
+	REAL	  CP(4,4)	! input control point array
+	REAL	  FCOEF(10,2)	! output forward bicubic (to map space)
+	REAL	  BCOEF(10,2)	! output backward bicubic (to m/c space)
+C
+C common blocks:
+***	COMMON/COORDS/
+***	COMMON/DIGC/
+***	COMMON/MASTER/
+C
+	REAL*8	  CPCOEF(4,2)	! four-point transform coeffs
+	COMMON /CPCOM/ CPCOEF
+	REAL*8	  CRIT		! criterion for rejection of fit
+	COMMON /FITCOM/ CRIT
+C
+C workspace:
+	INTEGER   III		! do loop counter
+	INTEGER	  NGOOD		! number of test points
+	REAL      CTEMP(4,4)	! local copy of control points
+	REAL	  OFFSET(2)	! offset of blh control pnt in map space
+	REAL	  REQACC	! required accuracy of fit (HRD counts)
+	REAL	  SPOL(10)	! single precision copy of POL
+	REAL	  XI,YI		! ideal m/c space coords of mesh points
+	REAL	  XF,YF		! ditto (after transforming twice)
+	REAL	  XMAX,YMAX	! maximum errors
+	REAL	  XRMS,YRMS	! RMS errors
+	REAL	  XT,YT		! temporary variables
+	REAL*8	  POL(10)	! 1,X,Y,XX,XY,YY,XXX,XXY,XYY,YYY
+C
+C functions:
+	LOGICAL*4 CPSET
+	LOGICAL*4 CPTEST
+	LOGICAL*4 FIT
+C
+C ......................................................................
+C
+	TRXSET_LOCAL=1		! normal sucessful completion
+C
+C ... transform the machine space part of the control points by the CCs.
+C ... subtract any constant offset in the map space values (for now).
+	OFFSET(X)=CP(3,2)
+	OFFSET(Y)=CP(4,2)
+	DO 10 III=1,4
+	  CALL TRSFRM(CC,   CP(1,III),   CP(2,III),
+     &                   CTEMP(1,III),CTEMP(2,III),3)
+	  CTEMP(3,III)=CP(3,III) - OFFSET(X)
+	  CTEMP(4,III)=CP(4,III) - OFFSET(Y)
+10	CONTINUE
+C
+	IF (CPTEST(CTEMP)) GO TO 80	! do preliminary tests
+	IF (CPSET(CTEMP)) GO TO 80	! OK (?) - pass CPs to TRANLIB
+C
+	NGRD=0				! no points in mesh yet
+	DO 30 XI=-50000.0,50000.0,10000.0	! loop over screen X
+	  DO 20 YI=-35000.0,35000.0,10000.0	! loop over screen Y
+	    NGRD=NGRD + 1			! one more point
+	    OBS(X,NGRD)=XI			! save m/c space value
+	    OBS(Y,NGRD)=YI
+	    CALL TRSFRM(CC,XI,YI,GRD(X,NGRD),GRD(Y,NGRD),3)   ! apply CC
+	    CALL CPUSE(GRD(X,NGRD),GRD(Y,NGRD))		      ! and CP
+20	  CONTINUE
+30	CONTINUE
+C
+C ... now fit bicubics forwards and backwards.
+	CRIT=1.0D6		! be tolerant
+	IF (FIT(NGRD,GRD,OBS,FCOEF,3,1)) TRXSET_LOCAL=40
+	IF (FIT(NGRD,OBS,GRD,BCOEF,3,1)) TRXSET_LOCAL=40
+	CRIT=1.0D3		! tighten up fit criterion again
+C
+C ......................................................................
+C
+C ... correct for any offset in the map space coordinates.
+C ... the correction to be applied to BCOEF is not at all obvious !!
+C ... (see DM for a derivation of the formulae).
+	CALL POLGEN(POL,DBLE(OFFSET(X)),DBLE(OFFSET(Y)),3)
+	DO 40 III=1,10
+	   SPOL(III)=SNGL(POL(III))	! 1,X,Y,XX,XY,YY,XXX,XXY,XYY,YYY
+40	CONTINUE
+	DO 50 III=1,2
+	   FCOEF(1,III)=FCOEF(1,III) + OFFSET(III)
+	   CPCOEF(1,III)=CPCOEF(1,III) + OFFSET(III) ! correct CP coeffs
+	   BCOEF(1,III)=BCOEF(1,III) - (BCOEF(2,III)*SPOL(2) +
+     &			BCOEF(3,III)*SPOL(3) - BCOEF(4,III)*SPOL(4) -
+     &			BCOEF(5,III)*SPOL(5) - BCOEF(6,III)*SPOL(6) +
+     &			BCOEF(7,III)*SPOL(7) + BCOEF(8,III)*SPOL(8) +
+     &			BCOEF(9,III)*SPOL(9) + BCOEF(10,III)*SPOL(10))
+	   BCOEF(2,III)=BCOEF(2,III) - (BCOEF(4,III)*2.0*SPOL(2) +
+     &			BCOEF(5,III)*SPOL(3) -
+     &			BCOEF(7,III)*3.0*SPOL(4) -
+     &			BCOEF(8,III)*2.0*SPOL(5) -
+     &			BCOEF(9,III)*SPOL(6))
+	   BCOEF(3,III)=BCOEF(3,III) - (BCOEF(5,III)*SPOL(2) +
+     &			BCOEF(6,III)*2.0*SPOL(3) -
+     &			BCOEF(8,III)*SPOL(4) -
+     &			BCOEF(9,III)*2.0*SPOL(5) -
+     &			BCOEF(10,III)*3.0*SPOL(6))
+	   BCOEF(4,III)=BCOEF(4,III) - (BCOEF(7,III)*3.0*SPOL(2) +
+     &			BCOEF(8,III)*SPOL(3))
+	   BCOEF(5,III)=BCOEF(5,III) - (BCOEF(8,III)*2.0*SPOL(2) +
+     &			BCOEF(9,III)*2.0*SPOL(3))
+	   BCOEF(6,III)=BCOEF(6,III) - (BCOEF(9,III)*SPOL(2) +
+     &			BCOEF(10,III)*3.0*SPOL(3))
+50	CONTINUE
+C
+C ......................................................................
+C
+C ... now test the fit.
+C ... transform the mid-points of the original grid squares both ways
+C ... and find the residuals.
+	NGOOD=0
+	XRMS=0.0
+	YRMS=0.0
+	XMAX=-1.0E37
+	YMAX=-1.0E37
+	DO 70 XI=-45000.0,45000.0,10000.0
+	   DO 60 YI=-30000.0,30000.0,10000.0
+	      NGOOD=NGOOD + 1
+	      CALL TRSFRM(FCOEF,XI,YI,XT,YT,3)
+	      CALL TRSFRM(BCOEF,XT,YT,XF,YF,3)
+	      XT=ABS(XF - XI)
+	      YT=ABS(XF - XI)
+	      XRMS=XRMS + XT*XT
+	      YRMS=YRMS + YT*YT
+	      IF (XT.GT.XMAX) XMAX=XT
+	      IF (YT.GT.YMAX) YMAX=YT
+60	   CONTINUE
+70	CONTINUE
+	XRMS=SQRT(XRMS/NGOOD)
+	YRMS=SQRT(YRMS/NGOOD)
+	REQACC=FIDMAX		! use FIDMAX as convenient criterion
+	IF (REQACC.LT.0.1) REQACC=15.0
+	IF (XMAX.LE.REQACC.AND.YMAX.LE.REQACC) GO TO 90
+	CALL WRITEF('Residuals: RMS%F7.1%F7.1 Max%F7.1%F7.1',
+     &				    XRMS,YRMS,	  XMAX,YMAX)	! duff
+	IF (.NOT.WIZARD) TRXSET_LOCAL=40
+	GO TO 90
+C
+C ......................................................................
+C
+80	CALL WRITEF('*** Bad control points%C',7)
+	TRXSET_LOCAL=42
+90	RETURN
+	END
+C
+	SUBROUTINE TRXUSE(X,Y,C)
+C
+***	MODULE	TRXUSE
+***	IDENT	29AP86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Rewritten; TRXUSE_LOCAL removed		 DM	29-Apr-1986
+C	Created					WJJ	21-Oct-1982
+C
+C Applies bicubic coefficients in C to coordinates (X,Y).
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C arguments:
+	REAL	  X,Y		! input and output coordinates
+	REAL	  C(10,2)	! bicubic coefficients
+C
+	REAL	  T		! temporary variable
+C
+C ......................................................................
+C
+	T=C(1,1) + X*(C(2,1) + X*(C(4,1) + X*C(7,1))) +
+     &		   X*Y*(C(5,1) + X*C(8,1) + Y*C(9,1)) +
+     &		   Y*(C(3,1) + Y*(C(6,1) + Y*C(10,1))) 
+	Y=C(1,2) + X*(C(2,2) + X*(C(4,2) + X*C(7,2))) +
+     &		   X*Y*(C(5,2) + X*C(8,2) + Y*C(9,2)) +
+     &		   Y*(C(3,2) + Y*(C(6,2) + Y*C(10,2))) 
+	X=T
+	RETURN
+	END
+C
+	SUBROUTINE TRSFRM(COEFFS,XIN,YIN,XOUT,YOUT,NORDER)
+C
+***	MODULE	TRSFRM
+***	IDENT	30MY86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+C	Created 				 DM	29-May-1986
+C
+C Applies bicubic coefficients in COEFFS to coordinates (XIN,YIN) to
+C produce (XOUT,YOUT).
+C Replacement for the TRANLIB routine of the same name.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C arguments:
+	REAL	  COEFFS(10,2)	! bicubic coefficients
+	REAL	  XIN,YIN	! input coordinates
+	REAL	  XOUT,YOUT	! output (transformed) coordinates
+	INTEGER*2 NORDER	! order of fit (ignored - always 3)
+C
+C ......................................................................
+C
+	XOUT=XIN
+	YOUT=YIN
+	CALL TRXUSE(XOUT,YOUT,COEFFS)
+	RETURN
+	END

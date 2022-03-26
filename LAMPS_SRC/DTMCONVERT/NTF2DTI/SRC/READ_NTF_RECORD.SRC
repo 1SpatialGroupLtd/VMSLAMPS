@@ -1,0 +1,246 @@
+	LOGICAL FUNCTION READ_NTF_RECORD
+C
+***	IDENT	06JL93
+***	MODULE	READ_NTF_RECORD
+C
+C Copyright (C) Laser-Scan Ltd, Cambridge, England
+C
+C Author TJ Ibbs, 7 October 1987
+C
+C Modified for variable length records 
+C	Iain McLeman, 21 August 1989
+C
+C	To read the next NTF record and its' length into /RECORD/
+C	- returns TRUE if it succeeds, FALSE if it fails
+C	NB end-of-file (tapemark) does not cause an error to be output,
+C	but does cause FALSE to be returned
+C
+CMOD	Adjust for NTF files without CR at end of line
+CMOD    Source moved from READ_RECORD			SG	09-Jul-1991
+CMOD	Bug fix in reading from mag_tape	        SG	16-Jul-1991
+CMOD	Cope with multiple tape volumes			JMC 	17-Dec-1992
+C
+CMOD	Copied to NTF2DTI from NTF2I for variable 
+C	length records					JB	18-May-1992
+C
+	IMPLICIT NONE
+C
+C Message definitions
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'HERE:NTF2DTIMSG.PAR'
+C
+C Common files
+	INCLUDE	'LSL$CMNLSL:MTIVCM.CMN'		! for MTIERR, MTINBL
+	INCLUDE	'HERE:COMMANDS.CMN'		! for IS_MAGTAPE
+	INCLUDE	'HERE:RECORD.CMN'		! for STRING
+	INCLUDE	'HERE:NTFDATA.CMN'
+C
+C Define the size of the blocks to be read from magnetic tape
+C
+	INTEGER 	BLOCKSIZE		!  num of bytes in each block 
+	PARAMETER	(BLOCKSIZE=2000)
+C
+	CHARACTER*(BLOCKSIZE)	BUFFER		! Buffer to be output
+	BYTE		BLOCK(BLOCKSIZE)
+	EQUIVALENCE	(BLOCK,BUFFER)
+C
+	INTEGER*2	BUFFER_PTR		! Where we are
+C 
+C Save these value ( i.e. Local common )
+C
+	DATA		BUFFER_PTR / BLOCKSIZE /
+	SAVE		BUFFER,	BUFFER_PTR
+C
+C Functions
+	LOGICAL		MTIRDB				! read block from tape
+	LOGICAL		FLRSTR				! read string from file
+	LOGICAL		RECOGNISED			! IS REC_DESCR VALID
+	LOGICAL		READ_VOLHDREC
+C
+C Workspace
+	INTEGER		BYTCNT				! number of bytes read
+	LOGICAL		OK				! function result
+	LOGICAL		BUFFER_IS_EMPTY
+	INTEGER		IERR				! ditto
+	INTEGER		I				! Loop counter
+	INTEGER		LASTSIG				! last significant char
+C
+C ************************************************************************
+C
+10	OK = .TRUE.		! assume the best
+	RECNUM = RECNUM + 1	! count the record
+C
+C.........................................................................
+C what are we reading from, tape or disk
+C
+C	---------------------------TAPE-----------------------------------
+C	See if we need to read a new block, a space is used to signal a null
+C	record used to pad out a block if there is no room for a new record
+C
+	IF (IS_MAGTAPE) THEN
+C
+C	  ................................................................
+C	  is the buffer empty? do we need to read from tape
+C
+	   IF (BUFFER_PTR.GE.BLOCKSIZE-3) THEN
+	     BUFFER_IS_EMPTY = .TRUE.
+C
+	   ELSEIF (BLOCK(BUFFER_PTR) .EQ. ' ') THEN
+	     BUFFER_IS_EMPTY = .TRUE.
+C
+	   ELSE
+	     BUFFER_IS_EMPTY = .FALSE.
+	   ENDIF
+C
+20	   CONTINUE
+C
+	   IF (BUFFER_IS_EMPTY) THEN
+C
+	      OK = MTIRDB( %REF(BUFFER), BLOCKSIZE, BYTCNT )	
+	      IF (.NOT.OK) THEN
+		 CALL LSL_PUTMSG(NTF2DTI__READBLK,MTINBL)
+		 CALL LSL_ADDMSG(OK)
+		 IF (OK.EQ.LSL__SYSERR) CALL LSL_ADDMSG(MTIERR)
+C
+	      ELSEIF (BYTCNT.NE.BLOCKSIZE) THEN
+		 CALL LSL_PUTMSG(NTF2DTI__SHORTBLK,MTINBL,BYTCNT)
+		 OK = .FALSE.
+	      ENDIF
+C
+	      BUFFER_PTR = 1
+	   ENDIF
+C
+	   IF (RECNUM.EQ.1) THEN
+	      IF (BUFFER(BUFFER_PTR:BUFFER_PTR+1).EQ.'01') THEN
+C
+C read the first record;
+C we insist that this should be a volume header record (VOLHDREC) at a
+C set length of 66 in a fixed or variable length record
+C
+	         STRING = BUFFER(1:66)
+	         LENGTH = 66
+C
+	         OK = READ_VOLHDREC()
+	         IF (.NOT.OK) GOTO 999
+C
+	      ELSE
+	         NTF$_REC_DESCR = STRING(1:2)
+	         CALL LSL_PUTMSG(NTF2DTI__NOVOLHDREC)
+	         CALL LSL_ADDMSG(NTF2DTI__UNEXPREC,NTF$_REC_DESCR,RECNUM)
+	         OK = .FALSE.
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+C
+C 	 ...................................................................
+C we have a block read in - get a record
+C variable length,try to find the end of the buffer
+C
+	   IF (FIXED) THEN			! fixed length
+	      STRING = BUFFER(BUFFER_PTR:BUFFER_PTR+79)
+	      LENGTH = 80
+C
+	   ELSE					! variable length
+	      LASTSIG = 1
+	      DO 100 I = BUFFER_PTR, MIN(BLOCKSIZE, BUFFER_PTR+80)
+	         IF (BUFFER(I:I) .EQ. EOR_MARKER) THEN
+C
+C Ignore EOR declaration in VOLHDREC record
+C
+		    IF (RECNUM.EQ.1 .AND. I.LT.66) GOTO 100
+C
+		    GOTO 200
+		 ENDIF
+C
+		 IF (BUFFER(I:I) .NE. ' ') LASTSIG = I
+100	      CONTINUE
+C
+	      IF (.NOT.FIXED. AND. LASTSIG.EQ.BLOCKSIZE) THEN
+		 BUFFER_IS_EMPTY = .TRUE.
+		 GOTO 20				! get next block
+	      ENDIF
+C
+C	      ..............................................................
+C 	      No terminating characters found => badly constructed record,
+C 	      error, Unless it is the volume header record which should 
+C	      always be 66 or 80 characters long and which defines the 
+C	      character to be used as EOR_MARKER (assumed to be <CR>)
+C
+	      IF ( BUFFER( BUFFER_PTR:BUFFER_PTR+1 ).EQ.'01' ) THEN
+		 IF ( BUFFER( BUFFER_PTR+62:BUFFER_PTR+62 ).EQ.'F' ) THEN
+	            I = BUFFER_PTR + 80
+	         ELSE
+	            I = BUFFER_PTR + 66
+	         ENDIF
+C
+	      ELSE
+	         CALL LSL_PUTMSG( NTF2DTI__READREC,RECNUM )
+	         CALL LSL_ADDMSG( NTF2DTI__NOTERMCR )
+		 I = LASTSIG	! guess length as last non-space
+	      ENDIF
+C
+200	      LENGTH = I - BUFFER_PTR + 1
+	      STRING = BUFFER(BUFFER_PTR:(BUFFER_PTR+LENGTH-1))
+	   ENDIF
+C
+	   BUFFER_PTR = BUFFER_PTR + LENGTH
+C
+C	---------------------------FILE---------------------------------------
+C
+	ELSE						! read from a file
+	   OK = FLRSTR( STRING, LENGTH, IERR )		! read string
+	   IF ( .NOT.OK ) THEN				! problem
+	      CALL LSL_PUTMSG(NTF2DTI__READREC,RECNUM)
+	      IF (OK.EQ.LSL__SYSREAD) CALL LSL_ADDMSG(MTIERR)
+	      GOTO 999
+	   ENDIF
+C
+	   IF (RECNUM.EQ.1) THEN
+	      IF (STRING(1:2).EQ.'01') THEN
+C
+C read the first record;
+C we insist that this should be a volume header record (VOLHDREC) at a
+C set length of 66 in a fixed or variable length record
+C
+	         OK = READ_VOLHDREC()
+	         IF (.NOT.OK) GOTO 999
+	      ELSE
+	         NTF$_REC_DESCR = STRING(1:2)
+	         CALL LSL_PUTMSG(NTF2DTI__NOVOLHDREC)
+	         CALL LSL_ADDMSG(NTF2DTI__UNEXPREC,NTF$_REC_DESCR,RECNUM)
+	         OK = .FALSE.
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+C
+	   IF (LENGTH.NE.80 .AND. FIXED) THEN			! fixed record
+	      CALL LSL_PUTMSG(NTF2DTI__SHORTREC,RECNUM,LENGTH)	! not 80 chars
+	      OK = .FALSE.
+	   ENDIF
+	ENDIF
+C
+C..........................................................................
+C is the record type recognised? if not try to get another
+C
+	IF (.NOT. RECOGNISED(STRING)) THEN
+	  CALL LSL_PUTMSG (NTF2DTI__UNEXPREC,STRING(1:2),RECNUM)
+	  CALL LSL_ADDMSG (NTF2DTI__RETRY)
+	  GOTO 10
+	ENDIF
+C
+C..........................................................................
+C adjust for the lack of a carriage return at the end of the string
+C
+C	IF (.NOT.FIXED) THEN
+C	  IF (STRING(LENGTH:LENGTH).NE.EOR_MARKER) THEN
+C	    IF (LENGTH.LT.80) LENGTH = LENGTH +1
+C	    STRING(LENGTH:LENGTH) = EOR_MARKER
+C	  ENDIF
+C	ENDIF
+C..........................................................................
+C
+999	READ_NTF_RECORD = OK
+C
+	RETURN
+	END
+C

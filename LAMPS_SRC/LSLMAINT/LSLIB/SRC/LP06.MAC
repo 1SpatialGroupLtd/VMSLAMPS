@@ -1,0 +1,923 @@
+	.TITLE	LP06
+	.IDENT	'05AP82'
+ 
+; CAD GP COMMAND PROCESSOR FOR PDP-11
+; P. Cross	JUL 74
+; New version for RSX-11M		FEB 76
+; VAX/VMS version (whatever happened to TRAPs?) Apr 82 (RF)
+ 
+.ENABL	LC
+ 
+.IIF NDF RSX,	RSX = 1		; default to RSX version
+.IIF EQ  RSX,	VMS = 0		; not VMS if it's DOS (!)
+.IIF NDF VMS,	VMS = 1		; otherwise default to VMS
+ 
+.IIF NDF LPFORT,LPFORT = 1
+ 
+	.IF NE	RSX		; covers whole program
+ 
+	.MCALL	DEFIN$,DIR$,GTSK$,SVTK$
+ 
+	.MACRO	.CSECT,NAME
+	.IF NB	NAME
+	.PSECT	NAME,D,GBL,OVR
+	.IFF
+	.PSECT
+	.ENDC
+	.ENDM	.CSECT
+ 
+	.IFTF
+ 
+.GLOBL	LMNT,LBEG,LERROR,INITLP,RESTLP,TESTLP
+.GLOBL	GETC,PUTC,PUTN,PUT2F,PUTSF,GETRS,CCLAS
+	.IFT
+.GLOBL	$FFIN,$FFOUT,BCKSPC,GET1A
+	.IFF
+.GLOBL	FFIN,FFOUT,G.CH,GETLB,PUTLB,TRAPL,TRAPF
+ 
+; TRAP TABLE
+ 
+LPTT:	LPTTX
+LERR	=	.-LPTT/2+TRAP
+	LERROR
+	LPTTX				; SPARES FOR PATCHING
+	LPTTX
+LPTTX:	BKP				; PRO TEM
+ 
+	.IFT
+ 
+	.IF EQ	VMS
+ 
+; SST vector for LP
+ 
+SVTL:	SVTK$	LPSST,LPSSL
+LPSST:	.WORD	0,0,0,0,0,0,LERRX	; i.e. TRAP to LERRX
+LPSSL=.-LPSST
+ 
+; save area for user's SSTV
+ 
+GTSK:	GTSK$	GTSB
+GTSB:	.BLKW	16.
+SVTK=GTSB+24				; SVTK$ for restoring user SSTV
+ 
+LERR = +104400				; i e TRAP
+ 
+LERRX:	TST	(SP)+
+	MOV	@SP,R5			; get error address
+ 
+	.IFF				; VMS
+ 
+; error invocation from within this  module
+	.MACRO	LERR
+	JSR	R5, LERROR
+	.ENDM	LERR
+ 
+	.ENDC				; VMS
+ 
+	.IFTF				; RSX
+ 
+; ERROR ROUTINE
+ 
+LERROR: MOV	R5,(PC)+		; SAVE ERR ADDR
+	000
+	JSR	R5,PUT2F
+	.BYTE	'?,SPACE
+	.IFF
+	MOV	GETLB,-(SP)
+	EMT	13		; .STAT
+	BIT	#400,(SP)+
+	BNE	1$		; J IF TERMINAL
+	BIT	#STOP,LMODE
+	BEQ	1$		; J IF TO CARRY ON
+	EMT	60		; OR GIVE UP
+	.IFTF
+1$:	JMP	@(PC)+
+LERRA:	000				; ERROR RETURN
+ 
+; BUFFER SIZES, ETC
+ 
+LNL=5					; NO. OF MNEMONICS
+LNI=10.				; NO. OF INTEGERS
+LNS=90.				; SPACE FOR STRINGS (IN INTEGERS)
+LNF=10.				; NO. OF REALS
+ 
+; CHARACTERS
+ 
+LCMC	=	'\			; COMMENT
+LATT	=	'&			; ESCAPE
+LSC	=	';			; SEMICOLON (COMMAND TERMINATOR)
+TAB	=	011
+LF	=	012
+VT	=	013			; VERTICAL TAB (NONPRINTING TERMINATOR
+FF	=	014
+CR	=	015
+SPACE	=	040
+ 
+; 'COMMON' definitions
+; N.B. FORTRAN /ON option assumed (1-word integers)
+ 
+.CSECT	LPMNEM				; MNEMONIC BUFFER
+LUMN:	.=.+LNL+LNL+LNL+LNL
+ 
+.CSECT	LPTREE
+BRANCH: .=.+LNL+LNL			; MNEMONIC NUMBER AT EACH LEVEL
+LMB:	.=.+LNL+LNL		; MNEMONIC BUFFER
+ 
+.CSECT	LPINT				; INTEGER BUFFER
+LIC:	.=.+2
+LINB:	.=.+LNI+LNI
+LINZ:
+ 
+.CSECT	LPSTR				; STRING BUFFER
+LSTN:	.=.+2
+LSTB:	.=.+LNS+LNS
+LSTZ:
+ 
+.CSECT	LPREAL
+LFPN:	.=.+2
+LFPB:	.=.+LNF+LNF+LNF+LNF
+LFPZ:
+ 
+.CSECT	LPARG				; arg counts at each level
+NUMI:	.=.+LNL+LNL
+NUMF:	.=.+LNL+LNL
+NUMS:	.=.+LNL+LNL
+ 
+.CSECT	LPIO				; input/output
+LPIN:	.=.+2
+LPOUT:	.=.+2				; FORTRAN unit numbers
+LPECH:	.=.+2
+ 
+.CSECT	LPSW				; user switches
+LUERR:	.WORD	0
+LMODE:
+; various switches (LOGICAL*1)
+CHARMD:	.BYTE	-1		; single-character input
+INTARG:	.BYTE	0		; structured argument handling
+SEARCH:	.BYTE	0		; restricted searches
+NUMBER:	.BYTE	0		; treat all nos as real AND integer
+NOCHEK:	.BYTE	0		; suppress all arg checking
+NOMEM:	.BYTE	0		; clr "memory" after executing command
+	.EVEN
+ 
+ 
+.CSECT
+ 
+ 
+ 
+; REGISTERS
+ 
+LITP=R4				; ITEM BUFF PTR
+LTYPE=R3				; TYPE OF ITEM
+LDEL=R2				; STRING DELIMITER
+	.IFT
+RX=PC				; standard for JSR
+	.IFF
+RX=R5
+	.IFTF
+ 
+; LANGUAGE TABLE MARKER BITS
+ 
+	LEN=100000			; end of sublist
+	LIAS=40000			; intermediate arg spec present
+	LIUR=20000			; intermediate user routine present
+	LAS=10000			; total arg spec present
+	LUR=4000			; entry is user routine (terminal) else headpointer
+ 
+
+; **-LEX
+ 
+; entry/exit subroutines
+ 
+	.IFF
+LPXIT:	MOV	SPSV,SP
+	TST	(SP)+			; TIDY UP STACK
+	MOV	(SP)+,TRAPL		; restore users traps
+FORT:	BR	1$			; OR BR .+2 IF UNDER FORTRAN
+	MOV	(SP)+,GETLB		; and selections
+	MOV	(SP)+,PUTLB
+	BIC	#200,G.CH-4	; CLR TERMINAL ECHO-SUPPRESS
+1$:	MOV	#LMB,R1		; CONVERT MNEMONICS TO ASCII FOR USER
+	MOV	#LUMN,R2
+	MOV	#LNL,R3
+2$:	MOV	(R1)+,-(SP)
+	MOV	R2,-(SP)
+	MOV	#1,-(SP)
+	EMT	42			; .RADUP
+	ADD	#3,R2
+	MOVB	#SPACE,(R2)+
+	SOB	R3,2$
+	JSR	R5,@R0			; enter user program
+	BR	.+2			; 'NO ARGUMENTS'
+ 
+; on return fall into entry sr
+ 
+LPENT:	TSTB	FORT
+	BNE	1$			; J IF NOT UNDER FORTRAN
+	MOV	PUTLB,-(SP)
+	MOV	GETLB,-(SP)		; SAVE USER'S SELECTIONS
+	JSR	R5,FFIN		; set up input from FORTRAN unit
+	+BR+1
+	LPIN
+	JSR	R5,FFOUT		; ... and output
+	+BR+1
+	LPOUT
+	BIC	#200,G.CH-4
+	TSTB	CHARMD
+	BEQ	1$		; J IF NOT CHAR MODE
+	BIS	#200,G.CH-4	; OR SET IT UP
+1$:	JSR	R5,GETRS	; RESET INPUT BACKSPACE
+	MOV	TRAPL,-(SP)
+	MOV	#LPTT,TRAPL
+	CLR	-(SP)
+	MOV	SP,SPSV		; FOR RESETTING AFTER LP ERRORS
+	JMP	@R5
+ 
+	.IFT
+ 
+ 
+LPXIT:	MOV	R5,LPRET	; save r.a.
+	MOV	SPSV,SP
+	MOV	R0,@SP		; user rtn addr
+; convert mnemonics to ascii
+	.GLOBL	R50ASC		; in SYSLIB
+	MOV	#LNL,-(SP)
+	MOV	#LUMN,-(SP)
+	MOV	#LMB,-(SP)
+	TST	-(SP)
+	MOV	SP,@SP
+	MOV	#3,-(SP)
+	SUB	@PC,2(SP)	; 3 args, 3 chars to convert
+1$:	MOV	SP,R5
+	JSR	PC,R50ASC
+	ADD	#2,4(SP)
+	ADD	#4,6(SP)
+	DEC	10(SP)
+	BGT	1$
+	ADD	#12,SP
+; exit to user prog
+	.IF EQ	VMS
+	DIR$	#SVTK		; restore user's traps
+	.ENDC
+	MOV	PC,R5
+	BR	.+2		; "no args"
+	JSR	PC,@(SP)+
+	MOV	#000,R4		; recover r.a.
+LPRET=.-2
+	; and fall into entry s/r
+ 
+LPENT:	JSR	R5,$FFIN
+	 +BR+1
+	 LPIN
+	JSR	R5,$FFOUT
+	 +BR+1
+	 LPOUT
+ 
+	.IF EQ	VMS
+	DIR$	#GTSK		; get user's SSTV
+	MOV	(PC)+,@(PC)+
+	 .BYTE	151,3		; SVTK$
+	 SVTK			; set up for restore
+	DIR$	#SVTL		; set LP SSTV
+	.ENDC
+ 
+	CLR	-(SP)
+	MOV	SP,SPSV
+	TSTB	NOMEM
+	BEQ	1$
+	CLR	LMB		; clear "memory"
+1$:	JMP	@R4
+ 
+; SR to clear counts etc
+LCL:	MOV	#LMB,LLEV		; reset level as well
+	MOV	#LMNT,HPSV
+ 
+LCC:	CLR	LIC
+	CLR	LSTN
+	CLR	LFPN
+	MOV	#LSTB,LSTP
+	RTS	R5
+ 
+
+; **-LGC
+	.IFTF
+ 
+; GET CHARACTER & ECHO
+ 
+	.IFF
+	.IFNE	LPFORT
+LGETC:	BR	LGCH	; or BR .+2
+	MOV	GETLB,-(SP)	
+	EMT	1		; .wait in case !
+	MOV	#000,R0		; pick up character
+LCH=.-2
+	MOVB	#LGCH-LGETC-2/2,LGETC
+	CLRB	LPTSW		; reset 'test' switches
+	BR	LGCJ
+LGCH:	JSR	R5,GETC
+LGCJ:
+	.IFF
+LGETC:	JSR	R5,GETC
+	.ENDC
+	MOVB	R0,LCHI		; SAVE FOR ECHO
+	BNE	1$
+	JSR	R5,PUTSF		; put out message if EOF
+	.ASCIZ	<CR><LF>'COMMANDS EXHAUSTED'<CR><LF>
+.EVEN
+	EMT	60			; exit to monitor
+1$:	CMPB	R0,#CR
+	BEQ	LCCR
+	CMPB	R0,#LF
+	BEQ	LCLF
+	TSTB	CHARMD
+	BEQ	LCHX		; J IF NO ECHO WANTED
+	JSR	R5,PUT2F		; ECHO
+LCHI:	.BYTE	000,VT
+	CLRB	LCLF			; CLEAR LINEFEED-SUPPRESS
+LCHX:	MOVB	LCHI,R0
+	CMPB	R0,#LF
+	BEQ	LGETC			; LINEFEED ALWAYS SWALLOWED
+	RTS	R5
+ 
+LCLF:	BR	.+2			; OR BR LGETC
+LCCR:	TSTB	CHARMD
+	BEQ	LCHX
+	JSR	R5,PUTN		; ECHO NEWLINE
+	MOVB	#LGETC-LCCR/2,LCLF
+	BR	LCHX
+ 
+	.IFT
+ 
+LGLF:	JSR	R5,PUT2F
+	 .BYTE	CR,SPACE
+LGETC:	JSR	R5,GETC
+	TSTB	R0
+	BNE	LGET10		; j unless eod
+	MOV	(PC)+,-(SP)
+	 .BYTE	63,1
+	EMT	377		; EXIT$S
+ 
+LGET10:	CMPB	R0,#LF
+	BEQ	LGLF
+	CMPB	R0,#CR
+	BNE	LGET20
+	JSR	R5,PUTN		; acho newline if c.r.
+LGET20:	RTS	R5
+ 
+	.IFTF
+ 
+; delete character
+LAT1:	MOV	(SP)+,@SP
+	MOV	(SP)+,@SP
+	CMP	SP,LITP
+	BHIS	LBEG2		; if item now empty
+ 
+ 
+; add character to item and deal with escape char
+LRDC:	JSR	R5,LGETC
+	JSR	R5, CCLAS	; separate escape (and upper-case)
+	.BYTE	1$-./2,LATT	; escape character
+	.BYTE	4$-./2,200	; any other classification -
+	.BYTE	4$-./2,4$-./2	;  treat as part of item to decode
+ 
+; got an '&' escape
+1$:	JSR	R5,LGETC	; see what follows
+	JSR	R5,CCLAS
+	.BYTE	LAT1-./2,'E	; &E _ erase character
+	.BYTE	LBEG2-./2,'K	; &K _ kill item
+	.BYTE	LBEG0-./2,'Q	; &Q _ general reset
+	.BYTE	4$-./2,LATT	; && _ &
+	.BYTE	3$-./2,200
+	.BYTE	3$-./2,3$-./2
+ 
+; success exit
+4$:	MOV	@SP,-(SP)
+	MOV	R1,2(SP)	; add char to item on stack
+	MOV	R1, R0		; return char in right place
+	RTS	R5
+ 
+; error exit
+3$:	LERR			; illegal char after escape
+ 
+ 
+; Ignore character
+LIGC:	TST	(SP)+
+	BR	LMAIN
+
+	.IFT
+; **-LIX	R S X   i n i t / r e s t a r t
+ 
+TESTLP:	JSR	R5,GET1A
+	BCC	1$		; j if char available
+	RTS	PC
+1$:	JSR	PC,BCKSPC
+ 
+RESTLP:	MOV	(PC)+,SP
+FORTSP:	000
+	BR	LREST
+ 
+INITLP:	MOV	SP,FORTSP
+LREST:	JSR	R4,LPENT
+	CLRB	LCLF
+ 
+	.IFTF
+; **-LID	D O S  i n i t / r e s t a r t
+ 
+	.IFF
+	.IFNE	LPFORT
+ 
+; FORTRAN entry
+ 
+INITLP: CLRB	FORT			; REMEMBER UNDER FORTRAN
+	MOV	SP,FORTSP	; SAVE FOR RESTART
+	MOV	#RESTLP,-(SP)
+	MOV	#2,-(SP)
+	EMT	41		; SET RESTART ADDRESS
+	MOV	#TRAPF,@#34
+	MOV	#340,@#36		; set up TRAP vector (reset by TMON ???)
+LREST:	JSR	R5,LPENT
+	BR	LBEG
+ 
+; 'TEST' entry - returns if no input available
+ 
+TESTLP:	MOV	GETLB,-(SP)
+	JSR	R5,FFIN
+	+BR+1
+	LPIN
+LPTSW:	BR	.+2		; or BR LPTWR
+LPTLF:	MOV	#LPTBF,-(SP)
+	MOV	GETLB,-(SP)
+	EMT	4		; .READ
+	MOVB	#LPTWR-LPTSW-2/2,LPTSW
+	CLRB	LGETC		; arrange to collect char later
+LPTWR:	MOV	#LPBSY,-(SP)
+	MOV	GETLB,-(SP)
+	EMT	0		; .WAITR
+	CMPB	LCH,#LF
+	BEQ	LPTLF		; round again if linefeed
+	MOV	(SP)+,GETLB	
+; fall into 'restart' entry
+ 
+; FORTRAN 'RESTART' ENTRY (FROM USER PROG OR ^C,RE)
+ 
+.GLOBL	$NAMC,$SEQC
+RESTLP:	MOV	(PC)+,SP	; RESET STACK
+FORTSP:	000
+; CLEAR TRACEBACK CHAIN
+	MOV	#$NAMC,R0
+1$:	MOV	@R0,R1
+	TST	@R1
+	BEQ	LREST		; J IF DONE
+	MOV	@R1,@R0		; UNCHAIN
+	CLR	(R1)+
+	MOV	@R1,$SEQC
+	CLR	@R1
+	BR	1$
+ 
+; 'TEST' linebufhdr
+ 
+LPTBF:	.WORD	1
+	.BYTE	206,0
+	.WORD	0
+	.WORD	LCH	; dump mode
+ 
+; 'TEST' busy exit
+ 
+LPBSY:	MOV	(SP)+,GETLB	; restore user selection
+	RTS	R5		; return from TESTLP
+ 
+	.ENDC
+ 
+
+; **-LBG
+	.IFTF
+ 
+; NORMAL ENTRY
+ 
+LBEG0:	JSR	R5,PUTN
+LBEG:	BISB	#1,LCSW		; set entry switch ('repeat' feature)
+LBEG1:
+LBEG3:	JSR	R5,PUT2F
+	.IFF
+	.BYTE	'*,VT			; PROMPT
+	.IFT
+	.BYTE	000,'*
+LCLF=.-2
+	.IFTF
+LBEG2:	CLR	LECF
+	MOVB	#LDIG-LSOK-2/2,LSOK	; allow sign
+	CLR	LTYPE
+	MOV	#LBEG3,LERRA
+	MOV	(PC)+,SP		; reset stack
+SPSV:	000
+	MOV	SP,LITP		; record start of item
+ 
+;  R E A D   I T E M
+ 
+; MAIN LOOP RETURN
+ 
+LMAIN:	JSR	R5,LRDC		; CHARACTER
+	CLR	R5			; CHAR-TYPE ACCUMULATOR
+	JSR	R5,CCLAS
+	.BYTE	LIGC-./2,177
+	.BYTE	LIGC-./2,FF
+	.BYTE	LCMT-./2,LCMC
+	.BYTE	LCR-./2,CR
+	.BYTE	LCT-./2,LSC
+	.BYTE	LPOS-./2,'+
+	.BYTE	LNEG-./2,'-
+	.BYTE	LSTOP-./2,'.
+	.BYTE	LCOD-./2,TAB
+	.BYTE	LCOD-./2,SPACE
+	.BYTE	LSTR-./2,200
+	.BYTE	LDIG-./2,LALPHA-./2
+ 
+; READ STRING
+ 
+LSTR:	MOV	(SP)+,LDEL		; save delimiter
+	TST	LTYPE
+	BEQ	1$
+	LERR				; string delimiter not in gap
+1$:	JSR	R5,LRDC
+	CMPB	R0,LDEL
+	BEQ	LSTR1			; J AT END OF STRING
+	CMPB	R0,#CR
+	BNE	1$
+	LERR				; EOL IN STRING
+ 
+ 
+
+; **-LCC
+ 
+; VARIOUS CHARACTER CLASSES
+ 
+; SIGN
+ 
+LNEG:
+LPOS:
+LSOK:	BR	.+2			; OR BR LDIG IF SIGN ALLOWED
+	LERR				; UNEXPECTED SIGN
+ 
+; DIGITS, LETTERS, '.'
+ 
+LSTOP:	INC	R5
+LDIG:	INC	R5
+LALPHA: INC	R5
+	CLRB	LSOK			; MAKE SIGN ILLEGAL
+	TSTB	LTYPE
+	BEQ	LOTH1			; J IF START OF ITEM
+	CMPB	LTYPE,R5
+	BEQ	LOTH2			; J IF SAME AS CURRENT ITEM
+	DEC	R5
+	BEQ	LOTH3			;J IF ALPHA
+	DEC	R5
+	BEQ	LMAIN			; DIGIT ALLOWED ANYWHERE
+	CMPB	#2,LTYPE
+	BEQ	LOTH62			; J IF INTEGER (TO F.P.)
+	LERR				; '.' IN MNEM OR EXPONENT
+ 
+; alpha, not in mnem
+LOTH3:	CMPB	#'E,(SP)
+	BEQ	1$
+	CMPB	#'D,(SP)
+	BEQ	1$
+	LERR				; UNEXPECTED LETTER
+ 
+; D or E in number - make exponent
+1$:	CMPB	#3,LTYPE
+	BEQ	LOTH61			; F.P. ACQUIRES EXPONENT
+	CMPB	#2,LTYPE
+	BEQ	LOTH6
+	LERR
+LOTH6:	INC	LTYPE			; INTEGER BECOMES F.P.
+LOTH61: MOVB	#LDIG-LSOK-2/2,LSOK	; SIGN ALLOWED AFTER 'E'
+LOTH62: INC	LTYPE
+	BR	LMAIN
+ 
+; first: 'type' becomes
+;	 1  => alpha (i.e. mnemonic starting)
+;	 2  => digit (i.e. number starting)
+;	 3  => dot (i.e. fp. number starting)
+LOTH1:	MOV	R5,LTYPE
+	BR	LMAIN
+ 
+; the character we just got was of the same type as 'type'
+LOTH2:	CMP	R5,#3
+	BLO	LMAIN
+	LERR				; 2nd '.' in f.p.n.
+ 
+; comment starting
+LCMT:	JSR	R5,LGETC
+	CMPB	R0,#CR
+	BNE	LCMT			; IGNORE UP TO C.R.
+	MOV	R0,@SP
+	TSTB	LCSW
+	BNE	LBEG3			; J IF NOTHING BEFORE COMMENT
+ 
+; COMMAND TERMINATOR
+ 
+LCR:
+LCT:	INC	LECF
+	BR	LCOD
+ 
+; END OF STRING
+ 
+LSTR1:	MOV	#5,LTYPE
+ 
+; END OF ITEM
+ 
+LCOD:	ASLB	LTYPE
+LCSW:	BNE	.+2			; OR .+4
+	BR	1$
+	JSR	R5,LCL			; CLEAR ARGS IF FIRST ITEM AFTER RE-ENTRY
+	CLRB	LCSW
+1$:	MOV	(PC)+,-(SP)
+LECF:	000
+	ADD	LTYPE,PC
+ 
+; ITEM JUMP TABLE
+ 
+LITT:	BR	LRETA			; NULL
+	BR	LMNEM			; MNEMONIC
+	BR	LINT			; INTEGER
+	BR	LFPT			; REAL NO.
+	BR	LFPT			; REAL NO. WITH EXPONENT
+	BR	LSTRIN			; STRING
+ 
+
+; **-LMN
+ 
+; P R O C E S S   I T E M
+; R0-R5 AVAILABLE; EOC FLAG ON STACK
+ 
+; MNEMONIC
+ 
+MN.M	=	R2			; MNEM BUFF PTR
+MN.Q	=	R3			; NEW MNEM (must be odd reg)
+MN.S	=	R4			; SAVED MNEM
+MN.T	=	R5			; TABLE PTR
+ 
+LMNEM:	MOV	(SP)+,@SP		; FLATTEN TERMINATOR
+	CLR	MN.Q
+; CONVERT TO RAD50
+1$:	MUL	#50,MN.Q
+	MOV	-(LITP),R1
+	CMP	LITP,SP
+	BLOS	4$
+	CMPB	R1,#'A
+	BHIS	3$
+	ADD	#56,R1
+3$:	SUB	#100,R1
+	ADD	R1,MN.Q
+4$:	CMP	MN.Q,(PC)+
+	.RAD50	/A/
+	BLO	1$
+ 
+; SEARCH TABLES
+ 
+	MOV	#LMNT,MN.T
+HPSV=.-2			; root for current search
+	TSTB	SEARCH
+	BNE	LMNR
+LEXM:	MOV	#LMB,#000
+LLEV=.-2			; current search level
+LMNH:
+LMNR:	MOV	LLEV,MN.M
+	CMP	MN.M,#LMB+LNL+LNL
+	BLO	1$
+	LERR				; AT DEEPEST LEVEL ALREADY
+1$:	TSTB	@SP
+	BMI	3$			; J IF EOC
+	MOV	(MN.M),MN.S		; PRESERVE OLD MNEM
+	MOV	MN.Q,(MN.M)		; SUBST NEW
+	TSTB	NOMEM
+	BEQ	3$
+	CLR	MN.S		; no memory
+3$:	JSR	R5,LSCH		; SEARCH
+	BCC	LMNF			; J IF FOUND
+	TSTB	@SP
+	BPL	2$
+	LERR				; INCOMPLETE COMMAND
+ 
+2$:	MOV	MN.S,(MN.M)		; PUT BACK OLD MNEMONIC
+	JSR	R5,LSCH
+	BCC	LMNG
+	LERR				; UNKNOWN COMMAND
+ 
+; MNEM RECOGNISED
+ 
+LMNF:	TSTB	@SP
+	BMI	LMNG			; J IF EOC
+	BIT	#LUR,R1
+	BNE	LMNI		; j if not headpointer
+	TSTB	SEARCH
+	BEQ	LMNI
+	MOV	MN.T,HPSV	; restrict following searches
+	ADD	#2,LLEV		; ... to next level
+LMNI:	BIT	#LIUR,R1
+	BEQ	LRET			; NO IUR
+	MOV	(R0),R0		; OR GET ADDR
+	JSR	R5,LPXIT		; exit to intermediate user routine
+LRETA:	BR	LRET
+ 
+ 
+; here if checking whole command (from "memory")
+ 
+LMNG:	ADD	#2,LLEV		; advance to next level
+	BIT	#LUR,R1
+	BEQ	LMNH			; J IF HEADPOINTER
+	TSTB	@SP
+	BMI	LEXR			; TO EXIT IF UR AND EOC
+	LERR			; unknown command
+ 
+
+; **-LNU
+ 
+; PROCESS INTEGER
+LINT:	INC	LTYPE			; LTYPE EVEN HERE
+ 
+; PROCESS REAL NUMBER
+ 
+LFPT:	MOV	LTYPE,R5
+	JSR	R5,LCONV
+	TSTB	NUMBER
+	BNE	1$			; IGNORE OVERFLOW IF BOTH WANTED
+	ROR	R5
+	BCC	LSTF			; J IF REAL ONLY
+	BPL	1$			; J IF NO OVERFLOW
+2$:	LERR				; integer overflow or buffer full
+1$:	MOV	LIC,R5
+	CMP	R5,#LNI
+	BHIS	2$
+	ASL	R5
+	MOV	R0,LINB(R5)		; store the integer
+	INC	LIC
+	TSTB	NUMBER
+	BEQ	LRET
+	; OR FALL INTO STORE-REAL
+ 
+LSTF:	MOV	LFPN,R5
+	CMP	R5,#LNF
+	BLO	1$
+	LERR				; real number buffer full
+1$:	ASL	R5
+	ASL	R5
+	STCDF	R0,LFPB(R5)
+	INC	LFPN
+	BR	LRET
+ 
+
+; **-LST
+ 
+; PROCESS STRING
+ 
+STP	=	R1
+ 
+LSTRIN: MOV	(PC)+,R5
+LSTP:	LSTB				; STRING BUFF PTR
+	MOV	LITP,@R5
+	SUB	SP,@R5			; STORE LENGTH
+	SUB	#4,@R5
+	ASR	@R5
+	MOV	R5,STP			; RUNNING PTR
+	ADD	(STP)+,R5		; NEW LSTP
+	ADD	#4,R5
+	BIC	#1,R5
+	CMP	R5,#LSTZ
+	BLO	1$
+	LERR				; STRING BUFF OVERFLOW
+1$:	MOV	R5,LSTP
+	CLR	2(SP)			; TERMMINATE STRING WITH NULL
+2$:	DEC	LITP
+	MOVB	-(LITP),(STP)+		; COPY STRING
+	BNE	2$
+	CLRB	@STP
+	INC	LSTN			; INCR NO. OF STRINGS
+	; FALL INTO LRET
+ 
+; END OF ITEM PROCESSING
+ 
+LRET:	NEG	@SP			; PROPAGATE EOC
+	BPL	2$
+	MOV	#LBEG0,LERRA		; HARDEN ERROR SWITCH
+	MOV	#LMNT,MN.T
+	TST	LMB
+	BEQ	1$		; j if null (no memory)
+	JMP	LEXM		; verify & execute command
+1$:	JMP	LBEG1
+2$:	JMP	LBEG2
+ 
+; ARG CHECK AND EXIT TO U.R.
+ 
+LEXR:	TSTB	NOCHEK
+	BNE	LEXN
+	ASR	R0
+	ASL	R1
+	ASL	R1
+	ADC	R0			; PASS IAS
+	ASL	R1
+	BPL	LEXN			; J IF NO ARG SPEC PROVIDED
+	ADC	R0			; PASS IUR
+	ASL	R0			; POINT TO ARG SPEC
+	JSR	R5,LGTA
+	CMP	R1,R0
+	BEQ	3$			; J IF 'ANY'
+	CMP	R1,LIC
+	BEQ	3$
+	LERR				; WRONG NUMBER OF INTEGERS
+3$:	CMP	R2,R0			; REALS
+	BEQ	4$
+	CMP	R2,LFPN
+	BEQ	4$
+	LERR
+4$:	CMP	R3,R0			; STRINGS
+	BEQ	5$
+	CMP	R3,LSTN
+	BEQ	5$
+	LERR
+5$:
+LEXN:	MOV	MN.T,R0
+	JSR	R5,LPXIT		; EXIT TO USER ROUTINE
+	JMP	LBEG
+ 
+
+; **-LSR
+; S U B R O U T I N E S
+; LANGUAGE TABLE SEARCH
+; (SP) list headpointer  R2 points to name on hand
+; if name found, exit with C=0, R5 value, markers in R1, R0 advanced
+; else C=1
+ 
+LSCH:	MOV	@SP,R0
+	CLR	BRANCH-LMB(R2)
+3$:	INC	BRANCH-LMB(R2)
+	CLR	-(SP)
+	TSTB	@R0
+	BLE	7$			; j bad table
+	MOV	(R0)+,R1
+1$:	CMP	@R0,(PC)+
+	.RAD50	/A/
+	BHIS	6$
+7$:	LERR				; bad table
+6$:	CMP	@R0,(PC)+
+	.RAD50	/Z99/
+	BHI	7$
+	CMP	(R0)+,@R2		; compare with name on hand
+	BNE	2$
+	INC	@SP			; record match
+2$:	DECB	R1			; decr alias count
+	BNE	1$			; j if more aliases
+	TST	(SP)+
+	BNE	5$			; j if match found
+	ASL	R1			; or advance to next entry
+	BCS	4$			; j if end of list
+	ASR	R0
+	ASL	R1
+	ADC	R0			; pass over IAS
+	ASL	R1
+	ADC	R0			; pass over IUR
+	ASL	R1
+	ADC	R0			; pass over AS
+	INC	R0
+	ASL	R0
+	BR	3$
+ 
+; exit with C=0 (success) or 1 (failure)
+4$:5$:	MOV	(R0)+,@SP	; 'value' for R5
+	RTS	R5
+ 
+; UNPACK ARG SPEC @R0 TO R1,R2,R3
+; AND SET R0 TO 17
+; FIELDS 171717
+ 
+LGTA:	MOV	@R0,R3
+	MOV	R3,R2
+	MOV	R3,R1
+	MOV	#-20,R0
+	ASH	#-14,R1
+	BIC	R0,R1
+	ASH	#-6,R2
+	BIC	R0,R2
+	BIC	R0,R3
+	COM	R0
+	RTS	R5
+ 
+ 
+; LP NUMBER CONVERSION
+;  TO INTEGER (R0) AND REAL (AC0)
+; START OF ITEM (ON STACK) IN R4
+ 
+.GLOBL	RDNUM,GETRT
+LCONV:
+	MOV	GETRT,-(SP)
+	MOV	#GIT,GETRT
+	JSR	R5,RDNUM		; USE GENERAL ROUTINE
+	MOV	(SP)+,GETRT
+	RTS	R5
+ 
+GIT:	MOV	-(R4),R0
+	RTS	R5
+ 
+	.ENDC			; RSX
+ 
+	.END

@@ -1,0 +1,434 @@
+	INTEGER*4 FUNCTION CLOJOI(ST,ID,IU,IV)
+C
+**	MODULE CLOJOI
+**	IDENT  30JN83
+C
+**	IF VAX
+	  IMPLICIT NONE
+**	ENDC
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Last edited				AJW	30-Jun-1983
+CMOD	Created 				AJW	02-Jun-1983
+C
+C subroutine to create points in /MPEP/ for a small closed feature
+C by using JOINTS information
+C
+C returns 1 (SS$_NORMAL) if success, even number if failure
+C (for possible trapping of arithmetic errors with 
+C FLF$SIG_TO_RET_NOARITH)
+C
+C arguments:
+	REAL      ST(2)		! start of scan
+	INTEGER   ID(2)		! direction of scan
+	INTEGER   IU,IV		! axes
+C
+C parameters:
+***	PARAMETER/PARAMS/
+	INTEGER    MAX_LOOPS
+	PARAMETER (MAX_LOOPS=500)
+C
+C common blocks:
+***	COMMON/BLG/
+***	COMMON/JOINTS/
+***	COMMON/LINKS/
+***	COMMON/MPEP/
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+C
+C local workspace:
+C
+	INTEGER FIRST_CHN
+	INTEGER FWDBCK			! forwards, back
+	INTEGER ICHN			! chain number
+	INTEGER IFTR			! feature number
+	INTEGER III,JJJ,KKK,LLL,MMM,NNN,OOO		! temporaries
+	INTEGER ILOOP			! loop number
+	INTEGER IPNT			! point in chain
+	INTEGER ISIDE			! left,right side
+	INTEGER JO_CFIRST(MAX_LOOPS)	! pointer to chains in JO_CLOOPS
+	INTEGER JO_CHN_FTR(MAXCHN)	! feature each chain belongs to
+	INTEGER JO_CHN_LOOP(2,MAXCHN)	! 2 loops each chain belongs to 
+	INTEGER JO_CLENGTH(MAX_LOOPS)	! lengths of chains in JO_CLOOPS
+	INTEGER JO_CLOOPS(2,2*MAXCHN)	! (1,) list of loops of chains
+C					! (2,) bit 0 is side 0,1 => L,R
+C					!      bit 1 is dir  0,1 => F,B
+	INTEGER JO_CTOP			! top of JO_CLOOPS
+	INTEGER JO_CUSE(MAXCHN)		! status of chains
+	INTEGER JO_FTR_LOOPS(2,MAX_FTR)	! the 2 chains for each feature
+	INTEGER JO_FTOP			! top of JO_FPOINTS
+	INTEGER JO_LOOP_NUM		! number of loops
+	INTEGER LFTRGT			! 0,1 => left, right hand side
+	INTEGER LLENGTH(3)		! the no of points in 3 loops
+C
+	LOGICAL CHANGE
+C
+C code:
+C
+	CLOJOI=40		! Warning - ABORT
+C
+C**********************************************************************
+C
+C
+C JO_CUSE is -1 => chain is totally duff
+C             0 => unused
+C             1 => LHS used
+C             2 => RHS used
+C             3 => both sides used
+C
+C reject all duff chains - null or edges
+	DO 20 ICHN=1,MAXCHN
+	  IPNT=CHAIN(ICHN)
+	  IF (IPNT.EQ.0) GOTO 10
+	  IF ((ENCBUF(W,IPNT).AND.NEGWID).GE.NEGNEG) GOTO 10
+	    JO_CUSE(ICHN)=0
+	    GOTO 20
+10	  CONTINUE
+C	    here if chain is not to be considered
+	    JO_CUSE(ICHN)=-1
+20	CONTINUE
+ 
+C
+C now loop getting rid of all chains that join to a duff one
+30	CONTINUE
+	  CHANGE=.FALSE.
+	  DO 50 ICHN=1,MAXCHN
+	  IF (JO_CUSE(ICHN).LT.0) GOTO 50
+	    DO 40 III=1,4		! each corner
+	      JJJ=JOICHN(III,ICHN)
+	      IF (JJJ.LE.0) GOTO 35	! off end of scan
+	      IF (JO_CUSE(JJJ).GE.0) GOTO 40
+35	        JO_CUSE(ICHN)=-1
+	        CHANGE=.TRUE.
+	        GOTO 50
+40	    CONTINUE
+50	  CONTINUE
+	  IF (CHANGE) GOTO 30
+C
+C**********************************************************************
+C
+C get all loops of chains in JO_CLOOPS, with pointers
+C JO_CFIRST and JO_CLENGTH. There will be JO_LOOP_NUM of them
+C
+	JO_LOOP_NUM=0
+	JO_CTOP=0
+C
+	DO 60 ICHN=1,MAXCHN
+	  JO_CHN_LOOP(1,ICHN)=0
+	  JO_CHN_LOOP(2,ICHN)=0
+60	CONTINUE
+C
+	DO 100 FIRST_CHN=1,MAXCHN
+	ICHN=FIRST_CHN
+C	try all chains as a start chain
+70	CONTINUE			! loop here for both sides
+	III=JO_CUSE(ICHN)
+	IF ((III.AND.3).EQ.3) GOTO 100	! duff or all used up
+C
+C	  LFTRGT = 0,1 => use left, right hand side
+C	  FWDBCK = 3,1 => go forwards, backwards
+C
+	  IF ((III.AND.1).EQ.0) THEN	! LHS unused
+	    LFTRGT=0			! so use it
+	    JO_CUSE(ICHN)=JO_CUSE(ICHN).OR.1
+	  ELSE
+	    LFTRGT=1			! use RHS
+	    JO_CUSE(ICHN)=JO_CUSE(ICHN).OR.2
+	  ENDIF
+	  FWDBCK=3			! go forwards first time
+C
+	  JO_LOOP_NUM=JO_LOOP_NUM+1
+	  IF (JO_LOOP_NUM.GT.MAX_LOOPS) THEN
+	    CALL WRITEF('CLOJOI - no room to add more loops')
+	    CALL LIB$SIGNAL(%VAL(1192))	! warning - array ref
+	    GOTO 230
+	  ENDIF
+	  JO_CFIRST(JO_LOOP_NUM)=JO_CTOP+1
+	  JO_CLENGTH(JO_LOOP_NUM)=0
+C
+C now step along the left or right side of ICHN
+80	  CONTINUE
+C
+C	    each chain is one loop twice, or two loops
+C	    set up the two loops for this chain
+	    IF (JO_CHN_LOOP(1,ICHN).EQ.0) THEN
+	      JO_CHN_LOOP(1,ICHN)=JO_LOOP_NUM
+	    ELSE
+	      JO_CHN_LOOP(2,ICHN)=JO_LOOP_NUM
+	    ENDIF
+C
+C	    one more chain in this loop
+	    JO_CTOP=JO_CTOP+1
+	    IF (JO_CTOP.GT.2*MAXCHN) THEN
+	      CALL WRITEF('CLOJOI - no room to add more chains to loop')
+	      CALL LIB$SIGNAL(%VAL(1192))	! warning - array ref
+	      GOTO 230
+	    ENDIF
+	    JO_CLENGTH(JO_LOOP_NUM)=JO_CLENGTH(JO_LOOP_NUM)+1
+	    JO_CLOOPS(1,JO_CTOP)=ICHN
+	    JO_CLOOPS(2,JO_CTOP)=0
+C
+C	    record side of chain and forwards/back
+	    IF (LFTRGT.EQ.1) THEN	! right hand side
+	      JO_CLOOPS(2,JO_CTOP)=JO_CLOOPS(2,JO_CTOP).OR.1
+	      JO_CUSE(ICHN)=JO_CUSE(ICHN).OR.2
+	    ELSE
+	      JO_CUSE(ICHN)=JO_CUSE(ICHN).OR.1
+	    ENDIF
+	    IF (FWDBCK.EQ.1) THEN	! backwards
+	      JO_CLOOPS(2,JO_CTOP)=JO_CLOOPS(2,JO_CTOP).OR.2
+	    ENDIF
+C
+	    IF (JOICOR(LFTRGT+FWDBCK,ICHN).GT.2) THEN
+	      III=1			! come back along new chain
+	    ELSE
+	      III=3			! go forwards
+	    ENDIF
+C
+	    ICHN=JOICHN(LFTRGT+FWDBCK,ICHN)
+C
+	    IF (FWDBCK.NE.III) THEN
+	      FWDBCK=III		! flip the direction
+	      LFTRGT=LFTRGT.XOR.1	! and the side
+	    ENDIF
+C
+C	    if the side of the new chain has not been used, step on
+	    IF ((JO_CUSE(ICHN).AND.ISHFT(1,LFTRGT)).EQ.0) GOTO 80
+	  GOTO 70		! else try another side
+100	CONTINUE
+	IF (JO_LOOP_NUM.LE.0) GOTO 230
+C
+C
+C**********************************************************************
+C
+C now get the feature to which each chain belongs
+C
+	DO 110 III=1,MAXCHN
+	  JO_CHN_FTR(III)=0
+110	CONTINUE
+C
+	JO_FTR_NUM=0
+C
+	DO 150 ILOOP=1,JO_LOOP_NUM
+C	  see if any chain in this loop already belongs to a feature
+	  DO 120 JJJ=JO_CFIRST(ILOOP),
+     &               JO_CFIRST(ILOOP)+JO_CLENGTH(ILOOP)-1
+	    ICHN=JO_CLOOPS(1,JJJ)
+	    KKK=JO_CHN_FTR(ICHN)
+	    IF (KKK.NE.0) THEN
+	      IFTR=KKK
+	      GOTO 130
+	    ENDIF
+120	  CONTINUE
+C	    no chain found, so create a new feature
+	    JO_FTR_NUM=JO_FTR_NUM+1
+	    IF (JO_FTR_NUM.GT.MAX_FTR) THEN
+	      CALL WRITEF('CLOJOI - no room to add more features')
+	      CALL LIB$SIGNAL(%VAL(1192))	! warning - array ref
+	      GOTO 230
+	    ENDIF
+	    IFTR=JO_FTR_NUM
+130	  CONTINUE
+C
+C now set up the feature for all chains in this loop
+	  DO 140 JJJ=JO_CFIRST(ILOOP),
+     &               JO_CFIRST(ILOOP)+JO_CLENGTH(ILOOP)-1
+	    ICHN=JO_CLOOPS(1,JJJ)
+	    KKK=JO_CHN_FTR(ICHN)
+	    IF     (KKK.EQ.0) THEN
+	      JO_CHN_FTR(ICHN)=IFTR
+	    ELSEIF (KKK.EQ.IFTR) THEN
+	      CONTINUE
+	    ELSE
+	      CALL WRITEF(
+     &          'CLOJOI - ICHN %N, JO_CHN_FTR(ICHN) %N, IFTR %N',
+     &                    ICHN,    KKK,                 IFTR)
+	      CALL LIB$SIGNAL(%VAL(40))
+	    ENDIF
+140	  CONTINUE
+150	CONTINUE
+	IF (JO_FTR_NUM.LE.0) GOTO 230
+C
+C**********************************************************************
+C
+C now get the two (and only two) loops that form each feature
+C
+C for each chain, get the two loops to which it belongs. For each of
+C these loops, get the feature to which the loop belongs. If the feature
+C already has that loop, OK, if it has a free loop slot, put the loop
+C there, else moan.
+C
+	DO 160 IFTR=1,MAX_FTR
+	  JO_FTR_LOOPS(1,IFTR)=0
+	  JO_FTR_LOOPS(2,IFTR)=0
+160	CONTINUE
+C
+	DO 180 ICHN=1,MAXCHN
+	IF (JO_CUSE(ICHN).LT.0) GOTO 180
+	  DO 170 ISIDE=1,2
+	    ILOOP=JO_CHN_LOOP(ISIDE,ICHN)
+	    IFTR =JO_CHN_FTR(ICHN)
+	    IF     (JO_FTR_LOOPS(1,IFTR).EQ.ILOOP) THEN
+	      CONTINUE
+	    ELSEIF (JO_FTR_LOOPS(1,IFTR).EQ.0) THEN
+	      JO_FTR_LOOPS(1,IFTR)=ILOOP
+	    ELSEIF (JO_FTR_LOOPS(2,IFTR).EQ.ILOOP) THEN
+	      CONTINUE
+	    ELSEIF (JO_FTR_LOOPS(2,IFTR).EQ.0) THEN
+	      JO_FTR_LOOPS(2,IFTR)=ILOOP
+	    ELSE
+C	      get the lengths of the chains in the three loops, and
+C	      throw away the shortest loop
+	      III=1
+161	      CONTINUE
+	        IF     (III.EQ.1) THEN
+	          JJJ=JO_FTR_LOOPS(1,IFTR)
+	        ELSEIF (III.EQ.2) THEN
+	          JJJ=JO_FTR_LOOPS(2,IFTR)
+	        ELSEIF (III.EQ.3) THEN
+	          JJJ=ILOOP
+	        ELSE
+	          GOTO 169
+	        ENDIF
+	        LLENGTH(III)=0
+	        DO 163 KKK=JO_CFIRST(JJJ),
+     &                     JO_CFIRST(JJJ)+JO_CLENGTH(JJJ)-1
+	          LLENGTH(III)=LLENGTH(III)+LENGTH(JO_CLOOPS(1,KKK))
+163	        CONTINUE
+	        III=III+1
+	        GOTO 161
+169	      CONTINUE
+	      IF     (LLENGTH(1).LT.LLENGTH(2).AND.
+     &                LLENGTH(1).LT.LLENGTH(3)) THEN
+C	        1 is shortest - replace it
+	        JO_FTR_LOOPS(1,IFTR)=ILOOP
+	      ELSEIF (LLENGTH(2).LT.LLENGTH(1).AND.
+     &                LLENGTH(2).LT.LLENGTH(3)) THEN
+C	        2 is shortest
+	        JO_FTR_LOOPS(2,IFTR)=ILOOP
+	      ENDIF
+C	      CALL WRITEF(
+C     &          'CLOJOI - IFTR %N, JO_FTR_LOOPS %N,%N, ILOOP %N',
+C     &                    IFTR,    JO_FTR_LOOPS(1,IFTR),
+C     &                             JO_FTR_LOOPS(2,IFTR), ILOOP)
+C	      CALL LIB$SIGNAL(%VAL(40))
+C	      JO_FTR_LOOPS(2,IFTR)=-1		! mark as duff
+C
+	    ENDIF
+170	  CONTINUE
+180	CONTINUE
+C
+C**********************************************************************
+C
+C now check that each feature has at least two loops
+C and create edge chains for each loop
+C
+	NMP(1)=0
+	JO_FTOP=0
+	JO_FTR_NUM=0
+C
+	DO 220 IFTR=1,MAX_FTR		! for each feature
+	IF (JO_FTR_LOOPS(2,IFTR).LE.0) GOTO 220
+	  JO_FTR_NUM=JO_FTR_NUM+1
+	  JO_FLENGTH(1,JO_FTR_NUM)=0
+	  JO_FLENGTH(2,JO_FTR_NUM)=0
+	  DO 210 ISIDE=1,2		! for each loop per feature
+	    JO_FFIRST(ISIDE,JO_FTR_NUM)=JO_FTOP+1
+	    ILOOP=JO_FTR_LOOPS(ISIDE,IFTR)
+	    DO 200 III=JO_CFIRST(ILOOP),	! each chain per loop
+     &                 JO_CFIRST(ILOOP)+JO_CLENGTH(ILOOP)-1
+	      JJJ=III+1
+	      IF (JJJ.GT.JO_CFIRST(ILOOP)+JO_CLENGTH(ILOOP)-1) THEN
+	        JJJ=JO_CFIRST(ILOOP)
+	      ENDIF			! JJJ is index of next chain on
+C
+	      ICHN=JO_CLOOPS(1,III)
+C
+	      FWDBCK=3-(JO_CLOOPS(2,III).AND.2)
+	      LFTRGT=   JO_CLOOPS(2,III).AND.1
+C
+C	      add half width if right hand side
+	      IF (LFTRGT.EQ.1) THEN
+	        KKK=+1
+	      ELSE
+	        KKK=-1
+	      ENDIF
+C
+C	      get the direction along the chain
+	      IF (FWDBCK.EQ.3) THEN
+	        LLL=FIRST(ICHN)
+	        MMM=LAST(ICHN)
+	        NNN=1
+	      ELSE
+	        LLL=LAST(ICHN)
+	        MMM=FIRST(ICHN)
+	        NNN=-1
+	      ENDIF
+C
+	      DO 190 IPNT=LLL,MMM,NNN		! each point per chain
+	        JO_FLENGTH(ISIDE,JO_FTR_NUM)=
+     &               JO_FLENGTH(ISIDE,JO_FTR_NUM)+1
+	        JO_FTOP=JO_FTOP+1
+	        IF (JO_FTOP.GT.NESIZE*2) THEN
+	          CALL WRITEF('CLOJOI - no room to add more points')
+	          CALL LIB$SIGNAL(%VAL(1192))	! warning - array ref
+	          GOTO 230
+	        ENDIF
+	        OOO=NODE(IPNT)
+	        JO_FPOINTS(IU,JO_FTOP)=ENCBUF(IU,OOO)
+	        JO_FPOINTS(IV,JO_FTOP)=ENCBUF(IV,OOO)+
+     &                               ((ENCBUF(W, OOO).AND.NEGWID)*KKK)/2
+	        CALL BUNCH(ST(X)+JO_FPOINTS(X,JO_FTOP),
+     &                     ST(Y)+JO_FPOINTS(Y,JO_FTOP),0)
+190	      CONTINUE
+C
+C if we are changing direction between this chain and the next one,
+C frig up a point half a pitch out from, and half way between,
+C the two points
+C
+	      LLL=JOICHN(FWDBCK+LFTRGT,ICHN)
+	      IF (3-(JO_CLOOPS(2,JJJ).AND.2).NE.FWDBCK) THEN
+	        JO_FLENGTH(ISIDE,JO_FTR_NUM)=
+     &              JO_FLENGTH(ISIDE,JO_FTR_NUM)+1
+	        JO_FTOP=JO_FTOP+1
+	        IF (JO_FTOP.GT.NESIZE*2) THEN
+	          CALL WRITEF('CLOJOI - no room to add more points')
+	          CALL LIB$SIGNAL(%VAL(1192))	! warning - array ref
+	          GOTO 230
+	        ENDIF
+C
+	        IF (FWDBCK.EQ.3) THEN		! if forwards along ICHN
+	          MMM=LAST(ICHN)
+	          NNN=LAST(LLL)
+	        ELSE
+	          MMM=FIRST(ICHN)
+	          NNN=FIRST(LLL)
+	        ENDIF
+C
+	        IF ((FWDBCK.EQ.3).EQV.(ID(IU).GT.0)) THEN
+C		  if forwards and scanning in +ve direction,
+C	          then add half pitch
+	          OOO=+1
+	        ELSE
+	          OOO=-1
+	        ENDIF
+	        JO_FPOINTS(IU,JO_FTOP)=ENCBUF(IU,NODE(MMM))+OOO*IPIT/2
+	        JO_FPOINTS(IV,JO_FTOP)=
+     &            (  ENCBUF(IV,NODE(MMM))+
+     &             ((ENCBUF(W, NODE(MMM)).AND.NEGWID)*KKK)/2+
+     &               ENCBUF(IV,NODE(NNN))-
+     &             ((ENCBUF(W, NODE(NNN)).AND.NEGWID)*KKK)/2)/2
+	        CALL BUNCH(ST(X)+JO_FPOINTS(X,JO_FTOP),
+     &                     ST(Y)+JO_FPOINTS(Y,JO_FTOP),0)
+	      ENDIF
+200	    CONTINUE
+210	  CONTINUE
+220	CONTINUE
+C
+C**********************************************************************
+C
+	CLOJOI=1
+230	CONTINUE
+	RETURN
+	END

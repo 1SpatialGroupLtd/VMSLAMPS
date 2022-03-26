@@ -1,0 +1,181 @@
+	LOGICAL FUNCTION READ_WILD_ACVAL( ACVAL, ACTYPE, IS_WILD )
+C
+***	IDENT	22DE87
+***	MODULE	READ_WILD_ACVAL
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C
+C Author Clarke Brunt, 18 December 1987
+C
+C to read a (possibly wildcarded) AC value
+C - returns TRUE if nothing there (ie not a value, not a wildcard)
+C
+	IMPLICIT NONE
+C
+C arguments
+C
+	INTEGER*4	ACVAL	! the value to read
+	INTEGER		ACTYPE	! the ACD code/type
+	LOGICAL		IS_WILD	! (input) true if wildcard permitted
+C				! (output) true if wildcard present
+C NB common /FRTACD/ must be loaded with values for ACTYPE
+C
+C **********************************************************************
+C parameter files
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE	'HERE:IPATCHMSG.PAR'
+	INCLUDE	'HERE:USEFUL.PAR'
+C
+C common files
+C
+	INCLUDE	'LSL$CMNLSL:EXCEPTION.CMN'
+	INCLUDE	'LSL$CMNFRT:FRTACD.CMN'
+C
+C functions
+C
+	LOGICAL		RDCHS		! read a character
+	LOGICAL		RDLONG		! read a long integer
+	INTEGER		READSTR
+	LOGICAL		RDREAL
+	LOGICAL		CVT_DATE
+	INTEGER		EXPAND
+	LOGICAL		CHECK_ACD_RANGE
+C
+C workspace
+C
+	BYTE		ICH		! character
+	INTEGER		IVALUE
+	REAL		RVALUE
+	CHARACTER*4	CVALUE
+	EQUIVALENCE	(IVALUE,RVALUE,CVALUE)
+	INTEGER		CLEN
+	INTEGER		DUMMY
+	CHARACTER*11	TIME_STRING
+	INTEGER		OK
+	CHARACTER*80	ERRSTR		! for error message
+	INTEGER		ERRLEN		! it's length
+	CHARACTER*(ACD_FORMAT_MAX+2)	DFORMAT
+	INTEGER				DFORMAT_LEN
+C
+C and the wildcard and absent characters
+C
+	BYTE		WILD,ABSENT
+	PARAMETER	(WILD='*',ABSENT='?')
+C
+C **********************************************************************
+C assume that we fail
+C
+	READ_WILD_ACVAL = .TRUE.
+C
+C is there anything on the line?
+C
+	IF ( RDCHS(ICH) ) GOTO 9000
+C
+C was it a wildcard?
+C
+	IF ( IS_WILD.AND.ICH.EQ.WILD ) THEN
+	   READ_WILD_ACVAL = .FALSE.
+	   GOTO 9000
+	ELSE
+	   IS_WILD = .FALSE.
+	ENDIF
+C
+C was it an absent value?
+C
+	IF ( ICH.EQ.ABSENT ) THEN
+	   IVALUE = IFF_ABSENT
+	   GOTO 900
+	ENDIF
+C
+	CALL BSCH
+C
+C what to read depends on data type
+	GOTO (100,200,300,400,500), ACD_DATA_TYPE
+C
+C reading an integer
+100	IF (RDLONG(IVALUE)) GOTO 899
+	GOTO 900
+C
+C reading a real number
+200	IF (RDREAL(RVALUE)) GOTO 899
+	GOTO 900
+C
+C reading up to 4 characters
+300	CVALUE = '    '			! pad with spaces
+	CALL RDCHS(ICH)
+	IF ( ICH.NE.Q1 .AND. ICH.NE.Q2 ) THEN
+	   CALL LSL_PUTMSG( LSL__UNEXPCH, ICH )
+	   GOTO 9000
+	ENDIF
+C
+C - and read the text itself
+C
+	CLEN = READSTR( CVALUE, ICH, ON_CHAR2, .FALSE., OK )
+	IF ( .NOT.OK ) THEN
+	   CALL LSL_PUTMSG( OK )	! describe the error
+	   GOTO 9000			! return
+    	ENDIF
+	IF (CLEN.EQ.0) IVALUE = IFF_ABSENT	! absent char value
+	GOTO 900
+C
+C reading date
+400	TIME_STRING = ' '			! make sure empty
+	CLEN = READSTR(TIME_STRING,-1,ON_SPACE)
+C
+C help to get valid date string, by ignoring lower case letters
+	CALL STR$UPCASE(TIME_STRING,TIME_STRING)
+	IF (.NOT.CVT_DATE(TIME_STRING,IVALUE,DUMMY)) THEN
+	   CALL LSL_PUTMSG(IPATCH__BADDATE,TIME_STRING(1:CLEN))
+	   GOTO 9000
+	ENDIF
+	GOTO 900
+C
+C reading time
+500	TIME_STRING = ' '			! make sure empty
+	CLEN = READSTR(TIME_STRING,-1,ON_SPACE)
+C
+C add "-- " to make time a valid (absolute) VMS time
+	IF (.NOT.CVT_DATE('-- '//TIME_STRING,DUMMY,IVALUE)) THEN
+	   CALL LSL_PUTMSG(IPATCH__BADTIME,TIME_STRING(1:CLEN))
+	   GOTO 9000
+	ENDIF
+	GOTO 900
+C
+899	IF ( ERRNUM.EQ.LSL__HADEXCP ) THEN
+	   CALL LSL_PUTMSG(ERRNUM)
+	   CALL LSL_ADDMSG(LSL_EXCP)
+	ELSE
+	   CALL LSL_PUTMSG(LSL__NONUM)
+	ENDIF
+	GOTO 9000
+C
+C check for valid value - integers, reals and characters
+900	IF (CHECK_ACD_RANGE( IVALUE ) ) THEN
+	   IF (ACD_DATA_TYPE.EQ.ACD_DATATYPE_C) THEN
+	      DFORMAT = '"'//ACD_FORMAT(:ACD_FORMAT_LEN)//'"'
+	      DFORMAT_LEN = ACD_FORMAT_LEN+2
+	   ELSE
+	      DFORMAT = ACD_FORMAT(:ACD_FORMAT_LEN)
+	      DFORMAT_LEN = ACD_FORMAT_LEN
+	   ENDIF
+	   ERRLEN = EXPAND('%WS'//DFORMAT(:DFORMAT_LEN)//
+     &		' is outside valid range for %S (%N)',
+     &		ERRSTR,IVALUE,ACD_NAME(:ACD_NAME_LEN),ACTYPE)
+	   CALL LSL_PUTMSG(IPATCH__ACDRANGE,ERRSTR(:ERRLEN))
+	   ERRLEN = EXPAND('%WSvalid range is '//
+     &		DFORMAT(:DFORMAT_LEN)//' : '//DFORMAT(:DFORMAT_LEN),
+     &		ERRSTR,ACD_MIN_MAX_I(1),ACD_MIN_MAX_I(2) )
+	   CALL LSL_ADDMSG(IPATCH__ACDRANGE,ERRSTR(:ERRLEN))
+	   GOTO 9000
+	ENDIF
+C
+	ACVAL = IVALUE				! assign integer result
+	READ_WILD_ACVAL = .FALSE.		! success
+C
+C and return
+C
+9000	RETURN
+	END

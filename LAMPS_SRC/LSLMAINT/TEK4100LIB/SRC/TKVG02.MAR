@@ -1,0 +1,659 @@
+	.IF DF	LCDISP
+	.IF NE	LCD16
+	.TITLE	LCVG16
+	.IFF
+	.IF NE	LCD14
+	.TITLE	LCVG14
+	.ENDC
+	.ENDC
+	.IFF
+	.TITLE	TKVG
+	.ENDC
+	.IDENT	/25FE94/
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+
+; G^ in front of LIB$SIGNAL for V3		AJW	31-Aug-1982
+; Author Susan Manning, from originals by R.Fairbairns
+;		from originals by P.A.Woodsford, P.Cross, et al.
+ 
+; date as .IDENT
+ 
+; T e k t r o n i x   d i s p l a y  ' v e c t o r   g e n e r a t o r '
+ 
+	CODE_PSECT	TKW
+ 
+ 
+; define number of bytes to be transmitted and a transmission table
+; defining which bytes must be sent as the result of a particular byte changing
+.IF NE LCD16
+BYTNO	= 7
+FRCLOX = ^O77
+TRANTB:	.BYTE	^O101,^O136,^O134,^O130,^O120,^O160,^O100
+.IFF
+.IF NE LCD14
+BYTNO	= 6
+FRCLOX	= ^O37
+TRANTB:	.BYTE	^O41,^O56,^O54,^O50,^O70,^O40,0
+.IFF
+BYTNO	= 5
+FRCLOX	= ^O17
+TRANTB:	.BYTE	^O21,^O26,^O24,^O34,^O20,0,0
+.ENDC
+.ENDC
+TRANTBW:.BYTE	1,3,7,15,16,48,112,240
+ 
+; flush moves
+ 
+T.FLSH: BBCC	#FLAG_V_TUPTD,FLAGW,FLRTS	; already up to date
+FFLSH:	MOVF	TKSAVX,R6	; 'force flush' entry (from within this module)
+	CLRW	R10
+	MOVF	TKSAVY,R8
+	BSBB	TKMVGN		; generate the move
+FLRTS:	RSB
+ 
+ 
+; TKMOV - generate a move
+ 
+;input:
+;   R6,R8 = position, machine coords, rel. centre of screen
+;   R10 = 0,1 => dark, bright vector
+ 
+$TKMOV:: TSTW	R10	
+	BNEQ	TKUPTD		; branch if bright
+	MOVF	R6,TKSAVX	; preserve endpoints
+	BISL2	#FLAG_M_TUPTD,FLAGW	; remember not up to date
+	MOVF	R8,TKSAVY
+	RSB			; nothing generated in this case
+ 
+; visible move - are we up to date?
+TKUPTD:	BBCC	#FLAG_V_TUPTD,FLAGW,TKMVGN	; branch if we are
+GETGRF:	PUSHL	R6		; entry to get to graph mode
+	PUSHL	R10		; preserve move-in-hand
+	PUSHL	R8
+	BSBB	FFLSH		; flush out buffered invisible
+				;  (or go invisibly to last graphic position,
+				;     to get back to graph mode)
+	MOVF	(SP)+,R8	; restore
+	MOVL	(SP)+,R10
+	MOVF	(SP)+,R6
+; fall through to generate move -in-hand
+; converts R6,R8 => R7,R9 (integer counts for $TKCOD )
+;
+; ensure in graphic mode
+TKMVGN:	PUSHL	R10		; save visibility
+	BSBW	$CHKBF		; ensure suff. room in buffer
+	.BYTE	17		; for an invisible plus visible
+	MOVL	(SP)+,R10	; recover visibility
+	TSTB	TKGRAF		; are we in graph mode
+	BNEQ	10$		; yes
+	TSTW	R10		; bright?
+	BNEQ	GETGRF		; yes - execute invisible to get to graph mode
+10$:	TSTW	R10		; in graph mode if necessary
+	BNEQ	15$		; skip if bright
+	MOVB	#AS.GS, R10
+	BSBW	$TKWCH		; output GS to get to graph mode
+	CLRB	THBRT		; mark dark vector
+	BRB	20$
+15$:	MOVB	#-1,THBRT	; mark bright
+20$:	MOVF	R6,TKSAVX	; preserve position
+	MOVF	R8,TKSAVY
+; force into range
+
+TXY: 	CMPF	R6,MINX
+	BGEQ	22$
+	MOVF	MINX,R6
+22$:	CMPF	R6,MAXX
+	BLEQ	24$
+	MOVF	MAXX,R6
+24$:	CMPF	R8,MINY
+	BGEQ	26$
+	MOVF	MINY,R8
+26$:	CMPF	R8,MAXY
+	BLEQ	28$
+	MOVF	MAXY,R8
+
+28$:	CVTFW	R6,R7		; to integer
+	XORW2	#^X8000,R7	; unsign
+	CVTFW	R8,R9
+	XORW2	#^X8000,R9
+	
+	BBS	#FLAG_V_TRANSPAR,FLAGW,65$	; output all bytes?
+	CMPW	R7,TKRHXC	; look for (0,0) move
+	BNEQ	65$
+	CMPW	R9,TKRHYC	; ...
+	BNEQ	65$
+	TSTB	TKGRAF		; treat 'getting to graph mode' as non-0 vector
+	BEQL	65$
+	BITB	THBRT,LSTBRT	; (0,0) move - either this or last dark?
+	BEQL	65$		; yes - force it out
+	RSB			; both bright - ignore move
+ 
+ 
+;let move go
+65$:	MOVZWL	R7,R7		; convert to unsigned longword
+	MOVZWL	R9,R9
+	MOVZWL	TKRHXC,R6
+	MOVZWL	TKRHYC,R8
+	MOVW	R7,TKRHXC	; save new endpoint in Tek space
+	MOVW	R9,TKRHYC
+	BBC	#FLAG_V_32BIT,FLAGW,TRN
+	TSTB	THBRT
+	BEQL	TRN
+	SUBL2	R6,R7		; use relative coordinate
+	SUBL2	R8,R9
+
+TRN:	MOVB	THBRT,LSTBRT	; save brightness marker
+	BBS	#FLAG_V_32BIT,FLAGW,67$
+	BSBW	$TKCOD		; code the move
+67$:	TSTB	TKGRAF		; in graph mode?
+	BNEQ	ESTAB		; yes
+	DECB	TKGRAF		; now in graph mode
+	BBS	#FLAG_V_32BIT,FLAGW,TRNSMT
+	CLRL	R9		; we weren't in graph mode - transmit everything in case
+	BRB	TRNSMT		; go to output
+
+; establish which bytes need to be transferred
+; TKCODD contains coded position currently held by display
+; TKCODC contains coded version of our current position
+ 
+ESTAB:	BBS	#FLAG_V_32BIT,FLAGW,TRNSMT
+	CLRL	R9		; initialize to force all bytes out
+	BBSC	#FLAG_V_TRANSPAR,FLAGW,TRNSMT	; don't check if forcing
+	MOVAB	TKCODC,R1	; source
+	MOVAB	TKCODD,R2	; dest'n
+	BBS	#FLAG_V_WESTWARD,FLAGW,ESTW
+	MOVB	#FRCLOX,R9	; init to transmit nothing
+	MOVAB	TRANTB,R4	; transmission table (see below)
+	MOVL	#TRANTB+BYTNO,R8	; loop limit
+10$:	CMPB	(R1)+,(R2)+	; compare one character
+	BEQL	20$		; no action if the same
+	BICB2	(R4),R9		; mark all bytes needing transmission as
+				; result of this byte changing
+20$:	AOBLSS	R8,R4,10$ ; loop
+	BRB	TRNSMT
+
+ESTW:	MNEGB	#2,R9		; init to transmit just low X
+	MOVAB	TRANTBW,R4	; transmission table (see below)
+	MOVL	#TRANTBW+8,R8	; loop limit
+10$:	CMPB	(R1)+,(R2)+	; compare one character
+	BEQL	20$		; no action if the same
+	BICB2	(R4),R9		; mark all bytes needing transmission as
+				; result of this byte changing
+20$:	AOBLSS	R8,R4,10$ ; loop
+
+ 
+; transmit coded position array
+; TKCODC (address in R6) holds new array
+; TKCODD (address in R7) holds array to store result in
+; R9 holds bitwise indication of whether to transmit bytes:
+;   d<n> = 0,1 => transmit, leave byte <n> of TKCODC
+;		   (n = 0,4)
+ 
+TRNSMT:	BBC	#FLAG_V_32BIT,FLAGW,5$
+
+	PUSHL	R7
+	PUSHAL	(SP)
+	CALLS	#1,W^TKINT
+	TSTL	(SP)+
+	PUSHL	R9
+	PUSHAL	(SP)
+	CALLS	#1,W^TKINT
+	TSTL	(SP)+
+	RSB
+
+5$:	MOVAB	TKCODC,R6
+	MOVAB	TKCODD,R7
+	MOVAB	TKBPTR,R1	; address of output buffer pointer
+	MOVL	(R1),R2		; pointer itself
+	MOVL	#BYTNO,R8 
+	BBC	#FLAG_V_WESTWARD,FLAGW,10$
+	MOVL	#8,R8		; 8 bytes on Westward
+	BISW2	#^XFF00,R9	; set bits for Westward
+;;;	CMPB	R9,#-1		; no bytes to transmit?
+;;;	BNEQ	10$
+;;;	CMPB	-(R2),#AS.GS	; just done GS (MOVTO)
+;;;	BEQL	18$		; remove the GS and forget move
+;;;	INCL	R2		; reinstate the GS
+10$:	MOVB	(R6)+,R10	; next character
+	ROTL	#-1,R9,R9	; byte to transmit?
+	BLSS	20$		; no
+	BBC	#FLAG_V_WESTWARD,FLAGW,16$
+	CMPB	R9,#-1		; now all set?
+	BNEQ	16$		; no
+	BISB3	#WEST.L,R10,(R2)+ ; to buffer with last flag
+	MOVL	#1,R8		; terminate loop
+	BRB	17$
+16$:	MOVB	R10,(R2)+	; to buffer
+17$:	MOVB	R10,(R7)+	; to output array
+	SOBGTR	R8,10$
+; the last byte is always transmitted so we will always exit
+; the loop here rather than at the other SOBGTR.
+;;;18$:
+	MOVL	R2,(R1)		; replace pointer
+	RSB
+ 
+20$:	INCL	R7		; as we've put nothing into output buffer
+	SOBGTR	R8,10$		; for all bytes
+	MOVL	R2,(R1)		; should not get here unless TRANTB altered
+	RSB
+ 
+ 
+;
+; Code R7, R9 into TKCODC array
+ 
+$TKCOD: MOVAB	TKCODC,R4
+DOCODE:	
+	BBS	#FLAG_V_WESTWARD,FLAGW,CODW
+	EXTZV	#11,#5,R9,R1		; high Y
+	BISB3	#TG.HIY,R1,(R4)+
+.IF NE LCD16
+	EXTZV	#0,#2,R7,R1		; extra extra extra byte
+	EXTZV	#0,#2,R9,R0
+	INSV	R0,#2,#2,R1
+	BISB3	#TG.LS2,R1,(R4)+
+.ENDC
+.IF NE LCD16!LCD14
+	EXTZV	#2,#2,R7,R1		; extra extra byte
+	EXTZV	#2,#2,R9,R0
+	INSV	R0,#2,#2,R1
+	BISB3	#TG.LS2,R1,(R4)+
+.ENDC
+	EXTZV	#4,#2,R7,R1		; extra byte
+	EXTZV	#4,#2,R9,R0
+	INSV	R0,#2,#2,R1
+	BISB3	#TG.LS2,R1,(R4)+
+	EXTZV	#6,#5,R9,R1		; low Y
+	BISB3	#TG.LOY,R1,(R4)+
+	EXTZV	#11,#5,R7,R1		; high X
+	BISB3	#TG.HIX,R1,(R4)+
+	EXTZV	#6,#5,R7,R1		; low X
+	BISB3	#TG.LOX,R1,(R4)+
+	RSB
+
+WEST.X = ^X60
+WEST.Y = ^X40
+WEST.L = ^X10
+CODW:	EXTZV	#1,#4,R7,R1		; low x
+	BISB3	#WEST.X,R1,(R4)+
+	EXTZV	#5,#4,R7,R1
+	BISB3	#WEST.X,R1,(R4)+
+	EXTZV	#9,#4,R7,R1
+	BISB3	#WEST.X,R1,(R4)+
+	EXTZV	#13,#3,R7,R1		; high x
+	BISB3	#WEST.X,R1,(R4)+
+	EXTZV	#1,#4,R9,R1		; low Y
+	BISB3	#WEST.Y,R1,(R4)+
+	EXTZV	#5,#4,R9,R1
+	BISB3	#WEST.Y,R1,(R4)+
+	EXTZV	#9,#4,R9,R1
+	BISB3	#WEST.Y,R1,(R4)+
+	EXTZV	#13,#3,R9,R1		; high y
+	BISB3	#WEST.Y,R1,(R4)+
+	RSB
+ 
+ 
+; check that there is space for n bytes in buffer
+; plus space for 'select VDU' sequence
+; expects TKBLIM to be set some distance (14 bytes say) from end
+; of buffer
+; Need 3 for esc=4, up to 7 AS.ESE from TKMAPT, and 3 for things
+; e.g. TKRASP which do not check
+;
+; call 	BSBW	$CHKBF
+;	.BYTE	n
+;
+; or FORTRAN CALL CHKBF(n)
+
+	.ENTRY	CHKBF,^M<R2,R10>
+	MOVZBL	@4(AP),R10	; get number of bytes
+	SUBL3	TKBPTR,TKBLIM,R1 ; get positions left in buffer
+	CMPL	R10,R1		; compare with no. wanted
+	BLEQ	10$		; enough?
+	BSBW	$FLUSH		; no, flush out buffer
+10$:	RET
+ 
+$CHKBF::MOVZBL	@(SP),R10	; get no. of bytes
+	SUBL3	TKBPTR,TKBLIM,R1 ; get positions left in buffer
+	CMPL	R10,R1		; compare with no. wanted
+	BLEQ	10$		; enough?
+	BSBW	$FLUSH		; no, flush out buffer
+10$:	INCL	(SP)		; reset return pc
+	RSB
+ 
+ 
+; set LCE on Tektronix
+ 
+$TKLCE:: MOVB	#AS.ESC,R10  	; by transmitting <esc>
+ 
+; ... and fall through
+ 
+ 
+; write character R10 to Tektronix
+ 
+$TKWCH:: MOVAB	TKBPTR,R1
+	MOVL	(R1),R2		; character pointer
+	MOVB	R10,(R2)+	; put character in buffer
+	MOVL	R2,(R1)		;restore updated pointer
+	RSB
+ 
+ 
+; write one or two characters (SP) to Tektronix
+;
+; call JSB $TKW2C
+;      .BYTE C1,C2		; C2=0 if one only
+ 
+$TKW2C:: MOVZBL	@(SP),R10	; first
+	BSBB	$TKWCH
+	INCL	(SP)
+	MOVZBL	@(SP),R10	; second
+	BEQL	10$
+	BSBB	$TKWCH
+10$:	INCL	(SP)
+	RSB
+ 
+ 
+; flush current buffer to Tek
+ 
+ 
+$FLUSH::	BBS	#FLAG_V_WESTWARD,FLAGW,5$
+
+; TEK
+MOVB	#AS.US,R10			; o/p US
+	BSBW	$TKWCH
+	BSBW	$TKW2C			; o/p CODE ANSI at end
+	.BYTE	AS.ESC,^A/%/
+	BSBW	$TKW2C
+	.BYTE	^A/!/,^A/1/
+	BRB	10$
+
+; Westward
+5$:	BBS	#FLAG_V_GIN,FLAGW,10$	; not if in GIN mode
+	BSBW	$TKW2C			; o/p ENTER VDU STATE at end
+	.BYTE	AS.ESC,^A/2/
+
+10$:	BSBW	$WBUFF			; wait for buffer to complete
+	MOVW	TKNEFN,TKEFN1		; mark buffer being transmitted
+	MOVAB	TKBUF1,R1
+	SUBL3	R1,TKBPTR,QO.LEN	; get no. of chars to o/p into DPB
+	TSTB	TKENBL			; enabled?
+	BEQL	30$			; no - don't output
+20$:	TSTB	TKWHDC			; waiting hard copy?
+	BEQL	40$			; no
+	$WAITFR_S	EFN=TKHTEF	; wait for timer to expire
+	BLBCW	R0,ERRSIG		; branch if failed
+	TSTB	TKWHDC			; still waiting?
+	BEQL	40$			; no
+	$CLREF_S	EFN=TKHTEF	; clear event flag and
+	BRB	20$			; try again
+	
+40$:	$QIO_G	QO.DPB			; output the buffer
+	BLBCW	R0,ERRSIG		; branch if failed
+30$:	MOVAB	TKBUF1,TKBPTR		; reset buffer pointer
+	BBS	#FLAG_V_WESTWARD,FLAGW,35$
+
+; TEK
+	BSBW	$TKW2C			; store 'CODE TEK' at start
+	.BYTE	AS.ESC,^A/%/		; of new buffer
+	BSBW	$TKW2C
+	.BYTE	^A/!/,^A/0/
+	BRB	99$
+
+; Westward
+35$:	BBSC	#FLAG_V_GIN,FLAGW,99$	; not if in GIN mode
+	BSBW	$TKW2C			; store ENTER GRAPHICS STATE at
+	.BYTE	AS.ESC,^A/1/		; start of new buffer
+
+99$:	CLRB	TKGRAF			; need GS before drawing
+	RSB
+ 
+ 
+; wait for buffer  to complete
+ 
+$WBUFF:: TSTW	TKEFN1			; read buffer's efn
+	BEQL	10$			; already complete if zero
+	TSTB	TKENBL			; enabled?
+	BEQL	20$			; no, nothing to wait for
+	TSTW	TKISB1			; IO completed?
+	BNEQ	20$			; yes
+30$:	$CLREF_S	EFN=TKNEFN	; clear event flag
+	TSTW	TKISB1			; IO just completed?
+	BNEQ	20$			; yes
+	$WAITFR_S	EFN=TKNEFN	; wait for completion
+	BRB	30$			; try again
+	MOVZWL	TKISB1,R0		; status return
+	BLBC	R0,ERRSIG		; $QIO function failed
+20$:	CLRW	TKEFN1			; mark completed
+10$:	RSB
+ 
+; general error exit
+ERRSIG:	PUSHL	R0
+	CALLS	#1,G^LIB$SIGNAL
+	RSB
+ 
+;
+; FORTRAN ESCSQ('AB') outputs sequence escAB
+	.ENTRY	ESCSQ,^M<R2,R10>
+	MOVB	#AS.ESC,R10		; esc
+	BSBW	$TKWCH
+	MOVQ	@4(AP),R0		; char descriptor
+	MOVAB	(R1),R0			; address of string
+	MOVB	(R0)+,R10		; first char
+	BSBW	$TKWCH
+	MOVB	(R0),R10		; second char
+	BSBW	$TKWCH
+	RET
+
+;
+; FORTRAN TKSTR('string') outputs char count then string
+	.ENTRY	TKSTR,^M<R2,R3,R10>
+	CALLG	(AP),B^TKINT		; output length
+	MOVQ	@4(AP),R0		; char descriptor
+	MOVZWL	R0,R0			; convert length to long
+	MOVAB	(R1),R3			; address into R3
+10$:	MOVB	(R3)+,R10		; first char
+	BSBW	$TKWCH
+	SOBGTR	R0,10$
+	MOVW	#1,TKLNCH
+	RET
+
+;
+; FORTRAN TKCH(byte) outputs single char
+	.ENTRY	TKCH,^M<R2,R10>
+	MOVB	@4(AP),R10
+	BSBW	$TKWCH
+	RET
+
+;
+; FORTRAN TKINT(n) output signed longword +/-65535
+	.ENTRY	TKINT,^M<R2,R3,R10>
+	CLRL	R3			; not transmitting yet
+	MOVL	@4(AP),R0		; integer
+	BGEQ	5$
+	MNEGL	R0,R0
+	MOVB	#^X20,AP		; -ve
+	BRB	6$
+5$:	MOVB	#^X30,AP		; +ve
+6$:	EXTZV	#10,#6,R0,R10
+	BEQL	10$
+	DECL	R3			; transmitting
+	BISB2	#^X40,R10
+	BSBW	$TKWCH
+10$:	EXTZV	#4,#6,R0,R10
+	BLBS	R3,15$			; force transmit
+	BEQL	20$
+15$:	BISB2	#^X40,R10
+	BSBW	$TKWCH
+20$:	EXTZV	#0,#4,R0,R10
+	BISB2	AP,R10
+	BSBW	$TKWCH
+	RET
+
+;
+; FORTRAN TKXY(x,y) to transmit encoded xy parameter, after transforming
+; as for a MOVTO
+	.ENTRY	TKXY,^M<R2,R4,R5,R6,R7,R8,R9,R10,R11>
+	CALLG	(AP),G^MOVTO		; move to position
+	MOVF	TKSAVX,R6
+	MOVF	TKSAVY,R8
+	BISL2	#FLAG_M_TRANSPAR,FLAGW	; force output all bytes
+	CLRB	THBRT			; pretend dark
+	BSBW	TXY			; transmit it
+	RET
+
+;
+; FORTRAN TK12XY(x,y) to transmit encoded xy parameter, range 0-1 maps
+; into 0-4095
+	.ENTRY	TK12XY,^M<R2,R4,R5,R6,R7,R8,R9,R10,R11>
+	MULF3	#4095,@4(AP),R0
+	CVTFW	R0,TKRHXC
+	MULF3	#4095,@8(AP),R0
+	CVTFW	R0,TKRHYC
+	BBS	#FLAG_V_32BIT,FLAGW,5$
+	ASHL	#4,TKRHXC,TKRHXC	; shift to 16 bit (x and y adjacent)
+5$:	MOVZWL	TKRHXC,R7
+	MOVZWL	TKRHYC,R9
+	BISL2	#FLAG_M_TRANSPAR,FLAGW	; force output all bytes
+	CLRB	THBRT			; pretend dark
+	BSBW	TRN			; transmit it
+	RET
+
+;
+; FORTRAN TKGIN set 'just done GIN' flag for $FLUSH
+	.ENTRY	TKGIN,^M<>
+	BISL2	#FLAG_M_GIN,FLAGW
+	RET
+;
+; FORTRAN TKREAD(EFN,IOSB)
+	.ENTRY	TKREAD,^M<>
+	MOVL	@4(AP),QI.EFN		; user's event flag
+	MOVAQ	@8(AP),QI.IOSB		; and status block
+	$QIO_G	QI.DPB			; issue read
+	BLBCW	R0,ERRSIG		; branch if QIO failed
+	RET
+
+;
+; FORTRAN TKKILL
+	.ENTRY	TKKILL,^M<>
+	$CANCEL_S	CHAN=QI.CHAN	; cancel read
+	BLBCW	R0,ERRSIG		; branch if QIO failed
+	RET
+
+;
+; FORTRAN TKGTXY(dev,buflen,buf,len) to retrieve coords after TKREAD
+; dev is 1 for keyboard, 2 for bitpad, 4 for mouse (the 2 and 4 must be
+; set as sig. chars for these devices)
+; buflen is the length of buf (assumed 16 for devices 2 and 4)
+; len is the number of characters placed in buf for device 1
+; For bitpad or mouse, buf contains 4 longwords, button,x,y,view
+; (view is set for Westward only)
+	.ENTRY	TKGTXY,^M<R2,R3,R4,R5,R6,R7,R8,R9>
+	MOVL	#1,R0
+	MOVZWL	@QI.IOSB[R0],R2		; number of chars read
+	BBC	#FLAG_V_WESTWARD,FLAGW,1$
+	CMPL	R2,#14			; length of locator report
+	BRB	4$
+1$:	BBS	#FLAG_V_32BIT,FLAGW,2$
+	CMPL	R2,#7			; length of locator report
+	BRB	4$
+2$:	CMPL	R2,#8			; length of locator report
+4$:	BNEQ	5$			; must be keyboard
+	MOVAB	TKIBUF,R1
+	CLRL	R0
+	SUBB3	#^A/0/,(R1)+,R0		; decode sig char
+	CMPL	R0,#2			; bitpad?
+	BEQL	10$
+	CMPL	R0,#4			; mouse?
+	BEQL	10$
+;
+; must be keyboard
+5$:	MOVL	#1,@4(AP)		; device 1
+	CMPL	R2,@8(AP)		; get number of characters
+	BLEQ	8$
+	MOVL	@8(AP),R2
+8$:	MOVL	R2,@16(AP)		; return in len
+	MOVC3	R2,TKIBUF,@12(AP)	; move chars to buf
+	RET
+;
+; decode xy report
+10$:	MOVL	R0,@4(AP)		; dev
+	MOVAB	@12(AP),R2		; address of buf
+	BBC	#FLAG_V_WESTWARD,FLAGW,11$
+	TSTB	(R1)+			; skip 'L' for locator
+11$:	CLRL	R0
+	SUBB3	#^A/0/,(R1)+,R0
+	CMPL	R0,#42			; was 'Z' i.e. button 0
+	BNEQ	20$
+	CLRL	R0
+20$:	BBC	#FLAG_V_WESTWARD,FLAGW,21$
+	DECL	R0			; start at button 0
+21$:	MOVL	R0,(R2)+		; but
+	CLRL	R7
+	CLRL	R9
+	BBC	#FLAG_V_32BIT,FLAGW,30$
+
+	SUBB3	#32,(R1)+,R6		; X
+	INSV	R6,#10,#6,R7
+	SUBB3	#32,(R1)+,R6
+	INSV	R6,#4,#6,R7
+	MOVB	(R1)+,R6
+	INSV	R6,#0,#4,R7
+	SUBB3	#32,(R1)+,R6		; Y
+	INSV	R6,#10,#6,R9
+	SUBB3	#32,(R1)+,R6
+	INSV	R6,#4,#6,R9
+	MOVB	(R1)+,R6
+	INSV	R6,#0,#4,R9
+	BRB	50$
+
+30$:	BBC	#FLAG_V_WESTWARD,FLAGW,40$
+	MOVB	(R1)+,R6
+	INSV	R6,#1,#4,R7		; low x
+	MOVB	(R1)+,R6
+	INSV	R6,#5,#4,R7
+	MOVB	(R1)+,R6
+	INSV	R6,#9,#4,R7
+	MOVB	(R1)+,R6
+	INSV	R6,#13,#3,R7		; high X
+	MOVB	(R1)+,R6
+	INSV	R6,#1,#4,R9		; low Y
+	MOVB	(R1)+,R6
+	INSV	R6,#5,#4,R9
+	MOVB	(R1)+,R6
+	INSV	R6,#9,#4,R9
+	MOVB	(R1)+,R6
+	INSV	R6,#13,#3,R9		; high Y
+	BRB	50$
+
+40$:	INSV	(R1),#11,#5,R9		; HIY
+	INSV	1(R1),#4,#2,R7		; extra X
+	INSV	1(R1),#2,#4,R9		; extra Y
+	BICL2	#12,R9			; clear extra X rubbish
+	INSV	2(R1),#6,#5,R9		; LOY
+	INSV	3(R1),#11,#5,R7		; HIX
+	INSV	4(R1),#6,#5,R7		; LOX
+50$:	CVTLF	R7,R7
+	CVTLF	R9,R9
+	BSBB	TKUSER
+	MOVF	R6,(R2)+		; x
+	MOVF	R8,(R2)+		; y
+	EXTZV	#0,#4,2(R1),(R2)	; view
+	RET
+
+ 
+; transform Tektronix counts into user units
+;	R6 = (R7 - 32768 - OFSETX)/TKTR(1)
+;	R8 = (R9 - 32768 - OFSETY)/TKTR(4)
+; R7,R9 are corrupted
+ 
+TKUSER: MOVF	#-32768.0,R6
+	ADDF2	R6,R7			; convert to signed
+	ADDF2	R6,R9
+	SUBF2	OFSETX,R7
+	DIVF3	TKTR,R7,R6
+	SUBF2	OFSETY,R9
+	DIVF3	TKTR+12,R9,R8
+	RSB
+
+	.PSECT
+	.END

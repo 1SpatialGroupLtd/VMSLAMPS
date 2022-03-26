@@ -1,0 +1,172 @@
+	LOGICAL FUNCTION STORE_ACSEL(ACS,SEL,RANGE,INEQ,VAL)
+C
+***	IDENT	09SE89
+***	MODULE	STORE_ACSEL
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					CCB	19-May-1988
+C
+C	To save an AC selection command
+C
+	IMPLICIT NONE
+C
+***     PARAMETER/LSL$CMNLSL:INEQ/
+***     PARAMETER/CMN:MOANMESS/
+***	COMMON/CMN:ACSEL/
+***	COMMON/LSL$CMNFRT:FRTACD/
+C
+C Arguments
+	RECORD	/ACSEL/	ACS		! record to store in
+	LOGICAL		SEL		! select or deselect
+	LOGICAL		RANGE		! range or single value
+	BYTE		INEQ		! inequality type
+	INTEGER		VAL(2)		! the range or value
+C
+C Functions
+	INTEGER		CMPAC
+	LOGICAL		TSTAC
+C
+C Local Variables
+	LOGICAL		S(2)
+	INTEGER		DEL(2)
+	INTEGER		T,I,C
+	INTEGER		TS(2)
+	INTEGER		IND
+C
+C masks for the different inequalities
+C 3 values are selected below/on/above particular value
+	LOGICAL*1	IQ(3,0:5)
+	DATA	IQ/	.FALSE., .TRUE.,.FALSE.,	! =
+     &			.FALSE.,.FALSE., .TRUE.,	! >
+     &			.FALSE., .TRUE., .TRUE.,	! >=
+     &			 .TRUE.,.FALSE.,.FALSE.,	! <
+     &			 .TRUE., .TRUE.,.FALSE.,	! <=
+     &			 .TRUE.,.FALSE., .TRUE./	! <>
+C
+	STORE_ACSEL = .FALSE.		! assume failure
+C
+C check room to insert extra toggle points for this AC
+	T = MAX_ACTOG - ACS.NTOG
+	IF (T.LE.0.OR.(RANGE.AND.T.LT.2)) THEN
+	   CALL MOAN(MSG_COMPACSEL,MAX_ACTOG)
+	   GOTO 999
+	ENDIF
+C
+C definitely want this AC to be present
+	ACS.PRES = .TRUE.
+C
+C get present selection status at values
+	IF (SEL.AND..NOT.ACS.SLCT) THEN
+	   S(1) = .FALSE.
+	   S(2) = .FALSE.
+	ELSE
+	   S(1) = TSTAC(ACS,VAL(1),ACD_DATA_TYPE)
+	   IF (RANGE) S(2) = TSTAC(ACS,VAL(2),ACD_DATA_TYPE)
+	ENDIF
+C
+	IND = 1				! doing first value
+	IF (RANGE) INEQ = INEQ_GEQ	! emulate >= for range
+C
+C find first toggle .GE. first value
+25	DO 30 T=1,ACS.NTOG
+	   C = CMPAC(ACS.TOG(T).VAL,VAL(IND),ACD_DATA_TYPE)
+	   IF (C.GE.0) GOTO 40
+30	CONTINUE
+C
+C all toggles .LT. first value
+	C = -1
+	T = ACS.NTOG+1
+C
+40	IF (C.NE.0) THEN	! not on toggle point
+C
+C make space for new toggle point
+	   DO 50 I=ACS.NTOG,T,-1
+	      ACS.TOG(I+1) = ACS.TOG(I)
+50	   CONTINUE
+	   ACS.NTOG = ACS.NTOG + 1
+C
+C insert new toggle point, setting its selection status to the present
+C state at this value
+	   ACS.TOG(T).VAL = VAL(IND)
+	   ACS.TOG(T).SEL(1) = S(IND)
+	   ACS.TOG(T).SEL(2) = S(IND)
+	   ACS.TOG(T).SEL(3) = S(IND)
+	ENDIF
+C
+C now modify selection status according to the inequality used, and
+C whether this is a SELECT or DESELECT command
+	IF (IQ(1,INEQ)) ACS.TOG(T).SEL(1) = SEL
+	IF (IQ(2,INEQ)) ACS.TOG(T).SEL(2) = SEL
+	IF (IQ(3,INEQ)) ACS.TOG(T).SEL(3) = SEL
+C
+C check if new toggle point is redundant (all three selection values
+C same) - if so set DEL to 1
+	DEL(IND) = 0
+	IF ((ACS.TOG(T).SEL(1).EQV.SEL).AND.
+     &      (ACS.TOG(T).SEL(2).EQV.SEL).AND.
+     &      (ACS.TOG(T).SEL(3).EQV.SEL) ) DEL(IND) = 1
+C
+	TS(IND) = T	! preserve index of this toggle point
+C
+C for a range, repeat for second value, emulating <=
+	IF (RANGE.AND.IND.EQ.1) THEN
+	   IND = 2
+	   INEQ = INEQ_LEQ
+	   GOTO 25
+	ENDIF
+C
+C now tidy up, removing unwanted toggle points, i.e. those made
+C redundant by the inequality used, and possibly the ones modified
+	IF (RANGE) THEN
+C
+C remove all toggles between TS(1) and TS(2)
+	   DO 60 I=TS(2)+DEL(2),ACS.NTOG
+	      ACS.TOG(I+TS(1)-TS(2)-DEL(1)-DEL(2)+1) = ACS.TOG(I)
+60	   CONTINUE
+	   ACS.NTOG = ACS.NTOG-(TS(2)-TS(1)-1+DEL(1)+DEL(2))
+C
+	ELSEIF (INEQ.EQ.INEQ_LSS.OR.
+     &		INEQ.EQ.INEQ_LEQ) THEN
+C
+C remove all toggles to left of T (=TS(1) for these cases)
+	   DO 70 I=T+DEL(1),ACS.NTOG
+	      ACS.TOG(I-T-DEL(1)+1) = ACS.TOG(I)
+70	   CONTINUE
+	   ACS.NTOG = ACS.NTOG-T-DEL(1)+1
+C
+	ELSEIF (INEQ.EQ.INEQ_GTR.OR.
+     &		INEQ.EQ.INEQ_GEQ) THEN
+C
+C remove all toggles to right of T (again =TS(1))
+	   ACS.NTOG = T-DEL(1)
+C
+	ELSEIF (INEQ.EQ.INEQ_NEQ) THEN
+C
+C remove all toggles (possibly except T)
+	   IF (DEL(1).EQ.0) THEN
+	      ACS.TOG(1) = ACS.TOG(T)
+	      ACS.NTOG = 1
+	   ELSE
+	      ACS.NTOG = 0
+	   ENDIF
+	ELSE
+C
+C leaves =, possibly remove T
+	   IF (DEL(1).NE.0) THEN
+	      DO 80 I=T+1,ACS.NTOG
+	         ACS.TOG(I-1) = ACS.TOG(I)
+80	      CONTINUE
+	      ACS.NTOG = ACS.NTOG-1
+	   ENDIF
+	ENDIF
+C
+C If removed all toggle points, the set overall selection
+	IF (ACS.NTOG.EQ.0) ACS.ALL = SEL
+C
+C definitely now in select mode
+	ACS.SLCT = .TRUE.
+	STORE_ACSEL = .TRUE.		! success
+C
+999	RETURN
+	END

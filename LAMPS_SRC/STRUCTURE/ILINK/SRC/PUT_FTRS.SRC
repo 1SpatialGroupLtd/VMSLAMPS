@@ -1,0 +1,342 @@
+	LOGICAL*4 FUNCTION PUT_FTRS(
+     &		PT,CC,NEAREST,NXT,PRV,FTR_PTS,FTR_START,
+     &		FTR_NDS,FTR_DAT,FTR_INFTR,FTR_IFC2,PNT_FTR,
+     &		FTR_ORIG_PR_FTR,IN_FTR_ADDR,IN_FTR_STATUS,
+     &		HEADARM,ARM,HEADSHR,SHR,
+     &		NPT,NOD_ADDR,
+     &		MAXPTS,MAXINFTRS,MAXOUTFTRS,
+     &		MAXSHRS,MAXARMS,MAXNODES)
+
+***	MODULE	PUT_FTRS
+***	IDENT	01AU89
+
+C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
+
+CMOD791 Calls to FILL_OUT_JPS and WRITE_JB only made if N_JPS and 
+C	N_NODES are > 0 respectively to avoid overflow division by 0
+C							JB  01-Aug-1989
+CMOD	Introduced /FREE_ENDS qualifier			ACM 06-Dec-1987
+CMOD	Made any SH entry in input get ignored		ACM 26-Oct-1987
+CMOD	Features deselected from processing are no longer
+C	copied to output when a link/node structure is
+C	being produced.					ACM 13-Oct-1987
+CMOD	Now write SH entry after the RA or (if present)
+C	the HI entry					TJH 18-Sep-1987
+CMOD	Made WRITE_JB and FILL_OUT_JPS into functions	ACM 18-Aug-1987
+CMOD 2/498 RA calc now includes features copied through
+C	using TRANSFER_FTR()				TJH 20-Jul-1987
+CMOD 2/495 RA now reflects output coordinate range, not
+C	just input RA copied through			TJH 07-Jul-1987
+CMOD	Made a function					TJH 28-May-1987
+C	Created   : ACM					       Dec 1986
+
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+	INCLUDE		'LSL$CMNLSL:LSLLIBMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINKCHAR.CMN'
+	INCLUDE		'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+
+C Data in
+	INTEGER*4	MAXPTS,MAXINFTRS,MAXOUTFTRS
+	INTEGER*4	MAXSHRS,MAXARMS,MAXNODES
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_START(MAXOUTFTRS)
+	INTEGER*4	FTR_NDS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_DAT(2,MAXOUTFTRS)
+	INTEGER*4	FTR_INFTR(MAXOUTFTRS)
+	INTEGER*4	FTR_ORIG_PR_FTR(MAXOUTFTRS)
+	INTEGER*4	NEAREST(MAXPTS)
+	INTEGER*4	NXT(MAXPTS),PRV(MAXPTS)
+	INTEGER*4	HEADSHR(MAXOUTFTRS)
+	INTEGER*4	SHR(2,MAXSHRS)
+	INTEGER*4	NOD_ADDR(2,MAXNODES)
+	INTEGER*4	HEADARM(MAXNODES)
+	INTEGER*4	ARM(2,MAXARMS)
+	INTEGER*4	IN_FTR_ADDR(MAXINFTRS)
+
+	BYTE		IN_FTR_STATUS(MAXINFTRS)
+	INTEGER*4	CC(MAXPTS)
+
+	INTEGER*2	FTR_IFC2(MAXOUTFTRS)
+
+	REAL*4		PT(2,MAXPTS)
+	REAL*4		NPT(2,MAXNODES)
+
+	LOGICAL*1	PNT_FTR(MAXOUTFTRS)
+
+C Workspace
+	INTEGER*4	FTRFIN,FTRSTA	! sta/fin ftr index in each layr
+	INTEGER*4	LPOSRA		! address of IFF RA
+	INTEGER*4	IN_FTR		! ftr index
+	INTEGER*4	ILAYER		! layer index
+	INTEGER*4	OSN		! layer number
+	INTEGER*4	NOPTR		! NO-entry IFF address
+	INTEGER*4	PR_FTR_COUNT	! processed-ftr count
+	INTEGER*4	FTRS_IN_LAYER	! No. of ftrs in a layer
+
+	INTEGER*2	IECODE,IELEN	! for IFFPKE
+
+	BYTE	 	NSBUF(80)	! for NS entry
+	BYTE	 	STATUS		! ftr status
+
+	LOGICAL*4  	HADNS		! seen NS entry?
+	LOGICAL*4  	COPY		! copy IFF ftr?
+
+C Functions
+	LOGICAL*4	TRANSFER_FTR
+	LOGICAL*4	WRITE_FTR
+	LOGICAL*4	WRITE_FTR_IFJ
+	LOGICAL*4	WRITE_JB
+	LOGICAL*4	FILL_OUT_JPS
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Writes output file using array of ftr addresses set up when
+C	features were taken from input file
+C
+C	See ILINK user guide for ILINK IFF output format specification
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	PUT_FTRS = SS$_NORMAL
+
+C If necessary, set ftr end-pt positions to corresponding node positions
+
+	IF (.NOT.HAD_VERIFY) THEN
+	  IF (	HAD_LLJOIN.OR.
+     &		HAD_LPJOIN.OR.
+     &		HAD_MERGE) THEN
+	    CALL FIX_ENDS(PT,FTR_PTS,FTR_NDS,NPT,
+     &			MAXPTS,MAXOUTFTRS,MAXNODES)
+	  END IF
+	END IF
+
+C Write pre-feature entries
+
+	HADNS = .FALSE.
+	CALL IFFSEL(INLUN)
+	CALL IFFRWD
+
+10	CALL IFFSEL(INLUN)			! select IFF input
+	CALL IFFNXT(IECODE,IELEN)		! get next entry
+	IF (IELEN.EQ.-1) THEN			! end-of-file encounterd
+	  PUT_FTRS = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(PUT_FTRS,INFILE(1:IN_LEN))
+	  GOTO 90
+	END IF
+
+	IF (IECODE.EQ.'RA') GOTO 25
+	IF (IECODE.EQ.'MH') GOTO 20
+	IF (IECODE.EQ.'MD') GOTO 20
+	IF (IECODE.EQ.'CC') GOTO 20
+	IF (IECODE.EQ.'CP') GOTO 20
+
+	IF (IECODE.EQ.'NS') GOTO 30
+	IF (IECODE.EQ.'NF') GOTO 40		! go to output ftrs
+	GOTO 10					! ignore any other entrs
+
+C Here to Transfer  HI, MH, MD, CC, CP entries from input file
+
+20	IF (HAD_VERIFY) GOTO 10			! no output file
+	CALL IFFSEL(INLUN)
+	CALL EIHCPY(OUTLUN)			! transfer to IFF output
+	GOTO 10					! loop for next entry
+
+C Create a null range entry, which we will patch with the
+C correct values when we have written all the ST's 
+
+25	IF (HAD_VERIFY) GOTO 10			! no output file
+	CALL IFFSEL(OUTLUN)
+	LPOSRA = LPOSE
+	CALL IFFRA(OUT_RANGE)
+
+C Get next entry and check if HI. We must do this to ensure that the
+C SH entry (if required) comes in the right place in the file.
+
+	CALL IFFSEL(INLUN)			! re-select input file
+	CALL IFFNXT(IECODE,IELEN)		! get next entry
+	IF (IELEN.EQ.-1) THEN			! end-of-file encounterd
+	  PUT_FTRS = ILINK__UNEXPEOF
+	  CALL LSL_PUTMSG(PUT_FTRS,INFILE(1:IN_LEN))
+	  GOTO 90
+	END IF
+	IF (IECODE.EQ.'HI') THEN		! if HI,
+	  CALL EIHCPY(OUTLUN)			! copy to output file
+	  IF (HAD_STRUCTURE) THEN		! then, if required,
+	    CALL IFFSEL(OUTLUN)			! write the SH out
+	    CALL IFFSH(	XMIN,YMIN,		! lower left corner
+     &			XSECSIZ,		! sector X dimension
+     &			YSECSIZ,		! sector Y dimension
+     &			NXSECTORS,NYSECTORS)	! No. of sectors in X&Y
+	  END IF
+	ELSE					! not HI, so write SH
+	  IF (HAD_STRUCTURE) THEN		! 1st (if required),
+	    CALL IFFSEL(OUTLUN)
+	    CALL IFFSH(	XMIN,YMIN,		! lower left corner
+     &			XSECSIZ,		! sector X dimension
+     &			YSECSIZ,		! sector Y dimension
+     &			NXSECTORS,NYSECTORS)	! No. of sectors in X&Y
+	  END IF
+	  IF (IECODE.EQ.'SH') GOTO 10		! ignore old SH entry
+	  CALL IFFSEL(INLUN)			! now write out entry to
+	  CALL EIHCPY(OUTLUN)			! follow the SH
+	END IF	   
+	GOTO 10					! loop for next entry
+
+C Here to write NS entry 
+
+30	HADNS = .TRUE.
+	IF (HAD_VERIFY) GOTO 10			! no output file
+C Write new NS entry
+	CALL EXPAND('Created by ILINK on ')
+	CALL DATE(EXPBUF(EXPLEN+1))
+	EXPLEN = EXPLEN+9
+	CALL APPEND(' at ')
+	CALL TIME(EXPBUF(EXPLEN+1))
+	EXPBUF(EXPLEN+9) = 0
+	CALL EXPAND('%W%A80',NSBUF,EXPBUF)
+	CALL IFFSEL(OUTLUN)
+	CALL IFFNS(EXPBUF)
+	GOTO 10					! loop for next entry
+
+C Check NS was seen so that SH and NS entries have been written
+
+40	IF (.NOT.HADNS) GOTO 30
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C Write (transfer or else take from data structure) every original input
+C ftr except for those rejected as not having a CB with one or more pts
+
+	FTRFIN = 0				! initialise FTRFIN
+
+C For each layer do...
+
+	DO 60 ILAYER = 1,N_IN_LAYERS
+
+C Write NO entry at start of layer
+
+	  IF (.NOT.HAD_VERIFY) THEN		! no output file
+	    CALL IFFSEL(OUTLUN)
+	    NOPTR = LPOSE
+	    OSN = LAYER_NUMBER(ILAYER)
+	    CALL IFFNO(OSN,0,0)
+	  END IF
+
+	  FTRS_IN_LAYER = 0
+
+C Find index of first & last ftr in layer
+
+	  FTRSTA = FTRFIN+1
+	  FTRFIN = LAST_INFTR_IN_LAYER(ILAYER)
+
+C For each ftr in layer do...
+
+	  DO 50 IN_FTR = FTRSTA,FTRFIN
+	    STATUS = IN_FTR_STATUS(IN_FTR)
+	    IF (STATUS.EQ.REJECT) THEN
+	      N_RJ_FTRS = N_RJ_FTRS+1
+	    ELSE
+	      FTRS_IN_LAYER = FTRS_IN_LAYER+1	! count ftrs in layer
+	      IF (STATUS.EQ.TRANSFER) THEN
+	        N_TR_FTRS = N_TR_FTRS+1
+	        N_OT_FTRS = N_OT_FTRS+1
+	        IF (.NOT.HAD_VERIFY) THEN	! no output file
+	          PUT_FTRS = TRANSFER_FTR(IN_FTR,IN_FTR_ADDR,MAXINFTRS)
+	          IF (.NOT.PUT_FTRS) GOTO 90
+	        END IF
+	      ELSE IF (STATUS.GE.PROCESS) THEN
+	        PR_FTR_COUNT = PR_FTR_COUNT+1
+	        IF (NEED_DATA_PER_POINT) THEN
+	          IF (.NOT.HAD_VERIFY) PUT_FTRS = WRITE_FTR(
+     &			PR_FTR_COUNT,
+     &			PT,CC,NEAREST,NXT,PRV,FTR_PTS,FTR_START,
+     &			FTR_NDS,FTR_INFTR,FTR_IFC2,FTR_DAT,
+     &			PNT_FTR,FTR_ORIG_PR_FTR,
+     &			IN_FTR_STATUS,IN_FTR_ADDR,
+     &			HEADSHR,SHR,
+     &			MAXPTS,MAXINFTRS,MAXOUTFTRS,MAXSHRS)
+	          IF (.NOT.PUT_FTRS) GOTO 90
+	        ELSE
+	          PUT_FTRS = WRITE_FTR_IFJ(
+     &			PR_FTR_COUNT,FTR_PTS,
+     &			FTR_INFTR,FTR_NDS,FTR_DAT,PNT_FTR,
+     &			IN_FTR_ADDR,NPT,
+     &			MAXINFTRS,MAXOUTFTRS,MAXNODES)
+	          IF (.NOT.PUT_FTRS) GOTO 90
+	        END IF
+	      END IF
+	    END IF
+50	  CONTINUE
+
+C Write EO entry at end of layer
+
+	  IF (HAD_VERIFY) GOTO 60
+
+	  CALL IFFSEL(OUTLUN)
+	  CALL IFFPKE(IECODE,IELEN,NOPTR)
+	  IF (IECODE.NE.'NO') THEN
+	    PUT_FTRS = ILINK__BADIFFNO
+	    CALL LSL_PUTMSG(PUT_FTRS,INFILE(:IN_LEN))
+	    GOTO 90
+	  END IF
+	  CALL EIHW(LPOSE,2,3)
+	  CALL IFFEO
+	  IF (HAD_MONITOR)
+     &	    CALL WRITEF('%N whole features written in layer %N',
+     &	    FTRS_IN_LAYER,OSN)
+60	CONTINUE
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C Write post-feature entries - [JB,] EM  EJ entries
+
+	IF (.NOT.HAD_VERIFY) CALL IFFSEL(OUTLUN)
+
+C If breaking ftrs (or just count arms-per-node) then write JB
+
+	IF ((HAD_LLJOIN.OR.HAD_LPJOIN.OR.HAD_PPJOIN.OR.HAD_MERGE.OR.
+     &		HAD_BREAK.OR.HAD_FREE_ENDS.OR.HAD_STRUCTURE) 
+     &      	.AND. N_NODES.GT.0) THEN
+	  PUT_FTRS = WRITE_JB (FTR_PTS,FTR_DAT,PNT_FTR,NPT,NOD_ADDR,
+     &	             HEADARM,ARM,MAXOUTFTRS,MAXNODES,MAXARMS)
+	  IF (.NOT.PUT_FTRS) GOTO 90
+	END IF
+
+	IF (HAD_VERIFY) GOTO 90
+
+C If HAD_STRUCTURE then go back and fill out link-to-node pointers
+
+	IF (HAD_STRUCTURE .AND. N_JPS.GT.0) THEN
+	  PUT_FTRS = FILL_OUT_JPS (NOD_ADDR,MAXNODES)
+	  IF (.NOT.PUT_FTRS) GOTO 90
+	END IF
+
+	CALL IFFSEL(OUTLUN)
+
+C Terminate the open map and file levels
+
+	CALL IFFEM
+	CALL IFFEJ
+
+C Now return to the position of the RA entry and patch it with the true
+C coordinate range 
+
+	CALL IFFPKE(IECODE,IELEN,LPOSRA)
+	IF (IELEN.LT.0) THEN
+	   PUT_FTRS = ILINK__BADADDR
+	   CALL LSL_PUTMSG(PUT_FTRS)
+	ELSE
+	   CALL EIHWR(OUT_RANGE,4,1)
+	END IF	   
+
+90	RETURN
+	END

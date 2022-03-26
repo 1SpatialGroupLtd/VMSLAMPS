@@ -1,0 +1,1 @@
+$iinfo/symbol/height test

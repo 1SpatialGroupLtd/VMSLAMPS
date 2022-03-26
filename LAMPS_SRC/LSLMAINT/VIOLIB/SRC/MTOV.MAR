@@ -1,0 +1,273 @@
+	.TITLE	MTOV
+	.IDENT	/04DE85/
+ 
+; Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+;
+; check for error after setting mode 			RWR	 4-Dec-85
+; MTONIT added - allows initialization by file name	SGH	16-Nov-1984
+;
+; Author	Susan Manning
+;		from PDP 11 routines by Paul Hardy
+ 
+; Date:	21:01:81
+ 
+; Magtape Output Routines
+ 
+; assemble with MTOVCM.MAR
+ 
+; Definitions
+ 
+	$IODEF
+	$MTDEF
+	$QIODEF
+ 
+; Macro definition
+ 
+	.MACRO	QIOTSTERR,QSTAT,QIOSB,QERREX,?QL1,?QL2
+.IF NB QSTAT				; check queuing of I/O request ?
+	CMPW	#SS$_NORMAL,QSTAT	; okay ?
+	BEQL	QL1			; yes
+.IIF NB QIOSB,	MOVW	QSTAT,QIOSB	; duplicate error
+	BRW	QERREX			; branch to error routine
+.ENDC
+QL1:
+.IF NB QIOSB				; check result of I/O request ?
+	CMPW	#SS$_NORMAL,QIOSB	; okay ?
+	BEQL	QL2			; yes
+	BRW	QERREX			; branch to error routine
+.ENDC
+QL2:
+	.ENDM	QIOTSTERR
+ 
+; Workspace
+ 
+	DATA_PSECT	VIO
+ 
+; Tape name descriptor
+MTDESC:	.LONG	MTEND - MTNAME
+	.LONG	MTNAME
+MTNAME:	.ASCII	/MT/
+MTNUM:	.ASCII	/0/
+MTEND:
+ 
+; general tape name descriptor
+MTGDSC:	.ASCID	/MTA0/
+
+ 
+; Tape characteristics buffer
+MTOMOD:	.WORD	0,2048
+MTOPAR:	.LONG	0
+ 
+; Tape I/O status block
+MTOISB:	.BLKW	1	; status return
+MTOCNT:	.BLKW	1	; byte count
+MTDINF:	.BLKL	1	; device information
+ 
+; QIO directive parameter block
+MTODPB:	$QIOW	FUNC=IO$_WRITEVBLK,-
+		IOSB=MTOISB
+ 
+QO.FUNC	= MTODPB+QIO$_FUNC
+QO.CHAN	= MTODPB+QIO$_CHAN
+QO.P1	= MTODPB+QIO$_P1
+QO.P2	= MTODPB+QIO$_P2
+ 
+	CODE_PSECT	VIO
+ 
+; MTONIT(name, pe [, norew]) initialises named device (default MTA0),
+; assigns it to a channel, rewinds it positioning tape at BOT
+;(unless <norew>, whose value is FALSE in default)
+; and sets tape characteristics to 800 bpi NRZI unless <pe>
+; If <pe> is .TRUE. then sets 1600 bpi phase encoded.
+ 
+ .ENTRY	MTONIT,^M<R10,R11>
+ 
+	BSBW	VIO$1ST				; init argument mechanism
+	BSBW	VIO$GNA				; get name argument
+	BCC	10$				; if CC, it's there
+	MOVAL	MTGDSC,R0			; default name MTA0
+10$:	$ASSIGN_S	DEVNAM=(R0),-		; assign to channel
+			CHAN=QO.CHAN
+ 
+	BRB	MTOI30
+; MTOI(n, pe[, norew]) initialises MT<n>:
+; assigns it to a channel, rewinds it (unless <norew>, default FALSE)
+; and sets tape characteristics to 800 bpi NRZI unless <pe>
+; If <pe> is .TRUE. then sets 1600 bpi phase encoded.
+ 
+ .ENTRY	MTOI,^M<R10,R11>
+ 
+	BSBW	VIO$1ST				; init argument mechanism
+	BSBW	VIO$GNA				; get <n> argument
+	BCC	10$				; if CC, it's there
+	CLRB	R0				; default n=0
+	BRB	20$
+10$:	MOVB	(R0), R0			; get <n>
+20$:	ADDB3	#^A/0/, R0, MTNUM		; set tape unit number
+	$ASSIGN_S	DEVNAM=MTDESC,-		; assign to channel
+			CHAN=QO.CHAN
+ 
+MTOI30:
+	MOVW	#SS$_NORMAL,MTOISB		; frig to use QIOTSTERR
+	QIOTSTERR	R0,MTOISB,ERR		; check result
+ 
+	BSBW	VIO$GNA				; get <pe> argument
+	BCC	30$				; if CC, arg there
+	CLRL	R10				; default FALSE
+	BRB	40$
+30$:	CVTBL	(R0), R10			; get <pe> value
+40$:	BSBW	VIO$GNA				; get <norew> argument
+	BCS	50$				; if CS, not there - assume FALSE
+	BLBS	(R0), 60$			; if LBS, arg TRUE - don't rewind
+50$:	MOVL	#IO$_REWIND,QO.FUNC		; rewind tape
+	$QIOW_G		MTODPB
+	QIOTSTERR	R0,MTOISB,ERR		; check okay
+ 
+60$:	INSV	#MT$K_NORMAL11,#MT$V_FORMAT,#MT$S_FORMAT,MTOPAR
+						; set to normal PDP-11 format
+	BLBC	R10, 70$			; if LBC, <pe> arg FALSE
+	INSV	#MT$K_PE_1600,-
+		#MT$V_DENSITY,#MT$S_DENSITY,-
+		MTOPAR				; set 1600 BPI
+	BRB	80$
+ 
+70$:	INSV	#MT$K_NRZI_800,-
+		#MT$V_DENSITY, #MT$S_DENSITY,-
+		MTOPAR				; set 800 BPI
+80$:	MOVL	#MTOMOD,QO.P1			; move into DPB
+	MOVL	#IO$_SETMODE,QO.FUNC		; set mode
+	$QIOW_G		MTODPB
+	CLRW	MTOPTR				; empty pointer
+	QIOTSTERR	R0,MTOISB,ERR		; check result
+	BRB	SUCC
+ 
+ 
+ 
+; Included for compatability
+; IERR = MTOATT(NMTO)	- Attach magtape
+; IERR = MTODET(NMTO)	- Detach magtape
+ 
+MTOATT::
+.ENTRY	MTODET,^M<>
+	BRB	SUCC
+ 
+ 
+ 
+; Rewind Magtape
+ 
+.ENTRY	MTORWD,^M<>
+	MOVL	#IO$_REWIND,QO.FUNC
+	$QIOW_G		MTODPB
+	QIOTSTERR	R0,MTOISB,ERR		; check okay
+ 
+; general success exit
+SUCC:	MOVZWL	MTOISB, R0
+	CLRW	MTOERR
+	BRB	EXIT
+ 
+; general error exit
+ERR:	MOVW	MTOISB,MTOERR
+	MNEGL	#1, R0
+ 
+ 
+EXIT:	CLRW	MTOISB
+	RET
+ 
+ 
+; MTOWRB(BUFFER,LENGTH) writes out buffer to MT0:
+ 
+.ENTRY	MTOWRB,^M<>
+	MOVW	@8(AP),R1			; block length
+	BEQL	SUCC				; nothing to output
+	MOVW	R1,QO.P2			; set length in DPB
+	MOVW	R1,MTOLST			; remember it
+	MOVL	4(AP),QO.P1			; address of buffer
+	MOVL	#IO$_WRITEVBLK,QO.FUNC
+	$QIOW_G		MTODPB
+	INCW	MTONBL				; count blocks
+	CLRW	MTOPTR				; set to empty buffer now
+	QIOTSTERR	R0,MTOISB,ERR		; check okay
+	BRW	SUCC
+ 
+ 
+ 
+; MTOEOF writes a tape mark
+ 
+.ENTRY	MTOEOF,^M<>
+	MOVL	#IO$_WRITEOF,QO.FUNC
+	$QIOW_G		MTODPB
+	QIOTSTERR	R0,MTOISB,ERR		; check okay
+	BRW	SUCC
+ 
+ 
+ 
+; MTOSPC(nblk)		space forward <nblk> blocks (default 1)
+;			     (backward -<nblk> blocks if nblk<0)
+; MTOBCK		space backward one block
+ 
+ .ENTRY	MTOBCK, ^M<R2>				; backspace
+ 
+	MNEGL	#1, R2				; 1 block backward
+	BRB	VIOIN_MTO_SP			; join MTOSPC
+ 
+ .ENTRY	MTOSPC, ^M<R2,R11>			; general space
+ 
+	BSBW	VIO$1ST				; init argument mechanism
+	BSBW	VIO$GNA				; get first argument
+	BCC	10$				; if CC, it's there
+	MOVL	#1, R2				; default 1 block forward
+	BRB	VIOIN_MTO_SP
+10$:	CVTWL	(R0), R2			; get nblk
+ 
+VIOIN_MTO_SP:					; MTOBCK joins
+ 
+	MOVL	#IO$_SKIPRECORD, QO.FUNC	; set function
+	MOVL	R2, QO.P1			; no. of blocks to skip
+	$QIOW_G		MTODPB			; effect the operation
+	CMPW	#SS$_ENDOFFILE, MTOISB		; eof allowed
+	BEQL	20$				; if EQL, that's it
+	QIOTSTERR	R0, MTOISB, ERR		; check for other errors
+	ADDW2	R2, MTONBL			; OK - count blocks
+20$:	BRW	SUCC				; success exit
+ 
+ 
+ 
+; MTORDB(buff, length[, bytcnt])	read from output tape
+ 
+ .ENTRY	MTORDB, ^M<R11>
+ 
+	BSBW	VIO$1ST				; init arg mechanism
+	BSBW	VIO$GNA				; get <buff>
+	BCS	20$				; if CS, arg missing
+	MOVAB	(R0), QO.P1			; transfer address of buffer
+	BSBW	VIO$GNA				; get <length>
+	BCS	20$				; if CS, arg missing
+	MOVZWL	(R0), QO.P2			; transfer buffer length
+	MOVL	#IO$_READVBLK, QO.FUNC		; transfer function
+	$QIOW_G		MTODPB			; execute transfer
+	INCW	MTONBL				; count blocks
+	QIOTSTERR	R0, MTOISB, ERR		; check for error
+ 
+	BSBW	VIO$GNA				; get <bytcnt>
+	BCS	10$				; if CS, doesn't need to know
+	MOVW	MTOCNT, (R0)			; return count of bytes transferred
+10$:	BRW	SUCC
+ 
+; mandatory argument missing
+20$:	MOVZWL	#SS$_INSFARG, MTODPB		; fake error
+	BRW	ERR
+ 
+ 
+; MTOSNS	sense characteristics of output tape
+;		(return results in R0)
+ 
+ .ENTRY	MTOSNS, ^M<>
+ 
+	MOVL	#IO$_SENSEMODE, QO.FUNC		; function
+	$QIOW_G		MTODPB			; execute it
+	QIOTSTERR	R0, MTOISB, ERR		; check operation
+	MOVL	MTDINF, R0			; transfer result to return
+	RET					; special - not by way of SUCC
+ 
+	.PSECT
+ 	.END

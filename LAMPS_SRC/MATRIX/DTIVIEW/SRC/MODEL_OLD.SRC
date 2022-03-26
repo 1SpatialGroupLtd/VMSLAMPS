@@ -1,0 +1,459 @@
+	SUBROUTINE MODEL
+C
+***	MODULE MODEL
+***	IDENT  24MY89
+C
+	IMPLICIT NONE
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England
+C
+C Combined ISODRW, PERDRW and DRAW3D routines from DTMTEK
+C Now TVES specific, with AUTO scaling truly automatic!
+C
+C Created    Dec 1984:     DRC
+C Modified   May 1985:  -  DRAW3D code incorporated and
+C 		   	   call to DTI_HGT   		DRC
+C Modified   May 1985:  -  GKS calls incorporated  	ACM
+C Modified   Jun 1985:  -  Now handles Null Heights  	DRC
+C MOD	     JUL 1986:  -  New common blocks inserted 	DRC
+C MOD	     JUL 1988:  -  To handle the fog capability ALB
+C MOD	     JAN 1989:  -  To correct vertical exag. problem
+C			   when sub-sampling            DRC
+C MOD	     Mar 1989   -  To correct scaling problem   MWSR
+C			   when null values present in 
+C			   model
+CMOD	     May 1989	-  To prevent FISHNET drawing   IMcL
+C			   after an error in initial draw
+C
+C
+C DTVIEW commons
+C
+***	COMMON/HERE:DTICMN/
+***	COMMON/HERE:DEVICE/
+***	COMMON/HERE:MODEL/
+***	COMMON/HERE:VIEW/
+***	COMMON/HERE:DRCTRL/
+***	COMMON/HERE:GKSCMN/
+***	COMMON/HERE:CULTRE/
+***	COMMON/HERE:USER_SYMBOLS/
+***	COMMON/HERE:FOG/
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C Locals
+	REAL		X,Y,Z		! model coordinates
+	REAL		XX,YY		! view  coordinates
+	INTEGER*4	NLINE		! line number
+	INTEGER*4	NPNTS
+	INTEGER*4	XGRID
+	INTEGER*4	YGRID
+	INTEGER*4	XSTART		! line drawing
+	INTEGER*4	YSTART 		! line and
+	INTEGER*4	XEND		! column
+	INTEGER*4	YEND		! limits, and
+	INTEGER*4	XSTEP		! loop increment
+	INTEGER*4	YSTEP		! values.
+	INTEGER*4	INXPOS		! initial X drawing position
+	INTEGER*4	XPOS		! current X drawing position
+	INTEGER*4	XINC 		! X drawing position increment
+	INTEGER*4	I, J		! loop variables
+	INTEGER*4	RETVAL		! function return value
+	INTEGER*2	THISY		! height at current point
+	INTEGER*2	PREVY		! height at previous point
+	LOGICAL		NOPLOT		! to plot or not to plot
+	LOGICAL		STORE_VIS	! have the plot coords been
+C					! stored?
+C
+C functions:
+	INTEGER*4	DTI_READ_WORD_DATA
+	INTEGER		ICOL
+	LOGICAL		HADCTRLC
+	LOGICAL		POINT_VISIBLE
+C
+C************************************************************************
+C
+	IF(PRIMARY)THEN
+	  CALL LSG_PLANE_SELECT(1,PLANE_MASK)
+	  CALL LSG_PLANE_OFFSET(1,0)
+	  CALL LSG_PLANE_VISIBLE(1,-1)
+	ENDIF
+C
+	IF(SECONDARY)THEN
+	  CALL LSG_PLANE_SELECT(2,PLANE_MASK)
+	  CALL LSG_PLANE_OFFSET(2,0)
+	  CALL LSG_PLANE_VISIBLE(2,-1)
+	ENDIF
+C
+C Set up viewing parameters
+	PHI    = DEFPHI
+	THETA  = DEFTHT
+C Set up vert exag. taking into account sub-sampling
+	IF(DIRECT.EQ.1.OR.DIRECT.EQ.3)THEN
+	  YSCALE = DEFZSC * X_SAMPLE
+	ELSE
+	  YSCALE = DEFZSC * Y_SAMPLE
+	ENDIF
+C
+	HOV    = DEFHOV*YSCALE	!muliply height of view by exagg. factor
+C
+C set scale values according to direction of view
+C
+	IF (DIRECT.EQ.2.OR.DIRECT.EQ.4) THEN	!north or south
+	   XSCALE =(-X_GRID(1)*X_SAMPLE)
+	   ZSCALE =(-Y_GRID(1)*Y_SAMPLE)
+	   NPNTS = NLINES
+C
+C save absolute grid interval for fog calculation
+C
+	   IF(HAD_FOG.AND.PRSPVW) THEN
+	      ABS_X_GRID = X_GRID(1)
+	      ABS_Z_GRID = Y_GRID(1)
+	   ENDIF
+	ELSE					!east or west
+	   XSCALE =(-Y_GRID(1)*Y_SAMPLE)
+	   ZSCALE =(-X_GRID(1)*X_SAMPLE)
+	   NPNTS = NPTS
+C
+C save absolute grid interval for fog calculation
+C
+	   IF(HAD_FOG.AND.PRSPVW) THEN
+	      ABS_X_GRID = Y_GRID(1)
+	      ABS_Z_GRID = X_GRID(1)
+	   ENDIF
+	ENDIF
+C
+C calculate transformation coefficients
+	IF (PRSPVW) THEN
+C compute rotation factors for perspective view
+	  SPHI = SIN(0.0174532925*PHI)
+          CPHI = COS(0.0174532925*PHI)
+          A1 = -SPHI
+          A2 = CPHI
+C
+C set absolute position of observer from origin for fog calculation
+C
+	  IF(HAD_FOG) THEN
+	     ABS_OBS_X = 0.0
+	     ABS_OBS_Y = HOV
+	     ABS_OBS_Z = - DOV
+	  ENDIF
+C
+C distance from viewer to plane of projection
+          DOVSC = DOV * 0.5*(ABS(XSCALE)+ABS(ZSCALE))
+          DIST = DOVSC+FLOAT(NPNTS-1)*(SPHI*ABS(XSCALE)+
+     &	          CPHI*ABS(ZSCALE))
+C z-coord of nearest point in model to viewer
+	  Z0   = 0.0
+          IF (SPHI*XSCALE.GT.0.0)Z0 = SPHI*XSCALE*FLOAT(NPNTS-1)
+        ELSE
+C
+C compute rotation factors for isometric view
+          SPHI = SIN(0.0174532925*PHI)
+          CPHI = COS(0.0174532925*PHI)
+          STHETA = SIN(0.0174532925*THETA)
+          CTHETA = COS(0.0174532925*THETA)
+          A11 = CPHI
+          A13 = -SPHI
+          A21 = STHETA*SPHI
+          A22 = CTHETA
+          A23  = STHETA*CPHI
+        ENDIF
+C
+C Initialise
+        CALL HORINI
+C
+C*********************************************************************
+C
+	NOPLOT = .TRUE.			!don't plot this time round
+	STORE_VIS = .FALSE.		!don't encode visibility matrix
+C					!on this pass
+C
+C initialise view limits
+	VWMINX =  100 000.0
+	VWMAXX = -100 000.0
+	VWMINY =  100 000.0
+	VWMAXY = -100 000.0
+C
+C initialise model height limits
+	MODMIN = MAX_WVALUE(1)
+	MODMAX = MIN_WVALUE(1)
+C
+C************************************************************************
+C
+        GOTO (130,140,150,160)DIRECT 
+C
+C	Viewing from west
+130     XSTART = DTI_WINDOW_SWX(1)
+	YEND   = DTI_WINDOW_SWY(1)
+	XEND   = DTI_WINDOW_NEX(1)
+	YSTART = DTI_WINDOW_NEY(1)
+	XSTEP = X_SAMPLE
+	YSTEP =-Y_SAMPLE
+	INXPOS=NPNTS+X_SAMPLE
+	XINC=-X_SAMPLE
+        GOTO 170
+C
+C	Viewing from south
+140     XSTART = DTI_WINDOW_SWY(1)
+	YEND   = DTI_WINDOW_NEX(1)
+	XEND   = DTI_WINDOW_NEY(1)
+	YSTART = DTI_WINDOW_SWX(1)
+	XSTEP = Y_SAMPLE
+	YSTEP = X_SAMPLE
+	INXPOS=NPNTS+Y_SAMPLE
+	XINC=-Y_SAMPLE
+        GOTO 170
+C
+C	Viewing from east
+150     XSTART = DTI_WINDOW_NEX(1)
+	YEND   = DTI_WINDOW_NEY(1)
+	XEND   = DTI_WINDOW_SWX(1)
+	YSTART = DTI_WINDOW_SWY(1)
+	XSTEP = -X_SAMPLE
+	YSTEP = Y_SAMPLE
+        INXPOS=NPNTS+X_SAMPLE
+        XINC=-X_SAMPLE 
+	GOTO 170
+C
+C	Viewing from north
+160     XSTART = DTI_WINDOW_NEY(1)
+	YSTART = DTI_WINDOW_NEX(1)
+	XEND   = DTI_WINDOW_SWY(1)
+	YEND   = DTI_WINDOW_SWX(1)
+	XSTEP = -Y_SAMPLE
+	YSTEP = -X_SAMPLE
+	INXPOS=NPNTS+Y_SAMPLE
+	XINC=-Y_SAMPLE
+C
+C************************************************************************
+C
+170	NLINE = 0
+C
+C Outer drawing loop
+	DO 500 I = XSTART,XEND,XSTEP
+C
+C has CTRL/C been pressed
+200	  IF (HADCTRLC()) GOTO 990
+C
+C get unrotated Z coordinate of DTI node position
+C
+	  IF(HAD_FOG.AND.PRSPVW.AND..NOT.NOPLOT) THEN
+	  ENDIF
+C
+	  Z = FLOAT(NLINE)*ZSCALE
+C
+	  NLINE = NLINE+ABS(XSTEP)
+	  XPOS = INXPOS		!set to initial x position
+C
+C******************************************************************
+C
+C Inner drawing loop
+	DO 400 J = YSTART,YEND,YSTEP
+C
+C get rotated X coordinate of DTI node position
+C
+	  IF(HAD_FOG.AND.PRSPVW.AND..NOT.NOPLOT) THEN
+	     ABS_Z = (I-XSTART) * ABS_Z_GRID * ABS(XSTEP) * CPHI
+     &	     + (J-YEND)*ABS_X_GRID * ABS(YSTEP) * SPHI
+	     ABS_X = - (J-YEND)*ABS_X_GRID * ABS(YSTEP) * CPHI
+     &	     + (I-XSTART) * ABS_Z_GRID * ABS(XSTEP) * SPHI
+	  ENDIF
+	  XPOS = XPOS+XINC
+C
+300	  IF(DIRECT.EQ.1.OR.DIRECT.EQ.3) THEN
+	    RETVAL=DTI_READ_WORD_DATA(1,THISY,I,J)	     
+	    IF(.NOT.RETVAL)THEN
+	      CALL LSL_PUTMSG(RETVAL)
+	      GOTO 999
+	    ENDIF
+	  ELSE
+	    RETVAL=DTI_READ_WORD_DATA(1,THISY,J,I)	     
+	    IF(.NOT.RETVAL)THEN
+	      CALL LSL_PUTMSG(RETVAL)
+	      GOTO 999
+	    ENDIF
+	  ENDIF
+C
+C get unrotated Y coordinate of DTI node position
+C
+	  IF(HAD_FOG.AND.PRSPVW.AND..NOT.NOPLOT) THEN
+	     ABS_Y = FLOAT(THISY)
+	  ENDIF
+C
+C Update model limits
+	  MODMAX = MAX(MODMAX,THISY)
+	  MODMIN = MIN(MODMIN,THISY)
+C
+C Bathymetry option?
+	  IF(BATH)THEN
+	    IF(THISY.GT.0)THISY=1	!treat land as flat 
+	  ENDIF
+C
+C**********************************************************************
+C First point (invisible move)	
+	  IF (J.EQ.YSTART) THEN		!initialise the line
+	    PREVY = THISY
+C
+C Initialise previous colour index
+	    PREV_INDEX = -1
+C
+	    X = FLOAT(XPOS)*XSCALE
+	    IF (THISY.LE.-32766) THEN	!null height
+	      Y = (ZLOWER-1.0)*YSCALE
+	    ELSE
+	      Y = FLOAT(THISY)*YSCALE
+	    ENDIF
+C
+C test whether DTI node point it exceeds visibility distance
+C
+	    IF(HAD_FOG.AND.PRSPVW.AND..NOT.NOPLOT) THEN
+	       IN_FOG =(.NOT.POINT_VISIBLE())		
+	    ENDIF
+C
+	    CALL CORDTF(X,Y,Z,XX,YY)	!transform coordinates
+	    IF(.NOT.NOPLOT)CALL HORVIN(XX,YY)
+C
+C Do various things if culture option has been selected
+	    IF((OVERLAY.OR.FISHNET.OR.SYMBOLS).AND.(STORE_VIS))THEN
+C Encode visibility grid
+	      XGRID=I
+	      YGRID=J
+	      IF(DIRECT.EQ.2.OR.DIRECT.EQ.4)THEN	
+	        CALL VSBLTY(XGRID,YGRID)	   
+	      ELSE
+	        CALL VSBLTY(YGRID,XGRID)
+	      ENDIF
+	    ENDIF
+	    GOTO 400
+	  ENDIF	   	   	        
+C
+C**********************************************************************
+C Not an initial point	  
+	  X = FLOAT(XPOS)*XSCALE
+C
+	  IF (THISY.LE.-32766) THEN
+	    Y = (ZLOWER-10.0)*YSCALE
+	  ELSE
+	    Y = FLOAT(THISY)*YSCALE
+	  ENDIF
+C
+C test whether DTI node point it exceeds visibility distance
+C
+	  IF(HAD_FOG.AND.PRSPVW.AND..NOT.NOPLOT) THEN
+	     IN_FOG = (.NOT.POINT_VISIBLE())		
+	  ENDIF
+	  IF (.NOT.NOPLOT) THEN
+	    IF (THISY.LE.-32766.OR.PREVY.LE.-32766) THEN
+	      COLOUR_INDEX=0
+	    ELSE
+	      IF(HAD_FOG.AND.PRSPVW) THEN
+	         IF(IN_FOG) THEN
+		    COLOUR_INDEX = FOG_COLOUR
+	         ELSE
+	            COLOUR_INDEX=ICOL(MAX(THISY,PREVY))
+	         ENDIF
+	      ELSE
+	         COLOUR_INDEX=ICOL(MAX(THISY,PREVY))
+	      ENDIF
+	    END IF
+	    CALL SET_COLOUR(COLOUR_INDEX)
+	  ENDIF
+C
+          CALL CORDTF(X,Y,Z,XX,YY)
+          IF(.NOT.NOPLOT)CALL HORVNX(XX,YY)
+C
+C Culture overlay option:
+          IF((OVERLAY.OR.FISHNET.OR.SYMBOLS).AND.(STORE_VIS))THEN
+C Encode visibility grid
+	    XGRID=I
+	    YGRID=J
+	    IF(DIRECT.EQ.2.OR.DIRECT.EQ.4)THEN
+	      CALL VSBLTY(XGRID,YGRID)	   
+	    ELSE
+	      CALL VSBLTY(YGRID,XGRID)
+	    ENDIF
+	  ENDIF
+C
+C
+	  PREVY = THISY 	    
+C
+C*********************************************************************
+C
+400	CONTINUE
+C
+C	If sampling ensure that the last J value is considered
+	IF((YSTEP.LT.-1.AND.J.GT.YEND).OR.
+     &     (YSTEP.GT.1. AND.J.LT.YEND))THEN
+	  J=YEND
+	  XPOS=XPOS+ABS(YEND-J)
+	  GOTO 300		!jump back into the inner loop
+	ENDIF
+C
+C*********************************************************************
+C
+500	CONTINUE
+C
+C	If sampling ensure that the last I value is considered
+	IF((XSTEP.LT.-1.AND.I.GT.XEND).OR.
+     &     (XSTEP.GT.1. AND.I.LT.XEND))THEN
+	  I=XEND
+	  GOTO 400		!jump back into the outer loop
+	ENDIF
+C
+C
+C*********************************************************************
+C
+C second pass   -- plotting proper
+	IF (.NOT.NOPLOT) GOTO 990
+C
+	IF (.NOT.STORE_VIS) THEN
+	   STORE_VIS=.TRUE.
+	ENDIF
+C
+	NOPLOT=.FALSE.
+C
+	IF (.NOT.DTICOL) THEN
+	  CALL SETCOL		! set colours based on MODMIN/MAX
+	  CSTEP = INT((MODMAX-MAX(1,MODMIN))/STPINT)
+	ELSE
+	  CSTEP = INT( (MAX_WVALUE(1)-MAX(1,MIN_WVALUE(1))) /STPINT)
+	ENDIF
+	CSTEP = MAX(1,MIN(CSTEP,MAXCOL))
+	CSTEP = MAXCOL/CSTEP
+	CSTEP = MAX(1,CSTEP)
+C
+C.........................................................................
+C
+	IF (PRIMARY.OR.SECONDARY)THEN
+C
+	   CALL PLTPOS(.TRUE.,.FALSE.)	! now know min and max
+C 					! x and y plot values.
+C	   CALL GCRSG(QUAD+1)	        !create segment
+C	   CALL GSSGP(QUAD+1,0.0)       !segment priority 0
+	   CALL GSSGT		        !set segment transf
+C
+	   IF (PRIMARY)THEN
+              CALL SHOTRN(1)
+	      VIEW_SHOWN(1,QUAD) = .TRUE.
+	   ENDIF
+	   IF (SECONDARY)THEN
+              CALL SHOTRN(2)
+	      VIEW_SHOWN(2,QUAD) = .TRUE.
+	   ENDIF
+	ENDIF
+C
+	GOTO 170
+C
+C----------------------------------------------------------------------------
+C Close segment (provided displays and use, and started plotting)
+990	IF(FISHNET)CALL DRAW_FISHNET
+C
+999	IF(.NOT.NOPLOT)THEN
+	  CALL EOPIC
+	  IF (.NOT.OVERLAY.AND.PLOT_IFF)CALL ENDIFF
+	ENDIF
+C
+C----------------------------------------------------------------------------
+	RETURN
+C
+	END

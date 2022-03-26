@@ -1,0 +1,555 @@
+	PROGRAM DTICONVERT
+C
+***	MODULE	DTICONVERT
+***	IDENT	09JA96
+C
+C 	Copyright Laser-Scan Ltd., Cambridge, England
+C
+C 	Author D R Catlow
+C 	Created						 DRC 09-Dec-1986
+C
+CMOD 	Reprompt instead of exiting if input mistakes	MWSR 29-Jan-1989
+CMOD 	Add BIT datatype				  JB 13-Jun-1990
+CMOD931 Increase number of rows allowed to 10000,
+C	and warn if exceeded				  JB  2-Nov-1990
+C
+CMOD1134 Increase number of rows allowed to 65535 via new
+C	 DTILIB values					  JB  4-Aug-1992
+C
+CMOD1517 Set output origin and interval in output file	  JB 16-Nov-1995
+C	 via DTI_UNITS module
+C	 Output header information to the UHL1 header.
+C
+CMOD1522 Set DSI and ACC sentinels on output to TED4 DTI
+C	 files						  JB 09-Jan-1996
+C
+C	Program to convert a DTI file from one header format to another,
+C 	or the data from one type to another.
+C 	The program utilises LSLLIB and DTILIB
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/		! LSLLIB error codes
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/		! DTILIB error codes
+***	PARAMETER/LSL$CMNDTI:DTIPAR/		! DTILIB parameters
+C
+C LSLLIB commons
+***	COMMON/LSL$CMNLSL:EXPC/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/LSL$CMNLSL:READSTR.PAR/
+C
+C DTILIB commons
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	COMMON/LSL$CMNDTI:DTIPROJ/
+C
+C Locals
+	INTEGER*4		IN_CHANNEL 	! chan on which to open input 
+	PARAMETER		(IN_CHANNEL=1)
+	INTEGER*4		OUT_CHANNEL	! chan on which to create out
+	PARAMETER		(OUT_CHANNEL=2)
+C
+	INTEGER*4		NCHS		! number of chs on line
+	INTEGER*4		INT4		! longword value
+	INTEGER*4		RETCOD		! function return code
+	INTEGER*4		ERROR		! system error code
+	INTEGER*4		CMD		! dictionary index
+	INTEGER*4		CONVERT		! conversion procedure required
+C
+	INTEGER*4		IN_LENGTH	! length of in DTI filename
+	INTEGER*4		OUT_LENGTH	! length of out DTI filename
+	INTEGER*4		FAKSTR(2)	! fake string descriptor
+	INTEGER*2		FAKLEN		! length of string
+	CHARACTER*128		IN_FILENAME	! input filename
+	CHARACTER*128		OUT_FILENAME	! output filename
+	BYTE			FAKBUF(128)
+	EQUIVALENCE		(FAKLEN,FAKSTR(1))
+	INTEGER			UNITS
+	INTEGER			I
+C
+	BYTE			DSI_BUFFER(3)
+	BYTE			ACC_BUFFER(3)
+C
+	BYTE			TEMP(33)
+	BYTE			UHL_BUF(33)
+	LOGICAL			DD, TENTH, HEMI
+C
+C Command dictionaries
+	EXTERNAL	HEADER_CMD_TABLE 	! header descriptors
+	EXTERNAL	DATA_CMD_TABLE	 	! data descriptors
+C
+C Datatypes:
+C	1	DATA_BYTE
+C	2	DATA_WORD
+C	3	DATA_LONG
+C	4	DATA_REAL
+C	5	DATA_BIT
+C
+C DTILIB Functions
+	INTEGER*4	DTI_OPEN		! to open a DTI file
+	INTEGER*4	DTI_CREATE		! to create a DTI file
+	INTEGER*4	DTI_CLOSE		! to close a DTI file
+	INTEGER*4	DTI_MINMAX_DATA		! to get min/max data value
+	INTEGER*4	DTI_PRINT_HEADER	! to print DTI header details
+	INTEGER*4	DTI_COPY_HEADER		! to copy DTI header
+	INTEGER*4	DTI_COPY_BYTE_HEADER	! to copy byte DTI header
+	INTEGER*4	DTI_UNITS		! units for DTI file
+	INTEGER*4	ADDANG			! .1 sec to ddmmss
+C
+C DTICONVERT Functions
+	LOGICAL		COPY_BIT		! deal with input bit  data
+	LOGICAL		COPY_BYTE		! deal with input byte data
+	LOGICAL		COPY_WORD		! deal with input word data
+	LOGICAL		COPY_LONG		! deal with input long data
+	LOGICAL		COPY_REAL		! deal with input real data
+C
+C LSLLIB Functions
+	INTEGER*4 	RDCOMM			! decode command
+	INTEGER*4	TTRSTR			! read input from terminal
+	INTEGER*4	READSTR			! read string
+	INTEGER*4	PARFILN			! parse filename
+	LOGICAL		RDLONG			! read a longword
+C
+C****************************************************************************
+C Initialise the two libraries
+	CALL LSL_INIT
+	CALL DTI_INIT
+C
+C Announce ourself
+	CALL DTMJPI
+C
+C----------------------------------------------------------------------------
+C First prompt for an input file
+C
+10	TXTPTR=80
+	RETCOD = TTRSTR(,NCHS,'Input Filename > ',ERROR)
+	IF(RETCOD)THEN
+	   IF(NCHS.EQ.0) GOTO 10		! blank line
+C
+	ELSE
+	   IF(RETCOD.EQ.LSL__EOF)GOTO 999
+	   CALL LSL_PUTMSG(ERROR)
+	   GOTO 10
+	ENDIF
+C
+C Parse the filename
+C
+	FAKSTR(2)=%LOC(FAKBUF)	! set up fake string descriptor
+	FAKLEN=128
+	CALL BSLN
+	FAKLEN=READSTR(FAKSTR,' ',ON_CHAR2,.FALSE.)
+C
+	RETCOD=PARFILN(IN_FILENAME,FAKLEN,FAKSTR,'LSL$DTI:.DTI',
+     &							.TRUE.)
+	IF (.NOT.RETCOD)THEN
+	  CALL LSL_PUTMSG(RETCOD)
+	  GOTO 10
+	ENDIF
+C
+	IN_LENGTH=FAKLEN
+C
+C Open the file on in_channel
+C
+	RETCOD = DTI_OPEN(IN_CHANNEL,IN_FILENAME,IN_LENGTH,.FALSE.,
+     &			  ERROR,.TRUE.)
+	IF (RETCOD.NE.DTI__NORMAL) THEN
+	  CALL LSL_PUTMSG(RETCOD)
+	  IF (RETCOD.EQ.DTI__SYSERR) CALL LSL_PUTMSG(ERROR)
+	  GOTO 10 		! reprompt
+	ENDIF
+C
+C Set units
+	UNITS = UNITS_DTI	! default to matrix units
+C
+	IF (HEADER_TYPE(IN_CHANNEL) .EQ. DTI_UHL1 .OR.
+     &	    HEADER_TYPE(IN_CHANNEL) .EQ. DTI_TED4) THEN
+	   UNITS = UNITS_DEG
+	ENDIF
+C
+	RETCOD = DTI_UNITS(IN_CHANNEL, UNITS)
+	IF (RETCOD.NE.DTI__NORMAL) THEN
+	  CALL LSL_PUTMSG(RETCOD)
+	  GOTO 999
+	ENDIF
+C
+C Print out header details to confirm successful opening
+	RETCOD = DTI_PRINT_HEADER(IN_CHANNEL, UNITS)
+	IF (RETCOD.NE.DTI__NORMAL) THEN
+	  CALL LSL_PUTMSG(RETCOD)
+	  GOTO 999
+	ENDIF
+C
+	IF (Y_EXTENT(IN_CHANNEL).GT.DTI_MAX_ROWS) THEN
+	   CALL WRITEF ('*** ERROR *** DTI file too large to convert')
+	   CALL WRITEF (' Maximum number of rows allowed is %N',
+     &							DTI_MAX_ROWS)
+	   GOTO 999
+	ENDIF
+C
+C-------------------------------------------------------------------------
+C Prompt for an output file
+C
+20	TXTPTR=80
+C
+	RETCOD = TTRSTR(,NCHS,'Output Filename > ',ERROR)
+	IF(RETCOD)THEN
+	   IF (NCHS.EQ.0) GOTO 20 ! blank line
+C
+	ELSE
+	   IF(RETCOD.EQ.LSL__EOF)GOTO 999
+	   CALL LSL_PUTMSG(ERROR)
+	   GOTO 20
+	ENDIF
+C
+C Parse the filename
+C
+	FAKSTR(2)=%LOC(FAKBUF)	! set up fake string descriptor
+	FAKLEN=128
+	CALL BSLN
+	FAKLEN=READSTR(FAKSTR,' ',ON_CHAR2,.FALSE.)
+	RETCOD=PARFILN(OUT_FILENAME,FAKLEN,FAKSTR,'LSL$DTI:.DTI',
+     &							.TRUE.)
+	IF (.NOT.RETCOD) THEN
+	  CALL LSL_PUTMSG(RETCOD)
+	  GOTO 20
+	ENDIF
+C
+	OUT_LENGTH=FAKLEN
+C
+C-----------------------------------------------------------------------
+C What type of header should we give the output file?
+C
+30	TXTPTR=80
+	RETCOD = TTRSTR(,NCHS,'Output Header Type> ',ERROR)
+	IF(RETCOD)THEN
+	   IF (NCHS.EQ.0) THEN	! blank line
+	     CALL WRITEF('Valid header types are LSLA, UHL1 or TED4')
+	     GOTO 30
+	   ENDIF
+C
+	ELSE
+	   IF(RETCOD.EQ.LSL__EOF)GOTO 999
+	   CALL LSL_PUTMSG(ERROR)
+	   GOTO 30
+	ENDIF
+C
+	TXTPTR = NCHS
+C
+C Check if we've been given a valid header
+C
+	CALL BSLN
+	CMD=RDCOMM(HEADER_CMD_TABLE)
+	IF (CMD .LE. 0) THEN
+	   CALL WRITEF('*** ERROR *** Unrecognised header type')
+	   CALL WRITEF('Valid header types are LSLA, UHL1 or TED4')
+	   GOTO 30	! reprompt
+	ENDIF
+C
+C Transfer CMD [ values of 1 (LSLA), 2 (UHL1), 3 (TED4) ] to
+C  HEADER_TYPE [ values of 1 (MIKE), 2 (UHL1), 3 (TED4), 4 (ALVY), 5 (LSLA) ] 
+C
+C Types ALVY, MIKE no longer allowed
+C
+	HEADER_TYPE(OUT_CHANNEL)=CMD
+C
+C If CMD = type 1 (LSLA), convert to DTI type 5 (LSLA)
+C
+	IF (HEADER_TYPE(OUT_CHANNEL).EQ.1) 
+     &				HEADER_TYPE(OUT_CHANNEL) = DTI_LSLA
+C
+C---------------------------------------------------------------------------
+C If an LSLA file has been selected, we also need to prompt
+C for the header size.  
+C
+40	IF (HEADER_TYPE(OUT_CHANNEL).NE.DTI_LSLA) GOTO 50 ! not LSLA
+C
+C By default, the header size is equal to the size of the header
+C of the input file if the input header is LSLA, or to the
+C default LSLA header size of 32.
+C
+	IF (HEADER_TYPE(IN_CHANNEL).EQ.DTI_LSLA .OR.     ! LSLA file
+     &      HEADER_TYPE(IN_CHANNEL).EQ.DTI_ALVY) THEN    ! ALVY file
+	   DATA_OFFSET(OUT_CHANNEL)=DATA_OFFSET(IN_CHANNEL)
+C
+	ELSE
+	   DATA_OFFSET(OUT_CHANNEL)=32	! create with def. header size
+	ENDIF
+C
+45	TXTPTR=80
+	CALL EXPAND('Header Size (Default = %N)> ',DATA_OFFSET(OUT_CHANNEL))
+	RETCOD = TTRSTR(,NCHS,EXPDSC,ERROR)
+	IF(RETCOD)THEN
+	   IF(NCHS.EQ.0)GOTO 50		! use default
+C 
+	ELSE
+	   IF(RETCOD.EQ.LSL__EOF)GOTO 999
+	   CALL LSL_PUTMSG(ERROR)
+	   GOTO 45	   
+	ENDIF
+C
+	CALL BSLN
+C
+	IF(RDLONG(INT4))GOTO 45		! reprompt
+	DATA_OFFSET(OUT_CHANNEL)=INT4
+C
+C---------------------------------------------------------------------------
+C Prompt for the data type
+C
+50	TXTPTR=80
+	RETCOD = TTRSTR(,NCHS,'Output Data Type  > ',ERROR)
+	IF (RETCOD) THEN
+	   IF (NCHS.EQ.0)THEN		! blank line
+	     CALL WRITEF
+     &       ('Valid data types are BIT, BYTE, WORD, LONGWORD, or REAL')
+	     GOTO 50
+	   ENDIF
+	ELSE
+	   IF(RETCOD.EQ.LSL__EOF)GOTO 999
+	   CALL LSL_PUTMSG(ERROR)
+	   GOTO 50
+	ENDIF
+C
+	TXTPTR = NCHS
+C
+C Check the validity of the reply
+C
+	CALL BSLN
+	CMD=RDCOMM(DATA_CMD_TABLE)
+	IF (CMD .LE. 0) THEN
+	   CALL WRITEF('*** ERROR *** Unrecognised data type')
+	     CALL WRITEF
+     &       ('Valid data types are BIT, BYTE, WORD, LONGWORD, or REAL')
+	   GOTO 50
+	ENDIF
+C
+	DATA_TYPE(OUT_CHANNEL)=CMD
+C
+C-------------------------------------------------------------------------
+C If outputting to datatype BIT, then make output Y size a multiple of 8
+C
+	X_EXTENT(OUT_CHANNEL) = X_EXTENT(IN_CHANNEL) 
+	Y_EXTENT(OUT_CHANNEL) = Y_EXTENT(IN_CHANNEL) 
+C
+	IF (DATA_TYPE(OUT_CHANNEL) .EQ. DATA_BIT) THEN
+	   IF (MOD(Y_EXTENT(IN_CHANNEL),8) .NE. 0)
+     &		Y_EXTENT(OUT_CHANNEL) = Y_EXTENT(IN_CHANNEL) + 8 -
+     &		MOD(Y_EXTENT(IN_CHANNEL),8) 
+	ENDIF
+C
+C Create the output file
+C
+	RETCOD = DTI_CREATE(OUT_CHANNEL,OUT_FILENAME,OUT_LENGTH,
+     &			    HEADER_TYPE(OUT_CHANNEL),
+     &			    DATA_OFFSET(OUT_CHANNEL),
+     &			    DATA_TYPE(OUT_CHANNEL),
+     &                      X_EXTENT(OUT_CHANNEL),
+     &			    Y_EXTENT(OUT_CHANNEL),
+     &			    ERROR)
+C
+	IF (RETCOD.NE.DTI__NORMAL) THEN
+	  CALL LSL_PUTMSG(RETCOD)
+	  IF (RETCOD.EQ.DTI__SYSERR) CALL LSL_PUTMSG(ERROR)
+	  GOTO 900		! close input file and exit
+	ENDIF
+C
+C Transfer the grid values.  These are written to the output
+C file on close via the update option in DTI_CLOSE.
+C
+	X_GRID(OUT_CHANNEL) = X_GRID(IN_CHANNEL)
+	Y_GRID(OUT_CHANNEL) = Y_GRID(IN_CHANNEL)
+C
+C If the input and output files have the same header,
+C we can also copy the remainder of the header.  This is
+C most useful for ALVY files, but we must remember to check
+C that the output header size is sufficient to contain the
+C data in the input header
+C
+	IF ((HEADER_TYPE(IN_CHANNEL).EQ.HEADER_TYPE(OUT_CHANNEL)) .OR.
+     &      (HEADER_TYPE(IN_CHANNEL).EQ.4 .AND.
+     &       HEADER_TYPE(OUT_CHANNEL).EQ.5)) THEN
+	  IF ((HEADER_TYPE(IN_CHANNEL).EQ.4 .OR.
+     &         HEADER_TYPE(IN_CHANNEL).EQ.5) .AND.
+     &    (DATA_OFFSET(OUT_CHANNEL).LT.DATA_OFFSET(IN_CHANNEL))) GOTO 60
+C
+C Use DTI_COPY_HEADER to copy the relevant part of the header
+C
+	  RETCOD=DTI_COPY_HEADER(IN_CHANNEL,OUT_CHANNEL)
+	  IF (RETCOD.NE.DTI__NORMAL) CALL LSL_PUTMSG(RETCOD)
+	ENDIF
+C
+C-------------------------------------------------------------------------
+C Work out the data conversion that is required, and
+C call the appropriate routine to transfer the data.
+C
+C Input contains byte data.
+C
+60	IF (DATA_TYPE(IN_CHANNEL).EQ.DATA_BYTE) THEN
+           IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BYTE) CONVERT=0  ! no conversion
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_WORD) CONVERT=1  ! byte to word
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_LONG) CONVERT=2  ! byte to long
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_REAL) CONVERT=3  ! byte to real
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BIT)  CONVERT=4  ! byte to bit
+C
+	   IF (.NOT.COPY_BYTE(IN_CHANNEL,OUT_CHANNEL,CONVERT)) THEN
+	      CALL WRITEF('FATAL ERROR while transferring data')
+	      GOTO 800
+	   ENDIF
+C
+C Input contains word data.
+C
+	ELSEIF (DATA_TYPE(IN_CHANNEL).EQ.DATA_WORD) THEN
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_WORD) CONVERT=0  !no conversion
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BYTE) CONVERT=1  !word to byte
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_LONG) CONVERT=2  !word to long
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_REAL) CONVERT=3  !word to real
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BIT)  CONVERT=4  !word to bit
+C
+	   IF (.NOT.COPY_WORD(IN_CHANNEL,OUT_CHANNEL,CONVERT)) THEN
+	      CALL WRITEF('FATAL ERROR while transferring data')
+	      GOTO 800
+	   ENDIF
+C
+C Input contains longword data.
+C
+	ELSEIF (DATA_TYPE(IN_CHANNEL).EQ.DATA_LONG)THEN	  	
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_LONG) CONVERT=0  !no conversion
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BYTE) CONVERT=1  !long to byte
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_WORD) CONVERT=2  !long to word
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_REAL) CONVERT=3  !long to real
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BIT)  CONVERT=4  !long to bit
+C
+	   IF (.NOT.COPY_LONG(IN_CHANNEL,OUT_CHANNEL,CONVERT)) THEN
+	      CALL WRITEF('FATAL ERROR while transferring data')
+	      GOTO 800
+	   ENDIF
+C
+C Input contains real data.
+C
+	ELSE IF (DATA_TYPE(IN_CHANNEL).EQ.DATA_REAL) THEN	  	
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_REAL) CONVERT=0  !no conversion
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BYTE) CONVERT=1  !real to byte
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_WORD) CONVERT=2  !real to word
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_LONG) CONVERT=3  !real to long
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BIT)  CONVERT=4  !real to bit
+C
+	   IF(.NOT.COPY_REAL(IN_CHANNEL,OUT_CHANNEL,CONVERT))THEN
+	      CALL WRITEF('FATAL ERROR while transferring data')
+	      GOTO 800
+	   ENDIF
+C
+C Input contains bit data.
+C
+	ELSE IF (DATA_TYPE(IN_CHANNEL).EQ.DATA_BIT) THEN	  	
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BIT)  CONVERT=0  !no conversion
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_BYTE) CONVERT=1  !bit to byte
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_WORD) CONVERT=2  !bit to word
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_LONG) CONVERT=3  !bit to long
+	   IF (DATA_TYPE(OUT_CHANNEL).EQ.DATA_REAL) CONVERT=4  !bit to real
+C
+	   IF (.NOT.COPY_BIT(IN_CHANNEL,OUT_CHANNEL,CONVERT)) THEN
+	      CALL WRITEF('FATAL ERROR while transferring data')
+	      GOTO 800
+	   ENDIF
+	ENDIF
+C
+400	CONTINUE
+C
+C Output header info to the TED4 header
+C
+	IF (HEADER_TYPE(OUT_CHANNEL) .EQ. DTI_TED4 .AND.
+     &	    HEADER_TYPE(IN_CHANNEL)  .NE. DTI_TED4) THEN
+C
+	   DSI_BUFFER(1) = ICHAR('D')
+	   DSI_BUFFER(2) = ICHAR('S')
+	   DSI_BUFFER(3) = ICHAR('I')
+C
+	   ACC_BUFFER(1) = ICHAR('A')
+	   ACC_BUFFER(2) = ICHAR('C')
+	   ACC_BUFFER(3) = ICHAR('C')
+C
+	   RETCOD = DTI_COPY_BYTE_HEADER(OUT_CHANNEL, DSI_BUFFER,
+     &				.TRUE., 3, 236, ERROR)
+C
+	   IF (RETCOD.NE.DTI__NORMAL) THEN
+	      CALL LSL_PUTMSG(RETCOD)
+	      IF (RETCOD.EQ.DTI__SYSERR) CALL LSL_PUTMSG(ERROR)
+	      GOTO 900		! close input file and exit
+	   ENDIF
+C
+	   RETCOD = DTI_COPY_BYTE_HEADER(OUT_CHANNEL, ACC_BUFFER,
+     &				.TRUE., 3, 884, ERROR)
+C
+	   IF (RETCOD.NE.DTI__NORMAL) THEN
+	      CALL LSL_PUTMSG(RETCOD)
+	      IF (RETCOD.EQ.DTI__SYSERR) CALL LSL_PUTMSG(ERROR)
+	      GOTO 900		! close input file and exit
+	   ENDIF
+ 	ENDIF
+C
+C Output header info to the UHL1 header
+C
+	TENTH = .FALSE.
+	HEMI  = .TRUE.
+C
+	IF (HEADER_TYPE(OUT_CHANNEL) .EQ. DTI_UHL1 .AND.
+     &	    HEADER_TYPE( IN_CHANNEL) .NE. DTI_UHL1) THEN
+C
+	   DD     = .TRUE.
+	   RETCOD = ADDANG (UHL_BUF(5),  LONORI(IN_CHANNEL),
+     &					DD, TENTH, HEMI)
+C
+	   DD     = .FALSE.
+	   RETCOD = ADDANG (UHL_BUF(13), LATORI(IN_CHANNEL),
+     &					DD, TENTH, HEMI)
+C
+	   CALL EXPAND ('%W%P0%I4', UHL_BUF(20), LONINT(IN_CHANNEL))
+	   CALL EXPAND ('%W%P0%I4', UHL_BUF(24), LATINT(IN_CHANNEL))
+C
+	   DO 405 I = 1,28
+	     TEMP(I) = UHL_BUF(I+4)
+405	   CONTINUE
+C
+	   RETCOD = DTI_COPY_BYTE_HEADER(OUT_CHANNEL, TEMP,
+     &				.TRUE., 27, 5, ERROR)
+C
+	   IF (RETCOD.NE.DTI__NORMAL) THEN
+	      CALL LSL_PUTMSG(RETCOD)
+	      IF (RETCOD.EQ.DTI__SYSERR) CALL LSL_PUTMSG(ERROR)
+	      GOTO 900		! close input file and exit
+	   ENDIF
+C
+	ENDIF
+C
+C------------------------------------------------------------------------
+C Determine the maximum and minimum data values in the
+C output file.  These are written to the file on close.
+C
+	RETCOD = DTI_MINMAX_DATA(OUT_CHANNEL,.FALSE.,ERROR)
+	IF (RETCOD.NE.DTI__NORMAL) CALL LSL_PUTMSG(RETCOD)	
+C
+C Print the header to confirm all is well
+C
+C Set units
+	UNITS = UNITS_DTI	! default to matrix units
+C
+	RETCOD = DTI_PRINT_HEADER(OUT_CHANNEL, UNITS)
+	IF (RETCOD.NE.DTI__NORMAL) CALL LSL_PUTMSG(RETCOD)	
+C
+C-------------------------------------------------------------------------
+C Close the output file
+C
+800	RETCOD = DTI_CLOSE(OUT_CHANNEL,.TRUE.,.FALSE.,ERROR)
+	IF(RETCOD.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETCOD)	
+	  IF (RETCOD.EQ.DTI__SYSERR)CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+C Close the input file
+C
+900	RETCOD = DTI_CLOSE(IN_CHANNEL,.FALSE.,.FALSE.,ERROR)
+	IF(RETCOD.NE.DTI__NORMAL)THEN
+	  CALL LSL_PUTMSG(RETCOD)
+	  IF (RETCOD.EQ.DTI__SYSERR) CALL LSL_PUTMSG(ERROR)
+	ENDIF
+C
+999	END
+C

@@ -1,0 +1,322 @@
+	LOGICAL FUNCTION CMDLIN
+C
+***     MODULE CMDLIN
+***     IDENT	06NO96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author	IM	18-Aug-1987
+C Modified	TJI	 6-Oct-1987
+C
+C Reads and decodes the command line
+C Returns TRUE for successful completion, otherwise FALSE
+C
+CMOD 	Implement LOWER_LEFT qualifier			VLG	1-Feb-1990
+C
+CMOD	Added new qualifier /LSL, will enable reading of correct filename and 
+C	map descriptor information from comment records preceeding the SEHREC
+C	record 						SG	13-August-1991
+C
+CMOD	Out of sequence code used for validating /ATTR and /FRT qualifiers
+C	moved from PROCESS_NTF_HEADER()			SG	17-sep-1991
+C
+CMOD	Allow use of /FRT independently from /ATTRIBUTE. Attribute file needs
+C	FRT but not vice-versa. FRT is now used to look up GT when deciding
+C	whether to output a RO entry.			ST      01-Oct-1991
+C
+CMOD	New qualifier /IFF_POINTSIZE (the default) added which permits users
+C	to output text heights in point sizes or sheet mm.
+C
+CMOD	New qualifiers added for reading OSCAR data. They are /OSCAR,
+C	/OSCAR_START_AC and /OSCAR_END_AC. Mod 1447.	ST	14-Dec-1994
+C
+CMOD    Implement CITF96 changes (WI/CC 1545)           TJM     12-Jun-1996
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'HERE:NTF2IMSG.PAR'
+C
+C Commons:
+	INCLUDE 	'LSL$CMNLSL:CLD.CMN'
+	INCLUDE		'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE		'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE 	'CITF.CMN'
+	INCLUDE 	'COMMANDS.CMN'
+	INCLUDE		'FILENAME.CMN'
+	INCLUDE		'NTFDATA.CMN'
+C
+C Command language definitions:
+C
+	EXTERNAL 	NTF2I_CLD
+C
+C Functions:
+	LOGICAL 	DCL_FILE
+	LOGICAL 	DCL_STARTUP
+	LOGICAL 	DCL_QUAL
+ 	INTEGER 	DCL_INT		! Read an integer 
+	LOGICAL		TEST_FOREIGN
+	LOGICAL		FRTINI		! Initialise reading from FRT
+	LOGICAL		CITF_SETUP
+C
+C Workspace:
+	LOGICAL 	ABSENT		!  File-spec absent ?
+	LOGICAL 	OK,FAILED	!  Function return
+	LOGICAL 	FPRES		!  Qualifier present
+	LOGICAL 	FNEGA		!  Qualifier negated
+	INTEGER 	THERE		!  Qualifier there
+	INTEGER		IERR		!  Error flag
+C
+C.....................................................................
+C Initialise the command line
+C
+	OK=DCL_STARTUP('NTF2I',.FALSE.,NTF2I_CLD,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+C
+C.....................................................................
+C /LOG - get this first so we know if we should output messages
+C		
+	OK=DCL_QUAL('LOG',LOG,FPRES,FNEGA,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+C.....................................................................
+C /CONTINUE - do we continue processing if this is not a level 2 CITF file
+C
+	OK=DCL_QUAL('CONTINUE',HADCONT,FPRES,FNEGA,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+C.....................................................................
+C /OSCAR - are we attempting to read OSCAR data and therefore NODE records?
+C
+	OK=DCL_QUAL('OSCAR',HAD_OSCAR,FPRES,FNEGA,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+C.....................................................................
+C /OSCAR_START_AC - the AC used to hold the level at the start of a link
+C
+	OK=DCL_QUAL('OSCAR_START_AC',HAD_OSCAR_START,FPRES,FNEGA,.TRUE.)
+ 	IF (.NOT.OK) GOTO 999
+C
+ 	IF (HAD_OSCAR_START) THEN
+C
+C If the qualifier was given, get the value
+C
+ 	   OK=DCL_INT('OSCAR_START_AC',.TRUE.)
+ 	   IF (.NOT.OK) GOTO 999
+ 	   OSCAR_START_AC = IARRAY(1)
+C
+C Check the range
+C
+	   IF (OSCAR_START_AC.LT.1 .OR. OSCAR_START_AC.GT.32767) THEN
+	      HAD_OSCAR_START = .FALSE.
+	      HAD_OSCAR = .FALSE.
+	      CALL LSL_PUTMSG(NTF2I__BADVALUE,OSCAR_START_AC,'OSCAR_START_AC')
+	   ENDIF
+ 	ENDIF	   
+C
+C.....................................................................
+C /OSCAR_END_AC - the AC used to hold the level at the end of a link
+C
+	OK=DCL_QUAL('OSCAR_END_AC',HAD_OSCAR_END,FPRES,FNEGA,.TRUE.)
+ 	IF (.NOT.OK) GOTO 999
+C
+ 	IF (HAD_OSCAR_END) THEN
+C
+C If the qualifier was given, get the value
+C
+ 	   OK=DCL_INT('OSCAR_END_AC',.TRUE.)
+ 	   IF (.NOT.OK) GOTO 999
+ 	   OSCAR_END_AC = IARRAY(1)
+C
+C Check the range
+C
+	   IF (OSCAR_END_AC.LT.1 .OR. OSCAR_END_AC.GT.32767) THEN
+	      HAD_OSCAR_END = .FALSE.
+	      HAD_OSCAR = .FALSE.
+	      CALL LSL_PUTMSG(NTF2I__BADVALUE,OSCAR_END_AC,'OSCAR_END_AC')
+	   ENDIF
+ 	ENDIF	   
+C
+C.....................................................................
+C /CITF - get this to determine if default filename extension should
+C be '.CITF'
+C
+	HAD_CITF93 = .FALSE.
+	HAD_CITF96 = .FALSE.
+C
+	OK=DCL_QUAL('CITF',THERE,FPRES,FNEGA,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+	IF (THERE) THEN
+C
+C If the qualifier was given, get the value 
+C
+	   OK=DCL_INT('CITF',.TRUE.)
+	   IF (.NOT.OK) GOTO 999
+C
+C If it wasn't 93 or 96 flag an error
+C
+	   IF (IARRAY(1).EQ.93 ) THEN
+	      HAD_CITF93 = .TRUE.
+C
+	   ELSEIF (IARRAY(1).EQ.96) THEN
+	      HAD_CITF96 = .TRUE.
+C
+	   ELSE
+	      CALL LSL_PUTMSG(NTF2I__NOCITF,IARRAY(1))
+	      OK = NTF2I__ABORT
+	      GOTO 999
+	   ENDIF
+C
+	ENDIF
+C
+C Set up various things specific to CITF
+C
+	IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	   OK = CITF_SETUP()
+	   IF (.NOT.OK) GOTO 999
+	ENDIF
+C
+C....................................................................
+C Now get the input file...
+C
+	IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	   OK=DCL_FILE('INFILE','.CITF',ABSENT,.TRUE.,.TRUE.)
+	ELSE
+	   OK=DCL_FILE('INFILE','.NTF',ABSENT,.TRUE.,.TRUE.)
+	ENDIF
+	IF (OK) THEN					!we got a file spec
+	  NTFLEN =FIL_LEN(1)				!save it
+	  NTFFILE=FILARY(1)(:NTFLEN)
+C
+C	  ....................................................................
+C 	  If a device name was given, see if its a magtape (mounted foreign)
+C
+	  IF (HAD_DEV) THEN
+	    OK=TEST_FOREIGN(STR_DEV(:LEN_DEV),IS_MAGTAPE,IERR)
+	    IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(NTF2I__TESTFOR,STR_DEV(:LEN_DEV))
+	      CALL LSL_ADDMSG(OK)
+	      IF (OK.EQ.LSL__SYSERR) CALL LSL_ADDMSG(IERR)
+	    ELSE IF (IS_MAGTAPE) THEN
+	      DEVLEN=LEN_DEV
+	      DEVICE=STR_DEV(:LEN_DEV)	! remember the device name
+	    ENDIF
+	  ELSE
+	    IS_MAGTAPE=.FALSE.
+	  ENDIF
+	ENDIF
+C
+	IF (.NOT.OK) GOTO 999
+C
+C.....................................................................
+C SERIAL_MAGTAPE - is it a DIL etc device
+C
+ 	OK=DCL_QUAL('SERIAL_MAGTAPE',IS_SERIAL,FPRES,FNEGA,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+C
+C.....................................................................
+C /OUTPUT=file - output a log file
+C
+	OK=DCL_QUAL('OUTPUT',OUTPUT,FPRES,FNEGA,.TRUE.)
+	IF (OK.AND.OUTPUT) THEN
+ 	   OK=DCL_FILE('OUTPUT','NTF2I.LOG',ABSENT,.TRUE.,.TRUE.)
+	   IF (OK) THEN
+	     LOGLEN =FIL_LEN(1)
+	     LOGFILE=FILARY(1)(:LOGLEN)
+	   ENDIF
+	ENDIF
+C
+	IF (.NOT.OK) GOTO 999
+C
+C.....................................................................
+C /OS - create an OS map header
+C
+	OK=DCL_QUAL('OS',OS_DATA,FPRES,FNEGA,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+C
+C.....................................................................
+C /LOWER_LEFT - output lower left coords of texts
+C
+	OK=DCL_QUAL('LOWER_LEFT',LOWER_LEFT,FPRES,FNEGA,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+C
+C.....................................................................
+C /FRT qualifier
+C
+	OK=DCL_QUAL('FRT',HAD_FRT,FPRES,FNEGA,.TRUE.)		!look for /FRT
+	IF( OK.AND.HAD_FRT) THEN				!got it
+	   OK=DCL_FILE('FRT','LSL$FRT:.FRT',ABSENT,.FALSE.,.TRUE.)
+	   IF (OK) THEN						!got filespec
+	     FRTFIL = FILARY(1)(1:FIL_LEN(1))			!store filespec
+	     FRTLEN = FIL_LEN(1)
+	   ENDIF
+	ENDIF
+C
+C Check OK first to see if valid qualifier
+C
+	IF (.NOT.OK) GOTO 999
+C
+	IF (HAD_FRT) THEN
+	   FAILED = FRTINI( FRTFIL(:FRTLEN) )		!open the FRT file
+	   IF (FAILED) THEN				!failure
+	      CALL LSL_PUTMSG(NTF2I__ERROPNFRT,FRTFIL(:FRTLEN) )
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+	IF (HAD_CITF93.OR.HAD_CITF96) CALL CHECK_CITF_ATTS()
+C
+C............................................................................
+C /ATTRIBUTE_FILE qualifier
+C
+	OK=DCL_QUAL('ATTRIBUTE_FILE',HAD_ATTRIBUTE,FPRES,FNEGA,.TRUE.)
+	IF (OK.AND.HAD_ATTRIBUTE) THEN
+	   OK=DCL_FILE('ATTRIBUTE_FILE','.NTF_ATTR;0',ABSENT,.TRUE.,.TRUE.)
+	   IF (OK) THEN
+	     ATTFIL = FILARY(1)(1:FIL_LEN(1))
+	     ATTLEN = FIL_LEN(1)
+	   ENDIF
+	ENDIF
+C
+	IF (.NOT.OK) GOTO 999
+C
+C............................................................................
+C /FC_LOOKUP qualifier
+C
+	OK=DCL_QUAL('FC_LOOKUP',HAD_FC_LOOKUP,FPRES,FNEGA,.TRUE.)
+	IF (OK.AND.HAD_FC_LOOKUP) THEN
+	   OK=DCL_FILE('FC_LOOKUP','.FC_L;0',ABSENT,.TRUE.,.TRUE.)
+	   IF (OK) THEN
+	     LUTFIL = FILARY(1)(1:FIL_LEN(1))
+	     LUTLEN = FIL_LEN(1)
+	   ENDIF
+	ENDIF
+C
+	IF (.NOT.OK) GOTO 999
+C
+C..............................................................................
+C /LOWER_LEFT - output lower left coords of texts
+C
+	OK=DCL_QUAL('LSL',LSL,FPRES,FNEGA,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+C
+C..............................................................................
+C /IFF_POINTSIZE - output text heights in mm or point sizes
+C
+	OK=DCL_QUAL('IFF_POINTSIZE',HAD_IFF_POINTSIZE,FPRES,FNEGA,.TRUE.)
+	IF (.NOT.OK) GOTO 999
+C
+C-----------------------------------------------------------------------------
+C validate the combination of /FRT and /ATTR qualifiers
+C we cant check the level here. we cant know that until we read the NTF dataset
+C
+C	IF (HAD_ATTRIBUTE.XOR.HAD_FRT ) THEN		! either but not both
+C	   CALL LSL_PUTMSG( NTF2I__BOTHATTFRT )		! must have both
+C	   HAD_ATTRIBUTE = .FALSE.			! cancel qualifier
+C	   HAD_FRT = .FALSE.				! cancel qualifier
+C	ENDIF
+C
+C###############################################################################
+C
+999	CMDLIN=OK
+	RETURN
+	END
+C

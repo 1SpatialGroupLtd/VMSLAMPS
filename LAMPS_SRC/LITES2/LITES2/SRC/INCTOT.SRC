@@ -1,0 +1,535 @@
+	BYTE FUNCTION INCTOT(REG)
+C
+***	IDENT	10MY96
+***	MODULE	INCTOT
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C to decide how a feature impinges on the region
+C it returns a bit significant byte:-
+C  = 2 feature is entirely within region
+C  = 4 feature cuts boundary of region
+C  = 8 feature is entirely outside region
+C
+C NOTE: file pointer should be positioned at start of feature
+C ===========================================================
+C 
+C       on entry to this routine
+C	========================
+C
+C only PACK(PAKGT) and PACK(PAKFC) are significant parts of pack
+C
+C
+C Author R.W. Russell				 7-Oct-1985
+C
+	IMPLICIT	NONE
+C
+C parameter and common blocks
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:REGPAR/
+C
+***	COMMON/CMN:CB/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:REGCMN/
+***	COMMON/CMN:STRIKE/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C arguments
+C
+	INTEGER*4	REG			! region to check
+C
+C functions
+C
+	LOGICAL		GENAUX
+	LOGICAL		PINREG,CUTREG,ARCREG
+	LOGICAL		FRTFND,BOXCUTREG
+	LOGICAL		GEOG_TRANS_ARRAY
+C
+C working storage
+C
+	INTEGER*4	PACK(PAKLEN)	! dummy pack of feature to test
+	INTEGER*2	IECODE, IELEN	! for IFF reading
+	INTEGER*2	ISTAT(4)	! feature status words
+	INTEGER*4	FSPTR
+C
+	LOGICAL		HADST
+	LOGICAL		INSIDE,TEMP
+	LOGICAL		RESOLVED	! have ambiguities been resolved?
+C
+	REAL*8		DLX,DLY
+	REAL		X1,Y1		! temporary coordinates
+	REAL		RILIMIT(4)	! box around arc
+C
+	INTEGER		I,J		! loop counters
+	INTEGER		TXSIZE
+C
+	REAL		TMPXY(2)	! temporary
+	REAL		DIR
+	INTEGER		CTXD(CTXDLEN)	! a composite text
+C
+C stuff that should be in common elsewhere
+C
+	REAL		RIAUX(AUXLEN)
+	REAL		RIANG
+	LOGICAL		F_INSIDE
+	INTEGER		ADDR
+C
+	INCTOT=0
+C
+C generate a dummy pack for this feature
+	PACK(PAKPNF) = LPOSH
+C
+C position onto the FS entry
+C
+	CALL IFFNXC('FS',IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999
+	ENDIF
+C
+	FSPTR=LPOSH			! remember position
+	ISTAT(3)=0			! default text position
+C
+C read FS
+C
+	CALL EIHR(ISTAT,MIN(IELEN,4),1)
+	PACK(PAKFC)=ISTAT(1)
+C
+C find graphical type
+C
+	IF (FRTFND(PACK(PAKFC))) THEN
+C
+C don't collapse - we can get here with a missing feature
+C code using SELECT OUTPUT on a read-only map.
+	   CALL MOAN(MSG_BADCODE,PACK(PAKFC))
+	   GOTO 999
+	ENDIF
+	PACK(PAKGT)=FRTGT
+C
+C switch on graphical type
+C
+	GOTO (50,200,200,200,200,50,300,300,300,400,50,50),FRTGT
+C
+C ====================================================================
+C
+C deal with linear features
+C
+C first check if whole feature lies along region. The algorithm below
+C for this case is appalling, and this is well worth while.  In 99.99%
+C of cases very little time will be wasted.
+C
+50	HADST=.FALSE.
+	CALL PUTLNG(%VAL(REGPTR(1,REG)+OFFX),X1)
+	CALL PUTLNG(%VAL(REGPTR(1,REG)+OFFY),Y1)
+	J=REGPTR(1,REG)
+C
+C position onto next entry
+C
+60	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999			! exit
+	ENDIF
+C
+C if end of feature then region is longer than region, and must be
+C inside it
+C
+	IF (IECODE.EQ.'EF') THEN
+	   INSIDE=.TRUE.
+	   GOTO 950			! success
+	ENDIF
+C
+	IF (IECODE.NE.'CB') GOTO 60	! ignore all but CBs
+C
+C got an ST
+C
+	CALL EIHRCB_HEAD(CBH)
+	IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	   CALL EIHRCB_DATA(RIXY)
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract RIXY
+	   CALL IFS_CB_READ(CBH,CBD,RIXY,2,COLHXY,1,CBH.NROW)
+	ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	IF (DO_FLY_TRANS) THEN
+	   IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                         CURR_UNIT,CURR_ORG,
+     &	                         LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                         LITES2UNIT,LITES2ORG,
+     &	                         CBH.NROW,RIXY)) GOTO 999
+	ELSEIF (USE_ORG) THEN
+	   CALL ADDORG(ORGXY,RIXY,CBH.NROW)
+	ENDIF
+C
+	RITOP=CBH.NROW
+	IF (HADST) THEN			! first ST; remember start
+	   TMPXY(1)=RIXY(1,1)		! to test for closed feature
+	   TMPXY(2)=RIXY(2,1)
+	   HADST=.TRUE.
+	ENDIF
+C
+C now check each point in region against these points
+C
+	DO 70,I=1,RITOP
+	   IF (J.EQ.REGPTR(2,REG)) THEN		! end of region
+	      CALL IFFNXT(IECODE,IELEN)		! see if end of coords
+	      IF (IELEN.EQ.-1) THEN
+	         CALL NASTY(MSG_UNEXPEIFF)
+	         CALL COLAPS(MSG_UNEXPEIFF)
+	         GOTO 999			! exit
+	      ENDIF
+	      IF (IECODE.NE.'EF') GOTO 100	! not end of coords
+C
+C check for end of feature; either closed or open feature
+C	      
+	      IF ((I.EQ.RITOP).OR.
+     &	          (I.EQ.(RITOP-1).AND.
+     &	           TMPXY(1).EQ.RIXY(1,RITOP).AND.
+     &	           TMPXY(2).EQ.RIXY(2,RITOP))) THEN
+	         INSIDE=.TRUE.
+	         GOTO 950
+	      ENDIF
+	   ELSE
+	      CALL PUTLNG(%VAL(J+OFFX),X1)
+	      CALL PUTLNG(%VAL(J+OFFY),Y1)
+	      IF (X1.NE.RIXY(1,I).OR.Y1.NE.RIXY(2,I)) GOTO 100
+	      CALL PUTLNG(%VAL(J),J)
+	   ENDIF
+70	CONTINUE
+	GOTO 60			! get next entry
+C
+C position onto FS entry (better checks here, if no ST for example)
+C
+100	CALL IFFPKE(IECODE,IELEN,FSPTR)
+	IF (IECODE.NE.'FS') THEN
+	   CALL NASTY(MSG_BADPNF)
+	   CALL COLAPS(MSG_BADPNF)
+	   GOTO 999
+	ENDIF
+C
+	HADST=.FALSE.			! not had any ST yet
+C
+C position to next entry
+C
+110	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999			! exit
+	ENDIF
+C
+C see what sort of entry we have
+C
+	IF (IECODE.EQ.'EF') THEN
+	   IF (.NOT.RESOLVED) THEN	! use last point as last resort
+	      CALL PINREG(RIXY(1,RITOP),REG,INSIDE)
+	   ENDIF
+	   GOTO 950	! finished, without crossing
+	ENDIF
+	IF (IECODE.NE.'CB') GOTO 110	! not interested 
+C
+C got an ST
+C
+	CALL EIHRCB_HEAD(CBH)
+C
+	IF (.NOT.HADST) THEN		! this is first ST
+	   HADST=.TRUE.
+	   IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	      CALL EIHRCB_DATA(RIXY)
+	   ELSE
+	      CALL EIHRCB_DATA(CBD)! read into scratch, and extract RIXY
+	      CALL IFS_CB_READ(CBH,CBD,RIXY,2,COLHXY,1,CBH.NROW)
+	   ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	   IF (DO_FLY_TRANS) THEN
+	      IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                            CURR_UNIT,CURR_ORG,
+     &	                            LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                            LITES2UNIT,LITES2ORG,
+     &	                            CBH.NROW,RIXY)) GOTO 999
+	   ELSEIF (USE_ORG) THEN
+	      CALL ADDORG(ORGXY,RIXY,CBH.NROW)
+	   ENDIF
+C
+	   RITOP=CBH.NROW
+C
+C see if start of feature is inside region
+C
+C - get an increment for moving off line
+C
+	   DLX=(DBLE(RIXY(1,2)) - DBLE(RIXY(1,1)))
+	   DLY=(DBLE(RIXY(2,2)) - DBLE(RIXY(2,1)))
+	   CALL PRPLIN(DLX,DLY,LINWDTH)
+C
+C check whether this is a big enough increment (to avoid problems of 
+C precision)
+C
+111	   TMPXY(1) = DBLE(RIXY(1,1)) + DLX*2.0
+	   TMPXY(2) = DBLE(RIXY(2,1)) + DLY*2.0
+	   IF ((DLX.NE.0.0.OR.DLY.NE.0.0).AND.
+     &	       (ABS(TMPXY(1)-RIXY(1,1)).LT.LINWDTH).AND.
+     &	       (ABS(TMPXY(2)-RIXY(2,1)).LT.LINWDTH)) THEN
+	      DLX = DLX*2.0
+	      DLY = DLY*2.0
+	      GOTO 111
+	   ENDIF
+C
+	   J=0
+	   TMPXY(1)=RIXY(1,1)		! get start of feature
+	   TMPXY(2)=RIXY(2,1)
+	   RESOLVED = .FALSE.
+C
+C TMPXY is on boundary?
+C
+115	   IF (PINREG(TMPXY,REG,INSIDE)) THEN
+	      IF (CBH.NROW.GT.1) THEN		! if not, assume inside
+C
+C try another point a bit along the first vector
+C
+	         J=J+1
+	         TMPXY(1)=DBLE(RIXY(1,1)) + J*DLX
+	         TMPXY(2)=DBLE(RIXY(2,1)) + J*DLY
+	         IF (J.LT.100) GOTO 115		! only try 99 times
+						! then assume inside
+	      ENDIF
+	   ELSE
+	      RESOLVED = .TRUE.
+	   ENDIF
+C
+	ELSE
+	   RIXY(1,1)=RIXY(1,RITOP)		! save last point
+	   RIXY(2,1)=RIXY(2,RITOP)
+	   IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	      CALL EIHRCB_DATA(RIXY(1,2))
+	   ELSE
+	      CALL EIHRCB_DATA(CBD)! read into scratch, and extract RIXY
+	      CALL IFS_CB_READ(CBH,CBD,RIXY(1,2),2,COLHXY,1,CBH.NROW)
+	   ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	   IF (DO_FLY_TRANS) THEN
+	      IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                            CURR_UNIT,CURR_ORG,
+     &	                            LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                            LITES2UNIT,LITES2ORG,
+     &	                            CBH.NROW,RIXY(1,2))) GOTO 999
+	   ELSEIF (USE_ORG) THEN
+	      CALL ADDORG(ORGXY,RIXY(1,2),CBH.NROW)
+	   ENDIF
+	   RITOP=CBH.NROW+1
+	ENDIF
+C
+C now check each vector of these STs with the region
+C
+	DO 120, I=1,RITOP-1
+	   IF (CUTREG(RIXY(1,I),REG,INSIDE,RESOLVED)) GOTO 900 ! cut
+  120	CONTINUE
+C
+C get next entry
+C
+	GOTO 110
+C
+C ======================================================================
+C
+C deal with arcs and circles
+C
+200	TXSIZE=0
+C
+C position onto the CB
+	CALL IFFNXC('CB',IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999
+	ENDIF
+C
+C read 3 coordinate pairs from it and see if it starts inside region
+	CALL EIHRCB_HEAD(CBH)
+	IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	   CALL EIHRCB_DATA(RIXY)
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract RIXY
+	   CALL IFS_CB_READ(CBH,CBD,RIXY,2,COLHXY,1,3)
+	ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	   IF (DO_FLY_TRANS) THEN
+	      IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                            CURR_UNIT,CURR_ORG,
+     &	                            LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                            LITES2UNIT,LITES2ORG,
+     &	                            3,RIXY)) GOTO 999
+	   ELSEIF (USE_ORG) THEN
+	      CALL ADDORG(ORGXY,RIXY,3)
+	   ENDIF
+C
+C generate auxiliary array
+	IF (GENAUX(3,RIXY,RIAUX,TXTDSC,RIANG,TXSIZE,PACK,ISTAT)) THEN
+	   GOTO 999
+	ENDIF
+C
+C is first point inside or outside region?
+C if it is on boundary, move it slightly
+C
+	IF (RIAUX(TOTI).GE.0.0) THEN
+	   DIR = 1.0
+	ELSE
+	   DIR = -1.0
+	ENDIF
+C
+	J=0
+	DLX = LINWDTH/DBLE(RIAUX(RADI))*DIR
+210	DLY = DBLE(RIAUX(STAI)) + J*DLX
+	TMPXY(1) = DBLE(RIAUX(XCENI)) + RIAUX(RADI)*COS(DLY)
+	TMPXY(2) = DBLE(RIAUX(YCENI)) + RIAUX(RADI)*SIN(DLY)
+	IF (PINREG(TMPXY,REG,INSIDE)) THEN	! try a bit along arc
+	   J=J+1
+	   IF (J.GT.999) GOTO 215
+	   GOTO 210
+	ENDIF
+C
+C is end point touching region? - if so move it a bit
+C
+215	J=0
+	DLY = DBLE(RIAUX(STAI)) + DBLE(RIAUX(TOTI))
+220	DLY = DBLE(RIAUX(STAI)) + DBLE(RIAUX(TOTI)) - J*DLX
+	TMPXY(1)=DBLE(RIAUX(XCENI))+RIAUX(RADI)*COS(DLY)
+	TMPXY(2)=DBLE(RIAUX(YCENI))+RIAUX(RADI)*SIN(DLY)
+	IF (PINREG(TMPXY,REG,TEMP)) THEN	! try a bit along arc
+	   J=J+1
+	   IF (J.GT.999) GOTO 230
+	   GOTO 220
+	ENDIF
+C
+C find out if arc cuts region
+C
+230	IF (INSIDE.NEQV.TEMP) GOTO 900		! definite cut
+	CALL BOXARC(RIAUX,RILIMIT(1),RILIMIT(2),RILIMIT(3),RILIMIT(4))
+	IF (ARCREG(RIAUX,RILIMIT,REG,INSIDE)) THEN
+	   GOTO 900				! arc cuts region
+	ELSE
+	   GOTO 950				! no cut
+	ENDIF
+C
+C ======================================================================
+C
+C deal with symbols
+C
+300	RIANG=0.0			! default orientation
+	TXTPTR=0			! no text
+	TXSIZE=DFTSIZ			! default text size
+C
+C scan the feature for relevant items
+310	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999
+	ENDIF
+	IF (IECODE.EQ.'CB') GOTO 320
+	IF (IECODE.EQ.'RO') GOTO 340
+	IF (IECODE.EQ.'EF') GOTO 350
+	GOTO 310		! ignore anything else
+C
+C ST
+320	CALL EIHRCB_HEAD(CBH)
+	IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	   CALL EIHRCB_DATA(RIXY)
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract RIXY
+	   CALL IFS_CB_READ(CBH,CBD,RIXY,2,COLHXY,1,CBH.NROW)
+	ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	IF (DO_FLY_TRANS) THEN
+	   IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                         CURR_UNIT,CURR_ORG,
+     &	                         LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                         LITES2UNIT,LITES2ORG,
+     &	                         CBH.NROW,RIXY)) GOTO 999
+	ELSEIF (USE_ORG) THEN
+	   CALL ADDORG(ORGXY,RIXY,CBH.NROW)
+	ENDIF
+	GOTO 310
+C
+C RO
+340	CALL EIHRR(RIANG,1,1)
+	GOTO 310
+C
+C EF
+350	RESOLVED = .FALSE.
+	IF (GENAUX(CBH.NROW,RIXY,RIAUX,TXTDSC,RIANG,TXSIZE,PACK,ISTAT)
+     &			) GOTO 999
+C
+	IF (BOXCUTREG(RIXY(1,1),RIXY(2,1),RIAUX,REG,
+     &	                     INSIDE,RESOLVED)) GOTO 900
+C
+C nothing has changed, so go to no cut exit
+C
+	GOTO 950
+C
+C ======================================================================
+C
+C deal with texts
+C
+400	CONTINUE
+C
+C get text into FTRCTXD, so that composite texts can be easily handled
+	CALL GETCTX(PACK,CTXD,.TRUE.)	! map is already selected (so
+					! PACK(PAKMAP) is not used; this
+					! is just as well as we don't
+					! know what it is
+	RESOLVED = .FALSE.
+	ADDR = CTXD(CTXD_FSTCTX)
+410	CONTINUE
+	IF (BOXCUTREG(%VAL(ADDR+CTX_O_X),%VAL(ADDR+CTX_O_Y),
+     &	              %VAL(ADDR+CTX_O_AUX),REG,INSIDE,RESOLVED)) GOTO 900
+C
+	IF (ADDR.EQ.CTXD(CTXD_FSTCTX)) THEN
+	   F_INSIDE = INSIDE
+	ELSEIF (F_INSIDE.NE.INSIDE) THEN
+	   GOTO 900	! one subtext inside, and one outside, so cut
+	ENDIF
+C
+C move onto next subtext
+	CALL PUTLNG(%VAL(ADDR+CTX_O_NXTPTR),ADDR)
+	IF (ADDR.NE.0) GOTO 410
+C
+C nothing has changed, so go to no cut exit
+C
+	GOTO 950
+C
+C ==================================================================
+C
+C exits
+C
+C there has been a cut
+C
+900	INCTOT=4
+	GOTO 999
+C
+C there has been no cut, so result is the same as we started with
+C
+950	IF (INSIDE) THEN
+	   INCTOT=2
+	ELSE
+	   INCTOT=8
+	ENDIF
+C
+999	RETURN
+	END

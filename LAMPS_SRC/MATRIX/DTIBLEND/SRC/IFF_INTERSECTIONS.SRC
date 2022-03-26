@@ -1,0 +1,355 @@
+	LOGICAL FUNCTION IFF_INTERSECTIONS(JPOS,LUN)
+C
+***	MODULE	IFF_INTERSECTIONS
+***	IDENT	18AU88
+C
+C	Copyright (C), Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	Created						TJH 20-MAY-1988
+CMOD	DTI_DTED replaced by parameter DTI_TED4         DRC 18-Aug-1988
+C
+C Function to get Z values from any IFF intersections along a blend 
+C profile for use in the interpolation function INTERP.
+C
+C The fixed Z values are put in the fixed Z array /PROCESS/FIXZAR. There
+C are /PROCESS/NUMINS fixed points. There will always be two 
+C (/PROCESS/NUMINS) fixed Z values in /PROCESS/FIXZAR on entry to
+C IFF_INTERSECTIONS. These define the Z values and distances at the 2
+C ends of the blend row or column. On exit, if there is IFF control
+C there may be anything between 3 and MAX_INS fixed Z values. 
+C
+C Function returns .TRUE. if all is well
+C
+	IMPLICIT NONE
+C
+C Argument
+	INTEGER	JPOS		! position along the shared edge
+	INTEGER	LUN		! the LUN of the blend file in use
+C
+C Parameters:
+	INCLUDE 'LSL$CMNDTIBLEND:DTIBLENDMSG.PAR'
+	INCLUDE 'LSL$CMNDTIBLEND:PARAMS.PAR'
+	INCLUDE 'LSL$CMNDTI:DTIPAR.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:COMMAND.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:PROCESS.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFSTR.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:FILES.CMN'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C W/s
+	INTEGER		I,J
+	LOGICAL*1 WITHIN_SECTION! within the relevant section of IFF ftr
+	INTEGER		NCOORD	! number of coords in ftr
+	INTEGER		SECTOR	! current blend sector
+	INTEGER*2 	ACTYPE	! type of AC
+	INTEGER   	LONG    ! 32 bits
+	INTEGER*2	IFIL	! IFF file number
+	INTEGER*2 	IECODE	! entry code for the entry-in-hand
+	INTEGER*2 	IELEN	! length of the entry-in-hand
+	INTEGER		IERR	! error return
+	LOGICAL		OK	! function return
+	REAL		ZVAL	! height of feature
+	REAL		IXYZ(3)	! intersection point z,y,z
+	INTEGER	 XYZCOL(3)	! for extracting X,Y and Z from CBD
+	REAL	 XYZ1(3),XYZ2(3) ! two ends of an IFF segment
+	INTEGER*2 ISTART,ISTOP	! start stop pts in CB within zone
+	REAL	DIS		! distance
+	REAL	PROFILE(2,2)	! x,y of profile pt 1,2
+	REAL	EQUP(3)		! equation of profile
+	REAL	EQUS(3)		! equation of IFF segment
+	LOGICAL	HAD_INSECT	! had an intersection (buzzzzzz)
+	LOGICAL	ZBITPAT1	! Z coordinate as a bit pattern
+	LOGICAL	ZBITPAT2	! Z coordinate as a bit pattern
+	EQUIVALENCE (ZBITPAT1,XYZ1(3))
+	EQUIVALENCE (ZBITPAT2,XYZ2(3))
+C
+C IFF CB structure definition:
+	INCLUDE   'LSL$CMNIFF:CB.STR'
+	RECORD	/IFF_CBH/CBH	! CB header
+	RECORD	/IFF_CBD/CBD	! CB data
+C
+C Functions:
+	LOGICAL	LINEQN		! calc line equation
+	LOGICAL	INTSEC		! calc intersection
+C
+C ......................................................................
+C
+	IFF_INTERSECTIONS=SS$_ABORT			! assume failure
+C
+C Fill array of CB column headers
+	XYZCOL(1) = IFF_C_X
+	XYZCOL(2) = IFF_C_Y
+	XYZCOL(3) = IFF_C_Z
+C
+C Calculate the x coordinate for the blend column, or the y coordinate
+C for the blend row in hand at position JPOS along the shared edge
+	IF (HEADER_TYPE(LUN).EQ.DTI_TED4) THEN	! geog units
+	   IF (HORIZONTAL_JOIN) THEN
+	      PROFILE(1,1)=
+     &	      LONREC(1,LUN)-MINXOF+(DTI_WINDOW_SWX(LUN)-1+JPOS-1)
+     &					*LONINT(LUN)
+	      PROFILE(1,2)=PROFILE(1,1)
+	      PROFILE(2,1)=FIXZAR(1,1)
+	      PROFILE(2,1)=FIXZAR(1,2)
+	   ELSE			! vertical join
+	      PROFILE(2,1)=
+     &		LATREC(1,LUN)-MINYOF+(DTI_WINDOW_SWY(LUN)-1+JPOS-1)
+     &					*LATINT(LUN)
+	      PROFILE(2,2)=PROFILE(2,1)
+	      PROFILE(1,1)=FIXZAR(1,1)
+	      PROFILE(1,2)=FIXZAR(1,2)
+	   ENDIF
+	ELSE		! grid units
+	   IF (HORIZONTAL_JOIN) THEN
+	      PROFILE(1,1)=
+     &		X_OFFSET(LUN)-MINXOF+(DTI_WINDOW_SWX(LUN)-1+JPOS-1)
+     &					*X_GRID(LUN)
+	      PROFILE(1,2)=PROFILE(1,1)
+	      PROFILE(2,1)=FIXZAR(1,1)
+	      PROFILE(2,1)=FIXZAR(1,2)
+	   ELSE
+	      PROFILE(2,1)=
+     &		Y_OFFSET(LUN)-MINYOF+(DTI_WINDOW_SWY(LUN)-1+JPOS-1)
+     &					*Y_GRID(LUN)
+	      PROFILE(2,2)=PROFILE(2,1)
+	      PROFILE(1,1)=FIXZAR(1,1)
+	      PROFILE(1,2)=FIXZAR(1,2)
+	   ENDIF
+	ENDIF
+C
+C We now have the coordinates relative to the local DTIBLEND datum
+C for both ends of the blend profile. Calculate the equation of the
+C blend profile.
+	OK=LINEQN(PROFILE(1,1),PROFILE(2,1),
+     &		     PROFILE(1,2),PROFILE(2,2),DIS,EQUP)
+C
+C Equation solution failure?
+	IF (.NOT.OK) THEN
+	   IFF_INTERSECTIONS=DTIBLN__EQNFAIL
+	   CALL LSL_PUTMSG(IFF_INTERSECTIONS)
+	   GOTO 110
+	ENDIF
+C
+C Determine which sector of the blend zone that the current profile 
+C lies within
+	DO 10 J=1,NSECTOR
+	   IF (HORIZONTAL_JOIN) THEN
+	      IF ((PROFILE(1,1).GE.BLEND_ZONE(1,1)
+     &			+BLEND_SECTOR_WIDTH(1)*(J-1))
+     &		.AND.
+     &		(PROFILE(1,1).LE.BLEND_ZONE(1,1)
+     &			+BLEND_SECTOR_WIDTH(1)*J)
+     &		.AND.
+     &		(PROFILE(2,1).GE.BLEND_ZONE(2,2))
+     &		.AND.
+     &		(PROFILE(2,1).LE.BLEND_ZONE(2,4))) THEN
+	         SECTOR=J
+	         GOTO 20
+	      ENDIF
+	   ELSE
+	      IF ((PROFILE(1,1).GE.BLEND_ZONE(1,1))
+     &		.AND.
+     &		(PROFILE(1,1).LE.BLEND_ZONE(1,4))
+     &		.AND.
+     &		(PROFILE(2,1).GE.BLEND_ZONE(2,2)
+     &			+BLEND_SECTOR_WIDTH(2)*(J-1))
+     &		.AND.
+     &		(PROFILE(2,1).LE.BLEND_ZONE(2,2)
+     &			+BLEND_SECTOR_WIDTH(2)*J)) THEN
+	         SECTOR=J
+	         GOTO 20
+	      ENDIF
+	   ENDIF
+10	CONTINUE
+C
+C ......................................................................
+C Now use the IFF tables set up in IFF_TAB_BUILD() to take all the
+C segments that lie in the current sector of the blend zone and test
+C each segment in turn for intersection with the current blend profile. 
+C ......................................................................
+C
+C Take each of the NUM_FTRS entries in the IFF features tables in turn
+20	DO 90 J=1,NUM_FTRS
+C
+C
+C Is IFF feature even in the sector occupied by the blend profile?
+	   IF (IFF_TAB(2,J).NE.SECTOR) GOTO 90
+C
+C Determine which IFF file we are dealing with. If the right IFF file
+C is already open don't try open it! If another is open close it and
+C open the correct one. 
+	   IFIL=IFF_TAB(1,J)
+	   IF (.NOT.IFFLUN_INUSE(IFIL)) THEN
+C
+C Find which IFF file is open for use and close it
+	      DO 30 I=1,NUM_IFF
+	         IF (IFFLUN_INUSE(I)) CALL IFFCLO(I)
+30	      CONTINUE
+	      CALL IFFOPI(IFIL,				! LUN
+     &		IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)),! filename
+     &		FID(1,IFIL),				! file ID
+     &		0)					! open readonly
+	      CALL IFFSEL(IFIL)
+	      IFFLUN_INUSE(IFIL)=.TRUE.
+C
+C Set the IFF input revision level to 1 - treat all CB, ST and
+C ZS entries as if they are CBs 
+	      CALL IFFIRV(1)
+	   ENDIF
+C
+C ......................................................................
+C Jump to the IFF feature containing the segements which cross through
+C the blend sector containing the current blend profile.
+	   CALL IFFPKE(IECODE,IELEN,NF_ADDRESS_TAB(J))
+	   IF (IELEN.EQ.-1) GOTO 100
+C
+C Started a new ftr. cannot be in middle of CBs
+	   WITHIN_SECTION=.FALSE.
+C
+C Get the AC (for height) and the CB's for the coordinates
+40	   CALL IFFNXT(IECODE,IELEN)
+	   IF (IELEN.EQ.-1) GOTO 100
+C
+C Dispatch on value of IECODE
+	   IF (IECODE.EQ.'AC') GOTO 50
+	   IF (IECODE.EQ.'CB') GOTO 60
+	   IF (IECODE.EQ.'EF') GOTO 90
+	   GOTO 40
+C
+C AC entry - extract height
+50	   CALL EIHRI(ACTYPE,1,1)
+	   IF (ACTYPE.EQ.2) THEN
+	      CALL EIHRL(LONG,1,2)
+	      ZVAL=FLOAT(LONG)
+	   ELSEIF (ACTYPE.EQ.3) THEN
+	      CALL EIHRR(ZVAL,1,2)
+	   ENDIF
+	   GOTO 40
+C
+C
+C CB (ZS or ST) all are treated as CBS under revision level one.
+C We must take the differing origin offsets into account by
+C using our local datum held in /PROCESS/LOCOFF. First read the CB.
+60	   CALL EIHRCB_HEAD(CBH)
+	   CALL EIHRCB_DATA(CBD)
+C
+C Are we past the relevant section?
+	   IF (NCOORD.GT.START_STOP_TAB(2,J)) GOTO 80
+C
+C Is the start of the section of the IFF feature that lies within
+C the blend sector (START_STOP_TAB(1,J) within this CB? If not go and
+C get the next CB.
+	   IF (START_STOP_TAB(1,J).GT.NCOORD+CBH.NROW) THEN
+	      NCOORD=NCOORD+CBH.NROW	!number of pts in ftr so far
+	      GOTO 40
+	   ENDIF
+C
+C If on second or subsequent CB holding pts forming the section
+C of linework within the blend zone copy the last point from
+C the previous CB to be the 1st point of the ist segment in the 
+C new CB
+	   IF (WITHIN_SECTION) THEN
+	      XYZ1(1)=XYZ2(1)
+	      XYZ1(2)=XYZ2(2)
+	      ISTART=1
+	   ELSE
+C
+C Calculate the offset into this CB that represents the start of
+C the relevant section of linework
+	      ISTART=START_STOP_TAB(1,J)-NCOORD	   
+	   ENDIF
+	   DO 70 I=ISTART,MIN(START_STOP_TAB(2,J)-NCOORD,CBH.NROW)-1
+	      IF (WITHIN_SECTION) THEN
+C
+C Read 2nd point for segment
+	         CALL IFS_CB_READ(CBH,CBD,XYZ2,3,XYZCOL,1,1)
+	         XYZ2(1) = XYZ2(1) + LOCOFF(1,IFIL)
+	         XYZ2(2) = XYZ2(2) + LOCOFF(2,IFIL)
+		 WITHIN_SECTION=.FALSE.
+	       ELSE	   
+C Read an XY pair from CB as 1st point in segment
+	         CALL IFS_CB_READ(CBH,CBD,XYZ1,3,XYZCOL,I,I)
+C Add local origin LOCOFF to X and Y
+	         XYZ1(1) = XYZ1(1) + LOCOFF(1,IFIL)
+	         XYZ1(2) = XYZ1(2) + LOCOFF(2,IFIL)
+C
+C Read 2nd point for segment
+	         CALL IFS_CB_READ(CBH,CBD,XYZ2,3,XYZCOL,I+1,I+1)
+	         XYZ2(1) = XYZ2(1) + LOCOFF(1,IFIL)
+	         XYZ2(2) = XYZ2(2) + LOCOFF(2,IFIL)
+	      ENDIF
+C
+C Quickly test if the segment's bounding rectangle lies even partly
+C within the bounding rectangle of the blend profile
+	      IF (MIN(XYZ1(1),XYZ2(1))
+     &			.GT.MAX(PROFILE(1,1),PROFILE(1,2))) GOTO 70
+	      IF (MIN(XYZ1(2),XYZ2(2))
+     &			.GT.MAX(PROFILE(2,1),PROFILE(2,2))) GOTO 70
+	      IF (MAX(XYZ1(2),XYZ2(2))
+     &			.LT.MIN(PROFILE(2,1),PROFILE(2,2))) GOTO 70
+	      IF (MAX(XYZ1(1),XYZ2(1))
+     &			.LT.MIN(PROFILE(1,1),PROFILE(1,2))) GOTO 70
+C
+C If Z value absent in CB use the constant Z value got from the AC.
+C Remember to apply any user specified multiplication or division
+C
+C 1st points Z
+	      IF (ZBITPAT1.EQ.IFF_ABSENT) THEN
+	         XYZ1(3)=ZVAL*IFF_MFACTR(IFIL)
+	      ELSE
+	         XYZ1(3)=XYZ1(3)*IFF_MFACTR(IFIL)
+	      ENDIF	   
+C 2nd  points Z
+	      IF (ZBITPAT2.EQ.IFF_ABSENT) THEN
+	         XYZ2(3)=ZVAL*IFF_MFACTR(IFIL)
+	      ELSE
+	         XYZ2(3)=XYZ2(3)*IFF_MFACTR(IFIL)
+	      ENDIF	   
+C
+C Was FEET to METRES conversion or vice versa specified?
+	      IF (IFF_FEET2M(IFIL)) THEN
+		 XYZ1(3)=XYZ1(3)/3.2808455
+	      ELSEIF (IFF_M2FEET(IFIL)) THEN
+		 XYZ1(3)=XYZ1(3)*3.2808455
+	      ENDIF
+C
+C Calculate equation of segment
+	      OK=LINEQN(XYZ1(1),XYZ1(2),XYZ2(1),XYZ2(2),DIS,EQUS)
+C
+C Equation  solution failure - ignore segment
+	      IF (.NOT.OK) GOTO 70	
+C
+C Try for an intersection
+	      HAD_INSECT=INTSEC(EQUP,EQUS,IXYZ)
+	      IF (.NOT.HAD_INSECT) GOTO 70
+	      NUMINS=NUMINS+1
+C
+C Lineally interpolate the Z value at the intersection	
+	      CALL INTERZ(XYZ1,XYZ2,IXYZ)
+	      FIXZAR(2,NUMINS)=IXYZ(3)
+	      IF (HORIZONTAL_JOIN) THEN
+	         FIXZAR(1,NUMINS)=IXYZ(2)
+	      ELSE
+	         FIXZAR(1,NUMINS)=IXYZ(1)
+	      ENDIF
+70	   CONTINUE
+	   NCOORD=NCOORD+CBH.NROW	! number of pts in ftr so far
+	   WITHIN_SECTION=.TRUE.
+	   GOTO 40			! get next CB or EF
+C
+C Finished with that feature. Zero all the CB handling flags
+80	   WITHIN_SECTION=.FALSE.
+	   NCOORD=0
+90	CONTINUE
+	IFF_INTERSECTIONS=SS$_NORMAL
+	GOTO 110
+C
+C Unexpected end of IFF file
+100	CALL LSL_PUTMSG(DTIBLN__UNEXPEOF,
+     &			IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)))
+110	RETURN
+	END 

@@ -1,0 +1,252 @@
+	LOGICAL FUNCTION START_SHEET( OLD_DMC, ICUVAL )
+C
+***	IDENT	11FE90
+***	MODULE	START_SHEET
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C
+C Author TJ Ibbs, 2 April 1986
+C
+C To read the main sheet header, and open an appropriate IFF file
+C
+C Return TRUE if we have a fatal error, FALSE otherwise
+C
+	IMPLICIT NONE
+C
+C arguments
+C
+	INTEGER		ICUVAL(2)	! values read from a record
+	LOGICAL		OLD_DMC		! true if old format header
+C
+C common blocks
+C
+	INCLUDE	'LSL$CMNIFF:MHDMB.CMN'		! OS style mapheader
+	INCLUDE	'LSL$CMNIFF:IFFHAN.CMN'		! IFF error numbers, etc
+	INCLUDE	'CMN:FILES.CMN'			! files and switches
+	INCLUDE	'CMN:SHEET.CMN'			! for CPS,RANGE
+	INCLUDE	'CMN:OSTF2IMSG.PAR'		! message numbers
+	INCLUDE 'LSL$CMNIFF:MHOSGB.CMN'		! New OS map header
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW_MH.CMN'	! New map header variables
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW.PAR'	! Header field definitions
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'	! LSLLIB message definitions
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'		! Text input
+C
+C workspace
+C
+	LOGICAL		IS_SIM		! currently not really used
+	CHARACTER*8	RECORD		! next input record
+	INTEGER		EXTENT		! size of edge of sheet
+	INTEGER		I,J		! for DO loops
+	INTEGER		REVISION	! IFF revision level
+	CHARACTER*256	FILE		! file name
+	INTEGER		FILE_LEN	! its length
+	LOGICAL		RET		! return from PARFILN
+	INTEGER		NUMRECS		! number of records in -1 header
+C
+C functions
+C
+	INTEGER*4	IFFCREATE	! create new IFF file
+	LOGICAL		GETREC		! get next record
+	LOGICAL		FIND_CODES	! find attribute codes
+	LOGICAL		PARFILN		! parse a filename
+	LOGICAL		OSMH_NEW_GETFLD ! Get field from MHOSGB
+C
+C **********************************************************************
+C assume the worst
+C
+	START_SHEET = .TRUE.
+C
+C is it a SIM plot?
+C
+	IF ( ICUVAL(2).GT.0 ) IS_SIM = .TRUE.	! yes
+C
+C now, read in the sheet reference, basic grid interval and scale
+C
+	IF ( MHTYPE.EQ.2 ) THEN
+	   IF ( GETREC( RECORD ) ) GOTO 99901
+	   READ (RECORD,5001,ERR=99902) MHMRCE
+5001	   FORMAT(I8)
+C
+	   IF ( GETREC( RECORD ) ) GOTO 99901
+	   READ (RECORD,5001,ERR=99902) MHMRCN
+C
+	   IF ( GETREC( RECORD ) ) GOTO 99901
+	   READ (RECORD,5001,ERR=99902) MHBGI
+C
+	   IF ( GETREC( RECORD ) ) GOTO 99901
+	   READ (RECORD,5001,ERR=99902) MHSCSC
+	ELSE
+C
+	   DO 50 I = 1, 4
+	      IF ( GETREC( RECORD ) ) GOTO 99901
+	      CALL COPY_TO_MH( RECORD )
+50	   CONTINUE
+C
+C The program assumes that the MHMRCE, MHMRCN, MHSCSC and MHBGI are in the
+C -1 header and will now be in the common block MHOSGB
+C
+	   IF (. NOT.OSMH_NEW_GETFLD( MD_X_ORIG ) ) THEN
+	      CALL LSL_PUTMSG( OSTF2I__HEADERONE )
+	      GOTO 9999
+	   ENDIF
+C
+C Getting the field was successful, so it will be in MH_I_VALUE
+C NOTE: Although we have a type 3 header the MHMRCE, MHMRCN, MHSCSC, MHBGI
+C	are being used a variables to enable only minor changes to be made.
+C
+	   MHMRCE = MH_I_VALUE
+C
+C Get Northing, Scale, BGI
+C
+	   IF (. NOT.OSMH_NEW_GETFLD( MD_Y_ORIG ) ) THEN
+	      CALL LSL_PUTMSG( OSTF2I__HEADERONE )
+	      GOTO 9999
+	   ENDIF
+	   MHMRCN = MH_I_VALUE
+C
+	   IF (. NOT.OSMH_NEW_GETFLD( MD_SCALE ) ) THEN
+	      CALL LSL_PUTMSG( OSTF2I__HEADERONE )
+	      GOTO 9999
+	   ENDIF
+	   MHSCSC = MH_I_VALUE
+C
+	   IF (. NOT.OSMH_NEW_GETFLD( MH_BGI ) ) THEN
+	      CALL LSL_PUTMSG( OSTF2I__HEADERONE )
+	      GOTO 9999
+	   ENDIF
+	   MHBGI = MH_I_VALUE
+C
+	ENDIF
+C
+C and copy information to the Process part of the header
+C               
+	PCMRCE = MHMRCE
+	PCMRCN = MHMRCN
+	PCSCSC = MHSCSC
+C
+C and our corner points are at the sheet corners, but in the same
+C units as the rest of the sheet
+C
+	EXTENT = 10*MHBGI
+C
+ 	CPS(1,1) = 0.0
+ 	CPS(2,1) = EXTENT
+ 	CPS(1,2) = 0.0
+ 	CPS(2,2) = 0.0
+ 	CPS(1,3) = EXTENT
+ 	CPS(2,3) = 0.0
+ 	CPS(1,4) = EXTENT
+ 	CPS(2,4) = EXTENT
+C
+C and copy over to the destination side of the CPs
+C
+	DO 200 I=3,4
+	   DO 100 J=1,4
+	      CPS(I,J) = CPS(I-2,J)
+100	   CONTINUE
+200	CONTINUE
+C
+C and assume that the range is something silly
+C
+	RANGE(X_MIN) =  32767
+	RANGE(X_MAX) = -32767
+	RANGE(Y_MIN) =  32767
+	RANGE(Y_MAX) = -32767
+C
+C if we have not been given a specific filename, then construct one
+C from the location and scale of the sheet
+C
+	IF ( .NOT.HAD_OUTFILE ) THEN
+C
+	   CALL OS_NAME( FILE, FILE_LEN, MHMRCE, MHMRCN, MHSCSC )
+C
+	   RET = PARFILN( OUTFILE, OUTFILE_LEN, FILE(1:FILE_LEN),
+     &		          'LSL$IF:.IFF', .FALSE. )
+C
+	   IF ( .NOT.RET ) THEN
+	      CALL LSL_PUTMSG( OSTF2I__OSNAME, FILE(1:FILE_LEN) )
+	      CALL LSL_ADDMSG( RET )
+	      GOTO 9999
+	   ENDIF
+C
+	ENDIF
+C
+C and log the result
+C
+	CALL WRITEF
+	CALL WRITEF('Writing sheet %I3 to IFF file %S',
+     &					THIS_MAP,OUTFILE(1:OUTFILE_LEN))
+C
+C If OSTF+ has been detected automatically, set revision level to 1
+C explicitly to override what IFFCREATE sets it to.
+C
+	IF (AUTO_PLUS) REVISION = 1
+C
+C open the IFF file
+C
+	IF (PLUS.AND.(.NOT.AUTO_PLUS)) THEN
+	   IF (.NOT. IFFCREATE( IFFLUN, OUTFILE(1:OUTFILE_LEN) ,,,,
+     &			             )) GOTO 9999
+	ELSE
+	   IF (.NOT. IFFCREATE( IFFLUN, OUTFILE(1:OUTFILE_LEN) ,,,,
+     &			     REVISION)) GOTO 9999
+	ENDIF
+C
+C check we have the required qualifiers if producing revision 1
+C
+	IF (ORVLEV .NE. 0) THEN
+	   IF (PLUS .AND. .NOT. HAD_FRT) THEN
+	      CALL LSL_PUTMSG(OSTF2I__NEEDFRT)
+	      GOTO 9999
+	   ELSEIF (.NOT. NEW_TYPE) THEN
+	      CALL LSL_PUTMSG(OSTF2I__NEEDHIST)
+	      GOTO 9999
+	   ENDIF
+	ENDIF
+C
+C and set up the attribute codes
+C
+	IF (FIND_CODES()) GOTO 9999
+C
+C in the old DMC format, that was all there was to the start of sheet
+C record, and the next entry would be a negative flag
+C
+C in true OSTF, there should now be a job number and digitising scale
+C
+C we are willing to accept either format - read the next record...
+C
+	IF ( GETREC( RECORD ) ) GOTO 99901
+	CALL COPY_TO_MH( RECORD )
+	READ (RECORD,5002,ERR=99903) ICUVAL(1), ICUVAL(2)
+5002	FORMAT(2I4)
+C
+C if it is negative, then we have a flag record
+C
+   	IF ( ICUVAL(1).LT.0 ) THEN
+	   CALL LSL_PUTMSG( OSTF2I__OLDSHDR )
+	   OLD_DMC = .TRUE.
+	ELSE
+	   PCJOBN = ICUVAL(1)*10000 + ICUVAL(2)
+	   IF ( GETREC( RECORD ) ) GOTO 99901
+	   CALL COPY_TO_MH( RECORD )
+	   READ (RECORD,5004,ERR=99904) MHDGSC
+5004	   FORMAT(I8)
+	   OLD_DMC = .FALSE.
+    	ENDIF
+C
+	START_SHEET = .FALSE.			! success
+	GOTO 9999
+C
+C **********************************************************************
+C error messages, triggered by READ errors
+C
+99901	CALL LSL_PUTMSG( OSTF2I__UNEXPEOF )
+99902	CALL LSL_PUTMSG( OSTF2I__RDSTART )
+	GOTO 9999
+99903	CALL LSL_PUTMSG( OSTF2I__FLAGJOB )
+	GOTO 9999
+99904	CALL LSL_PUTMSG( OSTF2I__DIGSCAL )
+	GOTO 9999
+C
+9999	RETURN
+	END

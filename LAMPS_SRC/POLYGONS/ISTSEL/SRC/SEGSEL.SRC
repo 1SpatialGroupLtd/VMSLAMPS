@@ -1,0 +1,330 @@
+	LOGICAL	FUNCTION SEGSEL()
+C
+***	MODULE	SEGSEL
+***	IDENT	19JN87
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+CMOD	File-specs now have explicit length. Text
+C	passed to IFF routines with %REF. Duff output
+C	file deleted. Checks for unexpected EOF added	TJH 19-Jun-1987
+C
+C	Created                              G.S.Tobiss 27-January-1987
+C
+C Function to recode the IFF L/R coded segements to new groupings
+C then write out only those segements with different L/R codes to
+C the output IFF file
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INTEGER*4	SS$_ABORT	!abort
+	EXTERNAL	SS$_ABORT
+	INTEGER*4	SS$_NORMAL	!successful completion
+	EXTERNAL	SS$_NORMAL
+	INTEGER*4	STS$K_WARNING	!severity = 'warning'
+	EXTERNAL	STS$K_WARNING
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'HERE:PARAMS.PAR'
+	INCLUDE 'HERE:ISTSELMSG.PAR'
+C
+C Common
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'HERE:COMMAND.CMN'
+C
+C Workspace
+	INTEGER*2	IELEN		!for IFF entry decoding
+	INTEGER*2	IECODE		!next IFF entry code
+	INTEGER*2	NOVER		!overlay number
+	INTEGER*2	UWORD		!unsigned word
+	INTEGER*4	NF(2)		!NF number
+	INTEGER*2	ISQ		!feature internal sequence no.
+	INTEGER*2	ACTYPE		!AC type
+	INTEGER*4	TXTLEN		!length of text in word form
+	INTEGER*4	LCLEN		!length of text (left code)
+	INTEGER*4	RCLEN		!length of text (right code)
+	INTEGER*4	I		!counter for TX text conversion
+	INTEGER*4	LPOSNO		!for remembering EOF position
+	INTEGER*4	TOTSEG		!count of segemnts
+	INTEGER*4	SEGDEL		!count of segemnts deleted
+C
+	LOGICAL		HAD_AC		!AC presence switch
+	LOGICAL		HADLEF		!AC left code switch
+	LOGICAL		HADRI		!AC right code switch
+	LOGICAL		IWRITE		!write switch
+	LOGICAL		HADTX		!to indicate a text feature
+	LOGICAL		TXCHA		!text change switch
+	LOGICAL		LACCHA		!left AC code change switch
+	LOGICAL		RACCHA		!right AC code change
+	LOGICAL		TXENT		!to tell ACSORT it's a TX
+C
+	CHARACTER*1	CNULL		!null string to pad text
+	CHARACTER*256	TXCHAR		!holds text for TX entry
+	CHARACTER*256	LCHR		!AC left character code
+	CHARACTER*256	RCHR		!AC right character code
+C
+C Functions:
+	INTEGER*4	IFFOPEN		!opens input IFF file
+	INTEGER*4	IFFCREATE	!opens output IFF file
+	LOGICAL		VIOCLR		! clears array
+C
+	DATA CNULL/0/
+C
+C-----------------------------------------------------------------------
+C
+	SEGSEL=%LOC(SS$_NORMAL)
+C
+C open input and output IFF files
+C
+	SEGSEL=IFFOPEN (INLUN,INFILE(:IN_LEN),,HAD_LOG)
+	IF (.NOT.SEGSEL) GOTO 80
+C
+	SEGSEL=IFFCREATE(OUTLUN,OUTFILE(:OUT_LEN),,,HAD_LOG)
+	IF (.NOT.SEGSEL) GOTO 80
+C
+C now select input and rewind
+C
+	CALL IFFSEL(INLUN)
+	CALL IFFRWD
+C
+C---------------------------------------------------------------------
+C
+C Initialise counters
+	TOTSEG=0
+	SEGDEL=0
+C now read IFF entries and process as appropriate
+C
+10	CALL IFFSEL(INLUN)
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.LT.0) GOTO 50		! unexpected EOF?
+C
+C If a NO then write it and remember its position
+C
+	IF (IECODE.EQ.'NO') THEN
+	   CALL EIHRI(NOVER,1,1)
+	   CALL IFFSEL(OUTLUN)
+	   LPOSNO=LPOSE
+	   CALL IFFNO(NOVER,0,0)
+	   GOTO 10
+	ENDIF
+C
+C For an EO update the pointer
+C
+	IF (IECODE.EQ.'EO') THEN
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFUNO(LPOSNO)
+	   CALL IFFEO
+	   GOTO 10
+	ENDIF
+C
+C For an EJ close proceedings
+C
+	IF (IECODE.EQ.'EJ') THEN
+	   CALL EIHCPY(OUTLUN)
+	   GOTO 60
+	ENDIF
+C
+C An NF is a special case - mark it's position so that the complete
+C feature can be written out if necessary and send control to the
+C feature entry decoder.
+C
+	IF (IECODE.EQ.'NF') THEN
+	   CALL EIHRI(UWORD,1,1)	!read NF
+	   NF(1)=UWORD
+	   CALL EIHRI(UWORD,1,2)	!read internal seq. no.
+	   CALL EIHMK(1)		!mark so we can rewind to here
+	   NF(2)=UWORD
+	   GOTO 20
+	ENDIF
+C
+C Write out the entry if we've come through to here
+C
+	CALL EIHCPY(OUTLUN)
+	GOTO 10				!back for the next entry
+C
+C-----------------------------------------------------------------------
+C This section decodes the feature attributes, looking for TX and AC
+C entries
+C
+20	CALL IFFSEL(INLUN)
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.LT.0) GOTO 50		! unexpected EOF?
+C
+C If we have an AC then find out it's type we only need to change
+C 4 or 5 so ignore them otherwise. The subroutine ACSORT makes
+C sure that the null bytes are coped with and converts the code
+C from byte to character. Then call STRSUB so that the code can
+C be changed if a match is found and padded with a null if needed
+C
+	IF (IECODE.EQ.'AC') THEN
+	   CALL EIHRI(ACTYPE,1,1)
+	   IF (ACTYPE.EQ.4) THEN
+	      HADLEF=.TRUE.			!set flag for left
+	      TXENT=.FALSE.			!tell ACSORT it's an AC
+	      CALL ACSORT(IELEN,LCHR,LCLEN,TXENT)
+	      CALL STRSUB(LCHR,LCLEN,LACCHA)
+	      GOTO 20				!back for next entry
+	   ELSEIF (ACTYPE.EQ.5) THEN
+	      HADRI=.TRUE.			!set flag for right
+	      TXENT=.FALSE.
+	      CALL ACSORT(IELEN,RCHR,RCLEN,TXENT)
+	      CALL STRSUB(RCHR,RCLEN,RACCHA)
+	      GOTO 20				!back for next entry
+	   ELSE
+	      GOTO 20				!ignore it
+	   ENDIF
+	ENDIF
+C
+C The other entry of interest is a TX entry because this will need
+C changing as well. Read the text string in word form from the IFF
+C file then convert it to character. Call up ACSORT to get the exact
+C length of the entry minus spaces and nulls - we need to pass IELEN
+C as a dummy variable just to keep the subroutine call balanced.
+C Then call STRSUB so can the code can be changed if matched and
+C padded with nulls if needed
+C
+	IF (IECODE.EQ.'TX') THEN
+	   HADTX=.TRUE.
+	   SEGSEL=VIOCLR(TXTBUF,256,0)	! clear TXTBUF
+	   CALL EIHR(TXTBUF,IELEN,1)	! Get the text in word form
+	   TXTPTR=IELEN*2
+	   TXTLEN=TXTPTR
+C
+C Convert TXTBUF (via TXTBUF fake desciptor) to true character in TXCHAR
+	   CALL COPY_STRING (TXTDSC,TXCHAR)
+	   TXENT=.TRUE.			!tell ACSORT it's got a TX
+	   TXTLEN=I			!remember entry length
+	   CALL ACSORT(IELEN,TXCHAR,TXTLEN,TXENT)
+	   CALL STRSUB(TXCHAR,TXTLEN,TXCHA)
+	   GOTO 20
+	ENDIF
+C
+C EF - see if we've had both left and right AC types (if we
+C are dealing with L/R AC types). Then check the old code
+C against the new code array. If there's a match then change
+C it. Then set the write switch by seeing if left and right
+C codes are the same. If they are chuck the feature.
+C
+	IF (IECODE.EQ.'EF') THEN
+	   IWRITE=.TRUE.			!set write switch
+	   IF (HADTX) THEN		!if TX then skip
+	      HADTX=.FALSE.		!reset TX indicator
+	      GOTO 30
+	   ENDIF
+	   IF (HADRI.AND.HADLEF) THEN
+	      TOTSEG=TOTSEG+1
+	      IF (LCHR(1:LCLEN).EQ.RCHR(1:RCLEN)) IWRITE=.FALSE.
+	      HADRI=.FALSE.
+	      HADLEF=.FALSE.		!reset AC detectors
+	   ELSE
+	      CALL LSL_PUTMSG(ISTSEL__ERRAC,NF(1),NF(2))
+	   ENDIF
+	ELSE
+	   GOTO 20			!ignore other entries for now
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C Now lets see if the feature needs to be written or not
+C
+	IF (.NOT.IWRITE) THEN
+	   SEGDEL=SEGDEL+1		! count number of segs. omitted
+	   GOTO 10			!get next entry
+	ENDIF
+C
+30	CALL IFFRWM			!go back to NF
+	CALL IFFSEL(OUTLUN)		!select outfile
+	ISQ=0				!set up internal sequence
+	CALL IFFNF(NF(1),ISQ)		!write new NF entry
+40	CALL IFFSEL(INLUN)		!select infile
+	CALL IFFNXT(IECODE,IELEN)	!find next entry
+	IF (IELEN.LT.0) GOTO 50		! unexpected EOF?
+C
+C First the EF
+C
+	IF (IECODE.EQ.'EF') THEN
+	   CALL IFFSEL(OUTLUN)		!select outfile
+	   CALL IFFEF			!close the feature
+	   GOTO 10			!back for next entry
+	ENDIF
+C
+C The AC - if it's been changed then convert to byte and write them
+C out otherwise just copy out the entry
+C
+	IF (IECODE.EQ.'AC') THEN
+	   CALL EIHRI(ACTYPE,1,1)
+	   IF (ACTYPE.EQ.4) THEN
+	      IF (LACCHA) THEN
+	         CALL IFFSEL(OUTLUN)
+	         CALL IFFAC(4,0,%REF(LCHR),LCLEN) ! write as byte array
+	         LACCHA=.FALSE.		!reset left AC switch
+	         GOTO 40
+	      ELSE
+	         CALL EIHCPY(OUTLUN)
+	         GOTO 40
+	      ENDIF
+	   ELSEIF (ACTYPE.EQ.5) THEN
+	      IF (RACCHA) THEN
+	         CALL IFFSEL(OUTLUN)
+	         CALL IFFAC(5,0,%REF(RCHR),RCLEN) ! write as byte array
+	         RACCHA=.FALSE.		!reset right AC switch
+	         GOTO 40
+	      ELSE
+	         CALL EIHCPY(OUTLUN)
+	         GOTO 40
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C TX entry, if it's been changed then convert to byte and write it out
+C
+	IF (IECODE.EQ.'TX') THEN
+	   IF (TXCHA) THEN
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFTX(%REF(TXCHAR),TXTLEN)	! write as byte array
+	      TXCHA=.FALSE.
+	      GOTO 40
+	   ELSE
+	      CALL EIHCPY(OUTLUN)
+	      GOTO 40
+	   ENDIF
+	ENDIF
+C
+C Through to here so just copy out the entry
+C
+	CALL EIHCPY (OUTLUN)
+	GOTO 40
+C
+C ......................................................................
+C
+C Error - unexpected end of input file
+50	SEGSEL=ISTSEL__UNEXPEOF
+	CALL LSL_PUTMSG(SEGSEL)
+	GOTO 70
+C
+C ......................................................................
+C
+60	IF (HAD_LOG) THEN
+	   CALL WRITEF(
+     &	   'Number of left/right coded links processed = %N',TOTSEG)
+	   CALL WRITEF(
+     &	   'Number of left/right coded links deleted = %N',SEGDEL)
+	ENDIF
+C
+C ......................................................................
+C
+C Close files then back to ISTSEL
+70	CALL IFFCLO(INLUN)
+	IF (.NOT.SEGSEL) THEN
+	   IF (IBITS(SEGSEL,0,3).NE.%LOC(STS$K_WARNING)) THEN
+	      CALL IFFCDL(OUTLUN) 			!delete file
+	   ELSE
+	      CALL IFFCLO(OUTLUN,%LOC(SS$_ABORT))	!just close file
+	   ENDIF
+	ELSE
+	   CALL IFFCLO(OUTLUN,%LOC(SS$_NORMAL)) 	!close file
+	ENDIF
+80	IF (SEGSEL) SEGSEL=%LOC(SS$_NORMAL)
+	RETURN
+	END

@@ -1,12 +1,17 @@
 	LOGICAL FUNCTION DOCONV
 C
 ***	MODULE DOCONV
-***	IDENT  26AP89
+***	IDENT  19JL90
 C
 C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
 C
 C	Author A.D. Trigg 08 June 1988
 C
+CMOD	Added extra FC map to distinguish repeated feature codes within and
+C	between layers. SPR 853. 19-Jul-90
+C
+CMOD	Altered logic and function calls to fit in with new text handling 
+C	procedures.	AJV 07-Jun-1990
 CMOD	Added ability to write each different feature code into
 C	a separate "logic block". This will assume that FCs
 C	have already been sorted so that all equal FCs
@@ -30,7 +35,8 @@ C
 
 C -----	Functions
 C
-	LOGICAL		CRETEX	!Creates text subsection in TDST file
+	LOGICAL		CRETEX_TX !Creates single text subsection in TDST file
+	LOGICAL		CRETEX_TS !Creates many text subsections in TDST file
 	LOGICAL		CREPOI	!Creates point subsection in TDST file
 	LOGICAL		CREPOL	!Creates polygon subsection in TDST file
 	LOGICAL		CREARC	!Creates arc subsection in TDST file
@@ -57,12 +63,15 @@ C
 	PARAMETER(	MAXLEVELS = 50)
 
 	INTEGER*4	FCMAP(FCMAPDIM)	!bit-map for ftr code check
+	INTEGER*4	FC_INLAYER_MAP(FCMAPDIM) !bit-map for ftr code check 
+						 !within layer
 	INTEGER*4	FC,BNT_FC	!longword feature code
 	INTEGER*4	CURRENT_FC	!FC for current logic block
 	INTEGER*4 	WORD		!Bit-map word position
 	INTEGER*4	OFFSET		!Bitmap offset
 
 	LOGICAL*4	SEEN_BEFORE	!FC seen before?
+	LOGICAL*4	SEEN_BEFORE_IN_LAYER !FC special case of SEEN_BEFORE
 	LOGICAL*4	HAD_PARENT(MAXLEVELS) ! had parent block @level?
 	BYTE		CH
 
@@ -94,6 +103,7 @@ C
 	HAD_PARENT(1) = .TRUE.
 C
 	CALL VIOCLR(FCMAP,FCMAPDIM*4,0)		! reset whole FC bit-map
+	CALL VIOCLR(FC_INLAYER_MAP,FCMAPDIM*4,0)! reset whole in-layer bit-map
 C
 C -----	Open /BNT file 
 C
@@ -114,9 +124,17 @@ C -----	Loop for each IFF entry
 C
 	CALL IFFNXT(IECODE,IELEN)
 	IF(IELEN.EQ.-1)GOTO 900
+C
+C ----- New layer, clear map of feature codes seen within layer
+C
+	IF(IECODE .EQ. 'NO') THEN
+	  CALL VIOCLR(FC_INLAYER_MAP,FCMAPDIM*4,0)
+	ENDIF
+C	
 	IF(IECODE .EQ. 'NF')GOTO 300
 	IF(IECODE .EQ. 'RA')GOTO 200
 	IF(IECODE .EQ. 'EJ')GOTO 800
+C
 	GOTO 100
 C
 C -----	Unpick range entry and write a TDST master block
@@ -243,13 +261,16 @@ C
 C -----	Test whether this FC has been seen before
 C
 	   SEEN_BEFORE = LIB$EXTZV(FC,1,FCMAP)
-	   IF (SEEN_BEFORE) GOTO 960	! reject feature if FC seen bef.
+	   SEEN_BEFORE_IN_LAYER = LIB$EXTZV(FC,1,FC_INLAYER_MAP)
+	   IF (SEEN_BEFORE_IN_LAYER) GOTO 955 ! reject feature, need ISORT
+	   IF (SEEN_BEFORE) GOTO 960	! reject feature, same FC in >1 layer
 C
 C -----	Set bit in FCMAP for new FC, and make this FC current
 C
 	   WORD = FC/32			! which word (0-n) the bits in
 	   OFFSET = MOD(FC,32)		! offset into word
 	   CALL LIB$INSV(MASK,OFFSET,1,FCMAP(WORD+1))
+	   CALL LIB$INSV(MASK,OFFSET,1,FC_INLAYER_MAP(WORD+1))
 	   CURRENT_FC = FC
 C
 C -----	Write new "logic block" header
@@ -263,7 +284,8 @@ C
 C
 C -----	Find the next feature and inspect it
 C
-350	CALL IFFNXT(IECODE,IELEN)
+350	HAD_TS = .FALSE.
+	CALL IFFNXT(IECODE,IELEN)
 C
 C -----	AC - Ancillary Codes
 C
@@ -286,14 +308,15 @@ C
 	IF(IECODE .EQ. 'TS')THEN
 	   IF(GT .NE. 10)GOTO 940
 	   HAD_TS = .TRUE.
-	   OK = CRETEX()	!Don't need to extract any more info
+	   OK = CRETEX_TS()	!Don't need to extract any more info
 				!TDST composite texts have same 
 				!attributes for all contained text
 	   IF(.NOT.OK)THEN
 	      DOCONV = .FALSE.
 	      GOTO 1000
 	   END IF
-	   GOTO 350		!Search for next feature
+	   IF (HAD_NF) GOTO 300
+	   GOTO 100		!Search for next feature
 	END IF
 C
 C -----	TH - Text height or line thickness
@@ -351,7 +374,7 @@ C
 	GOTO 100
 C
 C -----	Create TDST text feature
-390	OK = CRETEX()
+390	OK = CRETEX_TX()
 	IF(.NOT.OK)THEN
 	   DOCONV = .FALSE.
 	   GOTO 1000
@@ -380,7 +403,9 @@ C
 	GOTO 100	!Not fatal just abort this feature
 950	CALL LSL_PUTMSG(IDST__NONEXIGT,GT,FC)
 	GOTO 100	!Not fatal just abort this feature
-960	CALL LSL_PUTMSG(IDST__BADFCORDER,FSN)
+ 955	CALL LSL_PUTMSG(IDST__BADFCORDER,FSN)
+	GOTO 100	!Not fatal just abort this feature
+960	CALL LSL_PUTMSG(IDST__BADFCLAYER,FSN)
 	GOTO 100	!Not fatal just abort this feature
 1000	CALL IFFCLO(1)
 	CALL FLRCLO(BNTLUN)

@@ -1,0 +1,234 @@
+ 	SUBROUTINE GETIFF(RO,IN)
+C
+***	IDENT   24MR93
+***	MODULE  GETIFF
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Moved to GETIFF				CCB	 5-NOV-1984
+C       Written (as DOIFF)			RJH	25-SEP-1984
+C
+C Description
+C
+C	LITES2 cartographic editor routine to perform the work of
+C	   IFF, READ, and INSITU commands
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/		! moan constants
+***	PARAMETER/CMN:STAPAR/
+C
+	INCLUDE '($JPIDEF)'
+C
+***	COMMON/CMN:DOUT/		! cmd dec. output
+***	COMMON/LSL$CMNLSL:EXPC/		! for EXPDSC
+***	COMMON/LSL$CMNLSL:FILENAME/	! for maximum length of file name
+***	COMMON/CMN:FILES/		! filename details
+***	COMMON/LSL$CMNIFF:IFFHAN/	! IFF library interface
+***	COMMON/CMN:MAPS/		! multiple map details
+***	COMMON/CMN:OPTION/		! options
+***	COMMON/CMN:RFCTRL/
+***	COMMON/CMN:STATE/
+C
+C arguments
+	LOGICAL*1	RO		! file to be read-only
+	LOGICAL*1	IN		! file to be edited in situ
+C The combination RO and IN both true is not used.
+C
+C Functions called
+	LOGICAL		IFFHDR
+	LOGICAL		INPUT
+	LOGICAL		PARFILN		! parses a filename
+	LOGICAL		LOCKIF		! lock the file
+	INTEGER		LIB$SKPC
+	INTEGER		LIB$SGET1_DD	! use in preference to STR$
+C
+C External function for MSGCMD
+	EXTERNAL	LEARN
+C
+C Local Variables
+	INTEGER*4	RETCOD		! file parse return code
+	LOGICAL*4	IERR		! system error code
+	INTEGER*4	NAMLEN		! length of filename
+	INTEGER*4	RESDESC(2)	! descriptor
+	INTEGER*4	ERROR
+	INTEGER		MAP
+	INTEGER		LOCKS_LEFT
+	INTEGER		I,MAPS_SO_FAR,MAP_FREE
+C
+	INTEGER		LEAVE_LOCKS
+	PARAMETER	(LEAVE_LOCKS = 2)
+C
+	LOGICAL		VERNUM		! allow version numbers
+	PARAMETER	(VERNUM=.TRUE.)
+C
+C Check had FRT file
+	IF (.NOT. HADFRT) THEN
+	   CALL MOAN(MSG_NOFILENAME,'FRT')
+	   CALL MSGCMD(LEARN,MSG_REQFRTNAME)
+	   GOTO 998
+	ENDIF
+C
+C count maps already existing, and find first free slot
+	MAP_FREE = -1		! no free slot
+	MAPS_SO_FAR = 0
+	DO 5 I=0,MAPTOP
+	   IF (MAP_EXIST(I)) THEN
+	      MAPS_SO_FAR = MAPS_SO_FAR+1
+	   ELSE
+	      IF (MAP_FREE.LT.0) MAP_FREE = I
+	   ENDIF
+5	CONTINUE
+C
+C check if already got enough maps
+	IF (SINDEX.EQ.STATE_INITIAL) THEN
+	   IF (MAPS_SO_FAR.GT.NMAPS) THEN
+	      CALL MOAN(MSG_HADENOMAPS)
+	      CALL INFORM(MSG_CONWITHMAPS,MAPS_SO_FAR)
+	      GOTO 998
+	   ENDIF
+	ELSE
+	   IF (MAP_FREE.LT.0.AND.MAPTOP.EQ.(MAXMAP-1)) THEN
+	      CALL MOAN(MSG_MAPSFULL,MAXMAP)
+	      CALL LEARN(MSG_RETURNTOINITIAL)
+	      GOTO 998
+	   ENDIF
+	ENDIF
+C
+	IF (MAP_FREE.LT.0) MAP_FREE = MAPTOP+1
+C
+C allocate maximum space to IFFNAM
+	RETCOD = LIB$SGET1_DD(C_MAX_SIZ,IFFNAM(1,MAP_FREE))
+	IF (.NOT.RETCOD) THEN
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 998
+	ENDIF
+C
+C Parse IFF filename
+	RETCOD = PARFILN(IFFNAM(1,MAP_FREE),NAMLEN,
+     &		DSTR(1:DSTRL),IFFTEM//';0',VERNUM) 
+	IF (.NOT.RETCOD) THEN
+	   CALL MOAN(MSG_ERRFILENAME,'IFF')
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 998
+	ENDIF
+C
+C close all open maps (will not do anything in INITIAL state)
+	DO 10 MAP=0,MAPTOP
+	   IF (MAP_EXIST(MAP).AND.MAPLUN(MAP).NE.0) CALL CLOSIF(MAP)
+10	CONTINUE
+C
+C Open IFF file
+	CALL IFFOPN(INLUN,IFFNAM(1,MAP_FREE),0)	! read only
+	IF (IERCD .NE. 0) THEN
+C
+C trim off trailing spaces from dynamic string
+	   CALL STR$TRIM(IFFNAM(1,MAP_FREE),IFFNAM(1,MAP_FREE))
+	   CALL MOAN(MSG_IFFOPEN,MAP_FREE+1,IFFNAM(1,MAP_FREE))
+	   GOTO 998
+	ENDIF
+C
+C Got a valid map, so accept it
+	IF (MAP_FREE.GT.MAPTOP) MAPTOP = MAP_FREE
+	CALL IFFIRV(1)		! input revision level 1, for CB's
+	CALL IFFINQ(IFFNAM(1,MAP_FREE))		! get full name
+	CALL IFFID(FILEID(1,MAP_FREE))		! and identification
+C
+C lock the file (ensure nobody else editing it already)
+	IF (.NOT.RO) THEN
+C
+C check that there is a lock available
+	   CALL LIB$GETJPI(JPI$_ENQCNT,,,LOCKS_LEFT)
+	   IF (LOCKS_LEFT.LT.LEAVE_LOCKS) THEN
+	      CALL MOAN(MSG_NOMORELOCKS)
+	      CALL LEARN(MSG_INCREASEENQL)
+	      CALL IFFCLO(INLUN)	! can't lock, so close it again
+	      GOTO 997			! and forget it
+	   ENDIF	      
+C
+C set up dummy descriptor to point to the file id as char string
+	   RESDESC(1) = 28			! length
+	   RESDESC(2) = %LOC(FILEID(1,MAP_FREE))	! address
+C
+C check for completely zero fileid (DECnet access) - can't lock
+	   IF (LIB$SKPC(CHAR(0),RESDESC).EQ.0) THEN
+	      IF (LOKOPT) CALL INFORM(MSG_NOLOCK)
+	   ELSE
+C
+C form lock resource name from device id (counted string) and file id
+	      RESDESC(1) = 6	! descrptor to 6 byte file id
+	      RESDESC(2) = RESDESC(2)+16
+	      CALL EXPAND('LITES2%AC%S',FILEID(1,MAP_FREE),RESDESC)
+	      IF (LOCKIF(EXPDSC,MAPLCK(MAP_FREE),IFFNAM(1,MAP_FREE),LOKOPT)
+     &								) THEN
+	         CALL IFFCLO(INLUN)	! can't lock, so close it again
+	         GOTO 996		! and forget it
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C If insitu, then close and re-open for update, to ensure writeable
+	IF (IN.AND..NOT.RO) THEN		! open for update
+	   CALL IFFCLO(INLUN)
+	   CALL IFFOPI(
+     &		INLUN,IFFNAM(1,MAP_FREE),FILEID(1,MAP_FREE),,,'Insitu edit')
+	   IF (IERCD .NE. 0) THEN
+	      CALL MOAN(MSG_IFFPROT,MAP_FREE+1,IFFNAM(1,MAP_FREE))
+	      GOTO 996
+	   ENDIF
+	   CALL IFFIRV(1)	! input revision level 1, for CB's
+	ENDIF
+C
+	MAPCUR = MAP_FREE
+	MAP_EXIST(MAPCUR) = .TRUE.		! now exists
+	MAPRO(MAPCUR) = RO			! read-only?
+	MAPINS(MAPCUR) = IN			! in-situ?
+	MAPMAP(MAPCUR) = MAPOPT			! memory mapped
+C
+C set up IFF file handling (see SELIF etc.)
+	MAPLUN(MAPCUR) = 0			! no IFF LUN
+	LPOSFT(MAPCUR) = 0			! no writing position
+	MAPOVL(MAPCUR) = -1			! no open overlay
+	LPOSNO(MAPCUR) = 0			! no NO position
+C
+	MAPWRK(MAPCUR) = .FALSE.		! no valid workspace
+	MAPSEL(MAPCUR) = .TRUE.			! selected
+C
+C only setup maps read in in initial state on table
+	MAP_TABLE(MAPCUR) = (SINDEX.EQ.STATE_INITIAL).AND..NOT.HAD_SETUP_CANCEL
+C
+	CALL IFFRLA(.TRUE.)
+	IERR = IFFHDR()
+	CALL IFFCLO(INLUN)
+	IF (IERR) GOTO 996			! reject
+C
+C read in maps if had enough IFF commands
+	RANGE_PROBLEM = .FALSE.
+	IF (SINDEX.EQ.STATE_INITIAL) THEN
+	   IF (MAPS_SO_FAR .GE. NMAPS) THEN	! final IFF command ?
+	      IF (INPUT()) CALL LEARN(MSG_CONTNOINP)
+	   ENDIF
+	ELSE
+	   CALL NEW_MAP(MAP_FREE,ERROR)
+	   IF (ERROR) GOTO 996
+	   CALL INFORM(MSG_INPTCMPLT)
+	ENDIF
+	IF (RANGE_PROBLEM .AND. DO_FLY_TRANS) THEN
+	   CALL INFORM(MSG_RANGEPROBLEM)
+	   CALL INFORM(MSG_RANGEPROBLEM_1)
+	ENDIF
+	GOTO 999
+C
+C here to drop our lock on the file (because some other error)
+996	MAP_EXIST(MAP_FREE) = .FALSE.
+	IF (MAPLCK(MAP_FREE).NE.0) THEN
+	   CALL SYS$DEQ(%VAL(MAPLCK(MAP_FREE)),,,)
+	   MAPLCK(MAP_FREE) = 0
+	ENDIF
+997	IF (MAPTOP.EQ.MAP_FREE) MAPTOP = MAPTOP-1		! reject again
+C
+998	CALL IGNCMD
+C
+999	RETURN
+	END

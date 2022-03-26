@@ -1,0 +1,261 @@
+        INTEGER*4 FUNCTION PROCESS_DTI()
+C
+***	MODULE	PROCESS_DTI
+***	IDENT	25SE92
+C
+C 	Copyright Laser-Scan Ltd.,Cambridge,England
+C 	Author  : D R Catlow
+C	Created : 25 September 1987
+C
+C	Modified: 23 September 1992 				J Barber
+C		Check if terminal output, and if not output % complete
+C		message every 5%. Otherwise original % value output at
+C		every output column, overwriting itself
+C
+C	Function for DTITRANS to perform the required projection
+C	transformation and resampling.  
+C	The trasformation function is applied to each node in the
+C	output matrix in turn, followed by a call to the
+C	resample routine to determine the value of the node.
+C	The value is then written to the output file.
+C
+C----------------------------------------------------------------------
+	IMPLICIT NONE
+C
+C	DTILIB commons
+***	COMMON   /LSL$CMNDTI:DTIHDR/
+***	COMMON	 /LSL$CMNDTI:DTIPROJ/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+C	DTITRANS commons
+***	COMMON   /HERE:DTITRANS/
+***	PARAMETER/HERE:DTITRANSMSG/
+C
+C Functions:
+	LOGICAL		TEST_TERM	!terminal output?
+	INTEGER*4	SATMAP_TRANS	!to transform SATMAP pixels
+	INTEGER*4	DTI_WRITE_DATA	!to write a data value
+	INTEGER*4	SAMPLE		!to calculate the value
+C					!of the matrix node, on
+C					!the basis of the input 
+C					!matrix values.
+C Locals:
+	LOGICAL		OK,IS_TERM	!terminal output?
+	REAL		PCENT		!for percentage complete
+	REAL		PCF		!diagnostics messages.
+	INTEGER*4	FIVE_PC
+	INTEGER*4	IERR		!function return
+	INTEGER*4	ERROR		!system error code
+C
+	INTEGER*4	X,Y		!counters
+	REAL*8		SAMPLE_X	!true x position
+	REAL*8		SAMPLE_Y	!true y position
+	REAL*8		ICOORD(2)	!untransformed coord pt
+	REAL*8		OCOORD(2)	!transformed coord pt
+C
+	BYTE		BYTE_SAMPLE_VALUE	   !
+	INTEGER*2	UNSIGNED_BYTE_SAMPLE_VALUE !
+	INTEGER*2	WORD_SAMPLE_VALUE	   !sample value
+	INTEGER*4	LONG_SAMPLE_VALUE	   !
+	REAL		REAL_SAMPLE_VALUE	   !
+C
+C----------------------------------------------------------------------
+C	If diagnostics are enabled, tell the user what we are about to do
+C
+	IF (HAD_LOG) THEN
+          CALL FRAMED_MES
+	  OK = TEST_TERM('SYS$OUTPUT',IS_TERM,IERR)
+C
+	  PCENT = 0
+	  PCF = 100.0/X_EXTENT(OUT_LUN)
+	  IF (IS_TERM) THEN
+	    WRITE(*,'(1X,F6.2,''%'')') PCENT
+	  ELSE
+	    CALL WRITEF(' %F6.2%% complete', PCENT)
+	  ENDIF
+	ENDIF
+C
+	FIVE_PC = 5
+C
+C----------------------------------------------------------------------
+C	Outer Loop = output column (X) value
+	DO 500 X=1,X_EXTENT(OUT_LUN)
+C
+C----------------------------------------------------------------------
+C	Inner Loop = output row (Y) value
+	   DO 400 Y=1,Y_EXTENT(OUT_LUN)
+C
+C----------------------------------------------------------------------
+C	      IF IMAGEMAP, use transformation parameters to find output pixel
+C
+	      IF (IMAGEMAP) THEN
+C
+		 TRANS = 1	! i.e. ground to image
+C
+C		 Convert the output DTI pixel to real world coordinates
+C
+		 IN_X = ABSOLUTE_SWX(OUT_LUN) + 
+     &                  DBLE((X-1)*DTIPROJ_SAMPLE(1,OUT_LUN))
+		 IN_Y = ABSOLUTE_SWY(OUT_LUN) + 
+     &                  DBLE((Y-1)*DTIPROJ_SAMPLE(2,OUT_LUN))
+C
+C		 Transform this coordinate to image space to find the correct
+C		 pixel value
+C
+		 PROCESS_DTI=SATMAP_TRANS()
+		 SAMPLE_X = OUT_X
+		 SAMPLE_Y = OUT_Y
+C
+C----------------------------------------------------------------------
+C	      if converting projection
+C
+	      ELSE IF (CONTROL) THEN
+C
+	         ICOORD(1)=DTIPROJ_ORIGIN(1,OUT_LUN)
+     &                     +((X-1)*DTIPROJ_SAMPLE(1,OUT_LUN))
+     &	                   -CONTROL_OUTPUT_ORG(1)
+	         ICOORD(2)=DTIPROJ_ORIGIN(2,OUT_LUN)
+     &                     +((Y-1)*DTIPROJ_SAMPLE(2,OUT_LUN))
+     &	                   -CONTROL_OUTPUT_ORG(2)
+C
+	         CALL TRNUSE(ICOORD,OCOORD,BACKMATRIX)
+C
+C       Apply local origin
+	         SAMPLE_X = OCOORD(1) + CONTROL_INPUT_ORG(1)
+	         SAMPLE_Y = OCOORD(2) + CONTROL_INPUT_ORG(2)
+C
+C	Subtract origin offset before resampling
+	         SAMPLE_X = SAMPLE_X-DTIPROJ_ORIGIN(1,IN_LUN)
+	         SAMPLE_Y = SAMPLE_Y-DTIPROJ_ORIGIN(2,IN_LUN)
+C
+C----------------------------------------------------------------------
+C	      if converting projection
+C
+	      ELSE IF (DO_TRANSFORM) THEN
+C
+	         ICOORD(1)=DTIPROJ_ORIGIN(1,OUT_LUN)
+     &                     +((X-1)*DTIPROJ_SAMPLE(1,OUT_LUN))
+	         ICOORD(2)=DTIPROJ_ORIGIN(2,OUT_LUN)
+     &                     +((Y-1)*DTIPROJ_SAMPLE(2,OUT_LUN))
+C
+	         CALL TRANSFORM_COORD(ICOORD,OCOORD,.TRUE.)
+C
+C       Apply any user specified shift
+	         SAMPLE_X = OCOORD(1)
+	         SAMPLE_Y = OCOORD(2)
+C
+C	Subtract origin offset before resampling
+	         SAMPLE_X = SAMPLE_X-DTIPROJ_ORIGIN(1,IN_LUN)
+	         SAMPLE_Y = SAMPLE_Y-DTIPROJ_ORIGIN(2,IN_LUN)
+C
+	      ELSE
+C----------------------------------------------------------------------
+C	      Simply work out the coordinates of the node by multiplying the
+C	      matrix indices by the sample values and adding on any origin
+C	      values
+C
+	        SAMPLE_X = DTIPROJ_ORIGIN(1,OUT_LUN)
+     &                 + ((X-1)*DTIPROJ_SAMPLE(1,OUT_LUN))
+	        SAMPLE_Y = DTIPROJ_ORIGIN(2,OUT_LUN)
+     &                 + ((Y-1)*DTIPROJ_SAMPLE(2,OUT_LUN))
+C
+C             Apply any user specified shift and subtract the origin 
+C	      value of the input file before sampling
+		SAMPLE_X = SAMPLE_X-DTIPROJ_ORIGIN(1,IN_LUN)
+	        SAMPLE_Y = SAMPLE_Y-DTIPROJ_ORIGIN(2,IN_LUN)
+C
+	      ENDIF
+C
+C----------------------------------------------------------------------
+C Resample
+	      PROCESS_DTI=SAMPLE(IN_LUN,
+     &                             RESAMPLE_METHOD,
+     &                             SAMPLE_X,
+     &                             SAMPLE_Y,
+     &                             REAL_SAMPLE_VALUE)
+	      IF(.NOT.PROCESS_DTI)THEN
+	         CALL LSL_PUTMSG(DTRANS__RESAMPLE)
+	         CALL LSL_PUTMSG(PROCESS_DTI)
+	         PROCESS_DTI=DTRANS__RESAMPLE
+	         GOTO 999
+	      ENDIF
+C
+C----------------------------------------------------------------------
+C	      Write the sample value to the required output file
+C
+	      IF (DATA_TYPE(OUT_LUN).EQ.1) THEN
+		 UNSIGNED_BYTE_SAMPLE_VALUE = NINT(REAL_SAMPLE_VALUE)
+		 IF ( UNSIGNED_BYTE_SAMPLE_VALUE .GE. 128 )
+     &		      UNSIGNED_BYTE_SAMPLE_VALUE =
+     &		      UNSIGNED_BYTE_SAMPLE_VALUE - 256
+		 BYTE_SAMPLE_VALUE = UNSIGNED_BYTE_SAMPLE_VALUE
+	         PROCESS_DTI=DTI_WRITE_DATA ( OUT_LUN,
+     &					      BYTE_SAMPLE_VALUE, X, Y )
+	      ELSE IF (DATA_TYPE(OUT_LUN).EQ.2) THEN
+		 WORD_SAMPLE_VALUE = NINT(REAL_SAMPLE_VALUE)
+	         PROCESS_DTI=DTI_WRITE_DATA ( OUT_LUN,
+     &					      WORD_SAMPLE_VALUE, X, Y )
+	      ELSE IF (DATA_TYPE(OUT_LUN).EQ.3) THEN
+		 LONG_SAMPLE_VALUE = NINT(REAL_SAMPLE_VALUE)
+	         PROCESS_DTI=DTI_WRITE_DATA ( OUT_LUN,
+     &					      LONG_SAMPLE_VALUE, X, Y )
+	      ELSE
+	         PROCESS_DTI=DTI_WRITE_DATA ( OUT_LUN,
+     &					      REAL_SAMPLE_VALUE, X, Y )
+	      ENDIF
+C
+	      IF(.NOT.PROCESS_DTI)THEN
+	         CALL LSL_PUTMSG(PROCESS_DTI)
+	         PROCESS_DTI=DTRANS__PROCESS
+	         GOTO 999
+	      ENDIF
+C
+C----------------------------------------------------------------------
+400	   CONTINUE	    
+C
+C   	If diagnostics are enabled show progress
+	   IF (HAD_LOG) THEN
+	     PCENT = X*PCF
+C
+	     IF (IS_TERM) THEN
+	        WRITE(*,'(1H+,F6.2)') PCENT
+	     ELSE
+		IF (PCENT.GT.FIVE_PC) THEN
+		   FIVE_PC = FIVE_PC + 5
+		   CALL WRITEF(' %F6.2%% complete', PCENT)
+		ENDIF
+	     ENDIF
+	   ENDIF
+C
+C----------------------------------------------------------------------
+500	CONTINUE
+C
+C	If diagnostics output 100% complete, and then
+C	overwrite the % message
+	IF (HAD_LOG) THEN
+	  PCENT = 100
+C
+	  IF (IS_TERM) THEN
+	    WRITE(*,'(1H+,F6.2)') PCENT
+	    WRITE(*,'(1H+,''       '')')
+	  ELSE
+	    CALL WRITEF(' %F6.2%% complete', PCENT)
+	  ENDIF
+	ENDIF
+C
+C	If diagnostics inform the user how many matrix points have been
+C	processed
+	IF(HAD_LOG)THEN
+	  CALL WRITEF('Total of %N matrix points processed',
+     &    X_EXTENT(OUT_LUN)*Y_EXTENT(OUT_LUN))
+	  CALL WRITEF(' ')
+	ENDIF
+C
+C----------------------------------------------------------------------
+	PROCESS_DTI=DTRANS__NORMAL
+C
+C----------------------------------------------------------------------
+999	RETURN
+	END
+C

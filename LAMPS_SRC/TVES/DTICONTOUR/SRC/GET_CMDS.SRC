@@ -1,0 +1,369 @@
+	LOGICAL FUNCTION GET_CMDS(CONTOUR)
+C
+***	MODULE	GET_CMDS
+***	IDENT	10AU93
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD	ABSOLUTE coordinates now handled		TJH 28-Nov-1988
+C	Created 					TJH 09-Oct-1987
+C
+C Read in part of a grid from file, and store it in NDTM. 
+C Grid section held has WIN_NUM_ROW rows and
+C WIN_NUM_COL columns, selected out of a (possibly) bigger DTM.
+C
+	IMPLICIT NONE
+C
+C Argument:
+	LOGICAL	CONTOUR		! do the contouring?
+C
+C Parameters:
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNDTICONTOUR:PARAMS.PAR'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C Common blocks:
+	INCLUDE 'LSL$CMNDTICONTOUR:ANNOT.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:COMMAND.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:FILES.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:IFCTRL.CMN'
+	INCLUDE 'LSL$CMNDTICONTOUR:SMTCMN.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+C
+C W/s:
+	BYTE		CH		! for use with RDCHS
+	INTEGER		CMD     	! decoded command number
+	INTEGER		OK		! function return
+	INTEGER		IERR		! error code
+	LOGICAL*1	HAD_FILEOUT	! had a FILEOUT/IFF  cmd?
+	LOGICAL*1	HAD_FILEIN	! had a FILEIN cmd?
+C
+C Define command tables:
+	EXTERNAL	DTICONTOUR_CMD_TABLE
+	INTEGER		DTICONTOUR_CMD_TABLE
+C
+C Functions:
+	LOGICAL		DESELECT_CMD	! determine deselections
+	LOGICAL		DISABLE_CMD	! decode disable keywords
+	LOGICAL		ENABLE_CMD	! decode enable keywords
+	LOGICAL		FILEIN_CMD	! get input file-spec
+	LOGICAL		FILEOUT_CMD	! get and open output files
+	LOGICAL		HELP_CMD	! give help
+	LOGICAL		INTERVAL_CMD	! get contour interval
+	LOGICAL		INDEX_INTERVAL_CMD! get index contour interval
+	LOGICAL		LABEL_CMD	! set up labelling defaults
+	LOGICAL		PAUSE_CMD	! get pause command
+	LOGICAL		SELECT_CMD	! determine selections
+	LOGICAL         SET_CMD		! set IFF presets
+	LOGICAL         SHOW_CMD	! show status
+	LOGICAL         SPAWN_CMD	! for DCL SPAWN
+	LOGICAL		UNITS_CMD	! get units command
+	LOGICAL		WAIT_CMD	! wait for specified time
+	LOGICAL		WINDOW_CMD	! get WINDOW command args
+	LOGICAL		ZLIMITS_CMD	! get ZLIMITS command args
+C
+	INTEGER		CLOSE_FILES	! close any open files
+C
+	LOGICAL		GETFILNAM	! read file-spec
+	LOGICAL  	RDCHS		! read character from line
+	LOGICAL  	RDCH		! read character from line
+	LOGICAL 	RDCOMM  	! read command from line
+C
+	INTEGER         FLRSTR		! read record from file
+	INTEGER         FLROPN		! open file for LSLLIB FILEO	
+	INTEGER		TTRSTR  	! read line from terminal
+	INTEGER		RDFILN		! reads and parses a filename
+C
+C ......................................................................
+C
+	GET_CMDS = SS$_NORMAL
+C
+C Initialise all the command flags
+C
+	ABSOLUTE	=.TRUE.		! assume absolute coordinates
+	TTIN   		=.TRUE.		! assume reading from terminal
+	LAYER		= 1		! default IFF layer 
+	SMTNUM		= 0       	! de-select smoothed contours
+	MFACTR  	= 1.0		! multiplication factor for hts.
+	HADZ		=.FALSE.	! interval set?
+	HAD_FRAME	=.FALSE.	! generate frame?
+	HAD_FILEIN	=.FALSE.	! had filein?
+	HAD_FILEOUT	=.FALSE.	! had fileout?
+	HAD_SPOT	=.FALSE.	! do spot heights?
+	HAD_DIAG	=.FALSE.	! full diagnostic printout ?
+	MULT    	=.FALSE.	! multiplication set
+	DIVIDE  	=.FALSE.	! divide incoming heights ?
+	FEET2M  	=.FALSE.	! convert from feet to metres
+	M2FEET  	=.FALSE.	! convert from Metres to Feet
+	PMEING		=.FALSE.	! PME running?
+	DISABLED_INDEX  =.FALSE.	! don't do index contours
+	IFF_SCALE	= 50000.0D0	! for IFF MD
+C
+C And initialise the annotation variables
+	CALL ANNO_SET
+C
+C Set UNITS text
+	UNITS_TEXT(1)='DTI matrix units'
+	UNITS_TEXT(2)='Metres on the ground'
+	UNITS_TEXT(3)='Latlong (seconds)'
+	UNITS_TEXT(4)='Latlong (degrees, minutes and seconds)'
+	UNITS_TEXT(5)='Projection units'
+C
+C ......................................................................
+C Get an input line from the terminal
+C
+10	TXTPTR=80
+	IF (TTIN) THEN
+	   OK = TTRSTR(,,'DTICONTOUR> ',IERR)
+	ELSE
+	   CALL FLRSEL(INDLUN)
+	   OK = FLRSTR(,,IERR)
+	ENDIF
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      IF (TTIN) THEN
+	         GOTO 220		! end of file = exit
+	      ELSE
+	         CALL WRITEF('%S Unexpected end of indirect command '//
+     &			'file detected',WARNING)
+	         CALL WRITEF('                RETURN command assumed '//
+     &				'- returning to terminal input')
+	         GOTO 170		! close indirect file etc.
+	      ENDIF
+	   ENDIF
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 20
+	ENDIF
+C
+C echo and decode the line
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('DTICONTOUR> ')
+	   CALL APPEND(TXTDSC) ! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+	CALL BSLN
+C
+C Look for comment
+	IF (RDCHS(CH)) GOTO 10	! substantially empty line
+	IF (CH.EQ.'!') GOTO 10	! comment!
+C
+C Look for indirect file start
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 20
+	      ELSE
+	         CALL BSCH
+	      ENDIF
+	      OK=GETFILNAM(INDFILE,INDLEN,
+     &				'SYS$DISK:[].COM;0',.TRUE.,%REF('!'))
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	      OK=FLROPN(INDLUN, INDFILE(:INDLEN), IERR)
+	      IF (OK) THEN
+	         CALL WRITEF('Command input now being read from %S'
+     &					,INDFILE(:INDLEN))
+	         TTIN=.FALSE.
+	         GOTO 10
+	      ELSE
+	         CALL WRITEF('%S Can''t open indirect command file %S'
+     &			  ,WARNING,INDFILE(:INDLEN))
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+	CALL BSCH			! un-read non-'@'
+C
+	CMD=RDCOMM(DTICONTOUR_CMD_TABLE)
+	GOTO (	20,
+     &		30,	! go	
+     &		50,	! disable		
+     &		40,	! enable		
+     &		140,	! filein		
+     &		150,	! fileout/IFF		
+     &		60,	! help		
+     &		80,	! interval
+     &		90,	! index_interval
+     &		100,	! labelling
+     &		190,	! pause		
+     &		225,	! quit		
+     &		160,	! return		
+     &		120,	! set		
+     &		130,	! show		
+     &		180,	! spawn		
+     &		70,	! units		
+     &		200,	! wait		
+     &		210,	! window
+     &		110	! zlimits		
+     &	      		), CMD+1
+C
+C command number out of range
+	CALL WRITEF('Command not yet implemented')
+C
+C close indirect input following disaster
+20	IF (.NOT.TTIN) THEN
+	   TTIN=.TRUE.
+	   CALL FLRCLO(INDLUN)
+	   CALL WRITEF(' ')
+	   CALL WRITEF('%S Indirect file error - returning to '//
+     &			'terminal input',WARNING)
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C GO - go!
+30	IF (.NOT.(HAD_FILEIN.AND.HAD_FILEOUT)) THEN
+	   CALL WRITEF(WARNING//'You must specify both an input '//
+     &		'DTI file and an output IFF file before contouring '//
+     &		'can start')
+	   GOTO 20
+	ELSE
+	   CONTOUR=.TRUE.
+	   GET_CMDS=SS$_NORMAL
+	ENDIF
+	GOTO 230
+C
+C ......................................................................
+C Enable 'sub-command'
+C
+40	IF (.NOT.ENABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C Disable 'sub-command'
+C
+50	IF (.NOT.DISABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C HELP
+60	IF (.NOT.HELP_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C UNITS
+70	IF (.NOT.UNITS_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C INTERVAL
+80	IF (.NOT.INTERVAL_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C INDEX_INTERVAL
+90	IF (.NOT.INDEX_INTERVAL_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C LABELLING
+100	IF (.NOT.LABEL_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C ZLIMITS
+C
+110	IF (ZLIMITS_CMD()) GOTO 10
+	GOTO 20
+C
+C ......................................................................
+C SET
+120	IF (.NOT.SET_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SHOW
+130	IF (.NOT.SHOW_CMD()) GOTO 20
+	GOTO 10
+C
+C
+C ......................................................................
+C FILEIN [file-spec]
+C
+140	IF (DTILUN_INUSE(DTILUN)) THEN  ! already had successful FILEIN?
+	   CALL WRITEF('%S the DTI input file is already open!'
+     &					,WARNING)
+	ELSE
+	   IF (.NOT.FILEIN_CMD()) GOTO 20
+	   HAD_FILEIN=.TRUE.
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C FILEOUT [filespec]
+C
+150	IF (IFFOPN) THEN  	! already had successful FILEOUT?
+	   CALL WRITEF('%S the IFF output file is already open!'
+     &					,WARNING)
+	ELSE
+	   IF (.NOT.FILEOUT_CMD()) GOTO 20
+	   HAD_FILEOUT=.TRUE.
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C RETURN - return to terminal input
+C
+160	IF (TTIN) THEN
+	   CALL WRITEF(
+     &		'RETURN command ignored - command '//
+     &			'input is already from terminal')
+	ELSE
+	   CALL WRITEF(
+     &		'RETURN command detected - returning to terminal input')
+	ENDIF
+170	IF (.NOT.TTIN) CALL FLRCLO(INDLUN)
+	TTIN=.TRUE.
+	GOTO 10
+C
+C ......................................................................
+C SPAWN DCL process - primarily designed for file management
+C
+180	IF (.NOT.SPAWN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C PAUSE
+C
+190	CALL PAUSE_CMD(TTIN)
+	GOTO 10
+C
+C ......................................................................
+C WAIT
+C
+200	IF (.NOT.WAIT_CMD(TTIN)) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C WINDOW
+C
+210	IF (.NOT.WINDOW_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C EXIT with error
+C
+220	GET_CMDS=SS$_ABORT
+C
+C QUIT command given
+C
+225	IF (.NOT.TTIN) CALL FLRCLO(INDLUN)	! close indirect input
+C
+	IF (IFFOPN) CALL IFFCDL(IFFLUN)		! delete empty IFF
+	IFFOPN = .FALSE.
+C
+	OK = CLOSE_FILES()			! close all files
+C
+230	RETURN
+	END
+C

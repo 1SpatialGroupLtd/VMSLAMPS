@@ -1,0 +1,204 @@
+	LOGICAL FUNCTION NEXT_JUNCTION(JUNC_X,JUNC_Y,NUM_ARMS)
+C
+***	IDENT	04NO86
+***	MODULE	NEXT_JUNCTION
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RJH	10-Sep-1986
+C
+C	OS RELHT Program - Deal with the next junction
+C
+C Description
+C
+C	For each arm of a junction, the following procedure is 
+C	followed :-
+C
+C		- get the ST pointer and vertex number
+C		- get the feature code by comparing the ST pointer with 
+C		  the list of FS pointers to find the relevant FS entry
+C		- get the height priority from the priority table
+C		- use the index from the FS pointer list in conjunction 
+C		  with the vertex number to get the AC pointer from the 
+C		  AC pointer list
+C
+C	Once this information has been obtained for each arm, the 
+C	relative heights are reassigned, starting at 0. These values 
+C	are then written into the relevant AC entries in the output 
+C	file.
+C
+C	The junction positions for any doubtful link ends are recorded 
+C	in the LITES2 guidance file if one is being produced.
+C
+C	If a node list is being produced, all junction positions are 
+C	written to it.
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+C
+***	PARAMETER/HERE:RELHTMSG/	! message definitions
+C
+C Local Parameters
+C
+	INTEGER*2	MAX_ARMS	! maximum number of arms allowed
+	PARAMETER	(MAX_ARMS = 10)
+C
+C Arguments
+C
+	REAL*4		JUNC_X		! X coord of junction
+	REAL*4		JUNC_Y		! Y coord of junction
+	INTEGER*2	NUM_ARMS	! number of arms
+C
+C Common Blocks
+C
+***	COMMON/HERE:CONTROL/		! control variables
+***	COMMON/HERE:POINTERS/		! pointers into IFF files
+***	COMMON/HERE:PRIO_TABLE/		! feature code priority table
+***	COMMON/LSL$CMNIFF:IFFHAN/	! current position in IFF file
+***	COMMON/LSL$CMNIFF:MD2DES/	! type 2 map descriptor
+C
+C Functions called
+C
+	LOGICAL		BINARY_CHOP	! does a binary chop on FS ptrs
+	LOGICAL		NEW_PRIO	! gets the priorities to write
+	LOGICAL		UPDATE_HEIGHTS	! updates them in output file
+	LOGICAL		WRITE_LIS	! writes coords to node list
+	LOGICAL		WRITE_LCM	! writes posn to LITES2 guide
+C
+C Local Variables
+C
+	INTEGER*4	JUNC_E		! junction Easting
+	INTEGER*4	JUNC_N		! junction Northing
+	INTEGER*4	JUNC_PRIO(MAX_ARMS)	! priorities
+	INTEGER*4	JUNC_PTR(MAX_ARMS)	! AC pointers
+	INTEGER*4	JUNC_HEIGHT(MAX_ARMS)	! heights to write
+	LOGICAL		JUNC_DOUBT(MAX_ARMS)	! doubt indexes
+	INTEGER*4	ST_PTR		! pointer to the arm's ST
+	INTEGER*4	LIST_IND	! index into pointer lists
+	INTEGER*4	VERT_IND	! index into AC pointer list
+	INTEGER*2	VERT_NUM	! vertex number on the arm
+	INTEGER*2	THIS_ARM	! current arm number
+	INTEGER*2	FC		! current feature code
+C
+C Initialisation
+C
+	DO 10 THIS_ARM=1,MAX_ARMS
+	   JUNC_PRIO(THIS_ARM) = 0
+	   JUNC_PTR(THIS_ARM) = 0
+	   JUNC_HEIGHT(THIS_ARM) = 0
+	   JUNC_DOUBT(THIS_ARM) = .FALSE.
+10	CONTINUE
+C
+C Calculate the National Grid coordinates
+C
+	JUNC_E = NINT( MD2LOC(1) + JUNC_X )
+	JUNC_N = NINT( MD2LOC(2) + JUNC_Y )
+C
+C Check we can handle the number of arms 
+C
+	IF (NUM_ARMS.GT.MAX_ARMS .OR. NUM_ARMS.LE.0) THEN
+	   CALL LSL_PUTMSG(RELHT__BADARMNUM,
+     &				NUM_ARMS,MAX_ARMS,JUNC_E,JUNC_N)
+	   SCAN_OK = .FALSE.
+	ENDIF
+C
+C Write the junction coordinates to the node list file if one is being 
+C produced
+C
+	IF (SCAN_OK .AND. HAD_LIS) 
+     &			SCAN_OK = WRITE_LIS(JUNC_E,JUNC_N,NUM_ARMS)
+C
+C no point in doing anything to one armed junctions
+C
+	IF (NUM_ARMS .EQ. 1) GOTO 300
+C
+C two armed junctions can be assumed always to be at same height ??
+C
+	IF (NUM_ARMS .EQ. 2) GOTO 300
+C
+C While we haven't yet considered all the arms and there have been no 
+C errors, deal with the next arm
+C
+	THIS_ARM = 0
+100	IF ((THIS_ARM .GE. NUM_ARMS) .OR. .NOT. SCAN_OK) GO TO 200
+C
+C Get the ST pointer and vertex number for this arm
+C
+	THIS_ARM = THIS_ARM + 1
+	CALL JIHR(THIS_ARM,ST_PTR,VERT_NUM)
+	SCAN_OK = ((IERCD .EQ. 0) .AND. (IERNM .EQ. 1))
+C
+C Check we haven't got a dummy arm
+C
+	IF (SCAN_OK .AND. (ST_PTR .EQ. 0) .AND. (VERT_NUM .EQ. 0))
+     &		GO TO 100
+C
+C check the ST pointer for sanity
+C
+	IF (SCAN_OK.AND.(ST_PTR.LE.0.OR.ST_PTR.GE.LPOSE)) THEN
+	   CALL LSL_PUTMSG(RELHT__BADJBARM,ST_PTR,LPOSE,JUNC_E,JUNC_N,
+     &			THIS_ARM)
+	   GOTO 300	! skip this junction
+	ENDIF
+C
+C Get the index into the AC pointer and feature code lists by comparing 
+C the ST pointer with the FS pointer list
+C
+	IF (SCAN_OK) SCAN_OK = BINARY_CHOP(ST_PTR,LIST_IND)
+C
+C Get the feature code and deduce whether we are concerned with the 
+C first or last vertex of the feature
+C
+	IF (SCAN_OK) THEN
+	   FC = ALL_FC(LIST_IND)
+	   IF (VERT_NUM .EQ. FIRST) THEN
+	      VERT_IND = FIRST
+	   ELSE
+	      VERT_IND = LAST
+	   ENDIF
+C
+C Get the relative height value and doubt index from the priority 
+C table, and the AC pointer from the AC pointer list
+C
+	   JUNC_PRIO(THIS_ARM) = FC_PRIO(1,FC)
+	   JUNC_DOUBT(THIS_ARM) = FC_PRIO(2,FC)
+	   JUNC_DOUBT(THIS_ARM) = 
+     &		(JUNC_DOUBT(THIS_ARM) .OR. ALL_DOUBT(LIST_IND))
+	   JUNC_PTR(THIS_ARM) = AC_LIST(VERT_IND,LIST_IND)
+	ENDIF
+C
+C Go back for test
+C
+	GO TO 100
+C
+C Reassign the relative heights, starting at 0. If any are in doubt, 
+C record the junction position in the LITES2 guidance file if one is 
+C being produced, and output a message if logging is enabled.
+C
+200	IF (SCAN_OK) THEN
+	   IF (NEW_PRIO(JUNC_PRIO,JUNC_DOUBT,JUNC_HEIGHT,NUM_ARMS)) THEN
+	      IF (HAD_LCM) SCAN_OK = WRITE_LCM(JUNC_X,JUNC_Y)
+	      IF (HAD_LOG) THEN
+	         CALL EXPAND
+     &			('Junction at %^L%I7E %I7N ',JUNC_E,JUNC_N)
+	         CALL WRTAPP('has doubtful relative height values')
+	      ENDIF
+	   ENDIF
+C
+C Now update all the AC entries for this junction with their relative 
+C heights
+C
+	   IF (SCAN_OK) THEN
+	      SCAN_OK = UPDATE_HEIGHTS(JUNC_HEIGHT,JUNC_PTR,NUM_ARMS)
+	   ENDIF
+	ENDIF
+C
+C Assign function value (join here to skip this junction)
+C
+300	NEXT_JUNCTION = SCAN_OK
+C
+C Return
+C
+	RETURN
+	END

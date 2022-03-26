@@ -1,0 +1,216 @@
+	SUBROUTINE FLUFTR(PACK)
+C
+***	MODULE	FLUFTR
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Clarke Brunt	21-February-1985
+C
+C To FLUSH the feature pointed at by PACK
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:GKSPAR/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+C
+***	COMMON/CMN:CB/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:WORKS/
+C
+C arguments
+C
+	INTEGER*4 PACK(PAKLEN)	! a pack for the feature
+C
+C functions called
+C
+	LOGICAL	FRTFND		! find a feature code
+	LOGICAL GENAUX		! generate auxiliary array for symbols,
+C				! texts, and arcs
+	LOGICAL LOOPY		! check if curve is a closed loop
+	LOGICAL	GEOG_TRANS_ARRAY
+C
+C w/s
+C
+	INTEGER*2	IECODE,IELEN	! for reading from IFF
+	INTEGER		TXSIZE		! text size from TH entry
+	LOGICAL		HADST
+	INTEGER*2	TMP
+C
+C will be FLUSHing in-situ
+	USEINP = .TRUE.
+C
+C get correct map
+	CALL SELIF(PACK(PAKMAP))
+C
+C position onto the feature
+	CALL IFFPKE( IECODE, IELEN, PACK(PAKPNF) )
+	IF (IECODE.NE.'NF'.AND.IECODE.NE.'TC'.AND.IECODE.NE.'CH'
+     &					.AND.IECODE.NE.'VO') THEN
+	   CALL NASTY(MSG_BADPNF)
+	   CALL COLAPS(MSG_BADPNF)
+	   GOTO 999
+	ENDIF
+C
+C set up the feature code
+C (use FC in pack rather than reading IFF file)
+	IF ( FRTFND(PACK(PAKFC)) ) THEN
+	   CALL NASTY(MSG_BADCODE,PACK(PAKFC))
+	   CALL COLAPS(MSG_BADCODE)
+	   GOTO 999
+	ENDIF
+C
+C do not draw until the end if drawing prioritised (multi-pass) features
+C
+	OIDRAW = .NOT.DRAW_PRIORITY
+C
+C Initialise
+	HADST = .FALSE.
+	TXSIZE = 0
+	COIANG = 0.0
+	COIFS(3)=0			! text position to 0, by default
+	CALL CPYPAK(PAKLEN,PACK,COIPAK)
+	CALL FLUSH(0)
+C
+20	CALL IFFNXT(IECODE, IELEN)
+C
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999
+	ENDIF
+C
+	IF (IECODE.EQ.'EF') GOTO 120
+	IF (IECODE.EQ.'RO') GOTO 390
+	IF (IECODE.EQ.'CB') GOTO 70
+	IF (IECODE.EQ.'TH') GOTO 350
+	IF (IECODE.EQ.'TX') GOTO 320
+	IF (IECODE.EQ.'FS') GOTO 330
+C
+C ignore anything else
+	GOTO 20
+C
+C ST (CB) - string of coordinates
+C
+C Draw the previous ST if there was such
+70	IF (HADST) THEN
+	   CALL FLUSH(1)
+	ELSE
+C
+C generate auxiliary array for symbol strings
+	   IF (FRTGT.EQ.STRTYP) THEN
+C
+C GENAUX will produce its own error message if it fails,
+	      CALL GENAUX(
+     &	   COIIND-1,COIXY(1,2),COIAUX,COIDSC,COIANG,TXSIZE,COIPAK,COIFS)
+	   ENDIF
+	ENDIF
+C
+	CALL EIHRCB_HEAD(CBH)
+C
+C If on first ST or this ST starts 'pen up' then
+C see whether a curve feature is a closed loop
+	IF (FRTCUR.AND.((.NOT.HADST).OR.((CBH.FLAGS.AND.1).EQ.0))) THEN
+	   OILOOP = LOOPY()
+	ENDIF
+C
+C set up position of ST for FLUSH
+	OIPST = LPOSH
+	OIENDS = CBH.FLAGS
+C
+C read in the points
+	COIIND = CBH.NROW+1
+	IF (SIMPLE_XY) THEN	! read whole thing direct to COIXY
+	   CALL EIHRCB_DATA(COIXY(1,2))
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract XY
+C
+C only need attributes if drawing on KRISS ... 
+C (what about symbol drawing routine?)
+	   IF (KRSINI) THEN
+	      CALL GETATT(COIXY(1,2),COINATT,OIH_MAX_ATTR,COIATTC,
+     &	                        COIATTV(1,2),0,1,CBH.NROW)
+	   ELSE
+	      CALL IFS_CB_READ(CBH,CBD,COIXY(1,2),2,COLHXY,1,CBH.NROW)
+	   ENDIF
+	ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	IF (DO_FLY_TRANS) THEN
+	   IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                         CURR_UNIT,CURR_ORG,
+     &	                         LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                         LITES2UNIT,LITES2ORG,
+     &	                         CBH.NROW,COIXY(1,2))) THEN
+	      GOTO 999
+	   ENDIF
+	ELSEIF (USE_ORG) THEN
+	   CALL ADDORG(ORGXY,COIXY(1,2),CBH.NROW)
+	ENDIF
+C
+C mark we've had an ST
+	HADST = .TRUE.
+	GOTO 20
+C
+C EF - end feature
+C
+C generate auxiliary array for texts,symbols,circles
+120	IF (FRTARC.OR.(FRTSYM.AND.FRTGT.NE.STRTYP).OR.FRTTEX) THEN
+C
+C GENAUX will produce its own error message if it fails,
+	   CALL GENAUX(
+     &	   COIIND-1,COIXY(1,2),COIAUX,COIDSC,COIANG,TXSIZE,COIPAK,COIFS)
+	ENDIF
+C
+C flush last bit of feature (maybe all of it!)
+	CALL FLUSH(2)
+C
+C if feature not yet drawn, draw it now
+C create segment and draw it (if not done already)
+	IF (.NOT.OIDRAW) THEN
+	   IF (COILST.NE.0) THEN	! feature not deleted by FLUSH
+	      CALL LCRSG(COIPAK)
+	      IF (IAND(COIPAK(PAKFLG),LIMFLG).NE.0)
+     &					CALL LSVIS(COIPAK,GINVIS)
+	      CALL DRAFTR(COIPAK)
+	      CALL LCLSG
+	   ENDIF
+	   OIDRAW = .TRUE.
+	ENDIF
+	GOTO 999			! tara
+C
+C TX - text string
+320	IELEN = MIN(IELEN,(LNFAKE+1)/2)
+	CALL EIHR(COIBUF,IELEN,1)
+	COILEN = IELEN*2
+C Remove any trailing null
+	IF (COIBUF(COILEN).EQ.0) COILEN = COILEN-1
+	COILEN = MIN(COILEN,LNFAKE)	! truncate to max length
+	GOTO 20
+C
+C FS entry - use COIFS to pass to OIIH common block for symbols and text
+C            drawing routines - but note that FLUFTR is never called for
+C            texts or symbols (and does not cope with TS entries)
+330	CALL EIHRI(COIFS,MIN(IELEN,4),1)
+	GOTO 20
+C
+C TH entry
+350	CALL EIHRI(TMP,1,1)
+	TXSIZE = TMP			! extend into longword
+	GOTO 20
+C
+C RO - symbol or text rotation
+390	CALL EIHRR(COIANG,1,1)
+	GOTO 20
+C
+999	USEINP = .FALSE.		! restore FLUSH to normal
+	RETURN
+	END

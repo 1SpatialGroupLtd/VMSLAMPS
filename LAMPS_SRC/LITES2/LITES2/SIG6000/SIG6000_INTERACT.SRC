@@ -1,0 +1,694 @@
+	SUBROUTINE INTERACT(CTRLZ)
+C
+***	IDENT   18MR92
+***	MODULE  INTERACT
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					CCB	 7-DEC-1984
+C
+C Description
+C
+C	LITES2 cartographic editor interactive input routine
+C
+C      ---      THIS SUBROUTINE IS INSTALLATION DEPENDENT      ---
+C	--- This is Sigmex 6100 + Table Monitor/direct table Version ---
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:END/
+***	PARAMETER/CMN:MACMEN/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:DOUT/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:GLOBAL/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:MENUS/
+***	COMMON/CMN:MODIFY/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:PROMPT/
+***	COMMON/CMN:RFCTRL/
+***	COMMON/CMN:STATE/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:VAREFN/
+***	COMMON/CMN:WORKS/
+C
+C argument
+	LOGICAL*1	CTRLZ		! true when command from
+					! keyboard terminated with ^Z
+C
+C functions called
+	INTEGER*4	EXPAND
+	LOGICAL		HAD_ERROR,READ_ERROR
+	LOGICAL		HAD_PUCK,READ_PUCK
+	LOGICAL		HAD_STREAM,READ_STREAM
+	LOGICAL		RUBISH
+	LOGICAL		STRDTB
+	LOGICAL		DIGTRN
+	LOGICAL		GTYPAC
+	LOGICAL		INPLGN
+	LOGICAL		AUXACT		! are auxiliary inputs active
+	LOGICAL		SERVAUX		! service the auxiliary inputs
+	LOGICAL		AUXOFF		! has an auxiliary input gone off
+	LOGICAL		SERV_FOLLOW	! service event from following
+C
+C local variables
+	INTEGER*4	IERR
+	INTEGER*4	MASK
+	INTEGER*4	TTDESC(2)
+	INTEGER		I,J,K
+	REAL		TABXY(2)
+	INTEGER*4	DEV,BUTTON
+	INTEGER		PTR
+	LOGICAL*1	RMON		! .TRUE. if using table monitor
+	LOGICAL*1	RSIG		! .TRUE. if using Sigmex input
+	BYTE		BU		! button number returned by
+					! table monitor
+	INTEGER*4	IX,IY		! coordinates returned by
+					! table monitor
+	LOGICAL*1	POS		! positioning command
+	LOGICAL*1	POSDON		! implicit POS done?
+	CHARACTER*30	STRING		! command string from TRNTIP
+	INTEGER*4	STRLEN		! length of string
+	INTEGER*4	COUNT		! number of chars in typeahead
+	BYTE		BYTE1		! first character
+	LOGICAL*1	WAIT_STREAM	! awaiting stream input?
+	INTEGER		ISTART		! first char in TTBUF
+	LOGICAL*1	ABORT		! had an abort?
+	LOGICAL		FROM_MENU
+	INTEGER		TERMLEN
+	LOGICAL		HADKB		! input from TT or AUX
+C
+C Sigmex input
+	INTEGER		ICL,IDNR
+	LOGICAL*1	HADCH,HADLC
+	CHARACTER*70	ISTR
+	INTEGER		IA(4)
+	DATA		IA/0,2,20,10/
+C
+C initialise
+	RMON = TABINI.AND.MONOPT.AND..NOT.DTRON	! use table monitor
+	RSIG = BITINI.OR.(TABINI.AND..NOT.MONOPT)! use Sigmex input
+	ABORT = .FALSE.			! not had abort
+	TXTPTR = 0			! nothing in TXTBUF
+C
+C If using Sigmex string input (WOSPIN) as well as bitpad, then
+C set the bitpad devices into event mode
+	IF (WOSPIN.AND.BITINI) THEN
+	   CALL WSLCM(1,2,3,1)	! locator device 2
+	   CALL WSCHM(1,4,3,1)	! choice device 4
+	ENDIF
+C
+10	CTRLZ = .FALSE.			! assume not CTRL/Z
+	HADKB = .FALSE.			! no keyboard input
+	IF (.NOT.WOSPIN) CALL PROMPT	! prompt if required
+C
+C If workstation 1 (SIGMEX) is not open, then do ordinary terminal read
+	IF (.NOT.WKOP(1)) GOTO 100
+C
+C Otherwise maybe use WOSPLIB input
+C If this is first call since workstation opened, then decide what to do
+	IF (TTINIT) THEN
+	   IF (WOSPIN) THEN			! using Sigmex input
+	      CALL SYS$CANCEL(%VAL(TTICHN))	! so cancel QIO
+	      TTREAD = .FALSE.
+	   ENDIF
+	   TTINIT = .FALSE.
+	ENDIF
+C
+C get reads going
+100	IF (DTRON.AND..NOT.DTBREAD) THEN
+	   IF (GTYPAC(DTBCHN,COUNT,BYTE1)) THEN	! check type ahead buff
+	      IF (COUNT.GT.MXTYPC) THEN
+	         CALL MOAN(MSG_NOMOREBUTS,COUNT/15)
+	      ENDIF
+	   ENDIF
+	   DTBREAD=STRDTB(DTBFLG,DTBCHN,DTBOSB,,DTBLEN,DTBBUF)
+	ENDIF
+C
+	IF (WOSPIN) THEN
+C
+C initialise string device with current prompt
+C following code cribbed from routine PROMPT
+C
+	   ISTART = 0			! assume no prompt
+	   IF (PROINQ) THEN		! it's INQUIRE
+C
+C remove any control characters (e.g. from HELP utility) as they
+C tend to hang Sigmex
+	      DO 101 I=1,MIN(PRILEN,70)
+	         IF (ICHAR(PINSTR(I:I)).GE.32) THEN
+	            ISTART = ISTART+1
+	            ISTR(ISTART:ISTART) = PINSTR(I:I)
+	         ENDIF
+101	      CONTINUE
+	   ELSEIF (PROING) THEN		! ordinary prompt
+	      IF (PROSTA) THEN
+C
+C differentiate between MODIFY state, and Component Text State
+	         IF (SINDEX.EQ.STATE_MODIFY.AND.SUBTXT) THEN
+	            ISTART = STALEN+8
+	            ISTR(:ISTART) = STASTR(:STALEN)//' (part)>'
+	         ELSE
+	            ISTART = STALEN+1
+	            ISTR(:ISTART) = STASTR(:STALEN)//'>'
+	         ENDIF
+	      ELSE
+	         ISTART = PROLEN
+	         ISTR(:ISTART) = PROSTR(:ISTART)
+	      ENDIF
+	   ENDIF
+	   CALL WSSTM(1,1,0,1)
+	   CALL WINST(1,1,ISTART,ISTR,-1,0,0,0,0,80,ISTART+1,4,IA)
+	   CALL WSSTM(1,1,3,1)
+	   GOTO 150
+	ENDIF
+C
+C service any inputs from auxiliary lines, that are outstanding
+C
+	IF (AUXACT()) THEN		! are any aux inputs active?
+	   IF (.NOT.AUX_READ) THEN	! no read up
+	      IF (AUXOFF(AUXIOSB)) GOTO 600
+	   ENDIF
+	ENDIF
+C
+C get reads going
+C ===============
+C
+C set ordinary terminal read going
+	IF (.NOT.TTREAD.AND..NOT.TTABORT) THEN
+	   CALL QIOUP(TTASN,'SYS$INPUT',TTICHN,TTIFLG,TTIOSB,,
+     &	              TTBLEN,TTBUF,TTREAD,TTABORT)
+	   IF (TTABORT) GOTO 999
+	ENDIF
+C
+C put up reads for auxiliary inputs
+C then go and see if any have gone off
+	CALL STRTAUX(AUXIOSB,,TTBLEN,AUXBUF)
+	IF (AUXOFF(AUXIOSB)) GOTO 600
+C
+C now wait for a response from somewhere
+150	CONTINUE
+C
+C build event flag wait mask
+	MASK = 0				! clear to start with
+	IF (.NOT.WOSPIN) CALL EFWM(MASK,TTIFLG)	! terminal
+	CALL EFWM(MASK,CLCFLG)			! CTRL/C
+	IF (AUX_READ) CALL EFWM(MASK,AUXFLG)
+	IF (DTBREAD) CALL EFWM(MASK,DTBFLG)	! add direct table read
+	IF (RMON) THEN
+	   CALL EFWM(MASK,TABPUK,TABERR)	! monitor puck and error
+	   WAIT_STREAM = STREAM			! are we awaiting stream?
+	   IF (STREAM) THEN
+	      CALL EFWM(MASK,TABSTR)		! monitor stream
+	      STREAM = .FALSE.			! assume not stream next
+	   ENDIF
+	ENDIF
+	IF (RSIG) CALL EFWM(MASK,CSRFLG)	! add Sigmex timer flag
+C
+C stream digitising?
+	IF (FOLLOWING) CALL EFWM(MASK,FOLFLG)
+	IF (FOLLOWING.AND..NOT.FOLLOW_TIMING) THEN
+	   CALL FOLTMR()
+	   FOLLOW_TIMING = .TRUE.
+	ENDIF
+C
+	GOTO 160
+C
+C If ABORT (PF keys) used, then a certain amount of this stuff appears
+C necessary to keep the input devices working
+155	CALL WSLCM(1,2,0,0)	! disable all input devices
+	CALL WSCHM(1,4,0,0)
+	CALL WSSTM(1,1,0,1)
+	IF (BITINI) THEN
+	   CALL WSLCM(1,2,3,1)
+	   CALL WSCHM(1,4,3,1)
+	ENDIF
+C
+C n.b. If this IF block is done before the previous one, then Sigmex 6100
+C seems to hang in WWAIT if the string device is used next (Why???)
+	IF (WOSPIN) THEN
+	   CALL WINST(1,1,ISTART,ISTR,-1,0,0,0,0,80,ISTART+1,4,IA)
+	   CALL WSSTM(1,1,3,1)
+	ENDIF
+	CALL WUWK(1,1)	! flush out
+	CALL WPURGE	! throw away any pending input
+	ABORT = .TRUE.	! mark had an abort
+C
+C probe Sigmex
+160	IF (RSIG) THEN
+C
+	   HADCH = .FALSE.		! not had choice
+	   HADLC = .FALSE.		! not had locator
+C
+C 6100 series seems to read locator from current viewport,
+C so set this to the dummy viewport, then back again.
+C 6200 works regardless.
+170	   IF (BITINI) CALL WCVP(1,2)	! viewport 2 current
+	   CALL WWAIT(0,1,ICL,IDNR)
+	   IF (BITINI) CALL WCVP(1,1)	! back to viewport 1
+C
+C If there has been a timeout/abort, then purge any typeahead
+C (just in case we have queued up several WWAIT's, e.g. while
+C terminal was in SETUP mode). Allow a delay for the queued
+C commands to produce their response before purging it.
+	   IF (ABORT) THEN
+	      CALL LIB$WAIT(1.0)
+	      CALL WPURGE
+	      ABORT = .FALSE.
+	   ENDIF
+C
+	   IF (ICL.GT.0) GOTO 175	! some input done
+C
+C Timeout, abort, or just nothing doing
+	   IF (ICL.EQ.-1) THEN		! timeout
+	      IF (DIAOPT) CALL WRITEF('Input timeout')
+	      GOTO 155
+	   ENDIF
+	   IF (ICL.EQ.-2) THEN		! abort
+	      IF (DIAOPT) CALL WRITEF('Input abort')
+	      GOTO 155
+	   ENDIF
+C
+C See if a MUART table event has happened
+	   IF (TABINI.AND..NOT.MONOPT) THEN
+	      CALL WGTTAB(BUTTON,TABXY(1),TABXY(2))
+	      IF (BUTTON.NE.-1) THEN
+	         DEV = DIGLIN
+	         GOTO 900
+	      ENDIF
+	   ENDIF
+	   CALL CSRTMR		! re-time and wait
+	   GOTO 180
+C
+C some input ready
+175	   IF (ICL.EQ.4) THEN		! choice
+	      IF (IDNR.NE.4) THEN
+	         CALL WRITEF('??? Choice device %^L%N',IDNR)
+	         GOTO 160
+	      ENDIF
+	      CALL WGTCH(IDNR,BUTTON)
+	      IF (IDNR.EQ.-1) THEN
+	         IF (DIAOPT) CALL WRITEF('Choice input timeout')
+	         GOTO 155
+	      ENDIF
+	      BUTTON = BUTTON-1		! start at zero
+	      IF (DIAOPT) CALL WRITEF('Choice, Button %^L%N',BUTTON)
+	      HADCH = .TRUE.		! had choice
+	      IF (.NOT.HADLC) GOTO 170
+C
+	   ELSEIF (ICL.EQ.1) THEN	! locator
+	      IF (IDNR.NE.2) THEN
+	         CALL WRITEF('??? Locator device %^L%N',IDNR)
+	         GOTO 160
+	      ENDIF
+	      CALL WGTLC(IDNR,IX,IY)
+	      IF (IDNR.EQ.-1) THEN
+	         IF (DIAOPT) CALL WRITEF('Locator input timeout')
+	         GOTO 155
+	      ENDIF
+	      IF (DIAOPT) CALL WRITEF('Locator, position %N %N',IX,IY)
+	      HADLC = .TRUE.		! had locator
+	      IF (.NOT.HADCH) GOTO 170
+C
+	   ELSEIF (ICL.EQ.6) THEN	! string
+	      TTDESC(1) = 80
+	      TTDESC(2) = %LOC(TTBUF)
+	      CALL WGTST(J,TTDESC)
+	      IF (J.EQ.-1) THEN
+	         IF (DIAOPT) CALL WRITEF('String input timeout')
+	         GOTO 155
+	      ENDIF
+	      TTDESC(1) = J
+	      CALL TTWSTR(TTDESC)	! echo on alpha plane
+	      J = J-ISTART		! subtract prompt length
+	      STRLEN = 0		! no escape command
+	      HADKB = .TRUE.
+	      GOTO 205
+	   ELSE
+	      CALL WRITEF('??? Input class %^L%N',ICL)
+	      GOTO 160
+	   ENDIF
+C
+C here with both a choice (BUTTON) and locator (IX,IY)
+C
+C if tracking button, then convert locator to a map coordinate
+	   IF (BUTTON.EQ.0) THEN	! tracking button
+	      IF (SCRINI) THEN
+C
+C in screen menu?
+	         TABXY(1) = IX
+	         TABXY(2) = IY
+	         IF (INPLGN(TABXY,4,SCRMEN_BRDR,0.0001)) THEN
+	            CALL SCRNTIP(TABXY,STRING,STRLEN)	! interpret
+	            POS = .FALSE.
+	            BUTTON = 1		! frig button number
+	            GOTO 910
+	         ENDIF
+	      ENDIF
+C
+C need to convert to proper VDC here (see below for LD2W)
+	      CALL LD2W(IX,IY,TABXY(1),TABXY(2))
+	      IF (RUBISH(TABXY)) GOTO 160	! out of range
+	      POSXY(1) = TABXY(1)
+	      POSXY(2) = TABXY(2)
+	      POSPND = .TRUE.		! POS command pending
+	      POSDON = .FALSE.		! POS not done yet
+	      GOTO 990			! perform immediately
+	   ENDIF
+C
+C otherwise use locator position directly
+	   TABXY(1) = IX		! convert to real
+	   TABXY(2) = IY
+	   DEV = BITLIN			! on bitpad
+	   GOTO 900
+	ENDIF
+C
+180	IF (CTRLC.NE.CTRLC_OFF) THEN
+	   CALL SYS$CLREF(%VAL(CLCFLG))
+	   GOTO 990
+	ENDIF
+	CALL SYS$WFLOR( %VAL(TTIFLG), %VAL(MASK) )
+C
+C now look for what we have got
+	IF (.NOT.WOSPIN.AND.TTIOSB(1).NE.0) GOTO 200	! terminal input
+	IF (DTBREAD.AND.DTBOSB(1).NE.0) GOTO 400	! direct table
+	IF (RMON) THEN
+	   IF (HAD_ERROR(IERR)) THEN
+	      IF (.NOT.READ_ERROR(TXTBUF,TXTPTR,I,IERR)) THEN
+	         CALL INFORM(MSG_TABMONERR,I)
+	         CALL INFORM(MSG_STRING,TXTDSC)
+	         TXTPTR = 0		! buffer empty again
+	      ENDIF
+	      GOTO 160
+	   ELSEIF (HAD_PUCK(IERR)) THEN		! tab_mon puck
+	      IF (.NOT.READ_PUCK(BU,IX,IY,IERR)) GOTO 500
+	   ELSEIF (WAIT_STREAM) THEN		! waiting for stream
+	      IF (HAD_STREAM(IERR)) THEN	! tab_mon stream
+	         BU = -1			! mark as stream
+	         IF (.NOT.READ_STREAM(IX,IY,IERR)) GOTO 500
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C was it cursor timeout?
+	IF (CSRTMO) THEN
+	   CSRTMO = .FALSE.
+	   GOTO 160				! re-time and wait
+	ENDIF
+C
+C check for auxiliary input
+	IF (AUX_READ) THEN
+	   IF (AUXOFF(AUXIOSB)) GOTO 600
+	ENDIF	      
+C
+C check for stream digitising timer
+	IF (FOLLOWING.AND.FOLLOWED) THEN
+	   CALL FOLTMR()		! start timer again
+	   IF (SERV_FOLLOW()) GOTO 990	! got valid coordinate
+	   GOTO 10			! round again
+	ENDIF
+C
+C check for CTRL/C
+	IF (CTRLC.NE.CTRLC_OFF) THEN
+	   CALL SYS$CLREF(%VAL(CLCFLG))
+	   GOTO 990
+	ENDIF
+C
+C nothing happening?
+	CALL INFORM(MSG_NOINPUT)
+	GOTO 10
+C
+C got terminal input
+200	TTREAD = .FALSE.	! no terminal read outstanding
+	TTIDON = .TRUE.		! terminal input done (want prompt)
+	IF (.NOT.TTIOSB(1)) THEN
+	   CALL MOAN(MSG_ERRINTERRD)
+	   CALL LITES2_SIGNAL(TTIOSB(1))
+	   GOTO 10
+	ENDIF
+	HADKB = .TRUE.
+C
+C put string from terminal into TXTBUF
+	CTRLZ = TTIOSB(4).EQ.1.AND.TTIOSB(3).EQ.26
+	J = TTIOSB(2)		! number of chars input
+	TERMLEN = TTIOSB(4)	! terminator length
+	IF (J.EQ.0.AND.TERMLEN.LE.1) GOTO 990	! empty line
+C
+C Check for a valid keyboard escape sequence
+	STRLEN = 0
+	IF (TERMLEN.GT.1) CALL INTTERM(TTBUF(J+1),TERMLEN,STRING,STRLEN)
+C
+C Set appropriate carriage controls for next line -
+C If the line was not terminated by c/r, then pretend not had terminal
+C input, so next output will be preceded by newline, but force a prompt
+C if some chars were typed (since TTIDON false would not prompt)
+	IF (TTIOSB(3).NE.13) THEN
+	   TTIDON = .FALSE.	! want newline before output
+	   IF (J.NE.0) TTPROM = .TRUE.
+	ENDIF
+C
+	ISTART = 0		! starting at first char
+C
+205	PTR = 0
+C
+C add a POS command if required
+	IF (POSPND.AND..NOT.PROINQ) THEN
+	   PTR = EXPAND('%W%%POS %G0.8 %G0.8#',TXTBUF,
+     &					POSXY(1),POSXY(2))
+	   POSPND = .FALSE.
+	ENDIF
+C
+C now the ordinary characters
+	DO 210 I=1,J
+	   TXTBUF(I+PTR) = TTBUF(I+ISTART)
+210	CONTINUE
+	PTR = PTR+J
+C
+C and now the command resulting from an escape sequence
+C Ignore escape command in an inquire if any ordinary chars
+	IF (STRLEN.GT.0.AND.(J.EQ.0.OR..NOT.PROINQ)) THEN
+	   IF (J.NE.0) THEN
+	      PTR = PTR + 1
+	      TXTBUF(PTR) = '#'
+	   ENDIF
+	   PTR = PTR + EXPAND('%W%S',TXTBUF(PTR+1),STRING(1:STRLEN))
+	ENDIF
+	TXTPTR = PTR
+	GOTO 990		! return with TXTBUF filled
+				! ready for decoder
+C
+C got direct table input
+400	DTBREAD=.FALSE.
+C
+	IF (.NOT.DTBOSB(1)) THEN
+	   CALL MOAN(MSG_ERRINTABRD)
+	   CALL LITES2_SIGNAL(DTBOSB(1))
+	   GOTO 100
+	ENDIF
+C
+C translate string
+	J=DTBOSB(2)				! I*2 -> I*4
+	IF (J.EQ.0) GOTO 100
+	IF (DIGTRN(DTBBUF,J,BUTTON,IX,IY,USEFUN,%VAL(FUNADR))) THEN
+	   CALL INFORM(MSG_TABERRREAD,DTBBUF)   ! error in string
+	   GOTO 100
+	ELSE
+	   DEV=DIGLIN
+	   TABXY(1)=IX
+	   TABXY(2)=IY
+	ENDIF
+	GOTO 900
+C
+C got table monitor input
+C
+500	DEV=DIGLIN		! only from table, never from bitpad
+	BUTTON=BU		! byte to long conversion
+	TABXY(1)=IX		! long to real conversion
+	TABXY(2)=IY		!  "	   "       "
+C
+	IF (BUTTON.EQ.0) THEN		! stream button
+	   STREAM = .TRUE.		! want stream next time
+	   CALL READ_STREAM(IX,IY,IERR)	! clear event flag
+	ELSEIF (BUTTON.LT.0) THEN	! was streamed
+	   STREAM = .TRUE.		! want stream next time
+	   BUTTON = 0			! stream button
+	ENDIF
+	GOTO 900
+C
+C got input from auxiliary line
+C
+600	IF (SERVAUX(AUXIOSB,TTBLEN,AUXBUF)) THEN
+	   HADKB = .TRUE.
+	   GOTO 990
+	ELSE
+	   GOTO 10
+	ENDIF
+C
+C interpret input from table/bitpad
+C
+900	CALL TRNTIP(DEV,BUTTON,TABXY,POS,STRING,STRLEN,FROM_MENU)
+C
+C TRNTIP sets POS correctly for table and tracking area, taking account
+C of any PRIORITY POSITION command. It also converts TABXY to IFF units
+C for these devices.
+C It sets up POS .FALSE. for all other devices and does not alter TABXY.
+C
+C if coordinate from BITPAD, and not in menu, then get bitpad coords
+C into IFF units
+	IF (DEV.EQ.BITLIN.AND..NOT.FROM_MENU) THEN
+	   CALL LD2W(IX,IY,TABXY(1),TABXY(2))
+	ENDIF
+C	   
+C For other coordinate producing devices dealt with in INTERACT
+C POS is set by CHKPRIPOS
+	IF (.NOT.FROM_MENU) CALL CHKPRIPOS(DEV,BUTTON,POS)
+C
+C is there a POS command to set pending
+	IF (POS) THEN		! this probe defined a position
+	   IF ((BUTTON.EQ.0).OR..NOT.POSCMD) THEN	! so use it
+	      POSXY(1) = TABXY(1)
+	      POSXY(2) = TABXY(2)
+	      IF (.NOT.RUBISH(POSXY)) THEN
+	         POSPND = .TRUE.
+	         POSDON = .FALSE.		! POS not done yet
+	      ENDIF
+	   ENDIF
+	ENDIF
+910	IF (BUTTON.EQ.0.OR.STRLEN.EQ.0) GOTO 990	! no command
+C
+	IF (.NOT.QUIOPT) CALL PING		! acknowledge button
+	PTR = 0
+	IF (POSPND.AND..NOT.PROINQ) THEN
+	   PTR = EXPAND('%W%%POS %G0.8 %G0.8#',TXTBUF,POSXY(1),POSXY(2))
+	   POSPND = .FALSE.
+	ENDIF
+	TXTPTR = PTR + EXPAND('%W%S',TXTBUF(PTR+1),STRING(:STRLEN))
+C
+C have we got anything?
+990	IF (TXTPTR.EQ.0.OR.PROINQ) THEN		! no
+	   IF (POSPND.AND..NOT.POSDON) THEN	! perform implicit POS
+C
+C If there is a cursor constraint, then we have to journal explicit
+C POS command, otherwise journal may not reproduce correct results
+	      IF (ROLING.AND..NOT.PROINQ) THEN
+	         TXTPTR = EXPAND(
+     &			'%W%%POS %G0.8 %G0.8#',TXTBUF,POSXY(1),POSXY(2))
+	         POSPND = .FALSE.
+	         GOTO 999
+	      ENDIF
+	      DREALS(1) = POSXY(1)		! load arguments
+	      DREALS(2) = POSXY(2)
+	      DNREA = 2
+	      CALL DOPOSI			! execute POS
+	      CALL UPDATE			! update picture etc.
+	      POSDON = .TRUE.			! done POS
+	   ENDIF
+C
+C If CTRL/C not pressed, then try again, else return blank line and
+C let command decoder deal with it.
+C NB we should return to INTERACT before any more commands are obeyed
+	   IF (TXTPTR.EQ.0.AND.(.NOT.PROINQ.OR..NOT.HADKB)) THEN
+	      IF (CTRLC.EQ.CTRLC_OFF) GOTO 10
+	      IF (FOLLOWING) CALL ENDFOLL	! stop following on CTRLc
+	   ENDIF
+	ENDIF
+C
+999	IF (WOSPIN) THEN
+C
+C If using Sigmex string input, then disable all input devices
+C so that the keyboard functions normally
+	   CALL WSSTM(1,1,0,1)
+	   IF (BITINI) THEN
+	      CALL WSLCM(1,2,0,0)
+	      CALL WSCHM(1,4,0,0)
+	   ENDIF
+	   CALL WUWK(1,1)	! flush out
+	ENDIF
+C
+	MOANED = .FALSE.	! don't let command decoder ignore line
+	RETURN
+	END
+C
+	SUBROUTINE CSRTMR
+C
+***	IDENT   12JN85
+***	MODULE  CSRTMR
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C	Written					CCB	20-JUN-1985
+C	To set TEK cursor timer going
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:VAREFN/
+	EXTERNAL	CSRAST			! cursor AST routine
+	INTEGER*4	DAYTIM(2)
+	DATA		DAYTIM/-2 000 000,-1/	! one fifth second
+C
+C cancel old request (if any)
+	CALL SYS$CANTIM(%VAL(CSRFLG),)
+C
+C and set new one
+	CALL SYS$SETIMR(%VAL(CSRFLG),DAYTIM,CSRAST,%VAL(CSRFLG))
+	RETURN
+	END
+C
+	SUBROUTINE CSRAST
+C
+***	IDENT   12JN85
+***	MODULE  CSRAST
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C	Written					CCB	20-JUN-1985
+C	TEK cursor timer timeout AST routine
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:WORKS/
+C
+	CSRTMO = .TRUE.				! timed out
+	RETURN
+	END
+C
+	SUBROUTINE LD2W(DX,DY,WX,WY)
+C
+***	IDENT   17MR86
+***	MODULE  LD2W
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C	Written					CCB	17-Mar-1986
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:WORKS/
+C
+C arguments
+	INTEGER	DX,DY	! Sigmex screen coordinate range +/-32767
+	REAL	WX,WY	! IFF (world) coordinate
+C
+C workspace
+	REAL	RX,RY
+	REAL	FX,FY
+C
+	RX = WINDOW(2)-WINDOW(1)
+	RY = WINDOW(4)-WINDOW(3)
+C
+	IF (RX/SCRNSX(1).GT.RY/SCRNSY(1)) THEN
+	   FX = RX
+	   FY = FX*SCRNSY(1)/SCRNSX(1)
+	ELSE
+	   FY = RY
+	   FX = FY*SCRNSX(1)/SCRNSY(1)
+	ENDIF
+C
+	WX = WINDOW(1)+FX*
+     &		((DX+32767)/65535.0-WKVSWX(1))/(WKVNEX(1)-WKVSWX(1))
+	WY = WINDOW(3)+FY*
+     &		((DY+32767)/65535.0-WKVSWY(1))/(WKVNEY(1)-WKVSWY(1))
+	RETURN
+	END

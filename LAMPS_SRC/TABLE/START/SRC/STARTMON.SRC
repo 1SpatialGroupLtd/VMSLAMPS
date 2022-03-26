@@ -1,0 +1,261 @@
+	PROGRAM STARTMON
+C
+***	IDENT	16MR95
+***	MODULE	STARTMON
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 30 August 1984
+C - from the original test program, START.SRC
+C - allow a unique table monitor for each table
+C
+C	STARTMON - Start table monitor program
+C
+C This is the program which 'launches' the TABLE_MONITOR program
+C
+C This program should be installed with privileges
+C
+C	DETACH		to allow it to create TABLE_MONITOR
+C			as a detached process - it will thus not
+C			stop when the process running this exits
+C
+C	ALTPRI		to allow it to create TABLE_MONITOR
+C			with a higher priority, so that it can easily
+C			deal with digitising table input as it arrives
+C			in streamed mode
+C
+C *********************************************************************
+C
+	IMPLICIT NONE
+C
+C system parameters
+C
+	INCLUDE	'($SSDEF)'		! success/error codes
+	INCLUDE	'($PRVDEF)'		! privilege definitions
+C
+C our parameters
+C
+***	PARAMETER/CMN:TABMON/
+C
+C LSLLIB input common
+C
+***	PARAMETER/LSL$CMNLSL:READSTR/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/LSL$CMNLSL:EXPC/
+C
+C and we call
+C
+	INTEGER*4	EXPAND
+	LOGICAL		CHKPRC
+	LOGICAL		IS_ALPHA_AXP
+	INTEGER*4	LIB$SKPC	! to skip characters
+	INTEGER*4	LIB$GET_FOREIGN	! get line from user
+	INTEGER*4	STR$UPCASE	! upper case a string
+	INTEGER*4	SYS$CREPRC	! to create the process
+	LOGICAL		TRNALL		! translate a logical name
+	INTEGER*4	SIGCHS		! significant chars in string
+	INTEGER*4	READSTR		! read a string
+	LOGICAL		RDLONG		! read an integer
+	LOGICAL		RDLOCT		! read an octal number
+	LOGICAL		RDCHS		! read a byte
+C
+C and local workspace
+C
+	PARAMETER	BUFSIZ = 40
+C
+	INTEGER*4	IERR		! error return
+	INTEGER*4	TMPUIC
+	INTEGER*4	I,J
+	INTEGER*4	ERRFILEL	! length of error file name
+C
+	INTEGER*4	PRC_PID		! PID of the process
+	INTEGER*4	PRIV(2)		! process privileges
+	INTEGER*4	UIC		! process UIC
+C
+	INTEGER*2	UIC_BITS(2)	! UIC as two parts
+	EQUIVALENCE	(UIC_BITS(1),UIC)
+C
+	INTEGER*4	PRIORITY	! priority to start it at
+C
+	BYTE		ICH		! whether to use terminal name
+					! to identify the table monitor
+	CHARACTER*(BUFSIZ) TERM		! terminal
+	CHARACTER*(BUFSIZ) ERRFILE_NAME	! error file name
+C
+C *********************************************************************
+C
+C fake string for input stream
+C
+	INTEGER*4	INDSC(2)	! fake string
+	INTEGER*2	INLEN		! length
+	BYTE		INBUF(BUFSIZ)	! buffer
+C
+	INTEGER*4	TMPDSC(2)	! fake string
+	INTEGER*2	TMPLEN		! length
+	BYTE		TMPBUF(BUFSIZ)	! buffer
+C
+	EQUIVALENCE	(INDSC(1),INLEN)
+	EQUIVALENCE	(TMPDSC(1),TMPLEN)
+C
+	CALL LSL_INIT(.FALSE.)
+C
+	TMPDSC(2) = %LOC(TMPBUF)
+	TMPLEN    = BUFSIZ
+	INDSC(2) = %LOC(INBUF)
+	INLEN    = BUFSIZ
+	PRIORITY = 0
+C
+C *********************************************************************
+C
+C ask the user where to get table input from (but only ask if they
+C haven't already given it to us)
+C
+	TXTPTR = TXTLIM
+	IERR = LIB$GET_FOREIGN(TXTDSC,
+     &	'Specify  <table>  <priority>  <group>  <named monitor?>: ',
+     &	TXTPTR)
+	IF (.NOT.IERR) GOTO 9999
+C
+C and upper case the result
+C
+	IERR = STR$UPCASE( TXTDSC, TXTDSC )
+	IF ( .NOT.IERR ) THEN
+	   CALL WRITEF('Error upper-casing "%S"',TXTDSC)
+	   CALL LSL_PUTMSG( IERR )
+	   GOTO 9999
+	ENDIF
+C
+C and read the input name...
+C
+	CALL BSLN
+	TMPLEN = READSTR( TMPDSC, ,ON_SPACE )
+	IF ( TMPLEN.LE.0 ) THEN
+	   CALL TTWSTR('No table input name found')
+	   GOTO 9999
+	ENDIF
+C
+C and now find out what priority to start it at
+C
+	IF ( RDLONG( PRIORITY ) ) THEN
+	   CALL TTWSTR('No priority found')
+	   GOTO 9999
+	ENDIF
+C
+	IF ( PRIORITY.GT.31 .OR. PRIORITY.LT.0 ) THEN
+	   CALL TTWSTR('Priority out of range (0-31)')
+	   GOTO 9999
+	ENDIF
+C
+C the UIC to run the table monitor under
+C
+	IF ( RDLOCT( TMPUIC ) ) THEN
+	   CALL TTWSTR('No UIC group number found')
+	   GOTO 9999
+	ENDIF
+C
+C and finally whether to use the terminal line to identify the monitor
+C
+	IF (.NOT.RDCHS(ICH)) THEN
+	   ICH=ICH.EQ.'Y'
+	ENDIF
+C
+C and work out where the I/O for the process goes - translate the
+C logical name as far as it will go...
+C
+C input from where the user said
+C
+	IERR = TRNALL( TMPDSC,  TERM )
+	IF ( .NOT.IERR .AND. IERR.NE.SS$_NOLOGNAM ) THEN
+	   CALL WRITEF('Error translating "%S"',TXTDSC)
+	   CALL LSL_PUTMSG( IERR )
+	   GOTO 9999
+	ENDIF
+C
+C create unique process name
+C
+	IF (ICH) THEN
+	   I=LIB$SKPC('_',TERM)		! strip off leading '_'s
+	   J=INDEX(TERM,':')		! strip off trailing ':'s
+	   IF (J.EQ.0) J=SIGCHS(TERM)+1
+	   TMPLEN=BUFSIZ
+	   TMPLEN=EXPAND('%W%S%S',TMPBUF,T_NAME,TERM(I:J-1))
+	   ERRFILE_NAME=ER_NAME//TERM(I:J-1)//'.ERR'
+	ELSE
+C
+C use default
+C
+	   TMPLEN=BUFSIZ
+	   TMPLEN=EXPAND('%W%S',TMPBUF,DEF_T_NAME)
+	   ERRFILE_NAME=DEF_ER_NAME//'.ERR'
+	ENDIF
+	ERRFILEL=SIGCHS(ERRFILE_NAME)
+C
+C *********************************************************************
+C
+C so let us actually create this process...
+C
+C don't give the thing any privileges
+C
+	PRIV(1) = 0
+	PRIV(2) = 0
+C
+C and give it UIC [n,001], thus placing it in the same group as
+C most of LSL's normal activity
+C
+	UIC_BITS(1) = '001'O		! member number
+	UIC_BITS(2) = TMPUIC		! group  number
+C
+C and tell the user
+C
+	CALL WRITEF('Creating "%S"',TMPDSC)
+	CALL WRITEF('In UIC [%^W%P0%O3,%O3], at priority %^L%N',
+     &			UIC_BITS(2),UIC_BITS(1),      PRIORITY)
+	CALL WRITEF('Input is %S, output is %S',TERM(1:SIGCHS(TERM)),
+     &				ERRFILE_NAME(1:ERRFILEL))
+C
+C and create it
+C
+	CALL EXPAND('LSL$EXE:TABMON')
+	IF (IS_ALPHA_AXP()) CALL APPEND('_TV')
+	CALL APPEND('.EXE')
+	IERR = SYS$CREPRC(
+     &			PRC_PID,		! process PID
+     &			EXPDSC,			! image to start up
+     &			TERM(1:SIGCHS(TERM)),	!  input stream
+     &			ERRFILE_NAME(1:ERRFILEL),   ! output stream
+     &			ERRFILE_NAME(1:ERRFILEL),   ! error output
+     &			PRIV,			! privileges (none)
+     &			,			! default quotas
+     &			TMPDSC,			! process name
+     &			%VAL(PRIORITY),		! base priority
+     &			%VAL(UIC),		! UIC - thus detached
+     &			,			! no termination mbx
+     &			 )			! no status flags
+C
+C now check if that succeeded
+C
+	IF ( .NOT.IERR ) THEN
+	   CALL TTWSTR('Error creating the table monitor process')
+	   CALL LSL_PUTMSG( IERR )
+C
+C check that it is running, and has reached hibernation
+C
+	ELSEIF (CHKPRC(PRC_PID)) THEN
+	   CALL TTWSTR('Error running the table monitor')
+	   CALL TTWSTR('Check:-')
+	   CALL TTWSTR('  1) there is an image LSL$EXE:TABMON')
+	   CALL TTWSTR('  2) terminal name was specified correctly')
+	   CALL TTWSTR(
+     &	'  3) logical name LSL$MGMT is set up in group or system')
+	   CALL TTWSTR('                 symbol table')
+	   CALL TTWSTR('  4) you have adequate quotas/privilege')
+	   CALL WRITEF
+	ELSE
+	   CALL WRITEF('Process created, process ID %X8', PRC_PID )
+	ENDIF
+	CALL WRITEF
+C
+C and regardless, we now exit
+C
+9999	CALL LSL_EXIT
+	END

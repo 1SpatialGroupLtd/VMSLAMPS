@@ -1,0 +1,290 @@
+	SUBROUTINE EDGESET(SET_NO,SET,XY,ABORT,EXSTSU)
+C
+***	IDENT	28SE94
+***	MODULE	EDGESET
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RWR	 8-Feb-1985
+C
+C Description
+C
+C	Subroutine to do one set of observations for an edge setup
+C
+	IMPLICIT NONE
+C
+C Arguments
+C
+	INTEGER*4	SET_NO
+	INTEGER		SET		! number of set (for messages)
+	REAL		XY(2,4)		! resulting corner points
+	LOGICAL		ABORT		! flag for abort
+	LOGICAL		EXSTSU		! flag to use existing set up
+C
+C Included Parameter Files
+C
+***     PARAMETER/CMN:EFNLUN/		! event flags and luns
+***	PARAMETER/CMN:MACMEN/
+***     PARAMETER/CMN:MOANMESS/		! moan constants
+***     PARAMETER/CMN:TRNTYP/		! transformation types
+C
+C Common Blocks
+C
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:OTRANS/		! rest of transformation stuff
+***	COMMON/CMN:PTOLERANCE/
+***     COMMON/CMN:WORKS/		! info about worksatation
+C
+C Functions called
+C
+	LOGICAL		REGRESS
+	LOGICAL		INTERSECT
+C
+C Local Variables
+C
+	INTEGER		SIDE		! counter
+	INTEGER		POINT		! counter
+	INTEGER		I,J		! counters
+	INTEGER*4	DEVICE,BUTTON	! device and button digitised
+	REAL		DIGPTS(2,MAX_EDGE_POINT,4) ! points
+	REAL*8	  	COEFFS(3,4)		! returned line coeffs
+	REAL	  	RESID(MAX_EDGE_POINT)	! dists (points to line)
+	REAL	  	MAXRES		! max absolute distances
+	REAL	  	RESRMS(4)	! RMS residuals
+	REAL		DISTS(MAX_EDGE_POINT+1)
+	REAL		XYA(2),XYB(2)
+	INTEGER		DIST_COUNT
+	REAL		STACK(20)	! note this is plenty big enough
+	INTEGER		XORY		! 1 or 2 for X or Y
+	LOGICAL		SIDE_REOBS
+	LOGICAL		OBS_SIDE(4)	! these sides to be observed
+	REAL		GAP
+	REAL		MAXDIST,MINDIST
+	REAL		DIFF
+C
+	INTEGER		SIDE_N_LEN(4)
+	CHARACTER*5	SIDE_NAME(4)
+	DATA		SIDE_NAME/'WEST','SOUTH','EAST','NORTH'/
+	DATA		SIDE_N_LEN/4,5,4,5/
+C
+	EXTERNAL	REAL_CF,REAL_SWAP
+C
+C digitise points on each side
+C
+	SIDE_REOBS = .FALSE.
+C
+C the flags OBS_SIDE are used when sides have to be reobserved because
+C of poorly distributed points on the sides or parallel sides
+    2	DO 4,I=1,4
+	   OBS_SIDE(I) = .TRUE.
+    4	CONTINUE
+C
+C come here to digitise sides again
+C
+    5   CONTINUE
+	IF (SIDE_REOBS) THEN
+	   CALL PING
+	   CALL INFORM(MSG_REDIGSIDES,SET)
+	   DO 6, I=1,4
+	      IF (OBS_SIDE(I)) CALL INFORM(MSG_STRING,
+     &	            SIDE_NAME(I)(1:SIDE_N_LEN(I)))
+    6	   CONTINUE
+	   SIDE_REOBS = .FALSE.
+	ENDIF
+C
+	DO 30, SIDE=1,4
+	   IF (.NOT.OBS_SIDE(SIDE)) GOTO 30		! this side OK
+C
+	   CALL INFORM(MSG_BLANK)
+	   CALL INFORM(MSG_SETEDGE,SET,
+     &	            SIDE_NAME(SIDE)(1:SIDE_N_LEN(SIDE)))
+	   CALL INFORM(MSG_BLANK)
+	   DO 20,POINT=1,EDGE_POINT
+C
+C come here if need to try to digitise point again
+C
+   10	      CONTINUE
+C
+C put next digitised point in array of observations
+C
+	      CALL PING			! attract attention
+	      CALL INFORM(MSG_EDGEPOINT,POINT)
+	      CALL GTDGXY(DEVICE,BUTTON,DIGPTS(1,POINT,SIDE),
+     &	               EXSTSU,ABORT)
+C
+C check for ABORT, or use existing setup
+C
+	      IF (ABORT) GOTO 999	      ! (perhaps a bit drastic!)
+	      IF (EXSTSU) THEN
+	         IF (OMPDEF(SET_NO)) THEN
+	            IF (TRNTYP.NE.MAPTRNTYP(SET_NO)) 
+     &	               CALL INFORM(MSG_TRANWARN,
+     &	          TR_TYPE(MAPTRNTYP(SET_NO))
+     &	                        (1:TR_TYPE_LEN(MAPTRNTYP(SET_NO))),
+     &	          TR_TYPE(TRNTYP)(1:TR_TYPE_LEN(TRNTYP)))
+	            IF (EDGE_SET.NE.MAP_EDGE_SET(SET_NO).OR.
+     &	                  EDGE_POINT.NE.MAP_EDGE_POINT(SET_NO)) 
+     &	                  CALL INFORM(MSG_OLDEDGEWARN,
+     &	                  MAP_EDGE_SET(SET_NO),MAP_EDGE_POINT(SET_NO),
+     &	                        EDGE_SET,EDGE_POINT)
+	            GOTO 999			! ok, use existing setup
+	         ELSE
+	            CALL MOAN(MSG_NOEXSTVAL)
+	            CALL LEARN(MSG_DGNEWVALS)
+	            GOTO 10			! digitise this point
+	         ENDIF
+	      ENDIF			! again
+C
+C check for correct device (maps can only be on table)
+C
+	      IF (DEVICE.NE.DIGLIN) THEN
+	         CALL INFORM(MSG_MAPONTABLE)
+	         GOTO 10
+	      ENDIF
+   20	   CONTINUE
+C
+C calculate the best line through these points
+C
+	   IF (REGRESS(EDGE_POINT,DIGPTS(1,1,SIDE),COEFFS(1,SIDE),
+     &	            RESID,MAXRES,RESRMS(SIDE))) then
+	      SIDE_REOBS = .TRUE.
+	      GOTO 30
+	   ENDIF
+C
+C diagnostic output
+	   if (diaopt) then
+	      call writef(
+     &	      'Digitised points for %S side (set %^L%N), and residuals',
+     &	               side_name(side)(1:side_n_len(side)),set)
+	      call writef
+	      do 21, i = 1,edge_point
+	         call writef('%G0.8, %G0.8,   %G0.8',digpts(1,i,side),
+     &	                     digpts(2,i,side),resid(i))
+21	      continue
+	      call writef
+	      call writef(
+     &	               'Max residual = %G0.8, RMS residual = %G0.8',
+     &	               maxres,resrms(side))
+	   endif
+C
+C check the RMS (in table mm)
+	   IF (RESRMS(SIDE)*TABLE_COUNTS.GT.EDGE_SIDE_TOL) THEN
+	      SIDE_REOBS = .TRUE.
+	      GOTO 30
+	   ENDIF
+	   OBS_SIDE(SIDE) = .FALSE.		! this side OK, so far
+   30	CONTINUE
+C
+C do any sides need reobserved
+	IF (SIDE_REOBS) THEN
+C
+C say why
+	   DO 32,SIDE=1,4
+	      IF (OBS_SIDE(SIDE)) THEN
+	         IF (RESRMS(SIDE)*TABLE_COUNTS.GT.EDGE_SIDE_TOL) THEN
+	            CALL MOAN(MSG_POORREGRESSION,
+     &	               SIDE_NAME(SIDE)(1:SIDE_N_LEN(SIDE)),
+     &	               RESRMS(SIDE)*TABLE_COUNTS)
+	         ELSE
+	            CALL MOAN(MSG_BADREGRESSION,
+     &	               SIDE_NAME(SIDE)(1:SIDE_N_LEN(SIDE)))
+	         ENDIF
+	      ENDIF
+   32	   CONTINUE
+	   GOTO 5
+	ENDIF
+C
+C intersect edges to get corner points
+	IF (INTERSECT(COEFFS(1,1),COEFFS(1,4),
+     &	                        XY(1,1))) THEN
+	   CALL MOAN(MSG_EDGEPARA,'West','North')
+	   SIDE_REOBS = .TRUE.
+	   GOTO 2
+	ELSEIF (INTERSECT(COEFFS(1,2),COEFFS(1,1),
+     &	                        XY(1,2))) THEN
+	   CALL MOAN(MSG_EDGEPARA,'South','West')
+	   SIDE_REOBS = .TRUE.
+	   GOTO 2
+	ELSEIF (INTERSECT(COEFFS(1,3),COEFFS(1,2),
+     &	                        XY(1,3))) THEN
+	   CALL MOAN(MSG_EDGEPARA,'East','South')
+	   SIDE_REOBS = .TRUE.
+	   GOTO 2
+	ELSEIF (INTERSECT(COEFFS(1,4),COEFFS(1,3),
+     &	                        XY(1,4))) THEN
+	   CALL MOAN(MSG_EDGEPARA,'North','East')
+	   SIDE_REOBS = .TRUE.
+	   GOTO 2
+	ENDIF
+C
+C diagnostic output
+	if (diaopt) then
+	   call writef
+	   call writef(
+     &	         'These sides give the following corner points')
+	   call writef
+	   do 34, i = 1,4
+	      call writef('Point %^L%N = %G0.8, %G0.8',
+     &	                     i,xy(1,i),xy(2,i))
+34	   continue
+	endif
+C
+C Check for proper gaps along each sides
+C
+	DO 40, SIDE = 1,4
+	   XYA(1) = XY(1,SIDE)
+	   XYA(2) = XY(2,SIDE)
+	   IF (SIDE.EQ.4) THEN
+	      XYB(1) = XY(1,1)
+	      XYB(2) = XY(2,1)
+	   ELSE
+	      XYB(1) = XY(1,SIDE+1)
+	      XYB(2) = XY(2,SIDE+1)
+	   ENDIF
+C
+C use diff x or diff y?
+	   IF (ABS(XYB(1)-XYA(1)).GE.ABS(XYB(2)-XYA(2))) THEN
+	      XORY = 1
+	   ELSE
+	      XORY = 2
+	   ENDIF
+C
+C get distances from corner points to digitised points
+	   DIST_COUNT = EDGE_POINT + 1
+	   DO 35, J = 1,EDGE_POINT
+	      DISTS(J) = ABS(DIGPTS(XORY,J,SIDE)-XYA(XORY))
+   35	   CONTINUE
+C
+C and distance between corners
+	   DISTS(DIST_COUNT) = ABS(XYB(XORY)-XYA(XORY))
+C
+C sort them
+	   CALL QUICK_SORT(DISTS,DIST_COUNT,REAL_CF,REAL_SWAP,STACK)
+C
+C check distances between points (not between corners and first and last
+C points)
+C smallest distance must be greater than EDGE_MIN_GAP*ideal gap
+C greatest distance must be less than EDGE_MAX_GAP*ideal gap
+	   MAXDIST = -1.0
+	   MINDIST = DISTS(DIST_COUNT)
+	   DO 37, I = 2,EDGE_POINT
+	      DIFF = DISTS(I+1) - DISTS(I)
+	      MAXDIST = MAX(MAXDIST,DIFF)
+	      MINDIST = MIN(MINDIST,DIFF)
+  37	   CONTINUE
+C
+	   GAP = DISTS(DIST_COUNT)/DIST_COUNT
+	   IF (MINDIST.LT.(GAP*EDGE_MIN_GAP).OR.
+     &	       MAXDIST.GT.(GAP*EDGE_MAX_GAP)) THEN
+	      CALL MOAN(MSG_BADDISTRPTS,
+     &	               SIDE_NAME(SIDE)(1:SIDE_N_LEN(SIDE)))
+	      SIDE_REOBS = .TRUE.
+	      OBS_SIDE(SIDE) = .TRUE.
+	   ENDIF
+   40	CONTINUE
+	IF (SIDE_REOBS) GOTO 5
+C
+  999	CONTINUE
+	RETURN
+	END

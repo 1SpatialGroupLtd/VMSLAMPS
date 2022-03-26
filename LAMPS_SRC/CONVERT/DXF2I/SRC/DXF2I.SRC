@@ -1,0 +1,267 @@
+	PROGRAM DXF2I
+C
+***	MODULE	DXF2I
+***	IDENT	09JL93
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Jiffy created 				ATT  02-Nov-1987
+C
+C Completely standardised, renovated 
+C  and extended !!				ADT  27-Jun-1988
+C
+C Re-structuring of the entire library
+C  to introduce PARAMETER file			 PP  13-Mar-1990
+C
+CMOD961  Remove duplicate IFFEM, IFFEJ calls, removing CLOSEF.SRC
+C	 File opening routines moved to here
+C	 Delete IFF file on error if no LOG requested
+C						 JB  23-Jan-1991
+C
+CMOD1156 Add /ABSOLUTE qualifier to use $EXTMIN coords as an
+C	 origin offset MD2LOC, and to output correspondingly
+C	 altered coordinates.
+C	 Use FRTGTTYPE(I) instead FC(I) to get graphical type
+C	 in DXF_INSERT etc.			 JB  19-Oct-1992
+C
+CMOD1172 Only call IFFUNO if a layer has been started
+C						 JB  03-Jan-1993
+C
+CMOD1226 Add /SCAN to create a default parameter file
+C						 JB  29-Apr-1993
+C
+CMOD1246 Do not use the default (0,0) values in range calculation
+C	 if not a valid coordinate
+C	 Do not moan about negative colours in RDENTITY
+C						 JB  02-Jul-1993
+C
+C Utility to take AUTOCAD DXF (Drawing eXchange Format) file and
+C create an IFF file.
+C
+C*****************************************************************
+C A DXF file is an ASCII text file containing following sections:
+C
+C HEADER: Includes general information about the file.
+C
+C TABLES: Definition of lines, layers, styles and views.
+C
+C BLOCKS: Symbol definitions - the definition of DXF symbols is 
+C	  hierarchical, i.e. symbols may be composed of symbols
+C	  which themselves are composed of symbols etc to any level
+C	  of nesting.  In addition component symbols may be scaled
+C	  and/or rotated from their original definition. This runs
+C	  up against several problems within the LAMPS environment
+C	  and so, although a /SYMBOL qualifier exists, it will not
+C	  be implemented until these problems are circumnavigable.
+C
+C ENTITIES: Drawing entities (features) i.e. the bulk of the file.
+C
+C END OF FILE: As it says.
+C
+C*****************************************************************
+C
+	IMPLICIT NONE
+C
+	INCLUDE  'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE  'LSL$CMNDXFPAR:LOOKUP.CMN'
+	INCLUDE  'HERE:DXF2I.CMN'
+	INCLUDE  'HERE:DXF2IMSG.PAR'
+C
+C functions
+	INTEGER*4	IFFCREATE
+	INTEGER*4	FLROPN
+	INTEGER*4	FLWOPN
+	INTEGER*4	FLWSTR
+	INTEGER		EXPAND
+C
+	LOGICAL		FRTINI
+	LOGICAL 	GETCMD		! command line decoder & file opening
+	LOGICAL 	READ_FILE 	! read DXF file
+	LOGICAL		RDPAR           ! read PARAMETER file
+	LOGICAL		READ_FRT        ! read FRT file
+C
+C local
+	CHARACTER*255	SCAN_LINE
+	LOGICAL		OK
+	INTEGER*2	IECODE,IELEN
+	INTEGER*2	LEN
+C
+C.......................................................................
+C initialise LSLLIB
+C
+	CALL LSL_INIT(.TRUE.)
+C
+C get command line, open files 
+C
+	OK = GETCMD()
+	IF (.NOT.OK) GOTO 999
+C
+C----------------------------------------------------------------
+C If had SCAN, open the file for write
+C
+	IF (HAD_SCAN) THEN
+	   OK = FLWOPN(SCANLUN,SCANFIL(1:SCANLEN))
+C
+	   IF (.NOT.OK) THEN
+              CALL LSL_PUTMSG(DXF2I__ERROPNSCAN,SCANFIL(1:SCANLEN))
+              GOTO 999
+	   ENDIF
+C
+	   CALL FLWSEL(SCANLUN)
+	   OK = FLWSTR('!')
+	   LEN = EXPAND ('%WS% %S% %S',SCAN_LINE,
+     &	'! Template parameter file created by DXF2I/SCAN for ',
+     &					DXFFIL(1:DXFLEN))
+	   OK = FLWSTR(SCAN_LINE(1:LEN))
+	   OK = FLWSTR('!')
+C
+	   IF (.NOT.OK) THEN
+              CALL LSL_PUTMSG(DXF2I__ERROPNSCAN,SCANFIL(1:SCANLEN))
+              GOTO 999
+	   ENDIF
+C
+	   IF (HAD_LOG) CALL LSL_PUTMSG
+     &			(DXF2I__SCANOPNWRITE,SCANFIL(1:SCANLEN))
+C
+	   ILAYER	  = 0		! initialise layer number
+	   CURRLAYIND	  = 0		! initialise layer count
+	   ENTITY_CNT	  = 0		! initialise scan entity count
+	   SCAN_LAYER_CNT = 0		! initialise scan layer count
+C
+C Initialise FCs to something silly
+C
+	   ARC_FC = -1
+	   CIR_FC = -1
+	   INS_FC = -1
+	   LIN_FC = -1
+	   POI_FC = -1
+	   POL_FC = -1
+	   SOL_FC = -1
+	   TRA_FC = -1
+	   TXT_FC = -1
+C
+	ELSE
+C
+C If not SCANning, create and open IFF file, and if we can't do that
+C then give up
+C
+	   OK = IFFCREATE(IFFLUN,IFFFIL(1:IFFLEN)) 
+C
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(DXF2I__ERRCREIFF,IFFFIL(1:IFFLEN))
+	      GOTO 999
+	   ENDIF
+C
+	   IF (HAD_LOG) CALL LSL_PUTMSG
+     &			(DXF2I__IFFOPNWRITE,IFFFIL(1:IFFLEN))
+	ENDIF
+C
+C----------------------------------------------------------------
+C open DXF file for read, and if we can't do that, then give up
+C
+	OK = FLROPN(DXFLUN,DXFFIL(1:DXFLEN))
+C
+	IF (.NOT.OK) THEN
+           CALL LSL_PUTMSG(DXF2I__ERROPNDXF,DXFFIL(1:DXFLEN))
+           GOTO 21
+	ENDIF
+C
+        IF (HAD_LOG) CALL LSL_PUTMSG
+     &			(DXF2I__DXFOPNREAD,DXFFIL(1:DXFLEN))
+C
+C then select the DXF file for input
+C
+        CALL FLRSEL(DXFLUN)
+C
+C now initialize the FRT file
+C
+        OK = FRTINI(FRTFIL(:FRTLEN))
+C
+	IF (OK) THEN
+	   OK = DXF2I__ERROPNFRT
+           GOTO 20
+        ENDIF
+C
+        IF (HAD_LOG) CALL LSL_PUTMSG
+     &			(DXF2I__FRTOPNREAD,FRTFIL(1:FRTLEN))
+C
+C read parameter file
+C
+	IF (HAD_PAR) THEN
+	   OK = RDPAR()
+	   IF (.NOT.OK) GOTO 20
+	ENDIF
+C
+C read FRT file
+C
+	IF (.NOT.HAD_SCAN) THEN
+	   OK = READ_FRT()
+	   IF (.NOT.OK) GOTO 20	
+	ENDIF
+C
+C read the input DXF file
+C
+	OK = READ_FILE()
+	IF (.NOT.OK) GOTO 20	
+C
+C....................................................................
+C close the last layer and end the job
+C
+5000	CONTINUE
+C
+	IF (.NOT.HAD_SCAN) THEN
+	  IF (IN_LAYER) THEN
+	    CALL IFFUNO(LPOSNO)			! Goto matching NO &
+	    CALL IFFEO				! write EO address
+	  ENDIF
+C
+	  CALL IFFEM
+	  CALL IFFEJ
+C
+C now go back and set the RA entry
+C
+	  IF (RANGE_UPDATE) THEN
+	    CALL IFFPKE(IECODE,IELEN,LPOSRA)
+	    CALL EIHWR(RA,4,1)
+	  ENDIF
+C
+	ENDIF
+C
+C....................................................................
+C reports
+C
+        IF (HAD_LOG) THEN
+	   CALL LSL_PUTMSG(DXF2I__ENTFND,PROCESS_TOTAL)
+           CALL LSL_PUTMSG(DXF2I__PROCESUCC,PROCESS_SUCC)
+           IF (PROCESS_FAIL.GT.0) CALL LSL_PUTMSG
+     &					(DXF2I__PROCEFAIL,PROCESS_FAIL)
+	ENDIF
+C
+C close the relevant files
+C
+20	CALL FLRCLO(DXFLUN)
+C
+C Close IFF files, deleting on error if no LOG
+C
+21	CONTINUE
+C
+	IF (HAD_SCAN) THEN
+	   CALL FLWCLO(SCANLUN)
+C
+	ELSE
+	   IF (.NOT.OK .AND. .NOT.HAD_LOG) THEN
+	      CALL IFFCDL(IFFLUN)
+	   ELSE
+	      CALL IFFCLO(IFFLUN)
+	   ENDIF
+	ENDIF
+C
+C -------------------------------------------------------- 
+C Finally exit with error status
+C
+999	IF (OK) OK = DXF2I__NORMAL
+	CALL LSL_EXIT(OK)
+C
+	STOP
+	END
+C

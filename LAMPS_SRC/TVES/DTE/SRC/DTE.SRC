@@ -1,0 +1,254 @@
+ 	PROGRAM DTE
+C
+***	IDENT	07AU86
+***	MODULE	DTE
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C
+C	Author	  : Andrew Morris
+C	Created   : 23rd Oct 1984
+C
+C
+CMOD	Modified to make use of TRACKERBALL and FUNCTION BUTTONS
+CMOD	and to work without TABLE_MONITOR.
+CMOD	New commands FLOOD, LUT and VT added	  ATT  July-1986
+C
+	IMPLICIT NONE
+C
+	INCLUDE '($SSDEF)'
+	INCLUDE '($IODEF)'
+	INCLUDE '($DVIDEF)'
+C
+***	PARAMETER/HERE:DTEPAR/
+C
+***	COMMON/LSL$CMNVIO:TXTC/		! switch input/decoding
+***	COMMON/LSL$CMNVIO:EXPC/		! message output
+***	COMMON/LSL$CMNVIO:CMDCOM/	! command decoding
+***	COMMON/LSL$CMNVS:IDXPAR/	! VSLIB event flags
+***	COMMON/HERE:TAB/		! digitising table data
+***	COMMON/HERE:DTECMN/		! odd very common variables
+***	COMMON/HERE:DTEQIO/		! has IOSB_TOFF, IN_CHAN, etc.
+***	COMMON/HERE:CURS/		! has CURSAR
+***	COMMON/HERE:CTRLC/		! has CTRLC
+C
+C workspace
+	INTEGER		COMLEN		! command length
+	INTEGER		MX,MY		! menu coords
+	INTEGER		IEFN		! an event flag number
+	INTEGER		LUN		! dummy
+	INTEGER		PTR		! pointer into TXTBUF
+	INTEGER		CMD		! command number
+	INTEGER		I,J		! odd integers
+	INTEGER		TIMOUT		! tabmon time-out period
+C
+C functions
+	INTEGER		RDCOMM		! read next command
+	INTEGER		GETCLI		! get command line
+	INTEGER		SYS$ASSIGN	! assign I/O channels
+	INTEGER		LIB$GETDVI	! get device
+C
+	LOGICAL		HAD_PUCK	! had single point?
+	LOGICAL		READ_PUCK	! read puck data
+	LOGICAL		READ_FB		! read function button
+	LOGICAL		READ_TRKB	! read trackerball
+	LOGICAL		INIT_TAB	! initialise table monitor
+	LOGICAL		IN_MENU		! point in menu area?
+	LOGICAL		WAIT_INPUT	! wait for input from things
+	LOGICAL		TERMINAL_INPUT	! inpt from terminal?(/cmd file)
+	LOGICAL		HADCTRLC	! had a ^C ?
+	LOGICAL		HAD_MVMT	! had trackerball movement ?
+C
+C externals
+	INTEGER		DTE_CMD_TABLE	! table of keyboard commands
+	EXTERNAL	DTE_CMD_TABLE
+C
+C BOXMAP mapping from menu index -> command index
+	DATA BOXMAP/ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     +		     1,  2,  3,  4, 17, 18,  0,  0,  0,  0,
+     +	             5,  6,  7,  8, 19, 20,  0,  0,  0,  0,
+     +		     0,  0,  0,  0, 29,  0,  0,  0,  0,  0,
+     +	             9, 10, 11,	12, 21, 22, 23, 24,  0,  0,
+     +	            13, 14, 15, 16, 25, 26, 27, 28,  0,  0/
+C
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C This is the TVES DTI-file editing MAIN program to run on a TVES
+C workstation consisting of a VDU, T4014 and SIGMA graphic displays,
+C and an ALTEK digitising table.
+C
+C Commands are input from the menu, cursor buttons or keyboard.
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C
+C initialise digitising table
+	HAD_TABLE = .TRUE.	! Assume we have one
+C
+	TIMOUT = 25		! 1/100ths of a second timout period
+	ERR = INIT_TAB(TIMOUT,IERR)
+	IF (ERR) THEN		! table not available so ....
+	  CALL WRITEF('*** ERROR *** initialising table monitor')
+	  CALL WRITEF('Assume no table is available')
+	  HAD_TABLE = .FALSE.
+	END IF
+C
+C set up CURSAR and CURDEL arrays for repeated use by the special
+C SIGMA cursor writing subroutine SIGCSWT
+	DO 3 I = 1,CURSIZ
+	  CURCOL(I) = 1			! cursor will be white
+	  DELCOL(I) = 0			! for undrawing cursor
+3	CONTINUE
+C
+	CURCOL(CURSIZ/2+1) = 0		! remove cursor centre pixel
+C
+C initialise state variables
+	MENU_SET = .FALSE.	! menu location not set yet
+	MAP_SET = .FALSE.	! map location not yet set
+	FILE_SET = .FALSE.	! no file set yet
+	WINDOW_SET = .FALSE.	! DTI window not yet set
+	BAR_CHART = .FALSE.	! bar chart not yet on display
+	GOT_TEK = .FALSE.	! assume T4014 is NOT available
+	GOT_MODTEN = .FALSE.	! not got MODTEN colouring yet
+	GOT_FLOOD = .FALSE.	! no FLOOD command yet
+	HAD_ALPHA = .TRUE.	! assume we have LSL$VSALPHA set up
+	VT = .TRUE.		! assume we have VT100
+	LIM_CON = .TRUE.	! limit contours to edit window
+	CMDFIL = .NOT.TERMINAL_INPUT()	! input from command file?
+C
+C assign input and output channels
+	IERR = SYS$ASSIGN('SYS$INPUT',IN_CHAN,,)
+	IF (.NOT.IERR) THEN
+	  CALL GEN_SYSMSG(IERR)
+	  CALL DTE_EXIT(.TRUE.)
+	END IF
+C
+C set event flag numbers depending upon whether we have a table or not
+	IF (HAD_TABLE) THEN
+	  CALL RETURN_EFN(EF_POINT,EF_STREAM,EF_ERROR,EF_VDU,EF_LAST)
+C
+C use next two free event flags for trackerball and function buttons
+	  EF_TRKB = EF_VDU+1
+	  EF_FB = EF_VDU+2
+	  IDTBEF = EF_TRKB
+	  IDFBEF = EF_FB
+C
+C and clear any rubbish event flags as we havn't called VSINIT yet
+	  CALL CLREF(EF_TRKB)
+	  CALL CLREF(EF_FB)
+	ELSE			! No TABLE available so ...
+	  EF_VDU = 1		! Set VDU event flag to be 1
+	  EF_TRKB = EF_VDU+1	! and the trackerball and 
+	  EF_FB = EF_VDU+2	! function buttons to be the next
+	  IDTBEF = EF_TRKB
+	  IDFBEF = EF_FB
+C
+C and clear any rubbish event flags as we havn't called VSINIT yet
+	  CALL CLREF(EF_TRKB)
+	  CALL CLREF(EF_FB)
+	ENDIF
+C
+C initialise VIOLIB for GETCLI to work (see pp.2 @ VIOLIB document)
+	TXTADD = %LOC(TXTBUF)
+	TXTPTR = 80
+C
+C See whether we have a TVES setup (VT100 and SIGMA) or SIGMA alone. 
+C Look at the devices assigned to SYS$OUTPUT and LSL$VSALPHA.
+	IERR = LIB$GETDVI(DVI$_DEVNAM,,'SYS$OUTPUT',,TTDEV,)
+	IF (.NOT.IERR) THEN
+	  CALL GEN_SYSMSG(IERR)
+	  CALL DTE_EXIT(.TRUE.)
+	ENDIF
+C
+	IERR = LIB$GETDVI(DVI$_DEVNAM,,'LSL$VSALPHA',,VSDEV,)
+	IF (.NOT.IERR) THEN
+	  CALL GEN_SYSMSG(IERR)
+	  CALL WRITEF('%S Warning LSL$VSALPHA not found.',BELL)
+	  CALL WRITEF('%S Command VT invalid.',BELL)
+	  HAD_ALPHA = .FALSE.
+	ENDIF
+C
+C If we have a SIGMA alone then set VT FALSE so we get decent display
+	IF (TTDEV.EQ.VSDEV) VT = .FALSE.
+C
+	IF (.NOT.VT) CALL SIGINIT
+C
+C initialise ^C handling 
+	IF (.NOT.CMDFIL) THEN
+	  CTRLC = .TRUE.		! fake a ^C
+	  CALL HADCTRLC()		! arm ^C mechanism
+	END IF
+C
+C assume any text following DTE on initial command line is filename
+	COMLEN = GETCLI(TXTDSC)	! put initial command line into TXTBUF
+	IF (COMLEN.GT.0) CALL FILE
+C
+C get next command from keyboard, menu, trackerball, function buttons
+C or puck.
+30	ERR = .NOT.WAIT_INPUT('DTE')
+	IF (ERR) CALL DTE_EXIT(.TRUE.)		! exit on fatal error
+C
+C check and execute it, depending on where it came from
+	IF (HAD_PUCK()) THEN			! table input?
+C
+	  PRE_X_TAB = X_TAB			! Put old TABLE coords
+	  PRE_Y_TAB = Y_TAB			! where they belong
+C
+	  ERR = READ_PUCK(BUTTON,X_TAB,Y_TAB,IERR)
+C
+	  IF (ERR) THEN
+	    CALL DTEMSG('Error reading puck data')
+	    CALL WRITEF('%S',BELL)
+	    CALL DTE_EXIT(.TRUE.)
+	  END IF
+C
+	  IF (IN_MENU(CMD)) THEN		! in menu box?
+	    CALL EXECOM(CMD,MENU)		! execute menu command
+C
+	  ELSEIF (GOT_FLOOD) THEN		! we have FLOODING ?
+	    CMD = CMD_FLOOD
+	    CALL EXECOM(CMD,CURSOR_BUT)
+C
+	  ELSE				   	! must be a button cmd
+	    CMD = BUTTON+1		     	! buttons start from 0
+	    CALL EXECOM(CMD,CURSOR_BUT) 	! execute cursor cmd
+	  END IF
+C
+	ELSE IF (HAD_VDU) THEN			! keyboard input
+	  IF (TXTBUF(1).EQ.26) THEN		! exit for ^Z
+	    CMD = CMD_EXIT
+	    GOTO 40
+	  END IF
+	  CALL BSLN
+	  CMD = RDCOMM(DTE_CMD_TABLE)
+40	  IF (ERRNUM.NE.0.OR.CMD.LE.0) GOTO 30	! get next input
+	  CALL EXECOM(CMD,KEYBOARD) 		! execute keyboard cmd
+C
+	ELSE IF (HAD_FB) THEN			! Function button input
+	  ERR = READ_FB(CMD)			! Read relevant FB
+C
+	  IF (ERR) THEN
+	    CALL DTEMSG('Error reading function buttons ')
+	    CALL DTE_EXIT(.TRUE.)
+	  END IF
+C
+	  CALL EXECOM(CMD,FUNCTION_BUT) 
+C						! execute FB cmd
+C
+	ELSE IF (HAD_TRKB) THEN			! Trackerball
+	  ERR = READ_TRKB(HAD_MVMT)		! Have we moved ?
+C
+	  IF (ERR) THEN
+	    CALL DTEMSG('Error reading trackerball input')
+	    CALL DTE_EXIT(.TRUE.)
+	  END IF
+C
+C If the trackerball has moved then lets move ... otherwise don't bother
+	  IF (.NOT.WINDOW_SET) GOTO 30		! no window yet...ignore
+C						! and get next cmd
+	  IF(HAD_MVMT)THEN
+	    CMD = CMD_MOVE			! moving unless.....
+	    IF (GOT_FLOOD) CMD = CMD_FLOOD	! we have FLOODING 
+	    CALL EXECOM(CMD,TRACKERBALL)
+	  END IF
+	END IF
+C
+	GOTO 30					! get next command
+C
+	END

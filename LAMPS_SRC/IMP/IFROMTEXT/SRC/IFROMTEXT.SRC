@@ -1,0 +1,196 @@
+	PROGRAM IFROMTEXT
+C
+***     MODULE  IFROMTEXT
+***     IDENT   03AU94
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England.
+C
+CMOD1387Add /ORIGIN to supply origin offset		  JB 03-Aug-1994
+CMOD    New Version to cope with CB and /FRT		MWSR 03-Nov-1987
+CMOD	LSLLIB IFF file open routine added		 TJH 03-Nov-1986
+CMOD	LSL_EXIT added. Name changed to IFROMTEXT! 	 TJH 01-Oct-1986
+C
+C	Created						 RJH 16-MAR-1984
+C
+C Description
+C
+C	This program reads a text file containing IFF information and
+C	produces an IFF file.
+C	The object code of the main program should be linked with the 
+C	object code of the following modules and libraries :-
+C
+C	T2ICML,
+C	T2IFIL,T2IMAP,T2ISEC,T2IOVE,T2IFEA,T2IIGN,
+C	T2INXT,T2ISKP,T2ILIN,T2ITST,
+C	T2IINT,T2ILON,T2IREA,T2IMDN,T2ISTR,T2IINF,T2IMHT,
+C	T2ICON,T2ISEP,T2ICOR,
+C	T2ICMD,T2IECD,T2IMCD,
+C	LSL$LIBRARY:LSLLIB/LIB
+C
+C    The mnemonic IFROMTEXT can be set up in a LOGIN file as follows :-
+C
+C		IFROMTEXT =="$<device>:<directory>IFROMTEXT"
+C
+C    The program can then be run by typing
+C
+C		IFROMTEXT [ <command line> ]
+C
+C the command line being optional. If not given, the program will prompt
+C for it. The syntax required for the command line is documented in the
+C function T2ICML.
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INTEGER	SS$_NORMAL
+	EXTERNAL SS$_NORMAL		! normal successful completion
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$CMNIFROMTEXT:IFROMMSG.PAR'
+C
+C Common blocks
+	INCLUDE 'LSL$CMNIFROMTEXT:T2ICOM.CMN'
+	INCLUDE 'LSL$CMNIFROMTEXT:T2IPAR.CMN'! global variables
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+C
+C Functions called
+	INTEGER*4	IFFCREATE	! create & open IFF file
+	INTEGER*4       T2ICOM		! reads and decodes command line
+	INTEGER*4	T2ICON		! converts IFF code to seq. no.
+	INTEGER*4	FLROPN		! VIOLIB - opens file
+	INTEGER*4	FLRCLO		! VIOLIB - closes file
+	LOGICAL		FRTINI          ! reads FRT file
+C
+C Local variables
+	INTEGER*4	RUNIT		! file read unit number
+	INTEGER*4	WUNIT		! file write unit number
+	INTEGER*4	ERROR		! file I/O error code
+	INTEGER*4	RETCOD		! file I/O error return code
+	INTEGER*4	I		! counter
+	LOGICAL		DELIFF		! delete IFF file on close?
+	LOGICAL		LOCAL		! .T. if qual. is local
+	LOGICAL		LOCNEG		! set .TRUE. if qual. is 
+	LOGICAL	        NOFILE		! locally negated
+	LOGICAL		OK		! function return
+C
+C ......................................................................
+C Initialise LSLLIB
+C
+	CALL LSL_INIT
+C
+	LSL_STATUS = %LOC(SS$_NORMAL)	! assume success
+C
+C Increase default size of TXTBUF and EXPBUF to allow for 255
+C byte AC, CH, TC, and TX strings
+C
+	CALL SET_EXPMAX(STRSZ)
+	CALL SET_TXTLIM(STRSZ)
+C
+C Initialisation
+C
+	DELIFF  = .FALSE.		! delete IFF file on close?
+	INPFIL	= ' '			! pad with blanks
+	OUTPFIL	= ' '
+C
+C As this unit is hard-coded into the program, if it is changed then it
+C must also be amended in T2IMH3 which selects the translation table 
+C for read, and then restores RUNIT to continue processing input file.
+C
+	RUNIT  = 1			! file reading unit number
+	WUNIT  = 2			! file writing unit number
+	TERMIN = .FALSE.		! assume input from a file
+C
+C IFF library initialisation and file opening
+C Get command line
+C
+	LSL_STATUS = T2ICOM()
+	IF (.NOT.LSL_STATUS) GOTO 1000 	
+C
+	LSL_STATUS = IFFCREATE(WUNIT,OUTPFIL(:OUTPLEN),,,LOG)  ! open IFF 
+	IF (.NOT.LSL_STATUS) GOTO 1000 	
+C
+	OK = FLROPN(RUNIT,INPFIL,RETCOD)	! open text file
+	IF (.NOT. OK) THEN
+	   CALL LSL_PUTMSG(IFROM__ERROPTXT,INPFIL(:INPLEN))   
+	   CALL LSL_ADDMSG(OK)
+	   IF (RETCOD.NE.%LOC(SS$_NORMAL)) CALL LSL_ADDMSG(RETCOD)
+	   DELIFF=.TRUE.
+	   GOTO 800
+	ELSE
+	   IF (LOG) CALL LSL_PUTMSG(IFROM__OPTXT,INPFIL(:INPLEN))
+	ENDIF
+C
+C read FRT file
+C
+	IF (HAD_FRT)THEN
+	   IF (FRTINI(FRT_FILE(:FRT_LEN)))THEN
+	      CALL LSL_PUTMSG(IFROM__ERRREADFRT,FRT_FILE(:FRT_LEN))
+	      GOTO 700
+	   ENDIF
+	ELSE
+	   CALL FRT_ACDINI
+	ENDIF
+C
+C select input file again
+C
+	CALL FLRSEL(RUNIT)
+C
+C Read text file and write IFF file
+C
+C    The structure is :-
+C
+C 	initialise remaining common variables
+C 	get first line of first entry
+C	if not done process text file
+C
+	CURRA(1) =  1.7E38		! maximum real
+	CURRA(2) = -1.7E38		! minimum real
+	CURRA(3) =  1.7E38		! maximum real
+	CURRA(4) = -1.7E38		! minimum real
+	CURLIN = 0			! current input line no.
+	ECDNUM = 0
+	MAXFIL = T2ICON('EJ')		! end of file
+	MAXMAP = T2ICON('EM')		! end of map
+	MAXSEC = T2ICON('CP')		! corner points
+	MAXOVE = T2ICON('EO')		! end of overlay
+	MAXFEA = T2ICON('CB')		! coordinate block
+	MAXIGN = T2ICON('HI')		! history entry
+	HIGHNO = 0
+	HIGHNF = 0
+	HIGHSQ = 0
+	GOTPTS = .FALSE.
+	GOTNXT = .FALSE.
+	DONE   = .FALSE.
+	FIRST  = ' '			! pad with blanks
+C
+C Get first line of first entry
+C
+	CALL T2INXT(.TRUE.)
+C
+C If not done process text file
+C
+	IF (.NOT.DONE) CALL T2IFIL
+C
+C Close files
+C
+700	LSL_STATUS=FLRCLO(RUNIT,RETCOD)	! close text file
+	IF (.NOT. LSL_STATUS) THEN
+  	   CALL LSL_PUTMSG(IFROM__ERRCLOTXT,INPFIL(:INPLEN))
+	   CALL LSL_ADDMSG(LSL_STATUS)
+           CALL LSL_ADDMSG(RETCOD)
+	ENDIF
+
+800	IF (DELIFF) THEN
+	  CALL IFFCDL(WUNIT)		! close and delete IFF file
+	ELSE
+	  CALL IFFCLO(WUNIT)		! merely close IFF file
+	ENDIF
+C
+C Finish up
+C
+1000	CALL LSL_EXIT
+	END
+C

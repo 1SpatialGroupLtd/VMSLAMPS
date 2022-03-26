@@ -1,0 +1,422 @@
+	LOGICAL*4 FUNCTION AREPRC(EMPTY,BYTMAP,SQRNUM,NOMAP)
+C
+***	MODULE	AREPRC
+***	IDENT	03JN86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Converged				 DM	28-Jan-1986
+CMOD	Optimised a bit				 DM	05-Jul-1983
+CMOD	Now a function (.TRUE. if aborted)	 DM	24-Jun-1983
+CMOD	VIOCLR introduced, uses INT rather than
+CMOD	NINT in 3rd argument to ARESET		 DM	07-Jun-1983
+CMOD	BYTMAP stuff added			 DM	17-May-1983
+C 	Author 					JHR	04-Feb-1982
+C 	(from module FRSPRC, as used in LAR)
+C
+C
+C	 AREa-scan PRoCessor - 
+C
+C	  receives encounters detected by scanning in x then y 
+C	(via ARESCA), and converts to pixels, applying various 
+C	constraints, and then constructs a byte map of the x and y 
+C	pixels. After analysis this is then converted back to edges.
+C	This is done for each individual scan-block scanned.
+C
+C	The byte-map is centred at the bi-section of the x and y
+C	scan vectors.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+***	PARAMETER/PARAMS/
+C
+***	COMMON/AREA/
+***	COMMON/LKPARM/
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+***	COMMON/XYPIXC/
+C
+C function(s) called.
+	INTEGER NEGET		! returns encounters captured by the
+				! scanner.
+C
+C o/p arguments
+	LOGICAL*1 EMPTY		! TRUE if no encounter found in the 
+				!  current scan-block.
+C bytmap stuff
+	INTEGER SQRNUM		! which scan-block are we in ?
+	LOGICAL*1 NOMAP		! byte-map wanted ?
+C
+C this bit is *really* dodgy - if .NOT.NOMAP then set up BYTMAP of size
+C (ARESQX*PIXNUM/2:-ARESQX*PIXNUM/2, ARESQY*PIXNUM/2:-ARESQY*PIXNUM/2)
+C if NOMAP then set up a dummy BYTMAP of size (0:0,0:0) !!!
+	LOGICAL*1 BYTMAP(-(NOMAP+1)*ARESQX*PIXNUM/2:
+     &			  (NOMAP+1)*ARESQX*PIXNUM/2,
+     &			 -(NOMAP+1)*ARESQY*PIXNUM/2:
+     &			  (NOMAP+1)*ARESQY*PIXNUM/2)
+C
+C w/s
+	INTEGER SCANAT		! scan-line we're at.
+	INTEGER ENCTSB		! number of encounters we've processed
+				!  in this scan-block.
+	INTEGER ENCTSL		! number of encounters we've processed
+				!  in this scan-line.
+	INTEGER START		! enc at which to start conversion into
+				!  byte map entries.
+	INTEGER COORD		! temp. location when swapping coords on
+				!  the scan-line into ascending order. 
+	INTEGER HSLPM2		! half scan length in pitches minus 2
+	INTEGER	I,III,J,JJJ,KKK	! DO loop variables, etc.
+	INTEGER LLL
+	INTEGER*4 LI,LJ
+	INTEGER MLEN		! variable for debugging.
+	INTEGER N		! function button read.
+	INTEGER LUN		! lun for requested debug-printout.
+	LOGICAL*1 XAXIS		! TRUE if this is the 1st scan of the
+				!  current scan-block ( x-axis).
+	LOGICAL*1 ENDENC	! TRUE if we've processed all the 
+				!  encounters in a scan-block, and we're
+				!  just flushing-out the last scan-line.
+	LOGICAL*1 WHITAL	! TRUE if scan-line we've just scanned 
+				!  was in 'all-white'.
+	LOGICAL*1 DEBUG2	! TRUE if FB2 is pressed - displays 
+				!  byte-map after scans in x, and in 
+				!  x and y; for debugging purposes.
+	LOGICAL*1 DEBUG3	! TRUE if FB3 is pressed - as for FB2,
+				!  but the o/p is sent to -
+				!        LSL$DB:LARKSVO.MIT
+	LOGICAL*1 HADPOS	! TRUE, if, when extracting edges from 
+				! the byte-map, we've just had +ve edge.
+	LOGICAL*1 GOTONE	! TRUE, if after extracting all the encs
+				!  from the byte-map, on any scan-line,
+				!  we are still 'in-line'.
+				!  Used to set/clear global flag INLINE.
+C				
+C oh the times they are a changin'
+	SAVE	XAXIS
+C				
+C initialise
+	DATA XAXIS/.FALSE./
+	DATA DEBUG2/.FALSE./
+	DATA DEBUG3/.FALSE./
+C
+C ......................................................................
+C
+	ENCTSB=0
+	ENCTSL=0
+	SCANAT=0
+	AREPRC=.FALSE.
+	ENDENC=.FALSE.
+	WHITAL=.FALSE.
+	EMPTY=.FALSE.
+	XAXIS=.NOT.XAXIS
+C
+C see if he wants to give up (or displaying of byte-map is needed).
+	CALL FBRD(N)
+	IF (N.EQ.16) GO TO 902
+CCC	IF (N.EQ.2) DEBUG2 = .NOT. DEBUG2
+CCC	IF (N.EQ.3) DEBUG3 = .NOT. DEBUG3
+CCC	IF (DEBUG3) DEBUG2 = .FALSE.
+CCC	CALL FBWT(2,DEBUG2)
+CCC	CALL FBWT(3,DEBUG3)
+C
+C get all the encounters for this scan-block.
+	INE = NEGET(NEBUF,NESIZE)
+	IF (INE.EQ.-1) GOTO 990
+	IF (INE.EQ.0 .AND. XAXIS .AND. INLINE) GOTO 80 ! no encs on 1st-
+				       ! scan (x), and left 'in-line'
+	IF (INE.EQ.0 .AND. XAXIS) GOTO 900 ! no encs on 1st scan (x).
+C
+C initialisation needed if 1st scan of this scan-block.
+	IF (XAXIS) CALL VIOCLR(PIXMAP(-PIXNUM/2,-PIXNUM/2),
+     &			       (PIXNUM+1)**2,32)
+	IF (INE.EQ.0 .AND. .NOT.XAXIS) GOTO 993 ! encs in x scan, but 
+				! not in y? - moan and ignore x-axis
+				! captured data and check we're 
+				! not still 'in-line'.
+C
+C got some encounters, clear-out remnants of last encounters found.
+	CALL VIOCLR(INPOSN,2*PIXNUM)
+	INLINE = .FALSE.
+	POSCNT = 0
+C
+C process next encounter, checking for last encounter.
+5	ENCTSB = ENCTSB + 1
+	IF (ENCTSB.LE.INE) GOTO 10
+C
+C at end of encounters; flag it thus and flush-out the last scan-line
+C of encounters.
+	ENDENC = .TRUE.
+	GOTO 11
+C
+C determine what type of encounter this is. 
+10	IF (NEBUF(1,ENCTSB).EQ.MULPOS .OR.
+     &	    NEBUF(1,ENCTSB).EQ.MULNEG) GOTO 50
+C
+C	S I N G L E   E N C O U N T E R 
+C	  OR   	A L L  -  W H I T E.
+C
+C	  - means we've started on a new scan-line, so deal with
+C	    old scan-line first.
+C
+	IF (SCANAT.EQ.0) GOTO 40	! j if 1st scan-line
+C
+C see if 'old' line was scanned in 'all-white' - if so
+C set all the cells for this scan-line in the byte-map.
+11	IF (.NOT. WHITAL) GOTO 12
+	WHITAL = .FALSE.		! clear flag
+	CALL ARESET(SCANAT-(HSLENP+1),-HSLENP,HSLENP,XAXIS)
+	GOTO 40				! deal with new scan-line
+C
+C see if we scanned this 'old' line in -ve x, or y.
+12	DO 1000 I=1, ENCTSL-1
+	   IF (CURLIN(1,I+1) - CURLIN(1,I)) 15,1000,25
+1000	CONTINUE
+C
+C - scanned negatively, so flip.
+15	DO 2000 I=1,2
+	   IF (ENCTSL .GT. 3) GOTO 20
+	   COORD = CURLIN(I,1)
+	   CURLIN(I,1) = CURLIN(I,ENCTSL)
+	   CURLIN(I,ENCTSL) = COORD
+	   GOTO 2000
+C
+20	   DO 3000 J=0, (ENCTSL-1) / 2
+	      COORD = CURLIN(I,J+1)
+	      CURLIN(I,J+1) = CURLIN(I,ENCTSL-J)
+	      CURLIN(I,ENCTSL-J) = COORD
+3000	   CONTINUE
+2000	CONTINUE
+C
+C here with encounters in correct order,
+C (i.e. left-to-right, for the scan in x, or bottom-to-top, for 
+C the scan in y),
+C  - set up byte map according to the polarity of the encounters.
+25	START = 1
+	IF (CURLIN(2,1).NE.NEGEDG .AND. CURLIN(2,1).NE.MULNEG) GOTO 30
+C
+C start of this scan was in-line, so set byte map white up to, and
+C including this enc.
+	START = 2
+	CALL ARESET(SCANAT-(HSLENP+1),
+     &		    -HSLENP,
+     &		    INT(FLOAT(CURLIN(1,1))/IPIT),
+     &		    XAXIS)
+	IF (ENCTSL .EQ. 1) GOTO 40
+	IF (ENCTSL .EQ. 2) GOTO 30
+	GOTO 35
+C
+C here with a +ve encounter...
+C ... I'm probably being paranoid, but I'm still going to check that
+C this is so.
+30	IF (CURLIN(2,START).EQ.POSEDG .OR. CURLIN(2,START).EQ.MULPOS)
+     &	   GO TO 33
+C
+	GO TO (32,31),START		! duff encounter
+31	IF (CURLIN(2,2).NE.NEGEDG .AND. CURLIN(2,2).NE.MULNEG) GOTO 32
+CCC	PAUSE 'AREPRC: Two adjacent negative encounters - PAUSING'
+	IF (TMPCHK)
+     &	   CALL WRITEF('AREPRC: Two adjacent negative encounters')
+	GO TO 33
+CCC32	PAUSE 'AREPRC: Unrecognised encounter - PAUSING'
+32	IF (TMPCHK) CALL WRITEF(
+     &	   'AREPRC: Unrecognised encounter %O',CURLIN(2,START))
+C
+33	IF (ENCTSL .GT. START) GOTO 35
+C
+C set byte-map white from this last encounter up to the end.
+	CALL ARESET(SCANAT-(HSLENP+1),
+     &		    NINT(FLOAT(CURLIN(1,START))/IPIT),
+     &		    HSLENP,
+     &		    XAXIS)
+	GOTO 40
+C
+C having dealt with the possibility of a -ve first encounter we
+C can now proceed with processing the other encounters on this 
+C scan-line.
+35	DO 4000 I=START,ENCTSL-1,2
+	   IF (CURLIN(2,I).NE.NEGEDG.AND.CURLIN(2,I).NE.MULNEG) GO TO 36
+CCC	   PAUSE 'AREPRC: Two adjacent negative encounters - PAUSING'
+	   IF (TMPCHK)
+     &	      CALL WRITEF('AREPRC: Two adjacent negative encounters')
+36	   CALL ARESET(SCANAT-(HSLENP+1),
+     &		       NINT(FLOAT(CURLIN(1,I))/IPIT),
+     &		       INT(FLOAT(CURLIN(1,I+1))/IPIT),
+     &		       XAXIS)
+4000	CONTINUE
+C
+C deal with the last encounter on this scan-line, that is if we haven't
+C already dealt with it!
+	IF (MOD((ENCTSL-START),2).EQ.0) 
+     &	   CALL ARESET(SCANAT-(HSLENP+1),
+     &		       NINT(FLOAT(CURLIN(1,ENCTSL))/IPIT),
+     &		       HSLENP,
+     &		       XAXIS)	! set from this last enc up to the end
+C
+C now we've finished processing this scan-line, deal with the single, 
+C or all-white encounter we've just received, updating various
+C pointers first.
+40	ENCTSL = 1	! 1st enc on this scan-line, in this scan-block
+	IF (ENDENC) GOTO 60	! jump if end of encs
+C
+C compute the position of this new scan-line.
+	IF (XAXIS) SCANAT=NEBUF(3,ENCTSB)/IPIT + 1	   ! for x 
+	IF (.NOT.XAXIS) SCANAT=NEBUF(2,ENCTSB)/IPIT + 1	   ! for y
+	IF (SCANAT.GT.SCPSCB) GOTO 991		! check for sillies
+C
+C see what caused this new scan-line, i.e. an all-white scan, or a
+C single encounter?
+	IF (NEBUF(1,ENCTSB).EQ.POSEDG .OR.
+     &	    NEBUF(1,ENCTSB).EQ.NEGEDG) GOTO 45
+C
+C all-white scan - flag accordingly, and get to next scan-line,
+C  checking consistency of encounter-types returned from the 
+C  scanner-library.
+	IF (NEBUF(1,ENCTSB).NE.WHITE) 
+     &	   CALL WRITEF('AREPRC: Inconsistent returns from SCRTS')
+	WHITAL = .TRUE.
+	GOTO 5
+C
+C single encounter, store encounter and sense.
+45	IF (XAXIS) CURLIN(1,ENCTSL)=NEBUF(2,ENCTSB)	   ! enc (x)
+	IF (.NOT.XAXIS) CURLIN(1,ENCTSL)=NEBUF(3,ENCTSB)   ! enc (y)
+	CURLIN(2,ENCTSL)=NEBUF(1,ENCTSB)		   ! sense
+	WHITAL = .FALSE.			! not all-white scan
+	GOTO 5
+C
+C 	M U L T I P L E   E N C O U N T E R
+C
+C	 - store the encounter, and its sense.
+C
+50	ENCTSL = ENCTSL + 1		! bump enc count for this
+					! scan-line, in this scan-block
+	IF (ENCTSL.GT.ENCBLK) GOTO 992	! check for sillies
+	IF (XAXIS) CURLIN(1,ENCTSL)=NEBUF(2,ENCTSB)	   ! enc (x)
+	IF (.NOT.XAXIS) CURLIN(1,ENCTSL)=NEBUF(3,ENCTSB)   ! enc (y)
+	CURLIN(2,ENCTSL)=NEBUF(1,ENCTSB) 		   ! sense
+	GOTO 5
+C
+C	E N D   O F  E N C O U N T E R S 
+C
+C	 - if we've completed both the x and y scans, then our byte-map
+C	   is complete; we then need to convert this back into edges, 
+C	   with respect to our knowledge of the outside world.
+C
+C
+C see if debug print-out was requested.
+C
+60	CONTINUE
+C	IF (.NOT.DEBUG2 .AND. .NOT.DEBUG3) GOTO 65
+C	LUN=5
+C	IF (DEBUG3) LUN = DEBLUN
+C	IF (XAXIS) WRITE(LUN,6660)
+C6660	FORMAT(' X-scan byte-map :-')
+C	IF (.NOT.XAXIS) WRITE(LUN,6661)
+C6661	FORMAT(' X+Y merged byte-map :-')
+C	  DO 4250 I = -PIXNUM/2, PIXNUM/2
+C	   MLEN = 1
+C	     DO 4500 J = -PIXNUM/2, PIXNUM/2
+C	      IF (PIXMAP(J,I) .NE. ' ') MLEN = J
+C4500	     CONTINUE
+C	   WRITE(LUN,6662) ( PIXMAP(J,I), J = 1, MLEN )
+CCC6662	   FORMAT(1X,201A1)
+C6662	   FORMAT(201A1)					! DM
+C4250	  CONTINUE
+65	IF (XAXIS) RETURN	! only scanned in x so far
+	HSLPM2=HSLENP - 2
+C
+C ......................................................................
+C
+C ... set up a byte map for the complete scan ?
+	IF (NOMAP) GO TO 999
+	JJJ=(SCPSCB-4)*(MOD(SQRNUM-1,ARESQX) - ARESQX/2)
+	KKK=(SCPSCB-4)*(ARESQY/2 - (SQRNUM-1)/ARESQY)
+	DO 998 I=-HSLPM2,HSLPM2
+	   III=KKK - I
+	   DO 997 J=-HSLPM2,HSLPM2
+	      LLL=JJJ + J
+	      BYTMAP(LLL,III)=PIXMAP(J,I)
+997	   CONTINUE
+998	CONTINUE
+C
+C ......................................................................
+C
+C ... now extract encounters from our glorious byte-map, working from
+C ... the bottom left to the top right, ignoring a 2-cell thick
+C ... perimeter around the edges.
+999	GOTONE=.FALSE.
+	POSCNT=0
+	III=2
+	DO 5000 LI=-HSLPM2,HSLPM2	! loop through scan-lines
+	   III=III + 1
+C
+C ... take account of what's gone before this scan-block.
+	   HADPOS=(MOD(ENCSF(III),2) .NE. 0)
+	   DO 6000 LJ=-HSLPM2,HSLPM2	! loop through cells
+C
+C ... look for a transition.
+	      IF (.NOT.(HADPOS.XOR.(PIXMAP(LJ,LI).NE.' '))) GOTO 6000
+C
+C ... got one - extract an encounter for this transition.
+	      HADPOS=.NOT.HADPOS
+	      ENCSF(III)=ENCSF(III) + 1
+	      SWABUF(ENCSF(III),III)=LJ + HSLENP + SWATOT
+6000	   CONTINUE
+C
+C ... check if we're still 'in-line' at the end of this scan-line.
+C ... if so, remember the scan-line and flag the occurrence.
+	   IF (MOD(ENCSF(III),2).EQ.0) GOTO 5000
+	   POSCNT=POSCNT + 1
+	   GOTONE=.TRUE.
+	   INPOSN(POSCNT)=III
+5000	CONTINUE
+	INLINE = GOTONE			! set global flag accordingly
+	GOTO 9999
+C
+C here with no encounters in this scan-block, but the last time we had
+C some encounters we finished some of the scan-lines 'in-line',
+C so, fabricate the closing encounter (at the start of this scan-block),
+C for the offending scan-line(s).
+C
+80	INLINE = .FALSE.		! clear global flag
+	DO 7000 I=1,POSCNT
+	   III=INPOSN(I)
+	   ENCSF(III)=ENCSF(III) + 1	! bump counter
+C
+C I'm still paranoid, so check we're now 'out-of-line'. (even)
+	   IF (MOD(ENCSF(III),2).NE.0)
+     &	      CALL WRITEF('AREPRC: In-line fabrication wrong')
+	   SWABUF(ENCSF(III),III)=SWATOT
+	   INPOSN(I) = 0		! clear 'in line' pos
+7000	CONTINUE
+	POSCNT = 0
+C
+C no encounters from this scan - inform ARESCA. Also, since we'll be
+C skipping the y-scan, flip the flag for what axis we're to scan in.
+900	XAXIS = .NOT. XAXIS
+901	EMPTY = .TRUE.
+C
+C update start of scan position (in pixels).
+9999	SWATOT = SWATOT + (SCPSCB - 4)
+	RETURN
+C
+C ... scan aborted.
+902	AREPRC=.TRUE.
+	XAXIS=.FALSE.			! synchronize scan direction
+	INLINE=.FALSE.
+	GO TO 901			! signal back an empty scan
+C
+C error return(s).
+990	CALL WRITEF('AREPRC: Buffer for DMA too small - data lost')
+	RETURN
+991	CALL WRITEF('AREPRC: Scan-at exceeds scans/scan-block')
+	RETURN
+992	CALL WRITEF('AREPRC: Too many encounters (%N)',ENCTSL)
+	RETURN
+CCC993	CALL WRITEF('AREPRC: Encs found in x-scan, but not in y-scan')
+993	IF (INLINE) GOTO 80		! deal with 'in-line' case
+	GOTO 9999
+C
+	END

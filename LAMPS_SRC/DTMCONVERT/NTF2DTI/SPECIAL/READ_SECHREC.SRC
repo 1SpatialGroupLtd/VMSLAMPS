@@ -1,0 +1,468 @@
+	LOGICAL FUNCTION READ_SECHREC
+C
+***     MODULE READ_SECHREC
+***     IDENT  23JN93
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author	 IM	27-Apr-87
+C
+C Reads the data from the section header record
+C into the DTI common block
+C
+C Modified	TJI	 5-Oct-87
+C
+CMOD	Works out DTI name from SECHREC if not on command line.
+C							SG 19-Aug-1991
+CMOD	Note that raster information is height and is not redefinable at 
+C	level 0. Previously XYLEN had been used to redefine the data width.
+C	This is not allowable and so FIELD_WIDTH is being used.
+C							SG 10-Sep-1991
+C
+CMOD	 Read Z_MULT factor				JB 29-Oct-1991
+C
+CMOD	 Add new format code for Version 1.1		JB 21-May-1992
+C	 Change issue of NOTRASTER from error to warning, and
+C	 carry on (OS definition of raster is different to ours!)
+C
+CMOD	 Use LSL$DTI for output file names		JB 31-Mar-1993
+C
+CMOD1242 Read ver 2.0 level 5 NTF			JB 21-Jun-1993
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'HERE:NTF2DTIMSG.PAR'
+C
+C Commons:
+	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE	'HERE:FILENAME.CMN'
+C
+	INCLUDE 'HERE:COMMANDS.CMN'
+	INCLUDE	'HERE:RECORD.CMN'
+	INCLUDE	'HERE:NTFDATA.CMN'
+	INCLUDE	'HERE:NTF2DTI.CMN'
+	INCLUDE	'HERE:LUNS.PAR'
+	INCLUDE	'LSL$CMNLSL:READSTR.PAR'
+C
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIPROJ.CMN'
+C
+C Functions:
+	LOGICAL		PARFILN		! work out a file-spec
+	LOGICAL		RDINT		! read an integer from input buffer
+	LOGICAL		RDLONG		! read a longword from input buffer
+	LOGICAL		RDREAL		! read a real from input buffer
+	LOGICAL		READ_CONTINUE	! read a continuation record
+	LOGICAL		READSTR
+	LOGICAL		CHECK_FNAME
+C
+C Workspace:
+	INTEGER		OK		! Success flag
+	INTEGER		NUM		! To RDINT into
+	INTEGER		I		! DO loop counter
+	INTEGER		SCALE		! Temp storage of scale
+	INTEGER*4	RETVAL
+C
+	CHARACTER*10	SECT_REF
+	CHARACTER*7	UNITS
+	INTEGER		UNLEN
+C
+C...........................................................................
+C Check that this is raster data
+C
+	IF ( STRING(14:14).NE.'2' ) CALL LSL_PUTMSG
+     &				(NTF2DTI__NOTRASTER,COUNT_SECTION)
+C
+C...........................................................................
+C get the output file name if we need to
+C
+	IF (DEDUCE_FILE) THEN
+C
+C	  ..................................................................
+C first check that there is data in the section ref field of the SECHREC
+C
+	   SECT_REF = STRING(3:12)
+C
+	   CALL SETAUX( %REF(STRING(3:12)), 10)
+	   DTILEN = READSTR(DTIFILE,,ON_SPACE,RETVAL)
+	   OK = DTILEN.GT.0
+	   IF (.NOT.OK) THEN
+	     CALL WRITEF('%%NTF2DTI-E-MISC, error reading DTI file name')
+	     CALL WRITEF('-NTF2DTI-I-MISC, SECHREC entry was "%S"',STRING(3:12))
+	     GOTO 999
+	   ENDIF
+C
+	   DTIFILE = 'LSL$DTI:'//DTIFILE(1:DTILEN)
+	   DTILEN  = DTILEN + 8
+C
+C	   ...............................................................
+C	   check the file name, make sure its acceptable by VMS
+C
+	   OK = CHECK_FNAME(DTIFILE, DTILEN, 'DTI')
+	   IF (.NOT.OK) GOTO 999
+	ENDIF
+C
+C...........................................................................
+C Find out the size of planimetric coordinates - XYLEN
+C
+C  XYLEN is an optional field, 00000 for ver 2.0 level 5, or blank otherwise
+C
+	IF (STRING(15:19).EQ.'00000' .AND. LEVEL.EQ.5) THEN
+	   XYLEN=FIELD_WIDTH			! defaults to FIELD_WIDTH
+C
+	ELSEIF (STRING(15:19).EQ.' ') THEN
+	   XYLEN=FIELD_WIDTH			! defaults to FIELD_WIDTH
+C
+	ELSE
+	   CALL SETAUX( %REF(STRING(15:19)), 5)
+	   IF (RDINT(XYLEN)) THEN
+	      CALL LSL_PUTMSG(NTF2DTI__SECHREC,'XYLEN',RECNUM)
+	      CALL LSL_ADDSTR(STRING(15:19))
+	      OK=.FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C...........................................................................
+C Now the units that our planimetric data is in - XY_UNIT
+C
+	CALL SETAUX( %REF(STRING(20:20)), 1 )
+	IF (RDINT(XY_UNIT)) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__SECHREC,'XY_UNIT',RECNUM)
+	   CALL LSL_ADDSTR(STRING(20:20))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+	IF (XY_UNIT.EQ.1) THEN		! - data is in degrees
+	   DTIPROJ_UNITS(1)=4		!   assumes X,Y orientation
+	   DTIPROJ_PROJECTION(1)=100	!   has to be geographic 
+C
+	ELSEIF (XY_UNIT.EQ.2) THEN	! - data is in metres 
+	   DTIPROJ_UNITS(1)=2		!   so metres it is
+	   DTIPROJ_PROJECTION(1)=101	!   assume UK national grid
+C
+	ELSEIF (XY_UNIT.EQ.3) THEN	! - data is in feet
+	   DTIPROJ_UNITS(1)=1		!   so feet it is
+	   DTIPROJ_PROJECTION(1)=101	!   assume UK national grid
+C
+	ELSE				! - data is not recognised
+	   CALL LSL_PUTMSG(NTF2DTI__SECHREC,'XY_UNIT',RECNUM)
+	   CALL LSL_ADDMSG(NTF2DTI__BADUNIT,XY_UNIT)
+	ENDIF
+C
+C...........................................................................
+C Read the multiplication factor for our data - XY_MULT
+C
+	IF (STRING(21:30).EQ.'0000000000' .AND. LEVEL.EQ.5) THEN
+	   NUM = 1000			 	! XY_MULT need not be given
+C
+	ELSEIF (STRING(21:30).EQ.' ') THEN	! XY_MULT need not be given
+	   NUM = 1000				! defaults to 1000
+C
+	ELSE
+	   CALL SETAUX(%REF(STRING(21:30)),10)
+	   IF (RDINT(NUM)) THEN
+	      CALL LSL_PUTMSG(NTF2DTI__SECHREC,'XY_MULT',RECNUM)
+	      CALL LSL_ADDSTR(STRING(21:30))
+	      OK=.FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C Check that the value is non-zero!
+C
+	IF (NUM.EQ.0) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__NILXYMULT)
+	   NUM = 1000
+	ENDIF
+C
+C Convert it from 1/1000s to a real number
+C
+	XY_MULT = FLOAT(NUM) / 1000.0
+C
+c ----------------------------------------------------------------------
+C Data format changes from here on depending on whether the version 
+C is 1.0 or 1.1/2.0
+C
+	IF (INTVER.NE.110 .AND. INTVER.NE.200) THEN
+C
+C ----------------------------------------------------------------------
+C Version 1.0 from here:
+C
+C Field 31 = Z_UNIT
+C
+C Get multiplication factor Z_MULT 
+C
+	  IF (STRING(32:41).EQ.' ') THEN	! Z_MULT need not be given
+	    NUM = 1000				! defaults to 1000
+	  ELSE
+	    CALL SETAUX(%REF(STRING(32:41)),10)
+	    IF (RDINT(NUM)) THEN
+	      CALL LSL_PUTMSG(NTF2DTI__SECHREC,'Z_MULT',RECNUM)
+	      CALL LSL_ADDSTR(STRING(32:41))
+	      OK=.FALSE.
+	      GOTO 999
+	    ENDIF
+	  ENDIF
+C
+C Check that the value is non-zero!
+C
+	  IF (NUM.EQ.0) NUM = 1000
+C
+C NTF values are multiplied by Z_MULT/1000 for the DTI
+C Convert it from 1/1000s to a real number
+C
+	  Z_MULT = FLOAT(NUM) / 1000.0
+C
+C...........................................................................
+C None of the remaining data in this record is relevant for OS supplied data
+C
+	  IF (IS_OS) GOTO 200
+C
+C ....................................................................
+C The origin of OS supplied data is taken from the map reference in 
+C the grid record as it seems more realistic
+C
+C Now for the origin in X - X_ORIG
+C
+	  X_ORIG=0.0					! Default
+	  CALL SETAUX(%REF(STRING(42:51)),10)
+	  IF (RDREAL(X_ORIG)) THEN
+	    CALL LSL_PUTMSG(NTF2DTI__SECHREC,'X_ORIG',RECNUM)
+	    CALL LSL_ADDSTR(STRING(42:51))
+	    OK=.FALSE.
+	    GOTO 999
+	  ENDIF
+C ....................................................................
+C and Y - Y_ORIG
+C
+	  Y_ORIG=0.0					! Default
+	  CALL SETAUX(%REF(STRING(52:61)),10)
+	  IF (RDREAL(Y_ORIG)) THEN
+	    CALL LSL_PUTMSG(NTF2DTI__SECHREC,'Y_ORIG',RECNUM)
+	    CALL LSL_ADDSTR(STRING(52:61))
+	    OK=.FALSE.
+	    GOTO 999
+	  ENDIF
+C ....................................................................
+C
+C Field 62:69 = Z_DATUM
+C
+C We may also have a source scale
+C
+	  IF (STRING(70:75).NE.' ') THEN
+	    CALL SETAUX(%REF(STRING(70:75)),6)
+	    OK = .NOT.RDLONG(SCALE)
+	    IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(NTF2DTI__SECHREC,'SCALE',RECNUM)
+	      CALL LSL_ADDSTR(STRING(70:75))
+	      GOTO 999
+	    ENDIF
+	  ENDIF
+C
+C End of ver 1.0
+C
+C ----------------------------------------------------------------------
+C
+	ELSE				! Read Version 1.1 or 2.0
+C
+C ----------------------------------------------------------------------
+C Version 1.1 or 2.0 from here:
+C
+C Field 31:35 = Z_LEN
+C
+C Field 36:36 = Z_UNIT
+C
+C Get multiplication factor Z_MULT 
+C
+	  IF (STRING(37:46).EQ.'0000000000' .AND. LEVEL.EQ.5) THEN
+	    NUM = 1000				! Z_MULT need not be given
+C
+	  ELSEIF (STRING(37:46).EQ.' ') THEN	! Z_MULT need not be given
+	    NUM = 1000				! defaults to 1000
+C
+	  ELSE
+	    CALL SETAUX(%REF(STRING(37:46)),10)
+	    IF (RDINT(NUM)) THEN
+	      CALL LSL_PUTMSG(NTF2DTI__SECHREC,'Z_MULT',RECNUM)
+	      CALL LSL_ADDSTR(STRING(37:46))
+	      OK=.FALSE.
+	      GOTO 999
+	    ENDIF
+	  ENDIF
+C
+C Check that the value is non-zero!
+C
+	  IF (NUM.EQ.0) NUM = 1000
+C
+C NTF values are multiplied by Z_MULT/1000 for the DTI
+C Convert it from 1/1000s to a real number
+C
+	  Z_MULT = FLOAT(NUM) / 1000.0
+C
+C...........................................................................
+C None of the remaining data in this record is relevant for OS supplied data
+C
+	  IF (IS_OS) GOTO 200
+C
+C ....................................................................
+C The origin of OS supplied data is taken from the map reference in 
+C the grid record as it seems more realistic
+C
+C Now for the origin in X - X_ORIG
+C
+	  X_ORIG=0.0					! Default
+	  CALL SETAUX(%REF(STRING(47:56)),10)
+	  IF (RDREAL(X_ORIG)) THEN
+	    CALL LSL_PUTMSG(NTF2DTI__SECHREC,'X_ORIG',RECNUM)
+	    CALL LSL_ADDSTR(STRING(47:56))
+	    OK=.FALSE.
+	    GOTO 999
+	  ENDIF
+C ....................................................................
+C and Y - Y_ORIG
+C
+	  Y_ORIG=0.0					! Default
+	  CALL SETAUX(%REF(STRING(57:66)),10)
+	  IF (RDREAL(Y_ORIG)) THEN
+	    CALL LSL_PUTMSG(NTF2DTI__SECHREC,'Y_ORIG',RECNUM)
+	    CALL LSL_ADDSTR(STRING(57:66))
+	    OK=.FALSE.
+	    GOTO 999
+	  ENDIF
+C ....................................................................
+C
+C Field 67:74 = Z_DATUM			! ver 1.1
+C Field 67:76 = Z_DATUM			! ver 2.0
+C
+C Version 1.1 or 2.0 specific no longer
+C
+	ENDIF
+C
+C All versions - rejoin code to get record continuation
+C
+C ...................................................................
+C Set up more of the map descriptor (note that the projection was set
+C when we set the XY units)
+C
+	DTIPROJ_SPHEROID(1) = 9		! Assume the spheroid is Airy
+C
+C ...................................................................
+C the next record is a mandatory continuation - check that we do indeed
+C have a continuation mark, and then read it in
+C
+	IF (.NOT.FIXED) LENGTH = LENGTH - 1
+C
+	IF (STRING(LENGTH:LENGTH).NE.'1') THEN
+	   CALL LSL_PUTMSG(NTF2DTI__SHORTSECH)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+	OK = READ_CONTINUE('SECHREC '//STRING(3:12))
+	IF (.NOT.OK) GOTO 999
+C
+C ..................................................................
+C Get the X & Y max and min values for our first approx. to the extent
+C
+	CALL SETAUX(%REF(STRING(3:12)),10)	! XMIN
+	IF (RDLONG(XMIN)) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__SECHREC,'XMIN',RECNUM)
+	   CALL LSL_ADDSTR(STRING(3:12))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+	CALL SETAUX(%REF(STRING(13:22)),10)	! YMIN
+	IF (RDLONG(YMIN)) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__SECHREC,'YMIN',RECNUM)
+	   CALL LSL_ADDSTR(STRING(13:22))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+	CALL SETAUX(%REF(STRING(23:32)),10)	! XMAX
+	IF (RDLONG(XMAX)) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__SECHREC,'XMAX',RECNUM)
+	   CALL LSL_ADDSTR(STRING(23:32))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+	CALL SETAUX(%REF(STRING(33:42)),10)	! YMAX
+	IF (RDLONG(YMAX)) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__SECHREC,'YMAX',RECNUM)
+	   CALL LSL_ADDSTR(STRING(33:42))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C ...................................................................
+C Ignore the rest of the record
+C
+200	CONTINUE
+C
+	IF (.NOT.FIXED) LENGTH = LENGTH - 1	! miss EOR marker
+C
+	IF (STRING(LENGTH:LENGTH).EQ.'1') THEN
+	   OK = READ_CONTINUE('SECHREC')
+	   IF (.NOT.OK) THEN
+	      GOTO 999
+	   ELSE
+	      GOTO 200
+	   ENDIF
+	ENDIF
+C
+C ...................................................................
+C If we're producing a log file, write pertinent information to it
+C
+	IF (IS_OS) GOTO 999	! If OS then we don't have/need the info
+C
+	IF (OUTPUT) THEN
+	   CALL FLWSTR('Section header record:')
+	   CALL FLWRTF('	Section reference  "%S"',SECT_REF(1:10))
+	   CALL FLWRTF('	Output to DTI file "%S"',DTIFILE(1:DTILEN))
+C
+	   IF (XY_UNIT.EQ.1) THEN
+	      UNITS = 'degrees'
+	      UNLEN = 7
+	   ELSEIF (XY_UNIT.EQ.2) THEN
+	      UNITS = 'metres'
+	      UNLEN = 6
+	   ELSEIF (XY_UNIT.EQ.3) THEN
+	      UNITS = 'feet'
+	      UNLEN = 4
+	   ELSE
+	      UNITS = 'illegal'
+	      UNLEN = 7
+	   ENDIF
+C
+	   CALL FLWRTF('	XYlen = %I2, XY_unit = %I1 (%S)',
+     &				XYLEN,	     XY_UNIT, 	UNITS(1:UNLEN))
+C
+	   CALL FLWRTF('	XY multiplication = %F',XY_MULT)
+C
+	   CALL FLWRTF('	XY origin = %F, %F',
+     &				X_ORIG, Y_ORIG)
+C
+	   CALL FLWRTF('	Xmin = %N, Ymin = %N',
+     &				XMIN,	   YMIN)
+	   CALL FLWRTF('	Xmax = %N, Ymax = %N',
+     &				XMAX,	   YMAX)
+	   IF (SCALE.NE.0) THEN
+	      CALL FLWRTF('	Scale = 1:%N	(this is an extension of NTF)',
+     &				SCALE)
+	   ENDIF
+	ENDIF
+C
+C ...................................................................
+C rejoin errors
+C
+999	READ_SECHREC=OK
+C
+	RETURN
+	END
+C

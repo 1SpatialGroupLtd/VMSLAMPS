@@ -1,0 +1,636 @@
+.IF NE Laserview
+	.TITLE	LVU_IP
+.IFF
+	.TITLE	TKIP
+.ENDC
+	.IDENT	/30NO87/
+
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+; Author: Susan Manning		date as .IDENT
+
+
+; T e k t r o n i x    D i s p l a y    I n p u t    M e c h a n i s m
+
+	CODE_PSECT	TKW
+
+; TKREAD(CHAN,BUFFER,MAXLEN,LENRD [,EFN] [,IOSB] [,ASTADR])
+
+; CHAN specifies the device	1 => terminal
+;				2 => bitpad/digitiser
+;				0 => call from CSRD
+; the remaining parameters are stored for use when unsolicited input
+; is received from that device
+
+; error conditions are marked by appropriately setting R0 and cancelling
+; the input request
+
+
+ .ENTRY		TKREAD,^M<R2,R3,R4,R11>
+	JSB	G^VIO$1ST		; init for arg handling interface
+	JSB	G^VIO$GNA		; get 1st arg (CHAN)
+	BCS	NOCHAN			; branch if missing
+	MOVL	#6,R2			; no. of args following 1st
+	CASE	(R0),<5$,10$,15$>,-	; branch on line number
+		LIMIT=#0
+	BRB	INVCHAN			; here if invalid
+
+; parameters for CSRD
+5$:	MOVAB	CSBFAD,R3
+	BRB	20$
+
+; parameters for the bitpad/digitiser
+15$:	MOVAB	BPBFAD,R3		; get start of bitpad workspace
+	BRB	20$
+
+; parameters for the terminal
+10$:	MOVAB	TTBFAD,R3		; get start of terminal workspace
+20$:	MOVL	R3,R4			; remember start of current workspace
+
+; disable ASTs so that our read AST does not access the data structure
+; while we are modifying it
+	$SETAST_S ENBFLG=#0
+; loop to store remaining parameters
+30$:	JSB	G^VIO$GNA		; get next argument
+	BCS	40$			; if absent, branch
+	MOVL	R0,(R3)+		; store address of argument
+	BRB	50$
+; missing argument - check whether optional ( last 3 )
+40$:	CMPL	R2,#3
+	BGTR	BADPAR
+	CLRL	(R3)+			; mark as absent
+50$:	SOBGTR	R2,30$			; back for next, if more
+
+; store values of efn (if present) and buffer length
+	TSTL	12(R4)			; efn specified ?
+	BEQL	70$			; no
+	MOVZWL	@12(R4),12(R4)		; value of efn
+	$CLREF_S	EFN=12(R4)	; clear caller's efn
+	BRB	80$
+70$:	DECL	12(R4)			; mark absent by setting efn = -1
+80$:	MOVL	16(R4),R0		; IOSB present?
+	BEQL	90$			; no
+	CLRQ	(R0)			; clear IOSB
+90$:	MOVZWL	@4(R4),4(R4)		; value of buffer length
+	BRB	SUCCESS
+
+; error conditions
+NODEV:	MOVL	#SS$_NOSUCHDEV,R0
+	RET
+
+NOCHAN:	MOVL	#SS$_NOIOCHAN,R0
+	RET
+
+INVCHAN: MOVL	#SS$_IVCHAN,R0
+	RET
+
+BADPAR:	MOVL	#SS$_BADPARAM,R0
+	CLRL	(R4)			; cancel i/p req. for valid channel
+	BRB	ERREXIT
+
+SUCCESS: MOVL	#SS$_NORMAL,R0
+ERREXIT: $SETAST_S ENBFLG=#1		; re-enable ASTs
+	RET
+
+
+
+; TKKILL(CHAN)
+
+; Cancel input request on device specified by CHAN
+;			1 => terminal
+;			2 => bitpad/digitiser
+
+; error cnditions are marked in R0
+
+
+ .ENTRY		TKKILL,^M<R11>
+	JSB	G^VIO$1ST		; init for arg. handling interface
+	JSB	G^VIO$GNA		; get CHAN
+	BCS	NOCHAN			; branch if missing
+	CASE	(R0),<10$,20$>,-	; branch on channel number
+		LIMIT=#1
+	BRW	INVCHAN			; invalid channel
+
+; cancel input request by clearing buffer address
+10$:	CLRL	TTBFAD			; terminal
+	BRB	SUCCEX
+20$:	CLRL	BPBFAD			; bitpad
+SUCCEX:	MOVL	#SS$_NORMAL,R0
+	RET
+
+BADEX:	MOVL	#SS$_BADPARAM,R0
+	RET
+
+; utility to check for valid line number as next arg
+; valid arg returned in R6
+; if invalid, then returns through caller's return address
+
+GETLIN:	JSB	G^VIO$GNA
+	BCS	NOCHAN
+	MOVZWL	(R0),R6			; line number
+	CMPW	R6, #2			; valid line number (2 or 3)?
+	BLSS	INVCHAN
+	CMPW	R6, #3
+	BGTR	INVCHAN
+	RSB
+
+; TKIDEV(LINE,TABLET [,MODE])
+
+; enable tablet on specified line ( 2 or 3 only)
+; tablet type :		1 => bitpad
+;			2 => freescan
+;			3 => SID
+;			4 => GTCO Digipad
+;			5 => Supergrid
+
+; error conditions are marked in R0
+
+ .ENTRY		TKIDEV,^M<R2,R6,R7,R8,R10,R11>
+	JSB	G^VIO$1ST
+
+; get line number and validate
+	BSBB	GETLIN			 ; get line number
+
+; get tablet type and validate
+	JSB	G^VIO$GNA		 ; get tablet type
+	BCS	10$			 ; missing ?
+	MOVZWL	(R0),R7			 ; tablet type
+	BLEQ	10$			 ; is type 1 to 5?
+	CMPB	R7, #5
+	BLEQ	20$
+10$:	BRW	NODEV
+
+; get mode, if not present default to zero
+20$:	CLRL	R8			; default mode zero
+	JSB	G^VIO$GNA		; try for MODE
+	BCS	30$
+	MOVZBL	(R0),R8			; save mode for transmission
+
+; transmit enabling sequence   <escape = T <n> <t> <mode>>
+30$:	JSB	$CHKBF			 ; ensure sequence contiguous
+	.BYTE	6
+	MOVZBW	#^A/T/,R0
+	JSB	$ESCSQ6
+	BRB	SUCCEX
+
+
+
+; TKTRAC(LINE,BUTTON)
+
+; enable tracking on LINE with BUTTON
+; LINE ( 1, 2 or 3 only )
+; BUTTON = 63	=> disable tracking on line
+
+; error conditions are marked in R0
+
+ .ENTRY		TKTRAC,^M<R2,R6,R7,R8,R10,R11>
+	JSB	G^VIO$1ST
+
+; get line number and validate
+	JSB	G^VIO$GNA
+	BCC	5$
+	BRW	NOCHAN
+5$:	CASE	(R0),<10$,10$,10$>,-	; branch on line number
+		LIMIT=#1		; 10$ if 1, 2 or 3
+	BRW	INVCHAN			; here if invalid
+
+10$:	MOVZWL	(R0),R6			; save valid line number
+	JSB	G^VIO$GNA		; get BUTTON
+	BCC	15$
+	BRW	BADEX			; if CS, BUTTON missing
+
+; transmit enable tracking sequence <escape = S <n> <b>>
+15$:	MOVZWL	(R0),R7			; save button number
+	JSB	$CHKBF			; ensure sequence contiguous
+	.BYTE	5
+	MOVZBW	#^A/S/,R0
+	JSB	$ESCSQ5
+	BRW	SUCCEX
+
+
+
+; TKMAPT(LINE,MATRIX)
+
+; set MATRIX on specified LINE
+; MATRIX specifies start of 5 longwords
+
+; errors are marked in R0
+
+ .ENTRY		TKMAPT,^M<R2,R4,R5,R6,R7,R8,R9,R10,R11>
+	JSB	G^VIO$1ST
+
+; get and validate LINE, check MATRIX present
+	BSBW	GETLIN
+
+	JSB	G^VIO$GNA		; get address of 1st longword
+	BCC	12$
+	BRW	BADEX			; branch if missing
+12$:	MOVL	R0,R9			; save address
+
+; transmit <escape = Q <line>> part of sequence
+	JSB	$CHKBF			; ensure entire sequence contiguous
+	.BYTE	19
+	MOVZBW	#^A/Q/,R0
+	JSB	$ESCSQ4
+
+; save matrix for mapping tablet counts into user units
+	MOVAF	TKOFFX,R8
+	MOVL	#5,R5
+13$:	MOVF	(R9)+,(R8)+
+	SOBGTR	R5,13$
+
+; calc X,Y - tablet counts corr. to 0,0 in user units
+; XX=((-32768-OFSETX)/TKTR(1)-TKOFFX)/TKSCAL
+; YY=((-32768-OFSETY)/TKTR(4)-TKOFFY)/TKSCAL
+; X =(XX*TKROTC)+(YY*TKROTS)
+; Y =(YY*TKROTC)-(XX*TKROTS)
+
+	CLRF	R7
+	CLRF	R9
+	BSBW	TKUSER			; intermediate result in R6,R8
+	SUBF3	TKOFFX,R6,R7		; swap X,Y to get correct sign
+	SUBF3	TKOFFY,R8,R9		; applied by TKROT
+	DIVF3	TKSCAL,R7,R8
+	DIVF3	TKSCAL,R9,R6
+	BSBW	TKROT
+
+; store X,Y in mapping workspace
+	MOVAB	TKMPSP,R1
+	CVTFL	R9,(R1)+
+	CVTFL	R7,(R1)+
+
+; calculate revised scale SCA = (4096*TKFACT/TKTR(1))/SCALE
+	MULF3	#^F4096,TKFACT,R6
+	DIVF2	TKTR,R6
+	DIVF2	TKSCAL,R6
+	CVTFL	R6,(R1)+		; store
+
+; calculate revised rotation ROT = TKROTS * 4096
+	MULF3	TKROTS,#^F4096,R6
+	CVTFW	R6,(R1)			; store
+
+; transmit each of 3 longwords as 4 * 6 bit biased numbers
+	MOVAB	TKMPSP,R9		; start of longwords
+	MOVL	#3,R5			; count of longwords
+	MOVL	#6,R7			; size of bit field for EXTZV
+15$:	MOVL	#18,R6			; initialise start pos. of bit field
+	MOVL	(R9)+,R8		; longword to transmit
+20$:	EXTZV	R6,R7,R8,R10		; extract 6 bits
+	JSB	$TKWBN			; transmit as biased
+	SUBW2	R7,R6			; adjust start pos of bit field
+	BGEQ	20$			; repeat for each byte in longword
+	SOBGTR	R5,15$			; repeat for each longword
+
+; finally transmit word as 3 biased numbers ( 4,6,6 bits)
+	MOVZWL	(R9),R8			; stretch 4 -> 6 bits for uniformity
+	MOVL	#12,R6			; initialise start position of bit field
+30$:	EXTZV	R6,R7,R8,R10		; extract 6 bits
+	JSB	$TKWBN			; transmit as biased
+	SUBW2	R7,R6			; adjust start pos of bit field
+	BGEQ	30$			; repeat for each byte
+	BRW	SUCCEX
+
+
+; various bits and pieces dealing with terminal mailbox
+
+; set up mailbox
+MBENBL:: BSBB	MBATTN			; enable write attn. AST
+	 BSBB	ENABLE			; enable notification
+	 RSB
+
+; declare an AST to execute when mailbox receives notification
+MBATTN: $QIOW_S	FUNC=#IO$_SETMODE!IO$M_WRTATTN,-
+			EFN=TKIEFN,-
+			CHAN=MBCHAN,-
+			P1=MBAST
+	RSB
+
+; enable mailbox to receive unsolicited input notification
+ENABLE:	$QIOW_S	FUNC=#IO$_WRITEVBLK!IO$M_ENABLMBX,-
+			EFN=TKIEFN,-
+			CHAN=TKCHAN,-
+			P1=MBNUL,-
+			P2=#1
+	RSB
+
+; clear out the mailbox
+MBCLR::
+10$:	BSBB	MBREAD			; read from it
+	TSTW	MBIOSB+2		; anything read?
+	BNEQ	10$			; if so - try ignoring something else
+	RSB
+
+; issues a read request for Teklib's local buffer after receipt of
+; unsolicited input notification
+
+ .ENTRY		MBAST,^M<>
+	BSBB	MBREAD
+	TSTW	MBIOSB+2			; anything read ?
+	BEQL	4$				; if EQL, nothing - EH?
+	CMPW	#MSG$_TRMUNSOLIC,MBBUFF		; check unsol. i/p mess
+	BEQL	2$
+	BSBB	MBENBL				; no, ignore and re-enable
+	BRB	4$
+
+2$:	BSBB	REREAD				; issue read
+4$:	RET
+
+; read from mailbox
+MBREAD:	$QIOW_S	FUNC=#IO$_READVBLK!IO$M_NOW,-
+		EFN=TKIEFN,-
+		CHAN=MBCHAN,-
+		IOSB=MBIOSB,-
+		P1=MBBUFF,-
+		P2=#MBBUFSZ
+	RSB
+
+
+; Issues read with timeout and declares AST to execute on completion
+; disables unsolicited input notification to mailbox
+REREAD:	$QIO_S		FUNC=#IO$_READVBLK!IO$M_TIMED!IO$M_DSABLMBX,-
+			EFN=TKIEFN,-
+			ASTADR=RDAST,-
+			CHAN=TKCHAN,-
+			IOSB=TKIOSB,-
+			P1=TKIBUF,-
+			P2=#80,-
+			P3=#15
+	RSB
+
+
+; Read completion AST
+; determines whether input from terminal or bitpad
+; 	moves it to appropriate buffer ( decoding if for bitpad/digitiser)
+;	sets LNRD,IOSB,EFN parameters supplied in call to TKREAD
+;	calls user's AST routine (if present)
+
+
+ .ENTRY		RDAST,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10>
+	CMPW	#SS$_TIMEOUT,TKIOSB	; did read time out?
+	BNEQ	1$			; no
+	BRW	TIMOUT			; output message
+
+; is it a 4014 bitpad?
+1$:	BBC	#FLAG_V_4014,FLAGW,4$	; not 4014
+	CMPW	TKCHCT,#5		; 5 bytes?
+	BNEQ	4$			; no
+	MOVAB	TKIBUF,R2
+	BRB	14$
+
+; <altescape = W> sequence in buffer => bitpad/digitiser input
+4$:	CMPW	TKCHCT,#3		; enough to look for sequence ?
+	BGEQ	2$			; no - assume terminal
+	BRW	30$			; no -assume terminal
+2$:	CMPC3	#3,TKIBUF,ALTESC
+	BEQL	3$
+	BRW	30$
+3$:	MOVAB	TKIBUF+3,R2		; move past escape sequence
+
+; input from bitpad - R2 points at 1st byte beyond escape sequence
+	BLBS	TKIOSB,5$		; error in read ?
+	BRW	24$			; yes - don't decode
+5$:	CMPW	TKCHCT,#13		; correct number of characters ?
+	BEQL	10$
+	MOVW	#SS$_IVBUFLEN,TKIOSB	; mark error in iosb
+	BRW	24$			; don't try to decode
+; decode and validate line number
+10$:	BSBW	DECNUM
+	CASE	R3,<12$,14$,14$>,-	; branch to 14$ if line number = 2,3
+		LIMIT=#1			; or to 12$ if line = 1 (CSRD)
+	MOVW	#SS$_NOSUCHDEV,TKIOSB	; here if invalid -mark error in iosb
+	BRW	24$			; don't try to decode
+
+; read initiated by CSRD
+12$:	MOVAB	CSLNRD,R8		; ready for common code
+	MOVL	CSBFAD,R9
+	BRB	16$
+
+; usual read from tablet
+14$:	MOVAB	BPLNRD,R8		; ready for common code
+	MOVL	BPBFAD,R9
+
+16$:	BNEQ	17$			; appropriate buffer declared ?
+	BRW	REENBL			; if EQL, no - ignore input
+
+17$:	BBC	#FLAG_V_4014,FLAGW,18$	; if not 4014 gin input
+; decode 4014 gin input
+	MOVW	#2,(R9)+		; line 2 - assume bitpad
+	MOVZBW	(R2)+,(R9)+		; button number
+	PUSHL	R8			; save registers
+	PUSHL	R9
+	CLRL	R7			; build up X coord in R7
+	MOVB	(R2)+,R6
+	INSV	R6,#11,#5,R7
+	MOVB	(R2)+,R6
+	INSV	R6,#6,#5,R7
+	CVTLF	R7,R7
+	CLRL	R9			; build up Y coord in R9
+	MOVB	(R2)+,R6
+	INSV	R6,#11,#5,R9
+	MOVB	(R2)+,R6
+	INSV	R6,#6,#5,R9
+	CVTLF	R9,R9
+	BSBW	TKUSER			; transform to user units
+	POPL	R9			; restore R9
+	MOVF	R6,(R9)+		; add to buffer
+	MOVF	R8,(R9)
+	POPL	R8			; restore R8
+	BRB	25$
+	
+18$:	MOVW	R3,(R9)+		; move line number to buffer
+	BSBW	DECNUM			; decode button number
+	MOVW	R3,(R9)+		; move button number to buffer
+; decode 4 bytes into 24 bit sign extended number
+; for both X and Y coordinates
+	MOVL	#2,R6			; count for loop
+	.IF NE	Laserview
+	PUSHL	R8			; save
+	PUSHL	R9			;  registers
+	.ENDC
+20$:	BSBW	DECNUM			; decode most sig. byte
+	EXTV	#0,#6,R3,R4		; sign extend
+	INSV	R4,#18,#14,R5		; put into position
+	BSBW	DECNUM			; decode
+	INSV	R3,#12,#6,R5		; position
+	BSBW	DECNUM			; decode
+	INSV	R3,#6,#6,R5		; position
+	BSBW	DECNUM			; decode
+	INSV	R3,#0,#6,R5		; position
+	.IF NE	Laserview
+	CVTLF	R5, -(SP)		; save for processing below
+	.IFF
+	CVTLF	R5,(R9)+		; return into caller's buffer
+	.ENDC
+	SOBGTR	R6,20$			; repeat for Y
+	.IF NE	Laserview
+	MOVF	(SP)+, R9		; recover decoded
+	MOVF	(SP)+, R7		;   position
+	BSBW	TKUSER			; convert to user coordinates
+	POPL	R9			; recover pointer register
+	MOVF	R6, (R9)+		; return user coordinates to
+	MOVF	R8, (R9)		;   user's buffer
+	POPL	R8			; recover pointer register
+	.ENDC
+	BRB	25$
+
+; on error assume usual read from bitpad
+24$:	MOVAB	BPLNRD,R8
+
+; set up pointer for joining common code
+25$:	MOVL	R8,R9
+	MOVW	#4,@(R9)		; fake LENRD = no. of items in buffer
+	BRW	70$			; join common code
+
+
+; terminal buffer processing
+30$:	TSTL	TTBFAD			; buffer declared ?
+	BNEQ	32$			; if NEQ, yes
+	BRW	REENBL			; ignore input
+; get minimum of length read and buffer size into R8
+32$:	CMPW	TKCHCT,TTMXLN
+	BGEQ	35$
+	MOVZWL	TKCHCT,R8
+	BRB	40$
+35$:	MOVL	TTMXLN,R8
+; copy characters into caller's buffer
+40$:	MOVC3	R8,TKIBUF,@TTBFAD
+	MOVAB	TTLNRD,R9		; set up pointer into parameters
+	MOVW	R8,@(R9)		; and length copied
+
+
+; common code for processing/completing remainder of caller's parameters
+70$:	MOVAQ	@8(R9),R0		; iosb supplied ?
+	BEQL 80$			; if EQL, no
+	MOVQ	TKIOSB,(R0)		; return iosb to caller
+	BRB 90$
+80$:	BLBS	TKIOSB,90$		; error from qio and no iosb
+	CLRW	@(R9)			; indicate error by LENRD = 0
+90$:	MOVAL	@12(R9),R0		; ASTADR supplied ?
+	BEQL	100$			; if EQL, no
+	CALLS	#0,(R0)			; call AST
+100$:	MOVL	4(R9),R0		; efn supplied ?
+	BLSS	110$			; if LSS, no
+	$SETEF_S	EFN=R0		; set efn
+; If input not terminated by CR then cancel TMU read
+110$:	CLRL	-8(R9)			; mark buffer finished with
+	CMPB	TKIOSB+4,#AS.CR		; is terminator CR ?
+	BNEQ	CANTMU			; no, treat as timeout but no message
+	BRB	REENBL			; re-enable mailbox
+
+
+; on timeout, output message, transmit escape sequence and re-enable mailbox
+TIMOUT:	MOVL	#TIMSZ,R0		; length of timeout message
+	BRB	OUTPUT	
+CANTMU:	MOVL	#ESCSZ,R0		; length of esc=X part
+
+; use hard copy timer event flag for QIO
+OUTPUT:	$QIO_S		FUNC=#IO$_WRITEVBLK!IO$M_NOFORMAT,-
+			EFN=TKHTEF,-
+			CHAN=TKCHAN,-
+			P1=ESCMSG,-
+			P2=R0,-
+			P4=<<#^A/ />>
+
+; re-enable mailbox for input notification
+; check if there is anything in the typeahead buffer
+; if there is, clear the mailbox and set a read going to get it,
+; if not, then set mailbox write attention AST
+;
+
+REENBL:	TSTB	TKENBL			; if not enabled, thats all
+	BEQL	20$
+	BSBW	ENABLE			; enable mailbox
+	$QIOW_S		FUNC=#IO$_SENSEMODE!IO$M_TYPEAHDCNT,-
+			EFN=TKIEFN,-
+			CHAN=TKCHAN,-
+			P1=TKIOSB
+	TSTW	TKIOSB			; number of characters
+	BEQL	10$
+; clear mailbox, in case unsolicited input arrived since we enabled it
+	BSBW	MBCLR
+	BSBW	REREAD			; issue read
+	BRB	20$
+
+10$:	BSBW	MBATTN			; set mailbox write AST
+20$:	RET
+
+
+
+
+; decode biased number pointed to by R2 into longword in R3
+;  (R2 incremented to point to next)
+
+DECNUM:	MOVZBL	(R2)+,R3		; stretch it
+	SUBL2	#AS.NBI,R3		; subtract bias
+	BICL2	#^O177700,R3		; mask to 6 bits
+	RSB
+
+
+
+; transform Tektronix counts into user units
+;	R6 = (R7 - 32768 - OFSETX)/TKTR(1)
+;	R8 = (R9 - 32768 - OFSETY)/TKTR(4)
+; R7,R9 are corrupted
+
+TKUSER:: MOVF	#-32768.0,R6
+	ADDF2	R6,R7			; convert to signed
+	ADDF2	R6,R9
+	SUBF2	OFSETX,R7
+	DIVF3	TKTR,R7,R6
+	SUBF2	OFSETY,R9
+	DIVF3	TKTR+12,R9,R8
+	RSB
+
+
+; apply rotation
+;	R7 = R6 * TKROTC - R8 * TKROTS
+;	R9 = R8 * TKROTC + R6 * TKROTS
+; R6,R8 are corrupted
+; N.B from CSRD 	X,Y = R6,R8
+;     from TKMAPT	X,Y = R8,R6
+
+TKROT::	MULF3	TKROTC,R6,R4
+	MULF3	TKROTS,R8,R5
+	SUBF3	R5,R4,R7
+	MULF2	TKROTC,R8
+	MULF2	TKROTS,R6
+	ADDF3	R8,R6,R9
+	RSB
+
+
+; set up GIN mode
+
+ .ENTRY		TKGIN,^M<R2,R10>
+
+	JSB	$CHKBF
+	.BYTE	2
+	BLBC	@4(AP),10$	; argument is .FALSE.
+
+; .TRUE. - put GIN cursor up
+
+	JSB	$TKW2C		; send 'GIN request'
+	.BYTE	AS.ESC,AS.SUB
+	JSB	$FLSH1		; flush out without "US"
+	JSB	$WBUFF		; and wait until it's out
+	BRB	20$
+
+;.FALSE. - take gin down
+
+10$:	MOVB	#AS.CR,R10	; output CR
+	BSBW	$TKWCH
+	JSB	$FLUSH		; flush out
+	JSB	$WBUFF		; and wait until it's out
+20$:	RET
+
+; frig for setting up GIN mode
+
+ .ENTRY		TKGINFR,^M<>
+
+	$QIOW_S		FUNC=#IO$_READVBLK!IO$M_TIMED,-
+			CHAN=TKCHAN,-
+			P1=TKIBUF,-
+			P2=#80,-
+			P3=#0
+	RET
+
+	.PSECT
+	.END

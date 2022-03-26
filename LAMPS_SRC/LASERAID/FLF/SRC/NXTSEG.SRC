@@ -1,0 +1,228 @@
+	SUBROUTINE NXTSEG
+C
+***	MODULE	NXTSEG
+***	IDENT	30JN86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Prevent SEGLEN overflow			 DM	30-Jun-1986
+CMOD	Converged				 DM	28-May-1986
+CMOD	Update jnc output arm if prediction chn	 DM	09-May-1986
+CMOD	SEGLEN and SEGJUN not reset if junction	 DM	02-May-1986
+CMOD	Append WHOLE edge unless no next connctn DM	11-Mar-1986
+CMOD	Copes with one-point chains; tidied	 DM	04-Mar-1986
+CMOD	NOTVEX stuff removed			 DM	21-Feb-1986
+CMOD	Handles junction arm prediction chains	 DM	12-Sep-1985
+CMOD	Compute a 'width' on wide lines		WJJ	15-Jun-1983
+CMOD	Suppress local vertex extraction	WJJ	03-Feb-1983
+CMOD	Allow local vertex extraction again	WJJ	18-Nov-1982
+CMOD	Rework severely				WJJ	16-Nov-1982
+CMOD	Avoid using 'unnormalised' TRKWID on	WJJ	09-Nov-1982
+CMOD	 short edges and short wide lines
+CMOD	Undo previous edits, still check for
+CMOD	  end of apex though.			WJJ	25-Oct-1982
+CMOD	Don't append anything shorter than
+CMOD	  WGHT(2)*TRKWID. Check for close to 
+CMOD	  end of apex				WJJ	11-Oct-1982
+CMOD	Vertex extraction conditionalised	 DM	29-Sep-1982
+CMOD	Treat reverse apexes as lines		PGH	16-Jun-1982
+CMOD	Don't output gumph if TMPCHK		PGH	15-Jun-1982
+CMOD	New junction stuff added		AJW	02-Jun-1982
+CMOD	Only compute segment width if a line	WJJ	07-May-1982
+CMOD	SEGJUN=-1 , not SEGJUN=.FALSE.		AJW	11-Nov-1981
+CMOD	Tidied					AJW	27-Jan-1981
+CMOD	Checking of WAY corrected		MCF	29-May-1980
+CMOD	Conditionalisation tidied		MCF	20-May-1980
+CMOD	Split into NXTSEG and APPSEG		AJW	29-Nov-1979
+C	Started life as TOMP			MCF	18-Apr-1977
+C
+C Output CHNSEL to /TRKSEG/, ready to be appended.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C parameters:
+***	PARAMETER/PARAMS/
+C
+	PARAMETER WIDFLD='37777'O	! width field of encounter
+C
+C common blocks:
+***	COMMON/ANACOM/
+***	COMMON/LINKS/
+***	COMMON/LKFOLL/
+***	COMMON/LKPARM/
+***	COMMON/MPEP/
+***	COMMON/RSE/
+***	COMMON/TRKSEG/
+C
+C workspace:
+	INTEGER   DW			! width correction
+	INTEGER   IDU,IDV		! vector between chain points
+	INTEGER   IEND			! U coord of far end of chain
+	INTEGER   IW			! width field of encounter
+	INTEGER   IWT			! dist from chain end to stop
+	INTEGER   NN(2)			! ends of chain
+	INTEGER   NTRK			! number of pts added to segment
+	INTEGER   WAY			! direction of chain traversal
+	INTEGER*4 I,J,K			! temporary variables
+	INTEGER*4 NCHN,NEDG,NEND,NTYPE	! connection details
+	LOGICAL*1 GOTLIN		! got a line-type connection ?
+	LOGICAL*1 NEAR			! near to end of chain ?
+	LOGICAL*1 NEGCOR		! negative width correction ?
+	LOGICAL*1 SECEDG		! doing second edge of apex ?
+	REAL	  DU			! copy of IDU (but REAL)
+	REAL	  P(2)			! coordinates of point on chain
+	REAL	  SECANT		! secant of chain gradient
+	REAL	  UNTWID		! un-normalised track width
+	REAL	  Z			! weighting factor for interpoln
+C
+	SAVE	  SECANT		! preserve between calls
+C
+C function:
+	LOGICAL*4 ELEMNT		! get next chain element on edge
+C
+C ......................................................................
+C
+	IF (CHNSEL.GT.0) GO TO 10
+	SEGLEN=0				! no selection in hand
+	GO TO 210
+C
+10	NTYPE=CONNCT(4,CHNSEL)
+	IF (NTYPE.EQ.5) GO TO 200		! junction
+	SEGJUN=-1				! it's not a junction
+	IF (NTYPE.NE.4) GO TO 20		! prediction chain ?
+	IF (LSTSEL.LE.0) GO TO 20		! junction last ?
+	IF (CONNCT(4,LSTSEL).EQ.5) GO TO 180	! special case if so
+C
+20	SEGLEN=0
+	NCHN=CONNCT(2,CHNSEL)
+	IF (CHAIN(NCHN).EQ.0) GO TO 210
+	NEND=CONNCT(3,CHNSEL)
+	NN( NEND )=FIRST(NCHN)
+	NN(3-NEND)=LAST(NCHN)
+	WAY=3-NEND-NEND
+	IEND=ENCBUF(IU,NODE(NN(2)))
+	GOTLIN=(NTYPE.EQ.0.OR.NTYPE.EQ.2)	! line or wide line
+	IF (ELF) THEN
+	  DW=0
+	ELSE
+	  DW=CONNCT(1,CHNSEL)
+	ENDIF
+	NEGCOR=(DW.LT.0)
+	SECEDG=.FALSE.			! first edge of apexes
+	SEGWID=0.0
+	NTRK=0
+	IWT=TRKWID*WGHT(2)		! dist from chain end to stop
+	IF (NTYPE.NE.1) GO TO 30	! if edge ...
+	IF (ANLYZD.LT.0) GO TO 30	! and data structure set up ...
+	NEDG=CHNEDG(1,NCHN)		! get next connection for edge
+	IF (NEDG.LE.0) NEDG=CHNEDG(2,NCHN)		! if any add ...
+	IF (.NOT.ELEMNT(3-NEND,NCHN,NEDG,I,J,K)) IWT=-1 ! ALL of NCHN
+C
+C loop for points in chain
+30	NEAR=.FALSE.			! not near end yet
+	DO 160 J=NN(1),NN(2),WAY
+	  I=NODE(J)
+	  P(IU)=ENCBUF(IU,I)
+	  P(IV)=ENCBUF(IV,I)
+	  IF (J.EQ.NN(1)) GO TO 50	! first point ?
+40	  IDU=P(IU) - ENCBUF(IU,NODE(J-WAY))
+	  IDV=P(IV) - ENCBUF(IV,NODE(J-WAY))
+	  GO TO 70
+50	  IF (J.NE.NN(2)) GO TO 60	! yes - also last point ?
+	  IF (SECEDG) GO TO 40		! yes - second side of apex ?
+	  SECANT=MAX(1.0,SECANT)	! must be a one point chain
+	  GO TO 80			! (try to use last gradient)
+60	  IDU=ENCBUF(IU,NODE(J+WAY)) - P(IU)
+	  IDV=ENCBUF(IV,NODE(J+WAY)) - P(IV)
+70	  IF (IDU.EQ.0) GO TO 210	! chain going sideways
+C 
+C recalculate unnormalised TRKWID
+	  DU=IABS(IDU)
+	  SECANT=SQRT(DU*DU + FLOAT(IDV)**2)/DU
+80	  UNTWID=TRKWID*SECANT
+	  IW=(ENCBUF(W,I).AND.WIDFLD)
+C
+C now split to calculate width correction
+	  GO TO (140,90,100,110),NTYPE+1
+	  GO TO 130		! anything but lines,edges,wides,apexes
+C
+C edge correction
+90	  DW=UNTWID/2.0		! half the current trackwidth
+	  GO TO 120
+C
+C wide line correction
+100	  DW=(FLOAT(IW)-UNTWID)/2.0
+	  GO TO 120
+C
+C apex correction
+110	  DW=(FLOAT(IW)-UNTWID)/2.0
+	  IF (SECEDG) DW=-DW
+C
+C take sign of width correction into account
+120	  IF (NEGCOR) DW=-DW
+C
+C add width correction
+	  P(IV)=P(IV) + DW
+C
+C Check for near to end of chain
+130	  Z=ABS(IEND-P(IU)) - IWT
+	  IF (Z.GE.0.0) GO TO 140	! jump if OK
+	  NEAR=.TRUE.			! say we're near end
+	  IF (J.EQ.NN(1)) GO TO 140	! can't adjust first point
+	  Z =(DU + Z)/DU	! weighting factor for interpolation
+	  P(IU)=P(IU)*Z + (SEGPT(IU,SEGLEN)-START(IU))*(1.0-Z)
+	  P(IV)=P(IV)*Z + (SEGPT(IV,SEGLEN)-START(IV))*(1.0-Z)
+C
+C append it to segment in /TRKSEG/, adding START
+140	  IF (SEGLEN.LT.MAXSEG) SEGLEN=SEGLEN + 1
+	  SEGPT(X,SEGLEN)=P(X) + START(X)
+	  SEGPT(Y,SEGLEN)=P(Y) + START(Y)
+	  IF (.NOT.GOTLIN) GO TO 150	! only compute width if a line
+	  IW=FLOAT(IW)/SECANT + 0.5	! normalised width
+	  SEGWID=SEGWID + IW
+150	  NTRK=NTRK + 1
+ 
+C check special cases
+	  IF (.NOT.NEAR) GO TO 160		! easy if not near end
+	  IF (NTYPE.NE.3 .OR. SECEDG) GO TO 170	! give up if near
+C
+	  SECEDG=.TRUE.				! do other side of apex
+	  WAY=-WAY
+	  NN(2)=NN(1)				! reverse args of 'DO'
+	  IF (J.NE.NN(1)) NN(1)=J + WAY
+	  GO TO 30				! go and restart 'DO'
+C
+160	CONTINUE
+C
+C set up average width of the line segment just output
+170	IF (.NOT.GOTLIN) GO TO 210
+	SEGWID=SEGWID/NTRK
+C
+C but if wide, set a width between the old and the new
+	IF (NTYPE.EQ.2) SEGWID=(SEGWID+TRKWID)/2
+C
+C set track polarity if ELF
+	IF (ELF) TRKPOL=CONNCT(1,CHNSEL)
+	GO TO 210
+C
+C form track segment from junction arm prediction data
+180	SEGLEN=0
+	J=CONNCT(2,CHNSEL)
+	DO 190 I=FIRST(J),LAST(J)
+	   IF (SEGLEN.LT.MAXSEG) SEGLEN=SEGLEN + 1
+	   SEGPT(X,SEGLEN)=START(X) + ENCBUF(X,NODE(I))
+	   SEGPT(Y,SEGLEN)=START(Y) + ENCBUF(Y,NODE(I))
+190	CONTINUE
+	SEGWID=0.0
+	IF (MPJANG(1,NMP(1)).EQ.-361) J=0     ! manual junction ?
+	MPOARM(NMP(1))=J		      ! reset output arm number
+	IF (NMP(1).EQ.1.AND.PENUP) SECJOA=J   ! 1st point in track ?
+	GO TO 210
+C
+C form track segment from junction data
+200	CALL JNCTRK(CONNCT(2,CHNSEL),CONNCT(3,CHNSEL))
+C
+210	RETURN
+	END

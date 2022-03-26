@@ -1,0 +1,252 @@
+	INTEGER FUNCTION SPLIT(RENUM,IPLUN,OPLUN,NUMIN,NUMOUT)
+C
+C
+C
+***	MODULE SPLIT
+***	IDENT  10JN86
+C
+C	Copyright, Laser-Scan Ltd., Cambridge, England
+C
+C	Author       : J.M. Price Williams
+C
+C	Date         : 23-april-1986
+C
+C	description  : The module accesses the IFF junction structured file
+C		       which is present on logical unit IPLUN and breaks
+C		       all features with junctions in to sub features. The
+C		       daughter features will all retain the full attributes
+C		       of the parent, and if the RENUM switch is not set the
+C		       same FSN. If the switch RENUM is set the features will
+C		       all be renumbered uniquely.
+C
+C
+	IMPLICIT NONE
+C
+C	Arguments :
+C
+	INTEGER*2 	IPLUN		!lun of the input IFJ file  (IN)
+	INTEGER*2 	OPLUN 		!   "       output IFF file (IN)
+	LOGICAL*4 	RENUM 		!=.t.if renumbering req     (IN)	
+	INTEGER*4 	NUMIN 		!Number of original features(OUT)
+	INTEGER*4 	NUMOUT		!Final number of features   (OUT)
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/
+	INCLUDE '($SSDEF)'
+C
+C	Local variable declration and explanation
+C
+	INTEGER*2 	CODE		!The code  of the present entry
+	INTEGER*2 	LENGTH		!length of present entry
+	INTEGER*2 	OLYNUM		!The present overlay number
+	INTEGER*2 	FNUM  		!FSN of parent feature 
+	INTEGER*2 	COUNT 		!FSN of feature when renumbering 
+	INTEGER*2 	ISN   		!Dummy ISN always set to 0
+	INTEGER*4 	OLSADR		!Start address of the present overlay
+	INTEGER*4 	OLEADR		!End address of the present overlay
+	INTEGER*4 	POSAT 		!Temporary store of present address
+	INTEGER*4 	NFADDR		!Address of last 'nf' entry encountered
+	INTEGER*4 	JPCOUNT		!No of JP entries between NF-EF pair
+	INTEGER*4 	NUMATS		!No of entries between NF & 1st JP
+	INTEGER*4 	I		!Do loop counter 
+	INTEGER*4	ERRBR		!Contains which branch due to error
+	LOGICAL*4 	HADSTR		!Flag to show string occured before JP
+	LOGICAL*4 	HADNF 		!Flag to show are in a feature
+C
+C	Start processing get 1st file entry
+C
+50	CALL IFFSEL(IPLUN)
+	CALL IFFNXT(CODE,LENGTH)
+	IF (IERCD .NE. 0) GO TO 1010
+	IF (LENGTH .EQ. -1) GO TO 999	!End of file so exit
+C
+C	Process until an end of file condition is sensed going to the requested
+C	position on the dispatch list dependent on the value of CODE
+C
+	IF (CODE .EQ. 'NO') GO TO 100
+	IF (CODE .EQ. 'EO') GO TO 200
+	IF (CODE .EQ. 'NF') GO TO 300
+	IF (CODE .EQ. 'EF') GO TO 400
+	IF (CODE .EQ. 'JP') GO TO 500
+	IF (CODE .EQ. 'JB') GO TO 50	!Not required in output
+	IF (CODE .EQ. 'SH') GO TO 50    !  "     "      "    
+C
+C	
+C	Any other entry will drop through to here were it is checked that it's
+C	valid to do a straight copy from i/p to o/p files.
+C
+	IF ((HADNF) .AND. (JPCOUNT .EQ. 0)) THEN
+	   NUMATS = NUMATS + 1
+	   IF (CODE .EQ. 'ST') HADSTR = .TRUE.
+	ENDIF
+	CALL EIHCPY(OPLUN)
+	GO TO 50
+C
+100	CONTINUE
+C	This is an "NO" entry in the iff file it can not be directly 
+C	copied but must be read and rewritten to maintain the integrity
+C	of the 'end of overlay' "EO" address pointer, a dummy value is
+C	written at this stage.
+C
+	CALL EIHRI(OLYNUM,1,1)
+	CALL IFFSEL(OPLUN)
+	OLSADR = LPOSE
+	OLEADR = 0
+	CALL IFFNO(OLYNUM,0,OLEADR)
+	GO TO 50
+C
+200	CONTINUE
+C
+C	This is the "EO" entry in the IFF file. The pointer in the "NO"
+C	entry of the file must be corrected at this stage.
+C
+	CALL IFFSEL(OPLUN)
+	CALL IFFUNO(OLSADR)
+	ERRBR = 1
+	IF (IERCD .NE. 0) GO TO 1001 !Unexpected error
+	CALL IFFEO
+	GO TO 50
+C
+300	CONTINUE
+C
+C	This is an "NF" entry in the IFF file. If the file is being 
+C	renumbered the FSN must be change to the next seq numb else
+C	it will be the same as the original featire FSN. The entry
+C	position is stored so that any attributes which occur ie
+C	AC, TH, TX entries can be accessed for addition to the daughter
+C	object.
+C
+	JPCOUNT = 0
+	HADSTR = .FALSE.
+	NUMATS = 0
+	NUMIN = NUMIN + 1
+	NUMOUT = NUMOUT + 1
+	NFADDR = LPOSH
+	HADNF = .TRUE.
+	ISN = 0
+	IF (RENUM) THEN
+	   CALL IFFSEL(OPLUN)
+	   CALL IFFNF(COUNT,ISN)
+	   COUNT = COUNT + 1
+	ELSE
+	   CALL EIHRI(FNUM,1,1)
+	   CALL IFFSEL(OPLUN)
+	   CALL IFFNF(FNUM,ISN)
+	ENDIF
+	GO TO 50
+C
+400	CONTINUE
+C
+C	This is an "EF" entry. Just reset counters and flags
+C
+	CALL IFFSEL(OPLUN)
+	CALL IFFEF
+	HADNF = .FALSE.
+	GO TO 50
+C
+500	CONTINUE
+C
+C	"JP" entry. If is the first 'JP' after an 'NF' then must not
+C	terminate feature and start a new one, if not the first the one
+C	must terminate the feature and start a new feature including all
+C	the attributes of the 'father' feature.
+C
+	POSAT = LPOSH
+	IF (JPCOUNT .EQ. 0) THEN
+	   JPCOUNT = JPCOUNT + 1
+	   IF (HADSTR) THEN
+C
+C	      A feature has to be formed as ther is an ST entry prior to
+C	      the first JP so the feature formed is meaningfull
+C	      Check the next entry is not an 'EF' as if it is don't
+C	      output the 'NF' or 'EF' entries for this JP
+C
+	      CALL IFFNXT(CODE,LENGTH)
+	      IF (IERCD .NE. 0) GO TO 1010
+	      IF (CODE .NE. 'EF') THEN		!not an 'EF' entry
+	         CALL IFFPKE(CODE,LENGTH,POSAT)
+		 ERRBR = 3
+                 IF (CODE .NE. 'JP') GO TO 1003
+	         CALL IFFSEL(OPLUN)
+	         CALL IFFEF
+	         ISN = 0
+	         IF (RENUM) THEN
+	            CALL IFFNF(COUNT,ISN)
+	         ELSE
+	   	    CALL IFFNF(FNUM,ISN)
+	         ENDIF
+	         NUMOUT = NUMOUT + 1
+	         COUNT = COUNT + 1
+	         CALL IFFSEL(IPLUN)
+	         CALL IFFPKE(CODE,LENGTH,NFADDR)
+	         ERRBR = 4
+	         IF (CODE .NE. 'NF') GO TO 1004
+	         DO 510, I = 1, NUMATS
+	            CALL IFFNXT(CODE,LENGTH)
+	  	    IF (IERCD .NE. 0) GO TO 1010
+		    IF (CODE .NE. 'ST') CALL EIHCPY(OPLUN)
+510	         CONTINUE
+	      ENDIF
+	      ERRBR = 5
+	   ENDIF
+	ELSE 
+C
+C	   Check the next entry is not an 'EF' as if it is don't
+C	   output the 'NF' or 'EF' entries for this JP
+C
+	   CALL IFFNXT(CODE,LENGTH)
+	   IF (IERCD .NE. 0) GO TO 1010
+	   IF (CODE .NE. 'EF') THEN		!not an 'EF' entry
+	      CALL IFFPKE(CODE,LENGTH,POSAT)
+	      ERRBR = 6
+	      IF (CODE .NE. 'JP') GO TO 1003
+	      CALL IFFSEL(OPLUN)
+	      CALL IFFEF
+	      ISN = 0
+	      IF (RENUM) THEN
+	         CALL IFFNF(COUNT,ISN)
+	      ELSE
+		 CALL IFFNF(FNUM,ISN)
+	      ENDIF
+	      NUMOUT = NUMOUT + 1
+	      COUNT = COUNT + 1
+	      CALL IFFSEL(IPLUN)
+	      CALL IFFPKE(CODE,LENGTH,NFADDR)
+	      ERRBR = 7
+	      IF (CODE .NE. 'NF') GO TO 1004
+	      DO 520, I = 1, NUMATS
+	         CALL IFFNXT(CODE,LENGTH)
+		 IF (IERCD .NE. 0) GO TO 1010
+		 IF (CODE .NE. 'ST') CALL EIHCPY(OPLUN)
+520	      CONTINUE
+	   ENDIF
+	   ERRBR = 8
+	ENDIF
+C
+C	Go back to JP entry so in correct place in file
+C
+	CALL IFFPKE(CODE,LENGTH,POSAT)
+	IF (CODE .NE. 'JP') GO TO 1003
+	GO TO 50
+C
+999     CONTINUE
+	SPLIT = 1 	!ie set this to true as must now have succeded
+9999	RETURN		!back to main program
+C
+C	Error handling
+C
+1001	CALL WRITEF(
+	1   'SPLIT Error updating overlay ref pointer addr @ ERRBR %I',ERRBR)
+	GO TO 9999
+1003	CALL WRITEF(
+	1   'SPLIT Corrupt return pointer to JP after NF @ ERRBR %I',ERRBR)
+	GO TO 9999
+1004	CALL WRITEF(
+	1   'SPLIT Corrupt return pointer to last NF     @ ERRBR %I',ERRBR)
+	GO TO 9999
+1010	IF (IERNM .NE. 1) THEN
+	   SPLIT = SS$_ABORT	!IFF internal error
+	ELSE
+	   SPLIT = IERNM	!System error
+	ENDIF
+	GO TO 9999
+	END	

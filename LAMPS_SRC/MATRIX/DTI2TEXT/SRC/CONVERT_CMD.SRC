@@ -1,0 +1,251 @@
+	LOGICAL FUNCTION CONVERT_CMD()
+C
+***	MODULE CONVERT_CMD
+***	IDENT	08AU91
+C
+C	Copyright (C), Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	Created						JMB 02-Dec-1987
+C
+C Function to deal with actual conversion of a DTI file to
+C a text file, checking that relevant files are open and that
+C required output format will accomodate range of values in DTI file 
+C Function returns .TRUE. if all is well.
+C
+	IMPLICIT NONE
+C
+C Parameters :
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+C
+C Common block :
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'	
+	INCLUDE 'LSL$CMNDTI:DTIPAR.PAR'
+	INCLUDE	'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+	INCLUDE	'LSL$CMNDTI2TEXT:CONTROL.CMN'
+	INCLUDE 'LSL$CMNDTI2TEXT:DTI2TEXTMSG.PAR' 
+C
+C Column vector, dynamic according to column size for particular file :
+	LOGICAL*4	COLUMN(MAX_Y)	! dummy column vector
+C
+	REAL*4		RCOL(MAX_Y)	! real
+	INTEGER*4	LCOL(MAX_Y)	! longword
+	INTEGER*2	WCOL(MAX_Y)	! word
+	BYTE		BCOL(MAX_Y)	! byte/bit
+C
+	EQUIVALENCE	(COLUMN,RCOL,WCOL,LCOL,BCOL)
+C
+C w/s
+	LOGICAL		OK		! error returns
+	LOGICAL		IERR		! error returns
+	INTEGER		X		! current output column
+	INTEGER		X_START
+	INTEGER		X_END
+	INTEGER		Y_START		! Y positions in file
+	INTEGER		Y_END
+	INTEGER		CY_START	! Y positions in vector
+	INTEGER		CY_END
+	INTEGER		NROWS,CNROWS
+	INTEGER		START_POS
+	INTEGER		DIAG_INTERVAL	! Col. interval printed out
+C
+C functions :
+	LOGICAL		TEXT_OUTPUT	! to format and output text
+	LOGICAL		CHECK_FORMAT	! to check format fits dti file
+C
+	LOGICAL		FLWSEL		! select output file
+	LOGICAL		FLWLIN		! output line
+	LOGICAL		FLWCLO		! close output file
+	LOGICAL		DTI_CLOSE	! close input file
+	LOGICAL		DTI_COPY_DATA	! copy DTI column to array
+C
+C ......................................................................
+C
+	CONVERT_CMD = .TRUE.	! assume success
+C
+C Check that input and output files are open
+C
+	IF (.NOT.TXTOPN) THEN
+	   CALL WRITEF('%S Please check that text output file is open', 
+     &			ERROR)
+	   CONVERT_CMD = .FALSE.
+	   GOTO 20
+	ENDIF
+C
+	IF (.NOT.DTIOPN) THEN
+	   CALL WRITEF('%S Please check that DTI input file is open',
+     &			ERROR)
+	   CONVERT_CMD = .FALSE.
+	   GOTO 20
+	ENDIF
+C
+C Check that format is allowable with this DTI file
+C
+	OK = CHECK_FORMAT()
+	IF (.NOT.OK) THEN
+	   CONVERT_CMD = .FALSE.
+	   GOTO 30
+	ENDIF
+C
+C Select output text file
+C
+	OK = FLWSEL (TXTLUN)
+	IF (.NOT.OK) THEN	! error in selecting file
+	   CONVERT_CMD = .FALSE.
+	   CALL WRITEF('%S Error in selecting output file %S',
+     &			ERROR, TXTFILE(:TXTLEN))
+	   CALL LSL_PUTMSG(OK)
+	   GOTO 20
+	ENDIF
+C
+C Set up start and end X,Y values, checking if have window set up
+C
+	IF (WIN_SET) THEN
+	   X_START = DTI_WINDOW_SWX(DTILUN)
+	   X_END   = DTI_WINDOW_NEX(DTILUN)
+	   Y_START = DTI_WINDOW_SWY(DTILUN)
+	   Y_END   = DTI_WINDOW_NEY(DTILUN)
+	ELSE
+	   X_START = 1
+	   X_END   = X_EXTENT(DTILUN)
+	   Y_START = 1
+	   Y_END   = Y_EXTENT(DTILUN)
+	ENDIF
+C
+C Set up variables to give position in vectors where required data
+C will be once read.
+C Special case is for bit data
+C Check if it is bit data, and adjust Y start and end accordingly
+C N.B. should only have multiples of eight.
+C Done because bit data stored in bytes.
+C
+C BIT - Get the bytes that span the bit positions:
+C		 CY_START = 1+8n smaller/= to Y_START
+C		 CY_END   = 8n greater/= to Y_END
+C
+	IF (DATA_TYPE(DTILUN).EQ.DATA_BIT) THEN
+	   CY_START  = Y_START - MOD((Y_START-1), 8)
+	   CY_END    = Y_END + 7 - MOD((Y_END-1), 8)
+	   START_POS = Y_START - CY_START + 1
+	ELSE
+	   CY_START  = Y_START
+	   CY_END    = Y_END
+	   START_POS = Y_START
+	ENDIF
+C
+C Title for diagnostic printout
+C
+	DIAG_INTERVAL = 1	! default
+C
+	IF (HAD_DIAG) THEN
+	   CALL WRITEF
+	   CALL WRITEF('Converting from DTI file %S to text file %S.',
+     &			DTIFILE(:DTILEN),TXTFILE(:TXTLEN))
+	   CALL WRITEF
+	   CALL WRITEF('Details of input DTI file :')
+	   CALL WRITEF
+	   CALL DTI_PRINT_HEADER(DTILUN,UNITS)
+	   CALL WRITEF
+C
+	   DIAG_INTERVAL = (X_END - X_START) / 10
+	ENDIF
+C
+	IF (DIAG_INTERVAL.EQ.0) DIAG_INTERVAL = 1
+C
+C Now start loop to read in and output DTI file column by column
+C
+	NROWS  = Y_END  - Y_START + 1
+	CNROWS = CY_END - CY_START + 1
+C
+	DO 10 X = X_START, X_END
+C
+C Copy column of data into array
+C All arrays occupy same storage
+C
+	   OK = DTI_COPY_DATA(	DTILUN,		! LUN of DTI
+     &				COLUMN,		! Target array
+     &				.FALSE.,	! Copy into array
+     &				X,		! First X (column)
+     &				CY_START,	! First Y (row)
+     &				1,		! Number of columns
+     &				CNROWS,		! Number of rows
+     &				IERR)		! Error code
+C
+C Check for errors
+C
+	   IF (.NOT.OK) THEN
+	      CALL WRITEF('%S Error reading column %I10 of DTI file %S',
+     &			ERROR, X, DTIFILE(:DTILEN))
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      CONVERT_CMD = .FALSE.
+	      GOTO 20
+	   ENDIF
+C
+C Do diagnostic printout if wanted
+C
+	   IF ((HAD_DIAG).AND.(X_END.NE.X_START)) THEN
+	      IF (MOD((X-X_START),DIAG_INTERVAL).EQ.0) THEN
+	         CALL WRITEF('   Converting columns %N to %N', 
+     &			X, MIN((X + DIAG_INTERVAL - 1), X_END))
+	      ENDIF
+	   ENDIF
+C
+C Call routine to format and output data
+C
+	   OK = TEXT_OUTPUT (	RCOL(1),		! real
+     &				WCOL(1),		! word
+     &				LCOL(1),		! longword
+     &				BCOL(1),		! byte/bit
+     &				NROWS,			! no of values
+     &				START_POS)		! start value
+C
+	   IF (.NOT.OK) THEN
+	      CONVERT_CMD = .FALSE.
+	      GOTO 20
+	   ENDIF
+C
+10	CONTINUE
+C
+C Close any open files and reset appropriate flags
+C Only close dti and text files if both are open
+C If only one is open, then this was an erroneous call to convert
+C
+20	IF (TXTOPN.AND.DTIOPN) THEN
+	   OK = FLWCLO (TXTLUN,IERR)	! close text output file
+	   IF (.NOT.OK) THEN		! check for errors
+	      CALL WRITEF('%S Error closing text output file %S', 
+     &				ERROR, TXTFILE(:TXTLEN))
+	      CALL LSL_PUTMSG(D2T__CLTXT)
+	      CALL LSL_ADDMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      CONVERT_CMD = .FALSE.
+	   ENDIF
+	   TXTOPN = .FALSE.
+C
+C Close DTI input file
+C
+	   OK = DTI_CLOSE (DTILUN,	! close dti input file
+     &			   .FALSE.,	! dont update header
+     &			   .TRUE.,	! do clear hdr cmn blk
+     &			   IERR)	! error code
+C
+	   IF (.NOT.OK) THEN		! check for errors
+	      CALL WRITEF('%S Error closing DTI input file %S', 
+     &				ERROR, DTIFILE(:DTILEN))
+	      CALL LSL_PUTMSG(D2T__CLDTI)
+	      CALL LSL_ADDMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      CONVERT_CMD = .FALSE.
+	   ENDIF
+	   DTIOPN = .FALSE.
+	   WIN_SET = .FALSE.		! clear window
+	ENDIF
+C
+C Exit
+C
+30	RETURN
+	END
+C

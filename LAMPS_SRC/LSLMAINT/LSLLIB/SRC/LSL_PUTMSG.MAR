@@ -1,0 +1,272 @@
+	.TITLE		LSL_PUTMSG
+	.IDENT		/17MR87/
+
+	.LIBRARY	/LSL$LIBRARY:LSLMACLIB/
+;
+; Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+;
+; Author: Tim Hartnall					15-Nov-1985
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Must be assembled with:
+;			    LSL$CMNLSL:EXPC.MAR 
+;			    LSL_CMNLSL:LSLLIBMSG.MAR
+;			and LSL$CMNLSL:STATUS.MAR
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;mod	17-Mar-1987	Tony J Ibbs	mod 2/432
+;	extract the checking of LSL$DEBUG_TRACE into a separate routine,
+;	that can be called once by LSL_INIT
+;
+;mod	30-Oct-1986	Tony J Ibbs
+;	correct setting of EXPMAX - should be to MAX_EXPMAX, not MAX_EXPMAX+1
+;
+;mod	 6-Oct-1986	Tony J Ibbs
+;	add LSL_SETMSG to change the message request spec bits
+;
+;mod	17-Sep-1986	Tony J Ibbs
+;	LSL_PUTMSG now checks to see if LSL$DEBUG_TRACE exists as a
+;	logical name - if it does, it calls LSL_SIGNAL instead
+;
+;mod	23-Jun-1986	Tony J Ibbs
+;	correct overwriting of BUFDSC length by LSL_ADDMSG - caused
+;	further calls to buffer overflow!
+;
+;mod	 3-Jun-1986	Tony J Ibbs
+;	add LSL_ADDMSG - see description below
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+	$SSDEF
+
+	DATA_PSECT	LSL
+
+PERCENT=37		; ASCII percent ("%")
+HYPHEN =45		; ASCII hyphen  ("-")
+
+VECTOR:
+	.LONG	1
+	.LONG	LSL__BUFFEROVF
+STR_LEN:				; prepare args. for SYS$GETMSG
+	.WORD	0			; length of returned msg text
+
+BUFDSA:	.LONG	 256			; descriptor for string itself, as
+	.ADDRESS BUFFER			; used for LSL_ADDMSG - same as BUFDSC
+
+BUFDS2:
+	.LONG	 257			; descriptor for string itself, as
+	.ADDRESS BUFF			; used for LSL_PUTMSG - includes
+					; preliminary percent
+BUFDSC:
+	.LONG	 256			; descriptor for string itself
+	.ADDRESS BUFFER			; - just the basic buffer
+
+BUFF:	.BYTE	PERCENT			; append a "%" to start of 
+					; string for EXPAND's benefit
+BUFFER:	.BLKB	256
+
+FLAGS:	.WORD	^B1111			; default = all flag bits set
+					; - always get all parts of message
+
+
+LOGDSC:	.ASCID	/LSL$DEBUG_TRACE/	; logical name to check for
+TABDSC:	.ASCID	/LNM$FILE_DEV/		; logical name table search list
+					; - we search all name tables
+
+TRACE:	.BYTE	0			; 0 => do LSL_PUTMSG,
+					; 1 => do LSL_SIGNAL
+
+	CODE_PSECT	LSL
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	ok = LSL_DEBUG_TRACE( tracing )
+;
+; called by LSL_INIT to set the TRACE flag for LSL_PUTMSG. It also returns
+; the TRACE value in 'tracing', if given. Returns the $TRNLNM status in 'ok'
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; Register usage:
+;		R11	used by VIO$1ST and VIO$GNA
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	.ENTRY	LSL_DEBUG_TRACE, ^M<R2,R11>
+;
+; are we to convert LSL_PUTMSG calls to be LSL_SIGNAL calls?
+; - see if LSL$DEBUG_TRACE exists
+;
+	CLRL	R0				; assume no argument
+	JSB	VIO$1ST				; init argument mechanism
+	JSB	VIO$GNA				; is there an argument?
+	MOVL	R0,R2				; address of any argument
+
+	CLRB	TRACE				; assume that we don't convert
+
+	$TRNLNM_S	LOGNAM = LOGDSC,-	; logical name to check
+			TABNAM = TABDSC		; tables to check in
+	CMPL	R0, #SS$_NORMAL			; did the name exist?
+   	BNEQ	5$   				;  no - branch away
+	INCB	TRACE				; yes - set TRACE
+
+5$:	TSTL	R2				; was it zero (no argument)
+	BEQL	10$				; yes - just return
+	MOVB	TRACE,(R2)			;  no - copy TRACE to argument
+10$:	RET
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	call LSL_PUTMSG( condition_code [,arg] ... )
+;
+;	call LSL_ADDMSG( condition_code [,arg] ... )
+;
+; Searches using SYS$GETMSG for message text for 'condition_code'. The
+; text  may contain EXPLODE escape sequences. If text is found, then 
+; LSL_PUTMSG,LSL_ADDMSG will use EXPAND to substitute in all the
+; supplied arguments.
+;
+; LSL_PUTMSG outputs the message as returned, and updates LSL_STATUS
+;
+; LSL_ADDMSG outputs the message with an initial hyphen (instead of
+;	     a percent), and does not update LSL_STATUS
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; Register usage:
+;		R2	saves address of original first argument
+;		R3	low bit 0 => LSL_PUTMSG, 1 => LSL_ADDMSG
+;		R4	save user's value of EXPMAX
+ 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	.ENTRY	LSL_PUTMSG, ^M<R2,R3,R4>
+;
+; if TRACE is 0 then we are OK to do LSL_PUTMSG, but if it is 1 then
+; we must call LSL_SIGNAL instead
+;
+	BLBC	TRACE,5$			; go and do LSL_PUTMSG
+;
+	CALLG	(AP),G^LSL_SIGNAL		; call LSL_SIGNAL instead
+	RET					; and return at once
+;
+5$:	CLRL	R3				; remember we are PUTMSG
+ 	BRB	LSL_xxxMSG			; and join common code
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	.ENTRY	LSL_ADDMSG, ^M<R2,R3,R4>
+ 	MOVB	#1,R3				; remember we are ADDMSG
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;and both routines then join up
+;
+LSL_xxxMSG:
+;
+; get the first arg (which should be the condition code passed by 
+; reference), and save its address in R2
+;
+	MOVL	@4(AP),	R1		
+	MOVL	4(AP),	R2		; save address of original 1st arg.
+;
+; if this is LSL_PUTMSG, then set LSL_STATUS for $STATUS usage out in
+; command files
+;
+ 	BLBS	R3,10$			; skip if this is LSL_ADDMSG
+	BISL3	#LSL_QUIET, R1, LSL_STATUS
+
+10$:	$GETMSG_S -
+		MSGID=R1, -
+		MSGLEN=STR_LEN, -
+		BUFADR=BUFDSC, -
+		FLAGS=FLAGS
+
+;
+; Examine the success of our foray
+;
+	CMPL	R0, #SS$_MSGNOTFND	; did we find the message?
+	BNEQ	15$
+	CLRW	STR_LEN			; no. Set string length to 0
+	MOVL	#LSL__MSGNOTFND, R0	; substitute LSLLIB err. for
+					; the system one
+;
+; we have no choice other than to return
+	RET
+
+15$:	CMPL	R0, #SS$_BUFFEROVF	; found the msg text but it was
+					; so long truncation occurred?
+	BNEQ	20$
+	
+;
+; Yes truncation has occurred. Warn the user then go back and get the 
+; message again and attempt to output it. There is a danger that there 
+; will be a mismatch of EXPLODE escapes and the number of args. supplied
+;
+	$PUTMSG_S -
+		MSGVEC=VECTOR		
+;
+; we now want to insert the EXPAND format string we have just got (presumably)
+; in place of the condition code, so that we can use WRITEF to expand and
+; output the string and other arguments
+;
+20$:	MOVW	EXPMAX,R4		; save user's buffer length
+	MOVW	#MAX_EXPMAX,EXPMAX	; set EXPBUF length to maximum
+;
+; if there is a percent sign at the beginning of the message, then we must
+; either add another in front of it (LSL_PUTMSG) or overwrite it with a
+; hyphen (LSL_ADDMSG)
+;
+	CMPB	BUFFER,#PERCENT
+	BNEQ	22$			; branch if there isn't a percent
+	BLBC	R3,25$			; branch if LSL_PUTMSG
+;
+; deal with LSL_ADDMSG - change initial "%" to a "-"
+;
+    	MOVB	#HYPHEN,BUFFER		; overwrite first character
+;
+; deal with no percent here - output the buffer as it stands
+;
+22$:	MOVW	STR_LEN,BUFDSA		; set length in descriptor
+	MOVAL	BUFDSA,4(AP)		; & transfer to original AP position
+	BRB	30$
+;
+; deal with LSL_PUTMSG - add in "%" before the first "%", so EXPAND won't
+; lose it
+;
+25$:	INCW	STR_LEN			; adjust length to allow for %
+	MOVW	STR_LEN, BUFDS2		; set length in descriptor
+ 	MOVAL	BUFDS2, 4(AP)		; & transfer to original AP position
+;
+; and use WRITEF (EXPAND to insert the arguments, and TTWSTR to output the
+; resulting string)
+;
+30$:	CALLG	(AP), G^WRITEF
+	MOVL	R2,4(AP)		; restore address of original 1st arg
+	MOVL	R4,EXPMAX		; and user's length for EXPBUF
+	RET
+ 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;	call LSL_SETMSG( facility-name, severity, message-name )
+;
+; the arguments are TRUE/FALSE according to whether the relevant part
+; of the message is to be output (& thus default is all TRUE)
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	.ENTRY	LSL_SETMSG, ^M<>
+;
+; extract the bottom bit from each argument, and place it in the relevant
+; place in FLAGS - assume that all arguments are present!
+;
+
+	INSV	@4(AP), #3,#1,FLAGS		; bit 3 - facility-name
+	INSV	@8(AP), #2,#1,FLAGS		; bit 2 - severity
+	INSV	@12(AP),#1,#1,FLAGS		; bit 1 - message-name
+
+	RET
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+	.PSECT
+	.END

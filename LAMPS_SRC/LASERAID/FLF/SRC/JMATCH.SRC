@@ -1,0 +1,216 @@
+	INTEGER*4 FUNCTION JMATCH(MANUAL)
+C
+***	MODULE	JMATCH
+***	IDENT	20MY86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+C	Created 				 DM	25-Apr-1986
+C
+C Searches the vicinity of the last backlogged or master point (or
+C current position if none) looking for a previously digitised junction.
+C The function value returned is:	+1 - junction found
+C					 0 - nothing found
+C					-1 - manual junction found
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+***	PARAMETER/PARAMS/
+C
+	LOGICAL*1 MANUAL		! in manual point mode ?
+C
+***	COMMON/ANACOM/
+***	COMMON/DIGC/
+***	COMMON/JCRCOM/
+***	COMMON/JNCLST/
+***	COMMON/JUNCTN/
+***	COMMON/LINKS/
+***	COMMON/LKFOLL/
+***	COMMON/LKPARM/
+***	COMMON/MASTER/
+***	COMMON/MPEP/
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+***	COMMON/TRKSEG/
+C
+	INTEGER*2 FSTCON,CONGOT		! connection information
+	INTEGER*2 I,J			! temporary variables
+	LOGICAL*1 GOT2			! got 2 data points ?
+	REAL	  ANG			! arm angle
+	REAL	  ARMLEN,ARMOFF		! length, offset of dummy arm
+	REAL	  DX,DY			! vector components
+	REAL	  POS(2)		! temporary position
+	REAL	  RATIO			! ratio of lengths
+	REAL	  SINANG,COSANG		! sin, cos of ANG
+	REAL	  TEMP			! temporary variable
+C
+C function:
+	LOGICAL*4 JSSRCH		! searches for known junction
+C
+C ......................................................................
+C
+	JMATCH=0				! assume we fail
+	IF (JINHIB) JNCING=JINHIB		! reset junction inhibit
+	IF ((JNCING.AND.5).NE.1) GO TO 170	! are we enabled ?
+C
+C ... if a junction prediction chain is already in hand we force a scan.
+	IF (CHNSEL.LE.0) GO TO 10
+	IF (CONNCT(4,CHNSEL).NE.4) GO TO 10	! prediction chain now ?
+	IF (LSTSEL.LE.0) GO TO 10
+	IF (CONNCT(4,LSTSEL).EQ.5) GO TO 170	! junction last ?
+C
+C ... get the search position.
+10	IF (MANUAL.OR.JUMPED) GO TO 20		! jumped some linework ?
+C
+C ... get two points from the current buffers which are within LIMIT(10)
+C ... of the start of the scan and separated by at least LIMIT(8).
+	CALL GTLST2(START,LIMIT(10),LIMIT(8),I,LSTONE,NXTLST,J)
+	IF (I.EQ.4) GO TO 50			! got 2 distinct pnts ?
+	GOT2=.FALSE.
+	IF (I.LT.3) GO TO 20			! got at least 1 point ?
+	JNCPOS(X,1)=LSTONE(X)			! yes - use it
+	JNCPOS(Y,1)=LSTONE(Y)
+	GO TO 60
+C
+C ... no context - use current position.
+20	IF (HADLDI) GO TO 30
+	POS(X)=0.0
+	POS(Y)=0.0
+	GO TO 40
+C
+30	POS(X)=NEXT(X)				! NEXT set up in LINK
+	POS(Y)=NEXT(Y)
+40	JNCPOS(X,1)=0
+	JNCPOS(Y,1)=0
+	START(X)=POS(X)
+	START(Y)=POS(Y)
+	GO TO 60
+C
+C ... got two distinct points.
+C ... extrapolate by half the trackwidth to give a better search pos.
+50	GOT2=.TRUE.
+	DX=FLOAT(LSTONE(X) - NXTLST(X))		! vector components
+	DY=FLOAT(LSTONE(Y) - NXTLST(Y))
+	TEMP=TRKWID				! get track width ...
+	IF (TEMP.LT.0.0) TEMP=SEGWID		! or segment width if -1
+	RATIO=0.5*TEMP/SQRT(DX*DX + DY*DY)	! new/old length ratio
+	JNCPOS(X,1)=LSTONE(X) + INT(RATIO*DX)	! extrapolated position
+	JNCPOS(Y,1)=LSTONE(Y) + INT(RATIO*DY)
+	POS(X)=START(X) + FLOAT(JNCPOS(X,1))
+	POS(Y)=START(Y) + FLOAT(JNCPOS(Y,1))
+C
+C ... try to match an existing junction.
+60	IF (.NOT.JSSRCH(POS(X),POS(Y),JNCBRA,BRAANG,I,J)) GO TO 170
+C
+C ... found one - remember its position relative to START.
+	IF (J) 70,80,100			! where was it found ?
+70	POS(X)=JCRPOS(X,I)			! in the in-core list
+	POS(Y)=JCRPOS(Y,I)
+	GO TO 90				! (so transform it)
+80	POS(X)=JLXPOS(I)			! in the flushed list
+	POS(Y)=JLYPOS(I)
+90	CALL TRXUSE(POS(X),POS(Y),BCOEFF)	! (so transform it)
+	GO TO 110
+100	POS(X)=MP1(X,I)				! in the master pnt list
+	POS(Y)=MP1(Y,I)
+110	JNCPOS(X,1)=INT(POS(X) - START(X))
+	JNCPOS(Y,1)=INT(POS(Y) - START(Y))
+C
+C ... check for manual junction.
+	IF (BRAANG(1,1).NE.-361) GO TO 120
+	CALL WRITEF('Manual junction%C',7)
+	JMATCH=-1
+	LISTED=.TRUE.			! (fool ASSESS later)
+	CONGOT=1
+	CONNCT(2,2)=-1			! (fool ASSESS later)
+	CONNCT(4,2)=0			! (fool JSURE later)
+	QUALTY(2)=LIMIT(7) - LIMIT(6)
+	BRAINC(1)=0			! (fool APPSEG later)
+	NEGOT=0				! don't let anything be drawn
+	GO TO 150			! join common code
+C
+C ... not manual, so assess the junction.
+120	JNCNUM=1
+	CALL JASSES(CONGOT,.TRUE.,GOT2)
+	IF (CONGOT.LE.0) GO TO 170		! found a connection ?
+	IF (CONNCT(3,1).EQ.BRAINC(1)) GO TO 170	! not back-tracking ?
+	JMATCH=1				! ordinary junction
+C
+C ... dummy up some chains for the arms.
+	NEGOT=0				! don't let anything be drawn
+	ENCBUF(X,1)=0			! the junction itself
+	ENCBUF(Y,1)=0
+	NXT(1)=0
+	CALL SETCHN			! clear out existing chains
+C
+C ... start of chain is 3*IPIT away from junction position.
+C ... end of chain is IDSIZE away from that (so we can see the arm).
+	ARMOFF=FLOAT(3*IPIT)
+	ARMLEN=FLOAT(IDSIZE) + ARMOFF
+	DO 130 I=1,JNCBRA(1)		! loop through the arms
+	   CHAIN(I)=2*I + 1		! create a chain for each ...
+	   LENGTH(I)=2			! with two points
+	   ANG=ABS(FLOAT(BRAANG(I,1))*3.141593/180.0)
+	   COSANG=COS(ANG)
+	   SINANG=SIN(ANG)
+	   ENCBUF(X,2*I+1)=JNCPOS(X,1) + INT(ARMLEN*COSANG)
+	   ENCBUF(Y,2*I+1)=JNCPOS(Y,1) + INT(ARMLEN*SINANG)
+	   NXT(2*I+1)=2*I
+	   ENCBUF(X,2*I)=JNCPOS(X,1) + INT(ARMOFF*COSANG)
+	   ENCBUF(Y,2*I)=JNCPOS(Y,1) + INT(ARMOFF*SINANG)
+	   NXT(2*I)=0
+130	CONTINUE
+	CALL CHNLST			! make chains into lists
+	LISTED=.TRUE.
+C
+C ... now redefine all the connections to be prediction chains only.
+	TEMP=QUALTY(CONGOT)		! remember LOWEST quality
+	CONGOT=CONGOT + 1		! make room for junction itself
+	DO 140 I=CONGOT,2,-1		! connection 1 is the junction
+	   CONNCT(1,I)=0
+	   CONNCT(2,I)=CONNCT(3,I-1)	! recover chain no. (= arm no.)
+	   CONNCT(3,I)=1
+	   CONNCT(4,I)=4
+	   QUALTY(I)=LIMIT(7) + (QUALTY(I-1)-TEMP)*LIMIT(6)
+140	CONTINUE
+	CONNCT(4,CONGOT+1)=0		! terminate the list
+C
+C ... make the junction be the next item to be appended.
+150	CHNSEL=1
+	CONNCT(1,1)=0
+	CONNCT(2,1)=0			! (fool APPSEG and JNCTRK later)
+	CONNCT(3,1)=CONNCT(2,2)		! best arm
+	CONNCT(4,1)=5
+	QUALTY(1)=QUALTY(2) + LIMIT(6)	! give junction highest quality
+	BRAINC(0)=BRAINC(1)		! incoming arm (used by APPSEG)
+C
+C ... add the connections.
+	I=ANLYZD
+	ANLYZD=-1			! don't let ADDASS interfere
+	FSTCON=1
+	BSTCON=0
+	CALL ADDASS(FSTCON,CONGOT)
+	NXTBST(1)=0			! hide the arms for now
+	ANLYZD=I			! we need ANLYZD again later
+	ASSED=.TRUE.			! assessment completed
+C
+C ... set up a segment containing the junction.
+	SEGLEN=1
+	SEGJUN=JNCBRA(1)
+	SEGPT(X,1)=POS(X)
+	SEGPT(Y,1)=POS(Y)
+	DO 160 I=1,JNCBRA(1)
+	   SEGANG(I)=BRAANG(I,1)
+160	CONTINUE
+	SEGWID=0.0
+C
+C ... and that should be it !
+	JINHIB=JNCING			! don't spot junction again
+	JNCING=.FALSE.			! N.B. APPSEG must tolerate this
+C
+170	RETURN
+	END

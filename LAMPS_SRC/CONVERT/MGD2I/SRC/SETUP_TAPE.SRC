@@ -1,0 +1,355 @@
+	INTEGER FUNCTION SETUP_TAPE()
+C
+***	MODULE SETUP_TAPE
+***	IDENT 02AU88
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C Author: J.M. Billing			2 August 1988
+C
+C Routine to set up tape as required by the MGD77 to IFF
+C conversion utility MGD2I
+C The routine checks that the drive is allocated and mounted,
+C and then it positions the tape as specified on the command
+C line using the /REWIND and /SELECT qualifiers
+C
+	IMPLICIT NONE
+C
+C common blocks
+	INCLUDE	'LSL$MGD2I:MGD2I.CMN'
+	INCLUDE 'LSL$MGD2I:MGD2IMSG.PAR'
+	INCLUDE 'LSL$CMNLSL:MTIVCM.CMN'		! tape input common blk
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE '($DVIDEF)'
+	INCLUDE	'($MTDEF)'
+C
+C w/s
+	INTEGER	I		! count variable
+	LOGICAL	LAST_BLOCK_EOF	! .T. if last block read was tapemark
+	LOGICAL	AT_BOT		! .T. if at BOT (beginning of tape)
+	LOGICAL SAVE_DIAG_FLAG	! to preserve WANT_DIAGNOSTICS during
+				! skipping of sheets, when full
+				! diagnostics will never be printed
+	LOGICAL	MOUNTED_FOREIGN	! .T. if device mounted foreign
+	INTEGER	IERR		! error return code
+	INTEGER	DVI_RETURN	! tape DeVice Information 
+				! characteristics sensing return code
+C
+C functions
+	INTEGER MTINIT		! initialise tape drive
+	INTEGER	READ_BLOCK	! read block from tape
+	INTEGER	MTIBCK		! back spce by one block
+	INTEGER	TEST_FOREIGN	! test whether tape is mounted /foreign
+	INTEGER	LIB$GETDVI	! used to sense tape characteristics
+	INTEGER	SIGCHS		! find num signif chars in string
+C
+C Assume success
+C
+	SETUP_TAPE = MGD2I__NORMAL
+C
+C Test if the tape device is mounted /FOREIGN
+C
+	SETUP_TAPE = TEST_FOREIGN(DEVICE, MOUNTED_FOREIGN, IERR)
+C
+C Check for errors, and report any found, then exit
+C
+	IF (.NOT.SETUP_TAPE) THEN
+	   CALL LSL_PUTMSG(SETUP_TAPE)
+	   IF (SETUP_TAPE.EQ.LSL__SYSERR) CALL LSL_ADDMSG(IERR)
+	   GOTO 900
+	ENDIF
+C
+C Check if device is mounted foreign, report and exit if it is not
+C
+	IF (.NOT.MOUNTED_FOREIGN) THEN
+	   SETUP_TAPE = MGD2I__NOTMOUNTFOR
+	   CALL LSL_PUTMSG(SETUP_TAPE)
+	   GOTO 900
+	ENDIF
+C                 
+C Sense the tape device characteristics to find out if at beginning 
+C of tape.
+C                  
+	SETUP_TAPE=LIB$GETDVI(
+     &		DVI$_DEVDEPEND,		! flag, to sense tape charac'cs
+     &		,
+     &		DEVICE(1:SIGCHS(DEVICE)),! tape device name
+     &		DVI_RETURN,		! returned characteristic bits
+     &		,)
+C
+C Check for errors, reporting them and exiting if any found
+C
+	IF (.NOT.SETUP_TAPE) THEN
+	   CALL LSL_PUTMSG(MGD2I__BADTAPEDEV)
+	   CALL LSL_ADDMSG(SETUP_TAPE)
+	   GOTO 900
+	ENDIF
+C
+C Set up flag to indicate if at BOT mark by ANDing device information
+C return with mask from $MTDEF.
+C
+	AT_BOT = (((DVI_RETURN.AND.MT$M_BOT).NE.0).OR.
+     &		  WANT_REWIND)
+C
+C Set up flag to indicate if last block was tapemark by ANDing device 
+C information return with mask from $MTDEF.
+C
+	LAST_BLOCK_EOF = (((DVI_RETURN.AND.MT$M_EOF).NE.0).AND.
+     &			  (.NOT.WANT_REWIND))
+C
+C Output diagnostics, if required giving details of sheet wanted 
+C and starting point of tape
+C
+	IF (WANT_DIAGNOSTICS) THEN
+C
+C Say which sheet we want (the end of this message depends on 
+C whether a /REWIND qualifier was specified in command line)
+C
+	   CALL EXPAND('Searching for sheet number %N',SHEET)
+C
+C Check if we are to rewind the tape, and output appropriate 
+C messages if we are
+C
+	   IF (WANT_REWIND) THEN
+	      CALL WRITAP(' (counted from beginning of tape)')
+	      CALL WRITEF('Rewinding tape')
+C
+C Otherwise, check if we are at the BOT, and output appropriate 
+C messages if we are
+C
+	   ELSEIF (AT_BOT) THEN
+	      CALL WRITAP(' (counted from current tape position)')
+	      CALL WRITEF(
+     &		'Current position is at beginning of tape (BOT)')
+C
+C Otherwise, check if last block was EOF, and output appropriate 
+C messages if it was
+C
+	   ELSEIF (LAST_BLOCK_EOF) THEN
+	      CALL WRITAP(' (counted from current tape position)')
+	      CALL WRITEF('Current position is after a tapemark (EOF)')
+	   ENDIF
+	ENDIF
+C
+C Initialise the tape, rewinding it if that was requested with the
+C /REWIND qualifier
+C
+	SETUP_TAPE = MTINIT(
+     &		DEVICE,			! name of magtape drive
+     &		(.NOT.WANT_REWIND),	! .T. if not to rewind
+     &		,)			! default device type
+C
+C Check for errors in initialising the tape, report and exit if
+C there are any
+C
+	IF (.NOT.SETUP_TAPE) THEN
+	   CALL LSL_PUTMSG(SETUP_TAPE)
+	   CALL LSL_ADDMSG(MTIERR)
+	   GOTO 900
+	ENDIF
+C
+C Save diagnostics flag. Will not print out full diagnostics for
+C blocks in any sheets which we skip
+C
+	SAVE_DIAG_FLAG = WANT_DIAGNOSTICS
+	WANT_DIAGNOSTICS = .FALSE.
+C
+C Prior to repositioning at required sheet, must attempt
+C to backspace by one block, to determine if the previous
+C block was a tapemark - this is necessary in case the tape
+C is currently positioned between the two tapemarks which indicate
+C the end of volume
+C
+C	SETUP_TAPE = MTIBCK()
+C
+C Check for an end of tape error (i.e. already at start of tape)
+C
+C	IF (SETUP_TAPE.EQ.LSL__ENDOFTAPE) THEN
+C
+C Set flag to indicate the previous block was not a tapemark
+C
+C	   LAST_BLOCK_EOF = .FALSE.
+C
+C Set return code to indicate normal condition
+C
+C	   SETUP_TAPE = MGD2I__NORMAL
+C
+C Check for any other errors
+C
+C	ELSEIF (.NOT.SETUP_TAPE) THEN
+C
+C Report overall error
+C
+C	   CALL LSL_PUTMSG(SETUP_TAPE)
+C
+C Report any additional information for a system error
+C
+C	   IF (SETUP_TAPE.EQ.LSL__SYSERR) CALL LSL_ADDMSG(MTIERR)
+C
+C And exit
+C
+C	   GOTO 900
+C
+C No errors, so re-read the block we have just backspaced over to
+C determine whether it was a tapemark
+C
+C	ELSE
+C	   SETUP_TAPE = READ_BLOCK()
+C
+C Check for successful read - i.e. not a tapemark
+C
+C	   IF (SETUP_TAPE) THEN
+C	      LAST_BLOCK_EOF = .FALSE.
+C
+C Check for end of file - i.e. was a tapemark
+C
+C	   ELSEIF (SETUP_TAPE.EQ.LSL__EOF) THEN
+C	      LAST_BLOCK_EOF = .TRUE.
+C
+C Set return code to indicate still normal
+C
+C	      SETUP_TAPE = MGD2I__NORMAL
+C
+C Otherwise, was some other error, so report it and exit
+C
+C	   ELSE
+C	      CALL LSL_PUTMSG(SETUP_TAPE)
+C	      IF (SETUP_TAPE.EQ.LSL__SYSERR) CALL LSL_ADDMSG(MTIERR)
+C	      GOTO 900
+C	   ENDIF
+C	ENDIF
+C
+C Now decide whether the tape can be left in its present position
+C (if /SELECT=1 was used), or whether repositioning to some
+C other sheet is wanted.
+C Test that next block is not tapemark (espec. if following another
+C tapemark) and then exit if current next sheet wanted.
+C
+	IF (SHEET.EQ.1) THEN
+C
+C Read the next block
+C
+	   SETUP_TAPE = READ_BLOCK()
+C
+C Test if have end of file following another end of file, change 
+C error to end of volume
+C
+	   IF ((SETUP_TAPE.EQ.LSL__EOF).AND.(LAST_BLOCK_EOF))
+     &		SETUP_TAPE = MGD2I__ENDOFVOL
+C
+C Test for errors in reading initial block in next sheet,
+C reporting and exiting if any are found
+C
+	   IF (.NOT.SETUP_TAPE) THEN
+	      CALL LSL_PUTMSG(SETUP_TAPE)
+	      IF (SETUP_TAPE.EQ.LSL__SYSERR) CALL LSL_ADDMSG(MTIERR)
+	      GOTO 900
+	   ENDIF
+C
+C Otherwise, the first block in the sheet in not an end of volume
+C or an end of file or anything else really nasty and unpleasant
+C so back space over the block to get the tape to the right place 
+C to start reading from again
+C
+	   SETUP_TAPE = MTIBCK()
+C
+C Check for errors in backspacing
+C
+	   IF (.NOT.SETUP_TAPE) THEN
+	      CALL LSL_PUTMSG(SETUP_TAPE)
+	      IF (SETUP_TAPE.EQ.LSL__SYSERR) CALL LSL_ADDMSG(MTIERR)
+	      GOTO 900
+	   ENDIF
+	ENDIF
+C
+C Now position the tape over the sheet number specified with
+C the /SELECT qualifier, the current (next) sheet is
+C specified as 1, with those following being, obviously, 2,3,4...
+C This loop will not be executed if SHEET = 1
+C
+	DO 20 I = 1,(SHEET-1)
+C
+C Report which sheet has been found, if diagnostics have been
+C requested
+C
+	   IF (SAVE_DIAG_FLAG) CALL WRITEF('Found sheet %N',I)
+C
+C Now read the next block on the tape
+C
+10	   SETUP_TAPE = READ_BLOCK()
+C
+C If the read block has succeeded, read the next block
+C
+	   IF (SETUP_TAPE) THEN
+C
+C Clear flag to indicate last block was not a tapemark
+C
+	      LAST_BLOCK_EOF = .FALSE.
+C
+C Loop to read next block
+C
+	      GOTO 10
+C
+C Check if read block has failed due to end of file (sheet)
+C i.e. that a tapemark has been read
+C
+	   ELSEIF (SETUP_TAPE.EQ.LSL__EOF) THEN
+C
+C Check if the last block read was a tapemark, if it was, then
+C report the two adjacent tapemarks as an end of volume and exit
+C
+	      IF (LAST_BLOCK_EOF) THEN
+C
+C Report end of volume error
+C
+	         CALL LSL_PUTMSG(MGD2I__ENDOFVOL)
+C
+C Set return code to be end of volume error
+C
+	         SETUP_TAPE = MGD2I__ENDOFVOL
+C
+C Exit from routine
+C
+	         GOTO 900
+	      ENDIF
+C
+C Set return code to indicate successful completion again
+C (Needed in case this is the last time through the loop)
+C
+	      SETUP_TAPE = MGD2I__NORMAL
+C
+C Set flag, so that if the next block read is a tapemark, an end
+C of volume can be determined
+C
+	      LAST_BLOCK_EOF = .TRUE.
+C
+C Deal with other errors in reading block by reporting them and exiting
+C
+	   ELSE
+	      CALL LSL_PUTMSG(SETUP_TAPE)
+	      IF (SETUP_TAPE.EQ.LSL__SYSERR) CALL LSL_ADDMSG(MTIERR)
+	      GOTO 900
+	   ENDIF
+C
+C End of DO loop for skipping sheets
+C Only reaches here when end of sheet found
+C
+20	CONTINUE
+C
+C Restore diagnostics flag
+C
+	WANT_DIAGNOSTICS = SAVE_DIAG_FLAG
+C
+C Report that the required sheet has been found
+C
+	IF (WANT_DIAGNOSTICS) 
+     &		CALL WRITEF('Found required sheet %N',SHEET)
+C
+C Reset number of blocks read so far to zero
+C
+	MTINBL = 0
+C
+C Should now be positioned just before the first block of the
+C sheet in which we are interested, so exit
+C
+900	RETURN
+	END

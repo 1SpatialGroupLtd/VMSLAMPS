@@ -1,0 +1,709 @@
+	LOGICAL FUNCTION DTMGRD()
+C
+***	MODULE	DTMGRD
+***	IDENT	15NO91
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C	Stolen from old PANACEA's PANDORA		TJH 18-Mar-1988
+C
+CMOD	Triangle undershoot and overshoot limits UREST
+C	and OREST correctly applied. Calls to WAIT 
+C	changed to LSL_WAIT				TJH 15-Nov-1991
+C
+C Calculates a DTM of NROW rows by NCOL columns between the X,Y limits
+C XMIN to XMAX, YMIN to YMAX. If smooth patch interpolation is selected
+C interpolation LIMITS are applied, 1) overall - lowest poss. ht. in
+C entire DTM area and highest poss. ht. in entire DTM area and 2)
+C individual triangle undershoot and overshoot. 
+C
+C If the logical flag for AUTO_LIMITS "ATOLIM" is .TRUE. then the
+C individual triangle limits are applied in a modified manner to 
+C triangles whose vertex hts. indicate a slope. 
+C
+C SLOPING TRIANGLES
+C Two sloping triangle situations may obtain:
+C
+C 1) One or more of the 3 triangle vertices is feature coded as being
+C part of a river or a ridgeline. In this case no Z-value is produced 
+C which lies outside the overall Z limits set by the Z values of the 
+C triangle vertices themselves. This should prevent "scalloping" of 
+C valley floors into pools and riffles. 
+C 
+C 2) None of the 3 triangle vertices is feature coded as being part
+C of a river or a ridgeline. In this case the individual triangle
+C under/overshoot limit is applied relative to the triangle facet
+C plane slope. 
+C
+C FLAT TRIANGLES
+C Triangles which have all 3 Z values with equal ht. have "normal"
+C (explicitly user supplied) under and over shoot values applied. This
+C will allow continued overshoot or "ballooning" of hill tops.
+C AUTO_LIMITS code will NOT restrict undershoot in triangles with equal
+C ht. such that DTM points lie within the Z range of the triangle. It is
+C therefore important to specify a low under-shoot limit (say contour
+C interval/4.0) if valley floors are not defined by 3d river strings. 
+C
+C
+C FEATURE FLAGGING
+C If feature flag information is available in TPOLOGY() (HADTOP=.TRUE.)
+C then no under-shoot will be allowed in flat triangles which have
+C any vertices defined as river points. Similarly, flat triangles
+C which have any vertices defined as ridgeline points will not be
+C allowed any overshoot, but will be allowed the user specified 
+C undershoot limit.
+C
+C---------------------------------------------------------------------
+C 	Function returns .TRUE. if all is well
+C---------------------------------------------------------------------
+C
+C Parameters:
+	INCLUDE 'LSL$DTMCREATESYS:GRIDPARAMS.PAR'
+	INCLUDE 'LSL$CMNTRIGRID:TRIGRIDMSG.PAR'
+C
+C Common:
+	INCLUDE 'LSL$DTMCREATESYS:CONTRL.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:DTMDET.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:FINDIT.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:STORIT.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:TPOLGY.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:TRYVAR.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:ZONVAR.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFDEV.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:RESOLUTION.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+C
+	INTEGER	  GRDTOT	! total number of grid intersections
+	INTEGER	  NUMGRD	! number of grid intersections done
+	INTEGER	  BRKTRI	! counts tri. breakline vertices
+	INTEGER*2 HEIGHT	! height at this sample point
+	INTEGER*2 HMAX,HMIN	! max, min heights encountered
+	INTEGER	  NTEM(NTMSIZ)	! list of neighbours
+	LOGICAL	  FLAT		! .T. = triangle vertices all same ht
+	LOGICAL	  ONVRTX	! .T. = on triangle vertex
+	LOGICAL	  OK		! function return
+C
+	REAL	  P(2)		! triangle slopes
+	REAL	  ZLINR		! Z limit value above/below linear 
+C				! facet plane
+C Functions:
+	LOGICAL	WRITE_POST	! write a post into the DTM
+
+C
+	LOGICAL	BIAS
+
+	DIMENSION LIST(3),LMIN(2),LMAX(2),LIMLO(2),LIMHI(2),
+     &		PMIN(2),PMAX(2),IGRID(2),RINC(2),RINT(2)
+C
+C ......................................................................
+C
+	DTMGRD=.TRUE.			! assume success
+C
+C Announce this stage of processing and init number of grid 
+C intersections done counter
+	IF (DIAG) THEN
+	   NUMGRD=0
+	   GRDTOT=NROW*NCOL
+	   IF (GRAPHICS.AND.(.NOT.GPX)) THEN
+	      CALL EXPAND('Generating DTM grid')
+	      CALL TXTOUT(.TRUE.)
+	      CALL LSL_WAIT(2,2)		! wait for 2 seconds
+	   ELSE
+	      CALL FRAMED_MES(5,0)
+	   ENDIF
+	   CALL PERCENT('of grid intersections calculated',
+     &		0,GRDTOT,10,-1)
+	ENDIF
+C
+	BIAS=.FALSE.
+C
+C Rewind node/neighbour file
+C
+	REWIND LGC3
+C
+C Set up absolute limits on z-values in grid
+C
+	IZBOT=BOTTOM
+	IZTOP=UPPER
+C
+C Calc. integer z value equivalent to 1.0
+C
+	CALL CONVER(VMIN(3),IB,3)
+	CALL CONVER(VMAX(3),IT,3)
+	IONE=NINT(FLOAT(IT-IB)/(VMAX(3)-VMIN(3)))
+C
+C Get number of rows and hi and low real limits
+	PMIN(1)=XMIN
+	PMIN(2)=YMIN
+	PMAX(1)=XMAX
+	PMAX(2)=YMAX
+	IGRID(1)=NCOL-1
+	IGRID(2)=NROW-1
+C
+
+C Switch on graphics if required
+C
+	IF (GRAPHICS) THEN
+	  SYPROP=SIDEY/SIDEX
+	  CALL GINIT(FLOAT(NCOL-1),FLOAT(NROW-1)*SYPROP)
+	  GONOFF=.TRUE.			! graphics device now active
+	  CALL COLOUR(2,.FALSE.)		! set DOT colour
+	ENDIF
+C
+C
+C Set buffer parameter to "clear buffer"
+C
+	  IERR=-1
+C
+C Get integer equivalent of DTM limits
+C
+	  DO 20 I=1,2
+	    LMIN(I)=(PMIN(I)-VMIN(I))*VSCAL(I)+OFFSET(I)+0.5
+	    LMAX(I)=(PMAX(I)-VMIN(I))*VSCAL(I)+OFFSET(I)+0.5
+20	  CONTINUE
+C
+C Get real increment per row/col for scaled integer limits
+C
+	  DO 30 I=1,2
+	    RINC(I)=1.0
+	    IF (IGRID(I).NE.0) THEN
+     		RINC(I)=(FLOAT(LMAX(I))-FLOAT(LMIN(I)))/FLOAT(IGRID(I))
+	    ENDIF
+30	  CONTINUE
+C
+C LMIN(1) to LMAX(1) and LMIN(2) to LMAX(2) delimit the grid area.
+C create triangles from the node/neighbour file. Accept only those
+C triangles 1) whose neighbours have a higher node number than the
+C node itself (to avoid duplication), and 2) those which lie in the
+C DTM grid area.
+C
+	IF (GRAPHICS) THEN
+	   CALL LSL_WAIT(1,2)	    	! wait for 1 second
+	   CALL COLOUR(2,.FALSE.) 	! restore DOT colour
+	ENDIF
+C
+C ......................................................................
+C  M A I N   L O O P   S T A R T S   H E R E.
+C ......................................................................
+C
+	  DO 270 KNODE=1,NP
+	    CALL REDNOD(LGC3,NODE,1,IERR)
+	    IF (IERR.NE.0) GOTO 280
+	    CALL REDNOD(LGC3,NUMBER,1,IERR)
+	    IF (IERR.NE.0) GOTO 999
+C
+C Read neighbour list
+C
+	    CALL REDNOD(LGC3,NTEM,NUMBER,IERR)
+	    IF (IERR.NE.0) GOTO 999
+C
+C Go through neighbour list looking for useful triangles. NB the
+C start and stop nodes will be the same for interior points, but
+C different for the peripheral imaginary points.
+C
+	    NUMBER=NUMBER-1
+	    DO 260 IPOS=1,NUMBER
+	      IF(NTEM(IPOS).LT.NODE.OR.NTEM(IPOS+1).LT.NODE)GOTO 260
+C
+C Triangle not a duplicate, so check it for being in the area
+C store it as LIST(1)-LIST(3).
+C
+	      LIST(1)=NODE
+	      LIST(2)=NTEM(IPOS)
+	      LIST(3)=NTEM(IPOS+1)
+C
+C Get triangle limits in scaled integer format
+C
+	      DO 50 L=1,2
+CCC	        LIMLO(L)=300000
+CCC	        LIMHI(L)=-300000
+	        LIMLO(L)=MAX_RES_INT
+	        LIMHI(L)=-MAX_RES_INT
+	        DO 40 J=1,3
+	          K=LIST(J)
+	          LIMLO(L)=MIN0(LIMLO(L),MD(L,K))
+	          LIMHI(L)=MAX0(LIMHI(L),MD(L,K))
+40	        CONTINUE
+50	      CONTINUE
+C
+C Check whether the limits fall outside this DTM grid's area
+C
+	      DO 60 J=1,2
+	        IF(LIMHI(J).LT.LMIN(J).OR.LIMLO(J).GT.LMAX(J))GOTO 260
+60	      CONTINUE
+C
+C Determine rows of DTM covered by the triangle, allowing
+C a slight leeway for real arithmetic error. 
+C
+	      IA=(LMAX(2)-LIMHI(2))/RINC(2)+0.99
+	      IA=MAX0(IA,1)
+	      IB=(LMAX(2)-LIMLO(2))/RINC(2)+1.01
+	      IB=MIN0(IB,NROW)
+C
+C Check for triangle lying outside area or falling between
+C two rows
+C
+	      IF(IA.GT.IB)GOTO 260
+C
+C Set marker to indicate no triangle patch set up yet performed
+C
+	      MARK=1
+C
+C Find column coverage for each row by determining triangle side
+C intersections with the row
+C
+	      DO 250 I=IA,IB
+	        IH=LMAX(2)-(I-1)*RINC(2)
+C
+C Set intersection counter to zero
+	        L=0
+C
+C Check each triangle side for crossing y height of IH
+	        DO 140 J=1,3
+	          K=MOD(J,3)+1
+	          JA=LIST(J)
+	          JB=LIST(K)
+C
+C Check for vertex JA being below, on, or above IH
+	          IF(MD(2,JA)-IH)80,70,90
+C
+C Vertex is on IH. Check for IX already in intersection list
+70	          A=MD(1,JA)
+	          GOTO 110
+C
+C Check for vertex JB being above IH, as JA is below
+80	          IF(MD(2,JB).LE.IH)GOTO 140
+	          GOTO 100
+C
+C Check for vertex JB being below IH, as JA is above
+90	          IF(MD(2,JB).GE.IH)GOTO 140
+C
+C IH crosses line from vertex JA to JB. Calculate intersection of
+C JA to JB with the horizontal line IH
+100	          A=FLOAT(IH-MD(2,JA))/FLOAT(MD(2,JB)-MD(2,JA))
+     &                             *FLOAT(MD(1,JB)-MD(1,JA))+MD(1,JA)
+110	          IF(L.EQ.0)GOTO 130
+	          DO 120 KA=1,L
+	            IF(RINT(KA).EQ.A)GOTO 140
+120	          CONTINUE
+C
+C Put IX in the list
+130	          L=L+1
+	          RINT(L)=A
+140	        CONTINUE
+C
+C Check for none, one, or two intersections having been found
+	        IF (L-1) 250,150,160
+C
+C One intersection - so duplicate it
+150	        RINT(2)=RINT(1)
+C
+C Two intersections have been found. Get them sorted out to produce
+C column numbers covered by the triangle (JA to JB). Check for any
+C coverage. Once again allow a small leeway for real arithmetic
+C error.
+160	        RMIN=AMIN1(RINT(1),RINT(2))
+	        JA=(RMIN-LMIN(1))/RINC(1)
+	        JA=MAX0(JA,1)
+	        RMAX=AMAX1(RINT(1),RINT(2))
+	        JB=(RMAX-LMIN(1))/RINC(1)+2.01
+	        	     JB=MIN0(JB,NCOL)
+C Check for triangle outside area or lying between two columns
+	        IF(JA.GT.JB)GOTO 250
+C
+C Go through the row's grid nodes filling them in
+	        DO 240 J=JA,JB
+	          IX=LMIN(1)+(J-1)*RINC(1)+0.5
+C
+C Check this is inside the triangle as defined by the intersections
+	          IF(IX.LT.RMIN.OR.IX.GT.RMAX)GOTO 240
+C
+C Use linear facet, or smooth fitting?
+	          IF (LINEAR.EQ.0) GOTO 170
+C
+C ......................................................................
+C        L I N E A R  F A C E T   I N T E R P O L A T I O N
+C ......................................................................
+C
+	          CALL FACET(IX,IH,IZ,MARK,LIST)
+	          GOTO 220
+C
+C ......................................................................
+C        S M O O T H    P A T C H    I N T E R P O L A T I O N
+C ......................................................................
+C
+170	          IF (BIAS) THEN
+		    ONVRTX=.FALSE.
+C
+C Test for special case of vertex on grid intersection
+		    DO 175 L=1,3
+		      M=LIST(L)
+		      IF ((MD(1,M).LE.IX+2.AND.MD(1,M).GE.IX-2)
+     &		      .AND.
+     &		      (MD(2,M).LE.IH+2.AND.MD(2,M).GE.IH-2)) 
+     &		       				ONVRTX=.TRUE.
+175		     CONTINUE
+		  ENDIF
+	          CALL TRIVAL(IX,IH,IZ,MARK,LIST)
+C
+C If this is the first time of entry into this triangle get the
+C limits of the vertex z-values (IVTMIN and IVTMAX -UREST and +OREST)
+	          IF (MARK.EQ.0) GOTO 210
+		  LASVRT=LIST(3)
+		  MDX=MD(1,LASVRT)
+		  MDY=MD(2,LASVRT)
+		  MDZ=ABS(MD(3,LASVRT))
+CCC	          IVTMIN=300000
+	          IVTMIN=MAX_RES_INT
+	          IVTMAX=0
+	          DO 180 L=1,3
+	            M=LIST(L)
+	            NZVT=IABS(MD(3,M))
+	            IVTMIN=MIN0(IVTMIN,NZVT)
+	            IVTMAX=MAX0(IVTMAX,NZVT)
+180	          CONTINUE
+C
+C Have AUTO_LIMITS been selected? See comment block at head of routine.
+C
+C ......................................................................
+C    AUTO_LIMITS ?
+C ......................................................................
+		  IF (ATOLIM) THEN
+C
+C We must check if this triangle lies on a slope.  Also check that all
+C three vertices are not flagged as breakline points. If so the
+C triangle must be protected against the effects of BIAS and TRACE as it
+C is probably part of a lake, river or worst of all the sea.
+C 
+C Assume all 3 vertices at same height ...
+C
+		    FLAT=.TRUE.
+C
+C Assume that no vertices are flagged as breakline pts...
+C
+		    BRKTRI=0
+	            IFIRST=IABS(MD(3,LIST(1)))
+C    ... until proved otherwise.
+	            DO 190 L=1,3
+	              M=LIST(L)
+	              IF (MD(3,M).LT.0) BRKTRI=BRKTRI+1
+	              IF (IABS(MD(3,M)).GT.IFIRST+3
+     &			.OR.IABS(MD(3,M)).LT.IFIRST-3) FLAT=.FALSE.
+190	            CONTINUE
+C
+C Check that we do not have a triangle with all 3 vertives flagged as
+C breakline points. If so we must not apply the special BIAS and TRACE
+C options, but just use the triangle Z-range instead
+		    IF (BRKTRI.EQ.3) THEN
+		       NVTA=IVTMIN
+		       NVTB=IVTMAX
+		       ONVRTX=.FALSE.
+		       GOTO 215
+		    ENDIF
+C		
+C Calculate the vertical value of the undershoot (UREST) and 
+C overshoot (OREST) limits which are applied othogonal to the triangle 
+C facet plane if the triangle has slope.
+		    IF (ORTHOG.AND.(.NOT.FLAT)) THEN
+C
+C Calc. facet plane XY slopes
+		      TA=0.0
+		      TB=0.0
+		      SA=0.0
+		      SB=0.0
+		      SC=0.0
+		      IZVAL=IABS(MD(3,LASVRT))
+		      DO 101 IVERT=1,2
+		        P(IVERT)=0.0
+		        L=LIST(IVERT)
+		        X=MD(1,L)-MD(1,LASVRT)
+		        Y=MD(2,L)-MD(2,LASVRT)
+		        Z=IABS(MD(3,L))-IZVAL
+		        SA=SA+X*X
+		        SB=SB+X*Y
+		        SC=SC+Y*Y
+		        TA=TA+X*Z
+		        TB=TB+Y*Z
+101		      CONTINUE
+		      DET=SA*SC-SB*SB
+		      IF(DET.LT.1.0E-5) THEN
+			P(1)=0.0
+			P(2)=0.0
+		      ELSE
+		        P(1)=(TA*SC-TB*SB)/DET
+		        P(2)=(SA*TB-SB*TA)/DET
+		      ENDIF
+C
+C Slopes for the linear trend passing through the third vertex
+C are now stored in P(1) for F1(X), and in P(2) for F1(Y).
+		      SLOPE=SQRT(P(1)*P(1)+P(2)*P(2))
+		      FANG=ATAND(SLOPE)
+C
+C We are going to apply the orthogonal distance as a vertical addition 
+C or subtraction from the linear facet height for the current IX IH 
+C location
+		      ORTUND=UREST/COSD(FANG)
+		      ORTOVR=OREST/COSD(FANG)
+		    ENDIF
+C
+C If feature flag information is available we can determine whether
+C this triangle is part of a ridgeline or river.
+		    IF (HADTOP) THEN
+		      IRIV=0
+	              IRID=0
+	               DO 200 L=1,3
+	                IF (TPOLGY(LIST(L)).EQ.1) IRIV=IRIV+1
+	                IF (TPOLGY(LIST(L)).EQ.2) IRID=IRID+1
+200	              CONTINUE
+		    ENDIF
+C
+C If this is a flat triangle add and subtract the under-shoot (UREST)
+C and over-shoot (OREST) values from the triangle Z range (IVTMIN and 
+C IVTMAX)
+	            IF (FLAT) THEN
+C
+C If contour tracing was selected then try to determine whether this 
+C "flat" triangle is supposed to bulge up or down
+		      IF (TRACE) CALL DETER(LIST,IDET)
+C
+C But if feature flag information is available we can treat ridge 
+C line and river meanders as special cases. See comment block at head of
+C routine. A byte TPOLGY() is set st 1 if river point or a 2 if 
+C ridgeline point.
+	               IF (HADTOP) THEN
+C
+C Flat triangle with at least one corner on a river ?
+C If so don't allow ANY undershoot, but allow normal overshoot !
+	                IF (IRIV.GE.1) THEN
+	                  NVTA=IVTMIN
+	                  NVTB=FLOAT(IVTMAX)+OREST
+C
+C Flat triangle with at least one corner on a ridgeline ?
+C If so don't allow ANY overshoot but allow normal undershoot !
+	                ELSEIF (IRID.GE.1) THEN
+	                  NVTA=FLOAT(IVTMIN)-UREST
+	          	  NVTB=IVTMAX
+	                ELSE
+C
+C No. Just an ordinary indifferent boring flat triangle.
+		          IF (TRACE) THEN
+			    IF (IDET.EQ.-1) THEN
+	                      NVTA=FLOAT(IVTMIN)-UREST
+	                      NVTB=FLOAT(IVTMAX)-IONE
+			    ELSEIF (IDET.EQ.1) THEN
+	                      NVTA=FLOAT(IVTMIN)+IONE
+	                      NVTB=FLOAT(IVTMAX)+OREST
+			    ELSE
+	                      NVTA=FLOAT(IVTMIN)-UREST
+	                      NVTB=FLOAT(IVTMAX)+OREST
+			    ENDIF
+			  ELSE
+	                    NVTA=FLOAT(IVTMIN)-UREST
+	                    NVTB=FLOAT(IVTMAX)+OREST
+			  ENDIF
+			ENDIF
+	              ELSE
+C
+C No topology information available. Just use the user supplied limit
+C values and calculate interpolation limits orthogonal to the triangle 
+C facet plane, which as the triangle facet is horizontal will
+C require no special calculation!
+		          IF (TRACE) THEN
+			    IF (IDET.EQ.-1) THEN
+	                      NVTA=FLOAT(IVTMIN)-UREST
+	                      NVTB=FLOAT(IVTMAX)-IONE
+			    ELSEIF (IDET.EQ.1) THEN
+	                      NVTA=FLOAT(IVTMIN)+IONE
+	                      NVTB=FLOAT(IVTMAX)+OREST
+			    ELSE
+	                      NVTA=FLOAT(IVTMIN)-UREST
+	                      NVTB=FLOAT(IVTMAX)+OREST
+			    ENDIF
+			  ELSE
+	                    NVTA=FLOAT(IVTMIN)-UREST
+	                    NVTB=FLOAT(IVTMAX)+OREST
+			  ENDIF
+	              ENDIF
+	            ELSE			
+C
+C Triangle with slope and no feature flags, OR triangle with river
+C feature flag. 
+		      IF (ORTHOG) THEN
+C
+C Calculate interpolation limits orthogonal to the 
+C triangle facet plane, allowing no undershoot outside of the triangle
+C limits
+C
+C Is at least one vertex part of a river?
+C
+		        IF (IRID.EQ.0) THEN
+		          ZB=MDZ+P(1)*(IX-MDX)
+     &				+P(2)*(IH-MDY)
+			  ZLINR=ZB-ORTUND
+C
+C Apply BIAS?
+C
+			  IF (BIAS) THEN
+	                    NVTA=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN))
+     &						,FLOAT(IVTMAX-IONE))
+			  ELSE
+	                    NVTA=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN))
+     &						,FLOAT(IVTMAX))
+			  ENDIF
+			  ZLINR=ZB+ORTOVR
+C
+C Apply BIAS?
+C
+			  IF (BIAS) THEN
+	                    NVTB=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN))
+     &						,FLOAT(IVTMAX-IONE))
+			  ELSE
+	                    NVTB=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN))
+     &						,FLOAT(IVTMAX))
+			  ENDIF
+		        ELSE
+C 
+C Triangle with slope and at least 1 vertex feature flagged as a
+C ridgeline point. Just use orthogonal limits within the triangle z 
+C range to limit the interpolation. 
+C
+		          ZB=MDZ+P(1)*(IX-MDX)
+     &				+P(2)*(IH-MDY)
+		          ZLINR=ZB-ORTUND
+	                  NVTA=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN))
+     &						,FLOAT(IVTMAX))
+		          ZLINR=ZB+ORTOVR
+	                  NVTB=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN))
+     &						,FLOAT(IVTMAX))
+		        ENDIF
+		      ELSE
+C
+C Apply vertical limits allowing no undershoot outside of the triangle
+C limits
+C
+		        IF (IRID.EQ.0) THEN
+	                  NVTA=IVTMIN
+	                  NVTB=IVTMAX
+		          IF (BIAS) NVTB=NVTB-IONE
+		        ELSE
+C 
+C Triangle with slope and at least 1 vertex feature flagged as ridgeline
+C point. Just use vertical limits within the triangle z range to 
+C limit the interpolation.
+C
+	                  NVTA=IVTMIN
+	                  NVTB=IVTMAX
+		        ENDIF
+		      ENDIF			
+	            ENDIF
+C
+C ......................................................................
+C No AUTO_LIMITS
+C ......................................................................
+C
+	          ELSE
+	            NVTA=FLOAT(IVTMIN)-UREST
+	            NVTB=FLOAT(IVTMAX)+OREST
+		  ENDIF
+		  GOTO 215
+C
+C ......................................................................
+C
+C Now actually apply the interpolation limits
+C
+C Truncate interpolation if it is outside...
+C 1) The user supplied individual triangle limits applied orthogonal to 
+C    the facet plane if sloping triangle with no feature flags...
+C
+210	          IF (ORTHOG.AND.
+     &			.NOT.FLAT.AND.IRID.EQ.0) THEN
+		    ZB=MDZ+P(1)*(IX-MDX)
+     &				+P(2)*(IH-MDY)
+		    IF (BIAS) THEN
+	              NVTA=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN)),
+     &					FLOAT(IVTMAX-IONE))
+		    ELSE
+	              NVTA=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN)),
+     &					FLOAT(IVTMAX))
+		    ENDIF
+		    ZLINR=ZB+ORTOVR
+		    IF (BIAS) THEN
+	              NVTB=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN)),
+     &					FLOAT(IVTMAX-IONE))
+		    ELSE
+	              NVTB=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN)),
+     &					FLOAT(IVTMAX))
+	            ENDIF
+		  ELSEIF (ORTHOG.AND.
+     &			.NOT.FLAT.AND.IRID.GT.0) THEN
+		    ZB=MDZ+P(1)*(IX-MDX)
+     &				+P(2)*(IH-MDY)
+		    ZLINR=ZB-ORTUND
+	            NVTA=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN)),FLOAT(IVTMAX))
+		    ZLINR=ZB+ORTOVR
+	            NVTB=AMIN1(AMAX1(ZLINR,FLOAT(IVTMIN)),FLOAT(IVTMAX))
+		  ENDIF
+C
+C 2) The range of the triangle vertices (-UREST and +OREST the contour 
+C    interval or equivalent if on a flat triangle), already calculated 
+C    on first entry into triangle (when MARK=1)
+C
+215		  IF (ONVRTX) THEN
+		    IZ=MIN0(MAX0(IZ,IVTMIN),IVTMAX+IONE)
+		  ELSE
+		    IZ=MIN0(MAX0(IZ,NVTA),NVTB)
+		  ENDIF
+C
+C ......................................................................
+C
+C Linear facet option rejoins here.
+C
+C Update triangle count if this is the first time for this triangle
+C and then unset marker for this triangle.
+C
+220	          IF (MARK.EQ.1) THEN
+	            MARK=0
+	          ENDIF
+C
+C Graphics option selected?
+	          IF (GRAPHICS) THEN
+	            CALL DOT(I,J)
+	          ENDIF
+C
+C Check absolute range, store node, and update pointer
+		  OK=WRITE_POST(J,NROW+1-I,MIN0(MAX0(IZ,IZBOT),IZTOP))
+	          IF (.NOT.OK) GOTO 999
+	          NUMGRD=NUMGRD+1	! count # intersections done
+	          IF (DIAG) THEN
+	             CALL PERCENT('of grid intersections calculated'
+     &		  		,NUMGRD,GRDTOT,10,0)
+	             IF (GRAPHICS) CALL COLOUR(2,.FALSE.)! set DOT colour
+	          ENDIF
+240	        CONTINUE
+250	      CONTINUE
+C
+C All done. Get the next neighbour triangle for this node
+C
+260	    CONTINUE
+C
+C Get next node
+270	    CONTINUE
+C
+C ......................................................................
+C Grid complete
+C
+	IF (DIAG) THEN
+	  CALL PERCENT('of grid intersections calculated',GRDTOT,
+     &			GRDTOT,10,1)
+	ENDIF
+	GOTO 280
+C
+C ......................................................................
+C Unexpected eof
+C
+999	DTMGRD=.FALSE.
+280	RETURN
+	END

@@ -1,0 +1,364 @@
+	LOGICAL FUNCTION LOAD_LINKS(SCAN_ONLY,
+     &		NOD_I,NOD_R,NOD_L,ARM_I,ARM_L,LNK_I,LNK_R,LNK_L,PUP_I,
+     &		PDN_I,NET_I,STN_I,STN_R,STL_I,STL_L,MNX_I,MNX_R,PNT_I,PNT_R,
+     &		MAX_PNTS,MAX_NODS,MAX_ARMS,MAX_LNKS,MAX_STNS,MAX_STLS)
+C
+***	MODULE	LOAD_LINKS
+***	IDENT	25AU93
+C	
+C 	Copyright Laser-Scan, Cambridge, England.
+C 	Created						ALB 11-Apr-1988
+C
+CMOD	Fixed bug in MAX_LNKS count			ACM 25-Oct-1988
+CMOD	Changed the order in which I3D does things so
+C	that the ONEARM stage is no longer required	ACM 23-Dec-1988
+CMOD	Merged with SCAN_IFF routine			ACM 19-Jan-1989
+CMOD889 Now passes pen control to CBINOUT		TJH 30-May-1990
+C
+CMOD967	Deal with multiple CB block features by not null-terminating 
+C	the coordinate string link-list till the end of feature
+C							 JB 21-Feb-1991
+CMOD1288 Add LNK_FSN for the feature serial number	 JB 23-Aug-1993
+C
+C 	Description: Loads the river and ridge data from file into VM arrays
+C
+	IMPLICIT NONE
+C	
+C Parameters
+        INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+        INCLUDE 'LSL$CMNI3D:I3DMSG.PAR'
+        INCLUDE 'LSL$CMNI3D:CONSTANTS.PAR'
+C
+C Common blocks
+        INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+	INCLUDE 'LSL$CMNI3D:GROUP.CMN'
+	INCLUDE 'LSL$CMNI3D:SELECT.CMN'
+C
+C Structures
+        INCLUDE 'LSL$CMNIFF:CB.STR'
+C
+C Records
+	RECORD /IFF_CBH/ CBH
+	RECORD /IFF_CBD/ CBD
+C
+C Data in
+	LOGICAL		SCAN_ONLY	! scan IFF for mem siz estimatn
+C
+C Dynamically assigned array argument declarations
+	INCLUDE 'LSL$CMNI3D:VM_ARG_DECL.SRC'
+C
+C Workspace
+	REAL		DATA_RBUFF(3,IFF_MAXCBROW)! x y values from CB
+	INTEGER		DATA_IBUFF(3,IFF_MAXCBROW)! x y values from CB
+	INTEGER		NROWS		! last row to read (from CB hdr)
+	INTEGER		FEAT_CODE	! graphical Code (FS entry)
+	INTEGER		FSN		! feature number
+C
+	INTEGER		TOTPTS		! tot num of points in feature
+	INTEGER		START_PNT_INDX	! link start PNT
+	REAL		XMIN		! minimum x value in feature
+	REAL		YMIN		! minimum y value in feature
+	REAL		XMAX		! maximum x value in feature
+	REAL		YMAX		! maximum y value in feature
+	REAL		LEN_VEC		! vec length
+	REAL		DX,DY		! vec coords
+C
+	INTEGER		NUM_PNT		! point number
+	INTEGER		NUM_LNK		! link number
+C
+	LOGICAL		LAY_SELECTED	! T if selected item
+	LOGICAL		FSN_SELECTED	! T if selected item
+	LOGICAL		FC_SELECTED	! T if selected item
+	LOGICAL		REQUIRED_FC	! required FC (ie riv or ridge)
+	LOGICAL		FOUND_CB	! data found in CB for curr LNK
+	LOGICAL		FIRST_CB	! T at start of first CB in LNK
+	LOGICAL		IS_RIVER,IS_RIDGE
+	LOGICAL		PENDOWN		! CB pen control
+C
+	INTEGER*2	LUN		! IFF logical unit number
+	INTEGER*2	IECODE		! IFF entry code
+	INTEGER*2	IELEN		! IFF entry length
+        INTEGER*2       IENDS           ! additional string variable
+        INTEGER*2	ISEQ            ! feature number
+C
+	INTEGER		I		! loop counter
+	LOGICAL		OK		! return code
+C
+	EQUIVALENCE(	DATA_RBUFF, DATA_IBUFF)
+C
+C Functions
+	LOGICAL		IFFOPEN
+	LOGICAL		CHECK_LAYER
+	LOGICAL		CHECK_FSN
+	LOGICAL		CHECK_FC
+	LOGICAL		CHECK_GROUP
+C
+C **********************************************************************
+C
+	LOAD_LINKS = .FALSE.		! assume failure
+C
+C .......................  initialise ..................................
+C Get LUN for input IFF file
+C
+	LUN = FILEIN_LUN
+C
+C Re-open IFF file using file ID
+C
+	IF (.NOT.OPEN_FILEIN) THEN
+	   OK = IFFOPEN(LUN,FILEIN_FNAME(FILEIN_NUM),
+     &	      			FILEIN_FID(1,FILEIN_NUM),,1)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(OK)
+	      GOTO 999
+	   ENDIF
+C
+	   OPEN_FILEIN = .TRUE.
+	ENDIF
+C
+C Select file and rewind
+C
+	CALL IFFSEL(LUN)		! select IFF file	
+	CALL IFFRWD			! rewind input file
+C
+	IF (SCAN_ONLY) THEN
+	   IF (FILEIN_NUM.EQ.1) THEN	! for first IFF file
+	      MAX_PNTS = 0
+	      MAX_LNKS = 0
+	   ENDIF
+	ELSE
+	   IF (FILEIN_NUM.EQ.1) THEN	! for first IFF file
+	      NUM_PNT = 0
+	      NUM_LNK = 0
+	   ELSE
+	      NUM_PNT = NUM_PNTS	! set to num of points so far
+	      NUM_LNK = NUM_LNKS	! set to number of links so far
+	   ENDIF
+	ENDIF
+C .......................... get next entry in IFF .....................
+C
+90	CALL IFFNXT(IECODE,IELEN)
+C
+	IF (IELEN.EQ.-1) GOTO 700	! end of file
+C
+C Put file level tests below here (call this level 1) 
+C
+	IF (IECODE.EQ.'NF') THEN
+	   GOTO 200 			! new feature
+C
+	ELSEIF (IECODE.EQ.'FS') THEN
+	   GOTO 300			! feature status
+C
+	ELSEIF (IECODE.EQ.'CB') THEN
+	    GOTO 400			! coordinate block
+C
+	ELSEIF (IECODE.EQ.'EF') THEN
+	    GOTO 499			! end of feature
+C
+	ELSEIF (IECODE.EQ.'RA') THEN
+	   GOTO  95			! get range
+C
+	ELSEIF (IECODE.EQ.'NO') THEN
+	   GOTO 100			! new layer
+C
+	ELSEIF (IECODE.EQ.'EJ') THEN
+	   GOTO 700			! end of file
+C
+	ELSE
+	   GOTO 90			! no more entries of interest
+	ENDIF
+C
+C ----------------------------------------------------------------------
+C RA found
+C
+95	IF (.NOT.SCAN_ONLY) GOTO 90
+	CALL EIHRR(RANGE,4,1)		! read RA & save in common var
+	COORD_TOL = MAX(RANGE(2),RANGE(4))/0.5E6
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C NO found
+C
+100	CALL IFFRLA(.TRUE.)			! switch on look ahead
+	OK = CHECK_LAYER(LAY_SELECTED, .FALSE.) ! check whether required layer
+	IF (.NOT.OK) GOTO 799
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C NF found
+C
+200	OK = CHECK_FSN(FSN,FSN_SELECTED, .FALSE.)  ! check whether req,d FSN
+	IF (.NOT.OK) GOTO 799
+C
+	TOTPTS = 0
+	FOUND_CB = .FALSE.
+	FIRST_CB = .TRUE.
+C
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C FS found
+C
+C Check whether required feature code
+300	OK = CHECK_FC(FEAT_CODE,FC_SELECTED,.FALSE.)
+	IF (.NOT.OK) GOTO 799
+C
+	IS_RIVER = .FALSE.
+	IS_RIDGE = .FALSE.
+C
+	IF (FC_SELECTED) THEN
+	   OK = CHECK_GROUP(FEAT_CODE,RIVER,.FALSE.,IS_RIVER,
+     &	        .FALSE.)			! is FC a river
+	   IF (.NOT.OK) GOTO 799
+C
+	   IF (.NOT.IS_RIVER) THEN
+	      OK = CHECK_GROUP(FEAT_CODE,RIDGE,.TRUE.,IS_RIDGE,
+     &	           .FALSE.)			! is FC a ridge
+	      IF (.NOT.OK) GOTO 799
+	   ENDIF
+	ENDIF
+	REQUIRED_FC = IS_RIDGE .OR. IS_RIVER
+C
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C CB found
+C
+400	IF (.NOT.REQUIRED_FC) GOTO 90	! only scan CB if river or ridge
+C
+C Load CB data into DATA_RBUFF
+	CALL CBINOUT(DATA_RBUFF,.FALSE.,3,NROWS,PENDOWN)
+C
+	FOUND_CB = .TRUE. 		! set FOUND_CB T if data found
+C
+	IF (SCAN_ONLY) THEN
+	   MAX_PNTS = MAX_PNTS + NROWS	! count total points
+	   GOTO 90
+	ENDIF
+C
+	IF (NROWS.LE.0) THEN
+	   CALL LSL_PUTMSG(I3D__CBPNTERR,
+     &	       FILEIN_FNAME(FILEIN_NUM)(1:FILEIN_LEN(FILEIN_NUM)),
+     &						FSN,FEAT_CODE)
+	   GOTO 799
+	ENDIF
+C
+	IF (FIRST_CB) THEN
+	   START_PNT_INDX = NUM_PNT + 1
+	   FIRST_CB = .FALSE.
+	   LEN_VEC = 0
+	ENDIF
+C
+	DO 440 I = 1,NROWS
+	   TOTPTS = TOTPTS + 1
+	   NUM_PNT = NUM_PNT + 1
+	   PNT_R(PNT_XXX,NUM_PNT) = DATA_RBUFF(1,I)
+	   PNT_R(PNT_YYY,NUM_PNT) = DATA_RBUFF(2,I)
+C
+	   IF (NUM_PNT.GT.START_PNT_INDX) THEN
+	     DX = PNT_R(PNT_XXX,NUM_PNT)-PNT_R(PNT_XXX,NUM_PNT-1)
+	     DY = PNT_R(PNT_YYY,NUM_PNT)-PNT_R(PNT_YYY,NUM_PNT-1)
+	     LEN_VEC = SQRT(DX*DX + DY*DY)
+	   ENDIF
+C
+	   PNT_R(PNT_LEN,NUM_PNT) = LEN_VEC
+C     
+	   IF (DATA_IBUFF(3,I).EQ.IFF_ABSENT) THEN
+	      PNT_I(PNT_ZZZ,NUM_PNT) = IFF_ABSENT
+C	      PNT_R(PNT_ZZZ,NUM_PNT) = 0.0	! strange effects if used!!
+	   ELSE
+	      PNT_R(PNT_ZZZ,NUM_PNT) = DATA_RBUFF(3,I)
+	   ENDIF
+C
+	   PNT_I(PNT_PRV,NUM_PNT) = NUM_PNT-1
+	   PNT_I(PNT_NXT,NUM_PNT) = NUM_PNT+1
+C
+	   IF (TOTPTS.EQ.1) THEN
+	      XMAX = DATA_RBUFF(1,I)
+	      YMAX = DATA_RBUFF(2,I)
+	      XMIN = DATA_RBUFF(1,I)
+	      YMIN = DATA_RBUFF(2,I)
+	   ELSE
+	      XMAX = MAX(XMAX,DATA_RBUFF(1,I))
+	      YMAX = MAX(YMAX,DATA_RBUFF(2,I))
+	      XMIN = MIN(XMIN,DATA_RBUFF(1,I))
+	      YMIN = MIN(YMIN,DATA_RBUFF(2,I))
+	   ENDIF
+440	CONTINUE
+C
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C EF found
+C
+499	IF (.NOT.FOUND_CB) GOTO 90
+C
+	IF (SCAN_ONLY) THEN
+	   MAX_LNKS = MAX_LNKS + 1	! count another link
+	   GOTO 90
+	ENDIF
+C
+	IF (TOTPTS.LE.1) THEN
+	   CALL LSL_PUTMSG(I3D__CBPNTERR,
+     &	       FILEIN_FNAME(FILEIN_NUM)(1:FILEIN_LEN(FILEIN_NUM)),
+     &						FSN,FEAT_CODE)
+	   GOTO 799
+	ENDIF
+C
+C Null terminate both ends of PNT linked list
+	PNT_I(PNT_PRV,START_PNT_INDX) = 0
+	PNT_I(PNT_NXT,NUM_PNT) = 0
+C
+	NUM_LNK = NUM_LNK+1		! incr feature count
+C
+	IF (NUM_LNK.GT.MAX_LNKS) THEN	! check within range
+	  CALL LSL_PUTMSG(I3D__FTRMISCOUNT)
+	  GOTO 799
+	ENDIF
+C
+C .......... complete loading of LNK_xDATA array .......................
+C
+	LNK_R(LNK_MXX,NUM_LNK) = XMAX
+	LNK_R(LNK_MXY,NUM_LNK) = YMAX
+	LNK_R(LNK_MNX,NUM_LNK) = XMIN
+	LNK_R(LNK_MNY,NUM_LNK) = YMIN
+	LNK_I(LNK_STA,NUM_LNK) = START_PNT_INDX
+	LNK_I(LNK_FIN,NUM_LNK) = START_PNT_INDX+TOTPTS-1
+C
+	IF (FSN_SELECTED) LNK_I(LNK_FSN,NUM_LNK) = FSN
+C
+	IF (IS_RIVER) LNK_I(LNK_GRP,NUM_LNK) = RIVER
+	IF (IS_RIDGE) LNK_I(LNK_GRP,NUM_LNK) = RIDGE
+C
+	MNX_I(MNX_LNK,NUM_LNK) = NUM_LNK
+	MNX_R(MNX_MNX,NUM_LNK) = XMIN	! save min x for sorting
+C
+	GOTO 90
+C
+C ----------------------------------------------------------------------
+C EJ found
+C
+700	IF (SCAN_ONLY) THEN
+	   MAX_PNTS = MAX_PNTS + MAX_LNKS*AVG_INTS_PER_LNK
+	   MAX_ARMS = 2*MAX_LNKS
+	   MAX_NODS = 2*MAX_LNKS
+	   MAX_STNS = MAX_NODS
+	   MAX_STLS = MAX_LNKS
+C
+	ELSE
+	   NUM_PNTS = NUM_PNT		! save total number of points
+	   NUM_LNKS = NUM_LNK		! save total number of links
+	ENDIF
+C
+	LOAD_LINKS = MAX_LNKS.GT.0.AND.MAX_PNTS.GT.0
+	IF (.NOT.LOAD_LINKS) CALL LSL_PUTMSG(I3D__NOFEATURES)
+C
+799	CONTINUE
+C
+800	CALL IFFRLA(.FALSE.)		! switch off look ahead
+	CALL IFFCLO(LUN)		! close IFF
+	OPEN_FILEIN = .FALSE.
+C
+999	RETURN
+	END
+C

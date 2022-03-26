@@ -1,0 +1,452 @@
+	SUBROUTINE PRPVRT(PACK,PKLST,REV,END,MOVXY,CHKEDG,EDGLNE)
+C
+***	MODULE	PRPVRT
+***	IDENT	11SE92
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author  Ron Russell, after ADDVRT of Clarke Brunt
+C
+C Written  4-June-l985
+C
+C To add all but one of the vertices of the feature pointed at by
+C PACK to the current output item and to propagate MOVXY along
+C the propagation distance to the missing point.
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:PACK/
+C
+***	COMMON/CMN:DEFINE/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:STRIKE/
+***	COMMON/CMN:VARIAT/
+C
+C arguments
+	INTEGER*4	PACK(PAKLEN)	! PACK for feature
+	INTEGER		PKLST		! (total) number of vertices
+					! in feature
+	LOGICAL		REV		! copying backwards if .TRUE.
+	LOGICAL		END		! propagate at end of feature
+					! if .TRUE., at start if .FALSE.
+	REAL		MOVXY(3)	! x and y distance to "lose"
+	LOGICAL		CHKEDG		! if .TRUE. don't move points
+					! across EDGLNE
+	REAL		EDGLNE(2,2)	! line
+C
+C w/s
+	INTEGER 	VV1,VV2		! first and last vertices to
+					! output
+	INTEGER		I		! temporary
+	INTEGER		NVRTS		! number of vertices wanted
+	INTEGER		FLG		! save for ENDS flag
+	REAL		STRTXY(2),	! coord of first vertex
+     &			ENDXY(2)	! and of the last
+	REAL		TOTDST		! total length of feature
+	REAL		PRPDST		! distance to propagate along
+					! (may be total distance for
+					! short features)
+	REAL		DISTSF		! current distance along feature
+					! (distance so far)
+	REAL		SRTDST		! when to start propagating if
+					! outputing towards 
+					! missing point
+	REAL		LASTXY(2)	! previous vertex of feature
+	REAL		XFAC,YFAC	! movements required/ IFF unit
+	REAL		ZFAC		! movement in Z
+	LOGICAL		STRTED		! anything output yet?
+	LOGICAL		DONE		! finished propagating
+	INTEGER		OPER,OPERFM
+	INTEGER		NATT
+	LOGICAL		MOVE_Z
+	REAL		TMP
+	INTEGER		TMPI
+	EQUIVALENCE	(TMP,TMPI)
+	REAL		DX,DY
+	LOGICAL		MOVE,FAR_MOVE
+C
+C initialise
+	OPER = DEFINITION(P_MOVE)
+	IF (OPER.EQ.0) OPER = DEFINITION(P_OTHER)
+	OPERFM = DEFINITION(P_FAR_MOVE)
+C
+C get info about feature, including distance to propagate
+C
+	CALL PRPLNG(PACK,PKLST,PRPTOL*SCLFRT,TOTDST,PRPDST,
+     &	               STRTXY,ENDXY)
+C
+C get propagation factors
+C
+	MOVE_Z = .FALSE.
+	IF (PRPDST.GT.0) THEN
+	   XFAC=MOVXY(1)/PRPDST
+	   YFAC=MOVXY(2)/PRPDST
+	   IF (ZOPT) THEN
+	      CALL PUTLNG(MOVXY(3),TMP)
+	      IF (TMPI.NE.IFF_ABSENT) THEN
+	         ZFAC = MOVXY(3)/PRPDST
+	         MOVE_Z = .TRUE.
+	      ENDIF
+	   ENDIF
+	ELSE
+	   XFAC=0.0		! hopefully we won't be propagating
+	   YFAC=0.0		! over such a silly distance, but
+	ENDIF			! just in case!
+C
+C work out what first and last vertices will be for all 4 cases
+C
+	IF (REV) THEN		! going backwards
+C
+	   IF (END) THEN	! with missing point at end
+C
+	      STRTED=.TRUE.	! point has already beeen output
+	      LASTXY(1)=ENDXY(1)! measuring distances from end
+	      LASTXY(2)=ENDXY(2)! of feature
+	      VV1=PKLST-1	! start at second last vertex
+	      VV2=1		! and go to first point
+C
+	   ELSE			! missing point at start
+C
+	      STRTED=.FALSE.	! nothing there yet
+	      SRTDST=TOTDST-PRPDST ! start propagating when got this far
+	      VV1=PKLST		! start at last vertex
+	      VV2=2		! and don't output the first one
+	   ENDIF
+C
+	ELSE			! going forwards
+C
+	   IF (END) THEN	! with missing point at end
+	      STRTED=.FALSE.	! nothing there yet
+	      SRTDST=TOTDST-PRPDST ! start propagating when got this far
+	      VV1=1		! start at first vertex
+	      VV2=PKLST-1	! output up to second last point
+C
+	   ELSE			! with missing point at start
+C
+	      STRTED=.TRUE.	! point already output
+	      LASTXY(1)=STRTXY(1)! measuring distances from start
+	      LASTXY(2)=STRTXY(2)! of feature
+	      VV1=2
+	      VV2=PKLST
+	   ENDIF
+	ENDIF
+C
+	DONE=.FALSE.		! not finished propagating yet
+	DISTSF=0.0		! not started moving along feature yet
+C
+	NVRTS = IABS(VV2-VV1)+1	! number of vertices
+	FLG = 1			! assume visible to first point
+C
+C Get some vertices
+C
+10	CALL GETVRT(PACK,VV1,VV2)
+	FAR_MOVE = .FALSE.
+	MOVE = .FALSE.
+C
+C If copying forwards, force first vertex to be visible
+C (If this really is the first vertex of a new feature, then FLUSH
+C will ensure that it is marked pen-up, but if it is the first vertex
+C of a bridged bit, then we don't want it marked invisible.)
+C
+	IF (.NOT.REV.AND.VV1.EQ.1) RIFLG(1) = RIFLG(1).OR.1
+C
+C add them to output item
+	IF (REV) THEN
+C
+C deal specially with first point
+	   IF (IAND(FLG,1).EQ.0) THEN
+	      CALL FLUSH(1)
+	      OIENDS = 0
+	   ENDIF
+C
+C alter this coord slightly if required
+C
+	   IF (.NOT.DONE) THEN		! may have propagated completely
+	      IF (STRTED) THEN		! got coords to work with
+	         DISTSF=DISTSF+		! so can add this vector
+     &	                  SQRT((LASTXY(1)-RIXY(1,RITOP))**2+
+     &	                       (LASTXY(2)-RIXY(2,RITOP))**2)
+	      ELSE
+	         STRTED=.TRUE.		! will be ok next time
+	      ENDIF
+C
+C save this vertex
+C
+	      LASTXY(1)=RIXY(1,RITOP)
+	      LASTXY(2)=RIXY(2,RITOP)
+C
+C now move this point slightly
+C
+	      IF (END) THEN	! distance to move getting smaller
+C
+	         IF (DISTSF.LT.PRPDST) THEN
+	            RIXY(1,RITOP)=RIXY(1,RITOP)+XFAC*(PRPDST-DISTSF)
+	            RIXY(2,RITOP)=RIXY(2,RITOP)+YFAC*(PRPDST-DISTSF)
+	            FAR_MOVE = OPERFM .GT. 0	! possible move
+	            MOVE = OPER .GT. 0
+	            IF (MOVE_Z.AND.RI_Z_COL.NE.-1) THEN
+	               CALL PUTLNG(RIATTV(RI_Z_COL,RITOP),TMP)
+	               IF (TMPI.NE.IFF_ABSENT) THEN
+	                  TMP = TMP+ZFAC*(PRPDST-DISTSF)
+	                  CALL PUTLNG(TMP,RIATTV(RI_Z_COL,RITOP))
+	               ENDIF
+	            ENDIF
+C
+C		    check that point not moved across line
+C
+	            IF (CHKEDG) CALL TSTPRP(LASTXY,RIXY(1,RITOP),EDGLNE)
+	            IF (FAR_MOVE) THEN
+	               DX = LASTXY(1) - RIXY(1,RITOP)
+	               DY = LASTXY(2) - RIXY(2,RITOP)
+	               FAR_MOVE = (DX**2 + DY**2) .GT. FAR_MOVE_IFF**2
+	            ENDIF
+	         ELSE
+	            DONE=.TRUE.		! finished propagating
+	         ENDIF
+C
+	      ELSE		! distance to move getting bigger
+C
+	         IF (DISTSF.GT.SRTDST) THEN ! started propagating
+	            RIXY(1,RITOP)=RIXY(1,RITOP)+XFAC*(DISTSF-SRTDST)
+	            RIXY(2,RITOP)=RIXY(2,RITOP)+YFAC*(DISTSF-SRTDST)
+	            FAR_MOVE = OPERFM .GT. 0	! possible move
+	            MOVE = OPER .GT. 0
+	            IF (MOVE_Z.AND.RI_Z_COL.NE.-1) THEN
+	               CALL PUTLNG(RIATTV(RI_Z_COL,RITOP),TMP)
+	               IF (TMPI.NE.IFF_ABSENT) THEN
+	                  TMP = TMP+ZFAC*(DISTSF-SRTDST)
+	                  CALL PUTLNG(TMP,RIATTV(RI_Z_COL,RITOP))
+	               ENDIF
+	            ENDIF
+C
+C		    check that point not moved across line
+C
+	            IF (CHKEDG) CALL TSTPRP(LASTXY,RIXY(1,RITOP),EDGLNE)
+	            IF (FAR_MOVE) THEN
+	               DX = LASTXY(1) - RIXY(1,RITOP)
+	               DY = LASTXY(2) - RIXY(2,RITOP)
+	               FAR_MOVE = (DX**2 + DY**2) .GT. FAR_MOVE_IFF**2
+	            ENDIF
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C
+C output this point
+C
+	   NATT = RINATT
+	   IF (MOVE) 
+     &	      CALL LSTARR(OPER,NATT,RIATTC,RIATTV(1,RITOP),.TRUE.)
+	   IF (FAR_MOVE) THEN
+	      CALL LSTARR(OPERFM,NATT,RIATTC,RIATTV(1,RITOP),.TRUE.)
+	   ENDIF
+	   CALL ADCORD(RIXY(1,RITOP),NATT,RIATTC,RIATTV(1,RITOP))
+C
+C now do the same for ALL the rest of the vertices
+C
+	   DO 40 I=RITOP-1,1,-1
+C
+C FLUSH if invisible to this point (remember going backwards)
+	      FLG = RIFLG(I+1)
+	      IF (IAND(FLG,1).EQ.0) THEN
+	         CALL FLUSH(1)
+	         OIENDS = 0		! invisible
+	      ENDIF
+C
+C alter this coord slightly if required
+C
+	      FAR_MOVE = .FALSE.
+	      MOVE = .FALSE.
+C
+	      IF (.NOT.DONE) THEN	! may have propagated completely
+	         IF (STRTED) THEN	! got coords to work with
+	            DISTSF=DISTSF+	! so can add this vector
+     &	                     SQRT((LASTXY(1)-RIXY(1,I))**2+
+     &	                          (LASTXY(2)-RIXY(2,I))**2)
+	         ELSE
+	            STRTED=.TRUE.		! will be ok next time
+	         ENDIF
+C
+C save this vertex
+C
+	         LASTXY(1)=RIXY(1,I)
+	         LASTXY(2)=RIXY(2,I)
+C
+C now move this point slightly
+C
+	         IF (END) THEN	! distance to move getting smaller
+C
+	            IF (DISTSF.LT.PRPDST) THEN
+	               RIXY(1,I)=RIXY(1,I)+XFAC*(PRPDST-DISTSF)
+	               RIXY(2,I)=RIXY(2,I)+YFAC*(PRPDST-DISTSF)
+	               FAR_MOVE = OPERFM .GT. 0	! possible move
+	               MOVE = OPER .GT. 0
+	               IF (MOVE_Z.AND.RI_Z_COL.NE.-1) THEN
+	                  CALL PUTLNG(RIATTV(RI_Z_COL,I),TMP)
+	                  IF (TMPI.NE.IFF_ABSENT) THEN
+	                     TMP = TMP+ZFAC*(PRPDST-DISTSF)
+	                     CALL PUTLNG(TMP,RIATTV(RI_Z_COL,I))
+	                  ENDIF
+	               ENDIF
+C
+C		    check that point not moved across line
+C
+	               IF (CHKEDG) CALL TSTPRP(LASTXY,RIXY(1,I),EDGLNE)
+	               IF (FAR_MOVE) THEN
+	                  DX = LASTXY(1) - RIXY(1,I)
+	                  DY = LASTXY(2) - RIXY(2,I)
+	                  FAR_MOVE = (DX**2 + DY**2) .GT. FAR_MOVE_IFF**2
+	               ENDIF
+	            ELSE
+	               DONE=.TRUE.		! finished propagating
+	            ENDIF
+C
+	         ELSE		! distance to move getting bigger
+C
+	            IF (DISTSF.GT.SRTDST) THEN ! started propagating
+	               RIXY(1,I)=RIXY(1,I)+XFAC*(DISTSF-SRTDST)
+	               RIXY(2,I)=RIXY(2,I)+YFAC*(DISTSF-SRTDST)
+	               FAR_MOVE = OPERFM .GT. 0	! possible move
+	               MOVE = OPER .GT. 0
+	               IF (MOVE_Z.AND.RI_Z_COL.NE.-1) THEN
+	                  CALL PUTLNG(RIATTV(RI_Z_COL,I),TMP)
+	                  IF (TMPI.NE.IFF_ABSENT) THEN
+	                     TMP = TMP+ZFAC*(DISTSF-SRTDST)
+	                     CALL PUTLNG(TMP,RIATTV(RI_Z_COL,I))
+	                  ENDIF
+	               ENDIF
+C
+C		    check that point not moved across line
+C
+	               IF (CHKEDG) CALL TSTPRP(LASTXY,RIXY(1,I),EDGLNE)
+	               IF (FAR_MOVE) THEN
+	                  DX = LASTXY(1) - RIXY(1,I)
+	                  DY = LASTXY(2) - RIXY(2,I)
+	                  FAR_MOVE = (DX**2 + DY**2) .GT. FAR_MOVE_IFF**2
+	               ENDIF
+	            ENDIF
+	         ENDIF
+	      ENDIF
+C
+C and output point
+C
+	      NATT = RINATT
+	      IF (MOVE)
+     &	         CALL LSTARR(OPER,NATT,RIATTC,RIATTV(1,I),.TRUE.)
+	      IF (FAR_MOVE) 
+     &	         CALL LSTARR(OPERFM,NATT,RIATTC,RIATTV(1,I),.TRUE.)
+	      CALL ADCORD(RIXY(1,I),NATT,RIATTC,RIATTV(1,I))
+40	   CONTINUE
+	   FLG = RIFLG(1)		! preserve flag
+C
+C going forwards
+C
+	ELSE
+C
+	   DO 50 I=1,RITOP
+C
+C Flush if invisible up to the current point
+	      FLG = RIFLG(I)
+	      IF (IAND(FLG,1).EQ.0) THEN
+	         CALL FLUSH(1)
+	         OIENDS = 0		! invisible
+	      ENDIF
+C
+C alter this coord slightly if required
+C
+	      FAR_MOVE = .FALSE.
+	      MOVE = .FALSE.
+	      IF (.NOT.DONE) THEN	! may have propagated completely
+	         IF (STRTED) THEN	! got coords to work with
+	            DISTSF=DISTSF+	! so can add this vector
+     &	                     SQRT((LASTXY(1)-RIXY(1,I))**2+
+     &	                          (LASTXY(2)-RIXY(2,I))**2)
+	         ELSE
+	            STRTED=.TRUE.		! will be ok next time
+	         ENDIF
+C
+C save this vertex
+C
+	         LASTXY(1)=RIXY(1,I)
+	         LASTXY(2)=RIXY(2,I)
+C
+C now move this point slightly
+C
+	         IF (.NOT.END) THEN
+	            IF (DISTSF.LT.PRPDST) THEN
+	               RIXY(1,I)=RIXY(1,I)+XFAC*(PRPDST-DISTSF)
+	               RIXY(2,I)=RIXY(2,I)+YFAC*(PRPDST-DISTSF)
+	               FAR_MOVE = OPERFM .GT. 0	! possible move
+	               MOVE = OPER .GT. 0
+	               IF (MOVE_Z.AND.RI_Z_COL.NE.-1) THEN
+	                  CALL PUTLNG(RIATTV(RI_Z_COL,I),TMP)
+	                  IF (TMPI.NE.IFF_ABSENT) THEN
+	                     TMP = TMP+ZFAC*(PRPDST-DISTSF)
+	                     CALL PUTLNG(TMP,RIATTV(RI_Z_COL,I))
+	                  ENDIF
+	               ENDIF
+C
+C check that point not moved across line
+C
+	               IF (CHKEDG) CALL TSTPRP(LASTXY,RIXY(1,I),EDGLNE)
+	               IF (FAR_MOVE) THEN
+	                  DX = LASTXY(1) - RIXY(1,I)
+	                  DY = LASTXY(2) - RIXY(2,I)
+	                  FAR_MOVE = (DX**2 + DY**2) .GT. FAR_MOVE_IFF**2
+	               ENDIF
+	            ELSE
+	               DONE=.TRUE.
+	            ENDIF
+	         ELSE
+	            IF (DISTSF.GT.SRTDST) THEN
+	               RIXY(1,I)=RIXY(1,I)+XFAC*(DISTSF-SRTDST)
+	               RIXY(2,I)=RIXY(2,I)+YFAC*(DISTSF-SRTDST)
+	               FAR_MOVE = OPERFM .GT. 0	! possible move
+	               MOVE = OPER .GT. 0
+	               IF (MOVE_Z.AND.RI_Z_COL.NE.-1) THEN
+	                  CALL PUTLNG(RIATTV(RI_Z_COL,I),TMP)
+	                  IF (TMPI.NE.IFF_ABSENT) THEN
+	                     TMP = TMP+ZFAC*(DISTSF-SRTDST)
+	                     CALL PUTLNG(TMP,RIATTV(RI_Z_COL,I))
+	                  ENDIF
+	               ENDIF
+C
+C check that point not moved across line
+C
+	               IF (CHKEDG) CALL TSTPRP(LASTXY,RIXY(1,I),EDGLNE)
+	               IF (FAR_MOVE) THEN
+	                  DX = LASTXY(1) - RIXY(1,I)
+	                  DY = LASTXY(2) - RIXY(2,I)
+	                  FAR_MOVE = (DX**2 + DY**2) .GT. FAR_MOVE_IFF**2
+	               ENDIF
+	            ENDIF
+	         ENDIF
+	      ENDIF
+C
+C and add this point
+C
+	      NATT = RINATT
+	      IF (MOVE)
+     &	         CALL LSTARR(OPER,NATT,RIATTC,RIATTV(1,I),.TRUE.)
+	      IF (FAR_MOVE)
+     &	         CALL LSTARR(OPERFM,NATT,RIATTC,RIATTV(1,I),.TRUE.)
+	      CALL ADCORD(RIXY(1,I),NATT,RIATTC,RIATTV(1,I))
+50	   CONTINUE
+	ENDIF
+C
+C have we finished?
+	NVRTS = NVRTS-RITOP
+	IF (NVRTS.GT.0) THEN		! still more to do
+	   IF (REV) THEN
+	      VV1 = VV1-RITOP
+	   ELSE
+	      VV1 = VV1+RITOP
+	   ENDIF
+	   GOTO 10			! round again
+	ENDIF
+C
+	RETURN
+	END

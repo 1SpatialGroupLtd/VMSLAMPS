@@ -1,0 +1,150 @@
+	LOGICAL FUNCTION GET_POLY(P,NPTS,FROM,CLOSED)
+C
+***	IDENT	29JL86
+***	MODULE	GET_POLY
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C
+C	Author	  : Andrew Morris
+C	Created   : Nov 1984
+C
+CMOD	X_ATB,Y_TAB put in DTECMN		ATT 29-Jul-1986
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/HERE:DTEPAR/
+C
+***	COMMON/LSL$CMNVIO:EXPC/		! message output
+***	COMMON/HERE:DTECMN/		! has MAP_SET
+***	COMMON/HERE:TAB/		! digitising table data
+***	COMMON/HERE:TRANS/		! has TAB_TO_DTI transformation
+C
+C parameters in
+	INTEGER		FROM		! command source number
+	LOGICAL		CLOSED		! polygon to be closed?
+C
+C parameters out
+	INTEGER		P(2,MAXPTS)	! vertex coords
+	INTEGER		NPTS		! max number of vertices allowed
+C
+C workspace
+	INTEGER		X_DTI,Y_DTI	! DTI coords
+	INTEGER		PRE		! index of PREvious point
+	REAL		R1,R2,R3,R4	! working reals
+C
+C functions
+	INTEGER		GET_DTI_COORDS	! get DTI coords
+C
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C Prompts for and inputs a list of DTI points, terminated by END
+C
+C Each point may be input from cursor or keyboard
+C
+C Function result true iff procedure terminates with a completed
+C polygon, ie. is not terminated with an ABANDON command or ERROR
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C
+	NPTS = 0			! zero vertex count
+	GET_POLY = .FALSE.		! assume unsucessful
+C
+C interpret table point supplied as first vertex in polygon if input
+C is from cursor and map has been located and point is within map
+	IF (.NOT.CLOSED) GOTO 10
+	IF (FROM.NE.CURSOR_BUT) GOTO 10
+	IF (.NOT.MAP_SET) GOTO 10
+	R1 = X_TAB
+	R2 = Y_TAB
+	CALL TRANSF(TAB_TO_DTI,R1,R2,R3,R4)
+	X_DTI = R3
+	Y_DTI = R4
+	IF (X_DTI.LT.XMIN_DTI.OR.X_DTI.GT.XMAX_DTI.OR.
+     +	    Y_DTI.LT.YMIN_DTI.OR.Y_DTI.GT.YMAX_DTI) THEN
+	  CALL EXPAND
+     +	    ('%SDTI coord(s) out of range (%N:%N,%N:%N)',
+     +	    BELL,XMIN_DTI,XMAX_DTI,YMIN_DTI,YMAX_DTI)
+	  CALL DTEMSG(EXPDSC)
+	ELSE
+	  IERR = 0	! coords are OK
+	  WRITE(*,FMT='(1H+,A)')CHAR(7)	     ! aknowledge point accepted
+	  CALL SIGCSWT(X_DTI,Y_DTI,.FALSE.)  ! move cursor to this point
+	  CALL LIB$UP_SCROLL()		     ! & echo DTI coords
+	  CALL EXPAND('First pt %N %N',X_DTI,Y_DTI)
+	  CALL DTEMSG(EXPDSC)
+	  GOTO 20
+	END IF
+
+C get next DTI vertex 
+10	IERR = GET_DTI_COORDS(X_DTI,Y_DTI,'Vertex',.FALSE.)
+C
+20	IF (IERR.EQ.-1) THEN			! error?
+	  GOTO 50				! abandon command
+C
+C check for ABANDON signifying that a vertex is to be scrubbed
+	ELSE IF (IERR.EQ.1) THEN		! scrub vertex?
+	  IF (NPTS.LE.0) GOTO 50		! abandon command
+	  IF (NPTS.GT.1) THEN
+	    PRE = NPTS-1
+	    CALL DTELIN				! undraw last edge
+     +        (P(1,PRE),P(2,PRE),P(1,NPTS),P(2,NPTS),.FALSE.)
+	    CALL SIGCSWT(P(1,PRE),P(2,PRE),.FALSE.)	! redraw cursor
+	  END IF
+	  CALL EXPAND('Vertex (%N,%N) scrubbed',P(1,NPTS),P(2,NPTS))
+	  CALL DTEMSG(EXPDSC)
+	  NPTS = NPTS-1
+	  GOTO 10				! get next vertex
+C
+C check for END command
+	ELSE IF (IERR.EQ.2) THEN
+	  GOTO 40				! end vertex input
+	END IF
+C
+C accept this vertex?
+	IF (NPTS.GE.MAXPTS) THEN	! too many vertices?
+	  CALL EXPAND
+     +	    ('%SMax number of vertices reached (%N)',BELL,MAXPTS)
+	  CALL DTEMSG(EXPDSC)
+	  GOTO 10			! get scrub,end or abandon
+	END IF
+C
+	IF (NPTS.GE.1) THEN		! ignore multiple points
+	  IF (X_DTI.EQ.P(1,NPTS).AND.Y_DTI.EQ.P(2,NPTS)) THEN
+	    CALL DTEMSG('Repeat point ignored')
+	    GOTO 10
+	  END IF
+	END IF
+C
+	PRE = MAX0(NPTS,1)
+	NPTS = NPTS+1
+	P(1,NPTS) = X_DTI
+	P(2,NPTS) = Y_DTI
+C
+	IF (NPTS.GT.1)
+     +	  CALL DTELIN(P(1,PRE),P(2,PRE),P(1,NPTS),P(2,NPTS),.TRUE.)
+	GOTO 10				! get next vertex
+C
+C no more vertices -close polygon if > 2 vertices
+40	IF (NPTS.GT.0) THEN
+	  GET_POLY = .TRUE.		! success
+	  IF (NPTS.GT.2.AND.CLOSED) THEN! force polygon to close?
+	    IF(P(1,NPTS).NE.P(1,1).OR.P(2,NPTS).NE.P(2,1))THEN
+	      PRE = NPTS
+	      NPTS = NPTS+1		! draw closing edge
+	      P(1,NPTS) = P(1,1)
+	      P(2,NPTS) = P(2,1)
+	      CALL DTELIN(P(1,PRE),P(2,PRE),P(1,NPTS),P(2,NPTS),.TRUE.)
+	    END IF
+	  END IF
+	END IF
+	GOTO 60				! return
+C
+C scrub polygon boundary here if command was abandoned
+50	CALL VSDEF(2,1,6)
+	CALL VSPIC(2)
+	CALL VSCLR(2)
+C
+60	CALL VSDEF(2,2,6)
+	CALL VSSEL(3)			! display pics 1 and 2
+	CALL VSPIC(1)
+	CALL VSGEN
+C
+	END

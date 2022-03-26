@@ -1,0 +1,903 @@
+C
+C Calcomp to Versatec support routines
+C ====================================
+C
+C
+C***********************************************************************
+C Note that GOPWK is a replacement for the routine in GKSCAL5800LIB
+C
+	SUBROUTINE	GOPWK(WKID,CONID,WTYPE)
+C
+**	MODULE	GOPWK
+**	IDENT	19DE94
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-Jul-1983
+C Add initialise fill area update		TJI	27-Nov-1984
+C Versatec version				PGH	28-Feb-1988
+C
+C OPEN WORKSTATION   - sets up World Coordinates and Normalised Device
+C			  Coordinates to be 1 metre on the film with the
+C			  origin at the bottom left hand corner
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CONID			! connection-identifier
+	INTEGER	WTYPE			! workstation type
+C
+***	COMMON/GFADAT1/
+***	COMMON/GFABUF/
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Functions called
+	INTEGER	TRNALL		! LSLLIB, translate logical name
+	LOGICAL	RDLONG		! LSLLIB, read long integer
+	LOGICAL	RDREAL		! LSLLIB, read real number
+	LOGICAL	GKS_INIT_FILL_MEM
+C
+C Local variables
+	CHARACTER*10	TRAN
+	INTEGER		MODEL
+	REAL		MEMORY
+	REAL	NULL
+	REAL	RX,RY,DX,DY
+	INTEGER	I
+	INTEGER	IERROR
+	INTEGER MENU
+	INTEGER		IARG(2),IER
+	REAL		RARG(4)
+C
+	REAL	DEFMAXX,DEFMAXY,DEFPIXX,DEFPIXY
+	PARAMETER	(DEFMAXX=1.189,DEFMAXY=0.841)
+	PARAMETER	(DEFPIXX=1448.0,DEFPIXY=1024.0)
+C
+	GKSERR	= 0			! no errors
+C
+	WKIDS = WKID
+	WTYPES = WTYPE
+	DEFER = GASTI	! deferral mode is At Some TIme
+	REGEN = GSUPPD	! implicit regeneration suppressed
+	UPTRN = .TRUE.	! update transformation
+	UPLIN = .TRUE.	! update polyline attributes
+	UPFA  = .TRUE.	! update fill area attributes
+C
+C decide whether overlays are wanted opaque or transparent
+	OPAQUE = .TRUE.
+	IF (TRNALL('LSL$VERSATEC_TRANSPARENT',TRAN)) OPAQUE = .FALSE.
+C
+	HWTHK = '7FFFFFFF'X		! always use hardware thick
+C
+	MAXCOL = 255			! allow 0-255 (8 planes)
+	LSTPEN = 0			! no pens defined
+C
+C check for plot colour 0 in cell array - LSL$VERSATEC_BACKGROUND defined
+	PLOT0 = .FALSE.			! assume not
+	IF (TRNALL('LSL$VERSATEC_BACKGROUND',TRAN)) PLOT0 = .TRUE.
+C
+C check for use PIXFIL/RECT in cell array - LSL$VERSATEC_PIXFIL defined
+	USE_PIXFIL = .FALSE.			! assume RECT
+	IF (TRNALL('LSL$VERSATEC_PIXFIL',TRAN)) USE_PIXFIL = .TRUE.
+C
+C check for monochrome - LSL$VERSATEC_MONO defined
+	MONO = .FALSE.			! assume colour
+	IF (TRNALL('LSL$VERSATEC_MONO',TRAN)) MONO = .TRUE.
+C
+C set up plotter
+	IF (MONO) THEN
+	   CALL VPOPT(101,-1,0.0,IERROR)! disable colour
+	ELSE
+	   CALL VPOPT(101,0,0.0,IERROR)	! enable colour
+	ENDIF
+C
+C old COL2V1 library supports the VPOPT 101 code, whilst new VGS library
+C does not
+	VGS = .FALSE.
+	IF (IERROR.NE.0) THEN		! it's VGS
+	   VGS = .TRUE.			! flag using VGS
+	   MONO = .FALSE.		! VGS is always colour
+	ENDIF
+C
+	CALL VPOPT(8,0,2.54,IERROR)	! units are cm
+C
+C try for a model number from LSL$VERSATEC_MODEL (default is believed
+C to be a 3436) see PLOTS.FOR, VPOPT.FOR in Versatec library).
+C Amongst other things, the model number sets the available area
+C NB VGS does not support VPOPT 1 - the model must be set in the
+C parameter file
+	IF (.NOT.TRNALL('LSL$VERSATEC_MODEL',TRAN)) GOTO 10	! failed
+	CALL SETAUX(%REF(TRAN),10)
+	IF (RDLONG(MODEL)) GOTO 10
+	CALL VPOPT(1,MODEL,0,IERROR)
+10	CONTINUE
+C
+C try for a memory size from LSL$VERSATEC_MEMORY (default is believed
+C to 5500000.) see PLOTS.FOR, VPOPT.FOR in Versatec library).
+C NB VGS does not support VPOPT 34 - if required, set memory in the
+C parameter file
+	IF (.NOT.TRNALL('LSL$VERSATEC_MEMORY',TRAN)) GOTO 15	! failed
+	CALL SETAUX(%REF(TRAN),10)
+	IF (RDREAL(MEMORY)) GOTO 15
+	CALL VPOPT(34,0,MEMORY,IERROR)
+15	CONTINUE
+C
+C try for an expand factor from LSL$VERSATEC_EXPAND (default 1.0)
+	RASEXP = 1.0
+	IF (.NOT.TRNALL('LSL$VERSATEC_EXPAND',TRAN)) GOTO 20	! failed
+	CALL SETAUX(%REF(TRAN),10)
+	IF (RDREAL(RASEXP)) RASEXP = 1.0
+20	CONTINUE
+C
+C set size, and number of pixels
+	CALL LSG_SIZE('LSL$VERSATEC_SIZE:')
+C
+C check for menu - LSL$VERSATEC_MENU defined
+	MENU = 0			! assume not wanted
+	IF (TRNALL('LSL$VERSATEC_MENU',TRAN)) MENU = 1
+C
+C NB VGS ignores all arguments to PLOTS (so no menu)
+	CALL PLOTS(MENU,-1,1)
+C
+C set nominal line width
+C On a Versatec, inquire plotter model, nibs/inch (RARG(1)) etc.
+	CALL VPOPT(-1,IARG,RARG,IER)
+	GNOMLW = 25.4/RARG(1)/1000.0	! width in metres
+C
+C On a Versatec, inquire the paper dimensions from the library
+	CALL VPOPT(-2,IARG,RARG,IER)
+C
+	DCMAXX = RARG(2)/100.0		! x size, metres
+	DCMAXY = RARG(4)/100.0		! y size, metres
+	IF (RASTX.EQ.0.0.AND.RASTY.EQ.0.0) THEN
+	   RASTX = DEFPIXX		! x number of pixels
+	   RASTY = RASTX*DCMAXY/DCMAXX	! y number of pixels
+	ENDIF
+C
+C set resulting pixel size (device coords)
+	PSIZX = DCMAXX/RASTX
+	PSIZY = DCMAXY/RASTY
+C
+	CALL FACTOR(100.0)		! change from cm. to m.
+	CALL LSG_SET_LUT(WKID,'LSL$VERSATEC_COLOUR:') ! load colour table
+C
+C set each pen to a suitable width
+C NB VGS would allow pen 0-31
+	IF (VGS) THEN
+C
+C VGS allows pens 0 - 63, and widths 0 - 31, so use the first 31 pens
+C one for each possible width
+	   DO 30 I=0,30
+	      CALL DEFPEN(I,I+1,0,0,0,0)
+30	   CONTINUE
+	ELSE
+C
+C COL2V1 allows pens 0 - 7, so set these to a range of widths from
+C 1 to 16 nibs
+	   CALL DEFPEN(0,1,0,0,0,0)
+	   CALL DEFPEN(1,2,0,0,0,0)
+	   CALL DEFPEN(2,3,0,0,0,0)
+	   CALL DEFPEN(3,4,0,0,0,0)
+	   CALL DEFPEN(4,6,0,0,0,0)
+	   CALL DEFPEN(5,8,0,0,0,0)
+	   CALL DEFPEN(6,12,0,0,0,0)
+	   CALL DEFPEN(7,16,0,0,0,0)
+	ENDIF
+C
+C set colour toning
+	IF (MONO) THEN
+	   CALL SETPAT(0)
+	ELSE
+	   CALL TONFLG(1)
+	ENDIF
+C
+C set superimposed mode initially, unless Workstation type 1000, in
+C which case use overlay mode
+	CLEV = 0
+	IF (VGS.AND.WTYPE.EQ.1000) THEN
+C
+C NB COL2V1 library does not have a DRWMOD routine, so there will
+C be an unresolved reference which can be ignored
+C Note that even in VGS, the output driver may not support opaque mode.
+	   CALL DRWMOD(1)
+	   CLEV = 1
+	ENDIF
+C
+	CCOLI = -1	! ensure colour set first time round
+	CLWID = 0.0	! and linewidth
+	TXCOLI = 1
+	CPATT = -1
+	LSTLEV = 0
+	CPEN = -1
+C
+C set maximum size of area that can be hatched (limit of 4096 in calcomp)
+C need to allocate the memory we are going to use
+C
+	MAX_HATCH = DEFAULT_GFAMAX
+	IF (MEMORY_FAIL) GOTO 999
+C
+	IF (GFAMAX .EQ.0) THEN
+	   MEMORY_FAIL = GKS_INIT_FILL_MEM()
+	   IF (MEMORY_FAIL) GOTO 999
+	ENDIF	      
+	MAX_HATCH = GFAMAX	! no known limit for HATCH/TONE
+C
+999	RETURN
+	END
+C
+C***********************************************************************
+C Replacement GSCR subroutine for that in GKSCAL5800LIB
+C
+	SUBROUTINE	GSCR(WKID,CI,RED,GREEN,BLUE)
+C
+**	MODULE	GSCR
+**	IDENT	26AU86
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	25-Jul-1985
+C
+C SET COLOUR REPRESENTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CI			! colour index
+	REAL	RED,GREEN,BLUE		! colour values
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C workspace
+	INTEGER	COL(0:1,0:1,0:1)
+	DATA	COL/1,6,7,4,5,3,2,9/
+C
+	GKSERR = 0
+C
+	IF (CI.LT.0.OR.CI.GT.MAXCOL)THEN
+	   GKSERR	= 93		! colour index is invalid
+	ELSEIF (RED.LT.0.0.OR.RED.GT.1.0.OR.
+     &		GREEN.LT.0.0.OR.GREEN.GT.1.0.OR.
+     &		BLUE.LT.0.0.OR.BLUE.GT.1.0) THEN
+	   GKSERR	= 96		! colour out of range
+	ELSE
+C
+C set the colour
+	   RGB(CI,1) = RED
+	   RGB(CI,2) = GREEN
+	   RGB(CI,3) = BLUE
+C
+C Set RGBCOL array to nearest Versatec predefined pure colour, for
+C use with minimum thickness lines
+	   RGBCOL(CI) = COL(NINT(RED),NINT(GREEN),NINT(BLUE))
+C
+C Only use white if it seems to be really intended - it will only
+C be visible if drawn on top of something else in OPAQUE mode
+	   IF (RGBCOL(CI).EQ.9) THEN	! white
+	      IF (RED*GREEN*BLUE.LT.0.9) RGBCOL(CI) = 1	! black
+	   ENDIF
+C
+C NB allow colour 0 - didn't do in earlier versions
+C available range of colours thought to be 9-4095 for VGS
+C (possibly 1-2048 for COL2V1)
+	   IF (.NOT.MONO) THEN
+	      CALL DEFRGB(CI+256,RED,GREEN,BLUE)	! for areas
+	   ENDIF
+	ENDIF
+C
+	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GUPLIN
+C
+***	MODULE	GUPLIN
+***	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	26-April-1984
+C Take account of need to set UPFA	Tony J Ibbs	27-Nov-1984
+C
+C Update the polyline attributes
+C
+	IMPLICIT NONE
+C
+C local variables
+	INTEGER	NLTYPE,NCOLI,NPEN,WID
+	REAL	NLWID
+	LOGICAL	FST
+	INTEGER	PENW(1:16)
+	DATA	PENW/0,1,2,3,3,4,4,5,5,5,6,6,6,7,7,7/
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+	IF (GASF(1).EQ.GBUNDL) THEN
+	   NLTYPE = PLTYPE(PLIND)
+	ELSE
+	   NLTYPE = ILTYPE
+	ENDIF
+C
+	IF (GASF(2).EQ.GBUNDL) THEN
+	   NLWID = PLWDTH(PLIND)
+	ELSE
+	   NLWID = ILWID
+	ENDIF
+C
+	IF (GASF(3).EQ.GBUNDL) THEN
+	   NCOLI = PLCOL(PLIND)
+	ELSE
+	   NCOLI = ICOLI
+	ENDIF
+C
+	IF (NCOLI.NE.0) THEN
+	   FST = .FALSE.
+10	   FST = .NOT.FST
+	   IF (POFF.NE.0) NCOLI = ISHFT(NCOLI,POFF)! apply offset
+	   NCOLI = NCOLI.AND.PSEL.AND.'FF'X	! apply mask
+	   IF (NCOLI.GT.MAXCOL.OR.NCOLI.EQ.0) THEN
+C
+C First time, try again with colour 1, otherwise just use 1
+	      NCOLI = 1
+	      IF (FST) GOTO 10
+	   ENDIF
+	   IF (NCOLI.EQ.0) NCOLI = 1
+	ENDIF
+C
+	IF (NLTYPE.NE.CLTYPE) THEN
+	   CLTYPE = NLTYPE
+	ENDIF
+C
+	IF (NLWID.NE.CLWID .OR. NCOLI.NE.CCOLI) THEN
+	   IF (NLWID.NE.CLWID) THEN
+	      CLWID = MAX(1.0,NLWID)
+	      IF (NLWID.NE.FALWID) UPFA = .TRUE.	! check fill area
+	   ENDIF
+C
+	   IF (NCOLI.NE.CCOLI) THEN
+	      CCOLI = NCOLI
+	      UPFA  = .TRUE.			! and fill area update
+	   ENDIF
+C
+	   WID = MAX(1,NINT(CLWID))
+	   IF (VGS) THEN
+	      NPEN = MIN(31,WID-1)
+	   ELSE
+	      NPEN = PENW(MIN(16,WID))
+	   ENDIF
+	   IF (.NOT.MONO) THEN
+	      IF (NPEN.EQ.0) THEN		! minimum width pen
+	         CALL PENCLR(NPEN,RGBCOL(CCOLI))! use pure colour
+	      ELSE
+	         CALL PENCLR(NPEN,CCOLI+256)	! use tone colour
+	      ENDIF
+	   ENDIF
+	   IF (NPEN.NE.CPEN) THEN
+	      CPEN = NPEN
+	      CALL NEWPEN(CPEN)
+	   ENDIF
+	ENDIF
+C
+900	UPLIN = .FALSE.		! polyline now up to date
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE GUPFA
+C
+***	MODULE	GUPFA
+***	IDENT	30NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Tony J Ibbs	20-Nov-1984
+C
+C Update the fill area attributes
+C
+	IMPLICIT NONE
+C
+C local variables
+C
+	INTEGER	NINDEX,NCOLI,NSTYLE,NPEN,WID
+	LOGICAL	FST
+	INTEGER	PENW(1:16)
+	DATA	PENW/0,1,2,3,3,4,4,5,5,5,6,6,6,7,7,7/
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+C ---------------------------------------------------------------------
+C
+C establish whether each attribute is to be taken as bundled
+C or individual
+C
+	IF (GASF(11).EQ.GBUNDL) THEN	! interior style
+	   NSTYLE = FAISTY(FAIND)
+	ELSE
+	   NSTYLE = IFASTY
+	ENDIF
+C
+	IF (GASF(12).EQ.GBUNDL) THEN	! style index
+	   NINDEX = FASTYI(FAIND)
+	ELSE
+	   NINDEX = IFASTX
+	ENDIF
+C
+	IF (GASF(13).EQ.GBUNDL) THEN	! colour index
+	   NCOLI = FACOL(FAIND)
+	ELSE
+	   NCOLI = IFACOL
+	ENDIF
+	IF (NCOLI.NE.0) THEN
+	   FST = .FALSE.
+10	   FST = .NOT.FST
+	   IF (POFF.NE.0) NCOLI = ISHFT(NCOLI,POFF)! apply offset
+	   NCOLI = NCOLI.AND.PSEL.AND.'FF'X	! apply mask
+	   IF (NCOLI.GT.MAXCOL.OR.NCOLI.EQ.0) THEN
+C
+C First attempt, try again with colour 1, otherwise just use 1
+	      NCOLI = 1
+	      IF (FST) GOTO 10
+	   ENDIF
+	   IF (NCOLI.EQ.0) NCOLI = 1
+	ENDIF
+C
+C ---------------------------------------------------------------------
+C
+C now update the current values for each thing
+C
+	IF (NSTYLE.NE.CFASTY) THEN
+	   CFASTY = NSTYLE		! update fill area style
+	ENDIF
+C
+	IF (NINDEX.NE.CFASTX) THEN
+	   CFASTX = NINDEX		! update fill area style index
+	ENDIF
+C
+	IF (CFASTY.EQ.GSOLID) THEN
+	   IF (NCOLI.NE.CPATT) THEN
+	      IF (.NOT.MONO) CALL TONCLR(NCOLI+256)
+	      CPATT = NCOLI
+	   ENDIF
+	ELSE
+C
+	   IF (CLWID.NE.FALWID .OR. NCOLI.NE.CCOLI) THEN
+	      IF (CLWID.NE.FALWID) THEN	! check line width
+	         CLWID = MAX(1.0,FALWID)! set fill area line width
+	         UPLIN = .TRUE.		! changes polyline?
+	      ENDIF
+C
+	      IF (NCOLI.NE.CCOLI) THEN
+	         CCOLI = NCOLI
+	         UPLIN = .TRUE.		! may have clobbered polyline
+	      ENDIF
+C
+	      WID = MAX(1,NINT(CLWID))
+	      IF (VGS) THEN
+	         NPEN = MIN(31,WID-1)
+	      ELSE
+	         NPEN = PENW(MIN(16,WID))
+	      ENDIF
+	      IF (.NOT.MONO) THEN
+	         IF (NPEN.EQ.0) THEN		! minimum width pen
+	            CALL PENCLR(NPEN,RGBCOL(CCOLI)) ! use pure colour
+	         ELSE
+	            CALL PENCLR(NPEN,CCOLI+256)	! use tone colour
+	         ENDIF
+	      ENDIF
+	      IF (NPEN.NE.CPEN) THEN
+	         CPEN = NPEN
+	         CALL NEWPEN(CPEN)
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C ---------------------------------------------------------------------
+C
+C and check whether we have the right line style
+C - polyline settings may have changed these under our feet
+C
+	IF (CLTYPE.NE.FALTYP) THEN		! check line type
+	   CLTYPE = FALTYP
+	ENDIF
+C
+	UPFA = .FALSE.		! fill area now up to date
+	RETURN
+	END
+C
+C Text functions
+C ==============
+C
+C *********************************************************************
+C
+C	TEXT OUTPUT PRIMITIVE
+C	=====================
+C
+C
+	SUBROUTINE	GTX(PX,PY,STRING)
+C
+**	MODULE	GTX
+**	IDENT	18NO87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	24-Jul-1985
+C
+C TEXT
+C
+	IMPLICIT NONE
+C
+C Arguments:
+C
+	REAL	PX			! X coord
+	REAL	PY			! Y coord
+	CHARACTER*(*) STRING		! text
+C
+C Functions
+	LOGICAL	GKCLIP
+C
+C Workspace
+	REAL	DX,DY			! device coordinate
+	INTEGER	NPEN,WID
+	REAL	CHWID
+	INTEGER	INTEQ
+	INTEGER	PENW(1:16)
+	DATA	PENW/0,1,2,3,3,4,4,5,5,5,6,6,6,7,7,7/
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+	GKSERR	= 0			! no error (yet!)
+C
+C	 is this workstation active? - if not ignore it
+C
+	IF (.NOT.WSACT) GOTO 200
+C
+C	 ensure that our transformation is up to date
+C
+	IF (UPTRN) CALL GUPTRN		! update it
+C
+C	 is everything clipped (ie nothing visible)
+C
+	IF (CLPALL) GOTO 200
+	IF (ENCLIP) THEN
+	   IF (GKCLIP(PX,PY,PX,PY)) GOTO 200
+	ENDIF
+	CALL GKSW2D(1,PX,PY,DX,DY)
+	CHWID = CHGT/10.0/GNOMLW
+C
+	IF (CHWID.NE.CLWID .OR. TXCOLI.NE.CCOLI) THEN
+	   IF (CHWID.NE.CLWID) THEN
+	      CLWID = MAX(1.0,CHWID)
+	      IF (CHWID.NE.FALWID) UPFA = .TRUE.	! check fill area
+	   ENDIF
+C
+	   IF (TXCOLI.NE.CCOLI) THEN
+	      CCOLI = TXCOLI
+	      UPFA  = .TRUE.		! need to update fill area
+	   ENDIF
+C
+	   UPLIN = .TRUE.		! need to update polyline
+C
+	   IF (VGS) THEN
+	      NPEN = MIN(31,WID-1)
+	   ELSE
+	      NPEN = PENW(MIN(16,WID))
+	   ENDIF
+	   IF (.NOT.MONO) THEN
+	      IF (NPEN.EQ.0) THEN		! minimum width pen
+	         CALL PENCLR(NPEN,RGBCOL(CCOLI))! use pure colour
+	      ELSE
+	         CALL PENCLR(NPEN,CCOLI+256)	! use tone colour
+	      ENDIF
+	   ENDIF
+	   IF (NPEN.NE.CPEN) THEN
+	      CPEN = NPEN
+	      CALL NEWPEN(CPEN)
+	   ENDIF
+	ENDIF
+C
+	CALL SYMBOL(DX,DY,CHGT,STRING,INTEQ,CHANG,LEN(STRING))
+C
+200	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE HATCH(X,Y,N,ANG,DISTP,NUM)
+C
+**	MODULE	HATCH
+**	IDENT	28FE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	12MY88
+C
+C Emulation of Calcomp HATCH routine on VERSATEC
+C For solid fill only
+C
+	IMPLICIT NONE
+C
+C arguments
+	REAL	X(*),Y(*)		! coordinates
+	INTEGER	N			! number
+	REAL	ANG,DISTP		! dummies
+	INTEGER	NUM			! dummy
+C
+	CALL TONE(X,Y,N,1)
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE RASFIL(SX,SY,COLS,ROWS,B)
+C
+**	MODULE	RASFIL
+**	IDENT	28FE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	12MY88
+C
+C Emulation of Calcomp RASFIL routine on VERSATEC
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C arguments
+	REAL	SX,SY			! size of pixels
+	INTEGER	COLS,ROWS
+	INTEGER	B(*)			! array of values
+C
+C workspace
+	REAL	X,Y			! drawing position
+	REAL	DUMMY
+	INTEGER	I,J,JJ,IND
+	LOGICAL	VIS
+	INTEGER	LSTCOL
+C
+C get initial position
+	CALL WHERE(X,Y,DUMMY)
+C
+C for colour, and old library or new library and PIXFIL specially requested,
+C then we add 255 to all colours (0 only if required) and use PIXFIL
+C
+C NB PIXFIL in VGS library sometimes seems to use
+C a very verbose format with lots of thin lines).
+C Also, as at 24-Jan-1991, does not seem to work at all correctly sometimes
+	IF (.NOT.MONO.AND.(USE_PIXFIL.OR..NOT.VGS)) THEN
+C
+C GCA is passing array in range 1-256 (for Calcomp)
+C so add 255 to array of colours - we define colours 256-511
+	   DO 10 I=1,COLS*ROWS
+	      IF (B(I).NE.0.OR.PLOT0) B(I) = B(I)+255
+	      IF (B(I).EQ.1) B(I) = 0
+10	   CONTINUE
+C
+C and plot the pixels
+	   CALL PIXFIL(X,Y,SX,SY,COLS,ROWS,B)
+	   GOTO 999
+	ENDIF
+C
+C for monochrome plotter, do non-zero (non-1) pixels in black
+	IF (.NOT.MONO) GOTO 100
+C
+	IND = 0
+	DO 30 I=1,COLS
+	   VIS = .FALSE.
+	   DO 20 J=1,ROWS
+	      IND = IND+1
+	      IF (B(IND).EQ.1) THEN
+	         IF (VIS) THEN
+	            VIS = .FALSE.
+	            CALL RECT(X+(I-1)*SX,X+I*SX-0.99*GNOMLW,
+     &			      Y+(JJ-1)*SY,Y+(J-1)*SY-0.99*GNOMLW,0)
+	         ENDIF
+	      ELSE
+	         IF (.NOT.VIS) THEN
+	            VIS = .TRUE.
+	            JJ = J
+	         ENDIF
+	      ENDIF
+20	   CONTINUE
+	   IF (VIS) CALL RECT(X+(I-1)*SX,X+I*SX-0.99*GNOMLW,
+     &			      Y+(JJ-1)*SY,Y+ROWS*SY-0.99*GNOMLW,0)
+30	CONTINUE
+	GOTO 999
+C
+100	IND = 0
+	DO 130 I=1,COLS
+	   LSTCOL = -1
+	   JJ = 0
+	   DO 120 J=1,ROWS
+	      IND = IND+1
+	      IF (B(IND).NE.LSTCOL) THEN
+	         IF (JJ.NE.0.AND.(PLOT0.OR.LSTCOL.NE.1)) THEN
+	            CALL TONCLR(LSTCOL+255)
+	            CALL RECT(X+(I-1)*SX,X+I*SX-0.99*GNOMLW,
+     &			      Y+(JJ-1)*SY,Y+(J-1)*SY-0.99*GNOMLW,0)
+	         ENDIF
+	         LSTCOL = B(IND)
+	         JJ = J
+	      ENDIF
+120	   CONTINUE
+	   IF (PLOT0.OR.LSTCOL.NE.1) THEN
+	      CALL TONCLR(LSTCOL+255)
+	      CALL RECT(X+(I-1)*SX,X+I*SX-0.99*GNOMLW,
+     &			Y+(JJ-1)*SY,Y+ROWS*SY-0.99*GNOMLW,0)
+	   ENDIF
+130	CONTINUE
+	CPATT = -1		! remember tone colour now undefined
+	GOTO 999
+C
+999	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE NEWLVL(LVL)
+C
+**	MODULE	NEWLVL
+**	IDENT	28FE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	10DE90
+C
+C Emulation of Calcomp NEWLVL routine on VERSATEC
+C For solid fill only
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C arguments
+	INTEGER	LVL			! 0 - transparent, >0 - opaque
+C
+C workspace
+	INTEGER	MODE
+C
+C NB COL2V1 library does not have a DRWMOD routine, so there will
+C be an unresolved reference which can be ignored
+C Note that even in VGS, the output driver may not support opaque mode.
+	IF (LVL.GT.1) LSTLEV = 1	! prevent levels running out
+	IF (VGS) THEN
+	   MODE = 0
+	   IF (LVL.GT.0) MODE = 1
+	   CALL DRWMOD(MODE)
+	ENDIF
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	LOGICAL FUNCTION LSG_SIZE(FILE)
+C
+***	IDENT	23MY88
+***	MODULE	LSG_SIZE
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author Clarke Brunt					17-Mar-1986
+C
+C To read a file containing size and number of pixels for a
+C raster plotter.
+C
+C File contains one significant line containing:
+C X-size (metres) Y-size (metres) X-pixels Y-pixels
+C
+C Comment lines are preceded by a semi-colon, and may be interspersed
+C at will.
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'HERE:GKSDAT1.CMN'
+C
+C arguments
+	CHARACTER*(*)	FILE		! the filename
+C
+C functions used
+	LOGICAL		FLROPN
+	LOGICAL		FLRCLO
+	INTEGER*4	FLRLIN
+	LOGICAL		RDCHS
+	LOGICAL		RDREAL
+	LOGICAL*4	LIB$GET_LUN
+	LOGICAL*4	LIB$FREE_LUN
+C
+	LOGICAL*4	OK
+	INTEGER*4	ERROR
+	INTEGER		I			! count variable
+	INTEGER*4	LUN
+	BYTE		CH
+	INTEGER		IARG(2),IER
+	REAL		RARG(4)
+C
+C get a LUN to read the file on
+	OK = LIB$GET_LUN(LUN)
+	IF (.NOT.OK) THEN		! failed
+	   CALL LSL_PUTMSG(OK)
+	   GOTO 10000
+	ENDIF
+C
+C open up the file (just give up on error)
+	OK = FLROPN(LUN,FILE)	! open file
+	IF (.NOT.OK) GOTO 999
+C
+50	OK =  FLRLIN(,,,ERROR) 	! read into TXTBUF
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) GOTO 998		! end of file
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(ERROR)
+	   GOTO 999
+	ENDIF
+C
+C we have a line - what is it ?
+	CALL BSLN				! start of line
+	IF (RDCHS(CH)) GOTO 50			! empty line
+	IF (CH.EQ.';') GOTO 50			! comment line
+	CALL BSCH
+C
+C read x and y size (metres)
+	IF (RDREAL(DCMAXX)) GOTO 998
+	IF (RDREAL(DCMAXY)) GOTO 998
+C
+C write these back to the plotter library
+	RARG(1) = 0.0
+	RARG(2) = DCMAXX*100.0
+	RARG(3) = 0.0
+	RARG(4) = DCMAXY*100.0
+	CALL VPOPT(2,IARG,RARG,IER)
+C
+C and now number of pixels
+	IF (RDREAL(RASTX)) GOTO 998
+	IF (RDREAL(RASTY)) GOTO 998
+C
+998	OK = FLRCLO(LUN,ERROR)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(ERROR)
+	ENDIF
+C
+999	OK = LIB$FREE_LUN(LUN)	! free LUN
+	IF (.NOT.OK) CALL LSL_PUTMSG(OK)
+C
+10000	CONTINUE
+	RETURN
+C
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE VDUMMY()
+C
+**	MODULE	VDUMMY
+**	IDENT	28FE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Paul Hardy	28-Feb-1988
+C
+C CALCOMP (and other) dummy routines
+C
+	IMPLICIT NONE
+C
+C Calcomp HCBS
+	ENTRY	NEWPLT
+	ENTRY	SETLVL
+C
+C Internal software thick line
+	ENTRY	GKS_BEGIN_LINE
+	ENTRY	GKS_ADD_POINT
+	ENTRY	GKS_END_LINE
+C
+C all done
+	RETURN
+	END

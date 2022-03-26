@@ -1,0 +1,168 @@
+	SUBROUTINE CHEKCB( FSN )
+C
+***	IDENT	05JA88
+***	MODULE	CHEKCB
+C
+C Copyright LaserScan Laboratories Ltd., Cambridge, England
+C Author TJ Ibbs, 19 May 1982
+C
+C to manage the comparison of rows within CBs
+C
+C read in the first CB in the feature for each file, and then
+C get a row (point) with GETNXT for each file. We hand the rows to
+C COMPCB to compare them (it also handles lookahead of TOLGAP).
+C If we run out of rows, we check if the features may be considered
+C to match depending on how many were left in the other feature.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+C
+***	COMMON/HERE:FILES/
+***	COMMON/HERE:FEATUR/
+***	COMMON/HERE:CMPIFF/
+***	COMMON/HERE:CBCMN/
+***	COMMON/HERE:PARAM/		! for FULL
+C
+C call
+C
+	LOGICAL		SCANCB		! set up comparison for CBs
+	LOGICAL		COMPCB		! compare 2 points, etc
+	LOGICAL		GETNXT		! get next point
+	INTEGER		LEFT		! how many left in this ST?
+C
+C passed
+C
+	INTEGER	FSN			! feature serial number
+C
+C workspace
+C
+	INTEGER		I
+	INTEGER		REMN(2)		! holds return of LEFT
+	LOGICAL		THEY_MATCH
+C
+	RECORD	/IFF_CBITEM/	ROW1(IFF_MAXCBCOL)	! from file 1
+	RECORD	/IFF_CBITEM/	ROW2(IFF_MAXCBCOL)	! from file 2
+C
+C **********************************************************************
+C
+	IF (ARM.GT.0) CALL FLWRTF('.COMPARing CBs')
+C
+C scan the CB entries in this feature, and determine what we
+C are comparing
+C
+	IF (SCANCB(FSN)) GOTO 9000
+C
+	DO 50 I = 1,2
+C
+C	 position back to the relevant file
+C
+	   CALL IFFSEL(LUN(I))
+C
+C	 and read in the CB we have found
+C
+	   CALL READCB(I,.FALSE.)
+C
+	   OFFSET(I) = 0		! nowhere in CBDATA yet
+	   PTR(I)    = 0		! nor in CB as a whole
+C
+50	CONTINUE
+C
+	HAD_SAME  = .FALSE.	! no points match yet in this feature
+	LSTPT1 = 0		! last PTR(1) value unset - in effect
+C				! we say the 0th point was the last
+C				! to be matched
+	SPANS  = .FALSE.	! ARRAY does not yet span 2 CBs
+C
+C *** and we now are ready to do some comparison - read in the points
+C
+100	CONTINUE
+C
+	IF (GETNXT( ROW1, 1 )) THEN		! no row1 left
+C
+C	 we must fake getting a result from COMPCB
+C	 - work out how many points remain in file 2
+C	   if it is more than none, then the two features don't match
+C	   if it is more than TOLGAP, then they are unmatched, since
+C	   they differ by a span of more than /LOOKAHEAD points
+C
+	   REMN(1) = 0
+	   REMN(2) = LEFT(2)
+	   IF (REMN(2).GT.0) THEN
+	      FAIL_CB_NUM = .TRUE.
+	      IF (REMN(2).GT.TOLGAP) UNMATCHED = .TRUE.
+	      IF (FULL) CALL CBHDR(FSN,2,.FALSE.)
+	   ENDIF
+C
+	ELSEIF (GETNXT( ROW2, 2 )) THEN	! had a row1 - try for a row2
+C
+C	 note that we take LEFT(1)+1. This is because we have read
+C	 the next point from file 1, and it was there, but it is not
+C	 matched by a point from file 2 - we want to count that point
+C	 as one in those left.
+C
+C	 again, we fake getting a result from COMPCB
+C
+	   REMN(1) = LEFT(1) + 1
+	   REMN(2) = 0
+	   IF (REMN(1).GT.0) THEN
+	      FAIL_CB_NUM = .TRUE.
+	      IF (REMN(1).GT.TOLGAP) UNMATCHED = .TRUE.
+	      IF (FULL) CALL CBHDR(FSN,1,.FALSE.)
+	   ENDIF
+C
+	ELSE				! had a row2, too
+C
+C	 we have had a point from each file - send them off
+C	 to be compared...
+C
+	   THEY_MATCH = COMPCB( ROW1, ROW2, FSN )
+C
+C	 if we matched, then we go for the next point, otherwise we must
+C	 produce some diagnostic output. If we failed to match, then we
+C	 are abandoning this feature, so can leave the pointers for file 2
+C	 set as they are - ie pointing to the last point reached. However,
+C	 if it sort of matched, we shall continue processing, so must call
+C	 RESET2 to place the pointers back to where the match occurred.
+C
+	   IF (THEY_MATCH) THEN
+	      GOTO 100
+	   ELSE
+	      IF (.NOT.UNMATCHED) CALL RESET2	! reset PTR2, etc
+	      CALL PRTCBS(FSN)
+	      IF (UNMATCHED) THEN
+		 REMN(1) = LEFT(1)
+		 REMN(2) = LEFT(2)
+	      ELSE
+		 GOTO 100
+	      ENDIF
+	   ENDIF
+C
+	ENDIF
+C
+C
+C and here we have reached the end of one feature, but not the end
+C of the other - check whether we need to tell how many points we
+C have left in the longer CB
+C ie if NEWFSN, then we have not yet output anything for this feature,
+C so we don't want to start now
+C
+	IF (.NOT.NEWFSN.AND.FULL) THEN
+	   IF (REMN(1).NE.0) THEN
+	      CALL FLWRTF('    %^W%I5 point%m left in file 1', REMN(1))
+	   ENDIF
+	   IF (REMN(2).NE.0) THEN
+	      CALL FLWRTF('    %^W%I5 point%m left in file 2',REMN(2))
+	   ENDIF
+	ENDIF
+C
+C now check if we had a match or not (check on return from COMPCB,
+C but also note whether we've had any matches at all in this feature,
+C so that fitting within TOLGAP, but having no SAME points, is trapped)
+C
+9000	IF ( UNMATCHED .OR. .NOT.HAD_SAME ) THEN
+	   CALL MESSAG(FSN,0,'--- unmatched ---')
+	ENDIF
+C
+	RETURN
+	END

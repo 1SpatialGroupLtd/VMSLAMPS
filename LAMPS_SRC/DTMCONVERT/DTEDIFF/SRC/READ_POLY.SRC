@@ -1,0 +1,210 @@
+	INTEGER*4 FUNCTION READ_POLY(NUMPOL)
+C
+***	IDENT	07NO95
+***	MODULE	READ_POLY
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+C 	Author CC Brunt, 27 October 1983
+C	Modified for use with new DTEDIFF 	08-JUN-88  DRC
+C
+C This subroutine reads NUMPOL accuracy polygons from the ACC block,
+C and outputs features as required - each with an accuracy AC
+C
+C NB It is very similar to that of the same name in DFAD2I
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/HERE:DTEDIFFMSG/
+***	PARAMETER/LSL$CMNDLMS:FORMAT/
+C
+***	COMMON/HERE:PARAMS/	
+***	COMMON/LSL$CMNIFF:MHMCE/	! MCE map header
+***	COMMON/LSL$CMNLSL:EXPC/		! for EXPBUF, etc
+C
+C passed
+	INTEGER*2	NUMPOL		! number of polygons to read
+C
+C functions called
+	INTEGER*4	RDFANG		! read a fixed format angle
+	INTEGER*4	OUTANG		! .1 to DDMMSS and append to EXPBUF
+	LOGICAL		RDINT		! to read an integer
+C
+C workspace
+	INTEGER*2	DCP2		! decode pointer save
+C
+	INTEGER*4	ABSHAC		! absolute horizontal accuracy
+	INTEGER*4	RELHAC		! relative ditto
+	INTEGER*4	ABSVAC		! absolute vertical accuracy
+	INTEGER*4	RELVAC		! relative ditto
+	INTEGER*2	NUMPTS		! how many points in the thing
+C
+	INTEGER*4	IANGLE		! integer angle
+	REAL		STBUF(2,15)	! real storage buffer
+	INTEGER*4	BASE(2)		! base (origin) of map
+C
+	INTEGER*2	DCPWAS		! remember position in line
+	INTEGER*4	LENGTH		! total length of a subregion
+	INTEGER*4	OK		! function return
+C
+C by remembering where each region definition starts, and how long
+C a definition MAY be, we can always skip to the next one by simply
+C adding LENGTH to the DCPTR position before we read the region
+C
+	INTEGER*4	POL		! loop variable for polygons
+	INTEGER*4	CNR		! and for poly corners
+	INTEGER*4	XY		! and then for x,y coords
+	LOGICAL		XYDDD(2)	! to store DD, DDD correctly
+C
+	INTEGER*2	ZERO		! sic
+	INTEGER*2	ISTAT(4)	! IT, etc
+C
+	DATA	ISTAT /301,0,0,0/
+C
+C Remember - X is longitude, Y is latitude. BUT the angles are actually
+C presented in the opposite order to that...
+C
+C we must remember whether 'tis X or Y that has the long degree field
+C
+	XYDDD(1) = DDD			! long/X
+	XYDDD(2) = DD			! lat/Y
+C
+C remember where our origin is, so we can subtract it from coords
+C
+	BASE(1) = MHLOMO		! X
+	BASE(2) = MHLAMO		! Y
+C
+C
+C work out the total length of the accuracy subregion data...
+C this is the length of the accuracy fields + blank fills, plus the
+C field for how many points, followed by 14 coordinate pairs (not all
+C necessarily full)
+C
+	LENGTH = 8+8+2 + 14*(9+10)
+C
+	DO 500 POL = 1, NUMPOL		! loop around for all polygons
+C
+C	 first we remember where in the buffer we are now...
+C
+	   CALL DCPSAV(DCPWAS)
+C
+	   IF (HAD_LOG) CALL WRITEF('Reading polygon %N',POL)
+C
+C	 now we read in the accuracy information relating to this
+C	 subregion...
+C
+	   CALL SETWIN( , 4 )
+	   IF ( RDINT( ABSHAC ) ) GOTO 900
+	   CALL SETWIN( , 4 )
+	   IF ( RDINT( ABSVAC ) ) GOTO 900
+	   CALL SETWIN( , 4 )
+	   IF ( RDINT( RELHAC ) ) GOTO 900
+	   CALL SETWIN( , 4 )
+	   IF ( RDINT( RELVAC ) ) GOTO 900
+C
+C	 now find out how many points there are to define this accuracy
+C	 subregion...
+C
+	   CALL SETWIN( , 2)
+	   IF ( RDINT( NUMPTS ) ) GOTO 900
+	   CALL SETWIN( , )
+C
+	   IF ( NUMPTS.LT.3 ) THEN
+	      CALL LSL_PUTMSG(DTEDIFF__ACCTOOFEWPTS)
+	      GOTO 999
+	   ELSEIF ( NUMPTS.GT.14 ) THEN
+	      CALL LSL_PUTMSG(DTEDIFF__ACCTOOMNYPTS)
+	      GOTO 999
+	   ENDIF
+C
+C	 and at last we may read in the points
+C
+	   DO 200 CNR = 1, NUMPTS	! loop for all corners
+	      DO 250 XY = 2,1,-1	! and for x,y in each corner
+C
+	         IF (.NOT.RDFANG( XYDDD(XY), TENTH, HEMI, IANGLE ) ) THEN
+	            CALL LSL_PUTMSG(DTEDIFF__ACCBADCOORD)
+		    GOTO 999
+		 ENDIF
+C
+		 STBUF( XY, CNR ) = IANGLE - BASE(XY)
+C
+	         IF (HAD_LOG) THEN
+	            CALL EXPAND('Angle %N(%N) of region %N',
+     &					CNR,XY,		 POL )
+	            OK = OUTANG( IANGLE )
+		    CALL WRITEF(' offset %I8',INT(STBUF(XY,CNR)))
+	         ENDIF
+C
+250	      CONTINUE			! next x,y
+200	   CONTINUE			! next corner of polygon
+C
+C check position of decode pointer
+C
+	   CALL DCPSAV( DCP2 )
+	   IF( (DCP2-DCPWAS).NE.18+NUMPTS*19) THEN
+	      CALL LSL_PUTMSG(DTEDIFF__ACCBADREGION)
+	      GOTO 999
+	   ENDIF
+C
+C	 so by here we have an STBUF with NUMPTS points in it
+C	 Let us create a feature to define this accuracy subregion
+C
+C	 we already know what feature number we are
+C
+	   ZERO = 0			! just in case
+	   CALL IFFNF(POL, ZERO)	! FSN is polygon number
+C
+C	 and define ourselves as a 'line'
+C
+	   CALL IFFFS( ISTAT )
+C
+C	 next we must have the accuracy AC
+C
+	   CALL EXPAND('absh%I4 absv%I4 relh%I4 relv%I4',
+     &			ABSHAC, ABSVAC, RELHAC, RELVAC  )
+C
+	   CALL IFFAC( FADACC, 0, EXPBUF )
+C
+	   IF (HAD_LOG) CALL TTWLIN
+C
+C	 and we may now actually output our points
+C	 but wait - let us ensure that the feature is closed, since
+C	 that is nicer to deal with...
+C
+	   IF ( INT(STBUF(1,1)).NE.INT(STBUF(1,NUMPTS)) .OR.
+     &		INT(STBUF(2,1)).NE.INT(STBUF(2,NUMPTS)) ) THEN
+	      NUMPTS = NUMPTS+1			! need another point
+	      STBUF(1,NUMPTS) = STBUF(1,1)	! close the region
+	      STBUF(2,NUMPTS) = STBUF(2,1)
+	   ENDIF
+C
+	   ZERO = 0
+	   CALL IFFST( STBUF, NUMPTS, ZERO )
+C
+C	 and we are now free to close the feature
+C
+	   CALL IFFEF
+C
+C	 and then work our way to the end of this subregion...
+C
+	   DCPWAS = DCPWAS + LENGTH
+	   CALL DCPSET( DCPWAS )
+C
+500	CONTINUE			! next polygon
+C
+C and that is all the data we need to read from this buffer, so
+C we can safely return with our job finished
+C
+	READ_POLY=DTEDIFF__NORMAL
+	GOTO 999
+C
+C error return - just complain & ignore the rest
+C
+900	CALL DCPSAV( DCPWAS )
+	CALL LSL_PUTMSG(DTEDIFF__ACCBADFORMAT)
+	READ_POLY=DTEDIFF__BADTRANSFER
+C
+999	RETURN
+	END
+C

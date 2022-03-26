@@ -1,0 +1,203 @@
+	LOGICAL FUNCTION DIGTAB(XL,YL,X,Y,CURUSE,KEY)
+C
+***	MODULE DIGTAB
+***	IDENT  07DE87
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Converted to LSLLIB				TJH 07-Dec-1987
+CMOD	New device types supported		 	 DM 03-Apr-1985
+CMOD	Went IMPLICIT NONE				TJH 14-Dec-1984
+CMOD	Turn off alpha plane when cursor is up		 DM 04-Jul-1984
+CMOD	Concept of a master point 'M' added		 DM 18-Jul-1984
+CMOD	Returns the 'key' pressed			 DM 09-Jul-1984
+C	Author						TJH 29-Jun-1984
+C
+C Reads position from ALTEK table and allows tracking with button 0
+C
+C Function returns .T. if error occurs
+C
+	IMPLICIT NONE
+C
+	INTEGER	  KEY		! key pressed
+	LOGICAL	  CURUSE        ! .T. use  cursor
+	REAL	  X,Y		! position
+	REAL 	  XL,YL		! start coords.
+C
+C Parameters:
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNTRIEDIT:ANNOT.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:CONTR.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:GKS.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TTTYPE.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IDTPAR.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C Functions:
+	INTEGER SYS$CLREF
+	INTEGER	SYS$WAITFR
+	INTEGER EXPAND
+	INTEGER TKREAD		! read from the table
+	LOGICAL HAD_ERROR
+	LOGICAL READ_PUCK
+	LOGICAL WAIT_PUCK
+C
+C Workspace:
+	INTEGER*4 I,J		! temp vars
+	INTEGER   OK		! error return
+	INTEGER   TABEFN 	! table event flag (by reference)
+	INTEGER*2 TABPTR	! pointer to end (demanded by TKREAD)
+	INTEGER*2 TABBUF(7)	! buffer into which tablet data is put
+	INTEGER	  IX,IY,IXA,IYA
+C
+	INTEGER*2 TABLIN	! line number
+	INTEGER*2 TABBUT	! button pressed
+	REAL      TABX,TABY	! position
+C
+	EQUIVALENCE (TABLIN,TABBUF(1)),(TABBUT,TABBUF(2)),
+     &              (TABX  ,TABBUF(3)),(TABY  ,TABBUF(5))
+C
+C ......................................................................
+C
+	DIGTAB=.FALSE.
+C
+C Put up the cursor
+	IF (CURUSE) THEN		! is the cursor wanted ?
+	   IF (GPX) THEN		! VAXstation?
+	      PLANE_MASK=.NOT.15
+	      CALL LSG_PLANE_SELECT(WKID,PLANE_MASK)
+	      CALL LSG_PLANE_OFFSET(WKID,4)
+	      CALL LSG_SET_CURSOR(WKID,XL,YL,.TRUE.) !start cursor
+	   ELSEIF (S7000) THEN		! SIGMA 7000
+	      CALL VSCURS(1)		! put up the cursor
+	      CALL VSALFC		! turn off the alpha plane
+	      CALL VSCSWT(XL,YL)	! GOTO last position
+	   ELSEIF (MT4014) THEN		! MUART TEK 4014
+	      CALL DISMOD(1)		! into refresh mode
+	      CALL CURSOR		! reinstate cursor
+	      CALL CURSEL(1)		! a big cursor !
+	      CALL CSWT(XL,YL)  	! goto last position
+	      CALL REFRSH
+	   ELSEIF (T4014.OR.T4010.OR.
+     &		   T4105.OR.T4106.OR.T4107.OR.T4109.OR.T4115) THEN
+	      CALL MOVABS(NINT(XL),NINT(YL))
+	      CALL GETGIN
+	   ENDIF
+	ENDIF
+	X=XL
+	Y=YL
+	IF (MTABLE) THEN
+	   TABEFN=IDTAEF		! get the event flag
+	ELSE
+	   CALL RESUME_TAB(,OK)
+	ENDIF
+C
+10	IF (MTABLE) THEN
+	   CALL SYS$CLREF(%VAL(TABEFN))	! clear EF to begin with
+	   OK=TKREAD(2,TABBUF,12,TABPTR,TABEFN)
+	   IF (.NOT.OK) GOTO 30
+C
+C wait for something to happen
+	   CALL SYS$WAITFR(%VAL(TABEFN))	! wait for it ...
+	   CALL SYS$CLREF(%VAL(TABEFN))		! got it; now unset it
+	ELSE
+20	   IF (WAIT_PUCK(OK)) GOTO 30
+	   IF (READ_PUCK(TABBUT,I,J,OK)) GOTO 30
+	   IF (HAD_ERROR(OK)) THEN
+	      CALL READ_ERROR(EXPBUF,EXPLEN,OK,I)
+	      IF (OK.EQ.-1) GOTO 20	! ignore bad table string
+	      EXPBUF(EXPLEN+1)=0
+	      MESLEN=EXPAND('%WS%STABLIB reports: %A',
+     &			MESSAGE,ERROR,EXPBUF)
+	      GOTO 40
+	   ENDIF
+	   TABX=FLOAT(I)
+	   TABY=FLOAT(J)
+	ENDIF
+C
+C Which button was used ?
+	IF (CURUSE) THEN
+	   IF (TABBUT.EQ.0) THEN	! button 0 is for tracking
+	      X=TABX
+	      Y=TABY
+	      CALL CPUSE(X,Y)
+C Convert real values to scaled integer
+	      CALL CONVER(X,IXA,1)
+	      CALL CONVER(Y,IYA,2)
+C Check they are in the present window (that user has not careered
+C wildly round the screen)
+	      IXP=MAX0(MIN0(IXA,JFC),JSC)
+	      IYP=MAX0(MIN0(IYA,JFR),JSR)
+C Convert these checked coordinates back into screen ones.
+	      CALL POSCON(IX,IY,IXP,IYP)
+	      IX=IX + IXSH
+	      IY=IY + IYSH
+	      IF (GPX) THEN
+	         CALL LSG_SET_CURSOR(WKID,
+     &			FLOAT(IX),
+     &			FLOAT(IY),
+     &			.TRUE.) 		! move cursor 
+	      ELSEIF (S7000) THEN
+	         CALL VSCSWT(FLOAT(IX),FLOAT(IY))
+	      ELSEIF (MT4014) THEN
+	         CALL CSWT(FLOAT(IX),FLOAT(IY))
+	         CALL LDWAIT
+	      ELSEIF (T4014.OR.T4010.OR.
+     &		      T4105.OR.T4106.OR.T4107.OR.T4109.OR.T4115) THEN
+	         CALL KILGIN		      ! remove the GIN cursor
+	         CALL MOVABS(IX,IY)	      ! move
+	         CALL GETGIN		      ! and put it up again !!
+	      ENDIF
+	      GOTO 10
+	   ELSEIF (TABBUT.EQ.1) THEN	      ! button 1 is 'point'
+	      KEY='P'
+	   ELSEIF (TABBUT.EQ.2) THEN	      ! button 2 is 'master pnt'
+	      KEY='M'
+	   ELSEIF (TABBUT.EQ.3) THEN	      ! button 3 is 'end point'
+	      KEY='E'
+	   ELSE
+	      GOTO 10			      ! all others ignored
+	   ENDIF
+	   IF (GPX) THEN
+	         PLANE_MASK=-1
+	         CALL LSG_PLANE_SELECT(WKID,PLANE_MASK)
+	         CALL LSG_PLANE_OFFSET(WKID,0)
+	         CALL LSG_SET_CURSOR(WKID,XL,YL,.TRUE.) !start cursor
+	         CALL LSG_SET_CURSOR(WKID,
+     &			IX,
+     &			IY,
+     &			.FALSE.) 	      ! cursor off
+	   ELSEIF (S7000) THEN
+	      CALL VSCURS(0)		      ! turn off cursor
+	      CALL VSALOF		      ! and alpha plane
+	   ELSEIF (MT4014) THEN
+	      CALL DISMOD(0)		      ! clear refresh (& cursor)
+	   ELSEIF (T4014.OR.T4010.OR.
+     &		   T4105.OR.T4106.OR.T4107.OR.T4109.OR.T4115) THEN
+	      CALL KILGIN		      ! remove the GIN cursor
+	   ENDIF
+	ENDIF
+	X=TABX			
+	Y=TABY
+	GOTO 50
+C
+C Error
+30	CALL LSL_GETMSG(OK,MESSAGE,MESLEN)   ! what went wrong
+	J=INDEX(MESSAGE,'!') - 1	     ! (ignore any FAO stuff)
+	IF (J.LE.0) J=MESLEN
+40	IF (CURUSE) THEN		     ! if using cursor ...
+	   CALL ALARMS(1,0,MESSAGE(:J))	     ! we can't return junk ...
+	ELSE				     ! (may insert duff point)
+	   CALL OUTOPT(' ')
+	   CALL OUTOPT(MESSAGE(:J))	     ! otherwise assume we ...
+	   KEY='P'			     ! can recover
+	ENDIF
+	DIGTAB=.TRUE.
+C
+50	IF (.NOT.MTABLE) CALL STOP_TAB(OK)
+	RETURN
+	END

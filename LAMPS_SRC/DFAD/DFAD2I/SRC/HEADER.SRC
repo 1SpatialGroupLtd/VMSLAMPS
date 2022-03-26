@@ -1,0 +1,162 @@
+	LOGICAL FUNCTION HEADER
+C
+***	IDENT	18MR88
+***	MODULE	HEADER
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs,  3 March 1983
+C
+C this is to read in a header/trailer block from /DFAD/, determine
+C which it is, and extract the information from it
+C
+C It returns FALSE if this is a trailer (ie not a header), in which
+C case there will be no more manuscripts on this tape (there should
+C be 2 tapemarks to follow)
+C Otherwise we have a header block, start of a new manuscript, and we
+C return TRUE (it is a header), and extract what we can from it.
+C
+C The format of a header block is:
+C
+C Word	 Bits	#bits	Contents		Range
+C
+C 1	 1- 6	6	All zero
+C	 7- 9	3	Manuscript type		1-2
+C	10-12	3	Level Type		0 or 7
+C	13-26	14	WAG (WAC) number	1-9999
+C	27-31	5	WAG (WAC) cell		1-25
+C	32-36	5	WAG cell		1-16
+C
+C 2	 1-36	36	Latitude of origin
+C
+C 3	 1-36	36	Longitude of same
+C
+C 4	 1-18	18	Estimated latitude extent
+C	19-36	18	Estimated longitude ditto
+C
+C
+C For a trailer block, bits 1-6 (6 bits) of words 1-4 are set
+C
+C
+	IMPLICIT NONE
+C
+C common blocks...
+C
+***     PARAMETER/HERE:DFAD2IMSG/
+***	COMMON/HERE:SCRIPT/		! contains manuscript descn
+***	COMMON/HERE:STATE/		! contains BLKTYP
+***	COMMON/LSL$CMNDLMS:DFAD/	! buffer of 1/2 words
+C
+C functions
+C
+	INTEGER*4	LIB$EXTZV	! extract zero extended field
+	INTEGER		NEGTIV		! process -ve 36bit words
+C
+C workspace...
+C
+        INTEGER         RETVAL          ! for NEGTIV
+	INTEGER*4	I		! DO loop variable
+	INTEGER*4	TEMP1,TEMP2	! temporary variables
+	REAL		CONV		! conversion factor
+	LOGICAL		MINUS		! set if -ve quantity
+C
+C
+C firstly we wish to ascertain if it is a header or a trailer
+C
+C
+	IF ( DFABUF(DFAPTR+1).EQ.'3F000'X .AND.
+     &	     DFABUF(DFAPTR).EQ.0 ) THEN
+C
+C	 we have bits 1-6 (Univac) of the first word set, so this
+C	 looks like it should be a trailer - let's check as much
+C
+	   DO 100 I = 2,6,2
+	      IF ( DFABUF(DFAPTR+I).NE.0 .OR.
+     &		   DFABUF(DFAPTR+I+1).NE.'3F000'X ) THEN
+C  word I/2 of trailer label corrupt (manus MANNUM)
+  	         CALL LSL_PUTMSG(DFAD2I__CRPTRAILER, I/2, MANNUM )
+	         CALL LSL_PUTMSG(DFAD2I__CRPTWORDS, DFABUF(DFAPTR+1)  
+     &                 , DFABUF(DFAPTR+I+1) )  ! 1/2 words
+	      ENDIF
+100	   CONTINUE
+C
+	   HEADER = .FALSE.		! 'twas indeed a trailer
+	   BLKTYP = TRAILR		!  note it again
+C
+	ELSE
+C
+C	 we have a new manuscript starting now - read its header in
+C
+C	 we start with the first word...
+C	 first the manuscript type (1 for culture, 2 for landscape)
+C
+	   MTYPE  = LIB$EXTZV( 9, 3,  DFABUF(DFAPTR+1) )
+C
+C	 and then the level type (0 for level 1, 7 for level 2)
+C
+	   LEVEL  = LIB$EXTZV( 6, 3, DFABUF(DFAPTR+1) )
+C
+	   IF ( LEVEL.EQ.0 ) THEN
+	      LEVEL = 1
+	   ELSEIF ( LEVEL.EQ.7 ) THEN
+	      LEVEL = 2
+	   ENDIF
+C
+C	 then various world aeronautical thingies
+C	 WAGNUM spans the two 1/2 words...
+C
+	   TEMP1  = LIB$EXTZV(  0, 6, DFABUF(DFAPTR+1) )
+	   TEMP2  = LIB$EXTZV( 10, 8, DFABUF(DFAPTR) )
+C
+C	 combine the two parts...
+C
+	   WAGNUM = TEMP2 .OR. ISHFT( TEMP1, 8 )
+C
+C	 and so to the others...
+C
+	   WAGWAC = LIB$EXTZV( 5, 5, DFABUF(DFAPTR) )
+	   WAGCEL = LIB$EXTZV( 0, 5, DFABUF(DFAPTR) )
+C
+C	 and that completes the first word - move to the second
+C
+	   DFAPTR = DFAPTR+2
+C
+C	 and the next two words are 36 bit quantities - store them
+C	 as real tenths of a second, instead of integer tenths.
+C	 but first - are they negative? If so, then we must convert
+C	 from 1s complement to 2s complement, and must guard against
+C	 negative zero...
+C
+	   CONV  = FLOAT('40000'X)	! to multiply high 1/2 word by
+C
+	   RETVAL = NEGTIV(MINUS)	! call a routine to do it
+C
+	   LAT0   = DFABUF(DFAPTR) + DFABUF(DFAPTR+1)*CONV
+	   IF (MINUS) LAT0 = -LAT0
+C
+C	 and the next...
+C
+	   DFAPTR = DFAPTR+2
+	   RETVAL= NEGTIV(MINUS)		! check its sign
+C
+	   LONG0  = DFABUF(DFAPTR) + DFABUF(DFAPTR+1)*CONV
+	   IF (MINUS) LONG0 = -LONG0
+C
+C	 and the next word contains the extent (approximate) of the
+C	 manuscript, again in tenths of a second, but only 1/2 words
+C
+	   DFAPTR = DFAPTR+2
+C
+	   LATEX  = DFABUF(DFAPTR+1)
+	   LONGEX = DFABUF(DFAPTR)
+C
+C	 and that is the header read in
+C
+	   HEADER = .TRUE.		! it is a manuscript header
+	   BLKTYP = MANHED		! emphasise it
+C
+	ENDIF
+C
+C
+	RETURN				! back to the main program
+	END

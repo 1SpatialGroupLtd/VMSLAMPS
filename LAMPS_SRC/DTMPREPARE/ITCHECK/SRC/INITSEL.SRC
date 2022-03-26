@@ -1,0 +1,192 @@
+	LOGICAL FUNCTION INITSEL(GRPNUM)
+C
+***	MODULE	INITSEL
+***	IDENT	24FE88
+C
+C Copyright Laser Scan Laboratories Limited, Cambridge, England
+C
+C Modified from INITSEL in module ITCHECK		by ALB  16-Feb-1988
+C
+C Function to read in and checks feature codes from LOOKUP file
+C The command line is checked for correct syntax and used to initialise 
+C or update group bit-map.
+C
+C
+	IMPLICIT NONE
+C
+C
+C parameters
+C
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNITCHECK:CONSTANTS.PAR'
+C
+C common blocks
+C
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNITCHECK:CONTROL.CMN'
+	INCLUDE 'LSL$CMNITCHECK:GROUP.CMN'
+	INCLUDE 'LSL$CMNITCHECK:SELECT.CMN'
+C
+C Argument
+C
+	INTEGER GRPNUM		! number of group in group name table.
+C
+C W/s.
+C
+	INTEGER	BIT		! bit setting returned from FCMAP
+	LOGICAL OK		! return code
+	LOGICAL EOL		! end of line
+	INTEGER	CMD		! command number
+	INTEGER I		! loop controls.
+	INTEGER START		! lower limit for a range FC initialise
+	INTEGER FINISH		! upper limit for a range FC initialise
+	INTEGER*4 TMPMAP(FCMAX)	! temporary bit-map holding 1's for the
+				! selected/deselected bits for SEL/DES
+				! commands respectively.
+	BYTE CH			! for use with RDCH & RDCHS
+C
+C define group definition table
+C
+	EXTERNAL 	GROUP_CMD_TABLE
+	INTEGER 	GROUP_CMD_TABLE
+C
+C Functions.
+C
+	INTEGER 	RDCOMM
+	INTEGER 	LIB$EXTZV
+	LOGICAL*1 	READRANG
+	LOGICAL*1 	RDCHS
+	LOGICAL*1 	RDCH
+C
+C***********************************************************************
+C
+C Initialise.
+C
+	INITSEL=.TRUE.		! assume success
+C
+C Clear the temporary bit-map.
+C
+	CALL VIOCLR(TMPMAP,FCMAX*4)
+C
+C***********************************************************************
+C
+C Read all the groups and ranges given with this command before
+C updating the bit-map (since don't want to change anything if
+C there is an error). Set up a temporary bit-map to be OR'd or
+C AND NOT'd with the real bit-map when the whole command is decoded
+C (depending on whether it is a select or deselect command).
+C
+10	CONTINUE
+	EOL = RDCHS(CH)
+	IF(.NOT.EOL) THEN				! more feature codes
+	   IF ((CH.GE.48).AND.(CH.LE.57)) THEN		! 0 - 9
+	      GOTO 200
+	   ELSEIF (CH.EQ.COMMA) THEN			! check the delimiter. 
+	      GOTO 10	
+	   ELSE						! unexpected char
+	      CALL WRITEF('%S in LOOKUP file %S',ERROR,
+     &	   	LOOKUP_FNAME(:LOOKUP_LEN))
+	      CALL WRITEF('Unexpected character "%^B%C" '//
+     &		'at this point.',CH)
+	      INITSEL = .FALSE.
+	      GOTO 999
+	   ENDIF
+	ELSE						! no more FC's
+	   GOTO 300
+	ENDIF
+C
+C***********************************************************************
+C
+C Got an explicit ft code or range of ft codes.
+C
+200	CONTINUE
+	OK = READRANG(START,FINISH)
+	IF (.NOT.OK) THEN 
+	   INITSEL = .FALSE.
+	   GOTO 999
+	ENDIF
+	IF ((START.LT.0).OR.(START.GT.MAXFC)) THEN
+	   CALL WRITEF('%S in LOOKUP file %S',ERROR,
+     &		LOOKUP_FNAME(:LOOKUP_LEN))
+	   CALL WRITEF('Illegal feature code %^L%N.',START)
+	   CALL WRITEF('Feature code must be between 0 - %I',MAXFC)
+	   INITSEL = .FALSE.
+	   GOTO 999
+	ENDIF
+	IF ((FINISH.LT.0).OR.(FINISH.GT.MAXFC)) THEN
+	   CALL WRITEF('%S in LOOKUP file %S',ERROR,
+     &		LOOKUP_FNAME(:LOOKUP_LEN))
+	   CALL WRITEF('Illegal feature code %^L%N.',FINISH)
+	   CALL WRITEF('Feature code must be between 0 - %I',MAXFC)
+	   INITSEL = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C Mark up the temporary bit-map.
+C
+	DO 210 I=START,FINISH
+	   WORD=I/32
+	   OFFSET=I - WORD*32
+C
+C check that new feature code is unique if not first group in LOOKUP file
+C this the case when HAD_RESET is TRUE
+C
+	   IF(HAD_RESET) THEN			
+	      BIT = LIB$EXTZV(OFFSET,1,FCMAP(WORD+1))
+	      IF(BIT) THEN
+	         CALL WRITEF('%S in LOOKUP file %S',ERROR,
+     &		 LOOKUP_FNAME(:LOOKUP_LEN))
+	         CALL WRITEF('New feature code %I0 in group %S '//
+     &		 'is not unique',I,GRPNAM(GRPNUM))
+	         INITSEL = .FALSE.
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+	   CALL LIB$INSV(1,OFFSET,1,TMPMAP(WORD+1))
+210	CONTINUE
+	GOTO 10
+C
+C***********************************************************************
+C
+C reset bitmaps if not had reset (case when starting to load LOOKUP file)
+C
+300	CONTINUE
+	IF(.NOT.HAD_RESET) THEN
+	   FCSMOD = .TRUE.
+	   CALL VIOCLR(FCMAP,FCMAX*4)	! reset whole bit-map OFF
+	   DO 310 I = 1,GRPMAX
+	      GRPDEF(I) = .FALSE.
+	      CALL VIOCLR(GRPFCT(I,GRPNUM),FCMAX*4)
+310	   CONTINUE
+	   HAD_RESET = .TRUE.
+	ENDIF
+C
+C check whether the group has been previously defined. 
+C
+	IF(GRPDEF(GRPNUM)) THEN			! group already defined
+	   CALL WRITEF('%S Group %S previously defined ',WARNING,
+     &		GRPNAM(GRPNUM))
+	   CALL WRITEF('Feature codes will be added to group '//
+     &		'definition table')
+C
+C merge existing bitmap for current group with temporary bitmap
+C
+	   DO 320 I=1,FCMAX
+	      GRPFCT(I,GRPNUM)= GRPFCT(I,GRPNUM) .OR. TMPMAP(I)
+320	   CONTINUE
+	ELSE
+C
+C initialise group bitmap with the temporary bitmap
+C
+	   CALL VIOMV3(TMPMAP,FCMAX*4,GRPFCT(1,GRPNUM))
+	   GRPDEF(GRPNUM) = .TRUE.			! set group defined flag
+	   GRPCNT = GRPCNT + 1				! increment group count
+	ENDIF
+C
+C***********************************************************************
+C
+999	CONTINUE	
+	RETURN
+C
+	END

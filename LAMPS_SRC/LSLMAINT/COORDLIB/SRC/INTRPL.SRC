@@ -1,0 +1,328 @@
+	SUBROUTINE INTRPL(NCOORD,XY,INTFST,INTLST,LOOPED,EXTRA,POLATE)
+C
+***	MODULE	INTRPL
+***	IDENT	20NO86
+C
+C Copyright Laser Scan Laboratories Ltd, Cambridge, England.
+C Author Paul Hardy
+C
+C Lose 1st point in 3 point loops		RJH	12-Nov-1986
+C Copied from LITES2, modified for general use:	RJH	21-Oct-1986
+C    removed all common blocks/parameter files 
+C     except INTCOM and inserted INTPTS,
+C    MCCON replaced by argument EXTRA,
+C    XY now declared with length *,
+C    argument DISP transferred to INTCOM
+C     and removed from calls to POLATE,
+C    INTFST,INTLST,LOOPED, POLATE now arguments.
+C Tidy and remove bugs with small STs in	CCB	26-Sep-1986
+C closed loops.
+C Add argument DISP,				RJH	11-Mar-1985
+C add DISP to arguments of calls to POLATE,
+C replace calls to STDBFA with calls to ADDPTS.
+C Don't extrapolate if using McConalogue, 	CCB	25-Oct-1984
+C set ENDCON for MCONAL interpolation.
+C Transferred to LITES2				CCB	09-Jul-1984
+C Bug fixed in point generation between buffers	 DM	13-Mar-1984
+C Adapted for FPP (fast plotter program) which	 RD	07-Sep-1983
+C requires no overlap of pts between blocks
+C and has to be compatible with GKS library.
+C Also, it already knows if ft is a loop.
+C No longer restriction on no. of pts passed.
+C Modified to make use of the 'first'		PGH	06-Jun-1977
+C information that was already available.
+C Modified to deal satisfactorily with Akima	PGH	13-Sep-1976
+C POLATE routine.
+C Created.					PGH	21-Jul-1976
+C
+C
+C This is the general version of the curve interpolation routine INTRPL
+C
+C	Routines called	:	EXTRPL,AKIMA,MCONAL,LINEAR,GRAD,INCSIZ,
+C				ADDPTS
+C	Other Routines	:	INTRPL_INIT,CURTOL
+C	Common Blocks	:	INTCOM,INTPTS
+C
+C Prior to interpolating any lines, INTRPL_INIT should be called to 
+C initialise the common block of control variables. It should 
+C subsequently be called again if any of the tolerances change or if 
+C there is a scale change.
+C
+C INTRPL interpolates points between given master points in array XY.
+C If last point = first point then closes loop for end conditions,
+C else extrapolates two further points at each end for continuity.
+C Calls routine POLATE to do the interpolation.
+C The routine is split into 3 main sections which handle:-
+C     - the start of the buffer which may or may not be the start
+C	of the ft.
+C     - the main chunk of coordinates in the middle of the buffer.
+C     - the end of the buffer which may or may not be the end of 
+C	the ft.
+C Closed loops are drawn starting at the 3rd point, dealing with the
+C first two at the end.
+C
+C Control variables in /INTCOM/
+C DISP is true if curve is being drawn on screen (set by INTRPL_INIT)
+C ENDCON is used by McConalogue to determine whether start, middle, or
+C end of buffer.
+C
+C Control variables as arguments
+C INTFST should be TRUE if first call to INTRPL
+C INTLST should be TRUE if feature is to be completed
+C LOOPED should be TRUE if feature is a closed loop
+C EXTRA is TRUE if using Akima interpolation - we only bother
+C to extrapolate extra points for Akima.
+C
+C The dummy subroutine POLATE is supplied by the user as an actual 
+C argument to INTRPL. Its specification is :-
+C
+C	SUBROUTINE POLATE(XY)
+C
+C	REAL XY(2,6)		! XY holds the master points
+C 
+C POLATE is passed the start of an array of 6 points. It interpolates
+C between the 3rd and 4th, putting in last point but not first. It is 
+C referenced by
+C
+C 	CALL POLATE(XY)
+C
+C The actual subroutines used should be declared as EXTERNAL in the 
+C calling routine. Those currently available for this purpose are
+C AKIMA, MCONAL, and LINEAR, but users could of course supply
+C their own.
+C
+C EXTRPL is passed start of an array of 5 points. It extrapolates either
+C the first two or the last two from the other 3. The argument EXTRA 
+C passed to INTRPL controls whether or not EXTRPL is called, and should 
+C be compatible with the actual subroutine argument passed to INTRPL 
+C (i.e. TRUE if it is AKIMA).
+C
+C NB A call with NCOORD=0 is valid, and can be used with INTLST=.TRUE.
+C to finish off feature without adding more points.
+C
+C Users are required to supply the subroutine ADDPTS with the 
+C following specification :-
+C
+C 	SUBROUTINE ADDPTS(NPTS,XY,DRAW)
+C
+C 	INTEGER*4	NPTS		! number of points
+C 	REAL		XY(2,NPTS)	! line string
+C 	LOGICAL*1	DRAW		! draw line on screen ?
+C
+C It is referenced by
+C
+C 	CALL ADDPTS(NPTS,XY,DRAW)
+C
+C and allows the points either to be buffered up for subsequent 
+C output or passed to a graphics library for display on a screen.
+C
+C Thus it is possible to start with a complete line and simply 
+C add the filtered points to an output buffer as in IFILTER. 
+C Alternatively, as in LITES2, the original line could be read in 
+C section by section and the filtered points copied either to the 
+C output item using the normal flushing mechanism, or to the 
+C graphics output buffer. 
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:INTCOM/
+***	COMMON/CMN:INTPTS/
+C
+C arguments
+	INTEGER	NCOORD		! number of coords in XYCORD
+	REAL XY(2,*)		! coords to be interpolated between
+	LOGICAL*1 INTFST	! first bit of feature
+	LOGICAL*1 INTLST	! last bit of feature
+	LOGICAL*1 LOOPED	! feature is a closed loop
+	LOGICAL*1 EXTRA		! extrapolate extra points (Akima) ?
+	INTEGER	POLATE		! interpolation routine
+C
+C workspace
+	INTEGER LASTOT		! last INTTOT (no. coords already held)
+	INTEGER I,J,K		! loop control variables
+C
+	ENDCON=0		! default end condition
+	IF (INTFST) INTTOT=0	! no points so far
+C
+C Update the coord count for this ft
+	LASTOT=INTTOT		! remember no. of pts prior to this
+	INTTOT=INTTOT+NCOORD	! count total number of pts
+C
+C
+C***********************************************************************
+C
+C Save the first 5 points passed to us in XYE(,3:7) for use with
+C extra points extrapolated in XYE(,1:2).
+C
+	IF (LASTOT.GE.5) GOTO 200	! already got 5 or more
+C
+	J=MIN(5-LASTOT,NCOORD)
+	DO 40 I=1,J
+	   DO 40 K=1,2
+	      XYE(K,I+LASTOT+2)=XY(K,I)
+40	CONTINUE
+C
+C If just had 3rd point, then move to first point,
+C which is actual first point for open curve, but third point for loop
+	IF (LASTOT.LT.3.AND.INTTOT.GE.3) THEN
+	   IF (LOOPED) THEN
+	      CALL ADDPTS(1,XYE(1,5),DISP)
+	   ELSE
+	      CALL ADDPTS(1,XYE(1,3),DISP)
+	   ENDIF
+	ENDIF
+C
+	IF (INTTOT.LT.5) THEN
+C
+C Still not got 5 points - if not last bit then that's all for now
+	   IF (.NOT.INTLST) GOTO 1000
+	   GOTO 2000		! deal with features  with <5 points
+	ENDIF
+C
+C Here when just had 5th point
+C For loops, we save points 2-5 in XYS for use at end.
+C For open curves, extrapolate extra points and interpolate the
+C first two spans
+	IF (LOOPED) THEN
+	   DO 91 I=1,4
+	      DO 91 K=1,2
+	         XYS(K,I)=XYE(K,I+3)
+91	   CONTINUE
+	ELSE
+	   IF (EXTRA) CALL EXTRPL(.TRUE.,XYE(1,1))	! Akima only
+	   ENDCON=1			! first point
+	   CALL POLATE(XYE(1,1))
+	   ENDCON=0			! not first point
+	   CALL POLATE(XYE(1,2))
+	ENDIF
+C
+C Check if we need to use the first 5 points stored in XYE(,3:7)
+C This will be provoked when first buffer contains less than 5 points
+	IF (LASTOT.LE.0) GOTO 230	! no points in XYE
+	J=MIN(LASTOT,NCOORD-(5-LASTOT))
+C
+C Insert up to 4 points from XY into XYE(,8:11)
+	DO 110 I=1,J
+	   DO 110 K=1,2
+	      XYE(K,I+7)=XY(K,I+5-LASTOT)
+110	CONTINUE
+	DO 120 I=3,J+2
+	   CALL POLATE(XYE(1,I))
+120	CONTINUE
+	GOTO 230
+C
+C Here when already had 5 or more points. The last 5 are in
+C XYE(,1:5). Generate points 'between' buffers to ensure continuity
+200	J=MIN(5,NCOORD)
+	DO 210 I=1,J
+	   DO 210 K=1,2
+	      XYE(K,I+5)=XY(K,I)
+210	CONTINUE
+	DO 220 I=1,J
+	   CALL POLATE(XYE(1,I))
+220	CONTINUE
+C
+C***********************************************************************
+C
+C This section handles the main chunk of the data
+C
+230	DO 240 I=1,NCOORD-5
+	   CALL POLATE(XY(1,I))
+240	CONTINUE
+C
+C***********************************************************************
+C
+C This final section handles the end of the buffer
+C Get last 5 points into XYE(,1:5)
+C
+	IF (LASTOT.GE.5.OR.NCOORD.GE.5) THEN
+	   J=MIN(5,NCOORD)
+	   DO 310 I=1,5-J		! extract anything from XE/YE
+	      DO 310 K=1,2
+	         XYE(K,I)=XYE(K,I+J)
+310	   CONTINUE
+	   DO 320 I=1,J			! extract anything from X/Y
+	      DO 320 K=1,2
+	         XYE(K,I+5-J)=XY(K,NCOORD-J+I)
+320	   CONTINUE
+	ELSE
+C
+C If had less than 5 points before this call (still in XYE(,3:7)), and
+C this buffer has less than 5, then all the points so far are in
+C XYE(,3:11)
+	   DO 331 I=1,5
+	      DO 331 K=1,2
+	         XYE(K,I)=XYE(K,INTTOT-3+I)
+331	   CONTINUE
+	ENDIF
+C
+C If not last buffer, then that's all
+	IF (.NOT.INTLST) GOTO 1000
+C
+C Generate points depending on whether it is a closed loop or not.
+	IF (LOOPED) THEN
+C
+C Closed loop - last 5 points are in XYE(,1:5). Add on points 2-5 from
+C start of feature, and interpolate
+	   DO 370 I=1,4
+	      DO 370 K=1,2
+	         XYE(K,I+5)=XYS(K,I)
+370	   CONTINUE
+	   DO 380 I=1,4
+	      CALL POLATE(XYE(1,I))
+380	   CONTINUE
+	ELSE
+C
+C Open feature - extrapolate 2 extra points at end, and interpolate
+	   IF (EXTRA) CALL EXTRPL(.FALSE.,XYE(1,3))
+	   CALL POLATE(XYE(1,1))
+	   ENDCON=-1			! last point
+	   CALL POLATE(XYE(1,2))
+	ENDIF
+C
+C***********************************************************************
+C
+1000	RETURN
+C
+C***********************************************************************
+C
+C Deal with features with <5 points
+2000	IF (LOOPED) GOTO(1000,1000,2015,2030),INTTOT
+	GOTO (1000,2010,2020,2020),INTTOT
+C
+C 2 point open line - just output straight line
+2010	CALL ADDPTS(2,XYE(1,3),DISP)
+	GOTO 1000
+C
+C 3 point loop - straight line so lose 1st point (= 3rd, already output)
+2015	CALL ADDPTS(1,XYE(1,4),DISP)
+	GOTO 1000
+C
+C Got 3 or 4 point open line
+2020	IF (EXTRA) THEN		! extrapolate points for Akima
+	   CALL EXTRPL(.TRUE.,XYE(1,1))
+	   CALL EXTRPL(.FALSE.,XYE(1,INTTOT))
+	ENDIF
+C
+	ENDCON=1			! first point
+	CALL POLATE(XYE(1,1))
+	ENDCON=0			! middle bits
+	DO 2022 I=2,INTTOT-2
+	   CALL POLATE(XYE(1,I))
+2022	CONTINUE
+	ENDCON=-1			! last point
+	CALL POLATE(XYE(1,INTTOT-1))
+	GOTO 1000
+C
+C Got 4 point loop (have to wrap points around)
+2030	DO 2031 I=3,5
+	   DO 2031 K=1,2
+	      XYE(K,I+3)=XYE(K,I)
+	      XYE(K,I+6)=XYE(K,I)
+2031	CONTINUE
+	DO 2032 I=3,5
+	   CALL POLATE(XYE(1,I))
+2032	CONTINUE
+	GOTO 1000
+C
+	END

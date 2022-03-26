@@ -1,0 +1,244 @@
+	INTEGER*4 FUNCTION READ_TAPE()
+C
+***	MODULE	READ_TAPE
+***	IDENT	16MR87
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,Cambridge,England
+C 	Author: D R Catlow
+C
+C	Routine for READCCT to control tape reading operations
+C	for a STANDARD SPOT or TM CCT.
+C	The routine determines the record type for the current
+C	block of data, and calls the appropriate decoding routine.
+C
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'HERE:READCCTMSG.PAR'
+	INCLUDE 'HERE:READCCT.CMN'
+	INCLUDE 'HERE:TAPE.CMN'		!Values relating to the tape records
+	INCLUDE 'HERE:SPOT.PAR'		!Tape record parameters
+	INCLUDE 'HERE:TAPE_RECORDS.CMN'	!contains record counters etc.
+C
+	INCLUDE 'LSL$CMNLSL:MTIVCM.CMN'	!Tape input common
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'	!LSLLIB error messages
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C	Locals
+	INTEGER*4	NUMBER_BYTES	!number of bytes read
+	INTEGER*4	READ		!function return
+	INTEGER*4	IERR		!function return
+	INTEGER*4	I		!counter
+	INTEGER*2	SIGNED_VALUE1
+C	
+C	Functions
+	INTEGER*4	READ_DESCR	!to read a file descriptor
+	LOGICAL		READ_TEXT	!to read a text record
+	LOGICAL		READ_IMAGE	!to read a image data record
+	LOGICAL		READ_VOLUME	!to read the volume descriptor
+	LOGICAL		READ_POINTER	!to read a file pointer record
+	LOGICAL		READ_HEADER	!to read a header record
+	LOGICAL		READ_EPHEMERIS	!to read an ancilary data record
+	LOGICAL		READ_CALIBRATION!to read radiometric calib data
+	LOGICAL		READ_HISTOGRAM	!to read histogram data
+	LOGICAL		READ_PROJECTION	!to read projection data
+	LOGICAL		READ_GCP	!to read GCP/RCP data
+	LOGICAL		READ_TRAILER	!to read a trailer record
+C
+	INTEGER*4	MTINIT		!initialise the magtape
+	INTEGER*4	MTIRDB		!read a block of data	
+C
+	INTEGER*4	RDLONG		!read an INTEGER*4
+	INTEGER*4	RDOCT		!read an octal value
+C
+	EQUIVALENCE (MTBUF(12),SIGNED_VALUE1)
+C
+C-----------------------------------------------------------------------------
+C
+	READ_TAPE=.TRUE.		!assume function is successful
+C
+C	Initialise record type counters
+	COUNT_VOLUME_DESCR =0
+	COUNT_FILE_POINTER =0
+	COUNT_TEXT         =0
+	COUNT_FILE_DESCR   =0
+	COUNT_HEADER       =0
+	COUNT_EPHEMERIS    =0
+	COUNT_CALIBRATION  =0
+	COUNT_HISTOGRAM    =0
+	COUNT_PROJECTION   =0
+	COUNT_GCP          =0
+	COUNT_ANNOTATION   =0
+	COUNT_IMAGE        =0
+	COUNT_TRAILER      =0
+	COUNT_NULL	   =0
+C
+C-----------------------------------------------------------------------------
+C
+C	Initialise the tape
+	IERR = MTINIT (MTNAME,.FALSE.)
+	IF(IERR.NE.LSL__NORMAL)THEN
+	  IERR=READCCT__ERRMTINIT
+	  CALL LSL_PUTMSG(IERR)
+	  CALL LSL_PUTMSG(MTIERR)
+	  READ_TAPE=.FALSE.		!signal function failure
+	  GOTO 999
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C
+C	Read the next block on tape
+100	IERR = MTIRDB (MTBUF,MAX_RECORD_LENGTH,NUMBER_BYTES)
+	IF(IERR.EQ.LSL__EOF)THEN	!test if we have EOT (ie. another EOF)
+	  IERR = MTIRDB (MTBUF,MAX_RECORD_LENGTH,NUMBER_BYTES)
+	  IF(IERR.EQ.LSL__EOF)GOTO 950	!EOT
+	ENDIF
+C
+	IF(IERR.NE.LSL__NORMAL)THEN
+	  IERR=READCCT__ERRMTREAD
+	  CALL LSL_PUTMSG(IERR)
+	  CALL LSL_PUTMSG(MTIERR)
+	  READ_TAPE=.FALSE.		!signal function failure
+	  GOTO 999
+	ENDIF	
+C
+C----------------------------------------------------------------------------
+C	Read the record information (first 12 bytes)
+	CALL SETAUX(MTBUF,NUMBER_BYTES)	!set to own buffer
+C
+C	Record Number
+	CALL FORM_LONGWORD(RECORD_NUMBER,1)
+C
+C	Record Type
+	SUB_TYPE1=MTBUF(5)	!record sub_type1 code
+	TYPE     =MTBUF(6)	!type record
+	SUB_TYPE2=MTBUF(7)  	!record sub_type2 code
+	SUB_TYPE3=MTBUF(8)	!record sub_type3 code
+C
+C	Record Length
+	CALL FORM_LONGWORD(RECORD_LENGTH,9)
+C
+	IF(HAD_DIAG)THEN		!print out details of the record
+	  CALL WRITEF
+     &('Record Number: %I6 Length: %I6 Type: %^B%O4 Subtype: %^B%O4', 
+     &  RECORD_NUMBER,RECORD_LENGTH,TYPE,SUB_TYPE1)
+	ENDIF
+C
+C---------------------------------------------------------------------------
+C	Determine what type of record we are dealing with
+C	by testing the type and sub_type values,
+C	and call the appropriate routine to decode
+C	the rest of the block.
+C
+C	Image Data?
+	IF(TYPE.EQ.TYPE_F.AND.SUB_TYPE1.EQ.SUB_TYPE_G)THEN
+	  IF(.NOT.READ_IMAGE())GOTO 900	!read unsuccessful
+C
+C	  Test if we've finished with the data for this band
+	  IF(LINE_NUMBER.GE.LAST_LINE)THEN
+	    THIS_BAND(BAND_NUMBER)=.FALSE.
+C
+C	  Any more bands?
+	    DO 700 I=1,MAX_BANDS
+	       IF(THIS_BAND(I))GOTO 100
+700	    CONTINUE
+	    GOTO 950
+	  ENDIF
+C	    	  
+	  GOTO 100			!get next block
+	ENDIF
+C
+C	Volume Descriptor?
+	IF(TYPE.EQ.TYPE_A.AND.SUB_TYPE1.EQ.SUB_TYPE_A)THEN
+	  IF(.NOT.READ_VOLUME())GOTO 900	!read unsuccessful
+	  GOTO 100			!get next block
+	ENDIF
+C
+C	File Pointer Record?
+	IF(TYPE.EQ.TYPE_A.AND.SUB_TYPE1.EQ.SUB_TYPE_B)THEN
+	  IF(.NOT.READ_POINTER())GOTO 900	!read unsuccessful
+	  GOTO 100			!get next block
+	ENDIF
+C	  
+C	File Descriptor?
+	IF(TYPE.EQ.TYPE_A.AND.SUB_TYPE1.EQ.SUB_TYPE_D)THEN
+	  IERR=READ_DESCR()
+	  IF(.NOT.IERR)THEN
+	    CALL LSL_PUTMSG(IERR)
+	    GOTO 900
+	  ENDIF
+	  GOTO 100			!get next block
+	ENDIF
+C			
+C	Header?
+	IF(TYPE.EQ.TYPE_C.AND.SUB_TYPE1.EQ.SUB_TYPE_C)THEN
+	  IF(.NOT.READ_HEADER())GOTO 900	!read unsuccessful
+	  GOTO 100			!get next block
+	ENDIF
+C
+C	Ancillary Radiometric Calibration Data
+	IF(TYPE.EQ.TYPE_D.AND.SUB_TYPE1.EQ.SUB_TYPE_D)THEN
+	  IF(.NOT.READ_CALIBRATION())GOTO 900
+	  GOTO 100
+	ENDIF
+C
+C	Ancillary Histogram Data
+	IF(TYPE.EQ.TYPE_D.AND.SUB_TYPE1.EQ.SUB_TYPE_A)THEN
+	  IF(.NOT.READ_HISTOGRAM())GOTO 900
+	  GOTO 100
+	ENDIF
+C
+C	Ancillary Projection Data
+	IF(TYPE.EQ.TYPE_D.AND.SUB_TYPE1.EQ.SUB_TYPE_E)THEN
+	  IF(.NOT.READ_PROJECTION())GOTO 900
+	  GOTO 100
+	ENDIF
+C
+C	Ephmeris and Attitude Data
+	IF(TYPE.EQ.TYPE_D.AND.SUB_TYPE1.EQ.SUB_TYPE_H)THEN
+	  IF(.NOT.READ_EPHEMERIS())GOTO 900
+	  GOTO 100
+	ENDIF
+C
+C	GCP/RCP Data
+	IF(TYPE.EQ.TYPE_D.AND.SUB_TYPE1.EQ.SUB_TYPE_F)THEN
+	  IF(.NOT.READ_GCP())GOTO 900
+	  GOTO 100
+	ENDIF
+C
+C	Text record?
+	IF(TYPE.EQ.TYPE_B.AND.SUB_TYPE1.EQ.SUB_TYPE_C)THEN
+	  IF(.NOT.READ_TEXT())GOTO 900
+	  GOTO 100
+	ENDIF
+C
+C	Trailer record?
+	IF(TYPE.EQ.TYPE_G.AND.SUB_TYPE1.EQ.SUB_TYPE_C)THEN
+	  IF(.NOT.READ_TRAILER())GOTO 900
+	  GOTO 100
+	ENDIF
+C
+C	Record unrecognised or else we're not interested in it
+C
+	IF(TYPE.NE.TYPE_A.AND.TYPE.NE.TYPE_B.AND.
+     &     TYPE.NE.TYPE_C.AND.TYPE.NE.TYPE_D.AND.
+     &     TYPE.NE.TYPE_E.AND.TYPE.NE.TYPE_F.AND.
+     &     TYPE.NE.TYPE_G)THEN
+	   CALL LSL_PUTMSG(READCCT__BADTAPEFORMAT)
+	   GOTO 900
+	ENDIF
+C
+	GOTO 100			!get next block
+C
+C
+C-------------------------------------------------------------------------
+900	READ_TAPE=.FALSE.		!unsuccessful
+	GOTO 999
+C
+C	Print out summary if required
+950	IF(HAD_SUMMARY)CALL PRINT_SUMMARY
+C
+999	RETURN
+C
+	END
+

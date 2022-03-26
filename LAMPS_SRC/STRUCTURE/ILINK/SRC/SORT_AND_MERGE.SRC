@@ -1,0 +1,518 @@
+	LOGICAL*4 FUNCTION SORT_AND_MERGE(
+     &		PT,NXT,PRV,FTR_PTS,FTR_NDS,
+     &		FTR_ORIG_PR_FTR,
+     &		ARM,HEADARM,SHR,HEADSHR,
+     &		MAXPTS,MAXOUTFTRS,MAXNODES,
+     &		MAXARMS,MAXSHRS)
+
+***	MODULE	SORT_AND_MERGE
+***	IDENT	25MY93
+
+C	Copyright: Laser-Scan Ltd., Cambridge, England
+
+CMOD1232 Only output messages NOMERGE, NOTMERGE if had the qualifier
+C 	 /WARNING					 JB	25-May-1993
+
+CMOD1218 Do not access NXT(0) or PRV(0)			 JB	15-Apr-1993
+
+CMOD1171 Only check internal points of features involved in
+C	 the mod below					WJJ	 5-Feb-1993
+
+CMOD1171 Use point by point checking to check if the path between nodes
+C	 is identical, rather than assuming that they are identical
+C	 because they have the same start and end nodes and start at
+C	 the same angle					JB/WJJ	27-Jan-1993
+C
+CMOD	Added arg to INTRNLERR message			ACM	18-Aug-1987
+CMOD	Fixed bug in arm merging procedure		ACM	14-Aug-1987
+CMOD	Made a function					TJH	28-May-1987
+
+C	Created: 					ACM	   Jul 1986
+
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+
+	INTEGER*4	F1
+	PARAMETER(	F1 = 10)
+
+C Common blocks
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+
+C Data in/out
+	INTEGER*4	MAXPTS,MAXOUTFTRS
+	INTEGER*4	MAXNODES,MAXARMS,MAXSHRS
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_NDS(2,MAXOUTFTRS)
+	INTEGER*4	FTR_ORIG_PR_FTR(MAXOUTFTRS)
+	INTEGER*4	HEADARM(MAXNODES)
+	INTEGER*4	ARM(2,MAXARMS)
+	INTEGER*4	HEADSHR(MAXOUTFTRS)
+	INTEGER*4	SHR(2,MAXSHRS)
+	INTEGER*4	NXT(MAXPTS)
+	INTEGER*4	PRV(MAXPTS)
+	REAL*4		PT(2,MAXPTS)
+
+C Workspace
+	INTEGER*4	I,J,K,COUNT
+	INTEGER*4	I1,I2,IPT1,IPT2,IPT1N,IPT2N
+	REAL*4		X1,Y1,X2,Y2
+
+	INTEGER*4	IPT,IPTPRV		! pt indices
+	INTEGER*4	STANOD,FINNOD		! ftr end nodes
+	INTEGER*4	IFTR,FTRPRV		! ftr index
+	INTEGER*4	ORIG_FTR,ORIG_FTRPRV	! original ftr index
+	INTEGER*4	BASE_FTR,LOST_FTR	! merging ftr indices
+	INTEGER*4	INODE,JNODE		! node indices
+	INTEGER*4	IARM,JARM,PRVJARM	! arm indices
+	INTEGER*4	ISHR,JSHR,JSHRPRV	! sharing ftr index
+	INTEGER*4	NARMS			! No of arms at a node
+	INTEGER*4	NARMS_LEFT		! No of arms after merge
+	INTEGER*4	AMP(F1*MAXAPN)		! array of ARm Pointers
+	INTEGER*4	SHR_SET(MAXSHR)		! a set of SHR indices
+	INTEGER*4	FTR_SET(MAXSHR)		! a set of FTRindices
+	REAL*8		ANG(F1*MAXAPN)		! array of arm angles
+	REAL*8		THT
+	LOGICAL*4	NON_POINT_FTR		! non-point ftr?
+	LOGICAL*4	OUT,OUTPRV		! arm out from node?
+	LOGICAL*4	SAME_DIRECTION		! arms both in/out?
+	LOGICAL*4	MERGE			! merge ftrs?
+	LOGICAL*4	ANGLES_EQUAL		! angles equal?
+
+C Functions
+	REAL*8		ANGLE			! arm angle
+	LOGICAL*4	INSET			! set membership check
+	BYTE		LTEQGT			! priority ordering
+	LOGICAL*4	CREATE_SHR		! create shared feature
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Sorts arms on each node into order anti-clockwise from 3 o'clock
+C
+C	Data-structure must be proper link/node structure here
+C
+C	Whenever two arms from the same node have identical arm
+C	angle, the ftr with lower priority is taken into the ftr with
+C	higher priority and its arms are deleted at both ends.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	SORT_AND_MERGE = SS$_NORMAL	! assume the best
+
+C Clear arrays which are equivalenced and need to start = 0
+C (Not now necessary - I hope)
+
+C	CALL VIOCLR(SHR,MAXSHRS*4)
+C	CALL VIOCLR(HEADSHR,MAXOUTFTRS*2)
+
+	DO 180 INODE = 1,N_NODES
+
+C Put arm angles and arm indices into local arrays for sorting
+
+	  NARMS = 0
+	  IARM = HEADARM(INODE)
+	  IF (IARM.EQ.NIL) GOTO 180		! all arms deleted
+
+C Check ftr is still a base ftr
+
+10	  IFTR = ABS(ARM(ARM_FTR,IARM))
+	  IF (FTR_PTS(1,IFTR).EQ.NIL) GOTO 20
+
+	  NARMS = NARMS+1
+
+	  IF (NARMS.GT.F1*MAXAPN) THEN
+	    SORT_AND_MERGE = ILINK__TOOMNYAPN
+	    CALL LSL_PUTMSG(SORT_AND_MERGE,MAXAPN)
+	    GOTO 190
+	  END IF
+
+	  ANG(NARMS) = ANGLE(	IARM,
+     &				%VAL(PT_START),
+     &				%VAL(NXT_START),
+     &				%VAL(PRV_START),
+     &				%VAL(NPT_START),
+     &				%VAL(FTR_PTS_START),
+     &				%VAL(FTR_NDS_START),
+     &				%VAL(ARM_START),
+     &				MAXPTS_CMN,MAXOUTFTRS_CMN,
+     &				MAXNODES_CMN,MAXARMS_CMN)
+
+	  AMP(NARMS) = IARM
+
+20	  IARM = ARM(ARM_NXT,IARM)
+	  IF (IARM.NE.NIL) GOTO 10	! more arms ?
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Ripple sort arm angles together with arm indices by arm angle
+
+	  IF (NARMS.EQ.0) GOTO 180	! no non-pt-ftr arms to sort
+
+	  DO 40 I = 2,NARMS
+	    DO 30 J = I,2,-1
+	      IF (ANG(J) .GE. ANG(J-1)) GOTO 40
+
+	      THT  = ANG(J)
+	      IARM = AMP(J)
+
+	      ANG(J) = ANG(J-1)
+	      AMP(J) = AMP(J-1)
+	      ANG(J-1) = THT
+	      AMP(J-1) = IARM
+30	    CONTINUE
+40	  CONTINUE
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Merge ftrs with equal arms angle 
+
+	  IARM = AMP(1)
+	  FTRPRV = ARM(ARM_FTR,IARM)
+	  OUTPRV = FTRPRV.GT.0
+	  FTRPRV = ABS(FTRPRV)
+	  ORIG_FTRPRV = FTR_ORIG_PR_FTR(FTRPRV)
+	  I1 = 1
+
+	  DO 140 I2 = 2,NARMS
+	    IARM = AMP(I2)
+	    IFTR = ARM(ARM_FTR,IARM)
+	    OUT = IFTR.GT.0
+	    IFTR = ABS(IFTR)
+	    ORIG_FTR = FTR_ORIG_PR_FTR(IFTR)
+
+C Only point ftrs return angle = 0
+
+	    NON_POINT_FTR = ANG(I2).NE.0D0
+
+C If non-point ftrs and the LPJOIN-process is in use then do not
+C merge ftrs [unless both one-vector...?], because equal arm angles does
+C not necessarily mean equal feature geometry. Otherwise merge ftrs
+C whenever arm angles are equal.
+
+	    ANGLES_EQUAL = ABS(ANG(I2)-ANG(I1)) .LT. 1D-8
+
+	    MERGE = .FALSE.
+
+	    IF (.NOT.ANGLES_EQUAL) THEN
+	      MERGE = .FALSE.
+
+C	    ELSEIF (NON_POINT_FTR .AND. HAD_LPJOIN) THEN
+
+	    ELSEIF (HAD_LPJOIN) THEN
+	      MERGE = .FALSE.
+	    ELSE
+	      MERGE = .TRUE.
+	    ENDIF
+
+	    IF (.NOT.MERGE) THEN
+	      I1 = I2
+	      FTRPRV = IFTR
+	      OUTPRV = OUT
+	      ORIG_FTRPRV = ORIG_FTR
+	      GOTO 140
+	    ENDIF
+
+C Do not merge ftrs which are not both unshared at present
+C (This check should be redundant - but leave it here anyway)
+
+	    IF (FTR_PTS(1,IFTR)  .EQ.NIL .OR.
+     &	        FTR_PTS(1,FTRPRV).EQ.NIL) THEN
+	      MERGE = .FALSE.
+	      GOTO 99
+	    END IF
+
+C Do not merge ftr with itself
+
+	    IF (IFTR.EQ.FTRPRV) THEN
+	      MERGE = .FALSE.
+	      GOTO 99
+	    END IF
+
+C Do not merge ftrs which do not have the same nodes at both ends
+C (This may or may not be redundant)
+
+	    SAME_DIRECTION = OUT.EQ.OUTPRV
+
+	    IF (SAME_DIRECTION) THEN
+	      MERGE = FTR_NDS(1,IFTR).EQ.FTR_NDS(1,FTRPRV) .AND.
+     &	              FTR_NDS(2,IFTR).EQ.FTR_NDS(2,FTRPRV)
+	    ELSE
+	      MERGE = FTR_NDS(1,IFTR).EQ.FTR_NDS(2,FTRPRV) .AND.
+     &	              FTR_NDS(2,IFTR).EQ.FTR_NDS(1,FTRPRV)
+	    ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+99	    CONTINUE
+
+	    IF (.NOT.MERGE) THEN
+	      I1 = I2
+	      FTRPRV = IFTR
+	      OUTPRV = OUT
+	      ORIG_FTRPRV = ORIG_FTR
+	      GOTO 140
+	    ELSE				! MERGE
+	      GOTO 199
+	    ENDIF
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C For merging
+
+199	    CONTINUE
+
+C Check the internal path between the 2 nodes
+C Assume that start and end coords are the same
+
+C Start point for each feature
+	    IPT1 = FTR_PTS(1,FTRPRV)
+	    IF (SAME_DIRECTION) THEN
+	       IPT2 = FTR_PTS(1,IFTR)		! start at first
+	    ELSE
+	       IPT2 = FTR_PTS(2,IFTR)		! start at last and go backward
+	    ENDIF
+
+	    IPT1N = NXT(IPT1)			! skip to second point
+	    IF (SAME_DIRECTION) THEN
+		IPT2N = NXT(IPT2)
+	    ELSE
+		IPT2N = PRV(IPT2)
+	    ENDIF
+
+C Skip if either point does not have a neighbour
+
+	    IF (IPT1N.EQ.NIL .OR. IPT2N.EQ.NIL) GOTO 56
+
+55 	    CONTINUE
+
+	    IPT1 = IPT1N			! set up next point as this
+	    IPT2 = IPT2N
+
+	    IPT1N = NXT(IPT1)			! get next points now
+	    IF (SAME_DIRECTION) THEN
+		IPT2N = NXT(IPT2)
+	    ELSE
+		IPT2N = PRV(IPT2)
+	    ENDIF
+
+C only test points if there are valid next points
+	    IF (IPT1N.NE.NIL .AND. IPT2N.NE.NIL) THEN
+
+		X1 = PT(1,IPT1)
+		Y1 = PT(2,IPT1)
+		X2 = PT(1,IPT2)
+		Y2 = PT(2,IPT2)
+
+	        IF (X1.EQ.X2 .AND. Y1.EQ.Y2) GOTO 55	! same coord, get next
+
+C Coords differ, report and don't merge
+C		CALL WRITEF ('*** MERGE rejected (coords differ at %F %F)'
+C    &						,X1,Y1)
+
+		IF (HAD_WARNING) CALL LSL_PUTMSG(ILINK__NOMERGE,X1,Y1)
+	    ELSE
+
+C see if this is last for both features, if so assume OK
+		IF (IPT1N.EQ.NIL .AND. IPT2N.EQ.NIL) GOTO 56
+
+C not the last point for one feature only, report and don't merge
+
+C		CALL WRITEF (
+C     &	'*** MERGE rejected (different number of points near %F %F)'
+C     &						,PT(1,IPT1),PT(2,IPT1))
+
+		IF (HAD_WARNING) 
+     &		   CALL LSL_PUTMSG(ILINK__NOTMERGE,PT(1,IPT1),PT(2,IPT1))
+	    ENDIF
+
+C Interiors are different in some respect 
+	    MERGE = .FALSE.			! turn off merging
+	    GOTO 99
+
+56	    CONTINUE
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Here if ftrs are to be merged
+
+C Create new SHR record - else return
+
+	    SORT_AND_MERGE = CREATE_SHR(SHR,MAXSHRS)
+	    IF (.NOT.SORT_AND_MERGE) GOTO 190
+
+C Decide which ftr to merge into which
+
+	    IF (LTEQGT(ORIG_FTRPRV,ORIG_FTR)) 60,70,80
+
+C Take ftr FTRPRV into ftr IFTR
+
+60	    BASE_FTR = IFTR
+	    LOST_FTR = FTRPRV
+	    AMP(I1)  = NIL
+
+	    SAME_DIRECTION = OUT.EQ.OUTPRV
+
+	    I1 = I2
+	    FTRPRV = IFTR
+	    OUTPRV = OUT
+	    ORIG_FTRPRV = ORIG_FTR
+
+	    GOTO 90
+
+C Take later-ftr into earlier
+
+70	    IF (FTR_PTS(1,IFTR) .LT. FTR_PTS(1,FTRPRV)) GOTO 60
+
+C Take ftr IFTR into ftr FTRPRV
+
+80	    BASE_FTR = FTRPRV
+	    LOST_FTR = IFTR
+	    AMP(I2)  = NIL
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Take LOST_FTR into BASE_FTR
+
+	    SAME_DIRECTION = OUT.EQ.OUTPRV
+
+90	    FTR_PTS(1,LOST_FTR) = NIL
+
+	    IF (SAME_DIRECTION) THEN
+	      FTR_PTS(2,LOST_FTR) = BASE_FTR
+	    ELSE
+	      FTR_PTS(2,LOST_FTR) = -BASE_FTR
+	    END IF
+
+C Make the new SHR record for LOST_FTR into the head of the SHR list
+C for BASE_FTR, -
+
+	    ISHR = HEADSHR(BASE_FTR)
+	    HEADSHR(BASE_FTR) = N_SHRS
+	    SHR(SHR_FTR,N_SHRS) = LOST_FTR
+
+C and connect this, or the end of the SHR-list for LOST_FTR if it has
+C one, to the original head of the list for BASE_FTR 
+
+	    JSHR = HEADSHR(LOST_FTR)
+	    IF (JSHR.EQ.NIL) THEN
+	      SHR(SHR_NXT,N_SHRS) = ISHR
+	    ELSE
+	      SHR(SHR_NXT,N_SHRS) = JSHR
+	      COUNT = 0
+100	      IF (SHR(SHR_NXT,JSHR).NE.NIL) THEN
+	        IF (COUNT.GE.MAXSHR) THEN
+		  SORT_AND_MERGE = ILINK__TOOMNYSHFTRS
+	          CALL LSL_PUTMSG(SORT_AND_MERGE,MAXSHR)
+		  GOTO 190
+	        END IF
+
+C If JSHR is in set of JSHRs before this, or if SHR(SHR_NXT,JSHR) is
+C in set of FTR indices before this, then terminate SHR list at
+C JSHRPRV and take JSHRPRV as required value for JSHR.
+C (Don't ask why. This was found to be required as a bug fix.)
+
+	        COUNT = COUNT+1
+	        SHR_SET(COUNT) = JSHR			! accumulate SHR indices
+	        FTR_SET(COUNT) = SHR(SHR_FTR,JSHR)	! and FTR indics
+	        JSHRPRV = JSHR
+	        JSHR = SHR(SHR_NXT,JSHR)
+	        IF (INSET(SHR_SET,COUNT,JSHR,I).OR.
+     &	            INSET(FTR_SET,COUNT,SHR(SHR_FTR,JSHR),I)) THEN
+	          SHR(SHR_NXT,JSHRPRV) = NIL
+	          JSHR = JSHRPRV
+	          GOTO 110
+	        END IF
+
+	        GOTO 100
+	      END IF
+110	      SHR(SHR_NXT,JSHR) = ISHR
+	    END IF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Delete arm at other end of ftr - if there is one (pt ftrs have 1 arm)
+
+	    STANOD = FTR_NDS(1,LOST_FTR)
+	    FINNOD = FTR_NDS(2,LOST_FTR)
+	    IF (STANOD.EQ.FINNOD) GOTO 140
+
+C Find node JNODE at other end of ftr LOST_FTR
+
+	    IF (STANOD.EQ.INODE) THEN
+	      JNODE = FINNOD
+	    ELSE IF (FINNOD.EQ.INODE) THEN
+	      JNODE = STANOD
+	    ELSE			! debug
+	      SORT_AND_MERGE = ILINK__INTRNLERR
+	      CALL LSL_PUTMSG(SORT_AND_MERGE,1,'SORT_AND_MERGE')
+	      GOTO 190
+	    END IF
+
+C Find arm JARM at node JNODE corresponding to the other end of this ftr
+
+	    PRVJARM = NIL
+	    JARM = HEADARM(JNODE)
+	    GOTO 130
+
+120	    PRVJARM = JARM
+	    JARM = ARM(ARM_NXT,JARM)
+
+130	    IF (JARM.EQ.NIL) THEN	! debug
+	      SORT_AND_MERGE = ILINK__INTRNLERR
+	      CALL LSL_PUTMSG(SORT_AND_MERGE,2,'SORT_AND_MERGE')
+	      GOTO 190
+	    END IF
+
+	    IF (ABS(ARM(ARM_FTR,JARM)).NE.LOST_FTR) GOTO 120
+
+C Remove this arm from the arm list for node JNODE
+
+	    IF (PRVJARM.EQ.NIL) THEN
+	      HEADARM(JNODE) = ARM(ARM_NXT,JARM)
+	    ELSE
+	      ARM(ARM_NXT,PRVJARM) = ARM(ARM_NXT,JARM)
+	    END IF
+
+140	  CONTINUE
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Re-form arms into a linked list with this new order
+
+C Find first non-merged arm
+
+	  DO 150 I = 1,NARMS
+	    IF (AMP(I).NE.NIL) GOTO 160
+150	  CONTINUE
+
+C Should always be more than 1 non-merged arm left here
+
+	  SORT_AND_MERGE = ILINK__INTRNLERR
+	  CALL LSL_PUTMSG(SORT_AND_MERGE,3,'SORT_AND_MERGE')
+	  GOTO 190
+
+C First non-merged arm is head of arn list for node INODE
+
+160	  HEADARM(INODE) = AMP(I)
+
+C String rest of non-merged arms onto arm list following HEADARM
+
+	  NARMS_LEFT = 0
+	  DO 170 J = I+1,NARMS
+	    IF (AMP(J).EQ.NIL) GOTO 170
+	    NARMS_LEFT = NARMS_LEFT+1
+	    ARM(ARM_NXT,AMP(I)) = AMP(J)
+	    I = J
+170	  CONTINUE
+
+C Terminate arm list
+
+	  ARM(ARM_NXT,AMP(I)) = NIL
+
+	  IF (NARMS_LEFT.GT.MAXAPN) THEN
+	    SORT_AND_MERGE = ILINK__TOOMNYAPN
+	    CALL LSL_PUTMSG(SORT_AND_MERGE,MAXAPN)
+	    GOTO 190
+	  END IF
+
+180	CONTINUE
+
+190	RETURN
+	END
+

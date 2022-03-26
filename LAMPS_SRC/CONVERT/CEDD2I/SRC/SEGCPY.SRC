@@ -1,0 +1,386 @@
+        LOGICAL FUNCTION SEGCPY (IDN, DIR, FIRSTIDN)
+C
+***	IDENT	06SE88
+***	MODULE	SEGCPY
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author J Barber, 7 July 1988
+C
+C This function copies SEGments in the intermediate file across 
+C    into the current main IFF file, with no merging
+C Called by MERGER for each segment for each feature
+C
+	IMPLICIT NONE
+C
+        INTEGER         IDN             ! segment ID number
+        INTEGER         DIR             !         direction
+        LOGICAL         FIRSTIDN        ! first segment for feature?
+C
+***     PARAMETER/HERE:CEDD2IMSG/
+***     COMMON/LSL$CMNIFF:IFFHAN/       ! for LPOSH
+***     COMMON/HERE:DESCR/              ! for NFADDR
+***	COMMON/HERE:PARAMS/	        ! for DIAG
+C
+C workspace
+C
+        INTEGER*2       STNUM           ! no. of ST/ZS entries
+        INTEGER*2       STCNT
+C                                       !  belonging to segment 
+        INTEGER*2       ISN
+        INTEGER*2       NPTS
+        INTEGER*2       IECODE,IELEN
+        INTEGER*2       IENDS
+        INTEGER*2       ZERO
+        INTEGER         J,I             ! loop count
+        INTEGER         LPOSEG (500)    ! ST address in SEG file
+C
+        REAL            STARRY(2,200)   ! to hold coordinates
+        REAL            ZSARRY(3,200)
+C
+        REAL            REV_STARRY(2,200)        ! reversed
+        REAL            REV_ZSARRY(3,200)        ! coordinates
+C
+        REAL            FIRSTX
+        REAL            FIRSTY
+        REAL            FIRSTZ
+C
+        LOGICAL         SEG_REVERSE     ! reversing coordinates?
+        LOGICAL         HAD_ST, HAD_ZS
+C
+C  *************************************************************
+C  assume success
+C
+        SEGCPY = .TRUE.
+        SEG_REVERSE = .FALSE.
+C
+        CALL IFFSEL (SEGLUN)            ! get segments IFF file
+C
+        IF (DIAG) CALL WRITEF ('.Searching segment IFF file for ID no.',
+     &                                                          IDN)
+C
+C  position to the beginning of the required segment
+C
+        CALL IFFPKE (IECODE, IELEN, NFADDR(IDN))
+C
+        IF (IELEN.EQ.-1) THEN
+           CALL LSL_PUTMSG (CEDD2I__NFREPOSNEOF, NFADDR(IDN), IDN)
+           CALL LSL_PUTMSG (CEDD2I__MISSEGMENT, IDN)
+           SEGCPY = .FALSE.
+           GOTO 999
+        ENDIF
+C
+        IF (IECODE.NE.'NF') THEN
+           CALL LSL_PUTMSG (CEDD2I__NFREPOSERR, IECODE, IDN)
+           CALL LSL_PUTMSG (CEDD2I__MISSEGMENT, IDN)
+           SEGCPY = .FALSE.
+           GOTO 999                     ! give up segment
+        ENDIF
+C
+        CALL EIHR (STNUM, 1, 1)         ! read FSN as no. of ST/ZS's
+C                                       !    belonging to segment 
+        CALL EIHR (ISN, 1, 2)
+C
+        STCNT = 0
+        HAD_ST = .FALSE.
+        HAD_ZS = .FALSE.
+C
+C  set flag for reversing the coordinates
+C
+        IF (DIR.EQ.REVERSE .OR. DIR.EQ.DISJOINT_REV
+     &               .OR. DIR.EQ.INSIDE_REV) SEG_REVERSE = .TRUE.
+C
+100     CALL IFFNXT (IECODE, IELEN)     ! next entry
+C
+        IF (IELEN.EQ.-1) THEN
+           CALL LSL_PUTMSG (CEDD2I__NFREPOSNEOF, NFADDR(IDN), IDN)
+           CALL LSL_PUTMSG (CEDD2I__MISSEGMENT, IDN)
+           SEGCPY = .FALSE.
+           GOTO 999
+        ENDIF
+C
+        IF (IECODE.EQ.'ST') THEN
+           STCNT = STCNT + 1
+           IF (STCNT.GT.STNUM) THEN
+              CALL LSL_PUTMSG (CEDD2I__TOOMNYSTS)
+              SEGCPY = .FALSE.
+              GOTO 999
+           ENDIF
+           IF (HAD_ZS) CALL LSL_PUTMSG (CEDD2I__STMIXZS, IDN, ISN)
+           HAD_ST = .TRUE.
+C
+C   if coordinates need reversing, store the ST/ZS address to return
+C      to them in reverse order
+C
+           IF (SEG_REVERSE) THEN
+C
+              LPOSEG (STCNT) = LPOSH         ! store address
+C
+           ELSE
+C
+              CALL EIHRS (NPTS, IENDS)       ! read no of coordinates
+C
+              CALL EIHRR (STARRY, NPTS*2, 1) ! read coordinates
+C
+C  copy it straight, setting the pen up/down flag appropriately
+C
+              ZERO = 0                       ! assume pen up
+C
+C  pen flag = "up" for everything but forward (/reverse) directions 
+C    that aren't the first ST block for the first segment referenced 
+C    by the feature
+C
+              IF (DIR.EQ.FORWARD) THEN
+                 IF (STCNT.EQ.1 .AND. FIRSTIDN) THEN
+                    ZERO = 0
+                 ELSE
+                    ZERO = 1
+                 ENDIF
+              ENDIF
+C
+              FIRSTX = STARRY (1,1)
+              FIRSTY = STARRY (2,1)
+C
+              IF (FIRSTX.EQ.ENDSTX .AND. FIRSTY.EQ.ENDSTY) THEN
+C
+                 IF (NPTS.EQ.1) GOTO 100
+C
+                 NPTS = NPTS - 1
+C
+C  if coincident points, shuffle points in block down one point
+C     overwriting the identical one
+C
+                 DO 150 J = 1,NPTS
+                    STARRY (1,J) = STARRY (1,J+1)
+                    STARRY (2,J) = STARRY (2,J+1)
+150              CONTINUE
+              ENDIF
+C
+C   store last point for comparison with first point of next ST block
+C
+              ENDSTX = STARRY (1,NPTS)
+              ENDSTY = STARRY (2,NPTS)
+C
+              CALL IFFSEL (IFFLUN)
+              CALL IFFST (STARRY, NPTS, ZERO)
+              CALL IFFSEL (SEGLUN)
+C
+           ENDIF
+C
+           GOTO 100
+C
+        ELSEIF (IECODE.EQ.'ZS') THEN
+           STCNT = STCNT + 1
+           IF (STCNT.GT.STNUM) THEN
+              CALL LSL_PUTMSG (CEDD2I__TOOMNYSTS)
+              SEGCPY = .FALSE.
+              GOTO 999
+           ENDIF
+           IF (HAD_ST) CALL LSL_PUTMSG (CEDD2I__STMIXZS, IDN, ISN)
+           HAD_ZS = .TRUE.
+C
+C   if coordinates need reversing, first reverse each ST block
+C
+           IF (SEG_REVERSE) THEN
+C
+              LPOSEG (STCNT) = LPOSH         ! store address
+C
+           ELSE
+C
+              CALL EIHRS (NPTS, IENDS)       ! read no of coordinates
+C 
+              CALL EIHRR (ZSARRY, NPTS*3, 1) ! read coordinates
+C
+C  copy it straight, setting the pen up/down flag appropriately
+C
+              ZERO = 0                       ! assume pun up
+C
+C  pen flag = "up" for everything but forward (/reverse) directions 
+C    that aren't the first ZS block for the first segment referenced 
+C    by the feature
+C
+              IF (DIR.EQ.FORWARD) THEN
+                 IF (STCNT.EQ.1 .AND. FIRSTIDN) THEN
+                    ZERO = 0
+                 ELSE
+                    ZERO = 1
+                 ENDIF
+              ENDIF
+C
+              FIRSTX = ZSARRY (1,1)
+              FIRSTY = ZSARRY (2,1)
+              FIRSTZ = ZSARRY (3,1)
+C
+C  compare first and last points
+C
+              IF (FIRSTX.EQ.ENDSTX .AND. FIRSTY.EQ.ENDSTY
+     &                             .AND. FIRSTZ.EQ.ENDSTZ) THEN
+C
+                 IF (NPTS.EQ.1) GOTO 100
+C
+                 NPTS = NPTS - 1
+C
+C  if coincident points, shuffle points in block down one point
+C     overwriting the identical one
+C
+                 DO 200 J = 1,NPTS
+                    ZSARRY (1,J) = ZSARRY (1,J+1)
+                    ZSARRY (2,J) = ZSARRY (2,J+1)
+                    ZSARRY (3,J) = ZSARRY (3,J+1)
+200              CONTINUE
+              ENDIF
+C
+C   store last point (of shrunk block) for comparison with first 
+C      point of next ST block
+C
+              ENDSTX = ZSARRY (1,NPTS)
+              ENDSTY = ZSARRY (2,NPTS)
+              ENDSTZ = ZSARRY (3,NPTS)
+C
+              CALL IFFSEL (IFFLUN)
+              CALL IFFZS (ZSARRY, NPTS, ZERO)
+              CALL IFFSEL (SEGLUN)
+C
+           ENDIF
+C
+           GOTO 100
+C
+        ELSEIF (IECODE.EQ.'EF') THEN
+           IF (STCNT.NE.STNUM) THEN 
+              CALL LSL_PUTMSG (CEDD2I__STMISSING, IDN, ISN)
+           ELSEIF (.NOT.HAD_ST .AND. .NOT.HAD_ZS) THEN
+              CALL LSL_PUTMSG (CEDD2I__STMISSING, IDN, ISN)
+              SEGCPY = .FALSE.
+           ENDIF
+C
+C  copy the coordinate segments, if they were reversed, in reverse 
+C    order
+C
+           IF (SEG_REVERSE) THEN
+C
+              DO 500 I = 1,STCNT
+C
+                 CALL IFFPKE (IECODE, IELEN, LPOSEG (STCNT-I+1))
+                 CALL EIHRS (NPTS, IENDS)
+C
+                 ZERO = 0
+C
+C  set the pen up/down flag appropriately as before, this time for 
+C     REVERSE instead of FORWARD
+C
+                 IF (DIR.EQ.REVERSE) THEN
+                    IF (I.EQ.1 .AND. FIRSTIDN) THEN
+                       ZERO = 0
+                    ELSE
+                       ZERO = 1
+                    ENDIF
+                 ENDIF
+C
+                 IF (IECODE.EQ.'ST') THEN
+                    CALL EIHRR (STARRY, NPTS*2, 1)
+C
+C  reverse the coordinates
+C
+                    DO 300 J = 1,NPTS
+                       REV_STARRY (1,J) = STARRY (1, NPTS+1-J)
+                       REV_STARRY (2,J) = STARRY (2, NPTS+1-J)
+300                 CONTINUE
+C
+                    FIRSTX = REV_STARRY (1,1)
+                    FIRSTY = REV_STARRY (2,1)
+C
+C  compare first and last points
+C
+                    IF (FIRSTX.EQ.ENDSTX .AND. FIRSTY.EQ.ENDSTY) THEN
+C
+                       IF (NPTS.EQ.1) GOTO 500
+C
+                       NPTS = NPTS - 1
+C
+C  if coincident points, shuffle points in block down one point
+C     overwriting the identical one
+C
+                       DO 350 J = 1,NPTS
+                          REV_STARRY (1,J) = REV_STARRY (1,J+1)
+                          REV_STARRY (2,J) = REV_STARRY (2,J+1)
+350                    CONTINUE
+                    ENDIF
+C
+C   store last point (of shrunk block) for comparison with first 
+C      point of next ST block
+C
+                    ENDSTX = REV_STARRY (1,NPTS)
+                    ENDSTY = REV_STARRY (2,NPTS)
+C
+                    CALL IFFSEL (IFFLUN)
+                    CALL IFFST (REV_STARRY, NPTS, ZERO)
+C
+                 ELSEIF (IECODE.EQ.'ZS') THEN
+                    CALL EIHRR (ZSARRY, NPTS*3, 1)
+C
+C  reverse the coordinates
+C
+                    DO 400 J = 1,NPTS
+                       REV_ZSARRY (1,J) = ZSARRY (1, NPTS+1-J)
+                       REV_ZSARRY (2,J) = ZSARRY (2, NPTS+1-J)
+                       REV_ZSARRY (3,J) = ZSARRY (3, NPTS+1-J)
+400                 CONTINUE
+C
+C  compare first and last points as for non-reversed coordinates
+C
+                    FIRSTX = REV_ZSARRY (1,1)
+                    FIRSTY = REV_ZSARRY (2,1)
+                    FIRSTZ = REV_ZSARRY (3,1)
+C
+C  compare first and last points
+C
+                    IF (FIRSTX.EQ.ENDSTX .AND. FIRSTY.EQ.ENDSTY
+     &                             .AND. FIRSTZ.EQ.ENDSTZ) THEN
+C
+                       IF (NPTS.EQ.1) GOTO 500
+C
+                       NPTS = NPTS - 1
+C
+C  if coincident points, shuffle points in block down one point
+C     overwriting the identical one
+C
+                       DO 450 J = 1,NPTS
+                          REV_ZSARRY (1,J) = REV_ZSARRY (1,J+1)
+                          REV_ZSARRY (2,J) = REV_ZSARRY (2,J+1)
+                          REV_ZSARRY (3,J) = REV_ZSARRY (3,J+1)
+450                    CONTINUE
+                    ENDIF
+C
+C   store last point (of shrunk block) for comparison with first 
+C      point of next ST block
+C
+                    ENDSTX = REV_ZSARRY (1,NPTS)
+                    ENDSTY = REV_ZSARRY (2,NPTS)
+                    ENDSTZ = REV_ZSARRY (3,NPTS)
+C
+                    CALL IFFSEL (IFFLUN)
+                    CALL IFFZS (REV_ZSARRY, NPTS, ZERO)
+                 ENDIF
+                 CALL IFFSEL (SEGLUN)
+C
+500           CONTINUE
+C
+           ENDIF
+C
+           GOTO 999                     ! segment finished
+        ELSE
+C
+C  unexpected entry
+C
+           CALL LSL_PUTMSG (CEDD2I__STREPOSERR, IECODE, ISN)
+           GOTO 100
+        ENDIF
+C
+999     IF (DIAG) CALL WRITEF ('.Coordinates for segment %N copied    
+     & (from ISN no. %^W%N)',                              IDN, ISN)
+C
+        CALL IFFSEL (FEALUN)            ! back to feature file
+C
+        RETURN
+        END
+C

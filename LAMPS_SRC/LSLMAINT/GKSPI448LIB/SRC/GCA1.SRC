@@ -1,0 +1,416 @@
+C
+C Cell array functions
+C ====================
+C
+C *********************************************************************
+C
+C	PIXEL IMAGE PRIMITIVE
+C	=====================
+C
+C
+	SUBROUTINE	LSG_PIXEL_ARRAY(
+     &		PX,PY,NX,NY,VX1,VX2,VY1,VY2,SCX,SCY,PXARR)
+C
+**	MODULE	LSG_PIXEL_ARRAY
+**	IDENT	01AP92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+	IMPLICIT NONE
+C
+***	COMMON/GFABUF/
+C
+C Arguments:
+C
+	REAL	PX			! X coord (w.c.)
+	REAL	PY			! Y coord
+	INTEGER	NX,NY			! size of array, and direction
+	INTEGER	VX1,VX2,VY1,VY2		! portion of array
+	INTEGER	SCX,SCY			! scale factors
+	BYTE	PXARR(*)		! array of pixels
+C
+C
+C Functions
+	LOGICAL	GKS_INIT_FILL_MEM
+C
+C first time through, get the memory
+	IF (MEMORY_FAIL) GOTO 999
+C
+	IF (GFAMAX .EQ.0) THEN
+	   MEMORY_FAIL = GKS_INIT_FILL_MEM()
+	   IF (MEMORY_FAIL) GOTO 999
+	ENDIF	      
+C
+C call the actual routine to do the work, passing it a byte buffer to
+C use
+C
+	CALL LSG_PIXEL_ARRAY_SUB(
+     &		PX,PY,NX,NY,VX1,VX2,VY1,VY2,SCX,SCY,PXARR,
+     &	        BMAX,%VAL(B_ADDR))
+C
+999	RETURN
+	END
+C
+C ****************************************************************************
+C
+	SUBROUTINE	LSG_PIXEL_ARRAY_SUB(
+     &		PX,PY,NX,NY,VX1,VX2,VY1,VY2,SCX,SCY,PXARR,BMAX,B)
+C
+**	MODULE	LSG_PIXEL_ARRAY_SUB
+**	IDENT	25FE92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	REAL	PX			! X coord (w.c.)
+	REAL	PY			! Y coord
+	INTEGER	NX,NY			! size of array, and direction
+	INTEGER	VX1,VX2,VY1,VY2		! portion of array
+	INTEGER	SCX,SCY			! scale factors
+	BYTE	PXARR(*)		! array of pixels
+	INTEGER	BMAX			! size of workspace
+	INTEGER	B(BMAX)			! workspace
+C
+C Workspace
+	REAL	DX,DY			! device coordinate
+	REAL	SX,SY			! size
+	INTEGER	REPX,REPY		! replication factors
+	INTEGER	START
+	INTEGER	TEMP
+	INTEGER	NCOLS,NROWS,COLS
+	INTEGER	XSHIFT,YSHIFT
+	INTEGER	XSTEP,YSTEP
+	INTEGER	PIND,XIND,YIND
+	INTEGER	I,J,K
+	INTEGER*4	PIXL
+	BYTE		PIXB
+	EQUIVALENCE	(PIXL,PIXB)
+	INTEGER		P(2),Q(2),R(2)
+C
+	GKSERR	= 0			! no error (yet!)
+C
+C check arguments
+	IF (NX.EQ.0.OR.NY.EQ.0) GOTO 200
+	IF (VX1.LT.1.OR.VX2.GT.ABS(NX).OR.VX1.GT.VX2) GOTO 200
+	IF (VY1.LT.1.OR.VY2.GT.ABS(NY).OR.VY1.GT.VY2) GOTO 200
+	IF (SCX.LE.0.OR.SCY.LE.0) GOTO 200
+C
+C is this workstation active? - if not ignore it
+	IF (.NOT.WSACT) GOTO 200
+C
+C ensure that our transformation is up to date
+	IF (UPTRN) CALL GUPTRN		! update it
+C
+C is everything clipped (ie nothing visible)
+	IF (CLPALL) GOTO 200
+C
+	NCOLS = VX2-VX1+1
+	NROWS = VY2-VY1+1
+	XSTEP = SIGN(1,NX)
+	YSTEP = SIGN(NX,NY)
+	REPX = SCX
+	REPY = SCY
+	START = VX1 + (VY1-1)*ABS(NX)
+	XSHIFT = 0
+	IF (NX.LT.0) THEN
+	   START = START+NCOLS-1
+	   XSHIFT = 1-NCOLS*REPX
+	ENDIF
+	YSHIFT = 0
+	IF (NY.LT.0) THEN
+	   START = START+ABS(NX)*(NROWS-1)
+	   YSHIFT = 1-NROWS*REPY
+	ENDIF
+C
+	IF (PIXROT) THEN
+	   START = START+(NROWS-1)*YSTEP
+	   TEMP = NCOLS
+	   NCOLS = NROWS
+	   NROWS = TEMP
+	   TEMP = REPX
+	   REPX = REPY
+	   REPY = TEMP
+	   TEMP = XSTEP
+	   XSTEP = -YSTEP
+	   YSTEP = TEMP
+	   TEMP = XSHIFT
+	   XSHIFT = -YSHIFT-NCOLS*REPX+1
+	   YSHIFT = TEMP
+	ENDIF
+C
+C make sure that we can fit at least a row of data
+	IF (NROWS.GT.BMAX) THEN
+	   CALL TTWSTR('LSG_PIXEL_ARRAY - pixel buffer too small')
+	   CALL TTWSTR('Increase logical name LSL$FILL_POINTSMAX')
+	   GOTO 200
+	ENDIF
+C
+C work out size of pixels
+	SX = DCMAXX/RASTX
+	SY = DCMAXY/RASTY
+C
+C Convert world position to device coordinate
+	CALL GKSW2D(1,PX,PY,DX,DY)
+C
+C and shift to obtain bottom left of array
+	DX = DX+(XSHIFT-0.5)*SX
+	DY = DY+(YSHIFT-0.5)*SY
+C
+	XIND = START
+	COLS = 0
+	PIND = 1
+	DO 20 J=1,NCOLS
+	   YIND = 0
+	   COLS = COLS+1
+	   DO 10 I=1,NROWS
+	      PIXL = 0
+	      PIXB = PXARR(XIND+YIND)
+	      IF (POFF.NE.0) PIXL = ISHFT(PIXL,POFF)	! apply offset
+	      B(PIND) = PIXL.AND.PSEL.AND.'FF'X		! apply mask
+	      PIND = PIND+1
+	      YIND = YIND+YSTEP
+10	   CONTINUE
+C
+C Check if array is full - if so output it
+	   IF (J.EQ.NCOLS.OR.BMAX-PIND.LT.NROWS) THEN
+C
+C add small amount to pixel size so that whole array is
+C RASEXP steps (1 step = 1/800 cm) bigger, to try to avoid
+C leving small gaps between adjacent RASFILs.
+	      P(1) = DX*FAC
+	      P(2) = DY*FAC
+	      R(1) = P(1)
+	      R(2) = P(2)+(NROWS*REPY*SY+RASEXP/80000)*FAC
+	      Q(1) = R(1)+(COLS*REPX*SX+RASEXP/80000)*FAC
+	      Q(2) = R(2)
+	      CALL CDCARR(P,Q,R,NROWS,COLS,B)
+	      DY = DY+COLS*REPY*SY	! y coord of bottom left
+	      COLS = 0
+	      PIND = 1
+	   ENDIF
+	   XIND = XIND+XSTEP
+20	CONTINUE
+C
+200	RETURN
+	END
+C
+	SUBROUTINE	LSG_FILL_RECTANGLE(PX,PY)
+C
+**	MODULE	LSG_FILL_RECTANGLE
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	REAL	PX(2)			! X coords
+	REAL	PY(2)			! Y coords
+C
+C Workspace
+	REAL	X(4),Y(4)
+	INTEGER	NCOLI
+C
+	GKSERR	= 0			! no error (yet!)
+C
+C let GFA deal with it
+	X(1) = PX(1)
+	Y(1) = PY(1)
+	X(3) = PX(2)
+	Y(3) = PY(2)
+	X(2) = X(1)
+	Y(2) = Y(3)
+	X(4) = X(3)
+	Y(4) = Y(1)
+	CALL GFA(4,X,Y)
+C
+	RETURN
+	END
+C
+	SUBROUTINE	LSG_PLANE_SELECT(WKID,MASK)
+C
+**	MODULE	LSG_PLANE_SELECT
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Set plane selection mask
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	BYTE	MASK			! plane selection mask
+C
+C workspace
+	INTEGER	NLEV
+C
+	PSEL = MASK
+C
+	IF (.NOT.HADESC.AND.WTYPES.NE.1000) THEN
+	   IF (PSEL) THEN			! bottom plane selected
+	      NLEV = 0			! so use background level
+	   ELSE
+	      NLEV = 0
+	      IF (OPAQUE) NLEV = 1	! else use overlay level
+	   ENDIF
+C
+	   IF (NLEV.NE.CLEV) THEN
+	      CLEV = NLEV
+	      IF (NLEV.EQ.1) THEN
+	         CALL CSDRMD(23)	! 4 colour replace mode
+	      ELSE
+	         CALL CSDRMD(7)		! drawing mode OR
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	UPLIN = .TRUE.			! need to update line attributes
+	UPFA = .TRUE.			! and areas
+	RETURN
+	END
+C
+	SUBROUTINE	LSG_PLANE_OFFSET(WKID,OFFSET)
+C
+**	MODULE	LSG_PLANE_OFFSET
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Specify bit offset (shift) for writing index
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	INTEGER	OFFSET			! plane offset
+C
+	POFF = OFFSET
+	UPLIN = .TRUE.			! need to update line attributes
+	UPFA = .TRUE.			! and areas
+	RETURN
+	END
+C
+	SUBROUTINE	LSG_ROTATION_MODE(WKID,ROT)
+C
+**	MODULE	LSG_ROTATION_MODE
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Set rotation mode for pixel arrays
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	INTEGER		WKID			! unused
+	LOGICAL*1	ROT			! rotate?
+C
+	PIXROT = ROT
+	RETURN
+	END
+C
+	SUBROUTINE	LSG_PLANE_VISIBLE(WKID,MASK)
+C
+**	MODULE	LSG_PLANE_VISIBLE
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Set plane visibility mask
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GKSESL/
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	BYTE	MASK			! visibility mask
+C
+C do nothing
+	PVIS = MASK
+C
+	RETURN
+	END
+C
+	SUBROUTINE	LSG_ZOOM_IMAGE(WKID,PX,PY,ZF)
+C
+**	MODULE	LSG_ZOOM_IMAGE
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Zoom image
+C
+	IMPLICIT NONE
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	REAL	PX,PY			! position (w.c.)
+	INTEGER	ZF			! zoom factor
+C
+	RETURN
+	END
+C
+	SUBROUTINE	LSG_SET_CURSOR(WKID,PX,PY,ON)
+C
+**	MODULE	LSG_SET_CURSOR
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Set cursor position and visibility
+C
+	IMPLICIT NONE
+C
+C Arguments:
+C
+	INTEGER	WKID			! unused
+	REAL	PX,PY			! position (w.c.)
+	LOGICAL*1	ON		! visible?
+C
+	RETURN
+	END

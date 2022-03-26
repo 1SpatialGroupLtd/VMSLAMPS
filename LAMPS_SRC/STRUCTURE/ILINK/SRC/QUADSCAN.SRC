@@ -1,0 +1,306 @@
+	INTEGER*4 FUNCTION QUADSCAN(
+     &		USER_ROUTINE,
+     &		MAX_PTS,PT,N_PTS,XMIN,XMAX,YMIN,YMAX,
+     &		LINKED_LIST,MAX_NEXT,NEXT_PT,TOUCH_TOL,
+     &		N_LINES,LINE_ENDS,LINE_FC,POINT_STRINGS,
+     &		CHECK_FCS,CHECK,MAX_FCS,SELF_CHECK,
+     &		MAX_SECS,SEC,SHOW_PROGRESS)
+
+***	IDENT	18AU89
+***	MODULE	QUADSCAN
+
+C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
+
+C	Created   : ACM					    Jan 1986
+CMOD795 Remove QUADSCANMSG.PAR			      JB 17-Aug-1989
+
+	IMPLICIT NONE
+
+***	COMMON/CMN:QUADCMN/
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+C Data in, out, in/out and workspace
+	INTEGER*4	USER_ROUTINE	! (in) user routine
+	INTEGER*4	MAX_PTS		! (in) 'pt' dimension
+	REAL*4		PT(2,MAX_PTS)	! (i/o) points to be processed
+	INTEGER*4	N_PTS		! (i/o) num of points in 'pt'
+	REAL*4		XMIN,XMAX	! (in) 'pt' x-coordinate range
+	REAL*4		YMIN,YMAX	! (in) 'pt' y-coordinate range
+	LOGICAL*4	LINKED_LIST	! (in) 'pt' linked-list/contig?
+	INTEGER*4	MAX_NEXT	! (in) 'next_pt' dimension
+	INTEGER*4	NEXT_PT(MAX_NEXT)! (i/o) 'pt' linked-list ptrs
+	REAL*4		TOUCH_TOL	! (in) touch tolerance
+	INTEGER*4	N_LINES		! (in) num of lines in 'line'
+	INTEGER*4	LINE_ENDS(2,N_LINES)	! (i/o) sta/end pt inds
+	INTEGER*2	LINE_FC(N_LINES)	! (in) line feature code
+	LOGICAL*4	POINT_STRINGS	! (in) point_strings or vectors?
+	LOGICAL*4	CHECK_FCS	! (in) use feature code check?
+	INTEGER*4	MAX_FCS		! (in) 'check' dimension.
+	LOGICAL*1	CHECK(MAX_FCS,MAX_FCS)	! (in) check which ftrs?
+	LOGICAL*4	SELF_CHECK	! (in) check parts of same ftr?
+	INTEGER*4	MAX_SECS	! (in) 'workspace' dimension
+	INTEGER*4	SEC(3,MAX_SECS,4)	! (workspace)
+	LOGICAL*4	SHOW_PROGRESS	! (in) show % progress?
+
+C Workspace
+	REAL*4		PCENT,LPCENT	! for showing % image processed
+	REAL*4		MIN_RANGE	! min coord range
+	REAL*4		LXMIN,LXMAX	! local copies
+	REAL*4		LYMIN,LYMAX	! local copies
+	INTEGER*4	IPTSTA,IPTFIN
+	INTEGER*4	I,J,K		! misc. integers
+	INTEGER*4	NPOINTS		! No. of pts in a box
+	INTEGER*4	ISEC		! sec index
+	INTEGER*4	ILINE		! line index
+	INTEGER*4	MAX_DEP		! max depth of box subdivision
+	INTEGER*4	IX,IY		! current box index coords
+	LOGICAL*4	LOOP		! is line a closed loop?
+
+C Functions
+	INTEGER*4	DILLPTBX
+	INTEGER*4	DILLVEBX
+	INTEGER*4	DIARPTBX
+	INTEGER*4	DIARVEBX
+	INTEGER*4	PRLLPTBX
+	INTEGER*4	PRLLVEBX
+	INTEGER*4	PRARPTBX
+	INTEGER*4	PRARVEBX
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	QUADSCAN uses a quadtree based technique (outlined
+C	below) to select from a set of N (two dimensional) points each
+C	pair of points which are within a given small distance
+C	(relative to the maximum overall coordinate range), in a time
+C	which is proportional to N, rather than to N squared (as would
+C	be the case if every point was checked for proximity with every
+C	other). Each pair of points selected is passed on to a user
+C	provided routine for processing. 
+C
+C	The speed advantage over simple order N squared processing is
+C	approx:
+C
+C	N	  :     50       100       1000      10000      100000
+C	advantage :    0.5       1.0         50        500        5000
+C
+C	QUADSCAN works by dividing the original point set bounding
+C	rectangular box into four quarters, each overlapping by the
+C	given point separation tolerance. Each quarter box is then
+C	divided in exactly the same way. This process of recursive
+C	subdivision continues untill a box contains less than a given
+C	number of points. The box is then processed (i_.e_. every point
+C	is checked for proximity with every other and pairs within the
+C	sepcified tolerance are passed through to the user routine for
+C	processing) and the scan moves on to the next box. 
+C
+C	The user routine must have the form:
+C
+C	INTEGER FUNCTION userprocess(ilin,jlin,ipt,jpt)
+C
+C	in -  long	ilin		line index for point IPT
+C	in -  long	jlin		line index for point JPT
+C	in -  long	ipt		'pt' index for some point
+C	in -  long	jpt		'pt' index for some other point
+C
+C	It must return SS$_NORMAL for success and and some other
+C	condition code on failure. 
+C
+C	This routine may also communicate with routines outside QUADSCAN
+C	via common blocks. 
+C
+C	See COORDLIB USER_REFERENCE manual for further details.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	QUADSCAN = SS$_NORMAL		! assume success
+
+C Set up local touch-tolerance and its square
+
+	TCHTOL = MAX(TOUCH_TOL,MAX(XMAX-XMIN,YMAX-YMIN)/0.5E6)
+	TOLSQ = TCHTOL**2
+
+C Set up path sections in box 1 at level 0
+
+	N_SECS = 0
+	DO 10 ILINE = 1,N_LINES
+	  IF (LINE_ENDS(1,ILINE).EQ.NIL) GOTO 10	! deleted line?
+	  N_SECS = N_SECS+1
+	  IF (N_SECS.GT.MAX_SECS) THEN
+	    CALL WRITEF
+     &   ('*** Error - insufficient line section workspace in QUADSCAN')
+	    QUADSCAN = SS$_ABORT
+	    GOTO 80					! return
+	  END IF
+	  SEC(SEC_STA,N_SECS,1) = LINE_ENDS(1,ILINE)	! sta of 1st vec
+	  SEC(SEC_FIN,N_SECS,1) = LINE_ENDS(2,ILINE)	! end of lastvec
+	  SEC(SEC_LIN,N_SECS,1) = ILINE			! line index
+10	CONTINUE
+
+C Make vector linked-list closed-loops have start pt index = fin pt indx
+
+	IF (LINKED_LIST.AND..NOT.POINT_STRINGS) THEN
+	  DO 20 ISEC = 1,N_SECS
+	    IPTSTA = SEC(SEC_STA,ISEC,1)
+	    IPTFIN = SEC(SEC_FIN,ISEC,1)
+	    LOOP = NEXT_PT(IPTFIN).EQ.IPTSTA
+	    IF (LOOP) SEC(SEC_FIN,ISEC,1) = IPTSTA
+20	  CONTINUE
+	END IF
+
+	DO 30 I = 1,4
+	  NPTS(I,0) = 0				! zero pt and sec counts
+	  NSECS(I,0) = 0
+	  SECSTA(I,0) = 1			! all secs start at 1
+30	CONTINUE
+
+	NPTS(1,0) = N_PTS			! all pts in this box
+	NSECS(1,0) = N_SECS			! all secs in this box
+
+C Find dimensions of outer box
+
+C but first ensure that widths will be non zero
+
+	LXMAX = XMAX
+	LXMIN = XMIN
+	LYMAX = YMAX
+	LYMIN = YMIN
+
+	IF (XMAX.LE.XMIN+1) THEN
+	  LXMAX = XMAX+1
+	  LXMIN = XMIN-1
+	END IF
+	IF (YMAX.LE.YMIN+1) THEN
+	  LYMAX = YMAX+1
+	  LYMIN = YMIN-1
+	END IF
+
+	BOXWID(1,0) = LXMAX-LXMIN
+	BOXWID(2,0) = LYMAX-LYMIN
+
+C Find lower-left corner of this box
+
+	LL(1,0) = LXMIN
+	LL(2,0) = LYMIN
+
+C Find the maximum depth to which it is safe to subdivide without
+C creating boxes with a dimension smaller than TCHTOL before they
+C have been surrounded by an overlap of depth tchtol/2
+
+	IF (TCHTOL.LT.1E-5) THEN
+	  MAX_DEP = MAX_MAX_DEP
+	ELSE
+	  MIN_RANGE = MIN(BOXWID(1,0),BOXWID(2,0))
+	  MAX_DEP = LOG(MIN_RANGE/TCHTOL)/LOG(2.0)
+	  MAX_DEP = MAX(1,MIN(MAX_DEP,MAX_MAX_DEP))
+	END IF
+
+C Set dimensions of subsequent box subdivisions to be used
+
+	DO 40 I = 1,MAX_DEP
+	  BOXWID(1,I) = BOXWID(1,I-1)/2
+	  BOXWID(2,I) = BOXWID(2,I-1)/2
+40	CONTINUE
+
+	PCENT = 0			! zero % of area processed
+	LPCENT = 0
+	IF (SHOW_PROGRESS) WRITE(*,'(1X,F6.1''%'')') PCENT
+
+	DEP = 0
+
+C This is the loop start point for the depth-first 4-tree scan
+
+50	IBOX(DEP) = 0
+
+60	IBOX(DEP) = IBOX(DEP)+1		! boxes are numbered 1 to 4
+	IF (IBOX(DEP).GT.4) THEN	! if no more boxes at this depth
+	  DEP = DEP-1			! pop box depth,
+	  IF (DEP.GT.0) GOTO 60		! until stack empty
+	  GOTO 80			! return
+	END IF
+
+	NBOX = IBOX(DEP)
+	NPOINTS = NPTS(NBOX,DEP)	! No. of pts/vecs in box
+	IF (NPOINTS.LT.2) GOTO 70	! move straight on to next box
+
+C Find next box lower left corner
+
+	IF (DEP.NE.0) THEN
+	  IX = (NBOX-1)/2
+	  IY = (NBOX-1)-2*IX
+	  LL(1,DEP) = LL(1,DEP-1)+IX*BOXWID(1,DEP)
+	  LL(2,DEP) = LL(2,DEP-1)+IY*BOXWID(2,DEP)
+	END IF
+
+	IF ((NPOINTS.GT.SMALLNUM).AND.(DEP.LT.MAX_DEP)) THEN
+
+C Subdivide into 4 boxes
+
+	  IF (POINT_STRINGS) THEN
+	    IF (LINKED_LIST) THEN
+	      QUADSCAN
+     &	      = DILLPTBX(PT,N_PTS,MAX_PTS,NEXT_PT,MAX_NEXT,SEC,MAX_SECS)
+	    ELSE
+	      QUADSCAN
+     &	      = DIARPTBX(PT,N_PTS,MAX_PTS,SEC,MAX_SECS)
+	    END IF
+	  ELSE
+	    IF (LINKED_LIST) THEN
+	      QUADSCAN
+     &	      = DILLVEBX(PT,N_PTS,MAX_PTS,NEXT_PT,MAX_NEXT,SEC,MAX_SECS)
+	    ELSE
+	      QUADSCAN
+     &	      = DIARVEBX(PT,N_PTS,MAX_PTS,SEC,MAX_SECS)
+	    END IF
+	  END IF
+	  IF (QUADSCAN.NE.SS$_NORMAL) GOTO 80	! return
+	  DEP = DEP+1			! push box depth
+	  GOTO 50			! start over at new depth
+	ELSE
+
+C Process this box then move on through tree to next box
+
+	  IF (POINT_STRINGS) THEN
+	    IF (LINKED_LIST) THEN
+	      QUADSCAN = PRLLPTBX(
+     &		USER_ROUTINE,PT,NEXT_PT,MAX_PTS,MAX_NEXT,
+     &		LINE_FC,N_LINES,SEC,MAX_SECS,
+     &		CHECK,MAX_FCS,CHECK_FCS,SELF_CHECK)
+	    ELSE
+	      QUADSCAN = PRARPTBX(
+     &		USER_ROUTINE,PT,MAX_PTS,
+     &		LINE_FC,N_LINES,SEC,MAX_SECS,
+     &		CHECK,MAX_FCS,CHECK_FCS,SELF_CHECK)
+	    END IF
+	  ELSE
+	    IF (LINKED_LIST) THEN
+	      QUADSCAN = PRLLVEBX(
+     &		USER_ROUTINE,NEXT_PT,MAX_NEXT,
+     &		LINE_FC,N_LINES,SEC,MAX_SECS,
+     &		CHECK,MAX_FCS,CHECK_FCS,SELF_CHECK)
+	    ELSE
+	      QUADSCAN = PRARVEBX(
+     &		USER_ROUTINE,
+     &		LINE_FC,N_LINES,SEC,MAX_SECS,
+     &		CHECK,MAX_FCS,CHECK_FCS,SELF_CHECK)
+	    END IF
+	  END IF
+	  IF (QUADSCAN.NE.SS$_NORMAL) GOTO 80	! return
+	END IF
+
+C Show percentage of area processed so far
+
+70	IF (SHOW_PROGRESS.AND.DEP.GE.0) THEN
+	  PCENT = PCENT+100.0/4**DEP
+	  IF (PCENT-LPCENT.GE.0.1) THEN	! don't WRITE too often
+	    WRITE(*,'(1H+,F6.1)') PCENT
+	    LPCENT = PCENT
+	  END IF
+	END IF
+
+	IF (DEP.GT.0) GOTO 60		! move on to next box
+
+80	RETURN
+	END
+

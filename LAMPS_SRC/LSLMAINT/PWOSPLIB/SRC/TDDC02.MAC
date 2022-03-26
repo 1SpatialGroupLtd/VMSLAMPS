@@ -1,0 +1,187 @@
+	.TITLE	TDDC
+	.IDENT	/06DE83/
+	.ENABL LC
+ 
+ 
+; Copyright Laser Scan Laboratories Ltd., Cambridge, England
+; Author Clarke Brunt from originals by Susan Manning
+;  from originals by R.Fairbairns
+ 
+; Dot/dash/chain generation interface for Tektronix 4014, etc., display
+ 
+; Assemble with
+;	THKPAR (for spot size MSEP)
+;	TKDDCP (for fortran interface, etc)
+;	TKHD02 (header)
+;	TKWS02 (for $DIVRF)
+;	TKVW02 (for FLAGW etc.)
+ 
+ 
+; entry CHAIN(N)
+ 
+; set pattern dash=8N spots, gap=4N spots, dot=4 spots
+ 
+CHAIN::	MOV	#4,R4		; dot fixed
+	BR	DTCH
+ 
+; entry DOTTED(N)
+ 
+; set pattern dash=gap=8N spots (no 'dot')
+ 
+DOTTED:: CLR	R4		; no dot
+ 
+; DOTTED and CHAIN - convert to DASHED-like parameters
+DTCH:	JSR	PC, FTNFPU
+	TST	$DIVRF		; are we in refresh?
+	BEQ	1$		; no, so we can carry on
+	RTS	PC		; in refresh, don't do any more
+
+1$:	LDCIF	R4, F2
+	MOV	@(R5)+, R0	; get arg and get into range
+	BIC	#177770, R0
+	BEQ	$PTNOF		; value zero - switch pattern off
+	LDCIF	R0, F1		; pattern value to float for dash
+	MULF	MSEP, F1	; convert to centimetres on screen
+	STF	F1, F0		; copy for gap
+	MULF	#^F8.0, F1	; convert to
+	MULF	#^F4.0, F0	; correct sizes
+	MULF	MSEP, F2	; convert dot
+	BR	SETLST		; go to set line style on
+
+; cancel pattern
+$PTNOF:: TSTB	PTNON		; pattern in fact now on?
+	BEQ	1$		; if EQ, no
+	JSR	PC, $MOVB0	; flush out backlog
+	BIC	#IFTHK!THKD, FLAGW	; restore 'thick line' diversion
+	CLRB	PTNON		; pattern no longer on
+1$:	RTS	PC
+
+
+; entry DASHED(N,D,D1,D2)
+
+DASHED:: JSR	PC, FTNFPU
+	TST	$DIVRF		; are we in refresh?
+	BEQ	10$		; no, so we can carry on
+	RTS	PC		; in refresh, don't do any more
+	
+10$:	MOV	@(R5)+, R0	; N
+	BEQ	$PTNOF		; N=0 - set pattern off
+	BPL	1$
+	NEG	R0		; absolute value R0
+1$:	LDF	@(R5)+, F0	; pattern size (D)
+	LDF	@(R5)+, F1	; major on (D1)
+	CMP	R0, #1		; is it code 1 (dashed, rather than chain)
+	BNE	2$		; if NE, no
+	CLRF	F2		; suppress minor on
+	BR	3$
+2$:	LDF	@(R5)+, F2	; chain-type - minor on (D2)
+3$:	SUBF	F1, F0		; take major on from pattern
+	SUBF	F2, F0		;  and minor on
+	CFCC			; (leaving allowance for gap)
+	BLE	$PTNOF		; none! - switch pattern off
+	MULF	#^F0.5, F0	; divide gap into two constituents
+; and fall through to set line style on
+
+; set line style on
+SETLST:	CLR	R0
+
+; set pattern on
+;  F0=gap
+;  F1=major on
+;  F2=minor on
+;  R0=0 => 'line style'
+;    =1 => 'scrub'
+
+$SETPTN:: MOV	R0, -(SP)	; preserve pattern type
+	STF	F2, -(SP)	; preserve registers
+	STF	F0, -(SP)	; (NB order, for later)
+	STF	F1, -(SP)
+	JSR	PC, $MOVB0	; tidy every outstanding performance
+	TSTB	PTNON		; pattern already on?
+	BNE	1$		; if NE, yes
+	BIS	#IFTHK!THKD, FLAGW	; enable thick diversion
+	DECB	PTNON		; pattern now deemed 'on'
+1$:	MOV	#6, R0
+	MOV	#DDCMAJ, R1
+	MOV	#DREPCT, R2
+2$:	MOV	(SP)+, (R1)+	; copy pattern values to common block
+	CLR	(R2)+		; clear pattern parameters
+	SOB	R0, 2$
+	MOV	(SP)+, PTNTYP	; copy pattern type
+
+	CLR	DDCPTR		; no buffered points yet
+	CLRF	DDCRES		; no residue yet
+	MOV	#4, DDCSTG	; stage 4 forces major on first
+	CLR	DREPOS		; don't repeat
+	JSR	PC, $MOVB0	; get to start of line
+	RTS	PC
+
+
+; entry to buffer one point
+
+; input:
+;  R0 	 =0 => invisible
+;     non-0 => visible
+;  F1, F3 hold (X, Y) of endpoint of move
+
+T.DDC::	TST	R0
+	BEQ	INVIS
+
+; visible - buffer
+	INC	DDCPTR		; up pointer
+2$:	MOV	DDCPTR, R0	; get index
+	ASH	#2, R0		; to d2 for floating point operands
+	STF	F1, DDCX(R0)	; preserve in buffer
+	STF	F3, DDCY(R0)
+	CMP	R0, #9.*4	; filled buffer?
+	BLT	1$		; no
+	CLR	R1		; (not calling because of move)
+	JSR	PC, CALGEN	; call generator, and
+	BR	2$		; back again to buffer this point again at start
+
+; return, having buffered point
+; to caller of $LINTO etc.
+1$:	STF	F1, TKRUX	; save endpoint, for benefit
+	STF	F3, TKRUY	;  of later move/line BY
+; (NB not done in this module for invisible route, as we return
+;  to our caller, TKBS, which does it for us)
+
+	RTS	PC
+
+; invisible
+INVIS:	MOVB	#-1, R1		; (calling because of move)
+	JSR	PC, CALGEN	; call generator
+	STF	F1, DDCX	; put this endpoint into buffer
+	STF	F3, DDCY	;  as start of next sequence
+	CLR	R0		; restore 'invisible' marker
+	JMP	NOTHK		; back to TKBS to generate invisible move)
+
+
+; call, from the above, to the generator
+
+; preserves F1, F3, fpp status
+
+CALGEN:	STF	F1, -(SP)
+	STF	F3, -(SP)
+	STFPS	-(SP)
+	CLR	-(SP)		; prepare for fortran call
+	MOV	SP, R5
+	BIC	#IFTHK, FLAGW	; suppress thick line diversion
+	INC	DDCPTR		; convert to FORTRAN index
+	MOVB	R1, MOVFLS	; remember whether call because of move
+	JSR	PC, TKDDCG	; generate dot, dash, or chain lines
+	BIS	#IFTHK!THKD, FLAGW	; restore thick line diversion
+	TST	(SP)+		; clear FORTRAN call parameter from stack
+	LDFPS	(SP)+		; restore FPP
+	LDF	(SP)+, F3
+	LDF	(SP)+, F1
+	CLR	DDCPTR		; now nothing significant in buffer
+	RTS	PC
+
+; divert to call user-supplied pattern substitution routine
+TKSBST:: JMP	@SUBRTN		; destination supplied by call to DSUBST
+				; (default SUBSTT if no routine given
+				; in DSUBST call)
+
+	.END
+

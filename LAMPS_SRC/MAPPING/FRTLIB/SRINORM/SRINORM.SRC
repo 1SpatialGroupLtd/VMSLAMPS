@@ -1,0 +1,651 @@
+
+	PROGRAM SRINORM
+C
+***	MODULE	SRINORM
+***	IDENT	07MY92
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C Author Paul Hardy
+C
+C Created						PGH 22-Sep-1983
+C
+CMOD1110 Bug fix, /WIDTH with no arguments behaved oddly, now checks
+C	 that DCL_INT Did read a number before setting wid_inc
+C							 SG  7-may-1992
+C
+CMOD	 Converted to use CBs, and to truncate CB
+C	 entries to contain only X and Y		RWR  3-Apr-1990
+C
+CMOD	 Add /W - normalise the Width ACs for TRIs	TJI 19-Mar-1986
+C
+CMOD	 Add /W:n - as above, then add m/1000 to the
+C	 calculated width				TJI 21-Mar-1986
+C
+CMOD	 Converted to LSLLIB. DCL command decoding and
+C	 VMS style error messages added			TJH 26-Jan-1986
+C
+C Normalises a Symbol Representation IFF (SRI) file for use with FRTLIB
+C     - also for Text Representation IFF (TRI) files
+C
+C Command format:	
+C	$ SRINORM in-IFF-file out-IFF-file
+C
+C Command qualifiers:
+C	/CHARACTER=integer  choose character to normalise to (for TRI)
+C	/DEBUG		    debug - give extra output
+C	/LOG		    type extra data - presently AC widths only
+C			    specifies files opened etc.
+C	/WIDTH[=integer]    normalise width ACs, same ratio as for texts
+C			    If the optional argument is supplied also
+C			    add n/1000 to the width after it has been
+C			    normalised 
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'($SSDEF)'
+	INCLUDE 	'($STSDEF)'
+	INCLUDE 	'LSL$CMNSRINORM:SRINORMMSG.PAR'
+C
+	INTEGER*2	INLUN		! IFF input file LUN
+	PARAMETER	(INLUN=1)
+	INTEGER*2	OUTLUN		! IFF output file LUN
+	PARAMETER	(OUTLUN=2)
+	INTEGER		MAXFSN,MAXST
+	PARAMETER	(MAXFSN=32767)
+	PARAMETER	(MAXST=200)
+C
+C Common:
+	INCLUDE		'LSL$CMNIFF:CB.STR'	! CB structure definitions
+	INCLUDE 	'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 	'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 	'LSL$CMNLSL:STATUS.CMN'
+C
+C Word:
+	INTEGER  	I	! loop count
+	INTEGER*2	IECODE	! entry code for the entry-in-hand
+	INTEGER*2	IELEN	! length of the entry-in-hand
+	INTEGER*2	NFNORM	! feature number to normalise to
+	INTEGER*2	NONUM	! current layer number
+	INTEGER*2	IENDS	! ST flags
+	INTEGER*2	NNORM	! no of features normalised
+	INTEGER*2	ACTYPE	! type of AC
+	INTEGER*2	ISQ
+	INTEGER*2	LPOSNO
+	RECORD		/IFF_CBH/CBH	! CB header
+	RECORD		/IFF_CBD/CBD	! CB data
+	INTEGER		XYCOL(2)	! for extracting X and Y from CBD
+C
+	DATA		XYCOL/IFF_C_X,IFF_C_Y/
+C
+C Real:
+	REAL		DIST	! coordinate distance
+	REAL		EXTENT(MAXFSN)	! array of sizes
+	REAL		RANGE(4)	! output file coordinate range
+	REAL		STBUF(2,MAXST)	! array of coords
+	REAL		WIDTH	! width of text feature, from type 3 AC
+C
+C Logical:
+	LOGICAL		ABSENT		! is file-spec absent?
+	LOGICAL		HAD_ASC		! had feat. with ascii code?
+	LOGICAL		HAD_CH		! /CHARACTER qualifier present?
+	LOGICAL		DEBUG		! /DEBUG qualifier present?
+	LOGICAL		HAD_LOG		! /LOG qualifier present?
+	LOGICAL		HAD_WID		! /WIDTH qualifier present?
+	LOGICAL		INOPN		! input file open?
+	LOGICAL		LOCAL      	! is qualifier local?
+	LOGICAL		LOCNEG     	! qualifier locally negated?
+	LOGICAL		OUTOPN		! output file open?
+C
+C Longword:
+	INTEGER  	ASCII		! /CHARACTER argument
+	INTEGER		LASTNF		! previous feature number
+	INTEGER		NFNUM		! feature number
+	INTEGER		PASS		! which pass
+	INTEGER  	P1_LEN,P2_LEN	! length of file-specs
+	INTEGER  	WID_INC		! /WIDTH argument
+C
+C Character:
+	CHARACTER*256	P1_FIL		! input file-spec
+	CHARACTER*256	P2_FIL		! optional output file-spec
+C
+C Functions called
+	INTEGER		DCL_FILE	! reads and parses file title 
+	INTEGER		DCL_INT		! gets qualifier args. (integer)
+	INTEGER		DCL_QUAL	! looks for specified qualifier
+	INTEGER    	DCL_STARTUP	! gets parsed command line
+	INTEGER  	IFFCREATE	! create and open IFF file
+	INTEGER  	IFFMODIFY	! open IFF file for modification
+	INTEGER  	IFFOPEN		! open IFF file for readonly
+C
+C Command Language Definitions
+	EXTERNAL        SRINORM_CLD
+C
+C ......................................................................
+C Initialise LSLLIB
+C
+	CALL LSL_INIT(.TRUE.)
+C
+	RANGE(1)=1.0E36
+	RANGE(2)=-RANGE(1)
+	RANGE(3)=RANGE(1)
+	RANGE(4)=-RANGE(1)
+	NNORM = 0
+	HAD_ASC=.FALSE.
+	PASS = 1
+C
+C ......................................................................
+C		D E C O D E   C O M M A N D  L I N E
+C
+C Get command line for verb SRINORM. DCL_STARTUP will return set to
+C SS$_NORMAL if all well.
+C
+	LSL_STATUS=DCL_STARTUP('SRINORM',.FALSE.,SRINORM_CLD,.TRUE.)
+C
+C get the IFF file for input
+	IF (LSL_STATUS) THEN
+	   LSL_STATUS=DCL_FILE(
+     &		'P1','LSL$IF:SRI.SRI',ABSENT,.FALSE.,.TRUE.)
+	   IF (LSL_STATUS) THEN
+	      CALL EXPFLN(P1_FIL,P1_LEN)
+	   ENDIF				! got file-spec ok?
+	ENDIF				! DCL_STARUP ok?
+C
+C get the output file, parse against input file for defaults
+	IF (LSL_STATUS) THEN
+	   LSL_STATUS=DCL_FILE(
+     &		'P2',P1_FIL(:P1_LEN),ABSENT,.FALSE.,.TRUE.)
+	   IF (LSL_STATUS) THEN
+	      CALL EXPFLN(P2_FIL,P2_LEN)
+	   ENDIF				! got file-spec ok?
+	ENDIF
+C
+C ......................................................................
+C Check for remaining qualifiers, we could have:
+C ......................................................................
+C
+C			/CHARACTER=integer
+C			/DEBUG
+C			/LOG
+C			/WIDTH=integer
+C
+C Check for /DEBUG
+	IF (LSL_STATUS) THEN
+	   LSL_STATUS=DCL_QUAL('DEBUG',DEBUG,LOCAL,LOCNEG,.TRUE.)
+	ENDIF
+C
+C Check for /LOG
+	IF (LSL_STATUS) THEN
+	   LSL_STATUS=DCL_QUAL('LOG',HAD_LOG,LOCAL,LOCNEG,.TRUE.)
+	ENDIF
+C
+C Check for /CHARACTER=integer
+	IF (LSL_STATUS) THEN
+	   LSL_STATUS=DCL_QUAL('CHARACTER',HAD_CH,LOCAL,LOCNEG,.TRUE.)
+	   IF (LSL_STATUS) THEN
+C
+C Get its argument
+	      IF (HAD_CH) THEN
+	         LSL_STATUS=DCL_INT('CHARACTER',.TRUE.)
+C
+C And transfer it to an SRINORM variable
+	         IF (LSL_STATUS) THEN
+	            IF (IARRAY(1).LT.0.OR.IARRAY(1).GT.255) THEN
+	               CALL LSL_PUTMSG(SRINORM__INVALCH,IARRAY(1))
+	            ELSE
+	               ASCII=IARRAY(1)	  
+	            ENDIF
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C Check for /WIDTH=integer
+	IF (LSL_STATUS) THEN
+	   LSL_STATUS=DCL_QUAL('WIDTH',HAD_WID,LOCAL,LOCNEG,.TRUE.)
+	   IF (LSL_STATUS) THEN
+C
+C Get its argument
+	      IF (HAD_WID) THEN
+	         LSL_STATUS=DCL_INT('WIDTH',.TRUE.)
+C
+C And transfer it to an SRINORM variable
+	         IF (LSL_STATUS) THEN
+	            IF (IARRAY(1).LT.1.OR.IARRAY(1).GT.1000) THEN
+	               CALL LSL_PUTMSG(SRINORM__INVALWID,IARRAY(1))
+	            ELSE
+		       IF (NUMINT.GE.1) THEN
+	   		 WID_INC=IARRAY(1)	  
+		       ELSE
+			 WID_INC = 0
+		       ENDIF
+	            ENDIF
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C			O P E N   F I L E S
+C
+C Now open the input IFF file readonly
+C
+	IF (LSL_STATUS) THEN
+	   LSL_STATUS=IFFOPEN(INLUN,P1_FIL(:P1_LEN),,HAD_LOG)
+	   IF (LSL_STATUS) THEN
+	      INOPN=.TRUE.
+	      CALL IFFIRV(1)	! expect CBs
+	   ENDIF
+	ENDIF
+C
+C And the output IFF file for write
+	IF (LSL_STATUS) THEN
+	   LSL_STATUS=IFFCREATE(OUTLUN,P2_FIL(:P2_LEN),'Create',
+     &							,HAD_LOG)
+	   IF (LSL_STATUS) THEN
+	      OUTOPN=.TRUE.
+	      CALL IFFIRV(1)	! expect CBs
+	   ENDIF
+	ENDIF
+	IF (.NOT.LSL_STATUS) GOTO 140
+C
+C ......................................................................
+	DO 10 I=1,MAXFSN
+	   EXTENT(I)=0.0
+10	CONTINUE
+C
+C Select input file
+	CALL IFFSEL(INLUN)
+	CALL IFFRWD
+	CALL WRITEF(' ')
+20	CALL WRITEF('Starting pass %N',PASS)
+	IF (PASS.EQ.2.AND.HAD_CH) THEN
+	   CALL WRITEF('(Normalising to feature %N)',ASCII)
+	ENDIF
+C
+C ......................................................................
+C 			M A I N    L O O P
+C
+30	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.LT.0) GOTO 120 	! unexpected EOF
+C
+C Debug output?
+	IF (DEBUG.AND.(PASS.EQ.2)) THEN
+	   CALL WRITEF('--- DEBUG ---  %^W%C %N',IECODE,IELEN)
+	ENDIF
+C
+C On pass 1 only, copy all features to the output file, truncating
+C CBs to include only X and Y
+C
+	IF (PASS.EQ.1) THEN
+	   IF (IECODE.EQ.'NF') THEN
+	      CALL EIHRI(NFNUM,1,1)
+	      ISQ = 0
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFNF(NFNUM,ISQ)
+	      CALL IFFSEL(INLUN)
+	   ELSEIF (IECODE.EQ.'EF') THEN
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFEF
+	      CALL IFFSEL(INLUN)
+	   ELSEIF (IECODE.EQ.'NO') THEN
+	      CALL IFFSEL(OUTLUN)
+	      LPOSNO = LPOSE			! remember position of NO
+	      CALL IFFSEL(INLUN)
+	      CALL EIHCPY(OUTLUN)
+	   ELSEIF (IECODE.EQ.'EO') THEN
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFUNO(LPOSNO)		! update NO ptr
+	      CALL IFFEO
+	      CALL IFFSEL(INLUN)
+	   ELSEIF (IECODE.EQ.'CB') THEN
+	      CALL EIHRCB_HEAD(CBH)
+	      CALL EIHRCB_DATA(CBD)
+	      CALL IFS_CB_READ(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+C
+C make sure CB has only 2 columns, X and Y
+	      CBH.NCOL = 2
+	      CBH.COLH(1) = IFF_C_X
+	      CBH.COLH(2) = IFF_C_Y
+C
+C write back the 2 columns in STBUFF
+	      CALL IFS_CB_WRITE(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+C
+C and write out to output file
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFCB(CBH,CBD)
+	      CALL IFFSEL(INLUN)
+	   ELSE
+	      CALL EIHCPY(OUTLUN)
+	   ENDIF
+	ENDIF
+	IF (IECODE.EQ.'NF') GOTO 40
+	IF (IECODE.EQ.'CB') GOTO 60
+	IF (IECODE.EQ.'NO') GOTO 80
+	IF (IECODE.EQ.'AC') GOTO 100
+	IF (IECODE.EQ.'EJ') GOTO 110 	! finished
+	GOTO 30
+C
+C ......................................................................
+C NF - new feature
+C
+40	IF (DEBUG) THEN
+	   CALL WRITEF('--- DEBUG ---  %^W%C %N',IECODE,IELEN)
+	ENDIF
+C
+	LASTNF = NFNUM			! remember last one
+	NFNUM=0				! clear longword
+C
+	CALL EIHRI(NFNUM,1,1)
+	IF (NFNUM.LE.0) GOTO 50		! ignore NF 0s
+	IF (NFNUM.EQ.ASCII) THEN
+	   HAD_ASC=.TRUE.		! feat. with selected ASCII code
+	ENDIF
+	IF (NFNUM.GT.MAXFSN) THEN	! ignore if too big
+	   CALL LSL_PUTMSG(SRINORM__BADFSN,NFNUM,MAXFSN)
+	   GOTO 50
+	ENDIF
+	IF (PASS.EQ.2.AND.EXTENT(NFNUM).LE.1.0E-10) THEN
+	   CALL LSL_PUTMSG(SRINORM__BADEXTENT,NFNUM,EXTENT(NFNUM))
+	   GOTO 50
+	ENDIF
+	IF (PASS.EQ.2.AND.LASTNF.NE.NFNUM) THEN
+	   NNORM = NNORM + 1
+	   IF (HAD_LOG) THEN
+	      CALL WRITEF
+     &		('Symbol %N. Extent was %F',NFNUM,EXTENT(NFNUM))
+	   ENDIF
+	ENDIF
+	NFNORM = NFNUM			! default is norm to itself
+	IF (HAD_CH) NFNORM = ASCII	! but can norm to specific
+	GOTO 30
+C
+C skip this feature
+C
+50	CALL IFFNXT(IECODE,IELEN)                 
+	IF (IELEN.LT.0) GOTO 120 	! unexpected EOF
+C
+C Debug output?
+	IF (DEBUG) THEN
+	   CALL WRITEF('--- DEBUG ---  %^W%C %N',IECODE,IELEN)
+	ENDIF
+C
+C On pass 1 only, copy all features to the output file, truncating
+C CBs to include only X and Y
+C
+	IF (PASS.EQ.1) THEN
+	   IF (IECODE.EQ.'NF') THEN
+	      CALL EIHRI(NFNUM,1,1)
+	      ISQ = 0
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFNF(NFNUM,ISQ)
+	      CALL IFFSEL(INLUN)
+	   ELSEIF (IECODE.EQ.'EF') THEN
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFEF
+	      CALL IFFSEL(INLUN)
+	   ELSEIF (IECODE.EQ.'NO') THEN
+	      CALL IFFSEL(OUTLUN)
+	      LPOSNO = LPOSE			! remember position of NO
+	      CALL IFFSEL(INLUN)
+	      CALL EIHCPY(OUTLUN)
+	   ELSEIF (IECODE.EQ.'EO') THEN
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFUNO(LPOSNO)		! update NO ptr
+	      CALL IFFEO
+	      CALL IFFSEL(INLUN)
+	   ELSEIF (IECODE.EQ.'CB') THEN
+	      CALL EIHRCB_HEAD(CBH)
+	      CALL EIHRCB_DATA(CBD)
+	      CALL IFS_CB_READ(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+C
+C make sure CB has only 2 columns, X and Y
+	      CBH.NCOL = 2
+	      CBH.COLH(1) = IFF_C_X
+	      CBH.COLH(2) = IFF_C_Y
+C
+C write back the 2 columns in STBUFF
+	      CALL IFS_CB_WRITE(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+C
+C and write out to output file
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFCB(CBH,CBD)
+	      CALL IFFSEL(INLUN)
+	   ELSE
+	      CALL EIHCPY(OUTLUN)
+	   ENDIF
+	ELSE
+C
+C On second pass does this skipped feature affect the IFF range?
+	   IF (IECODE.EQ.'CB') THEN
+	      CALL EIHRCB_HEAD(CBH)
+	      CALL EIHRCB_DATA(CBD)
+	      CALL IFS_CB_READ(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+	      DO 55 I=1,CBH.NROW
+	         RANGE(1)=AMIN1(RANGE(1),STBUF(1,I))
+	         RANGE(2)=AMAX1(RANGE(2),STBUF(1,I))
+	         RANGE(3)=AMIN1(RANGE(3),STBUF(2,I))
+	         RANGE(4)=AMAX1(RANGE(4),STBUF(2,I))
+55	      CONTINUE
+	   ENDIF
+	ENDIF
+C
+C Just keep copying until end of the feature
+C
+	IF (IECODE.NE.'EF') GOTO 50
+	GOTO 30
+C
+C ......................................................................
+C CB - string of coords
+C
+60	CALL EIHRCB_HEAD(CBH)
+	CALL EIHRCB_DATA(CBD)
+	CALL IFS_CB_READ(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+C
+	DO 70 I=1,CBH.NROW
+	   IF (PASS.EQ.1) THEN	! find max coords this symbol
+	      DIST = ABS(STBUF(1,I))
+	      IF (DIST.GT.EXTENT(NFNUM)) EXTENT(NFNUM) = DIST
+	      DIST = ABS(STBUF(2,I))
+	      IF (DIST.GT.EXTENT(NFNUM)) EXTENT(NFNUM) = DIST
+	   ELSE						! normalise coords
+	      IF (DEBUG) THEN
+		CALL WRITEF('--- old: %F %F',STBUF(1,I),STBUF(2,I))
+	      ENDIF
+C
+	      STBUF(1,I) = STBUF(1,I)/EXTENT(NFNORM)
+	      STBUF(2,I) = STBUF(2,I)/EXTENT(NFNORM)
+	      CALL IFS_CB_WRITE(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+C
+	      RANGE(1)=AMIN1(RANGE(1),STBUF(1,I))
+	      RANGE(2)=AMAX1(RANGE(2),STBUF(1,I))
+	      RANGE(3)=AMIN1(RANGE(3),STBUF(2,I))
+	      RANGE(4)=AMAX1(RANGE(4),STBUF(2,I))
+	      IF (DEBUG) THEN 
+		CALL EXPAND('--- new: %F %F',STBUF(1,I),STBUF(2,I))
+	      ENDIF
+	   ENDIF
+70	CONTINUE
+C
+	IF (PASS.EQ.2) CALL EIHWCB(CBH,CBD)
+	GOTO 30
+C
+C ......................................................................
+C NO - New layer - report and skip layer 0
+C
+80	CALL EIHRI(NONUM,1,1)
+	IF (NONUM.GT.0) THEN
+	   IF (PASS.EQ.1) THEN
+	      IF (HAD_CH) THEN
+		CALL WRITEF(
+     &		'Looking for feature with '//
+     &		'/CHARACTER=%N ASCII code in layer %^W%N',ASCII,NONUM)
+	      ELSE
+	        CALL WRITEF('Scanning coordinates in layer %^W%N',NONUM)
+	      ENDIF
+	   ELSE
+	      CALL WRITEF(
+     &			'Normalising coordinates in layer %^W%N',NONUM)
+	   ENDIF
+	ELSE
+	   CALL LSL_PUTMSG(SRINORM__SKIPLAY,NONUM)
+90	   CALL IFFNXT(IECODE,IELEN)
+	   IF (IELEN.LT.0) GOTO 120 	! unexpected EOF
+C
+C Debug output?
+C
+	   IF (DEBUG) THEN
+	      CALL WRITEF('--- DEBUG ---  %^W%C %N',IECODE,IELEN)
+	   ENDIF
+C
+C On pass 1 only, copy all features to the output file, truncating
+C CBs to include only X and Y
+C
+	   IF (PASS.EQ.1) THEN
+	      IF (IECODE.EQ.'NF') THEN
+	         CALL EIHRI(NFNUM,1,1)
+	         ISQ = 0
+	         CALL IFFSEL(OUTLUN)
+	         CALL IFFNF(NFNUM,ISQ)
+	         CALL IFFSEL(INLUN)
+	      ELSEIF (IECODE.EQ.'EF') THEN
+	         CALL IFFSEL(OUTLUN)
+	         CALL IFFEF
+	         CALL IFFSEL(INLUN)
+	      ELSEIF (IECODE.EQ.'NO') THEN
+	         CALL IFFSEL(OUTLUN)
+	         LPOSNO = LPOSE			! remember position of NO
+	         CALL IFFSEL(INLUN)
+	         CALL EIHCPY(OUTLUN)
+	      ELSEIF (IECODE.EQ.'EO') THEN
+	         CALL IFFSEL(OUTLUN)
+	         CALL IFFUNO(LPOSNO)		! update NO ptr
+	         CALL IFFEO
+	         CALL IFFSEL(INLUN)
+	      ELSEIF (IECODE.EQ.'CB') THEN
+	         CALL EIHRCB_HEAD(CBH)
+	         CALL EIHRCB_DATA(CBD)
+	         CALL IFS_CB_READ(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+C
+C make sure CB has only 2 columns, X and Y
+	         CBH.NCOL = 2
+	         CBH.COLH(1) = IFF_C_X
+	         CBH.COLH(2) = IFF_C_Y
+C
+C write back the 2 columns in STBUFF
+	         CALL IFS_CB_WRITE(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+C
+C and write out to output file
+	         CALL IFFSEL(OUTLUN)
+	         CALL IFFCB(CBH,CBD)
+	         CALL IFFSEL(INLUN)
+	      ELSE
+	         CALL EIHCPY(OUTLUN)
+	      ENDIF
+	   ELSE
+C
+C On second pass does this skipped feature affect the IFF range?
+	      IF (IECODE.EQ.'CB') THEN
+	         CALL EIHRCB_HEAD(CBH)
+	         CALL EIHRCB_DATA(CBD)
+	         CALL IFS_CB_READ(CBH,CBD,STBUF,2,XYCOL,1,CBH.NROW)
+	         DO 95 I=1,CBH.NROW
+	            RANGE(1)=AMIN1(RANGE(1),STBUF(1,I))
+	            RANGE(2)=AMAX1(RANGE(2),STBUF(1,I))
+	            RANGE(3)=AMIN1(RANGE(3),STBUF(2,I))
+	            RANGE(4)=AMAX1(RANGE(4),STBUF(2,I))
+95	         CONTINUE
+	      ENDIF
+	   ENDIF
+C
+C Just keep copying until end of the layer
+C
+	   IF (IECODE.NE.'EO') GOTO 90
+	ENDIF
+	GOTO 30
+C
+C ......................................................................
+C AC - normalise type 3 ACs for TRI files? Only relevant on pass 2 and
+C if /WIDTH specified
+C
+100	IF (PASS.EQ.2.AND.HAD_WID) THEN	
+	   CALL EIHRI(ACTYPE,1,1)
+	   IF (ACTYPE.EQ.3) THEN	! ignore non type 3s
+C
+	      CALL EIHRR(WIDTH,1,2)
+	      IF (HAD_LOG.OR.DEBUG) THEN
+		 CALL WRITEF('--- old width: %F',WIDTH)
+	      ENDIF
+C
+	      WIDTH = WIDTH/EXTENT(NFNORM)	! normalise it
+	      IF (WID_INC.NE.0) WIDTH = WIDTH + WID_INC/1000.0
+	      CALL EIHWR(WIDTH,1,2)
+	      IF (HAD_LOG.OR.DEBUG) THEN
+	         CALL WRITEF('--- new width: %F',WIDTH)
+	      ENDIF
+C
+	      CALL WRITEF('Symbol %N - normalised width AC',NFNUM)
+C
+	   ENDIF
+	ENDIF
+	GOTO 30
+C
+C ......................................................................
+C EJ - End Job
+C
+110	PASS = PASS + 1
+	IF (PASS.EQ.2) THEN
+	   IF (HAD_CH.AND..NOT.HAD_ASC) THEN
+	      CALL LSL_PUTMSG(SRINORM__MISSASCII)
+	      GOTO 140
+	   ENDIF	
+	   IF (HAD_CH.AND.EXTENT(ASCII).LE.1.0E-10) THEN
+	      CALL LSL_PUTMSG(SRINORM__BADCHEXT,NFNUM,EXTENT(NFNUM))
+	      GOTO 140
+	   ENDIF
+	   CALL IFFSEL(OUTLUN)	! work on the output file from now on
+	   CALL IFFRWD
+	   GOTO 20		! loop back for second pass
+	ENDIF
+	GOTO 130		! all done
+C
+C ......................................................................
+C Error - end of file
+C
+120	IF (PASS.EQ.1) THEN
+	  CALL LSL_PUTMSG(SRINORM__UNEXPEOF,P1_FIL(:P1_LEN))
+	ELSE
+	  CALL LSL_PUTMSG(SRINORM__UNEXPEOF,P2_FIL(:P2_LEN))
+	ENDIF
+	GOTO 140
+C
+C ......................................................................
+C Normal end of file - finished
+C
+130	CALL WRITEF('%^W%N features normalised',NNORM)
+C
+C Adjust the output file range entry as appropriate
+	CALL IFFRWD
+	CALL IFFNXC('RA',IELEN)
+	IF (IELEN.LT.0) GOTO 120 	! unexpected EOF
+	CALL EIHWR(RANGE,4,1)
+C
+C Close any files which are open
+C
+140	IF (INOPN) THEN
+	   CALL IFFCLO(INLUN)
+	ENDIF
+	IF (OUTOPN) THEN
+	   IF (.NOT.LSL_STATUS) THEN
+	      IF (IBITS(LSL_STATUS,0,3).NE.STS$K_WARNING) THEN
+	         CALL IFFCDL(OUTLUN) 		! delete output file
+	      ELSE
+	         CALL IFFCLO(OUTLUN,SS$_ABORT)	! close output file
+	      ENDIF
+	   ELSE
+	      CALL IFFCLO(OUTLUN,SS$_NORMAL) 	! close output file
+	   ENDIF
+	ENDIF
+	CALL LSL_EXIT
+	END

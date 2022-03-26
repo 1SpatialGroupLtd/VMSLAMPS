@@ -1,0 +1,377 @@
+ 	PROGRAM SRP2DTI
+C
+***	MODULE SRP2DTI
+***	IDENT 21SE88
+C
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C 	Created 					IDJ 13-Sep-1988
+C
+C Program to read a SRP1 tape or disk file and reformat to 
+C LSL DTI format file on disk.
+C DTI file has a LSLA type header with no projection record. The user
+C will have to use DTITRANS to insert a projection record and set it
+C up if required. The data type of the DTI file is set automatically
+C by SRP2DTI.
+C
+	IMPLICIT NONE
+C
+C Common blocks
+C
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIPAR.PAR'
+	INCLUDE 'LSL$DTMCREATESYS:DTMDET.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:CONTRL.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:MTIVCM.CMN'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNLSL:EXCEPTION.CMN'
+	INCLUDE 'HERE:LSL_TAPE.CMN'
+	INCLUDE 'HERE:SRP2DTIMSG.PAR'
+	INCLUDE 'LSL$CMNDTI:DTILIBMSG.PAR'
+	INCLUDE '($SSDEF)'
+	INCLUDE '($DVIDEF)/NOLIST'
+	INCLUDE	'($DCDEF)/NOLIST'
+C
+C Functions
+C
+	LOGICAL	LSL_TAPE_SETUP		! Works out if is a tape or a file
+ 	LOGICAL LSL_TAPE_CLOSEDOWN	! Closesdown tape or file
+	LOGICAL LSL_TAPE_CLOSE		! Closes tape or file
+	LOGICAL HELLMCE_HEADER		! Read and decode header info.
+	LOGICAL ADCS_HELLMCE		! Get a line of data and decode it
+	LOGICAL MXINIT			! Initialises for reading
+	LOGICAL OPNDTI			! Creates & opens DTI file with header
+	LOGICAL DTI_COPY_BYTE_DATA	! Puts data from INBUFF into DTI file
+	LOGICAL DTI_MINMAX_DATA		! Find min & max data values
+	LOGICAL DTI_CLOSE		! Close DTI file & update header
+	LOGICAL	LIB$GETDVI		! Get term characteristics etc.
+	LOGICAL	RDCHS			! Get a character from TXTBUF
+	LOGICAL	TTRSTR			! Read a string into TXTBUF
+	LOGICAL	RDLONG			! Get an integer from TXTBUF
+C
+	INTEGER*4	DCL_FILE   ! reads & parses file title from DCL 
+C			           ! command line
+	INTEGER*4	DCL_QUAL   ! looks for specified qualifier
+        INTEGER*4       DCL_STARTUP! looks for command line
+C
+C CLD program block
+C
+	EXTERNAL	SRP2DTI_CLD	! Get command line
+C
+C W/s
+C	
+	INTEGER*4	RET_CODE	! General error reporting
+	INTEGER*4	FORM	! Input format (1=Byte,2=Word,3=Longword)
+	INTEGER		VALUE		! for GETDVI
+	INTEGER*4	I,J,K		! Loop counters	
+	INTEGER*4	IERR		! Error report
+	INTEGER*4	SRP_NAME_LENGTH ! Input file name's length
+	LOGICAL		OK,STATUS	! 
+	LOGICAL		REVERSE		! .TRUE. = decode in reverse
+	BYTE		INBUFF(65535)	! Input row data
+	BYTE 		OUTBUFF(65535)	! Output row data
+	CHARACTER*120	SRP_NAME	! Input file name
+	LOGICAL		ABSENT	  	! .T. if file param. not found
+	LOGICAL		HAD_QUAL   	! .T. if had this qualifier
+	LOGICAL		LOCAL     	! .T. if qual. is local
+	LOGICAL		LOCNEG     	! set .T. if qual. locally negated
+	LOGICAL		LOG		! .T. if LOG is required
+	INTEGER*2	PX,PY,DIRECTION	! SRP header information
+	INTEGER*4	XSAMPLE,YSAMPLE	! Sampling rates
+	CHARACTER 	CH 
+C
+C--------------------------------------------------------------------
+	CALL LSL_INIT			! Initialise libraries
+	CALL DTI_INIT
+C
+C....................................................................
+C
+C Get command line for verb SRP2DTI. DCL_STARTUP will return set to
+C SS$_NORMAL if all well.
+C
+	OK=DCL_STARTUP('SRP2DTI'    	! command verb
+     &      		,.FALSE.        ! don't split parameter lists
+     &      		,SRP2DTI_CLD    ! CLD module name
+     &      		,.TRUE.)        ! .T. -local error reporting
+        IF (.NOT.OK) GOTO 999 		! give up
+C
+C....................................................................
+C
+C Check for /BINARY qualifier
+C
+	OK=DCL_QUAL('BINARY'		! qual. name
+     &        		,BINARY		! returned .T. if qual. found
+     &			,LOCAL		! .T. if qual local to parameter
+     &			,LOCNEG		! .T. if qual. negated locally
+     &			,.TRUE.)	! .T.-local error reporting
+	IF (.NOT.OK) GOTO 999 		! give up
+C
+C Check for /LOG qualifier
+C
+	OK=DCL_QUAL('LOG'		! qual. name
+     &        		,LOG		! returned .T. if qual. found
+     &			,LOCAL		! .T. if qual local to parameter
+     &			,LOCNEG		! .T. if qual. negated locally
+     &			,.TRUE.)	! .T.-local error reporting
+	IF (.NOT.OK) GOTO 999 		! give up
+C
+C Get input file-spec
+	OK=DCL_FILE('P1'		! label
+     &	            ,'SYS$DISK:[]'	! default filespec
+     &	            ,ABSENT		! .T. if absent
+     &	            ,.FALSE.      	! don't expect list of files
+     &              ,.TRUE.)      	! .T.-local error reporting
+	IF (.NOT.OK) GOTO 999 		! give up
+C
+	IF (.NOT.ABSENT) THEN		! File specified
+            SRP_NAME=FILARY(1)(1:FIL_LEN(1))
+	    SRP_NAME_LENGTH=FIL_LEN(1)
+	ENDIF
+C
+C Get output file-spec
+	OK=DCL_FILE('P2'		! label
+     &	            ,'LSL$DTI:DTI.DTI;0'! default filespec
+     &	            ,ABSENT		! .T. if absent
+     &	            ,.FALSE.      	! don't expect list of files
+     &              ,.TRUE.)      	! .T.-local error reporting
+	IF (.NOT.OK) GOTO 999 		! give up
+C
+	IF (.NOT.ABSENT) THEN		! File specified
+            DTI_NAME(1)=FILARY(1)(1:FIL_LEN(1))
+	    DTI_NAME_LENGTH(1)=FIL_LEN(1)
+	ENDIF
+C
+C-------------------------------------------------------------------
+C
+C If LOG is required then:
+C Examine SYS$OUTPUT to see if it is assigned to a terminal
+C If it is we must determine whether it is a CRT or not.
+C
+	IF (LOG) THEN
+	   CRT=.FALSE.
+	   IS_TERM=.FALSE.
+C
+C See if output is to a terminal
+	   OK=LIB$GETDVI(DVI$_DEVCLASS,,'SYS$OUTPUT',VALUE,,)
+	   IF (OK) THEN			 ! success?
+	      IF (VALUE.EQ.DC$_TERM) IS_TERM=.TRUE. ! it is a terminal?
+	   ELSE
+	      CALL LSL_PUTMSG(OK)
+	      GOTO 999
+	   ENDIF
+C
+C If we have a terminal, is it a CRT?
+	   IF (IS_TERM) THEN	
+	     OK=LIB$GETDVI(DVI$_TT_SCOPE,,'SYS$OUTPUT',VALUE,,)
+	     IF (OK) THEN
+	        CRT=VALUE.EQ.1
+	     ELSE
+	        CALL LSL_PUTMSG(OK)
+	        GOTO 999
+	     ENDIF	
+	   ENDIF
+	ENDIF
+C
+C-------------------------------------------------------------------
+C
+	OK=LSL_TAPE_SETUP(SRP_NAME,RET_CODE)
+	IF (.NOT. OK) THEN
+	   IF (RET_CODE .EQ. -5) THEN
+	      CALL LSL_PUTMSG(SRP2DTI__ERRMTALLOC)
+	   ELSEIF (RET_CODE .EQ. -6) THEN
+	      CALL LSL_PUTMSG(SRP2DTI__ERRMTMOU)
+	   ELSEIF (RET_CODE .EQ. -7) THEN
+	      CALL LSL_PUTMSG(SRP2DTI__MTOFFLIN)
+	   ELSEIF (RET_CODE .EQ. -8) THEN
+	      CALL LSL_PUTMSG(SRP2DTI__FILEERR,SRP_NAME)
+	   ENDIF
+	   CALL LSL_ADDMSG(OK)
+	   STATUS=OK
+	   GOTO 950
+ 	ENDIF
+C
+	OK=MXINIT(SRP_NAME,.FALSE.)
+	IF (.NOT. OK) THEN
+	   RET_CODE=SRP2DTI__ERRMTINIT
+	   CALL LSL_PUTMSG(SRP2DTI__ERRMTINIT)
+	   CALL LSL_PUTMSG(MTIERR)
+	   CALL LSL_ADDMSG(OK)
+	   STATUS=OK
+	   GOTO 950
+	ENDIF
+C
+	DECODE_HELLMCE=.TRUE.			! Tape format
+	FORM=1					! Byte format
+C
+	IF (.NOT. HELLMCE_HEADER(PX,PY,DIRECTION)) GOTO 950
+	NCOL=NLINES
+	NROW=NSAMPLES
+C
+C	Set up the values for the header
+C
+	LGC4=1					! Which DTI file
+	DTI_ORDER_CORNER(1)=DTI_ORDER_NW	! NW corner = origin
+	DTI_ORDER_DIRECTION(1)=DTI_ORDER_CLOCKWISE	! clockwise
+	DTI_HDR_TYPE=DTI_LSLA			! LSLA format header
+	IF (BINARY) THEN			! What sort of data
+	   DTI_DATA_TYPE=DATA_BIT		! format is to be used
+	ELSE					! in the DTI file
+	   DTI_DATA_TYPE=DATA_BYTE
+	ENDIF
+	SIDEX=PY				! X and Y grid interval
+	SIDEY=PX				! value in metres.
+	XMIN=0  				! Offset values for
+	YMIN=0					! x and y.
+	XSAMPLE=1
+	YSAMPLE=1
+	WRITE (6,5) NLINES,NSAMPLES
+5	FORMAT ('$ Map size is ',I5,' columns by ',I5,' rows.') 
+	WRITE (6,10) SIDEX,SIDEY
+10	FORMAT ('$ X grid interval= ',F5.1,' Y grid interval= ',F5.1) 
+	WRITE (6,15) DIRECTION
+15	FORMAT ('$ direction code is ',I2) 
+	WRITE (6,16)
+16	FORMAT ('$') 
+C
+C	Prompt user for Sampling data values
+C
+20	OK=TTRSTR(,,'X sample rate:',IERR)
+	IF (.NOT. OK) THEN			! Error
+	   IF (OK .EQ. LSL__EOF) GOTO 20	! If ctrl-z
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 950
+	ENDIF
+C
+	CALL BSLN
+	IF (RDCHS(CH)) GOTO 30			! Empty line
+	CALL BSCH
+	IF (RDLONG(XSAMPLE)) THEN		! Error decoding integer
+	   CALL LSL_PUTMSG(SRP2DTI__NOTNUM)
+	   GOTO 950
+	ENDIF
+C
+30	OK=TTRSTR(,,'Y sample rate:',IERR)
+	IF (.NOT. OK) THEN			! Error
+	   IF (OK .EQ. LSL__EOF) GOTO 30	! If ctrl-z
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 950
+	ENDIF
+C
+	CALL BSLN
+	IF (RDCHS(CH)) GOTO 40			! Empty line
+	CALL BSCH
+	IF (RDLONG(YSAMPLE)) THEN		! Error decoding integer
+	   CALL LSL_PUTMSG(SRP2DTI__NOTNUM)
+	   GOTO 950
+	ENDIF
+C	
+C	Check for sensible values of XSAMPLE & YSAMPLE
+	IF (((XSAMPLE .GT. (NCOL/3)) .OR. (XSAMPLE .LT. 1)) .OR. 
+     -      ((YSAMPLE .GT. (NROW/3)) .OR. (YSAMPLE .LT. 1))) THEN
+	   CALL LSL_PUTMSG(SRP2DTI__BADSAMPLE)
+	   GOTO 950
+	ENDIF
+C
+C	Calculate the size of the DTI file using XSAMPLE & YSAMPLE
+40	NCOL=INT(NCOL/XSAMPLE)
+	NROW=INT(NROW/YSAMPLE)		
+C	Create and open a DTI file with a LSLA type header
+C
+	IF (.NOT. OPNDTI()) GOTO 950
+C
+C	Initialise percent
+	IF (LOG) THEN
+	   CALL PERCENT('of data formatted',1,NCOL,1,CRT,-1)
+	ENDIF
+C
+C	Read a line from the input data file/tape, decode it and copy it
+C	as a column into the DTI file
+C
+	DO 100,I=1,NCOL
+	   IF (.NOT. ADCS_HELLMCE(INBUFF,INBUFF,INBUFF,NSAMPLES,FORM,REVERSE,
+     &     RET_CODE)) GOTO 930
+	   IF (LOG) THEN
+	      IF (CRT) THEN
+	         CALL PERCENT('of data formatted',I,NCOL,1,CRT,0)
+	      ELSE
+	         CALL PERCENT('of data formatted',I,NCOL,10,CRT,0)
+	      ENDIF
+	   ENDIF
+C
+C	Put relevant bytes into OUTBUFF
+	   DO 45,K=1,NROW
+	      OUTBUFF(K)=INBUFF((K-1)*YSAMPLE+1)
+45	   CONTINUE
+C
+C	Copy OUTBBUFF to the DTI file
+	   OK=DTI_COPY_BYTE_DATA(LGC4,OUTBUFF,.TRUE.,I,1,1,NROW,RET_CODE)
+	   IF (.NOT. OK) GOTO 940
+C
+C	Skip unwanted lines
+	   DO 50,J=1,(XSAMPLE-1)
+	      IF (.NOT. ADCS_HELLMCE(INBUFF,INBUFF,INBUFF,NSAMPLES,FORM,
+     &        REVERSE, RET_CODE)) GOTO 930
+50	   CONTINUE
+100	CONTINUE
+C
+C  Finish with 100%
+	IF (LOG) THEN
+	   CALL PERCENT('of data formatted',NCOL,NCOL,1,CRT,1)
+	ENDIF
+C
+C   Find the minimum and maximum data values, close the DTI file-
+C   updating these values in the file header and clearing the variables
+C   in common DTIHDR relating to this file
+C
+	OK= DTI_MINMAX_DATA(LGC4,.FALSE., RET_CODE)
+	IF (.NOT. OK) GOTO 940				! Error
+	OK= DTI_CLOSE(LGC4,.TRUE.,.TRUE., RET_CODE)
+	IF (.NOT. OK) GOTO 940				! Error
+	GOTO 950					! Success
+C
+C   Output error message for adcs_hellmce
+C
+930	IF (RET_CODE .EQ. -1) THEN
+	   CALL LSL_PUTMSG(SRP2DTI__RDPHEOV)
+	ELSEIF (RET_CODE .EQ. -2) THEN
+	   CALL LSL_PUTMSG(SRP2DTI__RDPHEOT)
+	ELSEIF (RET_CODE .EQ. -3) THEN
+	   CALL LSL_PUTMSG(SRP2DTI__ADCSSHORT)
+	ELSEIF (RET_CODE .EQ. -4) THEN
+	   CALL LSL_PUTMSG(SRP2DTI__ADCSFORM)
+	ELSEIF (RET_CODE .EQ. -9) THEN
+	   CALL LSL_PUTMSG(SRP2DTI__RDPHEOF)
+	ELSE
+	   CALL LSL_PUTMSG(SRP2DTI__OTHERERR)
+	ENDIF
+	GOTO 950
+C
+C   Output error message for DTI_COPY_DATA, if is a system 
+C   error then add the system error message
+C
+940	CALL LSL_PUTMSG(OK)
+	IF (OK .EQ. DTI__SYSERR) THEN
+	   CALL LSL_ADDMSG(RET_CODE)
+	ENDIF
+C
+C--------------------------------------------------------------------
+C
+950	OK=LSL_TAPE_CLOSE()			! Close the input 
+	IF (.NOT. OK) GOTO 999			! file
+	OK=LSL_TAPE_CLOSE()			! if no error then
+	IF (.NOT. OK) GOTO 999			! try again
+	OK=LSL_TAPE_CLOSEDOWN()			! Closedown input file
+	IF (.NOT. OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	ENDIF
+C
+999	CALL LSL_EXIT
+	END	

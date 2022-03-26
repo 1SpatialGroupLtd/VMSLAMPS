@@ -1,0 +1,427 @@
+	LOGICAL FUNCTION GET_CMDS()
+C
+***	MODULE	GET_CMDS
+***	IDENT	10MR88
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C created by 				ALB	12-Feb-1988
+C
+C ITCHECK command processor.  This function is the main controlling
+C work horse for module.   
+C 
+	IMPLICIT NONE
+C
+C Parameters :
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE '($SSDEF)/NOLIST'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+C
+C Common blocks :
+	INCLUDE 'LSL$CMNITCHECK:CONTROL.CMN'
+ 	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C
+C W/s:
+	INTEGER		I		! loop counter
+	BYTE		CH		! for use with RDCHS
+	INTEGER		CMD    		! decoded command number
+	LOGICAL		OK		! function return
+	INTEGER		RET_CODE	! return code
+	INTEGER		IERR		! error code
+C
+C Define command tables:
+	EXTERNAL	ITCHECK_CMD_TABLE
+	INTEGER		ITCHECK_CMD_TABLE
+C
+C Functions:
+	LOGICAL		BORDER_CMD	! get BORDER command args
+	LOGICAL		CHECK_CMD	! list checks to be performed
+	LOGICAL		CLOSE_CMD	! close or simulate close
+	LOGICAL		CONTOUR_CMD	! set contour interval
+	LOGICAL		DESELECT_CMD	! deselect IFF checking level
+C	LOGICAL		EXIT_CMD	! exit from command processor
+	LOGICAL		GO_CMD		! do processing
+	LOGICAL		HELP_CMD	! give help information
+	LOGICAL		IFF_CMD		! specify IFF file-spec and open
+	LOGICAL		INDEX_CMD	! set index contour interval
+	LOGICAL		LAYER_CMD	! set layer in output error IFF file
+	LOGICAL		LIST_CMD	! specify output list file-spec
+	LOGICAL		LITES_CMD	! specify LITES2 file_spec
+	LOGICAL		LOOKUP_CMD	! specify lookup file open & load
+	LOGICAL		OUTPUT_CMD	! specify IFF error file-spec
+	LOGICAL		PAUSE_CMD	! await for user response
+	LOGICAL		PROFILE_CMD	! set profile interval
+C	non function	RETURN_CMD	! return from indirect input
+	LOGICAL		SELECT_CMD	! select IFF checking level
+	LOGICAL         SHOW_CMD	! show status
+	LOGICAL		SPAWN_CMD	! DCL spawn command
+	LOGICAL		SUPPLEMENTARY_CMD! set supplementary contour interval
+	LOGICAL		TOLERANCE_CMD	! set tolerance levels
+	LOGICAL		WAIT_CMD	! wait for specified time
+	LOGICAL		WINDOW_CMD	! get WINDOW command args
+	LOGICAL		ZLIMITS_CMD	! set minimum and maximum contours
+C
+	INTEGER		FLRCLO		! close file
+	INTEGER         FLRSTR		! read record from file
+	INTEGER         FLROPN		! open file for LSLLIB FILEO	
+	LOGICAL		GETFILNAM	! read file-spec
+	LOGICAL  	RDCHS		! read character from line
+	LOGICAL  	RDCH		! read character from line
+	LOGICAL 	RDCOMM  	! read command from line
+	INTEGER		RDFILN		! reads and parses a filename
+	INTEGER		TTRSTR  	! read line from terminal
+C
+C ......................................................................
+C
+C Get an input line from the terminal or the input file
+C
+10	TXTPTR=80
+	IF (TTIN) THEN
+	   OK=TTRSTR(,,'ITCHECK> ',IERR)
+	ELSE
+	   CALL FLRSEL(IND_LUN)		! input file selected
+	   OK=FLRSTR(,,IERR)
+	ENDIF
+C
+C Check that input line read correctly
+C
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      IF (TTIN) GOTO 990	! end of file = exit
+	   ENDIF
+	   CALL LSL_PUTMSG(OK)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 800			! close any indirect input
+	ENDIF
+C
+C echo and decode the line
+C
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('ITCHECK> ')
+	   CALL APPEND(TXTDSC)		! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+C
+C Reset decoding pointer
+C
+	CALL BSLN
+C
+C Read first character. Look for comment or empty line
+C
+	IF (RDCHS(CH)) GOTO 10		! substantially empty line
+	IF (CH.EQ.'!') GOTO 10		! comment!
+C
+C Look for indirect file start
+C
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 800
+	      ELSE
+	         CALL BSCH		! Move back to start of name
+	      ENDIF
+C
+C Get indirect file name from command line
+C
+	      OK=GETFILNAM(IND_FNAME,IND_LEN,
+     &				'SYS$DISK:[].COM;0',.TRUE.,%REF('!'))
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 800
+	      ENDIF
+C
+C and open indirect file, informing user and checking for errors
+C
+	      OK=FLROPN(IND_LUN, IND_FNAME(:IND_LEN), IERR)
+C
+	      IF (OK) THEN
+	         CALL WRITEF('Command input now being read from %S'
+     &					,IND_FNAME(:IND_LEN))
+	         TTIN=.FALSE.		! not reading from terminal
+	         GOTO 10		! start reading from file
+	      ELSE
+	         CALL WRITEF('%S Can''t open indirect command file %S'
+     &			  ,ERROR,IND_FNAME(:IND_LEN))
+	         CALL LSL_PUTMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 800
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+C
+	CALL BSCH			! un-read non-'@'
+C
+C Now deal with first command, looking it up in table.
+C
+	CMD=RDCOMM(ITCHECK_CMD_TABLE)
+	GOTO (	20,	! a unrecognised command
+     &		30,	! border		
+     &		40,	! checks		
+     &		50,	! close
+     &		60,	! contour_interval		
+     &		80,	! deselect		
+     &		100,	! exit (non function command)		
+     &		120,	! go 	
+     &		140,	! help
+     &		160,	! iff
+     &		180,	! index_interval
+     &		200,	! layer
+     &		220,	! list		
+     &		240,	! lites
+     &		260,	! lookup		
+     &		280,	! output		
+     &		300,	! pause
+     &		320,	! profile_interval
+     &		340,	! return (non function command)		
+     &		360,	! select
+     &		380,	! show
+     &		400,	! spawn
+     &		420,	! supplementary_interval
+     &		440,	! tolerance
+     &		460,	! wait		
+     &		480,	! window
+     &		500	! zlimits
+     &	      		), CMD+1
+C
+C command number out of range
+C
+	CALL WRITEF('Command not yet implemented')
+	GOTO 10
+C
+C unrecognised command
+C
+20	CONTINUE
+	GOTO 800
+C
+C ......................................................................
+C BORDER 
+C
+30	CONTINUE
+	IF (.NOT.BORDER_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C CHECKS 
+C
+40	CONTINUE
+	IF (.NOT.CHECK_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C CLOSE 'sub-command' 
+C
+50	CONTINUE
+	IF (.NOT.CLOSE_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C CONTOUR_INTERVAL 
+C
+60	CONTINUE
+	IF (.NOT.CONTOUR_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C DESELECT 'sub-command'
+C
+80	CONTINUE
+	IF (.NOT.DESELECT_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C EXIT - exit out of program
+C
+100	CONTINUE
+	GOTO 1000
+C
+C ......................................................................
+C Go : do checking
+C
+120	CONTINUE
+	IF (.NOT.GO_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C HELP
+C
+140	CONTINUE
+	IF (.NOT.HELP_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C IFF [filespec]
+C
+160	CONTINUE
+	IF (.NOT.IFF_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C INDEX_INTERVAL 
+C
+180	CONTINUE
+	IF (.NOT.INDEX_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C LAYER
+C
+200	CONTINUE
+	IF (.NOT.LAYER_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C LIST [filespec]
+C
+220	CONTINUE
+	IF (.NOT.LIST_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C LITES [filespec]
+C
+240	CONTINUE
+	IF (.NOT.LITES_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C LOOKUP [filespec]
+C
+260	CONTINUE
+	IF (.NOT.LOOKUP_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C OUTPUT [filespec]
+C
+280	CONTINUE
+	IF (.NOT.OUTPUT_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C PAUSE
+C
+300	CONTINUE
+	IF (.NOT.PAUSE_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C PROFILE_INTERVAL 
+C
+320	CONTINUE
+	IF (.NOT.PROFILE_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C RETURN - return to terminal input
+C
+340	CONTINUE
+	IF (TTIN) THEN
+	   CALL EXPAND('RETURN command ignored - ')
+	   CALL WRITAP('input is already from terminal.')
+	ELSE
+	   CALL EXPAND('RETURN command detected ') 
+	   CALL WRITAP('- returning to terminal input')
+	ENDIF
+	IF (.NOT.TTIN) THEN
+	   OK = FLRCLO(IND_LUN, IERR)
+	   IF (.NOT.OK) THEN
+	      CALL WRITEF('%S Closing indirect file %S',
+     &			ERROR, IND_FNAME(:IND_LEN))
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	   ENDIF
+	ENDIF
+	TTIN = .TRUE.
+	GOTO 10
+C
+C ......................................................................
+C SELECT 'sub-command'
+C
+360	CONTINUE
+	IF (.NOT.SELECT_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C SHOW
+C
+380	CONTINUE
+	IF (.NOT.SHOW_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C SPAWN
+C
+400	CONTINUE
+	IF (.NOT.SPAWN_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C SUPPLEMENTARY_INTERVAL 
+C
+420	CONTINUE
+	IF (.NOT.SUPPLEMENTARY_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C TOLERANCE
+C
+440	CONTINUE
+	IF (.NOT.TOLERANCE_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C WAIT
+C
+460	CONTINUE
+	IF (.NOT.WAIT_CMD(TTIN)) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C WINDOW
+C
+480	CONTINUE
+	IF (.NOT.WINDOW_CMD()) GOTO 800
+	GOTO 10
+C
+C ......................................................................
+C ZLIMITS
+C
+500	CONTINUE
+	IF (.NOT.ZLIMITS_CMD()) GOTO 800
+	GOTO 10
+C
+C close any indirect input following disaster
+C
+800	CONTINUE
+	IF (.NOT.TTIN) THEN
+	   TTIN=.TRUE.
+	   OK = FLRCLO(IND_LUN, IERR)
+	   IF (.NOT.OK) THEN
+	      CALL WRITEF('%S Closing indirect file %S',
+     &			ERROR, IND_FNAME(:IND_LEN))
+	      CALL LSL_PUTMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	   ENDIF
+	   CALL WRITEF
+	   CALL WRITEF('%S Indirect file error - returning to '//
+     &			'terminal input',WARNING)
+	ENDIF
+	GOTO 10
+C
+C prepare to exit
+C
+990	CONTINUE
+	GET_CMDS=SS$_ABORT
+	GOTO 1010
+
+1000	CONTINUE
+	GET_CMDS=SS$_NORMAL
+
+1010	CONTINUE
+	RETURN
+	END

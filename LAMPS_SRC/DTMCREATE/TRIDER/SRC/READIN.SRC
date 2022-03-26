@@ -1,0 +1,378 @@
+	LOGICAL FUNCTION READIN(IOPT,IZF,LAYER)
+C
+***	MODULE	READIN
+***	IDENT	27JA89
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C
+CMOD	Real fixed point value now FIXEDZ not Z		TJH 07-Apr-1988
+CMOD	LIMITS command became ZLIMITS command		TJH 06-Apr-1988
+C	Rehacked for DTMCREATE				TJH 20-Nov-1987
+C
+C Read in all data files collect option selections and if required
+C apply defaults.  If all defaults are applied the user need only 
+C specify the data file generic filename.  Then say GO!
+C
+	IMPLICIT NONE
+C
+C Arguments (out):
+	INTEGER	IOPT	! imaginary point option
+	INTEGER	IZF	! fixed imaginary point value
+	INTEGER LAYER	! # layers for shell/neighbour interp
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNTRIDER:TRIDERMSG.PAR'
+	INCLUDE 	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 	'LSL$DTMCREATESYS:GRIDPARAMS.PAR'
+	INCLUDE 	'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 	'($SSDEF)/NOLIST'
+C
+C W/s
+	INTEGER		I,J,JBOX! temp vars
+	INTEGER	        CMD     ! decoded command number
+	INTEGER		IERR	! for error reporting
+	BYTE		CH	! for use with RDCHS
+	CHARACTER*128   INDFILE	! indirect command file name
+	INTEGER		INDLEN	! and length of name
+	LOGICAL*1	HAD_FILE! go input files open?
+	CHARACTER*100	DEFNAM	! default device/directory for filename
+C
+C Command tables:
+	EXTERNAL     TRIDER_CMD_TABLE
+	INTEGER	     TRIDER_CMD_TABLE
+C
+C Functions:
+	INTEGER FLRSTR		! read record from file
+	INTEGER FLROPN		! open file for LSLLIB FILEO	
+	LOGICAL RDCHS		! read character from line
+	LOGICAL RDCOMM  	! read command from line
+	INTEGER	TTRSTR  	! read line from terminal
+	LOGICAL	GETFILNAM 	! get file-spec
+	LOGICAL	RDUNF		! efficient Fortran reads
+	LOGICAL	FILEIN_CMD	! get files
+	LOGICAL	HELP_CMD	! help
+	LOGICAL SPAWN_CMD	! tadpoles again
+	LOGICAL	WAIT_CMD	! wait for specified period
+	LOGICAL IMAGINARY_CMD	! set up imaginary point algorithms
+	LOGICAL SHOW_CMD	! show settings
+	LOGICAL ENABLE_CMD	! enable things
+	LOGICAL DISABLE_CMD	! disable things
+	LOGICAL	LIMITS_CMD	! set limits
+	LOGICAL	SIGCHS		! gets # significant characters
+C
+C Common blocks:
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:CONTRL.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:FINDIT.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:STORAG.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:TRYVAR.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:ZONVAR.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFDEV.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:DTMJPI.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C ......................................................................
+C
+C Initialise stuff and set defaults for options
+C
+	READIN=SS$_NORMAL
+	HAD_FILE=.FALSE.! no FILEIN command yet
+	VT100=.TRUE.	! assume VT100 to begin with
+	GONOFF=.FALSE.	! no graphics device active
+	DIAG=.FALSE.	! don't give voluminous daignostics
+	GRAPHICS=.FALSE.! no graphics
+	DIAG=.FALSE.	! don't give voluminous daignostics
+	TTIN=.TRUE.	! expect input from TT:
+C
+C Set startup interpolation restrictions
+	UPPER=1.0E24
+	BOTTOM=-1.0E24
+C
+C Set startup imaginary point estimation options
+	KWT=2
+	IOPT=0
+	RELOC=1.0
+C
+C Set scaled lower x,y limits to zero
+	MX1=0
+	MY1=0
+C
+C ......................................................................
+C
+C Get an input line from the terminal
+10	TXTPTR=80
+	IF (TTIN) THEN
+	   READIN=TTRSTR(,,'TRIDER> ',IERR)
+	ELSE
+	   CALL FLRSEL(INDLUN)
+	   READIN=FLRSTR(,,IERR)
+	ENDIF
+	IF (.NOT.READIN) THEN
+	   IF (READIN.EQ.LSL__EOF) THEN
+	      IF (TTIN) THEN
+	         GOTO 170		! end of file = exit
+	      ELSE
+	         CALL WRITEF('%S Unexpected end of indirect command '//
+     &			'file detected',WARNING)
+	         CALL WRITEF('                RETURN command assumed '//
+     &				'- returning to terminal input')
+	         GOTO 80		! close indirect file etc.
+	      ENDIF
+	   ENDIF
+	   CALL LSL_PUTMSG(READIN)
+	   CALL LSL_ADDMSG(IERR)
+	   GOTO 20
+	ENDIF
+C
+C echo and decode the line
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('TRIDER> ')
+	   CALL APPEND(TXTDSC) ! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+	CALL BSLN
+C
+C Look for comment
+	IF (RDCHS(CH)) GOTO 10	! substantially empty line
+	IF (CH.EQ.'!') GOTO 10	! comment!
+C
+C Look for indirect file start
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 20
+	      ELSE
+	         CALL BSCH
+	      ENDIF
+	      DEFNAM='SYS$DISK:[]'
+	      READIN=GETFILNAM(INDFILE,INDLEN,
+     &		DEFNAM(1:SIGCHS(DEFNAM))//'.COM;0',.TRUE.,%REF('!'))
+	      IF (READIN) THEN
+	         CALL STR$UPCASE(INDFILE,INDFILE)
+	      ELSE
+	         CALL LSL_PUTMSG(READIN)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	      READIN=FLROPN(INDLUN,INDFILE(:INDLEN), IERR)
+	      IF (READIN) THEN
+	         CALL WRITEF('Command input now being read from %S'
+     &					,INDFILE(:INDLEN))
+	         TTIN=.FALSE.
+	         GOTO 10
+	      ELSE
+	         CALL WRITEF('%S Can''t open indirect command file %S'
+     &			  ,WARNING,INDFILE(:INDLEN))
+	         CALL LSL_PUTMSG(READIN)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 20
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+	CALL BSCH			! un-read non-'@'
+C
+	CMD=RDCOMM(TRIDER_CMD_TABLE)
+C
+	GOTO (
+     &		20,			! error/nothing
+     &		30,			! disable
+     &		40,			! enable
+     &		140,			! filein
+     &		50,			! help
+     &		60,			! imaginary
+     &		105,			! limits
+     &		110,			! pause
+     &		120,			! quit
+     &		70,			! return
+     &		90,			! show
+     &		100,			! spawn
+     &		130,			! wait
+     &		145			! go!
+     &				) ,CMD+1
+C
+C ......................................................................
+C
+C Close indirect input following disaster
+20	IF (.NOT.TTIN) THEN
+	   TTIN=.TRUE.
+	   CALL FLRCLO(INDLUN)
+	   CALL WRITEF(' ')
+	   CALL WRITEF('%S Indirect file error - returning to '//
+     &			'terminal input',WARNING)
+	ENDIF
+	READIN=SS$_NORMAL
+	GOTO 10
+C
+C ......................................................................
+C DISABLE
+30	IF (.NOT.(DISABLE_CMD())) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C ENABLE
+40	IF (.NOT.(ENABLE_CMD())) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C HELP
+50	IF (.NOT.(HELP_CMD())) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C
+C IMAGINARY point estimaton   (uses IMAGE subtable)
+C
+60	IF (.NOT.IMAGINARY_CMD(IOPT,LAYER)) GOTO 20
+	GOTO 10
+
+C ......................................................................
+C RETURN - return to terminal input
+C
+70	IF (TTIN) THEN
+	   CALL WRITEF(
+     &		'RETURN command ignored - command '//
+     &			'input is already from terminal')
+	ELSE
+	   CALL WRITEF(
+     &		'RETURN command detected - returning to terminal input')
+	ENDIF
+80	IF (.NOT.TTIN) CALL FLRCLO(INDLUN)
+	TTIN=.TRUE.
+	GOTO 10
+C
+C ......................................................................
+C SHOW
+C
+90	IF (.NOT.SHOW_CMD(IOPT)) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SPAWN DCL process - primarily designed for file management
+C
+100	IF (.NOT.SPAWN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C LIMITS real real
+C
+105	IF (.NOT.LIMITS_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C PAUSE
+C
+110	CALL PAUSE(TTIN)
+	GOTO 10
+C
+C ......................................................................
+C QUIT
+C
+120	READIN=SS$_ABORT
+	GOTO 170
+C
+C ......................................................................
+C WAIT
+C
+130	IF (.NOT.WAIT_CMD(TTIN)) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C FILEIN
+C
+140	IF (HAD_FILE) THEN
+	   IF (TTIN) THEN
+	      CALL EXPAND(WARNING)
+	   ELSE
+	      CALL EXPAND(ERROR)
+	   ENDIF
+	   CALL WRTAPP('You already have %S open for input',
+     &					ITLE(1:TITLEN))
+	   GOTO 20
+	ELSE
+	   IF (.NOT.FILEIN_CMD()) GOTO 20
+	   HAD_FILE=.TRUE.
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C GO
+C
+C Read in triangulation transfer data file parameters, scaling
+C parameters, and data ranges, to convert from integer back to
+C real coordinates.
+145	IF (.NOT.HAD_FILE) THEN
+	   IF (TTIN) THEN
+	      CALL EXPAND(WARNING)
+	   ELSE
+	      CALL EXPAND(ERROR)
+	   ENDIF
+	   CALL WRTAPP(
+     &	   'You must specify the input files using the FILEIN command')
+	   GOTO 20
+	ENDIF
+	READ(LGC1)LIMPOL,NP,NPMAX,NBI,NBJ,MX2,MY2,MXI,MYI,ISHELL,
+     1            (VMIN(I),VMAX(I),VSCAL(I),OFFSET(I),I=1,3)
+C
+	IF(NP.GT.NMAX) GOTO 200	! report problem and exit
+C
+C Read in data set and next point in box markers for each point,
+C these markers are now read into MD(4,n) instead of MARKER()
+	READIN=RDUNF(LGC1,MD,5*NP)
+	IF (.NOT.READIN) GOTO 180
+C
+C Ensure all marker entries are positive
+	DO 150 I=1,NP
+	   MD(4,I)=IABS(MD(4,I))
+150	CONTINUE
+C
+C Set scaled offset for imaginary points. This is either zero by
+C default, or if the grid overlaps the data area is set to the
+C maximum amount of overlap. This ensures that all the grid has
+C no default values, no matter what relation the grid may be to
+C the map area at the edges (within reason!). KOFF is the scaled
+C integer unit equivalent overlap
+	KOFF=RELOC*10000.0
+C
+C Integer scale the interpolation limits supplied earlier
+	CALL CONVER(FIXEDZ,IZF,3) ! fixed imaginary point value
+	CALL CONVER(UPPER,J,3)    ! absolute upper
+	UPPER=J
+	CALL CONVER(BOTTOM,J,3)   ! absolute lower
+	BOTTOM=J
+C
+C Read in first point in box markers
+	JBOX=NBI*NBJ
+	IF(NAX.LT.JBOX)GOTO 190	! report problem and exit
+160	READIN=RDUNF(LGC1,INBOX,JBOX)
+	IF (.NOT.READIN) GOTO 180
+	CLOSE(UNIT=LGC1)
+170	RETURN
+C
+C ......................................................................
+C			     E R R O R S
+C Error reading from .DTA file
+180	CALL LSL_GETMSG(TRIDER__RDDTA,MESSAGE,MESLEN)
+	CALL EXPAND('%'//MESSAGE(:MESLEN))
+	GOTO 210
+C
+C Too many boxes
+190	CALL LSL_GETMSG(TRIDER__BOXOVR,MESSAGE,MESLEN)
+	GOTO 210
+C
+C Too many nodes
+200	CALL LSL_GETMSG(TRIDER__NODOVR,MESSAGE,MESLEN)
+210	CALL EXPAND('%'//MESSAGE(:MESLEN))
+	CALL TXTOUT(.FALSE.)
+	CALL ERRSNS(,I,J)		! find out what the problem is
+	IF (J.EQ.0) J=I
+	CALL LSL_GETMSG(J,MESSAGE,MESLEN)
+	J=INDEX(MESSAGE,'!') - 1		! (ignore any FAO stuff)
+	IF (J.LT.0) J=MESLEN
+	CALL ALARMS(MESSAGE(:MESLEN))		! close down & exit
+	END

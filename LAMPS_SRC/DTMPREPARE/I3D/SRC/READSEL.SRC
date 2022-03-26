@@ -1,0 +1,258 @@
+	LOGICAL FUNCTION READSEL(SELCMD)
+C
+***	MODULE	READSEL
+***	IDENT	03MY88
+C
+C Copyright Laser Scan Laboratories Limited, Cambridge, England
+C
+C Modified from RDSEL in module DTIVIEW		by ALB  5-May-1988
+C
+C 
+C Function to read in and check a feature code select or
+C deselect command. The command line is checked for correct
+C syntax and used to update the bit-map.
+C This version does not have any SAVE facility.
+C
+C This version rename to READSEL.
+C NOTE this version returns FALSE if error occurs.
+C
+	IMPLICIT NONE
+C
+	LOGICAL*1 SELCMD	! TRUE is SEL cmd, FALSE if DES cmd.
+C
+C Parameters
+C
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNI3D:CONSTANTS.PAR'
+C
+C common blocks
+C
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNI3D:CONTROL.CMN'
+	INCLUDE 'LSL$CMNI3D:GROUP.CMN'
+	INCLUDE 'LSL$CMNI3D:SELECT.CMN'
+C
+C
+C Workspace.
+C
+	LOGICAL OK		! return code
+	LOGICAL EOL		! end of line
+	INTEGER	BIT		! bit setting in group bit map
+	INTEGER	CMD		! command number
+	INTEGER I		! loop controls.
+	INTEGER J		! loop controls.
+	INTEGER GRPNUM		! number of group in group name table.
+	INTEGER*4 TMPMAP(FCMAX)	! temporary bit-map holding 1's for the
+				! selected/deselected bits for SEL/DES
+				! commands respectively.
+	BYTE CH			! for use with RDCH & RDCHS
+C
+C define group definition table
+C
+	EXTERNAL 	GROUP_CMD_TABLE
+	INTEGER 	GROUP_CMD_TABLE
+
+C
+C Functions.
+C
+	INTEGER 	RDCOMM
+	LOGICAL*1 	READRANG
+	LOGICAL*1 	RDCHS
+	LOGICAL*1 	RDCH
+	INTEGER		LIB$EXTZV
+C
+C***********************************************************************
+C
+C Initialise.
+C
+	READSEL=.TRUE.		! assume success
+C
+C Clear the temporary bit-map.
+C
+	CALL VIOCLR(TMPMAP,FCMAX*4)
+C
+C***********************************************************************
+C
+C Read all the groups and ranges given with this command before
+C updating the bit-map (since don't want to change anything if
+C there is an error). Set up a temporary bit-map to be OR'd or
+C AND NOT'd with the real bit-map when the whole command is decoded
+C (depending on whether it is a select or deselect command).
+C
+10	CONTINUE
+	EOL = RDCHS(CH)
+	IF (.NOT.EOL) THEN					! more features
+	   IF ((CH.GE.48).AND.(CH.LE.57)) THEN		! 0 - 9
+	      GOTO 200
+	   ELSEIF (((CH.GE.65).AND.(CH.LE.90)).OR.	! A - Z
+     &	    ((CH.GE.97).AND.(CH.LE.122))) THEN		! a - z
+	      GOTO 300
+	   ELSE
+	      IF (SELCMD) THEN
+	         CALL WRITEF('%s Specifying command SELECT FC',ERROR)
+		 CALL WRITEF('Unexpected character "%^B%C" '//
+     &		  'at this point.',CH)
+	      ELSE	
+	         CALL WRITEF('%s Specifying command DESELECT FC',ERROR)
+		 CALL WRITEF('Unexpected character "%^B%C" '//
+     &		  'at this point.',CH)
+	      ENDIF
+	   ENDIF
+	ELSE
+	   GOTO 500
+	ENDIF
+C
+C***********************************************************************
+C
+C Got an explicit ft code or range of ft codes.
+C
+200	CONTINUE
+	OK = READRANG(PAIRS(1,1),PAIRS(2,1))
+	IF (.NOT.OK) THEN 
+	   READSEL = .FALSE.
+	   GOTO 999
+	ENDIF
+	IF ((PAIRS(1,1).LT.0).OR.(PAIRS(1,1).GT.MAXFC)) THEN
+	   CALL WRITEF('Illegal feature code %^L%N.',PAIRS(1,1))
+	   READSEL = .FALSE.
+	   GOTO 999
+	ENDIF
+	IF ((PAIRS(2,1).LT.0).OR.(PAIRS(2,1).GT.MAXFC)) THEN
+	   CALL WRITEF('Illegal feature code %^L%N.',PAIRS(2,1))
+	   READSEL = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C Mark up the temporary bit-map.
+C
+	DO 230 I=PAIRS(1,1),PAIRS(2,1)
+	   WORD=I/32
+	   OFFSET=I - WORD*32 
+C
+C check that the feature code is defined in one of the groups
+C
+	   DO 210 J = 1,GRPMAX
+	      IF (GRPDEF(J)) THEN
+	         BIT = LIB$EXTZV(OFFSET,1,GRPFCT(WORD+1,J))
+		 IF (BIT) GOTO 220	! got ON bit can continue
+	      ENDIF
+210	   CONTINUE
+	   GOTO 230			! no ON in any group for FC
+220	   CONTINUE
+	   CALL LIB$INSV(1,OFFSET,1,TMPMAP(WORD+1))
+230	CONTINUE
+	GOTO 10
+C
+C***********************************************************************
+C
+C Got a group name.  Check whether it is a known group name ?
+C
+300	CONTINUE
+	CALL BSCH
+	IF (GRPCNT.LE.0) THEN		! no groups defined 
+	   IF (SELCMD) THEN
+	      CALL WRITEF('%S Specifing command SELECT FC ',ERROR)
+	      CALL WRITEF('No groups definitions loaded.')
+	      CALL WRITEF('Therefore no feature codes available '//
+     &		'for selection.')
+	      CALL WRITEF('Use command LOOKUP to load group '//
+     &		'definition table.')
+	      READSEL = .FALSE.
+	      GOTO 999
+	   ELSE
+	      CALL WRITEF('%S Specifing command DESELECT FC ',ERROR)
+	      CALL WRITEF('No groups definitions loaded.')
+	      CALL WRITEF('Therefore no feature codes available '//
+     &		'for deselection.')
+	      CALL WRITEF('Use command LOOKUP to load group '//
+     &		'definition table.')
+	      READSEL = .FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+	GRPNUM=RDCOMM(GROUP_CMD_TABLE)
+	IF (GRPNUM.LE.0) THEN		! bad group name
+	   IF (SELCMD) THEN
+	      CALL WRITEF('%S Specifing command SELECT FC ',ERROR)
+	   ELSE
+	      CALL WRITEF('%S Specifing command DESELECT FC ',ERROR)
+	   ENDIF
+	   CALL WRITEF('Invalid group name %S',CMDNST)
+	   READSEL = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C check that the group has been defined. 
+C
+	IF (.NOT.GRPDEF(GRPNUM)) THEN
+	   IF (SELCMD) THEN
+	      CALL WRITEF('%S Specifing command SELECT FC ',ERROR)
+	      CALL WRITEF('Group not defined.') 
+	      CALL WRITEF('Therefore no feature codes available '// 
+     &		'for selection for this group.')
+	      CALL WRITEF('Use command LOOKUP to load a'//
+     &		'definition table containing required group.')
+	      READSEL = .FALSE.
+	      GOTO 999
+	   ELSE
+	      CALL WRITEF('%S Specifing command DESELECT FC ',ERROR)
+	      CALL WRITEF('Group not defined.')
+	      CALL WRITEF('Therefore no feature codes available '// 
+     &		'for deselection for this group.')
+	      CALL WRITEF('Use command LOOKUP to load a'//
+     &		'definition table containing required group.')
+	      READSEL = .FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C merge existing bitmap for current group into temporary bitmap
+C
+	DO 310 I=1,FCMAX
+	   TMPMAP(I)=TMPMAP(I) .OR. GRPFCT(I,GRPNUM)
+310	CONTINUE
+	IF (RDCHS(CH)) GOTO 500
+	IF (CH.EQ.COMMA) GOTO 10	! check the delimiter.
+	CALL BSCH
+	GOTO 10
+C
+C***********************************************************************
+C
+C We have now finished checking the syntax of the command.
+C Prepare to update the real bit-map.
+C The updating is done by ORing or AND NOTing the temporary bit-map
+C with the real bit-map (depending on whether it is a SEL or DES
+C command and whether the real bit-map is in select or deselect mode).
+C
+C Update the real bit-map with the contents of the temporary bit-map.
+C
+500	CONTINUE
+	IF (.NOT.SELCMD) THEN
+C
+C Deselecting.
+C
+	   DO 510 I=1,FCMAX
+	      FCMAP(I)=FCMAP(I).AND..NOT.TMPMAP(I)
+510	   CONTINUE
+	ELSE
+C
+C Selecting - if currently in deselect mode then change to select mode.
+C
+	   IF (.NOT.FCSMOD) THEN
+	      FCSMOD=.TRUE.		! setting to select mode.
+	      CALL VIOMV3(TMPMAP,FCMAX*4,FCMAP)
+	   ELSE
+C
+	      DO 520 I=1,FCMAX
+	         FCMAP(I)=FCMAP(I).OR.TMPMAP(I)
+520	      CONTINUE
+	   ENDIF
+	ENDIF
+C
+C***********************************************************************
+C
+999	CONTINUE	
+	RETURN
+C
+	END

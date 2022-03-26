@@ -1,0 +1,675 @@
+	SUBROUTINE ASKSTRING
+C
+***	IDENT	04AP95
+***	MODULE	ASKSTRING
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RWR	31-May-1990
+C
+C	LITES2 cartographic editor ASK STRING command.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:AUXDEF/
+***     PARAMETER/CMN:CHARS/
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***     PARAMETER/CMN:MOANMESS/		! moan constants
+***	PARAMETER/LSL$CMNLSL:READSTR/
+***	PARAMETER/CMN:STAPAR/
+C
+	INCLUDE	'($DSCDEF)'
+	INCLUDE	'($LIBDEF)'
+	INCLUDE	'($LNMDEF)'
+	INCLUDE	'($SSDEF)'
+	INCLUDE	'($STRDEF)'
+	INCLUDE	'($RMSDEF)'
+C
+***	COMMON/CMN:DRAWIN/
+***     COMMON/CMN:DOUT/		! command decoding output
+***	COMMON/LSL$CMNLSL:FILENAME/
+***	COMMON/LSL$CMNFRT:FRTACD/
+***	COMMON/CMN:GLOBAL/
+***	COMMON/CMN:LABELS/
+***     COMMON/CMN:MASTER/
+***     COMMON/CMN:OPTION/
+***	COMMON/CMN:STATE/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C Functions
+	EXTERNAL	ASK_STRING_CMD_TABLE
+	EXTERNAL	ASK_STRING_PARSE_CMD_TABLE
+	EXTERNAL	NASTY
+	INTEGER		READSTR
+	LOGICAL		RDCHS
+	LOGICAL		RDDBLE
+	LOGICAL		RDLONG
+	LOGICAL		TRISCN
+	INTEGER		LIB$SGET1_DD		! use LIB$ rather than STR$
+						! as it returns errors
+						! rather than signalling them
+	INTEGER		LIB$SCOPY_DXDX
+	INTEGER		STR$POSITION
+	INTEGER		FINSTR
+	INTEGER		TRNALL
+	INTEGER		SIGCHS
+	INTEGER		LIB$GET_SYMBOL
+	INTEGER		STR$ELEMENT
+	INTEGER		SYS$TRNLNM
+	INTEGER		PUTFLN
+	INTEGER		LIB$FIND_FILE
+	INTEGER		STR$COMPARE_EQL
+	INTEGER		STR$FIND_FIRST_SUBSTRING
+	LOGICAL		TX_SZE_FRM_ATTBTS
+	INTEGER		CVT_DATE
+	INTEGER		CVT_DAY_STR
+	INTEGER		CVT_TIME_STR
+C
+C Local Variables
+	BYTE		CH
+	CHARACTER*1	CHR
+	INTEGER		LENGTH(2)
+	INTEGER*2	PTR
+	INTEGER*2	WLEN
+	INTEGER		I
+	INTEGER		RETCOD
+	REAL*8		TTT
+	LOGICAL		HAD_SPACE
+	INTEGER		L
+	INTEGER		FIND_FLAGS
+	INTEGER		FIND_CONTEXT
+	REAL		AUX(AUXLEN)
+	INTEGER		DATE,TIME
+C
+C dynamic descriptor for last file name
+	INTEGER		LAST_FIL_NAM(2)	! temporary - dynamic descriptor
+	BYTE		LAST_FIL_NAMB(4)
+	EQUIVALENCE	(LAST_FIL_NAM,LAST_FIL_NAMB)
+	DATA		LAST_FIL_NAMB/0,0,0,DSC$K_CLASS_D/
+C   
+C make sure FIND_CONTEXT retains its value
+	SAVE		FIND_CONTEXT,FIND_FLAGS,LAST_FIL_NAM
+
+	DATA		FIND_CONTEXT/0/
+	DATA		FIND_FLAGS/0/
+C
+C note - use dynamic strings, and the system service string handling,
+C as these cope better with zero length strings than FORTRAN string
+C handling.
+	INTEGER		STRING(2,2)	! dynamic strings
+	BYTE		STR1B(4)
+	BYTE		STR2B(4)
+	EQUIVALENCE	(STR1B,STRING(1,1)),(STR2B,STRING(1,2))
+	DATA		STR1B/0,0,0,DSC$K_CLASS_D/
+	DATA		STR2B/0,0,0,DSC$K_CLASS_D/
+C
+C item list structure
+	STRUCTURE /ITEM/
+	   UNION
+	   MAP
+	      INTEGER*2 BUFLEN
+	      INTEGER*2 CODE
+	   END MAP
+	   MAP
+	      INTEGER*4 END
+	   END MAP
+	   END UNION
+	   INTEGER*4 BUFADR
+	   INTEGER*4 RETLENADR
+	END STRUCTURE
+C
+	RECORD/ITEM/ITMLST(2)
+C
+C get tertiary command
+	CALL GET_COMMAND(DSTR(:DSTRL),ASK_STRING_CMD_TABLE)
+	IF (MOANED) GOTO 9990
+C
+C allocate maximum space to first string
+	RETCOD = LIB$SGET1_DD(DSM,STRING(1,1))
+	IF (.NOT.RETCOD) THEN
+	   CALL MOAN(MSG_ERRINASKSTRING,' ')
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 9990
+	ENDIF
+C
+C all commands take rest of line string, and put them in STRING(1) 
+C except INDEX, ELEMENT and PARSE - which need two strings to be
+C extracted from rest of line 
+	IF (DPRIN.NE.2.AND.DPRIN.NE.21.AND.DPRIN.NE.22) THEN
+	   IF (DSTRL.GT.0) THEN
+	      CALL DCPSAV(PTR)			! save TXTBUF pointer
+	      CALL SETAUX(%REF(DSTR),DSTRL)	! set auxiliary buffer
+	      LENGTH(1) = FINSTR(STRING(1,1),'string')
+C
+C this has not dealt with the string dynamically (which is why we
+C had to allocate space above), so take the part of the string we want
+	      CALL STR$LEFT(STRING(1,1),STRING(1,1),LENGTH(1))
+	      CALL BSLN				! restore TXTBUF
+	      CALL DCPSET(PTR)
+	   ELSE
+	      LENGTH(1) = 0
+	      CALL STR$FREE1_DX(STRING(1,1))	! make empty
+	   ENDIF
+	ELSE
+C
+C Want to read two strings from 'rest of line' argument, DSTR
+C
+C allocate maximum space to second string
+	   RETCOD = LIB$SGET1_DD(DSM,STRING(1,2))
+	   IF (.NOT.RETCOD) THEN
+	      CALL MOAN(MSG_ERRINASKSTRING,' ')
+	      CALL LITES2_SIGNAL(RETCOD)
+	      GOTO 9990
+	   ENDIF
+C
+	   IF (DSTRL.GT.0) THEN
+	      CALL DCPSAV(PTR)			! save TXTBUF pointer
+	      CALL SETAUX(%REF(DSTR),DSTRL)	! set auxiliary buffer
+C
+C use dynamic string descriptors, as strings may be empty - eg variables
+C and character variables subrng in these circumstances
+	      DO 10 I=1,2
+	         IF (RDCHS(CH)) THEN
+	            LENGTH(I) = 0
+	            CALL STR$FREE1_DX(STRING(1,I))	! make empty
+	            GOTO 10
+	         ENDIF
+	         IF (CH.EQ.DQOT) THEN			! double quoted string
+	            LENGTH(I) = READSTR(STRING(1,I),DQOT,ON_CHAR2,.FALSE.)
+	         ELSE					! terminate by space
+	            CALL BSCH
+	            LENGTH(I) = READSTR(STRING(1,I),SPACE,ON_SPACE,.TRUE.)
+	         ENDIF
+C
+C truncate
+	         CALL STR$LEFT(STRING(1,I),STRING(1,I),LENGTH(I))
+10	      CONTINUE
+C
+	      IF (.NOT.RDCHS(CH)) THEN
+	         CALL MOAN(MSG_ILLEGALTERM,CH)
+	         GOTO 9990	   			! something left on line
+	      ENDIF
+C
+	      CALL BSLN				! restore TXTBUF
+	      CALL DCPSET(PTR)
+	   ELSE
+	      LENGTH(1) = 0
+	      CALL STR$FREE1_DX(STRING(1,1))	! make empty
+	      LENGTH(2) = 0
+	      CALL STR$FREE1_DX(STRING(1,2))	! make empty
+	   ENDIF
+	ENDIF
+C
+C obey command
+	GOTO (100,200,300,400,500,600,700,800,900,1000,
+     &	      1100,1200,1300,1400,1500,1600,1700,1800,1900,2000,
+     &	      2100,2200,2300,2400,2500,2600), DPRIN
+C
+C Tertiary command number out of range
+	CALL MSGCMD(NASTY,MSG_ERRTERIND)
+	GOTO 9990
+C
+C LENGTH - return length of string in command line
+100	CALL STR$ANALYZE_SDESC(STRING(1,1),WLEN,I)
+	ASK_INT(1) = WLEN
+	ASK_INT_NUM = 1
+	GOTO 10000
+C
+C INDEX - position of second string wrt to first string
+200	CONTINUE
+	ASK_INT(1) = STR$POSITION(STRING(1,1),STRING(1,2))
+	ASK_INT_NUM = 1
+	GOTO 10000
+C
+C EXTRACT - extract a subtext from given text
+300	CALL STR$POS_EXTR(ASK_CHAR(1,1),STRING(1,1),DINTS(1),DINTS(2))
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C LEFT - extract left subtext from given string
+400	CALL STR$LEFT(ASK_CHAR(1,1),STRING(1,1),DINTS(1))
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C RIGHT - extract right subtext from given string
+500	CALL STR$RIGHT(ASK_CHAR(1,1),STRING(1,1),DINTS(1))
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C UPCASE - uppercase the string
+600	CALL STR$UPCASE(ASK_CHAR(1,1),STRING(1,1))
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C TRIM - trim the string - remove trailing spaces and tabs
+700	CALL STR$TRIM(ASK_CHAR(1,1),STRING(1,1))
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C PAD - fill string to specified length with zeros
+800	CONTINUE
+	IF (LENGTH(1).GT.DINTS(1)) THEN 		! no space for padding
+	   CALL STR$COPY_DX(ASK_CHAR(1,1),STRING(1,1))
+	ELSE
+C
+C generate a space string, and concatenate with source string
+	   CALL STR$DUPL_CHAR(STRING(1,2),DINTS(1)-LENGTH(1))
+	   CALL STR$CONCAT(ASK_CHAR(1,1),STRING(1,1),STRING(1,2))
+	ENDIF
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C ISDIGIT - -1 for numeric, 0 for not
+900	CONTINUE
+	ASK_INT_NUM = 1
+	ASK_INT(1) = 0
+	DO 910, I=1,LENGTH(1)
+	   CALL STR$POS_EXTR(CHR,STRING(1,1),I,I)
+	   IF (CHR.LT.'0'.OR.CHR.GT.'9') GOTO 10000
+910	CONTINUE
+	ASK_INT(1) = -1
+	GOTO 10000
+C
+C ISALPHA -  -1 for all alphabetic characters, 0 for not
+1000	CONTINUE
+	ASK_INT_NUM = 1
+	ASK_INT(1) = 0
+	DO 1010, I=1,LENGTH(1)
+	   CALL STR$POS_EXTR(CHR,STRING(1,1),I,I)
+	   IF (CHR.LT.'A'.OR.
+     &	       (CHR.GT.'Z'.AND.CHR.LT.'a').OR.
+     &	        CHR.GT.'z') GOTO 10000
+1010	CONTINUE
+	ASK_INT(1) = -1
+	GOTO 10000
+C
+C ASCII - returns ascii value of first character in character string
+1100	CONTINUE
+	IF (LENGTH(1).LE.0) THEN
+	   ASK_INT(1) = 0
+	ELSE
+	   CALL STR$POS_EXTR(CHR,STRING(1,1),1,1) ! extract 1 character from
+						  ! dynamic string
+	   ASK_INT(1) = ICHAR(CHR)
+	ENDIF
+	ASK_INT_NUM = 1
+	GOTO 10000
+C
+C NO_DOLLAR - replaces $escape characters by 8 bit ASCII code
+1200	CONTINUE
+	CALL STR$COPY_DX(ASK_CHAR(1,1),STRING(1,1))
+	IF (ESCOPT) CALL REPLACE_ESCAPE(
+     &		LENGTH(1),ASK_CHAR(1,1),I)	! I is dummy output
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C ISINTEGER -  -1 for integer, 0 for not
+1300	CONTINUE
+	IF (LENGTH(1).LE.0) THEN		! don't want to setaux
+	   ASK_INT(1) = 0	   
+	ELSE
+	   CALL DCPSAV(PTR)			! save TXTBUF pointer
+	   CALL SETAUX(%VAL(STRING(2,1)),LENGTH(1))! set auxiliary buffer
+C
+C read integer number from line
+	   IF (RDLONG(I)) THEN			! not number on line
+	      ASK_INT(1) = 0
+	   ELSEIF (RDCHS(CH)) THEN   		! nothing else on line
+	      ASK_INT(1) = -1
+	   ELSE					! something else on line
+	      ASK_INT(1) = 0
+	   ENDIF
+	   CALL BSLN				! restore TXTBUF
+	   CALL DCPSET(PTR)
+	ENDIF
+	ASK_INT_NUM = 1
+	GOTO 10000
+C
+C ISREAL -  -1 for real number, 0 for not
+1400	CONTINUE
+	IF (LENGTH(1).LE.0) THEN		! don't want to setaux
+	   ASK_INT(1) = 0	   
+	ELSE
+	   CALL DCPSAV(PTR)			! save TXTBUF pointer
+	   CALL SETAUX(%VAL(STRING(2,1)),LENGTH(1))! set auxiliary buffer
+C
+C read real number from line
+	   IF (RDDBLE(TTT)) THEN			! not number on line
+	      ASK_INT(1) = 0
+	   ELSEIF (RDCHS(CH)) THEN			! nothing else on line
+	      ASK_INT(1) = -1
+	   ELSE					! something else on line
+	      ASK_INT(1) = 0
+	   ENDIF
+	   CALL BSLN				! restore TXTBUF
+	   CALL DCPSET(PTR)
+	ENDIF
+	ASK_INT_NUM = 1
+	GOTO 10000
+C
+C COLLAPSE -  remove all spaces and tabs
+1500	CONTINUE
+	CALL STR$FREE1_DX(ASK_CHAR(1,1))	! make empty
+	DO 1510, I=1,LENGTH(1)
+	   CALL STR$POS_EXTR(CHR,STRING(1,1),I,I)
+	   IF (CHR.NE.BLANK.AND.CHR.NE.TABC) THEN
+	      CALL STR$CONCAT(ASK_CHAR(1,1),ASK_CHAR(1,1),CHR)
+	   ENDIF
+1510	CONTINUE	   
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C COMPRESS - reduce multiple spaces and tabs to single space
+1600	CONTINUE
+	CALL STR$FREE1_DX(ASK_CHAR(1,1))	! make empty
+	HAD_SPACE = .FALSE.
+	DO 1610, I=1,LENGTH(1)
+	   CALL STR$POS_EXTR(CHR,STRING(1,1),I,I)
+	   IF (CHR.EQ.BLANK.OR.CHR.EQ.TABC) THEN
+	      IF (.NOT.HAD_SPACE) THEN
+	         CALL STR$CONCAT(ASK_CHAR(1,1),ASK_CHAR(1,1),BLANK)
+	         HAD_SPACE = .TRUE.
+	      ENDIF
+	   ELSE
+	      CALL STR$CONCAT(ASK_CHAR(1,1),ASK_CHAR(1,1),CHR)
+	      HAD_SPACE = .FALSE.
+	   ENDIF
+1610	CONTINUE	   
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C LOWERCASE - reduce to lower case
+1700	CONTINUE
+	CALL STR$FREE1_DX(ASK_CHAR(1,1))	! make empty
+	DO 1710, I=1,LENGTH(1)
+	   CALL STR$POS_EXTR(CHR,STRING(1,1),I,I)
+	   IF (CHR.GE.'A'.AND.CHR.LE.'Z') CHR = CHAR(ICHAR(CHR)+32)
+	   CALL STR$CONCAT(ASK_CHAR(1,1),ASK_CHAR(1,1),CHR)
+1710	CONTINUE	   
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C TRNALL - do recursive translation of logical name
+1800	CONTINUE
+C
+C allocate maximum space for output
+	RETCOD = LIB$SGET1_DD(255,ASK_CHAR(1,1))
+	IF (.NOT.RETCOD) THEN
+	   CALL MOAN(MSG_ERRINASKSTRING,STRING(1,1))
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 9990
+	ENDIF
+C
+C do recursive translation of logical name
+	RETCOD = TRNALL(STRING(1,1),ASK_CHAR(1,1))
+	IF (RETCOD.EQ.SS$_NORMAL) THEN
+	   CALL STR$LEFT(ASK_CHAR(1,1),ASK_CHAR(1,1),SIGCHS(ASK_CHAR(1,1)))
+	ELSEIF (RETCOD.EQ.SS$_NOLOGNAM) THEN
+	   CALL STR$FREE1_DX(ASK_CHAR(1,1))	! make empty
+	ELSE
+	   CALL MOAN(MSG_ERRINASKSTRING,STRING(1,1))
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 9990
+	ENDIF
+C
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C TRNLNM - do single translation of logical name
+1900	CONTINUE
+C
+C allocate maximum space for output
+	RETCOD = LIB$SGET1_DD(255,ASK_CHAR(1,1))
+	IF (.NOT.RETCOD) THEN
+	   CALL MOAN(MSG_ERRINASKSTRING,STRING(1,1))
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 9990
+	ENDIF
+C
+	CALL STR$ANALYZE_SDESC(ASK_CHAR(1,1),WLEN,I)
+C
+C fill in itemlist
+	ITMLST(1).BUFLEN = WLEN
+	ITMLST(1).CODE = LNM$_STRING
+	ITMLST(1).BUFADR = I
+	ITMLST(1).RETLENADR = %LOC(L)
+	ITMLST(2).END = 0
+C
+C translate logical name
+	RETCOD = SYS$TRNLNM(LNM$M_CASE_BLIND,'LNM$FILE_DEV',STRING(1,1),
+     &	                    ,ITMLST)
+C
+	IF (RETCOD.EQ.SS$_NORMAL) THEN
+	   CALL STR$LEFT(ASK_CHAR(1,1),ASK_CHAR(1,1),L)
+	ELSEIF (RETCOD.EQ.SS$_NOLOGNAM) THEN
+	   CALL STR$FREE1_DX(ASK_CHAR(1,1))	! make empty
+	ELSE
+	   CALL MOAN(MSG_ERRINASKSTRING,STRING(1,1))
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 9990
+	ENDIF
+C
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C DCLSYMBOL - value of DCL symbol
+2000	CONTINUE
+	RETCOD = LIB$GET_SYMBOL(STRING(1,1),ASK_CHAR(1,1))
+	IF (RETCOD.EQ.LIB$_NOSUCHSYM) THEN
+	   CALL STR$FREE1_DX(ASK_CHAR(1,1))	! make empty
+	ELSEIF (RETCOD.NE.SS$_NORMAL) THEN
+	   CALL MOAN(MSG_ERRINASKSTRING,STRING(1,1))
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 9990
+	ENDIF
+	ASK_CHAR_NUM = 1
+	GOTO 9900		! get length of returned string
+C
+C extract delimited element from string
+2100	CONTINUE
+	IF (DINTS(1).LT.0) THEN
+	   CALL MOAN(MSG_NEGARGS)
+	ELSE
+	   RETCOD = STR$ELEMENT(ASK_CHAR(1,1),DINTS(1),STRING(1,1),STRING(1,2))
+	   IF (RETCOD.EQ.SS$_NORMAL) THEN
+	      ASK_CHAR_NUM = 1
+	      GOTO 9900		! get length of returned string
+C
+C if no element found, return delimiter
+	   ELSEIF (RETCOD.EQ.STR$_NOELEM) THEN
+	      CALL STR$COPY_DX(ASK_CHAR(1,1),STRING(1,1))
+	      ASK_CHAR_NUM = 1
+	      GOTO 9900
+	   ELSE
+	      CALL MOAN(MSG_ERRINASKSTRING,STRING(1,1))
+	      CALL LITES2_SIGNAL(RETCOD)
+	   ENDIF
+	ENDIF
+	GOTO 9990
+C
+C parse the file name and return the required field
+2200	CONTINUE
+	RETCOD = PUTFLN(STRING(1,1))
+	IF (RETCOD.EQ.LSL__SRCTOOBIG) THEN
+	   CALL INFORM(MSG_COMPTOOLONG)
+	ELSEIF (.NOT.RETCOD) THEN
+	   CALL MOAN(MSG_ERRINASKSTRING,STRING(1,1))
+	   CALL LITES2_SIGNAL(RETCOD)
+	   GOTO 9990
+	ENDIF
+C
+C get field required - this gives acceptable error messages
+C except when it is passed a null string (SETAUX does not like
+C that), so as a frig catch this case here
+	IF (LENGTH(2).GT.0) THEN
+	   CALL GET_COMMAND(STRING(1,2),ASK_STRING_PARSE_CMD_TABLE)
+	ELSE
+	   CALL MOAN(MSG_CMDLIBUXS,'command',' ')
+	ENDIF
+	IF (MOANED) GOTO 9990
+C
+C Tertiary command number out of range
+	IF (DPRIN.GT.6) THEN
+	   CALL MSGCMD(NASTY,MSG_ERRTERIND)
+	   GOTO 9990
+	ENDIF
+C
+	IF (DPRIN.EQ.1.AND.HAD_NOD.AND.LEN_NOD.GT.0) THEN
+	   CALL STR$COPY_DX(ASK_CHAR(1,1),STR_NOD(1:LEN_NOD))
+	ELSEIF (DPRIN.EQ.2.AND.HAD_DEV.AND.LEN_DEV.GT.0) THEN
+	   CALL STR$COPY_DX(ASK_CHAR(1,1),STR_DEV(1:LEN_DEV))
+	ELSEIF (DPRIN.EQ.3.AND.HAD_DIR.AND.LEN_DIR.GT.0) THEN
+	   CALL STR$COPY_DX(ASK_CHAR(1,1),STR_DIR(1:LEN_DIR))
+	ELSEIF (DPRIN.EQ.4.AND.HAD_NAM.AND.LEN_NAM.GT.0) THEN
+	   CALL STR$COPY_DX(ASK_CHAR(1,1),STR_NAM(1:LEN_NAM))
+	ELSEIF (DPRIN.EQ.5.AND.HAD_EXT.AND.LEN_EXT.GT.0) THEN
+	   CALL STR$COPY_DX(ASK_CHAR(1,1),STR_EXT(1:LEN_EXT))
+	ELSEIF (DPRIN.EQ.6.AND.HAD_VER.AND.LEN_VER.GT.0) THEN
+	   CALL STR$COPY_DX(ASK_CHAR(1,1),STR_VER(1:LEN_VER))
+	ELSE
+	   CALL STR$FREE1_DX(ASK_CHAR(1,1))	! make empty
+	ENDIF
+	ASK_CHAR_NUM = 1
+	GOTO 9900	   
+C
+C get complete file name
+2300	CONTINUE
+C
+C if this string has no wild card, then start a new search
+	IF (STR$FIND_FIRST_SUBSTRING(STRING(1,1),
+     &	                             I,     		! not used
+     &	                             RETCOD,		! not used
+     &	                             '*',
+     &	                             '%',
+     &	                             '...')
+     &	                                    .EQ.0) THEN
+	   CALL LIB$FIND_FILE_END(FIND_CONTEXT)
+	   FIND_CONTEXT = 0
+C
+C is this the same string as was used last time?
+	ELSEIF (.NOT.STR$COMPARE_EQL(STRING(1,1),LAST_FIL_NAM)) THEN
+	   CALL LIB$FIND_FILE_END(FIND_CONTEXT)
+	   FIND_CONTEXT = 0
+C
+C save this file spec till next time
+	   RETCOD = LIB$SCOPY_DXDX(STRING(1,1),LAST_FIL_NAM)
+	   IF (.NOT.RETCOD) THEN
+	      CALL MOAN(MSG_ERRINASKSTRING,STRING(1,1))
+	      CALL LITES2_SIGNAL(RETCOD)
+	      GOTO 9990
+	   ENDIF
+	ENDIF
+C
+C search for the file (allowing multiple files)
+	RETCOD = LIB$FIND_FILE(STRING(1,1),		! filespec
+     &	                       ASK_CHAR(1,1),		! resultant filespec
+     &	                       FIND_CONTEXT,		! context
+     &	                       ,			! default
+     &	                       ,			! related filespec
+     &	                       ,			! status value
+     &	                       FIND_FLAGS)		! flags (multiple)
+C
+	IF (RETCOD) THEN
+	   ASK_CHAR_NUM = 1
+	   GOTO 9900		! get length of returned string
+	ELSEIF (RETCOD.EQ.RMS$_NMF.OR.RETCOD.EQ.RMS$_FNF) THEN
+	   ASK_CHAR_NUM = 1
+	   CALL STR$FREE1_DX(ASK_CHAR(1,1))	! make empty
+	   GOTO 9900		! get length of returned string
+	ENDIF
+C
+C something has gone wrong
+	CALL MOAN(MSG_ERRINASKSTRING,STRING(1,1))
+	CALL LITES2_SIGNAL(RETCOD)
+	GOTO 9990	
+C
+C ANNOTATION SIZE
+2400	CONTINUE
+	IF (SINDEX .EQ. STATE_INITIAL) GOTO 9980
+C
+C get height of text in IFF units, for current settings of annotations,
+C into common block
+	CALL SETANNO(.TRUE.)
+C
+C use it to get height of text in IFF units
+	ASK_REAL(2) = ANNOSIZ
+	CALL SETANNO(.FALSE.)
+C
+C get length of text (as proportion of height)
+	IF (TRISCN(STRING(1,1),ANNOFONT,ASK_REAL(1),
+     &				HWTOPT.AND.ANNOHWT)) GOTO 9990
+C
+C reduce length of text by the justification factor of a character
+C height to allow for space at end of (last) letter. 
+C This is a bit arbitrary; it depends on the TRI being used.
+C Don't let it go negative
+	IF (ABS(ASK_REAL(1)).GT.JSTPROP) ASK_REAL(1) = ASK_REAL(1) -
+     &					SIGN(JSTPROP,ASK_REAL(1))
+C
+C and length in IFF units
+	ASK_REAL(1) = ASK_REAL(1) * ASK_REAL(2)
+	ASK_REAL_NUM = 2
+	GOTO 10000
+C
+C TEXT_SIZE
+2500	CONTINUE
+	IF (SINDEX .EQ. STATE_INITIAL) GOTO 9980
+C
+	IF (TX_SZE_FRM_ATTBTS(STRING(1,1),AUX)) GOTO 9990
+	ASK_REAL(1) = AUX(MAXXI)
+	ASK_REAL(2) = AUX(MAXYI)
+	ASK_REAL_NUM = 2
+	GOTO 10000
+C
+C ISTIMEDATE -  -1 for valid time/date string, 0 for not
+2600	CONTINUE
+	ASK_INT_NUM = 1
+	IF (LENGTH(1).LE.0) THEN		! don't want to setaux
+	   ASK_INT(1) = 0	   
+	ELSE
+C
+C help to get valid date string, by ignoring lower case letters
+	   CALL STR$UPCASE(STRING(1,1),STRING(1,1))
+	   RETCOD = CVT_DATE(STRING(1,1),DATE,TIME)
+	   IF (RETCOD .EQ. SS$_NORMAL) THEN
+	      ASK_INT(1) = -1
+C
+C use txtdsc as a temporary, as CVT_TIME_STR does not know about dynamic
+C string descriptors
+	      TXTPTR = TXTLIM
+	      RETCOD = CVT_DAY_STR(DATE,TXTPTR,TXTDSC)
+	      IF (RETCOD .EQ. SS$_NORMAL) THEN
+	         CALL STR$COPY_DX(ASK_CHAR(1,1),TXTDSC)
+	         ASK_CHAR_NUM = 1
+	         ASK_INT(2) = TXTPTR
+	         ASK_INT_NUM = 2
+	         TXTPTR = TXTLIM
+	         RETCOD = CVT_TIME_STR(TIME,TXTPTR,TXTDSC)
+	         IF (RETCOD .EQ. SS$_NORMAL) THEN
+	            CALL STR$COPY_DX(ASK_CHAR(1,2),TXTDSC)
+	            ASK_CHAR_NUM = 2
+	            ASK_INT(3) = TXTPTR
+	            ASK_INT_NUM = 3
+	         ENDIF
+	      ENDIF
+	   ELSE
+	      ASK_INT(1) = 0
+	   ENDIF
+	ENDIF
+	GOTO 10000
+C
+C get length of returned string
+9900	CALL STR$ANALYZE_SDESC(ASK_CHAR(1,1),WLEN,I)
+	ASK_INT(1) = WLEN
+	ASK_INT_NUM = 1
+	GOTO 10000
+C
+C command not valid in state... exit
+9980	CALL MSGCMD(MOAN,MSG_CMDNOTVALID)
+C
+9990	CALL IGNCMD
+	GOTO 10000
+C
+10000	RETURN
+	END

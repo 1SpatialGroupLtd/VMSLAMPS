@@ -1,7 +1,13 @@
 	LOGICAL FUNCTION WRITE_FEATURE
-CDEC$	IDENT	'28SE94'
+CDEC$	IDENT	'03NO94'
 C
 C	Copyright (C)			Laser-Scan Ltd., Cambridge
+C
+C       Author						ST 03-Nov-1994
+C
+C       MOD 1421. Call VIOCLR to clear flag arrays to	ST 21-Nov-1994
+C	prevent flags of previous feature being carried
+C       over onto the current one in RETAIN_FLAGS.
 C
 C Description:
 C       This routine write the IFF entries to form a feature and calls
@@ -94,6 +100,8 @@ C
 C Clear the FLAGS array for the next feature
 C
 	CALL VIOCLR(FLAGS,MAXPTS,0)
+	CALL VIOCLR(LINE_IN_FLAGS,MAXPTS,0)
+	CALL VIOCLR(LINE_OUT_FLAGS,MAXPTS,0)
 C
 C and that's it
 C

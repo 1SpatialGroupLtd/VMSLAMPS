@@ -1,0 +1,432 @@
+	SUBROUTINE FILLGFA(N,PX,PY)
+C
+**	MODULE	FILLGFA
+**	IDENT	27OC94
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				RJH	09-Dec-1986
+C
+C Area fill pattern output routine, based on GKS GFA
+C
+CMOD	Call SRIGPL, rather than GPL		RWR	 4-Oct-1988
+CMOD	Call PATFND for clipped fill areas
+C       to see if patterned lines have symbols	RWR	 6-Jan-1989
+CMOD	Composite area (invisibles in boundary)	CCB	26-Jul-1989
+CMOD	Use dynamic memory			CCB	 8-Apr-1992
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNFRT:FFABUF/
+***	COMMON/LSL$CMNFRT:SRIVEC/
+C
+C Arguments
+	INTEGER	N			! number of points
+	REAL	PX(N)			! X coords of points in WC
+	REAL	PY(N)			! Y coords of points in WC
+C
+C Functions
+	LOGICAL	FRT_INIT_FILL_MEM     	! gets virtual memory for workspace
+C
+C this is a jacket routine that calls the real routine passing it
+C the work space arrays (having made sure that they have been created)
+C
+C first time through, get the memory
+	IF (MEMORY_FAIL) GOTO 9999
+C
+	IF (FFAMAX .EQ.0) THEN
+	   MEMORY_FAIL = FRT_INIT_FILL_MEM()
+	   IF (MEMORY_FAIL) GOTO 9999
+	ENDIF	      
+C
+C now call the real routine
+	CALL FILLGFA_SUB(N,PX,PY,FFAMAX,FFASCT,
+     &			 %VAL(PTS_ADDR),%VAL(SIDES_ADDR),
+     &			 %VAL(SIDPTR_ADDR),%VAL(INTSCT_ADDR),
+     &			 %VAL(INTPTS_ADDR),%VAL(SIDES_ADDR),
+     &			 %VAL(SRIVEC(XSRIGPL)))
+C
+9999	RETURN
+C
+C
+	ENTRY	FRT_END_FILL
+C
+C FRT PATTERN FILL - end composite area
+C
+	CALL FRT_END_FILL_SUB(FFAMAX,FFASCT,
+     &			%VAL(PTS_ADDR),%VAL(SIDES_ADDR),
+     &			%VAL(SIDPTR_ADDR),%VAL(INTSCT_ADDR),
+     &			%VAL(INTPTS_ADDR),%VAL(SIDES_ADDR),
+     &			%VAL(SRIVEC(XSRIGPL)))
+C
+	RETURN
+C
+	ENTRY	FRT_BEGIN_FILL
+C
+C FRT PATTERN FILL - begin composite area
+C
+	CALL FRT_BEGIN_FILL_SUB
+	RETURN
+C
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	FILLGFA_SUB(N,PX,PY,FAMAX,FASCT,
+     &				    PTS,SIDES,SIDPTR,INTSCT,INTPTS,
+     &				    WORK_SPACE,SRIGPL)
+C
+**	MODULE	FILLGFA_SUB
+**	IDENT	26OC94
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				RJH	09-Dec-1986
+C
+C Area fill pattern output routine, based on GKS GFA
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNFRT:FRTFIL/
+***	COMMON/LSL$CMNFRT:FRTPAT/
+***	COMMON/LSL$CMNFRT:FFABUF/
+***	COMMON/LSL$CMNFRT:SRISCL/
+C
+C Arguments
+	INTEGER N   		! number of points
+	REAL	PX(N)  		! X coords of points in WC
+	REAL	PY(N)		! Y coords of points in WC
+	INTEGER	FAMAX		! maximum number of points in an area
+	INTEGER	FASCT		! maximum number of intersections on a line
+	REAL	PTS(2,FAMAX)	! buffer array
+	REAL	SIDES(4,FAMAX)	! array to hold sides of it
+	INTEGER	SIDPTR(FAMAX)	! pointer into that
+	REAL	INTSCT(4,FASCT)! store for sides intersected
+	REAL	INTPTS(FASCT)	! store for intersection points
+	REAL	WORK_SPACE(4*FAMAX)
+	EXTERNAL SRIGPL		! passed routine
+C
+C Functions
+	LOGICAL	PATFND			! finds line pattern
+C
+C Internal variables
+	INTEGER		I,J			! loop variable
+	INTEGER		TOP
+	INTEGER		NPT
+	REAL		TMPX(2),TMPY(2)		! X and Y coordinates
+	REAL		TMPZ(2)			! Z coordinate
+	LOGICAL		OPEN			! is polygon open
+	LOGICAL		TOOBIG			! is it too big to draw
+	INTEGER		CURPAT			! hatch style to use
+	REAL		CURANG			! hatch angle to use
+	REAL		NOMSEP			! nominal separation
+	LOGICAL		AREA			! in composite area
+	LOGICAL		ENDAREA			! ending composite
+	SAVE		TOOBIG,AREA,ENDAREA
+	REAL		TORAD
+	PARAMETER	(TORAD=3.14159265/180.0)
+C
+	ENDAREA = .FALSE.		! not ending composite area
+C
+C and check we have enough points for non-composite area
+	IF (.NOT.AREA) THEN
+	   IF (N.LT.3) THEN
+	      CALL FRTWRT('Less than 3 points do not define an area')
+	      GOTO 9999
+	   ENDIF
+C
+C do we have too large a polygon to draw?
+C
+C we can draw a filled polygon of up to FAMAX points (closed) -
+C above that we must draw it hollow
+	   NPTS = 0
+	   OPEN = PX(1).NE.PX(N) .OR. PY(1).NE.PY(N)
+	   IF (OPEN) THEN
+	      TOOBIG = (N+1).GT.FAMAX
+	   ELSE
+	      TOOBIG = N.GT.FAMAX
+	   ENDIF
+	ENDIF
+C
+C it must be hatch - first transfer our points into the FILL_SIDE array
+	IF (N.GT.FAMAX-NPTS) THEN
+	   TOOBIG = .TRUE.
+	   PTS(1,FAMAX) = PX(N)	! just save last point
+	   PTS(2,FAMAX) = PY(N)	! for closing line
+C
+C if this is first lot of points, fill up first element of PTS so that
+C closing line can be drawn later
+	   IF(NPTS .EQ. 0) THEN
+	      PTS(1,1) = PX(1)
+	      PTS(2,1) = PY(1)
+	   ENDIF
+	   NPTS = FAMAX
+	ELSE
+	   DO 100 I = 1,N
+	      PTS(1,NPTS+I) = PX(I)
+	      PTS(2,NPTS+I) = PY(I)
+100	   CONTINUE
+	   NPTS = NPTS+N
+	ENDIF
+C
+C ensure that the polygon is closed
+	IF (.NOT.AREA) THEN
+	   IF ( OPEN ) THEN
+	      NPTS = NPTS+1
+	      PTS(1,NPTS) = PX(1)
+	      PTS(2,NPTS) = PY(1)
+	   ENDIF
+	ENDIF
+C
+C and draw it
+199	IF ( TOOBIG .OR.
+     &	     (FILPAT.GE.100.AND.FILPAT.LE.106) .OR.
+     &	     FILPAT.GE.20000) THEN
+	   IF (.NOT.ENDAREA) THEN
+C
+C assume fill hollow - draw as polyline
+C output in FAMAX*4 size chunks, as we don't have a big Z array
+C
+C first fill workspace array with SRI_Z
+	      DO 10, I = 1,MIN(N,FAMAX*4)
+	         WORK_SPACE(I) = SRI_Z
+10	      CONTINUE
+	      NPT = N			! number of points remaining
+	      J = 1			! index into big array
+20	      CONTINUE
+	      TOP = MIN(NPT,FAMAX*4)
+	      CALL SRIGPL(TOP,PX(J),PY(J),WORK_SPACE)
+	      NPT = NPT - TOP + 1
+	      IF (NPT.GT.1) THEN
+	         J = N - NPT + 1
+	         GOTO 20
+	      ENDIF
+	   ENDIF
+C
+C ensure that it is closed
+	   IF (OPEN) THEN
+	      IF (ENDAREA.OR..NOT.AREA) THEN
+	         TMPX(1) = PTS(1,NPTS-1)
+	         TMPX(2) = PTS(1,NPTS)
+	         TMPY(1) = PTS(2,NPTS-1)
+	         TMPY(2) = PTS(2,NPTS)
+	         TMPZ(1) = SRI_Z
+	         TMPZ(2) = SRI_Z
+	         CALL SRIGPL(2,TMPX,TMPY,TMPZ)
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	IF (AREA) GOTO 9999		! that's all for composite area
+	IF (TOOBIG) GOTO 9999		! and for ones too big to fill
+C
+C set the hatch style
+	CURANG = 0.0
+	CURPAT = FILPAT
+	IF (CURPAT.GE.101.AND.CURPAT.LE.106) THEN
+	   CURPAT = CURPAT-100
+	ELSEIF (CURPAT.GE.10000) THEN
+	   IF (CURPAT.GE.20000) CURPAT = CURPAT-10000
+	   CURANG = (CURPAT-10000)/10.0*TORAD
+	   CURPAT = 1
+	ENDIF
+C
+C work out line separation 
+	IF (FRTSIZ .GT. 0.0) THEN
+	   NOMSEP = FRTSIZ*SRISCL
+	ELSE
+	   NOMSEP = 5*SRISCL
+	ENDIF
+C
+C fill with lines at the nominated spacing
+C if using symbols, and require clipping symbols then use FILL_CLIP
+C otherwise use FILL_SIDE
+C
+C find the line pattern, too set up PATMAJ and PATMIN
+	IF (FRTCLP) THEN
+	   IF (PATFND(FILSC)) GOTO 9999
+	ENDIF
+C
+	IF ((PATMAJ.NE.0.OR.PATMIN.NE.0).AND.FRTCLP) THEN
+	   CALL FILL_CLIP(NPTS,%VAL(PTS_ADDR),
+     &				CURPAT,FILSC,NOMSEP,SRIROT+CURANG)
+	ELSE
+	   CALL FILL_SIDE2( NPTS, PTS, SIDES, SIDPTR,
+     &				FASCT, INTSCT, INTPTS,
+     &				CURPAT, FILSC, NOMSEP,
+     &				1, SRIROT+CURANG )
+	ENDIF
+C
+9999	RETURN
+C
+	ENTRY	FRT_END_FILL_SUB(FAMAX,FASCT,
+     &				 PTS,SIDES,SIDPTR,INTSCT,INTPTS,
+     &				 WORK_SPACE,SRIGPL)
+C
+C FRT PATTERN FILL - end composite area
+C
+	AREA = .FALSE.
+C
+	IF (NPTS.LT.3) THEN
+	   CALL FRTWRT('Less than 3 points do not define an area')
+	   GOTO 9999
+	ENDIF
+C
+C and do we have too large a polygon to draw?
+	OPEN = PTS(1,1).NE.PTS(1,NPTS) .OR. PTS(2,1).NE.PTS(2,NPTS)
+C
+C ensure that the polygon is closed
+	IF ( OPEN ) THEN
+	   IF (NPTS.GE.FAMAX) THEN
+	      TOOBIG = .TRUE.
+	      NPTS = FAMAX-1
+	      PTS(1,NPTS) = PTS(1,NPTS+1)	! copy last point for
+	      PTS(2,NPTS) = PTS(2,NPTS+1)	! closing line
+	   ENDIF
+	   NPTS = NPTS+1
+	   PTS(1,NPTS) = PTS(1,1)
+	   PTS(2,NPTS) = PTS(2,1)
+	ENDIF
+	ENDAREA = .TRUE.
+	GOTO 199
+C
+	ENTRY	FRT_BEGIN_FILL_SUB
+C
+C FRT PATTERN FILL - begin composite area
+C
+	NPTS = 0		! no points in buffer
+	AREA = .TRUE.		! in composite area
+	TOOBIG = .FALSE.	! not too many points yet
+	RETURN
+C
+	END
+C
+C*****************************************************************************
+C
+	LOGICAL FUNCTION FRT_INIT_FILL_MEM
+C
+***	MODULE	FRT_INIT_FILL_MEM
+***	IDENT	12FE92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	12 February,1992
+C
+C to initialise the memory for the paterned areas
+C returns FALSE for success and TRUE if no virtual memory available
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNFRT:FFABUF/
+C
+C functions called
+C
+	INTEGER		LIB$GET_VM
+	INTEGER		TRNALL		! LSLLIB, translate logical name
+	LOGICAL		RDLONG
+	LOGICAL		RDCHS
+C
+C w/s
+	INTEGER		LENGTH
+	INTEGER		PTS_LENGTH,SIDES_LENGTH,SIDPTR_LENGTH
+	INTEGER		INTSCT_LENGTH,INTPTS_LENGTH
+	CHARACTER*8	TRAN
+	INTEGER		COND
+	BYTE		CH
+C
+	DATA	PTS_LENGTH,SIDES_LENGTH,SIDPTR_LENGTH,INTSCT_LENGTH,
+     &	        INTPTS_LENGTH/5*0/
+C
+C assume failure
+	FRT_INIT_FILL_MEM = .TRUE.
+C
+C get the maximum number of fill area points to be used
+	FFAMAX = DEFAULT_FFAMAX
+	IF (TRNALL('LSL$FILL_POINTSMAX',TRAN)) THEN
+	   LENGTH = LEN(TRAN)
+	   CALL SETAUX(%REF(TRAN),LENGTH)
+	   IF (RDLONG(FFAMAX)) FFAMAX = DEFAULT_FFAMAX
+	   IF (.NOT.RDCHS(CH)) FFAMAX = DEFAULT_FFAMAX
+	   FFAMAX = FFAMAX + 1 		! one more than the user expected!!!
+	ENDIF
+C
+C don't allow too few points
+	FFAMAX = MAX(100,FFAMAX)
+C
+C get the maximum number of intersections to be allowed
+C
+	FFASCT = DEFAULT_FFASCT
+	IF (TRNALL('LSL$FILL_CUTSMAX',TRAN)) THEN
+	   LENGTH = LEN(TRAN)
+	   CALL SETAUX(%REF(TRAN),LENGTH)
+	   IF (RDLONG(FFASCT)) FFASCT = DEFAULT_FFASCT
+	   IF (.NOT.RDCHS(CH)) FFASCT = DEFAULT_FFASCT
+	ENDIF
+C
+C don't allow too few intersections
+	FFASCT = MAX(10,FFASCT)
+C
+C now get memory for all the arrays
+C
+C 1) PTS array (real*4 x 2 x FFAMAX)
+	PTS_LENGTH = 4 * 2 * FFAMAX
+	COND = LIB$GET_VM(PTS_LENGTH,PTS_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   PTS_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C 2) SIDES array (real*4 x 4 x FFAMAX)
+	SIDES_LENGTH = 4 * 4 * FFAMAX
+	COND = LIB$GET_VM(SIDES_LENGTH,SIDES_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   SIDES_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C 3) SIDPTR array (integer*4 x 1 x FFAMAX)
+	SIDPTR_LENGTH = 4 * 1 * FFAMAX
+	COND = LIB$GET_VM(SIDPTR_LENGTH,SIDPTR_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   SIDPTR_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C 4) INTSCT array (real*4 x 4 x FFASCT)
+	INTSCT_LENGTH = 4 * 4 * FFASCT
+	COND = LIB$GET_VM(INTSCT_LENGTH,INTSCT_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   INTSCT_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C 5) INTPTS array (real*4 x 1 x FFASCT)
+	INTPTS_LENGTH = 4 * 1 * FFASCT
+	COND = LIB$GET_VM(INTPTS_LENGTH,INTPTS_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   INTPTS_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C set up equivalences
+C
+	FRT_INIT_FILL_MEM = .FALSE.			! success
+	GOTO 9999
+C
+9990	CONTINUE
+	CALL TTWSTR('FRTLIB FILLGFA - '//
+     &		'Failed to get virtual memory for patterned areas')
+	IF (INTPTS_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(INTPTS_LENGTH,INTPTS_ADDR,FILL_ZONE)	
+	IF (INTSCT_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(INTSCT_LENGTH,INTSCT_ADDR,FILL_ZONE)	
+	IF (SIDPTR_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(SIDPTR_LENGTH,SIDPTR_ADDR,FILL_ZONE)	
+	IF (SIDPTR_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(SIDPTR_LENGTH,SIDPTR_ADDR,FILL_ZONE)	
+	IF (PTS_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(PTS_LENGTH,PTS_ADDR,FILL_ZONE)	
+C
+9999	RETURN
+	END

@@ -1,0 +1,449 @@
+	SUBROUTINE ZONE(N,LIMPOL)
+C
+***	MODULE	ZONE
+***	IDENT	22MR93
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Sets /ERROR/ variables ERRNODX/Y in case an
+C	error occurs in STACK				ST   25-Mar-1993
+CMOD	Calls to WAIT changed to LSL_WAIT		TJH  21-Dec-1990
+CMOD	Converted for LSLLIB message formats		TJH  31-Jul-1987
+CMOD	Bug fix - "n nodes completed" output with
+C	correct modulus					TJH  23-Apr-1987
+CMOD    "n nodes completed" message not output if 
+C	Tek 4000 series graphics as the alpha mode stuff 
+C	then swamps the screen obscuring all the 
+C	triangles!					TJH  26-Sep-1986
+CMOD	Messages now output using TXTOUT to accommodate
+C	Sigmex 6164 code				TJH  29-Jul-1986
+CMOD	Diagnostic text output using MAXMOD rather than
+C	MINMOD when graphics selected. Connections
+C	between imaginary points now drawn in a different
+C	colour to ordinary triangles on T4100 series 
+C	terminals. 					TJH  17-Jul-1986
+CMOD	Setting of angles when baseline is horizontal
+C	or vertical changed to consider full 360 degrees
+C	rather than 180			     	     DM/ATT   2-Jul-1986
+CMOD	Went IMPLICIT NONE and REAL*8 cmn added		TJH  30-Sep-1985
+CMOD	Some double precision added for 32 bit grid	TJH  25-Jul-1985
+CMOD	Diagnostic printout modulus now varied with 
+C	size of dataset					TJH  05-Jul-1985
+CMOD	Sigma 7000 option added, GRAFCS.CMN now
+C 	referenced in LSL$PANSYSFUNCT			TJH  18-Apr-1985
+CMOD    Graphics hardware options /GRFDEV/		TJH  26-Feb-1985
+CMOD	MAD replaced by MD(5,...)		 	 DM  25-May-1984
+C	Standardised					TJH  06-Apr-1984
+C
+C Creates Thiessen neighbours for every point in dataset.
+C
+C
+	IMPLICIT NONE
+C
+	INTEGER		KABS,NR	! node identifiers
+	INTEGER		KALONE  ! 1 if only one entry for node
+	INTEGER		KFIN	! node completeion marker
+	INTEGER		LIMPOL	! number of imaginary points
+	INTEGER		LM,MR	! leftmost & rightmost node identifiers
+	INTEGER		N 	! total number of points
+	INTEGER		NCOMP	! completed node marker
+	INTEGER		NUMN 	! posn. before first empty neigb. list
+	INTEGER		NUMNOD	! number of neighbours
+	INTEGER		NPR	! active node posn. marker
+	INTEGER		NX,NY,KX,KY ! node & neighb. posn. screen coords
+	REAL*8		AVHD	! average 1/2 dist. between pts on map
+	REAL*8		COSA,SINA
+	REAL*8		DIST	! distance from centre point to point
+	REAL*8		PIST	! the reciprocal of DIST
+	REAL*8		AK,AB
+	INTEGER		I,J,K	! temp. vars.
+C
+	INCLUDE 'LSL$CMNTRIANG:TRIANGMSG.PAR'
+	INCLUDE 'LSL$CMNTRIANG:ERROR.CMN'
+	INCLUDE 'LSL$CMNTRIANG:CONTRL.CMN'
+	INCLUDE 'LSL$CMNTRIANG:STORAG.CMN'
+	INCLUDE 'LSL$CMNTRIANG:ZONVAR.CMN'
+	INCLUDE 'LSL$CMNTRIANG:ANG.CMN'
+	INCLUDE 'LSL$CMNTRIANG:CHECKS.CMN'
+	INCLUDE 'LSL$CMNTRIANG:FINDIT.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFDEV.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:GRAFCS.CMN'
+C
+C ......................................................................
+C 
+	IF (DIAG) CALL PERCENT('of nodes triangulated',0,N,10,-1)
+C
+C Initialise the output node buffer
+	CALL WRTNOD(I,1,-1)
+C
+C Calculate average half distance between points on the map for
+C use later in calculating the intial starting radius of the
+C search circle
+	ALIM=1.0D-15
+	AVHD=DSQRT(DFLOAT(MX2)*DFLOAT(MY2))/N*0.5D0
+C If a node has more than ten neighbours it annexes another row of
+C NOD, starting with the one at the NIX end of NOD and working back
+C towards the data end (limit NOX).
+C NOX is the limit for headward movement of the extension rows,
+C and is set to NIX-ISTACK, ie there are ISTACK rows available for
+C extensions at any one time.
+	NEWEXT=NIX
+	NOX=NIX-ISTACK
+C
+C Zero the pointer array NAD (points to node referenced by a
+C given node/neighbour list) to maximum cyclic length (NOX).
+C Do the same for the number of neighbours found array (NID).
+	CALL VIOCLR(NID(1),NOX*4,0)
+	CALL VIOCLR(NAD(1),NOX*4,0)
+C
+C Set the entry - in memory - exit marker array (MD(5,...)),
+C to indicate no points yet in the area
+	DO 10 I=1,NP
+	   MD(5,I)=0
+10	CONTINUE
+C
+C Fill the stack with the extension rows (held at the end of NAD)
+	DO 20 I=1,ISTACK
+	   J=NIX-I+1
+	   NAD(J)=J
+20	CONTINUE
+C
+C Fill in neighbour lists for polygon outline. every node has
+C two neighbours. the first is the stop node and the second is
+C the one to start from in the triangulation process.
+C The nodes are entered into NOD on the basis of their polygon
+C order, not their box order.
+	DO 30 I=1,LIMPOL
+	   MD(5,I)=I
+	   NID(I)=2
+	   NAD(I)=I
+30	CONTINUE
+C
+C Now the nodes are entered into MD(5,...), NID, and NAD, fill the
+C start situation neighbour lists in NOD.
+C The first entry is the box number of the stop point, the second
+C entry is the box number of the start point
+	DO 40 I=1,LIMPOL
+	   K=I-1
+	   IF (K.EQ.0)K=LIMPOL
+C
+C Start point
+	   NOD(2,I)=K
+C
+C Stop point
+	   NOD(1,I)=MOD(I,LIMPOL)+1
+40	CONTINUE
+C
+C Set remaining markers and sizes: NP is rotation point, IP is
+C the known neighbour, NUMN is the position before the first empty
+C neighbour list, NEXT keeps track of the active shell node number
+C NPR is the active node position marker in the node/neighbour
+C list, KENDP is the stop node for NP, N is the total number of
+C points in the data set, and LIMPOL is the number of bounding
+C imaginary ones. Set completed node marker (NCOMP) to zero.
+	NP=1
+	IP=LIMPOL
+	NUMN=LIMPOL
+	NEXT=-1
+	NPR=1
+	KENDP=2
+	NCOMP=0
+C
+C Ready to start or continue the iteration
+C NP is rotation point, IP is the known neighbour. set
+C limit based on angle created by imaginary point
+C (for this NP,IP). Calculate constants and midpoint
+50	MXA=MD(1,NP)
+	MYA=MD(2,NP)
+	MXB=MD(1,IP)
+	MYB=MD(2,IP)
+	XM=DFLOAT(MXA+MXB)*0.5D0
+	YM=DFLOAT(MYA+MYB)*0.5D0
+C
+C Distance from midpoint to known neighbour
+	YD=DFLOAT(MYB)-YM
+	XD=DFLOAT(MXB)-XM
+	IXD=SIGN(1.0D0,XD)
+	IYD=SIGN(1.0D0,YD)
+C
+C As we now have the 32 bit internal grid use double precision for
+C distance calc.
+	DIST=DSQRT((XD*XD)+(YD*YD))
+	PIST=1.0D0/DIST
+C
+C Calculate slope parameters
+	KSL=0
+	IF (MYB-MYA.EQ.0) GOTO 60
+	IF (MXB-MXA.EQ.0) GOTO 70
+C
+C .This is now double precision too for 32 bit grid (MJM fix)
+C .otherwise gross instability in side of line calc. will occur.
+	SLOPE=YD/XD
+	B=DFLOAT(MYB)-SLOPE*DFLOAT(MXB)
+	S1=1.0D0/SLOPE
+	SLOPE=SLOPE*XD
+	GOTO 80
+C
+C Baseline has zero slope
+60	KSL=1
+	SINA=0.0D0
+	COSA=DFLOAT(IXD)
+	GOTO 90
+C Base line is vertical
+70	KSL=2
+	SINA=DFLOAT(IYD)
+	COSA=0.0D0
+	GOTO 90
+C
+C Set up search parameter for circle
+C This value is to be based on the average distance
+C between points on the map in relation to the distance
+C between the chosen two known neighbours.
+80	SINA=YD*PIST
+	COSA=XD*PIST
+C
+C Look for point in first circle with diameter
+C XA,YA - XB,YB, and centre XM,YM.
+90	ANGMAX=-10.D35
+	MAXANG=0
+	R=DIST
+	XC=XM
+	YC=YM
+	K1=1
+	CALL SEARCH
+	K1=0
+C
+C Check for successful point
+	IF (MAXANG.NE.0) GOTO 130
+C
+C First circle unsuccessful, so expand it to a new much larger size
+C Calculate circle and box parameters
+	AK=AVHD*PIST
+100	AK=(AK+1.0D0)*2.0D0
+	R=(AK*AK+1.0D0)/(2.0D0*AK)*DIST
+	AB=R-DIST/AK
+C
+C Locate center of circle
+	XC=XM+SINA*AB
+	YC=YM-COSA*AB
+110	CALL SEARCH
+C
+C All boxes covering the search square have been checked.
+	IF (MAXANG.NE.0) GOTO 130
+C
+C Oh well. Check for no box points. If none found expand the
+C search circle to next size
+	IF (MARK.EQ.0) GOTO 100
+C
+C Points were found in box. find closest box point
+	ANGMAX=0.0
+	DO 120 I=1,NT
+	   L=NTEM(I)
+	   CALL PCHOOS(MD(1,L),MD(2,L))
+120	CONTINUE
+	IF (MAXANG.EQ.0) GOTO 100
+C
+C MAXANG is our closest point in box. create a circle
+C based on MAXANG and the base NP,IP and search it for
+C any better points
+	CALL CANNON(R,MD(1,MAXANG),MD(2,MAXANG))
+	GOTO 110
+C
+C Point has been found and may be either real or imaginary.
+C Store it for the future, whichever it may be.
+C Point NP is finished if MAXANG is the same point as we
+C started with for this node
+130	KFIN=0
+C
+C Set KFIN if point C is the original starting point
+	IF (MAXANG.EQ.KENDP)KFIN=1
+C
+C Add point C to right of point a unless node complete
+	IF (KFIN.EQ.0) THEN
+	   ERRCOORDS = .TRUE.
+	   ERRNODX = MD(1,KENDP)
+	   ERRNODY = MD(2,KENDP)
+	   CALL ADDRGT(NPR,MAXANG)
+	   ERRCOORDS = .FALSE.
+	ENDIF
+C
+C Has MAXANG (point C) entered the node index yet?
+	NR=MD(5,MAXANG)
+	IF (NR.NE.0) GOTO 160
+C
+C no it does not - so create a space for it at NUMN+1
+	NUMN=NUMN+1
+C
+C If NUMN has grown upto NOX - and may be in extension space -
+C then set it back to the beginning as the node/neighbour list
+C is cyclic. Check NUMN has not caught up with NPR.
+	IF (NUMN.GT.NOX)NUMN=1
+	IF (NAD(NUMN).NE.0) GOTO 280
+	NAD(NUMN)=MAXANG
+	MD(5,MAXANG)=NUMN
+	NOD(1,NUMN)=NP
+C
+C Put any extension space for the node about to be stomped on by
+C the new node back into circulation.
+	NR=NUMN
+140	NR=NID(NR)
+	IF (NR.GE.0) GOTO 150
+	NR=IABS(NR)
+	NEWEXT=NEWEXT+1
+	NAD(NEWEXT)=NR
+	GOTO 140
+C
+C Can now stomp on anything that was there before - gone for ever!
+150	NID(NUMN)=1
+	NR=NUMN
+C
+C Point C exists - is it a completed node?
+160	IF (NR.LT.0) GOTO 180
+C
+C No it is not. find leftmost (LM) and rightmost (MR) of C
+	LM=NOD(1,NR)
+C
+C KALONE is 1 if only one entry for a node, else set to zero
+	CALL FINRGT(MR,NR,KALONE)
+C
+C Check for fully determined point C before adding A to C
+C This will happen when not single entry and leftmost=rightmost
+	IF (KALONE.EQ.0.AND.LM.EQ.MR) GOTO 180
+C
+C Node C completed if LM of C is B and RM of C is A
+	IF (LM.NE.IP.OR.MR.NE.NP) GOTO 170
+	CALL ADDRGT(NR,IP)
+	GOTO 180
+C
+C Add A as LM of C, if B LM of C and A noT RM of C
+170	IF (IP.EQ.LM.AND.NP.NE.MR)CALL ADDLFT(NP,NR)
+C
+C Add B to RM of C, if A RM of C and B not LM of C
+	IF (NP.EQ.MR.AND.IP.NE.LM)CALL ADDRGT(NR,IP)
+C
+C Now update point B. Check for node B already completed
+180	NR=MD(5,IP)
+	IF (NR.LT.0) GOTO 200
+C
+C find leftmost and rightmost nodes in list for point B
+	LM=NOD(1,NR)
+	CALL FINRGT(MR,NR,KALONE)
+C
+C Check for a fully determined point B in the same way as for C
+	IF (KALONE.EQ.0.AND.LM.EQ.MR) GOTO 200
+C
+C Node B completed if LM of B is A and RM of B is C
+	IF (LM.NE.NP.OR.MR.NE.MAXANG) GOTO 190
+	CALL ADDRGT(NR,NP)
+	GOTO 200
+C
+C Add C as LM of B, if A LM of B and C not RM of B
+190	IF (NP.EQ.LM.AND.MAXANG.NE.MR)CALL ADDLFT(MAXANG,NR)
+C
+C Add A as RM of B, if C RM of B and A not LM of B
+	IF (MAXANG.EQ.MR.AND.NP.NE.LM)CALL ADDRGT(NR,NP)
+C
+C All done unless node is completed (KFIN = 1).
+200	IF (KFIN.EQ.0) GOTO 250
+C
+C Node is complete. COLLEC gathers neighbours and writes details
+C to file. NUMNOD is number of neighbours.
+210	KABS=IABS(NEXT)
+	CALL COLLEC(NUMNOD,NPR,KABS,LIMPOL)
+C
+C Write node/neighbour list to file together with its associated
+C pointers. NPR is shell number (assuming non cyclic storage),
+C NUMNODE the number of nodes, NAD(NPR) is the point order number
+C of the shell order NPR node (if you see what I mean!)
+C
+	CALL WRTNOD(NP,1,1)
+	CALL WRTNOD(NUMNOD,1,1)
+	CALL WRTNOD(NTEM,NUMNOD,1)
+C
+C ......................................................................
+C
+C Check for graphic display.
+C
+	IF (GRAPHICS) THEN
+C
+C NTEM now holds all NUMNOD nodes, in rotational order, that are
+C connected to node NP. Plot them on the screen if required
+	   CALL TRANS(MD(1,NP),MD(2,NP),NX,NY)
+	   K=0
+	   DO 220 I=1,NUMNOD
+	      L=NTEM(I)
+C
+C Plot links to only those neighbours that have a higher order
+C number than NP.
+	      IF (MD(5,L).LT.0) GOTO 220
+C
+C Neighbour is in the alive list in the cyclic stack and is ahead
+C of rotation node NP.
+	      CALL TRANS(MD(1,L),MD(2,L),KX,KY)
+C
+C Use a different colour for imaginary points ?
+	      IF (L.LE.LIMPOL) THEN	
+	         CALL COLOUR(4,.FALSE.)
+	      ELSE
+	         CALL COLOUR(3,.FALSE.)
+	      ENDIF
+	      CALL MOVABS(NX,NY)
+	      CALL DRWABS(KX,KY)
+	      K=1
+220	   CONTINUE
+	   IF (K.EQ.1) CALL OUTBUF
+	ENDIF
+C
+C Set markers to show all finished for this node
+230	MD(5,NP)=NEXT
+	NAD(NPR)=0
+	NEXT=NEXT-1
+C
+C Write message to user, if time is ripe
+	NCOMP=NCOMP+1
+	IF (DIAG) CALL PERCENT('of nodes triangulated',NCOMP,N,10,0)
+C
+C Choose next node taking care to be cyclic. If NAD(NPR) is unset
+C no nodes are left.
+240	NPR=NPR+1
+	IF (NPR.GT.NOX)NPR=1
+	NP=NAD(NPR)
+	IF (NP.EQ.0) GOTO 270
+C
+C Save end of rotation point number in KENDP
+	KENDP=NOD(1,NPR)
+C
+C Set pointers and restart.
+C Find IP (the other end of the baseline - point B)
+C Carry on with next point round NP (point A)
+ 
+250	CALL FINRGT(IP,NPR,KALONE)
+	IF (IP.NE.KENDP) GOTO 50
+C
+C We have reached termination node, entered at beg and end.
+	IF (NRC.NE.1) GOTO 260
+C
+C Find the last non negative marker value of NID for
+C this NPR and discount right hand node before stopping
+	NRC=11
+	NRA=NRB
+260	NID(NRA)=NRC-1
+	GOTO 210
+C
+C Empty node buffer and close the node transfer file
+270	IF (DIAG) CALL PERCENT('of nodes triangulated',NCOMP,N,10,1)
+	CALL WRTNOD(I,1,0)
+	RETURN
+C
+C ......................................................................
+C			E R R O R S
+C
+C The allocation of new nodes has caught up with our present
+C working node - leaving no space for allocating present new node.
+280	CALL LSL_GETMSG(TRIANG__INSUFFCYC,MESSAGE,MESLEN)
+	IF (GRAPHICS) CALL LSL_WAIT(4,2)	! wait for 4 seconds
+	CALL ALARMS(MESSAGE(:MESLEN))
+	END

@@ -1,0 +1,188 @@
+	INTEGER*4 FUNCTION READ_NRSC_TAPE()
+C
+***	MODULE	READ_NRSC_TAPE
+***	IDENT	17MR87
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,Cambridge,England
+C 	Author: D R Catlow
+C
+C	Routine to control tape reading operations for a NRSC
+C	RAE CCT.
+C	The routine determines the record type for the current
+C	block of data, and calls the appropriate decoding routine.
+C
+C	Possible record identifiers are:
+C	VOL 1, HDR 1, EOF 1, EOV 1.
+C	Otherwise we assume it is an image data record.
+C
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'HERE:READCCTMSG.PAR'
+	INCLUDE 'HERE:READCCT.CMN'
+	INCLUDE 'HERE:TAPE.CMN'		!Values relating to the tape records
+	INCLUDE 'HERE:TAPE_RECORDS.CMN'	!contains record counters etc.
+C
+	INCLUDE 'LSL$CMNLSL:MTIVCM.CMN'	!Tape input common
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'	!LSLLIB error messages
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+C
+C	Locals
+	INTEGER*4	NUMBER_BYTES	!number of bytes read
+	INTEGER*4	IERR		!function return
+	INTEGER*4	NCHS		!number of chs. read from terminal
+	INTEGER*4	I		!counter
+	BYTE		CHAR1,CHAR2,CHAR3
+C	
+C	Functions
+	LOGICAL		READ_NRSC_VOL   !to read a NRSC VOL record
+	LOGICAL		READ_NRSC_HDR   !to read a NRSC HDR record
+	LOGICAL		READ_NRSC_EOF	!to read a NRSC EOF record
+	LOGICAL		READ_NRSC_EOV	!to read a NRSC EOV record
+	LOGICAL		READ_NRSC_IMAGE_HEADER!to read a NRSC image
+C					!header record
+	LOGICAL		READ_NRSC_IMAGE	!to read a NRSC image data record
+	
+C
+	INTEGER*4	MTINIT		!initialise the magtape
+	INTEGER*4	MTIRDB		!read a block of data	
+	INTEGER*4	MTIRWD		!rewinds the magtape
+	INTEGER*4	TTRSTR		!to read terminal input
+C
+C-----------------------------------------------------------------------------
+C
+	READ_NRSC_TAPE=.TRUE.		!assume function is successful
+C
+C	Initialise record type counters
+	COUNT_VOL1         =0
+	COUNT_HDR1         =0
+	COUNT_EOF1	   =0
+	COUNT_EOV1	   =0
+	COUNT_IMAGE_HEADER =0
+	COUNT_IMAGE        =0
+C
+C-----------------------------------------------------------------------------
+C
+C	Initialise the tape
+	IERR = MTINIT (MTNAME,.FALSE.)
+	IF(IERR.NE.LSL__NORMAL)THEN
+	  IERR=READCCT__ERRMTINIT
+	  CALL LSL_PUTMSG(IERR)
+	  CALL LSL_PUTMSG(MTIERR)
+	  READ_NRSC_TAPE=.FALSE.		!signal function failure
+	  GOTO 999
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C
+C	Read the next block on tape
+100	IERR = MTIRDB (MTBUF,MAX_RECORD_LENGTH,NUMBER_BYTES)
+	IF(IERR.EQ.LSL__EOF)THEN	!test if we have EOT (ie. another EOF)
+	  IERR = MTIRDB (MTBUF,MAX_RECORD_LENGTH,NUMBER_BYTES)
+	  IF(IERR.EQ.LSL__EOF)THEN
+	    IERR=MTIRWD()		!rewind the tape
+	    GOTO 950
+	  ENDIF
+	ENDIF
+C
+	IF(IERR.NE.LSL__NORMAL)THEN
+	  IERR=READCCT__ERRMTREAD
+	  CALL LSL_PUTMSG(IERR)
+	  CALL LSL_PUTMSG(MTIERR)
+	  READ_NRSC_TAPE=.FALSE.		!signal function failure
+	  GOTO 999
+	ENDIF	
+C
+C----------------------------------------------------------------------------
+C
+C	If the length of the record is equal to LABEL_RECORD_LENGTH
+C	then determine the record type and call the approiate decode
+C	routine.
+	IF     (NUMBER_BYTES.EQ.LABEL_RECORD_LENGTH)THEN
+	  CHAR1=MTBUF(1)+128
+	  CHAR2=MTBUF(2)+128
+	  CHAR3=MTBUF(3)+128
+	  IF     (CHAR1.EQ.'V'.AND.CHAR2.EQ.'O'.AND.CHAR3.EQ.'L')THEN
+	    IF(.NOT.READ_NRSC_VOL())GOTO 900
+	    GOTO 100
+	  ELSE IF(CHAR1.EQ.'H'.AND.CHAR2.EQ.'D'.AND.CHAR3.EQ.'R')THEN
+	    IF(.NOT.READ_NRSC_HDR())GOTO 900
+	    GOTO 100
+	  ELSE IF(CHAR1.EQ.'E'.AND.CHAR2.EQ.'O'.AND.CHAR3.EQ.'F')THEN
+	    IF(.NOT.READ_NRSC_EOF())GOTO 900
+	    GOTO 100
+	  ELSE IF(CHAR1.EQ.'E'.AND.CHAR2.EQ.'O'.AND.CHAR3.EQ.'V')THEN
+	    IF(.NOT.READ_NRSC_EOV())GOTO 900
+C
+C------------------------------------------------------------------------
+C	Rewind this tape, and
+C	ask the user to load a continuation tape, or exit
+	    IERR=MTIRWD()
+	    IF(IERR.NE.LSL__NORMAL)THEN
+	      IERR=READCCT__ERRMTREW
+	      CALL LSL_PUTMSG(IERR)
+	      CALL LSL_PUTMSG(MTIERR)
+	      READ_NRSC_TAPE=.FALSE.		!signal function failure
+	      GOTO 999
+	    ENDIF
+C
+150	    CALL WRITEF('Mount continuation tape on %S',MTNAME)
+	    IERR=TTRSTR
+     &      (,NCHS,'Respond with E to exit, or Y when ready: ')
+	    IF(.NOT.IERR)THEN
+	      CALL LSL_PUTMSG(IERR)
+	      GOTO 150
+	    ELSE
+	      IF(NCHS.EQ.0)GOTO 150
+	      IF(TXTBUF(1).EQ.'E'.OR.TXTBUF(1).EQ.'e')GOTO 950
+	      IF(TXTBUF(1).EQ.'Y'.OR.TXTBUF(1).EQ.'y')THEN
+	        CALL WRITEF('Resuming read operation')
+	        CALL WRITEF(' ')
+	        GOTO 100
+	      ENDIF
+	      GOTO 150
+	    ENDIF
+C
+	  ELSE		!tape probably isn't in NRSC format
+	    CALL LSL_PUTMSG(READCCT__BADTAPEFORMAT)
+	    READ_NRSC_TAPE=.FALSE.
+	    GOTO 999
+	  ENDIF
+C------------------------------------------------------------------------
+	ELSE IF(NUMBER_BYTES.EQ.IMAGE_HEADER_LENGTH)THEN
+	  IF(.NOT.READ_NRSC_IMAGE_HEADER())THEN
+	    READ_NRSC_TAPE=.FALSE.
+	    GOTO 999
+	  ELSE
+	    GOTO 100
+	  ENDIF
+	ELSE IF(NUMBER_BYTES.EQ.IMAGE_DATA_LENGTH)THEN
+	  IF(.NOT.READ_NRSC_IMAGE())GOTO 900
+C	Is there a need to read the next band of imagery
+	  IF(LINE_NUMBER.EQ.NUMBER_IMAGE_LINES)THEN
+	    THIS_BAND(BAND_NUMBER)=.FALSE.
+	    DO 700 I=1,MAX_BANDS
+	      IF(THIS_BAND(I))GOTO 100
+700	    CONTINUE
+	    GOTO 950
+	  ENDIF
+	  GOTO 100
+	ENDIF
+C
+C-------------------------------------------------------------------------
+C	If we get here then the tape doesn't correspond to the NRSC
+C	format ie. it probably isn't a NRSC tape!
+C
+C-------------------------------------------------------------------------
+C
+900	READ_NRSC_TAPE=.FALSE.		!unsuccessful
+	CALL LSL_PUTMSG(READCCT__BADTAPEFORMAT)
+	GOTO 999
+C
+C	Print out summary if required
+950	IF(HAD_SUMMARY)CALL PRINT_NRSC_SUMMARY
+C
+999	RETURN
+C
+	END
+

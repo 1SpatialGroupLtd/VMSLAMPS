@@ -137,9 +137,7 @@ c	integer*4 nfeat
 	write(luno,1)
 1	format('HI')
 2	format(a)
-	call date(hirec(1:9))
-	hirec(10:11)=hirec(8:9)
-	hirec(8:9)='19'
+	call lib$date_time(hirec(1:11))
 	hirec(12:12)=' '
 	call time(hirec(13:20))
 	hirec(18:60)=' DUMMY      GENIFF   GENAMAP-19+25 to IFF'

@@ -1,0 +1,161 @@
+	INTEGER*4 FUNCTION JREMCH
+C
+***	MODULE	JREMCH
+***	IDENT	04NO82
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C	Bug in "cul-de-sac-with-island" fixed	 DM	04-Nov-1982
+C	Closed chains can't cause a break	 DM	03-Nov-1982
+C	Parallel chains can't break each other	 DM	01-Nov-1982
+C	Breaking a closed chn ==> 1 open chn	 DM	12-Jul-1982
+C	T P C H A R changed to TPTCHN		AJW	08-Jul-1982
+C	Deals with "cul-de-sac-with-island" case DM	08-Jul-1982
+C	Rehashed				 DM	28-Jun-1982
+C	Tidied					AJW	24-Sep-1981
+C	Author					RFT	   Aug-1981
+C
+C Removes or breaks chains if necessary.
+C Values returned are:
+C	-1	did nothing
+C	 0	removed one or more spurious chains
+C	 1	broke one or more chains
+C If a chain has to be broken, the chain causing the break is removed
+C but all other chains survive (spurious ones will be killed next time).
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C  parameters:
+***	PARAMETER/PARAMS/
+C
+C common blocks:
+***	COMMON/JUNCOM/
+***	COMMON/LKPARM/
+***	COMMON/LINKS/
+***	COMMON/RSE/
+C
+C local workspace:
+	INTEGER DUMMY1		! dummy argument for TSTATT
+	INTEGER GOODCH(MAXCHN)	! chain numbers for good chains
+	INTEGER I,J		! do loop dummies
+	INTEGER ICHN		! chain with no tpts
+	INTEGER NGOOD		! number of chains found
+	INTEGER NOD1		! node at which to break chain
+	INTEGER NXT1		! start of new chain
+	INTEGER TPT		! transition point
+	REAL	DIST2		! temp dist**2 for parallel chain check
+	REAL	DUMMY2		! dummy argument for TSTATT
+	REAL	MAXDST,MINDST	! max, min DIST2
+C
+C ......................................................................
+C
+	JREMCH=-1
+	NGOOD=0
+C
+C ... see whether to break a chain.
+	DO 60 I=1,MAXCHN		  ! loop through chains
+	  IF (CHAIN(I).EQ.0) GO TO 60	  ! ignore null chains
+	  NGOOD=NGOOD + 1
+	  GOODCH(NGOOD)=I
+	  IF (CHNTPS(1,I).EQ.0) GO TO 60  ! & those with no tpts
+	  IF (CHNTPS(2,I).EQ.0) GO TO 60  ! or only one
+	  TPT=CHNTPS(1,I) - 1
+C
+C ... these conditions for allowing a break may be a bit tight.
+C ... allow a break if two consecutive transition points (TPT and TPT+1)
+C ... on chain I correspond respectively to a transition to and from a
+C ... single other chain (ICHN) which itself has no transition points.
+10	  TPT=TPT + 1
+	  IF (TPT.GE.CHNTPS(2,I)) GO TO 60	! all tpts dealt with ?
+	  ICHN=TPTCHN(2,TPT)			! closest chn to TPT
+	  IF (CHNTPS(1,ICHN).NE.0) GO TO 10	! ignore chns with tpts
+	  IF (TPTCHN(1,TPT+1).NE.ICHN) GO TO 10	! or TPT+1 ==> wrong chn
+	  TPT=TPT + 1
+	  IF (CLOCHN(ICHN)) GO TO 10		! closed chain - no good
+C
+C ... possible break detected - check for parallel lines.
+C ... find the maximum and minimum distances between chains I and ICHN.
+	  MAXDST=0.0
+	  MINDST=1.0E38
+	  DO 20 J=FIRST(ICHN),LAST(ICHN)
+	    CALL TSTATT(ENCBUF(X,NODE(J)),ENCBUF(Y,NODE(J)),I,
+     &			1.0E10,0,0,DUMMY1,DUMMY2,DIST2)
+	    IF (DIST2.GT.MAXDST) MAXDST=DIST2
+	    IF (DIST2.LT.MINDST) MINDST=DIST2
+20	  CONTINUE
+C
+C ... if difference between MAXDST and MINDST is less than a line width,
+C ... the chains are deemed to be parallel and we don't do any breaking.
+	  IF (SQRT(MAXDST)-SQRT(MINDST).GE.TRAKWD) GO TO 30
+	  IF (TMPCHK) CALL WRITEF('JREMCH: Parallel chain - not broken')
+	  GO TO 10			! deal with rest of tpts on chn
+C
+C ... break chain at node half way between the two transition points.
+C ... (might be better to break at the node nearest to the other chain).
+30	  NOD1=NODE((TRPTAR(2,TPT-1)+TRPTAR(2,TPT))/2)
+	  NXT1=NXT(NOD1)
+	  NXT(NOD1)=0
+C
+C ... kill off the chain which 'caused' the break.
+	  CHAIN(ICHN)=0
+	  JREMCH=1
+C
+C ... if chain was closed, we want to end up with ONE open chain.
+C ... note that after each such operation the chain structure must be
+C ... rebuilt (by CHNLST), hence we can only break a closed chain once.
+	  IF (.NOT.CLOCHN(I)) GO TO 40
+	  IF (TMPCHK) CALL WRITEF('JREMCH: Closed chain broken')
+	  NXT(NODE(FIRST(I)))=NODE(LAST(I))	! join FIRST to LAST
+	  CHAIN(I)=NXT1				! redirect CHAIN
+	  CLOCHN(I)=.FALSE.
+	  GO TO 60				! finished with chain
+C
+C ... chain was not closed - create a new chain.
+40	  IF (TMPCHK) CALL WRITEF('JREMCH: Chain broken')
+	  DO 50 J=1,MAXCHN		! get next free chain number
+	    IF (CHAIN(J).NE.0) GO TO 50
+	    CHAIN(J)=NXT1
+	    CHNSNS(J)=CHNSNS(I)
+	    CLOCHN(J)=.FALSE.
+	    GO TO 10			! deal with rest of tpts on chn
+50	  CONTINUE
+	  CALL WRITEF('JREMCH: No room to create new chain')
+C
+60	CONTINUE
+C
+	IF (JREMCH.EQ.1.OR.NGOOD.EQ.0) RETURN
+C
+C ... if chain not broken, see if we've got a (possible)
+C ... cul-de-sac-with-island.
+	IF (NGOOD.NE.2) GO TO 80	! must have exactly two chains
+	I=0
+	IF (CLOCHN(GOODCH(1))) I=I + 2	! one of them must be closed ...
+	IF (CLOCHN(GOODCH(2))) I=I + 1
+	IF (I.EQ.0.OR.I.EQ.3) GO TO 80	! but not both
+	I=GOODCH(I)			! break the OPEN chain (N.B.)!!
+	NOD1=NODE((FIRST(I) + LAST(I))/2)  ! break it at its mid-point
+	J=0				! get the first free chain
+70	J=J + 1
+	IF (J.EQ.GOODCH(1).OR.J.EQ.GOODCH(2)) GO TO 70
+	CHAIN(J)=NXT(NOD1)
+	CHNSNS(J)=CHNSNS(I)
+	CLOCHN(J)=.FALSE.		! CLOCHN(I) already false
+	NXT(NOD1)=0
+C
+	IF (TMPCHK) CALL WRITEF('JREMCH: Chain broken')
+	JREMCH=1
+	RETURN
+C
+C ... if chain not broken, remove any spurious chains.
+80	DO 90 I=1,NGOOD			  ! loop through chains
+	  J=GOODCH(I)
+	  IF (CHNTPS(1,J).NE.0) GO TO 90  ! ignoring those with tpts
+	  CHAIN(J)=0			  ! delete the chain
+	  IF (TMPCHK) CALL WRITEF('JREMCH: Spurious chain removed')
+	  JREMCH=0
+90	CONTINUE
+C
+	RETURN
+	END

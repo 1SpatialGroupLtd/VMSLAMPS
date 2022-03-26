@@ -1,0 +1,300 @@
+	LOGICAL FUNCTION READ_CITF_NAMEREC(SERIAL_NO,FC,TEXT_STR,TEXTLEN,
+     &	     		                   UPDATE_DATE,UPDATE_STAT,SPEC,
+     &					   SPECLEN,MARG,PHYS,HAD_UP_DATE,
+     &					   HAD_UP_STAT,HAD_SPEC,HAD_MARG,
+     &	    				   HAD_PHYS)
+C
+***     MODULE READ_CITF_NAMEREC
+***     IDENT	27NO96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C       Author					S Townrow 30-Nov-1992
+C
+C Description
+C
+C A parallel routine to READ_NAMEREC which just handles CITF text.
+C It is intended to deal with the CITF NAMEREC record.
+C
+CMOD    Implement CITF96 changes (WI/CC 1545)                   TJM 18-Jun-1996
+C
+	IMPLICIT NONE
+C
+C Arguments:
+C
+	INTEGER		SERIAL_NO		! serial number
+	INTEGER		FC			! IFF feat. code result
+	CHARACTER*(*)	TEXT_STR		! the text itself
+	INTEGER		TEXTLEN			! its length
+	CHARACTER*8	UPDATE_DATE		! UPDATE_DATE attribute
+	CHARACTER*1	UPDATE_STAT		! UPDATE_STATUS attribute
+	CHARACTER*(*)	SPEC			! the SPEC attribute
+	INTEGER		SPECLEN			! length of above
+	CHARACTER*1	MARG			! MARGINAL_TXT
+	CHARACTER*1	PHYS			! PHYS_STAT
+	LOGICAL		HAD_UP_DATE		! UPDATE_DATE contained data
+	LOGICAL		HAD_UP_STAT		! UPDATE_STATUS contained data
+	LOGICAL		HAD_SPEC		! SPEC contained data
+	LOGICAL		HAD_MARG		! MARGINAL contained data
+	LOGICAL		HAD_PHYS		! PHYS_STAT contained data
+C
+C Messages:
+C
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Common files
+C
+	INCLUDE 'CITF.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE 'NTFDATA.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE 'LOOKUP.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+C
+C Functions:
+C
+	LOGICAL		RDINT			! read an integer
+	LOGICAL		RDLONG
+	LOGICAL		READ_CONTINUE
+	LOGICAL		IS_CONTINUATION
+C
+C Workspace:
+C
+	LOGICAL		OK			! Success flag
+	LOGICAL		MATCH
+	LOGICAL		HAD_FSN
+	INTEGER		NTF_FC			! NTF feat. code read from file
+	INTEGER		I,IND			! loop counter
+	INTEGER		INPUT_FSN
+	INTEGER		P1,P2,PREVLEN,TMPLEN,SIZE
+C
+	CHARACTER*5	RECORD_TYPE
+	CHARACTER*2	NTF$_REC_DESCR
+	CHARACTER*6	NTF$_SERIAL_NO
+	CHARACTER*8	NTF$_FEAT_CODE		! CITF96 mod
+	CHARACTER*2	NTF$_TEXT_LEN
+	CHARACTER*8	NTF$_UPDATE_DATE
+	CHARACTER*1	NTF$_UPDATE_STAT
+C
+C ........................................................................
+C Initialisations
+C 
+	OK=.TRUE.
+	NTF$_REC_DESCR		= STRING( 1:2 )
+	NTF$_SERIAL_NO		= STRING( 3:8 )
+	IF (HAD_CITF93) THEN
+	   NTF$_FEAT_CODE	= STRING( 9:12)
+	   NTF$_TEXT_LEN	= STRING(13:14)
+	   NTF$_UPDATE_DATE	= STRING(15:22)
+	   NTF$_UPDATE_STAT	= STRING(23:23)
+	ELSEIF (HAD_CITF96) THEN
+	   NTF$_FEAT_CODE	= STRING( 9:16)
+	   NTF$_TEXT_LEN	= STRING(17:18)
+	   NTF$_UPDATE_DATE	= STRING(19:26)
+	   NTF$_UPDATE_STAT	= STRING(27:27)
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Get the feature serial number
+C
+	HAD_FSN = .FALSE.				! initialise flag
+C
+	IF (NTF$_SERIAL_NO.NE.' ') THEN			! something in ID field
+	  CALL SETAUX(%REF(NTF$_SERIAL_NO),6)		! set as input buffer
+	  OK = .NOT.RDLONG(INPUT_FSN)			! attempt to read FSN
+	  HAD_FSN = OK.AND.(INPUT_FSN.GT.0)
+	ENDIF
+C
+	IF (HAD_FSN) THEN				! if we read the FSN
+	  SERIAL_NO = INPUT_FSN				! use it
+	ELSE						! didnt read FSN
+	  SERIAL_NO = SERIAL_NO + 1			! increment FSN
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Check for 'no data' in UPDATE fields
+C
+	HAD_UP_DATE = NTF$_UPDATE_DATE(1:8).NE.'00000000'
+	IF (HAD_UP_DATE) UPDATE_DATE = NTF$_UPDATE_DATE
+	HAD_UP_STAT = NTF$_UPDATE_STAT(1:1).NE.' '
+	IF (HAD_UP_STAT) UPDATE_STAT = NTF$_UPDATE_STAT
+C
+C------------------------------------------------------------------------------
+C Get field width for SPEC
+C
+	HAD_SPEC = .FALSE.
+	IF (HAD_CITF93) THEN
+	   P1 = 24
+	ELSEIF (HAD_CITF96) THEN
+	   P1 = 28
+	ENDIF
+	SPECLEN = 0
+	PREVLEN = 0
+20	P2 = INDEX(STRING(1:LENGTH),DIVIDER)
+	IF (P2.EQ.P1) THEN		! no field present, just divider
+	   P1 = MAX(P1+1,P2 + 1)
+	ELSEIF (P2.GT.P1) THEN		! spec was present
+	   SPECLEN = MIN(255,SPECLEN + P2 - P1)
+	   IF (PREVLEN.LT.255) THEN
+	      SPEC(PREVLEN+1:SPECLEN) = STRING(P1:P2-1)
+	   ENDIF
+	   PREVLEN = SPECLEN
+	   P1 = P2 + 1
+	   HAD_SPEC = .TRUE.
+	ELSEIF (P2.EQ.0) THEN		! either missing \ or it continues
+	   IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) THEN
+	      CALL LSL_PUTMSG(NTF2I__NODIVIDER,NTF$_REC_DESCR)
+	   ELSE
+	      HAD_SPEC = .TRUE.
+	      SPECLEN = MIN(255,SPECLEN + LENGTH - 2 - P1 + 1)
+	      IF (PREVLEN.LT.255) THEN
+		 SPEC(PREVLEN+1:SPECLEN) = STRING(P1:LENGTH-2)
+	      ENDIF
+	      PREVLEN = SPECLEN
+	      IF (IS_CONTINUATION(STRING,LENGTH)) THEN
+		 OK = READ_CONTINUE('NAMEREC')
+		 IF (.NOT.OK) GOTO 999
+		 P1 = 3
+		 GOTO 20
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Get field MARGINAL_TXT
+C
+	HAD_MARG = .FALSE.
+	IF (P1.GT.LENGTH-2) THEN
+	   IF (IS_CONTINUATION(STRING,LENGTH)) THEN
+	      OK = READ_CONTINUE('NAMEREC')
+	      IF (.NOT.OK) GOTO 999
+	      P1 = 3
+	      MARG = STRING(P1:P1)
+	      HAD_MARG = .TRUE.
+	   ELSE
+	      MARG = 'N'
+	   ENDIF
+	ELSE
+	   MARG = STRING(P1:P1)
+	   HAD_MARG = .TRUE.
+	ENDIF
+	P1 = P1 + 1
+C
+C------------------------------------------------------------------------------
+C
+	MATCH = .FALSE.					! default
+	FC = 0						! default FC =0
+C
+	IF (NTF$_FEAT_CODE.NE.' ') THEN			! something in field
+	   IF (HAD_CITF93) THEN
+	      CALL SETAUX(%REF(NTF$_FEAT_CODE),4)       ! Feature code CITF93
+	      OK = .NOT. RDINT(NTF_FC)
+	      FC = NTF_FC				! copy to result
+	      IF (HAD_FC_LOOKUP)			! translate?
+     &		CALL FC_TRANS(%VAL(LUT_BASE_ADDR), NTF_FC, FC)
+C
+	   ELSEIF (HAD_CITF96) THEN
+	      CALL SETAUX(%REF(NTF$_FEAT_CODE),8)       ! Feature code CITF96
+	      OK = .NOT. RDLONG(NTF_FC)
+	      FC = NTF_FC				! copy to result
+	      IF (HAD_FC_LOOKUP)			! translate?
+     &		CALL FC_TRANS(%VAL(LUT_BASE_ADDR), NTF_FC, FC)
+	      IF (FC.LE.0 .OR. FC.GT.32767) THEN
+		 CALL LSL_PUTMSG(NTF2I__FCTOOLARGE,FC)
+		 FC = 0
+	      ENDIF
+	   ENDIF
+C
+C	  ..................................................................
+C	  couldn't read feature code as a number, may be its a label
+C
+	  IF (.NOT.OK) THEN				! error while reading
+	     IND = 0						!initialise
+	     DO WHILE( (.NOT.MATCH).AND.(IND.LT.N_FCNAMES) )
+	       IND = IND+1					! increment
+	       MATCH =  (NTF$_FEAT_CODE .EQ. FCNAMES(IND))	! compare
+	     END DO
+C
+	     IF (.NOT.MATCH) THEN				! not matched
+	       CALL LSL_PUTMSG(NTF2I__UNKNFC,NTF$_FEAT_CODE,RECNUM)	! warn
+	       FC = 0						! reset to 0
+	     ELSE
+	       FC = 28						! FC = OS text
+!	       DO  110 IND = 1,4
+!		  OUT_FEAT_CODE(IND) = ICHAR(NTF$_FEAT_CODE(IND:IND))
+!110	       CONTINUE
+!	       IS_LAB = .TRUE.					!not true FC
+	     ENDIF
+	  ENDIF
+	ENDIF
+C
+C	.......................................................................
+C	Get the text length
+C
+	CALL SETAUX(%REF(NTF$_TEXT_LEN),2)			!Get the value 
+	OK = .NOT.RDINT(TEXTLEN)
+	IF (.NOT.OK) THEN
+!	   CALL LSL_PUTMSG(NTF2I__NAMEREC,NAME_ID,RECNUM)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'TEXT_LEN')
+	   CALL LSL_ADDSTR(NTF$_TEXT_LEN)
+	   GOTO 999
+	ENDIF	
+C
+C------------------------------------------------------------------------------
+C Get the text field itself
+C
+	TMPLEN = 0
+60	SIZE = MIN(TEXTLEN-TMPLEN,MAX(0,LENGTH-2+1-P1))
+	TEXT_STR(TMPLEN+1:TMPLEN+SIZE) = STRING(P1:P1+SIZE)
+	TMPLEN = TMPLEN + SIZE
+	IF (TMPLEN.LT.TEXTLEN) THEN
+	   IF (.NOT.IS_CONTINUATION(STRING,LENGTH)) THEN
+!	      CALL LSL_PUTMSG( NTF2I__NAMEREC,NAME_ID,RECNUM )
+	      CALL LSL_ADDMSG( NTF2I__SHORTXT,TMPLEN,TEXTLEN )
+	      GOTO 999
+	   ENDIF
+	   OK = READ_CONTINUE('NAMEREC')
+	   IF (.NOT.OK) THEN
+!	      CALL LSL_PUTMSG( NTF2I__NAMEREC,NAME_ID,RECNUM )
+	      GOTO 999
+	   ENDIF
+	   P1 = 3
+	   GOTO 60
+	ENDIF
+	P1 = P1 + SIZE
+C
+C------------------------------------------------------------------------------
+C Get field PHYS_STAT
+C
+	HAD_PHYS = .FALSE.
+	IF (P1.GT.LENGTH-2) THEN
+	   IF (IS_CONTINUATION(STRING,LENGTH)) THEN
+	      OK = READ_CONTINUE('NAMEREC')
+	      IF (.NOT.OK) GOTO 999
+	      P1 = 3
+	      PHYS = STRING(P1:P1)
+	      HAD_PHYS = .TRUE.
+	   ELSE
+	      PHYS = ' '
+	   ENDIF
+	ELSE
+	   PHYS = STRING(P1:P1)
+	   HAD_PHYS = .TRUE.
+	ENDIF
+C
+C Read any remaining continuation records
+C
+800	IF (IS_CONTINUATION(STRING,LENGTH)) THEN
+	   OK = READ_CONTINUE('NAMEREC')
+	   IF (OK) THEN
+	      REC_IN_HAND = .FALSE.
+	      GOTO 800
+	   ENDIF
+	ENDIF
+C
+C ........................................................................
+C So we can return
+C
+999	READ_CITF_NAMEREC=OK
+	RETURN
+	END

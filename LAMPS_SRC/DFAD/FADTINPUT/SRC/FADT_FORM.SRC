@@ -1,0 +1,673 @@
+ 	LOGICAL FUNCTION FADT_FORM()
+C
+***	MODULE FADT_FORM
+***	IDENT 20AP93
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C Author: J.M.Billing			18 Jan 1988
+C
+C Function to accept input/modification of FADT record via form,
+C and output changed record to FADT file.
+C Returns .TRUE. if succeeds.
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$FADTINPUT:FADTINPUT.CMN'
+	INCLUDE 'LSL$FADTCMN:FADT.CMN'
+	INCLUDE 'LSL$FADTCMN:HEADER.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+C
+C Field id and name tables
+	CHARACTER*6	FID_FIELDS(MAX_FADT_ARGS)	! Form's fields' ids, as from FID
+					! in form appearance order
+	CHARACTER*6	FIDTAB(10)	! Form's fields' ids
+	CHARACTER*20	FNAME(10)	! FADT record's fields' names
+	INTEGER*2	FNLEN(10)	! Field name lengths
+C
+C Field value table structure
+C Will be passable as argument to routines in place of
+C FADT record common variable
+	STRUCTURE /F/
+	   INTEGER*2	ARR(10)		! Current FADT values
+	END STRUCTURE
+	RECORD /F/	FA
+C
+C w/s variables
+	LOGICAL		HAD_RANGE	! FAC range flag 
+	INTEGER*2	STARTFAC	! 1st FAC in a FAC range
+	INTEGER*2	ENDFAC		! last FAC in a FAC range
+	LOGICAL		VALID(10)	! flags of fields which may
+					! be failing valid'n
+					! .FALSE. set up by 
+					! FADT_VALIDATE indicates field
+					! may have contributed to val'n
+					! failure.
+	INTEGER*2	FNUM		! current input field value
+	INTEGER*2	I		! general purpose temporary
+	INTEGER		J		! general purpose temporary
+	INTEGER		STATUS		! status code of last FDV call
+	CHARACTER*10	FID		! field id
+	CHARACTER*100	FIELD		! field string value
+	INTEGER		TERM		! field terminator
+	LOGICAL		WANT_DIAG	! want diagnostics flag
+	LOGICAL		NOLONG		! interger read flag
+	INTEGER*2	DEF_SEC		! default security
+	INTEGER*2	DEF_REL		! default releasibility
+C
+C program flow control variables
+	INTEGER*2     ENTER_FIELD	! current field in entry phase
+	INTEGER*2     VAL_FIELD		! current field in vald'n phase
+	LOGICAL	      FIRST_VALIDATION	! flag showing if first attempt
+					! made yet to validate field
+	LOGICAL	      RECORD_VALIDATION	! flag showing if in complete
+					! record validation phase
+C
+C Binary chop variables
+	INTEGER*4	L	! lower value
+	INTEGER*4	U	! upper value
+	INTEGER*4	V	! required array contents
+	INTEGER*4	M	! current value
+C
+C
+C functions
+	LOGICAL		FADT_READ
+	LOGICAL		FADT_WRITE
+	LOGICAL		FADT_DELETE
+	LOGICAL		FADT_VALIDATE
+	LOGICAL		HEADER_READ
+	LOGICAL		RDINT
+	LOGICAL		RDLONG
+C
+C Set up field id, name and name string length tables
+C
+C FADT field id's
+	DATA (FIDTAB(I),I=1,10)/'FAC','HEIGHT','FAT','FID','SEC','REL',
+     &				'SMC','ORDIDE','WIDROF','LENTRE'/
+C
+C FADT fields. 
+	DATA (FNAME(I),I=1,10)/	'FAC','Height','Type','FID',
+     &				'Security','Releasability','SMC','Ori/Dir/Den',
+     &				'Width/%-Roof','Length/%-tree'/
+C
+	DATA (FNLEN(I),I=1,10)/   3,     6,      4,    3,      8,
+     &				       13,        3,       11,
+     &				      12,            13/
+C
+C Names of fields which can have defaults from the FADT entries in the 
+C fadt defaults file.
+	DATA (FID_FIELDS(I),I=1,MAX_FADT_ARGS)/'FID','FAT','HEIGHT','SEC',
+     &				'REL','SMC','ORDIDE','WIDROF','LENTRE'/
+C
+C---------------------------------------------------------------------
+C Set up form
+C
+C Use security/releasability from header record as defaults in
+C FADT records
+C
+	IF (HEADER_READ()) THEN
+	   DEF_SEC = HDR1.SEC
+	   DEF_REL = HDR1.REL
+	ELSE
+	   DEF_SEC = 0
+	   DEF_REL = 0
+	ENDIF
+10	CALL FDV$CLRSH('FADT')
+	CALL EXPAND('%^W%N',DEF_SEC)
+	CALL FDV$PUT(EXPDSC,'SEC')
+	CALL EXPAND('%^W%N',DEF_REL)
+	CALL FDV$PUT(EXPDSC,'REL')
+	CALL FORM_MSG('Next FADT record, please enter required FAC'//
+     &			' or press RETURN to exit to menu',0)
+C
+C---------------------------------------------------------------------
+C Get the FAC field
+C
+13	CALL FDV$GET(FIELD,TERM,'FAC')
+C
+C Check if '0' terminator, i.e. ENTER/RETURN
+C
+	IF (TERM.EQ.0) GOTO 900		! exit
+C
+C Check if abort form terminator
+C
+	IF (TERM.EQ.ABORT_FORM) GOTO 900 ! exit
+C
+C Convert FAC text into integer
+C
+	CALL SETAUX(%REF(FIELD), 20)	! set up to point to buffer
+C
+	IF (RDINT(FA.ARR(1))) THEN
+	   CALL FORM_MSG('Invalid FAC entered, please try again',0)
+	   GOTO 13
+	ENDIF
+C
+C Save this FAC as start of a possible range
+	STARTFAC = FA.ARR(1)
+C
+C Validate FAC
+C
+	IF (.NOT.FADT_VALIDATE(	1,		! current field
+     &				1,		! lowest field
+     &				1,		! highest field
+     &				FA.ARR,		! current fadt record
+     &				VALID,		! field valid flag array
+     &				.TRUE.		! want diagnostics
+     &				)) THEN
+	   IF (.NOT.VALID(1)) GOTO 13
+	ENDIF
+C
+C Process terminator
+C
+	CALL FDV$PFT
+C
+C if invalid terminator re-get
+	CALL FDV$STAT(STATUS)
+	IF (STATUS.NE.1) GOTO 13
+C
+C Now get the ENDFAC field.
+C
+14	CALL FDV$GET(FIELD,TERM,'ENDFAC')
+C
+C Check if '0' terminator, i.e. ENTER/RETURN
+C
+	IF (TERM.EQ.0) GOTO 900		! exit
+C
+C Check if '2' terminator, i.e. BACKSPACE
+C
+	IF (TERM.EQ.2) GOTO 13		! back to re-enter first FAC
+C
+C Check if abort form terminator
+C
+	IF (TERM.EQ.ABORT_FORM) GOTO 900 ! exit
+C
+C Convert ENDFAC text into integer
+C
+	CALL SETAUX(%REF(FIELD), 20)	! set up to point to buffer
+C
+C First make sure number is not greater than a word
+	NOLONG = RDLONG(J)
+	IF ((.NOT.NOLONG).AND.(J.GT.32767)) THEN
+	   CALL FORM_MSG('Invalid FAC entered, please re-enter range',0)
+	   GOTO 14
+	ENDIF
+C
+	HAD_RANGE = .TRUE.			! initialise range flag
+C
+C now we can read number as a word.
+	CALL SETAUX(%REF(FIELD), 20)	! set up to point to buffer
+C
+C If no 'ENDFAC' is entered unset range flag and make ENDFAC = STARTFAC
+C so that later the loop which saves FADT records only saves one.
+	IF (RDINT(FA.ARR(1))) THEN
+	   HAD_RANGE = .FALSE.
+	   ENDFAC = STARTFAC
+C
+C If ENDFAC entered and it is equal to the STARTFAC the don't treat as range.
+	ELSEIF (FA.ARR(1).EQ.STARTFAC) THEN
+	   HAD_RANGE = .FALSE.
+	   ENDFAC = STARTFAC
+	ELSE
+C
+C If an 'ENDFAC' is entered validate as if FAC
+C
+	   ENDFAC = FA.ARR(1)
+	   IF (.NOT.FADT_VALIDATE(	1,		! current field
+     &					1,		! lowest field
+     &					1,		! highest field
+     &					FA.ARR,		! current fadt record
+     &					VALID,		! field valid flag array
+     &					.TRUE.		! want diagnostics
+     &					)) THEN
+	      IF (.NOT.VALID(1)) THEN
+	         GOTO 14
+	      ENDIF
+	   ENDIF
+C
+	   IF (ENDFAC.LT.STARTFAC) THEN
+	      CALL FORM_MSG('Last FAC is less than first FAC.'//
+     &		            ' Please correct.',0)
+	      GOTO 14
+	   ENDIF
+	ENDIF
+C
+C Test if user wants to delete the FADT records in this FAC range
+C i.e. if 'GOLD D' or 'GOLD d' has been typed
+C
+	IF (HAD_RANGE) THEN
+	   IF ((TERM.EQ.DELETE_FADT1).OR.(TERM.EQ.DELETE_FADT2)) THEN
+C
+C Try to delete the FADT records in specified range
+C
+	      DO 105 I = STARTFAC,ENDFAC
+	         IF (FADT_DELETE(I,FADTLUN)) THEN
+C
+C Inform the user if successful
+C
+	            CALL EXPAND('FADT record with FAC %N deleted',I)
+	            CALL FORM_MSG(EXPDSC,1)
+C
+C Deal with failure to delete the record
+C
+	         ELSE
+	            CALL EXPAND('Unable to delete FADT record with FAC %N',I)
+	            CALL FORM_MSG(EXPDSC,1)
+	         ENDIF
+105	      CONTINUE
+C
+C Loop for entry of next record
+C
+	      GOTO 10
+	   ENDIF
+	ENDIF
+C
+C Loop through range of FACs. If any already exist its an error so 
+C prompt to retry.
+C
+	IF (HAD_RANGE) THEN
+	   DO 100 I = STARTFAC,ENDFAC
+	      IF (FADT_READ(FA,I,FADTLUN)) THEN
+	         CALL EXPAND('A FADT record for FAC %^W%N in range '//
+     &			     'specified already exists. Try again.',
+     &			     I)
+	         CALL FORM_MSG(EXPDSC,0)
+		 GOTO 13
+	      ENDIF
+100	   CONTINUE
+	ENDIF
+C
+C Process terminator
+C
+	CALL FDV$PFT
+C
+C if invalid terminator re-get
+	CALL FDV$STAT(STATUS)
+	IF (STATUS.NE.1) THEN
+	   GOTO 14
+	ENDIF
+C
+C If were not doing a range entry ....
+	IF (.NOT.HAD_RANGE) THEN
+C
+C Make sure FA.ARR(1) has the starting FAC
+	   FA.ARR(1) = STARTFAC
+C
+C Try to read FADT with that FAC, and if found, put its values into form
+C and temporary array (processing simpler on array than record).
+C Using array because more efficient to access using index
+C derived by looking up field name in table.
+C
+	   IF (FADT_READ(FA,FA.ARR(1),FADTLUN)) THEN
+C
+C Tell user have found it
+C
+	      CALL EXPAND('The FADT record for FAC %^W%N already exists.',
+     &				FA.ARR(1))
+	      CALL FORM_MSG(EXPDSC,0)
+C
+C Put values into form fields
+C
+	      DO 15 I = 1,10
+	         CALL EXPAND('%^W%N',FA.ARR(I))
+	         CALL FDV$PUT(EXPDSC,FIDTAB(I))
+15	      CONTINUE
+C
+C Otherwise, set up default values for fields
+C
+	   ELSE
+	      DO 16 I = 2,10
+	         FA.ARR(I) = 0
+16	      CONTINUE
+	   ENDIF
+	ENDIF
+C
+C Set FID so we know ENDFAC was the last field
+	FID = 'ENDFAC'
+C
+C
+C---------------------------------------------------------------------
+C Now allow editing of all fields starting with FID rather than FAT.
+C 
+C Set flag showing not yet in record validation stage
+C
+	RECORD_VALIDATION = .FALSE.
+C
+	CALL FDV$GCF(FID)
+	CALL FDV$PFT
+C
+C Get name of next field
+C
+20	CALL FDV$GCF(FID)
+C
+C Set flag showing field not yet validated
+C
+	FIRST_VALIDATION = .TRUE.
+C
+C Get field contents
+C
+30	CALL FDV$GET(FIELD,TERM,FID)
+C
+C Check if abort form terminator
+C If it is abandon this FADT record
+C
+	IF (TERM.EQ.ABORT_FORM) GOTO 10	! restart fadt entry
+C
+C Check if '2' terminator, i.e. BACKSPACE
+C and if so go back to re-enter first FAC
+C
+	IF ((TERM.EQ.2).AND.(FID.EQ.'FAT')) GOTO 13 
+C
+C Convert it to integer
+C
+35	CALL SETAUX(%REF(FIELD), 20)	! set up to point to buffer
+C
+C If field is ENDFAC then save the value otherwise get next field.
+	IF (FID.EQ.'ENDFAC') THEN
+	   IF (.NOT.RDINT(FNUM)) THEN
+	      ENDFAC = FNUM
+	   ELSE
+	      ENDFAC = STARTFAC
+	      CALL FDV$PFT
+	      CALL FDV$GCF(FID)
+	      GOTO 30
+	   ENDIF	      
+C
+C If not a legal integer, report it and force re-entry, unless
+C this is an attempt to delete a FADT record, and this is not
+C the FAC field.
+C If this is an attempt to delete the FADT record, then the
+C current FAC must be correct, so if the current field is the
+C FAC field, it must be valid.
+C
+	ELSEIF ((RDINT(FNUM)).AND.
+     &	    ((FID.EQ.'FAC').OR.
+     &	     ((FID.NE.'FAC').AND.
+     &	      (TERM.NE.DELETE_FADT1).AND.
+     &	      (TERM.NE.DELETE_FADT2)
+     &	     ) 
+     &	    )
+     &	   ) THEN
+		CALL FORM_MSG('Not recognisable as a number, '//
+     &				'please check it.',0)
+	   GOTO 30
+	ENDIF
+C
+C If field is FAC save the value
+	IF (FID.EQ.'FAC') STARTFAC = FNUM
+C
+C Test if user wants to delete the FADT record with that FAC
+C i.e. if 'GOLD D' or 'GOLD d' has been typed
+C
+	IF ((TERM.EQ.DELETE_FADT1).OR.(TERM.EQ.DELETE_FADT2)) THEN
+C
+C Check if field just entered was FAC, and save its value if it was
+C The FAC determines which record to delete
+C
+	   IF (FID.EQ.'FAC') FA.ARR(1) = FNUM
+C
+C Validate FAC prior to attempting to delete it
+C
+	   IF (.NOT.FADT_VALIDATE(1,		! current field
+     &				  1,		! lowest field
+     &				  1,		! highest field
+     &				  FA.ARR,	! current fadt record
+     &				  VALID,	! field valid flag array
+     &				  .TRUE.	! want diagnostics
+     &				  )) THEN
+	      IF (.NOT.VALID(1)) GOTO 30
+	   ENDIF
+C
+C Try to delete the FADT record
+C
+	   IF (FADT_DELETE(FA.ARR(1),FADTLUN)) THEN
+C
+C Inform the user if successful
+C
+	      CALL EXPAND('FADT record with FAC %^W%N deleted',FA.ARR(1))
+	      CALL FORM_MSG(EXPDSC,3)
+C
+C Loop for entry of next record
+C
+	      GOTO 10
+C
+C Deal with failure to delete the record
+C
+	   ELSE
+	      CALL EXPAND('Unable to delete FADT record with FAC %^W%N',
+     &			   FA.ARR(1))
+	      CALL FORM_MSG(EXPDSC,0)
+	      GOTO 30
+	   ENDIF
+	ENDIF
+C
+C Find which one it is, validate it, and update FADT variable
+C
+	DO 40 ENTER_FIELD = 1,10
+	   IF (FID.EQ.FIDTAB(ENTER_FIELD)) GOTO 45
+40	CONTINUE
+C
+C Don't do any validation if ENDFAC
+	IF (FID.EQ.'ENDFAC') THEN
+	   CALL FDV$PFT
+	   GOTO 90
+	ENDIF
+C
+C Not a recognised FID, so tell user and restart form
+C
+	CALL EXPAND('There is a serious problem with this form,')
+	CALL APPEND(' please restart entry.')
+	CALL FORM_MSG(EXPDSC,5)
+	GOTO 10
+C
+C Check if value of field has been altered, if it has, set flag
+C to indicate it has not yet been validated, and put into
+C appropriate field in FADT array
+C
+45	IF (FA.ARR(ENTER_FIELD).NE.FNUM) THEN
+	   FIRST_VALIDATION = .TRUE.
+	   FA.ARR(ENTER_FIELD) = FNUM
+C
+C If record validation phase, and have not changed the field, and
+C the terminator is ENTER/RETURN then this is not a true first
+C validation phase.
+C
+	ELSEIF ((RECORD_VALIDATION).AND.(TERM.EQ.0)) THEN
+	   FIRST_VALIDATION = .FALSE.
+	ENDIF
+C
+C Work out if want diagnostics
+C
+	WANT_DIAG = FIRST_VALIDATION
+C
+C Validate it when found field number
+C Take appropriate action if fails validation
+C
+	IF (.NOT.FADT_VALIDATE( ENTER_FIELD,	! primary field
+     &				ENTER_FIELD,	! lowest field
+     &				ENTER_FIELD,	! highest field
+     &				FA.ARR,		! record
+     &				VALID,		! field valid flags
+     &				WANT_DIAG	! want diagnostics
+     &				)) THEN
+C
+C If ENTER_FIELD=1,3,4 then this is FAC,FAT,FID which MUST be valid, 
+C so re-enter
+C
+	   IF (((ENTER_FIELD.EQ.1).OR.
+     &		(ENTER_FIELD.EQ.3).OR.
+     &		(ENTER_FIELD.EQ.4)).AND.
+     &	        (.NOT.VALID(ENTER_FIELD))) THEN
+	      FIRST_VALIDATION = .TRUE.
+	      GOTO 30
+	   ENDIF
+C
+C If this is the first attempt to validate the field then move cursor
+C back to field to facilitate re-entry by user. Also reset flags to
+C show nolonger first validation attempt and nolonger record
+C validation stage.
+C
+	   IF (FIRST_VALIDATION) THEN
+	      FIRST_VALIDATION = .FALSE.
+	      GOTO 30
+	   ENDIF
+C
+	ENDIF
+C
+C Process terminator
+C
+	CALL FDV$PFT
+C
+C If current field is FID then lookup the defaults for this FID.
+	IF (ENTER_FIELD.EQ.4) THEN
+C
+C 'Binary chop' search of array.
+            L = 1
+	    U = FADT_COUNT
+	    V = FNUM
+C
+C Check individually when less than 5
+80	    IF ((L.GE.(U-5)))THEN
+	       DO WHILE (L .LE. U)
+	          M = L
+	          IF(FADT_DEFS(M,1,1) .EQ. V) GOTO 85
+	          L = L + 1
+	       END DO
+C
+C FID specified not found, so go on to next field.
+	       GOTO 90
+	    ENDIF		       
+C
+C Chop !
+	    M = L + (U-L)/2
+            IF (FADT_DEFS(M,1,1) .EQ. V) THEN
+               GOTO 85
+            ELSEIF (FADT_DEFS(M,1,1) .LT. V) THEN
+               L = M
+            ELSEIF (FADT_DEFS(M,1,1) .GT. V) THEN
+               U = M
+            ENDIF
+            GOTO 80       ! loop back
+C
+85	   DO 86 I = 2,MAX_FADT_ARGS
+	      IF (FADT_DEFS(M,I,2).EQ.-999) THEN
+	         CALL FDV$PUT(' ',FID_FIELDS(I))
+	      ELSE
+	         CALL EXPAND('%^W%N',FADT_DEFS(M,I,1))
+	         CALL FDV$PUT(EXPDSC,FID_FIELDS(I))
+		 IF (I.EQ.2) THEN
+		    FA.ARR(3) = FADT_DEFS(M,I,1)
+		 ELSE IF (I.EQ.3) THEN
+		    FA.ARR(2) = FADT_DEFS(M,I,1)
+		 ELSE
+		    FA.ARR(I+1) = FADT_DEFS(M,I,1)
+		 ENDIF
+	      ENDIF
+86	   CONTINUE
+	ENDIF
+C
+C
+C If terminator was not ENTER/RETURN then do not move on to record
+C validation. If this is re-entry of field as part of record
+C validation, and ENTER/RETURN not used, set flag to show
+C end of record validation and return to normal entry mode.
+C 
+90	IF (TERM.NE.0) THEN
+	   RECORD_VALIDATION = .FALSE.
+	   GOTO 20
+	ENDIF
+C
+C Remember status so can tell if form has been completed successfully
+C if RETURN pressed as terminator
+C
+	CALL FDV$STAT(STATUS)
+C
+	IF (STATUS.NE.1) GOTO 20
+C
+C---------------------------------------------------------------------
+C Validate entire record
+C
+C Have reached end of entry of current record
+C So re-validate every field
+C If invalid, inform user and allow to alter record
+C
+C Check if are already in record validation stage (i.e. have
+C just gone back to allow user to re-enter a single field)
+C If not, start field count at 1, and set record validation flag
+C
+	IF (.NOT.RECORD_VALIDATION) THEN
+	   VAL_FIELD = 1
+	   RECORD_VALIDATION = .TRUE.
+C
+C First, tell user what the delay is
+C
+	   CALL FORM_MSG('Validating entire record, please wait',0)
+C
+C If already doing record validation, move onto next field
+C
+	ELSE
+	   VAL_FIELD = VAL_FIELD + 1
+	   IF (VAL_FIELD.GT.10) GOTO 60		! finished
+	ENDIF
+C
+C Now validate every field together
+C
+50	IF (.NOT.FADT_VALIDATE(VAL_FIELD,1,10,FA.ARR,VALID,.FALSE.))
+     &	      THEN
+C
+C Find first potentially invalid field
+C
+55	   IF (VALID(VAL_FIELD)) THEN
+	      VAL_FIELD = VAL_FIELD + 1
+	      IF (VAL_FIELD.LE.10) GOTO 55
+	   ENDIF
+C
+C Check if any failure fields found
+C
+	   IF (VAL_FIELD.LE.10) THEN
+C
+C Tell the user what to do
+C
+	      CALL EXPAND('%S may be invalid.',
+     &				FNAME(VAL_FIELD)(1:FNLEN(VAL_FIELD)))
+	      CALL APPEND(' Press RETURN to accept.')
+	      CALL APPEND(' Otherwise alter it.')
+	      CALL FORM_MSG(EXPDSC,0)
+C
+C Allow record re-entry starting at first failure field
+C
+	      FID = FIDTAB(VAL_FIELD)
+	      FIRST_VALIDATION = .TRUE.
+	      GOTO 30
+C
+	   ENDIF	! if i.le.10
+C
+C Go on to redo validation from next field following first failure
+C This is needed because if the first failure field failed all
+C the rules present for this record, then the validation routine
+C may not have looked at any subsequent fields.
+C
+	   IF (VAL_FIELD.LT.10) THEN
+	      VAL_FIELD = VAL_FIELD + 1
+	      GOTO 50
+	   ENDIF
+C
+	ENDIF		! if .not.fadt_validate
+C	
+C So write this one to FADT file and move onto next. If it is not
+C a range of entries ENDFAC will be equal STARTFAC
+C
+60	DO 200 I = STARTFAC,ENDFAC
+	   FA.ARR(1) = I
+	   IF (.NOT.FADT_WRITE(FA,FADTLUN)) THEN
+	      CALL FORM_MSG('Error writing that FADT',0)
+	      GOTO 61
+	   ENDIF
+200	CONTINUE
+C
+61	GOTO 10	
+C
+C Exit, resetting decode pointer to TXTBUF (after SETAUX above)
+C
+900	CALL BSLN
+	FADT_FORM = .TRUE.
+	RETURN
+	END

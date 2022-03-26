@@ -10,6 +10,8 @@
 /************************************************************************/ 
 
 extern BOOLEAN  had_frt;	/* TRUE if we had FRT file qualifier	*/
+extern BOOLEAN  had_par;	/* TRUE if we had /PAR qualifier	*/
+extern BOOLEAN  had_tab;	/* TRUE if we had /INFO_TABLES qualifier*/
 extern BOOLEAN  had_log;	/* TRUE if we log file open/close, etc	*/
 extern BOOLEAN	had_debug;	/* TRUE if we should output debug info	*/
 

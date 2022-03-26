@@ -1,0 +1,435 @@
+	SUBROUTINE PLOT_AREA (NVERTS)
+C
+***	MODULE PLOT_AREA
+***	IDENT  03AU93
+C
+C	Copyright : Laser-Scan Ltd., Cambridge, England.
+C	Created   : 10DE85
+C	Author    : D R Catlow
+C
+CMOD	 Increase XVERTS etc. from 8192 to 32767	 JB 17-Jan-1992
+CMOD	 Increase INDEX and INTERX from 512 to 1024	 JB 17-Feb-1992
+C
+CMOD	 Add 0.0001 instead of 0.001 to RLINE to increase scan line
+C	 precision					JMC 08-Dec-1992
+C
+CMOD1253 Use double real arithmetic in the intersection calculations
+C	 here and the calculations in IFF_TO_DTI	 JB 13-Jul-1993
+C	 Implement the scan-line ordered edge list algorithm properly
+C	 when the y coord is the same as the scan-line, rather than
+C	 fudging by moving the scan-line value a small amount
+C							 JB 19-Jul-1993
+C
+C	Routine to determine internal coordinate points of an area,
+C	transform to DTM coordinate system, and pass to ENCODE_IFF for
+C	encoding and plotting. Following this the boundary of the area
+C	is also plotted. All points in the area will have the same DTI
+C	value.
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$CMNI2GRID:CULTRE.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+C
+C Arguments
+	INTEGER*4	NVERTS		! number of coord pts passed
+C
+C Locals
+	REAL*8		RLINE		! scan line
+	REAL*4		ALINE		! scan line
+	REAL*4		ZVAL
+	REAL*4		XVERTS(MAXPTS)	! transformed
+	REAL*4		YVERTS(MAXPTS)	! coordinates
+	REAL*4		X1,X2,X3	! DTI coord
+	REAL*4		Y1,Y2,Y3	! values
+C
+	REAL*8		INTER			! x intersection value
+	REAL*4		INTERX(MAXINTER)	! x intersection pts
+	INTEGER*4	INDEX(MAXINTER)		! required for REAL_RIPPLESORT
+	LOGICAL		MINMAX(MAXINTER)	! turning point?
+	LOGICAL		HORIZ			! horizontal segment
+	LOGICAL		IS_INVIS		! invisible segment
+C
+	INTEGER*4	YMIN,YMAX	! scan line limits
+	INTEGER*4	COUNT_VERTS	! number of verts defining
+	INTEGER*4	NSECT		! num of ints on current scan lin
+	INTEGER*4	LINE		! scan line counter
+	INTEGER*4	I,J		! loop counter
+	INTEGER*4	N,STR		! loop counter
+	INTEGER*4	NEXT_INVIS	! next invisible vertex
+	INTEGER*4	IINVIS		! invisible section index
+C
+	LOGICAL		DOWN
+C
+C***********************************************************************
+C
+	ZVAL = ZPTS(1)			! z val is ht of first point
+C
+C First transform (IFF to DTM) clipped boundary coordinates and put
+C into local arrays XVERTS and YVERTS. At the same time determine
+C minimum and maximum scan line values
+C
+	COUNT_VERTS = 0
+	YMIN        = 99999
+	YMAX        = 0
+	NEXT_INVIS  = 1
+C
+	DO 50 I = 1,NVERTS
+C
+C Convert to DTM coordinate system, storing transformed coordinates in
+C local arrays (DTM coords are not nintegerised yet)
+C
+	  COUNT_VERTS = COUNT_VERTS + 1
+	  CALL IFF_TO_DTI(XPTS(I),YPTS(I),
+     &			  XVERTS(COUNT_VERTS),YVERTS(COUNT_VERTS))
+C
+C Update maximum and minimum scan line values
+C
+	  YMIN = MIN(YMIN,NINT(YVERTS(COUNT_VERTS)))
+	  YMAX = MAX(YMAX,NINT(YVERTS(COUNT_VERTS)))
+50 	CONTINUE
+C
+C Ensure area is correctly closed
+C
+	IF (XVERTS(COUNT_VERTS).NE.XVERTS(1) .OR.
+     &	    YVERTS(COUNT_VERTS).NE.YVERTS(1)) THEN
+	  COUNT_VERTS = COUNT_VERTS+1
+	  XVERTS(COUNT_VERTS) = XVERTS(1)
+	  YVERTS(COUNT_VERTS) = YVERTS(1)
+	ENDIF
+C
+C Now determine interior coordinate points by scan line method,
+C involving calculation of intersection points
+C
+	YMIN = MAX(1,YMIN)
+	YMAX = MIN(YSIZE,YMAX)
+C
+        DO 200 LINE = YMIN,YMAX	
+C
+	  NSECT      = 0
+	  NEXT_INVIS = 1
+	  RLINE      = DBLE(LINE)
+C
+	  DO 150 I = 2,COUNT_VERTS
+C
+	    IF (NEXT_INVIS .LE. NUM_INVIS) THEN
+	       IF (INVIS(NEXT_INVIS).EQ.I) THEN
+C
+C ignore invisible lines
+		  NEXT_INVIS = NEXT_INVIS+1
+		  GOTO 150
+	       ENDIF
+	    ENDIF
+C
+	    HORIZ = .FALSE.
+C
+	    Y1 = YVERTS(I-1)
+	    Y2 = YVERTS(I)
+C
+C Horizontal sections, treat as stretched inflexions or intersection 
+C points
+C Real inflexions should have two entries added to the intersection
+C list, while an intersection has only one
+C
+	    IF (ABS(Y1-Y2).LT.1E-6) THEN
+		HORIZ = .TRUE.
+C
+		IF (ABS(Y1-LINE) .LE. 1E-6) THEN	! on scan line
+		  Y1 = LINE				! make it equal
+		  GOTO 110
+		ENDIF
+C
+		GOTO 150
+	    ENDIF
+C
+	    IF (RLINE.LT.Y1 .AND. RLINE.LT.Y2) THEN
+		GOTO 150
+	    ENDIF
+C
+	    IF (RLINE.GT.Y1 .AND. RLINE.GT.Y2) THEN
+		GOTO 150
+	    ENDIF
+C
+	    IF (Y2.LT.Y1) THEN
+		DOWN = .TRUE.
+	    ELSE
+		DOWN = .FALSE.
+	    ENDIF
+C
+C Horizontal segment special case
+C
+110	    CONTINUE			! don't change downness if horiz
+C
+	    IF (NSECT.EQ.MAXINTER) THEN
+		CALL WRITEF ('Too many scan line feature intersections')
+		NVERTS =  0
+		GOTO 900
+	    ENDIF
+C
+	    NSECT 	  = NSECT+1
+	    MINMAX(NSECT) = .FALSE.
+C
+	    X1 = XVERTS(I-1)
+	    X2 = XVERTS(I)
+C
+C Get the intersection x value - cope with a horizontal segment as an
+C inflexion
+C
+	    IF (HORIZ) THEN
+C
+C First horiz point
+C
+	      IF (I.EQ.2) THEN
+		X3 = XVERTS(NVERTS-1)				! point before
+		Y3 = YVERTS(NVERTS-1)				! horiz section
+	      ELSE
+		X3 = XVERTS(I-2)				! point before
+		Y3 = YVERTS(I-2)				! horiz section
+	      ENDIF
+C
+	      DO 100 J = 1,NUM_INVIS
+	        IF (INVIS(J).EQ.I-1) THEN		! found invisible move
+		  IS_INVIS  = .TRUE.
+		  IINVIS = J
+		  X3 = XVERTS(END_INVIS(IINVIS) - 1)	! replace x3,y3
+		  Y3 = YVERTS(END_INVIS(IINVIS) - 1)
+C
+		  IF (Y3.GT.Y1) THEN			! replace downness
+		    DOWN = .TRUE.
+		  ELSE
+		    DOWN = .FALSE.
+		  ENDIF
+C
+		  GOTO 102
+C
+		ELSE
+		  GOTO 100
+	        ENDIF
+100	      CONTINUE
+C
+102	      INTERX(NSECT) = X1
+	      MINMAX(NSECT) = .TRUE.
+C
+C Second horiz point
+C
+	      IF (I.EQ.NVERTS) THEN
+		X3 = XVERTS(2)			! next point after
+		Y3 = YVERTS(2)			! horiz section
+	      ELSE
+		X3 = XVERTS(I+1)			! next point after
+		Y3 = YVERTS(I+1)			! horiz section
+	      ENDIF
+C
+	      DO 101 J = 1,NUM_INVIS
+	        IF (END_INVIS(J).EQ.I) THEN		! found invisible move
+		  IS_INVIS  = .TRUE.
+		  IINVIS = J
+		  X3 = XVERTS(INVIS(IINVIS)+1)		! replace x3,y3
+		  Y3 = YVERTS(INVIS(IINVIS)+1)
+		  GOTO 104
+C
+	        ELSE
+		  GOTO 101
+	        ENDIF
+101	      CONTINUE
+C
+C Compare next point direction with previous
+C
+104	      IF (   (DOWN .AND. Y3.LT.Y2) .OR.
+     &		(.NOT.DOWN .AND. Y3.GT.Y2) ) GOTO 150	! still going up or down
+C
+	      IF (NSECT.EQ.MAXINTER) THEN
+		CALL WRITEF ('Too many scan line feature intersections')
+		NVERTS =  0
+		GOTO 900
+	      ENDIF
+C
+	      NSECT = NSECT + 1				! changing direction
+	      INTERX(NSECT) = X2			! treat as inflexion
+	      MINMAX(NSECT) = .TRUE.
+C
+	      GOTO 150
+C
+	    ELSE
+	      INTER = DBLE(X1) + DBLE(X2-X1) * DBLE(RLINE-Y1) / DBLE(Y2-Y1)
+	      INTERX(NSECT) = INTER
+	    ENDIF
+C
+C Scan convert the line segment
+C
+	    ALINE    = LINE
+	    IS_INVIS = .FALSE.
+C
+C Cope with point on scan line and use inflexions appropriately
+C
+	    IF (ALINE.EQ.Y1) THEN		! scan line on first point
+C
+C Check if y1 is a local minimum or maximum, or not, by finding the
+C previous point
+C
+C Check if any invisible move is involved, potentially giving 
+C spurious x3,y3
+C
+	      DO 120 J = 1,NUM_INVIS
+	        IF (INVIS(J).EQ.I-1) THEN		! found invisible move
+		  IS_INVIS  = .TRUE.
+		  IINVIS = J
+		  GOTO 122
+C
+	        ELSE
+		  GOTO 120
+	        ENDIF
+120	      CONTINUE
+C
+122	      IF (IS_INVIS) THEN
+		  X3 = XVERTS(END_INVIS(IINVIS) - 1)
+		  Y3 = YVERTS(END_INVIS(IINVIS) - 1)
+C
+	      ELSE
+		IF (I.EQ.2) THEN		   ! y3 = first point; prev =
+		  X3 = XVERTS(COUNT_VERTS-1)	   ! penultimate point
+		  Y3 = YVERTS(COUNT_VERTS-1)
+		ELSE
+		  X3 = XVERTS(I-2)		   ! previous point
+		  Y3 = YVERTS(I-2)
+		ENDIF
+	      ENDIF
+C
+C Coords order Y3,Y1,Y2
+C
+	      IF ( (Y1.LE.Y2 .AND. Y1.LE.Y3) .OR.
+     &		   (Y1.GE.Y2 .AND. Y1.GE.Y3) ) THEN
+C
+		MINMAX(NSECT) = .TRUE.
+	      ELSE
+		MINMAX(NSECT) = .FALSE.
+	      ENDIF
+C
+	    ELSEIF (ALINE.EQ.Y2) THEN		! scan line on second point
+C
+C Check if any invisible move is involved, potentially giving 
+C spurious x3,y3
+C
+	      DO 121 J = 1,NUM_INVIS
+	        IF (END_INVIS(J).EQ.I) THEN	! found invisible move
+		  IS_INVIS  = .TRUE.
+		  IINVIS = J
+		  GOTO 124
+C
+	        ELSE
+		  GOTO 121
+	        ENDIF
+121	      CONTINUE
+C
+C Check if y2 a local minimum or maximum, or not, by finding the next
+C point
+C
+124 	      IF (IS_INVIS) THEN
+		  X3 = XVERTS(INVIS(IINVIS)+1)
+		  Y3 = YVERTS(INVIS(IINVIS)+1)
+C
+	      ELSE
+		IF (I.EQ.COUNT_VERTS) THEN	! last point; next =
+		  X3 = XVERTS(2)		! first point
+		  Y3 = YVERTS(2)
+		ELSE
+		  X3 = XVERTS(I+1)		! next point
+		  Y3 = YVERTS(I+1)
+		ENDIF
+	      ENDIF
+C
+C Coords order Y1,Y2,Y3
+C
+	      IF ( (Y2.LE.Y1 .AND. Y2.LE.Y3) .OR.
+     &		   (Y2.GE.Y1 .AND. Y2.GE.Y3) ) THEN
+C
+		MINMAX(NSECT) = .TRUE.
+	      ELSE
+		MINMAX(NSECT) = .FALSE.
+	      ENDIF
+C
+	    ENDIF
+C
+150	  CONTINUE
+C
+	  IF (NSECT.LE.1) GOTO 200
+C
+C Now sort the x intersection points
+C
+	  CALL REAL_RIPPLESORT(INTERX,INDEX,NSECT,.TRUE.,MINMAX)
+C
+C Remove adjacent identical intersections that are not part of a maximum
+C or minimum
+C
+C Store NSECT
+C
+	  STR = 2
+	  N   = NSECT
+C
+155	  CONTINUE
+C
+	  DO 160 I = STR,N
+	    IF ( ABS(INTERX(I)-INTERX(I-1)) .LT. 1E-6 ) THEN
+C
+	      IF (MINMAX(I) .AND. MINMAX(I-1) ) THEN	! keep inflexions
+		GOTO 160	! get next pair
+C
+	      ELSE
+		STR = I		! store start of search
+		GOTO 165	! rearrange and compress list
+	      ENDIF
+	    ENDIF
+C
+160	  CONTINUE
+C
+	  GOTO 175		! no changes to list
+C
+C Move entries up by one
+C
+165	  CONTINUE
+C
+	  DO 170 J = STR,N-1
+	    INTERX(J) = INTERX(J+1)
+	    MINMAX(J) = MINMAX(J+1)
+170	  CONTINUE
+C
+	  N = N - 1
+C
+	  GOTO 155
+C
+C Restore NSECT
+C
+175	  NSECT = N
+C
+C Call encode to plot the interior scan lines
+C
+	  DO 180 I = 2,NSECT,2
+	    IF (INTERX(I).GT.XSIZE .AND. INTERX(I-1).GT.XSIZE) GOTO 180
+	    IF (INTERX(I).LT.1     .AND. INTERX(I-1).LT.1    ) GOTO 180
+C
+	    CALL ENCODE_IFF(
+     &		INTERX(I-1),ALINE,ZVAL,INTERX(I),ALINE,ZVAL,.FALSE.)
+180	  CONTINUE
+C
+200	CONTINUE
+C
+C Plot boundary points
+	NEXT_INVIS = 1
+C
+	DO 500 I = 2,COUNT_VERTS
+	  IF (NEXT_INVIS .LE. NUM_INVIS) THEN
+	     IF (INVIS(NEXT_INVIS).EQ.I) THEN
+C
+C ignore invisible lines
+		NEXT_INVIS = NEXT_INVIS+1
+		GOTO 500
+	     ENDIF
+	  ENDIF
+C
+	  CALL ENCODE_IFF (XVERTS(I-1),YVERTS(I-1),ZVAL,
+     &	                   XVERTS(I),YVERTS(I),ZVAL,.FALSE.)
+500	CONTINUE
+C
+900	RETURN
+	END
+C

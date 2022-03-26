@@ -1,0 +1,588 @@
+	SUBROUTINE INTERACT(CTRLZ)
+C
+***	IDENT   09MY96
+***	MODULE  INTERACT
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					CCB	 7-DEC-1984
+C
+C	LITES2 cartographic editor interactive input routine
+C
+C      ---      THIS SUBROUTINE IS INSTALLATION DEPENDENT	---
+C --- DECwindows Mouse/Screen menu/Table Monitor/Direct Table/
+C                Buttons/DSR version ---
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/CMN:DOUT/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:GLOBAL/
+***	COMMON/CMN:KERN/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:MOTIF_MOUSE/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:PROMPT/
+***	COMMON/CMN:SETUP/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:VAREFN/
+***	COMMON/CMN:WORKS/
+C
+C argument
+	LOGICAL*1	CTRLZ		! true when command from
+					! keyboard terminated with ^Z
+C
+C functions called
+	INTEGER*4	EXPAND
+	LOGICAL		HAD_ERROR,READ_ERROR
+	LOGICAL		HAD_PUCK,READ_PUCK
+	LOGICAL		HAD_STREAM,READ_STREAM
+	LOGICAL		GET_MOUSE
+	INTEGER		GET_BUTTON
+	INTEGER		GET_MENU
+	INTEGER		GET_KRSMENU
+	INTEGER		GET_FBUT
+	LOGICAL		RUBISH
+	INTEGER		CALLR
+	LOGICAL		STRDTB
+	LOGICAL		DIGTRN
+	LOGICAL		GTYPAC
+	LOGICAL		AUXACT		! are auxiliary inputs active
+	LOGICAL		SERVAUX		! service the auxiliary inputs
+	LOGICAL		AUXOFF		! has an auxiliary input gone off
+	LOGICAL		SERV_FOLLOW	! service event from following
+	EXTERNAL	DECWAST		! completion AST
+C
+C local variables
+	INTEGER*4	IERR
+	INTEGER*4	MASK
+	INTEGER		I,J
+	REAL*8		XYZ(3)
+	REAL		TABXY(3)
+	INTEGER*4	DEV,BUTTON
+	REAL		TEKXY(2)	! TEK cursor position
+	INTEGER		PTR
+	LOGICAL		RMON		! .TRUE. if using table monitor
+	BYTE		BU		! button number returned by
+					! table monitor
+	INTEGER*4	IX,IY		! coordinates returned by
+					! table monitor
+	LOGICAL		POS		! positioning command
+	LOGICAL		POSDON		! implicit POS done?
+	CHARACTER*30	STRING		! command string from TRNTIP
+	INTEGER*4	STRLEN		! length of string
+	INTEGER*4	COUNT		! number of chars in typeahead
+	BYTE		BYTE1		! first character
+	LOGICAL		WAIT_STREAM	! awaiting stream input?
+	LOGICAL		TRKING		! tracking?
+	LOGICAL		FROM_MENU
+	INTEGER		TERMLEN
+	LOGICAL		HADKB		! input from TT or AUX
+	LOGICAL		KRSUP		! KRISS cursor in use
+	INTEGER		KRSBOX		! KRISS menu box
+	LOGICAL		AST_OFF		! turned off MOTIF ASTs
+C
+C want in common...
+	REAL		POSZ		! i.e. POSXY(3) eventually
+	LOGICAL		POSZPND		! c.f. POSPND
+C
+C initialise
+C
+	AST_OFF = .FALSE.
+	RMON = TABINI.AND.MONOPT.AND..NOT.DTRON	! use table monitor?
+	TXTPTR = 0			! nothing in TXTBUF
+	KRSUP = .FALSE.
+C
+10	DEV = 0				! no input device yet
+	HADKB = .FALSE.			! no keyboard input
+	CTRLZ = .FALSE.			! assume not CTRL/Z
+	CALL PROMPT			! prompt if required
+C
+C service any inputs from auxiliary lines, that are outstanding
+C
+	IF (AUXACT()) THEN		! are any aux inputs active?
+	   IF (.NOT.AUX_READ) THEN	! no read up
+	      IF (AUXOFF(AUXIOSB)) GOTO 600
+	   ENDIF
+	ENDIF
+C
+C get reads going
+C ===============
+C
+C set ordinary terminal read going
+	IF (.NOT.TTREAD.AND..NOT.TTABORT) THEN
+	   CALL QIOUP(TTASN,'SYS$INPUT',TTICHN,TTIFLG,TTIOSB,DECWAST,
+     &	              TTBLEN,TTBUF,TTREAD,TTABORT)
+	   IF (TTABORT) GOTO 999
+	ENDIF
+C
+C put up reads for auxiliary inputs 
+C Then see if any have gone off
+	CALL STRTAUX(AUXIOSB,DECWAST,TTBLEN,AUXBUF)
+	IF (AUXOFF(AUXIOSB)) GOTO 600
+C
+C put up DSR read
+90	IF (DSRINI.AND..NOT.DSRREAD) THEN
+	   DSRREAD=CALLR(CSRFLG,DSROSB,DECWAST,DSRBUF,
+     &			%VAL(KERN_ADDRESSES(XDSR_START)))
+	ENDIF
+C
+C set up table reads (and if they fail, come back here)
+100	IF (DTRON.AND..NOT.DTBREAD) THEN
+	   IF (GTYPAC(DTBCHN,COUNT,BYTE1)) THEN	! check type ahead buff
+	      IF (COUNT.GT.MXTYPC) THEN
+	         CALL MOAN(MSG_NOMOREBUTS,COUNT/15)
+	      ENDIF
+	   ENDIF
+	   DTBREAD=STRDTB(DTBFLG,DTBCHN,DTBOSB,DECWAST,DTBLEN,DTBBUF)
+	ENDIF
+C
+C now wait for a response from somewhere
+C
+C build event flag wait mask
+	MASK = 0				! clear to start with
+	CALL EFWM(MASK,TTIFLG,CLCFLG)		! terminal and CTRL/C
+	IF (AUX_READ) CALL EFWM(MASK,AUXFLG)
+	IF (DTBREAD) CALL EFWM(MASK,DTBFLG)	! add direct table read
+	IF (RMON) THEN
+	   CALL EFWM(MASK,TABPUK,TABERR)	! monitor puck and error
+	   WAIT_STREAM = STREAM			! are we awaiting stream?
+	   IF (STREAM) THEN
+	      CALL EFWM(MASK,TABSTR)		! monitor stream
+	      STREAM = .FALSE.			! assume not stream next
+	   ENDIF
+	ENDIF
+	IF (BALINI) CALL EFWM(MASK,FBFLG,TBFLG)	! mouse buttons, motion
+	IF (SCRINI) CALL EFWM(MASK,TABFLG)	! screen menu
+	IF (BUTINI) CALL EFWM(MASK,BUTFLG)	! function buttons
+	IF (DSRINI) CALL EFWM(MASK,CSRFLG)	! KERN DSR
+C
+C stream digitising?
+	IF (FOLLOWING) CALL EFWM(MASK,FOLFLG)
+	IF (FOLLOWING.AND..NOT.FOLLOW_TIMING) THEN
+	   CALL FOLTMR(DECWAST)
+	   FOLLOW_TIMING = .TRUE.
+	ENDIF
+C
+C and wait for it
+C If DECwindows workstation is open, then first go and check if an
+C event has already happened - if not then come back to wait
+	IF (CTRLC.NE.CTRLC_OFF) THEN
+	   CALL SYS$CLREF(%VAL(CLCFLG))
+	   GOTO 990
+	ENDIF
+	IF (WKOP(1).OR.WKOP(2)) THEN
+	   IF (.NOT.AST_OFF) THEN
+	     CALL GUIS_SETAST(.FALSE.)
+	     AST_OFF = .TRUE.
+	   ENDIF
+	   GOTO 165
+	ENDIF
+C
+C start KRISS menu
+160	IF (USE_KRSMENU) THEN		! want KRISS menu
+	   IF (KRSINI) THEN		! KRISS still enabled
+C
+C display KRISS cursor and track motion of DSR
+	      CALL CALLR(%VAL(KERN_ADDRESSES(XKRISS_TRACK)))
+	      KRSUP = .TRUE.
+	   ELSE
+	      USE_KRSMENU = .FALSE.
+	   ENDIF
+	ENDIF
+	IF (WKOP(1).OR.WKOP(2)) THEN
+	   CALL GUIS_MAIN_LOOP(.TRUE.)
+	ELSE
+	   CALL SYS$WFLOR( %VAL(TTIFLG), %VAL(MASK) )
+	ENDIF
+C
+C stop KRISS menu tracking
+165	IF (KRSUP) THEN
+	   KRSBOX = -1	! flag, so can see if KRISS_STOP alters it
+	   CALL CALLR(IX,IY,KRSBOX,%VAL(KERN_ADDRESSES(XKRISS_STOP)))
+	ENDIF
+C
+C test bitpad/mouse (BALINI for both)
+170	IF (BALINI) THEN
+C
+C check the mouse...
+C tracking button pressed?
+	   IF (GET_MOUSE(POSXY(1),POSXY(2),TEKXY(1),TEKXY(2))) THEN
+C
+C transform position if required
+	      IF (SETUP .AND. WARP_TO_IMAGE)
+     &		CALL WARP_BACK(POSXY(1),POSXY(2))
+	      IF (.NOT.RUBISH(POSXY)) THEN	! in range
+	         POSPND = .TRUE.		! POS command pending
+	         POSZPND = .FALSE.		! with no Z
+	         POSDON = .FALSE.		! POS not done yet
+	      ENDIF
+	      GOTO 990				! perform immediately
+	   ENDIF
+C
+C other mouse button pressed?
+	   BUTTON = GET_BUTTON(TABXY(1),TABXY(2),TEKXY(1),TEKXY(2))
+	   IF (BUTTON.NE.0) THEN
+C
+C if bitpad, use root window coordinates
+	      IF (BITINI) THEN
+	         TABXY(1) = TEKXY(1)
+	         TABXY(2) = TEKXY(2)
+	         DEV = 2			! on bitpad device
+	      ELSE
+C
+C transform position if required
+	         IF (SETUP .AND. WARP_TO_IMAGE)
+     &		         CALL WARP_BACK(TABXY(1),TABXY(2))
+C
+	         DEV = 4			! on ball device
+	      ENDIF
+	      GOTO 900
+	   ENDIF
+	ENDIF
+C
+	IF (SCRINI) THEN
+C
+C check the screen menu...
+	   BUTTON = GET_MENU()			! menu box
+	   IF (BUTTON.NE.0) THEN		! was probed
+	      BUTTON = BUTTON-1			! start at 0
+	      DEV = 1				! on device 1
+	      GOTO 900
+	   ENDIF
+	ENDIF
+C
+	IF (BUTINI) THEN
+C
+C check the function buttons...
+	   BUTTON = GET_FBUT()			! function buttons
+	   IF (BUTTON.NE.0) THEN		! was pressed
+	      BUTTON = BUTTON-1
+	      DEV = 5				! on device 5
+	      GOTO 900
+	   ENDIF
+	ENDIF
+C
+C now look for what we have got
+	IF (TTIOSB(1).NE.0) GOTO 200	! terminal input
+	IF (DSRREAD.AND.DSROSB(1).NE.0) GOTO 300! KERN DSR
+	IF (DTBREAD.AND.DTBOSB(1).NE.0) GOTO 400! direct table
+	IF (RMON) THEN
+	   IF (HAD_ERROR(IERR)) THEN
+	      IF (.NOT.READ_ERROR(TXTBUF,TXTPTR,I,IERR)) THEN
+	         CALL INFORM(MSG_TABMONERR,I)
+	         CALL INFORM(MSG_STRING,TXTDSC)
+	         TXTPTR = 0		! buffer empty again
+	      ENDIF
+	      GOTO 160
+	   ELSEIF (HAD_PUCK(IERR)) THEN		! tab_mon puck
+	      IF (.NOT.READ_PUCK(BU,IX,IY,IERR)) GOTO 500
+	   ELSEIF (HAD_STREAM(IERR)) THEN	! tab_mon stream
+C
+C need to perform READ_STREAM to re-prime the blocking AST, even if
+C we are not interested in stream, hence the difference here from the
+C other INTERACTs
+	      IF (.NOT.READ_STREAM(IX,IY,IERR)) THEN
+	         IF (WAIT_STREAM) THEN		! waiting for stream
+	            BU = -1			! mark as stream
+	            GOTO 500
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C check for auxiliary input
+	IF (AUX_READ) THEN
+	   IF (AUXOFF(AUXIOSB)) GOTO 600
+	ENDIF	      
+C
+C check for stream digitising timer
+	IF (FOLLOWING.AND.FOLLOWED) THEN
+	   CALL FOLTMR(DECWAST)		! start timer again
+	   IF (SERV_FOLLOW()) GOTO 990	! got valid coordinate
+	   GOTO 10			! round again
+	ENDIF
+C
+C check for CTRL/C
+	IF (CTRLC.NE.CTRLC_OFF) THEN
+	   CALL SYS$CLREF(%VAL(CLCFLG))
+	   GOTO 990
+	ENDIF
+C
+C nothing happening?
+C OK if on DECwindows workstation - go back to wait
+	IF (WKOP(1).OR.WKOP(2)) GOTO 160
+	CALL INFORM(MSG_NOINPUT)
+	GOTO 10
+C
+C got terminal input
+200	TTREAD = .FALSE.	! no terminal read outstanding
+	TTIDON = .TRUE.		! terminal input done (want prompt)
+	IF (.NOT.TTIOSB(1)) THEN
+	   CALL MOAN(MSG_ERRINTERRD)
+	   CALL LITES2_SIGNAL(TTIOSB(1))
+	   GOTO 10
+	ENDIF
+	HADKB = .TRUE.
+C
+C put string from terminal into TXTBUF
+	CTRLZ = TTIOSB(4).EQ.1.AND.TTIOSB(3).EQ.26
+	J = TTIOSB(2)		! number of chars input
+	TERMLEN = TTIOSB(4)	! terminator length
+	IF (J.EQ.0.AND.TERMLEN.LE.1) GOTO 990	! empty line
+C
+C Check for a valid keyboard escape sequence
+	STRLEN = 0
+	IF (TERMLEN.GT.1) CALL INTTERM(TTBUF(J+1),TERMLEN,STRING,STRLEN)
+C
+C Set appropriate carriage controls for next line -
+C If the line was not terminated by c/r, then pretend not had terminal
+C input, so next output will be preceded by newline, but force a prompt
+C if some chars were typed (since TTIDON false would not prompt)
+	IF (TTIOSB(3).NE.13) THEN
+	   TTIDON = .FALSE.	! want newline before output
+	   IF (J.NE.0) TTPROM = .TRUE.
+	ENDIF
+C
+	PTR = 0
+C
+C add a POS command if required
+	IF (POSPND.AND..NOT.PROINQ) THEN
+	   IF (POSZPND) THEN
+	      PTR = EXPAND('%W%%POS %G0.8 %G0.8 %G0.8#',TXTBUF,
+     &					POSXY(1),POSXY(2),POSZ)
+	   ELSE
+	      PTR = EXPAND('%W%%POS %G0.8 %G0.8#',TXTBUF,
+     &					POSXY(1),POSXY(2))
+	   ENDIF
+	   POSPND = .FALSE.
+	ENDIF
+C
+C now the ordinary characters
+	DO 250 I=1,J
+	   TXTBUF(I+PTR) = TTBUF(I)
+250	CONTINUE
+	PTR = PTR+J
+C
+C and now the command resulting from an escape sequence
+C Ignore escape command in an inquire if any ordinary chars
+	IF (STRLEN.GT.0.AND.(J.EQ.0.OR..NOT.PROINQ)) THEN
+	   IF (J.NE.0) THEN
+	      PTR = PTR + 1
+	      TXTBUF(PTR) = '#'
+	   ENDIF
+	   PTR = PTR + EXPAND('%W%S',TXTBUF(PTR+1),STRING(1:STRLEN))
+	ENDIF
+	TXTPTR = PTR
+	GOTO 990		! return with TXTBUF filled
+				! ready for decoder
+C
+C got KERN DSR input
+300	DSRREAD=.FALSE.
+C
+	IF (.NOT.DSROSB(1)) THEN
+	   CALL MOAN(MSG_ERRINTABRD)
+	   CALL LITES2_SIGNAL(DSROSB(1))
+	   GOTO 90
+	ENDIF
+C
+C if using KRISS menu, then any DSR button triggers it
+C we may already have a button from KRISS_STOP above
+	IF (KRSUP) THEN
+	   USE_KRSMENU = .FALSE.
+	   KRSUP = .FALSE.
+	   BUTTON = KRSBOX			! KRISS menu box number
+	   IF (BUTTON.LT.0) BUTTON = GET_KRSMENU(IX,IY)	! menu box
+	   IF (BUTTON.NE.0) THEN		! was probed
+	      BUTTON = BUTTON-1			! start at 0
+	      DEV = 1				! on device 1
+	      GOTO 900
+	   ENDIF
+	   GOTO 90				! try again
+	ENDIF
+C
+C translate character from DSR into a button number
+	BUTTON = CALLR(DSRBUF,%VAL(KERN_ADDRESSES(XDSR_TRN)))
+	IF (BUTTON.LT.0) GOTO 90	! ignored character
+C
+C read DSR position (.TRUE. means the coord stored when the button
+C was pressed will do)
+	CALL CALLR(XYZ(1),XYZ(2),XYZ(3),.TRUE.,
+     &			%VAL(KERN_ADDRESSES(XDSR_READ)))
+	DEV=6
+	TABXY(1)=XYZ(1) - LITES2ORG(1)	! go from world coords to LITES2
+	TABXY(2)=XYZ(2) - LITES2ORG(2)
+	TABXY(3)=XYZ(3)
+	GOTO 900
+C
+C got direct table input
+400	DTBREAD=.FALSE.
+C
+	IF (.NOT.DTBOSB(1)) THEN
+	   CALL MOAN(MSG_ERRINTABRD)
+	   CALL LITES2_SIGNAL(DTBOSB(1))
+	   GOTO 100
+	ENDIF
+C
+C translate string
+	J=DTBOSB(2)				! I*2 -> I*4
+	IF (J.EQ.0) GOTO 100
+	IF (DIGTRN(DTBBUF,J,BUTTON,IX,IY,USEFUN,%VAL(FUNADR))) THEN
+	   CALL INFORM(MSG_TABERRREAD,DTBBUF)   ! error in string
+	   GOTO 100
+	ELSE
+	   DEV=DIGLIN
+	   TABXY(1)=IX
+	   TABXY(2)=IY
+	ENDIF
+	GOTO 900
+C
+C got table monitor input
+C
+500	DEV=DIGLIN		! only from table, never from bitpad
+	BUTTON=BU		! byte to long conversion
+	TABXY(1)=IX		! long to real conversion
+	TABXY(2)=IY		!  "	   "       "
+C
+	IF (BUTTON.EQ.0) THEN		! stream button
+	   STREAM = .TRUE.		! want stream next time
+	   CALL READ_STREAM(IX,IY,IERR)	! clear event flag
+	ELSEIF (BUTTON.LT.0) THEN	! was streamed
+	   STREAM = .TRUE.		! want stream next time
+	   BUTTON = 0			! stream button
+	ENDIF
+	GOTO 900
+C
+C got input from auxiliary line
+C
+600	IF (SERVAUX(AUXIOSB,TTBLEN,AUXBUF)) THEN
+	   HADKB = .TRUE.
+	   GOTO 990
+	ELSE
+	   GOTO 10
+	ENDIF
+C
+C interpret input from table/bitpad
+C
+900	CALL TRNTIP(DEV,BUTTON,TABXY,POS,STRING,STRLEN,FROM_MENU)
+C
+C TRNTIP sets POS correctly for table and tracking area, taking account
+C of any PRIORITY POSITION command. It also converts TABXY to IFF units
+C for these devices.
+C It sets up POS .FALSE. for all other devices and does not alter TABXY.
+C
+C if coordinate from BITPAD, and not in menu or defining a position,
+C then get TABXY into IFF units
+	IF (DEV.EQ.BITLIN.AND..NOT.(FROM_MENU.OR.POS)) THEN
+	   TABXY(1) = TEKXY(1)
+	   TABXY(2) = TEKXY(2)
+	   IF (SETUP .AND. WARP_TO_IMAGE)
+     &		CALL WARP_BACK(TABXY(1),TABXY(2))
+	ENDIF
+C	   
+C For other coordinate producing devices dealt with in INTERACT
+C POS is set by CHKPRIPOS
+	IF (.NOT.FROM_MENU) CALL CHKPRIPOS(DEV,BUTTON,POS)
+C
+C is there a POS command to set pending
+	IF (POS) THEN			! this probe defined a position
+	   IF ((BUTTON.EQ.0).OR..NOT.POSCMD) THEN	! so use it
+	      POSXY(1) = TABXY(1)
+	      POSXY(2) = TABXY(2)
+	      POSZ = TABXY(3)
+	      POSZPND = (DEV.EQ.6)		! Z from DSR only
+	      IF (.NOT.RUBISH(POSXY)) THEN
+	         POSPND = .TRUE.
+	         POSDON = .FALSE.		! POS not done yet
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C Button 0 is for tracking, except on device 1 (screen menu),
+C device 5 (function buttons), and device 6 (DSR)
+	TRKING = DEV.NE.1.AND.DEV.NE.5.AND.DEV.NE.6
+	IF ((BUTTON.EQ.0.AND.TRKING).OR.STRLEN.EQ.0) GOTO 990
+C
+	IF (.NOT.QUIOPT) CALL PING		! acknowledge button
+	PTR = 0
+	IF (POSPND.AND..NOT.PROINQ) THEN
+	   IF (POSZPND) THEN
+	      PTR = EXPAND('%W%%POS %G0.8 %G0.8 %G0.8#',TXTBUF,
+     &					POSXY(1),POSXY(2),POSZ)
+	   ELSE
+	      PTR = EXPAND('%W%%POS %G0.8 %G0.8#',TXTBUF,
+     &					POSXY(1),POSXY(2))
+	   ENDIF
+	   POSPND = .FALSE.
+	ENDIF
+	TXTPTR = PTR + EXPAND('%W%S',TXTBUF(PTR+1),STRING(1:STRLEN))
+C
+C have we got anything?
+990	USE_KRSMENU = .FALSE.		! don't want KRISS menu again
+	KRSUP = .FALSE.
+	IF (TXTPTR.EQ.0.OR.PROINQ) THEN		! no
+	   IF (POSPND.AND..NOT.POSDON) THEN	! perform implicit POS
+C
+C If there is a cursor constraint, then we have to journal explicit
+C POS command, otherwise journal may not reproduce correct results
+	      IF (ROLING.AND..NOT.PROINQ) THEN
+	         IF (POSZPND) THEN
+	            TXTPTR = EXPAND('%W%%POS %G0.8 %G0.8 %G0.8',TXTBUF,
+     &					POSXY(1),POSXY(2),POSZ)
+	         ELSE
+	            TXTPTR = EXPAND('%W%%POS %G0.8 %G0.8',TXTBUF,
+     &					POSXY(1),POSXY(2))
+	         ENDIF
+	         POSPND = .FALSE.
+	         GOTO 999
+	      ENDIF
+	      DREALS(1) = POSXY(1)		! load arguments
+	      DREALS(2) = POSXY(2)
+	      DNREA = 2
+	      IF (POSZPND) THEN
+	         DREALS(3) = POSZ
+	         DNREA = 3
+	      ENDIF
+	      CALL DOPOSI			! execute POS
+	      CALL UPDATE			! update picture etc.
+	      POSDON = .TRUE.			! done POS
+	   ENDIF
+C
+C If CTRL/C not pressed, then try again, else return blank line and
+C let command decoder deal with it.
+C NB we should return to INTERACT before any more commands are obeyed
+C Return blank line if INQUIRE, and input came from KB
+	   IF (TXTPTR.EQ.0.AND.(.NOT.PROINQ.OR..NOT.HADKB)) THEN
+	      IF (CTRLC.EQ.CTRLC_OFF) GOTO 10
+	      IF (FOLLOWING) CALL ENDFOLL	! stop following on CTRLc
+	   ENDIF
+	ENDIF
+C
+999	IF (AST_OFF) CALL GUIS_SETAST(.TRUE.)
+	MOANED = .FALSE.	! don't let command decoder ignore line
+	RETURN
+	END
+C
+	SUBROUTINE DECWAST
+C
+***	IDENT   09NO89
+***	MODULE  DECWAST
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written					CCB	 9-NOV-1989
+C
+C	Completion AST routine to send XWindow event
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:WORKS/
+C
+	IF (WKOP(1).OR.WKOP(2)) CALL GUIS_SEND_EVENT
+C
+	RETURN
+	END

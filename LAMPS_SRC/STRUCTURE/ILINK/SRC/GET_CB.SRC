@@ -1,19 +1,28 @@
 	LOGICAL*4 FUNCTION GET_CB (CBH_OUT, CBD_OUT)
 
-***	IDENT	16AU89
+***	IDENT	10DE93
 ***	MODULE	GET_CB
 
-C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
-C	Created   : 				ACM	Apr 1988
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+C	Created   : 					ACM	   Apr 1988
 
 CMOD794 Make ILINK.CMN and ILINK.STR consistent, and increase max no. 
 C	of points per feature to 15000
 C	To stop CB processing with a sensible message when maximum no. 
-C	of points has been reached		JB	14-Aug-1989
+C	of points has been reached			 JB	14-Aug-1989
+CMOD	Ensure that sequences of different width CB's 
+C	are handled properly.				WJJ	31-Jan-1990
+CMOD	Ignore JP entries between CB's			WJJ	07-Feb-1990
+CMOD	Process CB fixed attributes properly (SPR 881)	WJJ	30-Aug-1990
+C
+CMOD1127 Skip invisible moves to single points		 JB	20-Jul-1992
+CMOD1319 Increase no of points per feature from
+C	 15000 to 60000					 JB	10-Dec-1993
 
 	IMPLICIT NONE
 
 	INCLUDE	'LSL$CMNILINK:ILINKMSG.PAR'
+	INCLUDE	'LSL$CMNIFF:IFFHAN.CMN'		! define structures
 	INCLUDE	'LSL$CMNIFF:CB.STR'		! define structures
 	INCLUDE	'LSL$CMNILINK:ILINK.STR'
 
@@ -25,10 +34,21 @@ C Workspace
 	RECORD/	IFF_CBH/	CBH	! CB header
 	RECORD/	IFF_CBD/	CBD	! CB data
 
-	INTEGER*4	NPTS,ICOL	! num of pts in CB read in
+	INTEGER*4	NPTS		! num of pts in CB read in
 	INTEGER*4	NCOLS		! num of columns in CB
+	INTEGER*4	ICOL,JCOL	! column counters
 	INTEGER*4	CB_LEN		! point count
+	INTEGER*4	FIRST_CB	! IFF address of first CB
+	INTEGER*4	SCAN_STATUS	! status from IFS_SCAN_CB
+
 	INTEGER*2	IECODE,IELEN	! for IFFNXT
+
+	LOGICAL*4	SCAN_CB		! whether to scan for CB's
+	LOGICAL*4	SIMPLE		! returned from IFS_SCAN_CB
+	LOGICAL*4	OVERFLOW	! set when feature overflows
+
+C Function
+	INTEGER*4	IFS_CB_SCAN	! scans feature for CB columns
 
 C **********************************************************************
 
@@ -38,57 +58,135 @@ C	CBH_OUT/CBD_OUT.
 C	Returns .TRUE. when there are no further CBs in feature.
 
 C **********************************************************************
-
-	GET_CB = .FALSE.
-	CB_LEN = 0
-
-10	CALL EIHRCB_HEAD(CBH)
 C
-	IF (CB_LEN.EQ.0) THEN			! set CB header
+C	To cater for sequences of CB's of different widths (no. of cols
+C	plus no. of fixed attributes), the output data block must have
+C	the maximal columns set up. Hence to start with, the first CB is
+C	assumed to be the model, but if subsequent ones are wider, then 
+C	IFS_CB_SCAN is used to scan the whole feature. Note that all fixed
+C	attributes are expanded into the output CB.
+
+	GET_CB   = .FALSE.
+	SCAN_CB  = .FALSE.	! read straight through by default	
+	OVERFLOW = .FALSE.	! not yet
+	FIRST_CB = LPOSH	! record IFF address of first CB
+
+5	CB_LEN = 0		! start or restart output CB
+
+10	IF (CB_LEN.EQ.0) THEN			! set CB header initially
+	  IF (SCAN_CB) THEN
+
+C set column headers by scanning feature
+	    SCAN_STATUS = IFS_CB_SCAN(CBH_OUT.NCOL, CBH_OUT.COLH,
+     &					NCOLS, NPTS, SIMPLE)
+	    IF (.NOT.SCAN_STATUS) THEN
+	      CALL LSL_PUTMSG(ILINK__ERRSCANCB, SCAN_STATUS)
+	      GOTO 40
+	      ENDIF
+	    CALL EIHRCB_HEAD(CBH)
+	  ELSE
+
+C set column headers from first CB
+	    CALL EIHRCB_HEAD(CBH)
+
+C total output columns = input columns + input fixed attributes
+C (Should check total width!!!)
+	    CBH_OUT.NCOL = CBH.NCOL + CBH.NATT
+
+C copy input column headers
+	    DO 20 ICOL = 1,CBH.NCOL
+	      CBH_OUT.COLH(ICOL) = CBH.COLH(ICOL)
+20	    CONTINUE
+
+C copy fixed attribute names into column headers
+	    DO 22 ICOL = 1,CBH.NATT
+	      CBH_OUT.COLH(CBH.NCOL+ICOL) = CBH.ATT(ICOL).ATTC
+22	    CONTINUE
+	  ENDIF
+C
+C set other things from first CB
 	  CBH_OUT.FLAGS = 0
 	  CBH_OUT.GTYPE = CBH.GTYPE
 	  CBH_OUT.NROW = 0
-	  CBH_OUT.NCOL = CBH.NCOL
 C
-	  DO 20 ICOL = 1,CBH_OUT.NCOL
-	    CBH_OUT.COLH(ICOL) = CBH.COLH(ICOL)
-20	  CONTINUE
+C no fixed attributes now
+	  CBH_OUT.NATT = 0
 C
-	  CBH_OUT.NATT = CBH.NATT
-C
-	  DO 30 ICOL = 1,CBH_OUT.NATT
-	    CBH_OUT.ATT(ICOL).ATTC = CBH.ATT(ICOL).ATTC
-	    CBH_OUT.ATT(ICOL).IATTV = CBH.ATT(ICOL).IATTV
-30	  CONTINUE
-C
-	END IF
-C
+	ELSE
+
+C subsequent CB's read here
+	  CALL EIHRCB_HEAD(CBH)
+
+C return if pen-up break, signalling a new potential ftr, and process
+C the existing CB_LEN pts -
+C (but skip if an invisible move to a single point)
+	  IF (CB_LEN.GT.0 .AND. CBH.FLAGS.EQ.0) THEN
+	     IF (CBH.NROW.GT.1) THEN
+		GOTO 40			 ! leave this CB as new ftr for 
+	     ELSEIF (CBH.NROW.EQ.1) THEN ! processing
+		GOTO 35			 ! get next non-single point CB
+	     ENDIF
+	  ENDIF
+
+C skip pen-down CB's if overflowed
+	  IF (OVERFLOW) GOTO 35
+
+C if we haven't scanned, check that columns and attributes are 
+C present in the output CB
+	  IF (.NOT.SCAN_CB) THEN
+
+C check column headers first
+	    DO 30 ICOL = 1,CBH.NCOL
+	      DO 25 JCOL = 1,CBH_OUT.NCOL
+	        IF (CBH_OUT.COLH(JCOL) .EQ. CBH.COLH(ICOL)) GOTO 30
+25	      CONTINUE
+
+C here if column not in output CB, so restart with scanning on
+	      SCAN_CB = .TRUE.
+	      CALL IFFPKE(IECODE, IELEN, FIRST_CB)
+	      GOTO 5
+30	    CONTINUE
+
+C check fixed attributes
+	    DO 33 ICOL = 1,CBH.NATT
+	      DO 32 JCOL = 1,CBH_OUT.NCOL
+	        IF (CBH_OUT.COLH(JCOL) .EQ. CBH.ATT(ICOL).ATTC) GOTO 33
+32	      CONTINUE
+
+C here if attribute not in output CB, so restart with scanning on
+	      SCAN_CB = .TRUE.
+	      CALL IFFPKE(IECODE, IELEN, FIRST_CB)
+	      GOTO 5
+33	    CONTINUE
+	  ENDIF
+	ENDIF
+
+C get the data block
 	CALL EIHRCB_DATA(CBD)
 C
 	NPTS  = CBH.NROW
 	NCOLS = CBH.NCOL
 
-C Return if pen-up break
-	IF (CB_LEN.GT.0.AND.CBH.FLAGS.EQ.0) GOTO 40
-
 	IF (CB_LEN+NPTS.GT.ILINK_MAX_CB_ROW) THEN  ! warn if too many pnts 
-	  NPTS = ILINK_MAX_CB_ROW - CB_LEN
-	  IF (NPTS.LE.0) GOTO 40		   ! no room for more data
 	  CALL LSL_PUTMSG(ILINK__TOOMNYPPF,ILINK_MAX_CB_ROW)
+	  OVERFLOW = .TRUE.
+	  NPTS = ILINK_MAX_CB_ROW - CB_LEN	! Try for max points
+	  IF (NPTS.LE.0) GOTO 35		! no room for more data
 	END IF
 
 C Accumulate points in CBD_OUT
-
-	CALL IFS_CB_WRITE (CBH_OUT, CBD_OUT, CBD.I, CBH.NCOL, CBH.COLH,
-     &			   CB_LEN+1, CB_LEN+NPTS)
+	CALL IFS_CB_READ (CBH, CBD, CBD_OUT.I(1 + CBH_OUT.NCOL*CB_LEN),
+     &			CBH_OUT.NCOL, CBH_OUT.COLH, 1, NPTS)
 
 	CB_LEN = CB_LEN + NPTS		! sum total no. of pts in CB
 	CBH_OUT.NROW = CB_LEN
 
 C See if any more CBs follow
-
-	CALL IFFNXT(IECODE,IELEN)
+35	CALL IFFNXT(IECODE,IELEN)
 	IF (IECODE.EQ.'CB') GOTO 10
+
+C Ignore JP entries
+	IF (IECODE.EQ.'JP') GOTO 35
 
 	GET_CB = .TRUE.
 

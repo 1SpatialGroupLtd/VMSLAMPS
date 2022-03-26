@@ -1,11 +1,12 @@
 	SUBROUTINE 	IFF_START
-CDEC$	IDENT	'25SE94'
+CDEC$	IDENT	'31OC94'
 C
 C	Copyright (C)			Laser-Scan Ltd., Cambridge
 C
 C	Created					12-Jun-1990	John Cadogan
 C	Mod					11-Apr-1991	Jon Barber
 C	Mod 1400. Now part of MAPDATA2I		01-Sep-1994	Steve Townrow
+C       Mod 1415. Saves address of CPs		31-Oct-1994	Steve Townrow
 C
 C Description:
 C
@@ -86,6 +87,7 @@ C
 	CALL IFFMD( MD2ARR,MD2LEN )	! type 2 MD
 	CALL IFFNS( NEW_SECTION, 42 )	! new section
 	CALL IFFCC( CC )		! unit matrix cubic coefficients
+	LPOSCP = LPOSE			! remember where the CP is
 	CALL IFFCP( CPS )		! sheet corners as corner pts
 	LPOSNO = LPOSE			! remember where our NO is going
 C

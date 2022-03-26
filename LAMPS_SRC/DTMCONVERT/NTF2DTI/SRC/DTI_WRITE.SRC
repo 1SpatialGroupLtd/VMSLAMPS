@@ -1,0 +1,234 @@
+	LOGICAL FUNCTION DTI_WRITE
+C
+***     MODULE DTI_WRITE
+***     IDENT  06JL93
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author	IM	07-Apr-1988
+C
+C Opens and writes to the DTI file
+C
+CMOD	added messages to errors			SG	19-Aug-1991
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'HERE:NTF2DTIMSG.PAR'
+	INCLUDE 'LSL$CMNDTI:DTILIBMSG.PAR'
+C
+C Commons:
+	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE	'HERE:FILENAME.CMN'
+C
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNDTI:DTIPROJ.CMN'
+C
+	INCLUDE 'HERE:COMMANDS.CMN'
+	INCLUDE	'HERE:RECORD.CMN'
+	INCLUDE	'HERE:NTFDATA.CMN'
+	INCLUDE	'HERE:LUNS.PAR'
+C
+C Functions:
+	INTEGER*4	DTI_CREATE		! create a DTI file
+	INTEGER*4	DTI_COPY_DATA		! copy data to DTI file
+	INTEGER*4	DTI_CLOSE		! close DTI file
+	LOGICAL		DTI_PRINT_HEADER
+	LOGICAL		DTI_PRINT_PROJECTION
+	LOGICAL		DTI_MINMAX_DATA
+	LOGICAL		DTI_WRITE_PROJ_REC
+	LOGICAL		READ_GRIDREC		! read the grid data
+	LOGICAL		READ_NTF_RECORD		! read the next record
+C
+C Workspace:
+	INTEGER		OK			! Success flag
+	INTEGER		I			! DO loop counter
+	INTEGER*4	IERR,RETVAL		! Error return
+	INTEGER*4	BYTE_OFFSET		! offset of proj rec
+	INTEGER		HEADER_SIZE		! Size of this header
+	INTEGER		HEAD_SIZE(5)		! Sizes of the different headers
+	INTEGER*4	COLUMN(32767)		! Current column to fill
+	CHARACTER*80	MSG_STR
+	CHARACTER	ESC
+	PARAMETER	(ESC = CHAR(27))
+C
+	DATA HEAD_SIZE /256,256,3584,32,32/
+C
+C ..................................................................
+	DTIOPEN = .FALSE.
+C
+C Calculate the header size
+C
+	IF (PROJECT) THEN
+	   HEADER_SIZE=HEAD_SIZE(5)+DTIPROJ_RECORD_LENGTH
+	ENDIF
+C
+C ..................................................................
+C
+	DATA_TYPE(1)=3				! longword word
+	X_OFFSET(DTILUN) = X_ORIG
+	Y_OFFSET(DTILUN) = Y_ORIG
+	X_GRID(1) 	 = X_SAMP
+	Y_GRID(1) 	 = Y_SAMP
+	X_EXTENT(1) 	 = N_COLUMNS
+	Y_EXTENT(1) 	 = N_ROWS
+C
+	RETVAL = DTI_CREATE(DTILUN,DTIFILE(1:DTILEN),DTILEN,
+     &			HEADER_TYPE(1),		! LSLA,Uhl1,Ted4
+     &			HEADER_SIZE,		! + 1600 if proj. rec.
+     &			DATA_TYPE(1),		! word data
+     &			N_COLUMNS,N_ROWS,	! From GRIDHREC
+     &			IERR)			! Error return
+C
+	OK = RETVAL		!.ne.lsl__normal
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__DTICREATE,DTIFILE(1:DTILEN))
+	   CALL LSL_ADDMSG(RETVAL)
+	   IF (RETVAL.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+	   GOTO 9999
+	ENDIF
+C
+	DTIOPEN = .TRUE.
+	IF (LOG) CALL LSL_PUTMSG(NTF2DTI__DTIOPEN,DTIFILE(1:DTILEN))
+C
+C ..................................................................
+C Now add the projection record (if required)
+C
+	IF (PROJECT.AND.HEADER_TYPE(1).EQ.5) THEN
+C
+C Set up the variables needed for a projection record
+C
+	   DTIPROJ_RECORD_OFFSET(1) = 32	! start of proj rec
+	   DTIPROJ_ORIGIN(1,1) = X_ORIG		! origin
+	   DTIPROJ_ORIGIN(2,1) = Y_ORIG
+	   DTIPROJ_SAMPLE(1,1) = X_SAMP 		! grid interval
+	   DTIPROJ_SAMPLE(2,1) = Y_SAMP
+C
+	   IF (IS_OS) THEN	! we haven't read these values from the files
+	      DTIPROJ_UNITS(1) 	    = 2		! metres
+	      DTIPROJ_SPHEROID(1)   = 9		! Airy
+	      DTIPROJ_PROJECTION(1) = 101	! UK national
+	   ENDIF
+C
+	   BYTE_OFFSET=32
+C
+	   OK=DTI_WRITE_PROJ_REC(DTILUN,BYTE_OFFSET,IERR)	
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(NTF2DTI__PROJREC)
+	      CALL LSL_ADDMSG(OK)
+	      IF (OK.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+	      GOTO 9999
+	   ENDIF
+	ENDIF
+C
+C......................................................................
+C CLEAR the bottom bit of the screen for messages
+C
+	IF (LOG.AND.IS_TERM) THEN
+	  CALL LIB$PUT_OUTPUT(ESC//'[23H')
+	  CALL WRITEF()
+	  CALL WRITEF()
+	  CALL WRITEF()
+	ENDIF	
+C
+C ..................................................................
+C Now read through the grid records and output the data
+C
+	DO 10 I=1,N_COLUMNS
+C	..............................................................
+C	   read the data
+C
+	   OK=READ_GRIDREC(COLUMN)		!automatically sets next COLUMN
+	   IF (.NOT.OK) THEN
+	     CALL LSL_PUTMSG(NTF2DTI__GRIDREC, 'GRIDREC')
+	     GOTO 9999
+	   ENDIF
+C
+C	   ..............................................................
+C	   write the data
+C
+	   RETVAL=DTI_COPY_DATA(DTILUN,COLUMN,.TRUE., I, 1, 1,N_ROWS,IERR)
+C
+	   OK = RETVAL.EQ.DTI__NORMAL
+	   IF (OK) THEN
+	     IF (LOG.AND.IS_TERM) THEN
+	       CALL EXPAND('%WS %F6.2%% complete',
+     &				MSG_STR,  100.0*REAL(I)/REAL(N_COLUMNS) )
+	       CALL LIB$PUT_OUTPUT(ESC//'[21H'//ESC//'[1m'//MSG_STR(1:17)//
+     &				ESC//'[0m')	
+	     ENDIF
+	   ELSE
+	      CALL LSL_PUTMSG(NTF2DTI__DTICOPYDATA)
+	      CALL LSL_ADDMSG(RETVAL)
+	      IF (RETVAL.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+	      GOTO 9999
+	   ENDIF
+C
+	   IF (I.NE.N_COLUMNS) THEN
+21	      OK=READ_NTF_RECORD()
+	      IF (.NOT.OK) THEN
+		CALL WRITEF('%%NTF2DTI-E-MISC, not enough GRID_DATA records')
+		GOTO 9999
+	      ENDIF
+C
+	      IF (STRING(1:2).NE.'51') THEN
+		CALL WRITEF('%%NTF2DTI-W-MISC, GRID_DATA record not found')
+		CALL LSL_ADDMSG(NTF2DTI__UNEXPREC, STRING(1:2), RECNUM)
+		GOTO 21
+	      ENDIF
+	   ENDIF
+10	CONTINUE	
+C
+C ..................................................................
+C Update the Max and Min values
+C
+	OK = DTI_MINMAX_DATA(DTILUN,.FALSE.,IERR)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__MINMAX,DTIFILE(1:DTILEN))
+	   CALL LSL_ADDMSG(OK)
+	   IF (OK.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+	   GOTO 9999
+	ENDIF
+C
+C ..................................................................
+C And print out the header we have built
+C
+	IF (LOG) THEN
+	   OK=DTI_PRINT_HEADER(DTILUN,2)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(NTF2DTI__HEADER,DTIFILE(1:DTILEN))
+	      GOTO 9999
+	   ENDIF
+	ENDIF
+C
+	IF (PROJECT) CALL DTI_PRINT_PROJECTION (DTILUN)
+C
+C ..................................................................
+C Close the DTI file
+C
+	IF (LOG) THEN
+	   CALL WRITEF
+	   CALL WRITEF('%%NTF2DTI-I-MISC, closing DTI file')
+	ENDIF
+C
+	RETVAL = DTI_CLOSE(DTILUN,.TRUE.,.FALSE.,IERR)
+	IF (OK) OK = RETVAL
+C
+	IF (.NOT.RETVAL) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__DTICLOSERR,DTIFILE(1:DTILEN))
+	   CALL LSL_ADDMSG(RETVAL)
+	   IF (RETVAL.EQ.DTI__SYSERR) CALL LSL_ADDMSG(IERR)
+	ELSE
+	   DTIOPEN = .FALSE.
+	   IF (LOG) CALL LSL_PUTMSG(NTF2DTI__DTICLOSED)
+	ENDIF
+C
+C ..................................................................
+C rejoin errors
+C
+9999	DTI_WRITE=OK
+C
+	RETURN
+	END
+C

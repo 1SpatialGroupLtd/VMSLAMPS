@@ -1,0 +1,246 @@
+	SUBROUTINE NEIGHB(IOPT)
+C
+***	MODULE	NEIGHB
+***	IDENT	03JA91
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Calls to WAIT changed to LSL_WAIT		TJH  03-Jan-1990
+CMOD	Converted to LLSLLIB for TRIDER			TJH  19-Nov-1987
+CMOD	Graphics added. Indented.			TJH  30-Jul-1986
+CMOD	Diagnostic printout modulus now varied with
+C	size of dataset					TJH  05-Jul-1985
+C	Standardised					TJH  31-May-1985
+C
+C For every imaginary point in turn pick up the real neighbour numbers,
+C and assemble them without duplicates in NTEM. Mark these points for
+C derivative estimation, and write them out to file for use by the
+C interpolation algorithm. If any imaginary point has no neighbours then
+C abandon this option and reset to the box interpolation option. 
+C
+C
+C Parameters:
+	INCLUDE  'LSL$CMNTRIDER:TRIDERMSG.PAR'
+	INCLUDE  'LSL$DTMCREATESYS:GRIDPARAMS.PAR'
+C
+	DIMENSION JTEM(NTMSIZ)
+C
+C Common:
+	INCLUDE  'LSL$DTMCREATESYS:CONTRL.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:FINDIT.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:STORAG.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:TRYVAR.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:ZONVAR.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:GRAFCS.CMN'
+	INCLUDE  'LSL$DTMCREATESYS:GRAFDEV.CMN'
+C
+	INTEGER	  	I		! temporary variable
+	LOGICAL	  	OK		! function return
+C
+C function:
+	LOGICAL	  WRTUNF		! efficient Fortran writes
+C
+C ......................................................................
+C
+C
+C Set up a scratch file to store extended neighbours of imaginary
+C points
+	OPEN (UNIT=LGC1,FILE='TRIDER.TMP',STATUS='SCRATCH',
+     &	      FORM='UNFORMATTED',ERR=170)
+C
+C Set marker value for later use as a derivative marker (a -ve
+C value indicates derivatives need calculating)
+	DO 10 I=1,NP
+	   MD(4,I)=IABS(MD(4,I))
+10	CONTINUE
+C
+C Assemble lists of neighbours within the given number of layers of 
+C each imaginary point.
+C Abandon this method if any of the imaginary points cannot be estimated
+C by at least 5 neighbouring real points.
+	IF (DIAG) THEN
+	 IF (GRAPHICS.AND..NOT.GPX) THEN
+	   CALL EXPAND
+     &	   ('Imaginary point interpolation - collect star neighbours')
+	   CALL TXTOUT(.TRUE.)
+	 ELSE
+	   CALL FRAMED_MES(3,0)
+	 ENDIF
+	 CALL PERCENT('of imaginary point neighbourhoods determined',
+     &		0,LIMPOL,10,-1)
+	ENDIF
+	LAYER=1
+	DO 140 I=1,LIMPOL
+	   IF (DIAG) THEN
+	    CALL PERCENT('of imaginary point neighbourhoods determined',
+     &		I,LIMPOL,10,0)
+	   ENDIF
+	   KAYER=1
+	   MAYER=LAYER
+	   LSTA=1
+	   LSTO=1
+	   NTEM(1)=I
+	   IXPOS=MD(1,I)
+	   IYPOS=MD(2,I)
+	   N=0
+20	   DO 70 J=KAYER,MAYER
+C
+C Get neighbours for all nodes in NTEM from LSTA to LSTO.
+C Put any new neighbours into the list of nodes to expand for the next
+C layer search.
+	      DO 60 K=LSTA,LSTO
+	         L=IABS(NTEM(K))
+C
+C Get neighbours for point L
+	         CALL GETNAY(L,JTEM,150,NUM,LGC8)
+C
+C Go through them checking for any new additions
+C to the point found list (held in NTEM, N long).
+	         DO 50 M=1,NUM
+	            MA=JTEM(M)
+C
+C Throw it away if it is the present imaginary point
+	            IF(MA.EQ.I)GOTO 50
+C
+C Check for anything not yet in the list
+	            IF(N.EQ.0)GOTO 40
+C
+C Something in the list, so check ma for already being in the list
+	            DO 30 IA=1,N
+	               IF(MA.EQ.IABS(NTEM(IA)))GOTO 50
+30	            CONTINUE
+C
+C Point MA is a new neighbour, not found previously. Include it in
+C the list
+40	            N=N+1
+	            NTEM(N)=MA
+C
+C If this is the first layer mark new nodes negative
+	            IF(J.EQ.1)NTEM(N)=-MA
+C
+C If there is no more room to store nodes discontinue the search
+	            IF(N.EQ.KIX)GOTO 100
+50	         CONTINUE
+60	      CONTINUE
+C
+C Move onto next layer search. If nothing is found for last layer
+C (all points in the data set collected!) then quit looking.
+	      IF(N.EQ.LSTO)GOTO 100
+C
+C Update layer marker for looking for new points for the next
+C layer. NB: If we have just done the first layer the start point
+C for the next layer is not LSTO+1, but remains unchanged because
+C of the artificial seed not being counted as one of the points
+C in the area.
+	      IF(J.NE.1)LSTA=LSTO+1
+	      LSTO=N
+C
+C Go on to next layer
+70	   CONTINUE
+C
+C Check that enough real points have been found
+80	   M=0
+	   DO 90 K=1,N
+	      IF(IABS(NTEM(K)).GT.LIMPOL)M=M+1
+90	   CONTINUE
+	   IF(M.GT.10)GOTO 100
+C
+C No they have not. So expand the search to further layers
+	   KAYER=MAYER+1
+	   MAYER=KAYER+1
+	   GOTO 20
+C
+C Shrink list to remove any imaginary points, and find distance
+C from imaginary point to furthest node (+10%) to act as a range
+C estimate
+100	   M=0
+	   D=0.0
+	   DO 110 K=1,N
+	      L=IABS(NTEM(K))
+	      IF(L.LE.LIMPOL)GOTO 110
+	      M=M+1
+	      NTEM(M)=NTEM(K)
+C
+C Find the distance from this node
+	      D=AMAX1(FLOAT(IXPOS-MD(1,L))**2+FLOAT(IYPOS-MD(2,L))**2,D)
+110	   CONTINUE
+C
+C Get new number of points into N, and distance into KDIST.
+	   N=M
+	   KDIST=SQRT(D)
+	   KDIST=KDIST+0.1*KDIST
+C
+C Check whether we can proceed (enough points?)
+	   IF(N.GT.5)GOTO 120
+	   IOPT=1
+	   CALL LSL_GETMSG(TRIDER__INSPTLAY,MESSAGE,MESLEN)
+	   CALL EXPAND('%%%S',MESSAGE(:MESLEN))
+	   CALL TXTOUT(.FALSE.)
+	   GOTO 160
+C
+C All layers now either complete for this imaginary point, or we have
+C all we are going to get.
+C Write out list of points to use for interpolation to file
+120	   WRITE(LGC1)N,KDIST
+	   OK=WRTUNF(LGC1,NTEM,N)
+	   IF (.NOT.OK) GO TO 180
+C
+C Mark the points as needing derivative calculation
+	   DO 130 K=1,N
+	      L=IABS(NTEM(K))
+	      MD(4,L)=-IABS(MD(4,L))
+130	   CONTINUE
+140	CONTINUE
+	IF (DIAG) THEN
+	   CALL PERCENT('of imaginary point neighbourhoods determined',
+     &		I,LIMPOL,10,1)
+	   CALL EXPAND('%N imaginary point neighbourhoods determined'
+     &			,LIMPOL)
+	   CALL TXTOUT(.TRUE.)
+	ENDIF
+C
+C Check whether we have too many derivative estimates wanted to be
+C held at one time
+	KOUNT=0
+	DO 150 I=1,NP
+	   IF(MD(4,I).LT.0)KOUNT=KOUNT+1
+150	CONTINUE
+	IF (KOUNT.GT.LAX) THEN
+	   CALL LSL_GETMSG(TRIDER__DERIVOVR,MESSAGE,MESLEN)
+	   IF (GRAPHICS) CALL LSL_WAIT(4,2)	! wait for 4 seconds
+	   CALL ALARMS(MESSAGE(:MESLEN))
+	ENDIF
+C
+C Now get derivatives for all marked points. Rewind scratch file.
+	REWIND LGC1
+	CALL DERIV(4)
+C
+C Perform interpolations
+	CALL INTERP(IOPT)
+C
+C Close scratch file
+160	CLOSE (UNIT=LGC1)
+	RETURN
+C
+C ......................................................................
+C 			E R R O R S.
+C Error opening scratch file
+170	CALL LSL_GETMSG(TRIDER__OPNSCR,MESSAGE,MESLEN)
+	CALL EXPAND('%'//MESSAGE(:MESLEN))
+	CALL TXTOUT(.FALSE.)
+	GOTO 190
+C
+C Error writing to scratch file
+180	CALL LSL_GETMSG(TRIDER__WRTSCR,MESSAGE,MESLEN)
+	CALL EXPAND('%'//MESSAGE(:MESLEN))
+	CALL TXTOUT(.FALSE.)
+
+190	CALL ERRSNS(,I,J)		! find out what the problem is
+	IF (J.EQ.0) J=I
+	CALL LSL_GETMSG(J,MESSAGE,MESLEN)
+	J=INDEX(MESSAGE,'!') - 1		! (ignore any FAO stuff)
+	IF (J.LT.0) J=MESLEN
+	CALL ALARMS(MESSAGE(:MESLEN))		! close down & exit
+	END

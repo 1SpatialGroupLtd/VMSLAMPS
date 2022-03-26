@@ -1,0 +1,1040 @@
+	LOGICAL FUNCTION ASKMD(MD,TYPE)
+C
+***	MODULE ASKMD
+***	IDENT 26OC95
+C
+C Copyright Laser-Scan Laboratories Ltd.,Cambridge,England
+C 
+CMOD    Add Cassini Projection	    			RWR 19-Nov-1992
+CMOD    use new LSLLIB DISPANG			 	RWR  5-Aug-1988
+CMOD	Always get scale of map in this routine		RWR 12-Feb-1986
+C	(mod m2/420)
+CMOD	/HELP changed to /LEARNER			TJH 05-Dec-1986
+C	Author    Ron Russell				    09-Dec-1985
+C
+CMOD    Convert for F77 GCTPLIB compatibility (WI/CC 1514)      TJM 26-Oct-1995
+C
+C       This subroutine fills in map descriptor
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***	PARAMETER/LSL$CMNLSL:READANG/
+***	PARAMETER/LSL$CMNLSL:RDYES/
+***	PARAMETER/HERE:ITRANSMSG/
+C
+	INCLUDE '($STSDEF)/NOLIST'
+C
+***	COMMON/LSL$CMNLSL:EXCEPTION/
+***	COMMON/LSL$CMNLSL:EXPC/
+***	COMMON/HERE:GENERAL/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***     COMMON/HERE:DESCRIPT/
+C
+C argument
+C
+	INTEGER*2	MD(DESCLN)
+	INTEGER*4	TYPE		! = 1 ask for spheroid
+					! = 2 use default spheroid
+C
+C working storage
+C
+	INTEGER*2	THISMD(DESCLN)	! this is a copy of the argument
+					! to equivalence it
+C
+	INTEGER*2	MATTHS		! note I*2, for compatability
+	INTEGER*2	THSDUM		! and a dummy for longword
+					! alignment
+	REAL*8		THSLOC(2)	! local origin
+	REAL*8		THSSCL		! scale of map
+	INTEGER*4	THSPRJ		! projection system
+	INTEGER*4	THSUNT		! units that IFF file is in
+	INTEGER*4	THSSPH		! spheroid
+	REAL*8		THSUSP(2)	! user defined spheroid
+	REAL*8		THSSEP		! geoid - spheroid separation
+	REAL*8		THSPAR(15)	! parameters for projection
+C
+C which is equivalenced onto the variables
+C
+	EQUIVALENCE	(MATTHS,THISMD(1)),
+     &			(THSDUM,THISMD(2)),
+     &			(THSLOC,THISMD(3)),
+     &			(THSSCL,THISMD(11)),
+     &			(THSPRJ,THISMD(15)),
+     &			(THSUNT,THISMD(17)),
+     &			(THSSPH,THISMD(19)),
+     &			(THSUSP,THISMD(21)),
+     &			(THSPAR,THISMD(29)),
+     &	                (THSSEP,THISMD(MD2LEN+3))
+C
+	INTEGER*4	I,J,K		! loop counters
+	INTEGER*4	LEN
+	INTEGER*4	IERR
+	LOGICAL		YESNO
+	REAL*8		X,Y
+	INTEGER		PRJIND		! projection index
+	INTEGER		UNTIND		! unit index
+	INTEGER		SPHIND		! spheroid index
+	INTEGER		NUMUNT		! number of types of units
+	INTEGER		ORGSPH,ORGPRJ	! original spheroid/projection
+	REAL*8		DATA(15)
+	INTEGER		SYS,ZONE,UNIT
+	INTEGER		NOCHAR
+	CHARACTER*30	PROJ
+	CHARACTER*60	ERRMSG
+	CHARACTER*80	BLANK
+	DATA		(BLANK(I:I),I=1,80)/80*' '/
+	INTEGER		SPHTYP		! spherical type projection
+					! = 0 for shperoidal
+					! = 1 for shperical
+					! = 3 for don't care (geogs)
+C
+	INTEGER		IER		! error code for GCTP
+	COMMON/ERRM/	IER
+C
+C initialised parameters for spherical Oblique Mercator projection
+C
+	REAL*8		A,E,KS0,X0,Y0,LATP,LON0,AL,UL,
+     &			SINLATP,COSLATP
+	COMMON /CNST21/ A,E,KS0,X0,Y0,LATP,LON0,AL,UL,
+     &	                SINLATP,COSLATP
+C
+	REAL*8		DLON
+	REAL*8		LAT,LONG
+	REAL*8		ERR		! discrepancy
+	REAL*8		ERRLAT,ERRLNG	! discrepancy in lat and long	
+	REAL*8		ERRSEC		! discrepancy in seconds
+	REAL*8		TOL
+	REAL*8		TOLSEC
+	PARAMETER	(TOLSEC=0.002)	! tolerance in seconds
+C
+C functions
+C
+	INTEGER		ASKSEP
+	INTEGER		TTRSTR
+	INTEGER		RDDBLE
+	INTEGER		RDCHS
+	INTEGER		EXPAND
+	BYTE		ICH
+	INTEGER		RDLONG
+	INTEGER		SIGCHS
+	INTEGER		ASKPAR
+	REAL*8		ADJL
+	REAL*8		PAKR
+	CHARACTER*14	DISPANG
+	INTEGER		RDYES
+C
+C assume success
+C
+	ASKMD=ITRANS__NORMAL
+C
+C make a copy of the argument
+C
+	DO 10, I=1,DESCLN
+	   THISMD(I)=MD(I)
+10	CONTINUE
+C
+	ORGSPH=THSSPH
+	ORGPRJ=THSPRJ
+C
+C write out spheroid, if using default
+C
+20	CONTINUE
+	IF (TYPE.EQ.2.AND..NOT.HAD_DATUM) THEN		! already have it
+C
+C get the spheroid index
+C
+	   DO 30 I=1,MD2_NOSPH
+	      IF (THSSPH.EQ.MD2_SPHCD(I)) THEN
+	         sphIND=I
+	         GOTO 40
+	      ENDIF
+30	   CONTINUE
+C
+	   CALL LSL_PUTMSG(ITRANS__BADSPHCDS,THSSPH)
+	   ASKMD=ITRANS__BADSPHCDS
+	   GOTO 420
+40	   CONTINUE
+	   CALL WRITEF(' ')	
+	   CALL WRITEF('Using spheroid :%^L%I4 (%S)',MD2_SPHCD(SPHIND),
+     &	            MD2_SPH(SPHIND)(1:SIGCHS(MD2_SPH(SPHIND))))
+	   IF (THSSPH.EQ.101) THEN
+	      CALL WRITEF('  defined as %^D%F0.3   %F0.3',
+     &	                  THSUSP(1),THSUSP(2))
+	   ENDIF
+	   GOTO 170			! get separation and projection
+	ENDIF
+C
+C get spheroid
+C
+70	CONTINUE
+	IF (.NOT.HAD_LEARN) GOTO 100	! skip help if not required
+C
+C list available spheroids (in pairs)
+C
+80	CONTINUE
+	CALL WRITEF(' ')	
+	CALL WRITEF('Allowable spheroids and their codes are:-')
+	CALL WRITEF(' ')
+	DO 90, I=1,MD2_NOSPH/2
+	   J=I*2-1
+	   CALL WRITEF('%^L%I3 %S  %I3 %S',MD2_SPHCD(J),MD2_SPH(J),
+     &	                 MD2_SPHCD(J+1),MD2_SPH(J+1))
+90	CONTINUE
+C
+C and any odd one
+C
+	IF (MOD(MD2_NOSPH,2).NE.0) CALL WRITEF('%^L%I3 %S',
+     &	      		 MD2_SPHCD(MD2_NOSPH),MD2_SPH(MD2_NOSPH))
+C
+C ask for spheroid code
+C
+100	CALL WRITEF(' ')
+	J=THSSPH				! set up default
+	NOCHAR = EXPAND('Enter spheroid code (%^L%N): ',THSSPH)
+	ASKMD=TTRSTR(,LEN,EXPDSC,IERR)
+	IF (.NOT.ASKMD) THEN			!  error
+	   IF (ASKMD.NE.LSL__EOF) THEN		! must be LSL_SYSERR
+	      ASKMD=IERR
+	   ELSE
+	      ASKMD=ITRANS__EOF
+	   ENDIF
+	   CALL LSL_PUTMSG(ASKMD)
+	   GOTO 420				! quit on ctrl Z
+	ELSEIF (LEN.EQ.0) THEN			! take default
+	   GOTO 110
+	ENDIF
+C
+	CALL BSLN
+C
+C check for ?
+C
+	IF (RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPEOL)
+	   GOTO 100
+	ELSE
+	   IF (ICH.EQ.'?') THEN
+	      GOTO 80
+	   ELSE
+	      CALL BSCH
+	   ENDIF
+	ENDIF	
+C
+C read a value
+C
+	IF (RDLONG(J)) THEN
+	   IF (ERRNUM.EQ.LSL__HADEXCP) THEN
+	      CALL LSL_PUTMSG(LSL_EXCP)
+	   ELSE
+	      CALL LSL_PUTMSG(ERRNUM)
+	   ENDIF
+	   GOTO 100
+C
+C check for end of line
+C
+	ELSEIF (.NOT.RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPCH,ICH)
+	   GOTO 100
+	ENDIF	
+C
+C check if this is a valid code
+C
+110	CONTINUE
+	DO 120, I=1,MD2_NOSPH
+	   IF (J.EQ.MD2_SPHCD(I)) THEN
+	      sphIND=I
+	      GOTO 130
+	   ENDIF
+120	CONTINUE
+C
+C invalid spheroid code
+C
+	CALL LSL_PUTMSG(ITRANS__BADSPHCDW,J)
+	GOTO 80
+C
+130	CONTINUE
+	THSSPH=J
+	CALL WRITEF('%S(%S)',BLANK(1:NOCHAR),
+     &	            MD2_SPH(SPHIND)(1:SIGCHS(MD2_SPH(SPHIND))))
+C
+C ask for spheroid constants if user definable spheroid
+C clear to 0.0 otherwise
+C
+	IF (THSSPH.NE.MD2_SPHCD(MD2_NOSPH)) THEN
+	   THSUSP(1) = 0.0
+	   THSUSP(2) = 0.0
+	   GOTO 170
+	ENDIF
+C
+135	CALL WRITEF(' ')
+	X=THSUSP(1)				! set up default
+	Y=THSUSP(2)
+140	CALL EXPAND('Define elements of spheroid (%^D%F0.3, %F0.3): ',
+     &	             THSUSP(1),THSUSP(2))
+	ASKMD=TTRSTR(,LEN,EXPDSC,IERR)
+	IF (.NOT.ASKMD) THEN			!  error
+	   IF (ASKMD.NE.LSL__EOF) THEN
+	      ASKMD=IERR
+	      CALL LSL_PUTMSG(ASKMD)
+	      GOTO 420
+	   ELSE
+	      CALL LSL_PUTMSG(ITRANS__REENTER)
+	      GOTO 20
+	   ENDIF
+	ELSEIF (LEN.EQ.0) THEN			! take default
+	   GOTO  150
+	ENDIF
+C
+	CALL BSLN
+C
+C check for ?
+C
+	IF (RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPEOL)
+	   GOTO  140
+	ELSE
+	   IF (ICH.EQ.'?') THEN
+	      CALL WRITEF('Enter two real numbers, the first of '//
+     &	                     'which is the semi-major axis')
+	      CALL WRITEF('The second is one of 1) 0.0 for a sphere')
+	      CALL WRITEF('                     2) The semi-minor axis')
+	      CALL WRITEF('                     3) Eccentricity '//
+     &	                                             'squared')
+	      GOTO  140
+	   ELSE
+	      CALL BSCH
+	   ENDIF
+	ENDIF	
+C
+C read a value
+C
+	IF (RDDBLE(X)) THEN
+	   IF (ERRNUM.EQ.LSL__HADEXCP) THEN
+	      CALL LSL_PUTMSG(LSL_EXCP)
+	   ELSE
+	      CALL LSL_PUTMSG(ERRNUM)
+	   ENDIF
+	   GOTO  140
+	ENDIF	
+	IF (.NOT.RDDBLE(Y)) GOTO  160 ! check for both on one line
+C
+C check for end of line
+C
+	IF (.NOT.RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPCH,ICH)
+	   GOTO 140
+	ENDIF
+C
+150	CALL EXPAND('Second element (%^D%F0.3): ',THSUSP(2))
+	ASKMD=TTRSTR(,LEN,EXPDSC,IERR)
+	IF (.NOT.ASKMD) THEN			! error
+	   IF (ASKMD.NE.LSL__EOF) THEN
+	      ASKMD=IERR
+	      CALL LSL_PUTMSG(IERR)
+	      GOTO 420				! quit
+	   ELSE
+	      CALL LSL_PUTMSG(ITRANS__REENTER)
+	      GOTO 20				! start again
+	   ENDIF
+	ELSEIF (LEN.EQ.0) THEN			! take default
+	   GOTO  160
+	ENDIF
+C
+	CALL BSLN
+	IF (RDDBLE(Y)) THEN
+	   IF (ERRNUM.EQ.LSL__HADEXCP) THEN
+	      CALL LSL_PUTMSG(LSL_EXCP)
+	   ELSE
+	      CALL LSL_PUTMSG(ERRNUM)
+	   ENDIF
+	   GOTO  150
+	ENDIF
+C
+160	CONTINUE
+C
+C check for end of line
+C
+	IF (.NOT.RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPCH,ICH)
+	   GOTO 140
+	ENDIF
+C
+C check for impossible value
+C
+	IF (X.LE.0.0) THEN
+	   CALL LSL_PUTMSG(ITRANS__INVALRVAL,X)
+	   GOTO 135
+	ELSEIF (Y.LT.0.0) THEN
+	   CALL LSL_PUTMSG(ITRANS__INVALRVAL,Y)
+	   GOTO 135
+	ENDIF
+C
+	THSUSP(1)=X
+	THSUSP(2)=Y
+C
+C ask for separation, if doing accurate datum shift
+C
+170	CONTINUE
+	IF (HAD_HEIGHT) THEN
+	   ASKMD = ASKSEP(THSSEP)
+	   IF (.NOT.ASKMD) THEN
+	      IF (ASKMD.NE.ITRANS__EOF.OR.TYPE.EQ.2) THEN
+	         GOTO 420
+	      ELSE
+	         CALL LSL_PUTMSG(ITRANS__REENTER)
+	         GOTO 20
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C get projection
+C
+C projection is already defined if:
+C 1) this is target descriptor and doing plane transformation
+C          - use same projection as current descriptor
+c
+	IF (TYPE.EQ.2.AND.HAD_FTT) THEN
+C
+C get the projection index
+C
+	   DO 50 I=1,MD2_NOPRJ
+	      IF (THSPRJ.EQ.MD2_PRJCD(I)) THEN
+	         PRJIND=I
+	         GOTO 60
+	      ENDIF
+50	   CONTINUE
+C
+	   CALL LSL_PUTMSG(ITRANS__BADPRJCDS,THSPRJ)
+	   ASKMD=ITRANS__BADPRJCDS
+	   GOTO 420
+60	   CONTINUE
+	   CALL WRITEF(' ')	
+	   CALL WRITEF('Using projection: %I4 (%S)',MD2_PRJCD(PRJIND),
+     &	            MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))))
+	   GOTO 330			! get units
+	ENDIF
+C
+C ask for projection
+C
+	IF (.NOT.HAD_LEARN) GOTO 200	! skip help if not required
+C
+C list available projections (in pairs)
+C
+180	CONTINUE
+	CALL WRITEF(' ')	
+	CALL WRITEF('Allowable Projections and their codes are:-')
+	CALL WRITEF(' ')
+	DO 190, I=1,MD2_NOPRJ/2
+	   J=I*2-1
+	   CALL WRITEF('%^L%I3%S  %I3%S',MD2_PRJCD(J),MD2_PRJ(J),
+     &	                 MD2_PRJCD(J+1),MD2_PRJ(J+1))
+190	CONTINUE
+C
+C and any odd one
+C
+	IF (MOD(MD2_NOPRJ,2).NE.0) CALL WRITEF('%^L%I3 %S',
+     &	      		 MD2_PRJCD(MD2_NOPRJ),MD2_PRJ(MD2_NOPRJ))
+C
+C add an explanation
+C
+	CALL WRITEF
+	CALL WRITEF('Note: projections marked "*" are defined for '//
+     &	            'the sphere, not the spheroid.')
+	CALL WRITEF('      If a spheroid is defined, then the sphere '//
+     &	            'with the same surface area')
+	CALL WRITEF('      as the spheroid is used')
+C
+C ask for projection code
+C
+200	CALL WRITEF(' ')
+	J=THSPRJ			! set up default
+	IF (J.EQ.0) J=100		! geographicals if unset
+C
+C remember type of original projection if necessary
+C
+	IF (TYPE.EQ.2) THEN
+	   IF (J.EQ.100) THEN		! geogs, so don't care
+	      SPHTYP=3
+	   ELSE
+C
+C get projection index for input projection
+C
+	      DO 210, I=1,MD2_NOPRJ
+	         IF (J.EQ.MD2_PRJCD(I)) THEN
+	            PRJIND=I
+	            GOTO 220
+	         ENDIF
+210	      CONTINUE
+C
+220	      CONTINUE
+	      I= INDEX(MD2_PRJ(PRJIND),'*')
+	      IF (THSSPH.EQ.19.OR.THSSPH.EQ.20.OR.	! spheres
+     &	          THSSPH.EQ.101.AND.(THSUSP(1).EQ.THSUSP(2)
+     &	                             .OR.THSUSP(2).EQ.0.0).OR.
+     &	          I.NE.0)  THEN			! spherical projection
+	         SPHTYP=1
+	      ELSE
+	         SPHTYP=0
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	NOCHAR = EXPAND('Enter projection code (%^L%N): ',J)
+	ASKMD=TTRSTR(,LEN,EXPDSC,IERR)
+	IF (.NOT.ASKMD) THEN			!  error
+	   IF (ASKMD.NE.LSL__EOF) THEN
+	      ASKMD=IERR
+	      CALL LSL_PUTMSG(IERR)
+	      GOTO 420
+	   ELSE
+	      IF (TYPE.EQ.1) THEN
+	         CALL LSL_PUTMSG(ITRANS__REENTER)
+	         GOTO 20				! start again
+	      ELSE
+	         ASKMD=ITRANS__EOF
+	         CALL LSL_PUTMSG(ASKMD)
+	         GOTO 420			! quit
+	      ENDIF
+	   ENDIF
+	ELSEIF (LEN.EQ.0) THEN			! take default
+	   GOTO 230
+	ENDIF
+C
+	CALL BSLN
+C
+C check for ?
+C
+	IF (RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPEOL)
+	   GOTO 200
+	ELSE
+	   IF (ICH.EQ.'?') THEN
+	      GOTO 180
+	   ELSE
+	      CALL BSCH
+	   ENDIF
+	ENDIF	
+C
+C read a value
+C
+	IF (RDLONG(J)) THEN
+	   IF (ERRNUM.EQ.LSL__HADEXCP) THEN
+	      CALL LSL_PUTMSG(LSL_EXCP)
+	   ELSE
+	      CALL LSL_PUTMSG(ERRNUM)
+	   ENDIF
+	   GOTO 200
+C
+C check for end of line
+C
+	ELSEIF (.NOT.RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPCH,ICH)
+	   GOTO 200
+	ENDIF	
+C
+C check if this is a valid code
+C
+230	CONTINUE
+	DO 240, I=1,MD2_NOPRJ
+	   IF (J.EQ.MD2_PRJCD(I)) THEN
+	      PRJIND=I
+	      GOTO 250
+	   ENDIF
+240	CONTINUE
+C
+C invalid projection code
+C
+	CALL LSL_PUTMSG(ITRANS__BADPRJCDW,J)
+	GOTO 180
+C
+C check for sensible projection:
+C 1) cannot be unset
+C 2) UK national grid is on AIRY spheroid
+C 3) SPS projection is on CLARKE 1866 spheroid
+C 4) Stereographic (UKSL formulae) is on INTERNATIONAL spheroid
+C 5) If doing datum shift, must be geographicals
+C
+250	CONTINUE
+	IF (.NOT.HAD_DESCR.AND.J.EQ.0) THEN
+	   CALL LSL_PUTMSG(ITRANS__NOTUNSET)
+	   GOTO 180
+	ELSEIF (J.EQ.101.AND.THSSPH.NE.9) THEN
+	   CALL LSL_PUTMSG(ITRANS__BADPRJSPH,
+     &	               MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))),
+     &	               MD2_SPH(10)(1:SIGCHS(MD2_SPH(10))))
+	   CALL LSL_PUTMSG(ITRANS__REENTER)
+	   GOTO 20
+	ELSEIF (J.EQ.2.AND.THSSPH.NE.0)THEN
+	   CALL LSL_PUTMSG(ITRANS__BADPRJSPH,
+     &	               MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))),
+     &	               MD2_SPH(1)(1:SIGCHS(MD2_SPH(1))))
+	   CALL LSL_PUTMSG(ITRANS__REENTER)
+	   GOTO 20
+	ELSEIF (J.EQ.22.AND.THSSPH.NE.4) THEN
+	   CALL LSL_PUTMSG(ITRANS__BADPRJSPH,
+     &	               MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))),
+     &	               MD2_SPH(5)(1:SIGCHS(MD2_SPH(5))))
+	   CALL LSL_PUTMSG(ITRANS__REENTER)
+	   GOTO 20
+	ELSEIF (J.NE.100.AND.HAD_DATUM) THEN
+	   ASKMD = ITRANS__NOTGEOGS
+C
+C reduce severity of message to WARNIMG
+	   ASKMD = ASKMD.AND..NOT.STS$M_SEVERITY.OR.STS$K_WARNING
+	   CALL LSL_PUTMSG(ASKMD)
+	   CALL LSL_PUTMSG(ITRANS__REENTER)
+	   GOTO 200
+	ENDIF
+C
+C check for type of projection (spherical or spheroidal)
+C
+	IF (TYPE.EQ.2) THEN
+	   IF (J.NE.100.AND.SPHTYP.NE.3) THEN	! don't care if geogs
+	      I=INDEX(MD2_PRJ(PRJIND),'*')
+	      IF (THSSPH.EQ.19.OR.THSSPH.EQ.20.OR.	! spheres
+     &	          THSSPH.EQ.101.AND.(THSUSP(1).EQ.THSUSP(2)
+     &	                             .OR.THSUSP(2).EQ.0.0).OR.
+     &	          I.NE.0)  THEN			! spherical projection
+	         K=1
+	      ELSE
+	         K=0
+	      ENDIF
+C
+	      IF (K.NE.SPHTYP) THEN
+	         CALL LSL_PUTMSG(ITRANS__BADPRJTYP)
+CCC TEST	         GOTO 180
+	      ENDIF
+	   ENDIF
+C
+C cannot do plane transformation on geographical coords
+C
+	ELSE
+	   IF (HAD_FTT.AND.J.EQ.100) THEN
+	      CALL LSL_PUTMSG(ITRANS__NOTPLANE)
+	      ASKMD=ITRANS__NOTPLANE
+	      GOTO 420
+	   ENDIF
+	ENDIF
+C
+	THSPRJ=J
+	CALL WRITEF('%S(%S)',BLANK(1:NOCHAR),
+     &	            MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))))
+C
+C now get scale of map (only if dealing with IFF files)
+C
+260	IF (HAD_POINT.OR.THSPRJ.NE.21) GOTO 290
+	CALL WRITEF(' ')
+	X=THSSCL				! set up default
+270	CALL EXPAND('Enter scale of map (%^D%F0.1): ',THSSCL)
+	ASKMD=TTRSTR(,LEN,EXPDSC,IERR)
+	IF (.NOT.ASKMD) THEN			! error
+	   IF (ASKMD.NE.LSL__EOF) THEN
+	      ASKMD=IERR
+	      CALL LSL_PUTMSG(IERR)
+	      GOTO 420				! quit
+	   ELSE
+	      CALL LSL_PUTMSG(ITRANS__REENTER)
+	      GOTO 20				! start again
+	   ENDIF
+	ELSEIF (LEN.EQ.0) THEN			! take default
+	   GOTO 280
+	ENDIF
+C
+	CALL BSLN
+C
+C check for ?
+C
+	IF (RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPEOL)
+	   GOTO 270
+	ELSE
+	   IF (ICH.EQ.'?') THEN
+	      CALL WRITEF('Enter the denominator of the scale of '//
+     &	                  'the map that the IFF file represents.')
+	      CALL WRITEF('ie enter "2500" for a 1/2500 map')
+	      GOTO 270
+	   ELSE
+	      CALL BSCH
+	   ENDIF
+	ENDIF	
+C
+C read number
+C
+	IF (RDDBLE(X)) THEN
+	   IF (ERRNUM.EQ.LSL__HADEXCP) THEN
+	      CALL LSL_PUTMSG(LSL_EXCP)
+	   ELSE
+	      CALL LSL_PUTMSG(ERRNUM)
+	   ENDIF
+	   GOTO 270
+C
+C check for end of line
+C
+	ELSEIF (.NOT.RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPCH,ICH)
+	   GOTO 270
+	ENDIF
+C
+280	CONTINUE
+	THSSCL=X
+C
+C get parameters for the projection
+C
+290	CONTINUE
+	ASKMD=ASKPAR(THISMD,ORGSPH,ORGPRJ)
+	IF (.NOT.ASKMD) THEN
+	   IF (ASKMD.NE.ITRANS__EOF) THEN
+	      GOTO 420
+	   ELSE
+	      CALL LSL_PUTMSG(ITRANS__REENTER)
+	      GOTO 20
+	   ENDIF
+	ENDIF
+C
+C for projection with projection parameters, initialise projection
+C (0 is unset, 1 is UTM, 2 is SPCS at start)
+C (100 is geographicals, 101 is UK National Grid)
+C
+	IF (THSPRJ.GE.3.AND.THSPRJ.LE.(MD2_NOPRJ - 3)) THEN
+	   CALL PARINIT(SYS,ZONE,DATA,UNIT,THISMD,1)	! only care 
+							! about DATA
+	   IER=0
+	   ZONE=0	! insist that initialisation is done
+	   ITREX=.FALSE.
+	   CALL INITPJ(ZONE,DATA,THSPRJ)
+	   IF (IER.NE.0.OR.ITREX) THEN
+	      IF (ITREX) THEN	! arithmetical error
+	         CALL LSL_PUTMSG(ITRANS__WGCTPERR,
+     &	            MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))))
+	      ELSE
+	         CALL GTRNERR(IER,PROJ,ERRMSG)	! get error message
+	         CALL LSL_PUTMSG(ITRANS__WGCTPERR,PROJ(1:SIGCHS(PROJ)))
+	         CALL WRITEF('*** %S',ERRMSG(1:SIGCHS(ERRMSG)))
+	      ENDIF
+	      CALL LSL_PUTMSG(ITRANS__REENTER)
+	      GOTO 20
+	   ENDIF
+	ENDIF
+C
+C check origin of Oblique Mercator (spherical projection)
+C
+	IF (THSPRJ.EQ.21) THEN
+	   IF (THSSCL.LE.0.0) THEN
+	      TOL=TOLSEC
+	   ELSE
+	      TOL=TOLSEC*THSSCL
+	   ENDIF
+	   LONG=PAKR(DATA(7))
+	   LAT =PAKR(DATA(8))
+	   DLON=ADJL(LONG-LON0)
+	   ERR=UL			! this is set when initialising
+					! projection
+	   ERRSEC=ERR*3600*180/PI
+	   IF (ABS(ERRSEC).GT.TOL) THEN
+C
+C work out where this longitude cuts central line
+C
+	      LAT = ATAN(SIN(DLON)*TAN(PI/2-LATP))
+C
+C output this information
+C
+	      LONG=LONG*3600.0*180.0/PI
+	      LAT=LAT*3600.0*180.0/PI
+	      CALL WRITEF(' ')
+	      CALL WRITEF('Datum lies %^D%F0.3 seconds from '//
+     &	                  'the false equator',ERRSEC)
+	      CALL WRITEF('(%S , %S is on line)',
+     &	                  DISPANG(LAT,READANG_LATITUDE),
+     &	                  DISPANG(LONG,READANG_LONGITUDE))	      
+C
+C ask for go ahead
+C
+300	      CONTINUE
+	      ASKMD=RDYES('Do you wish to continue with this datum [N]',
+     &	            YESNO,ASSUME_NO,IERR)
+C
+	      IF (.NOT.ASKMD) THEN			!  error
+	         IF (ASKMD.NE.LSL__EOF) THEN
+	            ASKMD=IERR
+	            CALL LSL_PUTMSG(ASKMD)
+	            GOTO 420
+	         ELSE
+	            CALL LSL_PUTMSG(ITRANS__REENTER)
+	            GOTO 290
+	         ENDIF
+	      ENDIF
+C
+	      IF (.NOT.YESNO) GOTO 290
+	   ENDIF
+	ENDIF	   
+C
+C now get scale (if not dealing with points, and don't have it already)
+C
+	IF (HAD_POINT.OR.THSPRJ.EQ.21) GOTO 330
+	CALL WRITEF(' ')
+	X=THSSCL				! set up default
+310	CALL EXPAND('Enter scale of map (%^D%F0.1): ',THSSCL)
+	ASKMD=TTRSTR(,LEN,EXPDSC,IERR)
+	IF (.NOT.ASKMD) THEN			! error
+	   IF (ASKMD.NE.LSL__EOF) THEN
+	      ASKMD=IERR
+	      CALL LSL_PUTMSG(IERR)
+	      GOTO 420				! quit
+	   ELSE
+	      CALL LSL_PUTMSG(ITRANS__REENTER)
+	      GOTO 20				! start again
+	   ENDIF
+	ELSEIF (LEN.EQ.0) THEN			! take default
+	   GOTO 320
+	ENDIF
+C
+	CALL BSLN
+C
+C check for ?
+C
+	IF (RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPEOL)
+	   GOTO 310
+	ELSE
+	   IF (ICH.EQ.'?') THEN
+	      CALL WRITEF('Enter the denominator of the scale of '//
+     &	                  'the map that the IFF file represents.')
+	      CALL WRITEF('ie enter "2500" for a 1/2500 map')
+	      GOTO 310
+	   ELSE
+	      CALL BSCH
+	   ENDIF
+	ENDIF	
+C
+C read number
+C
+	IF (RDDBLE(X)) THEN
+	   IF (ERRNUM.EQ.LSL__HADEXCP) THEN
+	      CALL LSL_PUTMSG(LSL_EXCP)
+	   ELSE
+	      CALL LSL_PUTMSG(ERRNUM)
+	   ENDIF
+	   GOTO 310
+C
+C check for end of line
+C
+	ELSEIF (.NOT.RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPCH,ICH)
+	   GOTO 310
+	ENDIF
+C
+320	CONTINUE
+	THSSCL=X
+C
+C now get units - if dealing with points, then allow dd mm ss format
+C
+330	CONTINUE
+	IF (HAD_POINT) THEN
+	   NUMUNT=MD2_NOUNT+1
+	ELSE
+	   NUMUNT=MD2_NOUNT
+	ENDIF
+C
+C all spheroids known by GCTP are specified in International metres
+C
+C if user specified spheroid, then we talk about projection units;
+C
+C when dealing with Oblique Stereographic (UKSL format) with user
+C specified conformal earth's radius, then we had also better talk
+C about projection units
+C
+	IF (THSSPH.EQ.101.OR.
+     &	      THSPRJ.EQ.22.AND.THSPAR(4).GT.0.0) THEN
+	   MD2_UNT(3)='projection units'
+	ELSE
+	   MD2_UNT(3)='metres'
+	ENDIF
+C
+C set default for this projection if it has changed
+C
+	IF (HAD_FTT) THEN
+	   THSUNT=105
+	ELSEIF ((THSPRJ.NE.ORGPRJ.OR.THSUNT.EQ.0).OR.
+     &	        (TYPE.EQ.2.AND.THSPRJ.EQ.ORGPRJ.AND.TABUNTS)) THEN
+	   IF (THSPRJ.EQ.100) THEN		! geographicals
+	      IF (HAD_POINT) THEN
+	         THSUNT=200			! dd mm ss.ss
+	      ELSE				! radians
+	         THSUNT=5   
+	      ENDIF
+	   ELSEIF (THSPRJ.EQ.2) THEN
+	      THSUNT=1			! feet
+	   ELSE
+	      THSUNT=2			! metres
+	   ENDIF
+	ELSEIF (HAD_POINT.AND.THSPRJ.EQ.100) THEN
+	   THSUNT=200
+	ENDIF
+C
+	IF (.NOT.HAD_LEARN) GOTO 360	! skip listing of units
+C
+340	CONTINUE
+	CALL WRITEF(' ')	
+	CALL WRITEF('Allowable Units and their codes are:-')
+	CALL WRITEF(' ')
+	DO 350, I=1,NUMUNT/2
+	   J=I*2-1
+	   CALL WRITEF('%^L%I3 %S  %I3 %S',MD2_UNTCD(J),MD2_UNT(J),
+     &	                 MD2_UNTCD(J+1),MD2_UNT(J+1))
+350	CONTINUE
+C
+	IF (MOD(NUMUNT,2).NE.0) CALL WRITEF('%^L%I3 %S',
+     &	      		 MD2_UNTCD(NUMUNT),MD2_UNT(NUMUNT))
+C
+C explain complictions if dealing with plane transformation
+C
+	IF (HAD_FTT) THEN
+	   CALL WRITEF
+	   CALL WRITEF('Results of Plane transformation can '//
+     &	               'be in any plane units, but they take')
+	   CALL WRITEF('their scale from the four points entered above')
+	ENDIF
+C
+360	CALL WRITEF(' ')
+	J=THSUNT				! set up default
+	NOCHAR = EXPAND('Enter unit code (%^L%N): ',THSUNT)
+	ASKMD=TTRSTR(,LEN,EXPDSC,IERR)
+	IF (.NOT.ASKMD) THEN			!  error
+	   IF (ASKMD.NE.LSL__EOF) THEN
+	      ASKMD=IERR
+	      CALL LSL_PUTMSG(IERR)
+	      GOTO 420				! quit
+	   ELSE
+	      IF (TYPE.EQ.2.AND.HAD_FTT) THEN
+	         ASKMD=ITRANS__EOF
+	         CALL LSL_PUTMSG(ASKMD)
+	         GOTO 420			! quit
+	      ELSE
+	         CALL LSL_PUTMSG(ITRANS__REENTER)
+	         GOTO 20				! start again
+	      ENDIF
+	   ENDIF
+	ELSEIF (LEN.EQ.0) THEN			! take default
+	   GOTO  370
+	ENDIF
+C
+	CALL BSLN
+C
+C check for ?
+C
+	IF (RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPEOL)
+	   GOTO 360
+	ELSE
+	   IF (ICH.EQ.'?') THEN
+	      GOTO 340
+	   ELSE
+	      CALL BSCH
+	   ENDIF
+	ENDIF	
+C
+C read a value
+C
+	IF (RDLONG(J)) THEN
+	   IF (ERRNUM.EQ.LSL__HADEXCP) THEN
+	      CALL LSL_PUTMSG(LSL_EXCP)
+	   ELSE
+	      CALL LSL_PUTMSG(ERRNUM)
+	   ENDIF
+	   GOTO 360
+C
+C check for end of line
+C
+	ELSEIF (.NOT.RDCHS(ICH)) THEN
+	   CALL LSL_PUTMSG(ITRANS__UNEXPCH,ICH)
+	   GOTO 360
+	ENDIF	
+C
+C check if this is a valid code
+C
+370	CONTINUE
+	DO 380, I=1,NUMUNT
+	   IF (J.EQ.MD2_UNTCD(I)) THEN
+	      UNTIND=I
+	      GOTO 390
+	   ENDIF
+380	CONTINUE
+C
+C invalid unit code
+C
+	CALL LSL_PUTMSG(ITRANS__BADUNTCDW,J)
+	GOTO 340
+C
+C
+C check for sensible unit wrt projection
+C
+390	CONTINUE
+C
+C not allowed "unset" if doing real work
+	IF (.NOT.HAD_DESCR.AND.J.EQ.0) THEN
+	   CALL LSL_PUTMSG(ITRANS__NOTUNSET)
+	   GOTO 340
+C
+C cannot have degrees mins secs, in IFF files
+	ELSEIF(J.EQ.200.AND..NOT.HAD_POINT) THEN
+	   CALL LSL_PUTMSG(ITRANS__INVALANGUNT,
+     &	               MD2_UNT(UNTIND)(1:SIGCHS(MD2_UNT(UNTIND))))
+	   GOTO 360
+C
+C for geographicals, must have angular units;
+C for projections, must have plane units
+	ELSEIF ((THSPRJ.EQ.100.AND.
+     &	    (J.EQ.1.OR.J.EQ.2.OR.(J.GE.101.AND.J.LE.105))).OR.
+     &	    (THSPRJ.NE.100.AND.
+     &	    (J.EQ.0.OR.(J.GE.3.AND.J.LE.5)
+     &	           .OR.J.EQ.110.OR.J.EQ.200))) THEN
+	   CALL LSL_PUTMSG(ITRANS__INVALUNT,
+     &	               MD2_UNT(UNTIND)(1:SIGCHS(MD2_UNT(UNTIND))),
+     &	                  MD2_PRJ(PRJIND)(3:SIGCHS(MD2_PRJ(PRJIND))))
+	   GOTO 360
+C
+C cannot have table units or user specified units if in point mode
+C (don't know scale of map)
+	ELSEIF (HAD_POINT.AND.(J.GE.101.AND.J.LE.105)) THEN
+	   CALL LSL_PUTMSG(ITRANS__INVALTABUNT,
+     &	               MD2_UNT(UNTIND)(1:SIGCHS(MD2_UNT(UNTIND))))
+	   GOTO 360
+C
+C cannot have user units output if not doing specific plane
+C transformation
+	ELSEIF (TYPE.EQ.2.AND..NOT.HAD_FTT.AND.J.EQ.105) THEN
+	   CALL LSL_PUTMSG(ITRANS__INVALUSEUNT,
+     &	               MD2_UNT(UNTIND)(1:SIGCHS(MD2_UNT(UNTIND))))
+	   GOTO 360
+C
+C cannot have table units if invalid scale specified
+	ELSEIF (.NOT.HAD_POINT.AND.THSSCL.LE.0.0.AND.
+     &	    J.GE.101.AND.J.LE.104) THEN
+	   CALL LSL_PUTMSG(ITRANS__INVALSCL,THSSCL,
+     &	               MD2_UNT(UNTIND)(1:SIGCHS(MD2_UNT(UNTIND))))
+	   GOTO 260
+	ENDIF
+C
+C check for sensible unit wrt to spheroid (cannot have feet and user
+C specified spheroid as we don't know the relationship between 
+C projection units and feet)
+C
+	IF (THSSPH.EQ.101.AND.J.EQ.1) THEN
+	   CALL LSL_PUTMSG(ITRANS__IMPOSUNT)
+	   GOTO 360
+	ENDIF
+C
+	THSUNT=J
+	CALL WRITEF('%S(%S)',BLANK(1:NOCHAR),
+     &	            MD2_UNT(UNTIND)(1:SIGCHS(MD2_UNT(UNTIND))))
+C
+C copy the descriptor back into the argument
+C
+400	CONTINUE
+	MATTHS=2		! this descriptor is now set
+	DO 410, I=1,DESCLN
+	   MD(I)=THISMD(I)
+410	CONTINUE
+C
+420	RETURN
+	END

@@ -1,0 +1,360 @@
+C This library is a minimal LD.. to HP plotter converter.
+C It expects to be called via GKSLDLIB from FPP and makes assumptions
+C that GKSLDLIB is used (e.g. ORIGIN and UNITS are no-ops)
+C
+	SUBROUTINE LDINIT(INIARG,CONID,WTYPE)
+C
+***	MODULE	LDINIT
+***	IDENT	21FE91
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C Open/close HP plotter
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'HERE:HP.CMN'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'($DCDEF)'
+	INCLUDE	'($DVIDEF)'
+C
+C arguments
+	INTEGER	INIARG		! If non-zero then open, else close
+	INTEGER	CONID		! GKS connection identifier
+	INTEGER	WTYPE		! GKS workstation type
+C
+C functions called
+	INTEGER	LIB$GETDVI
+	INTEGER	LIB$GET_LUN,LIB$FREE_LUN
+	INTEGER	FLWOPN,FLROPN
+	INTEGER	FLRLIN
+	LOGICAL	RDCHS,RDLONG
+C
+C workspace
+	INTEGER	LIMIT(4)
+	INTEGER	IXTOP,IYTOP
+	INTEGER	OK,IERR
+	INTEGER	HPILUN
+	INTEGER	I
+	INTEGER	CLASS,CLASS2
+	BYTE	CH
+	INTEGER*2	SAVDP
+	INTEGER		ESC
+	PARAMETER	(ESC=27)
+C
+	IF (INIARG.EQ.0) GOTO 500
+C
+C Get LUNs to use
+	OK = LIB$GET_LUN(HPOLUN)
+	IF (.NOT.OK) GOTO 995
+	OK = LIB$GET_LUN(HPILUN)
+	IF (.NOT.OK) GOTO 995
+C
+C Open HP files
+	OK = FLWOPN(HPOLUN,'LSL$HP:',IERR)
+	IF (.NOT.OK) THEN
+	   CALL TTWSTR('***Error opening LSL$HP:')
+	   GOTO 995
+	ENDIF
+C
+	OK = FLROPN(HPILUN,'LSL$HPINPUT:',IERR)
+	IF (.NOT.OK) THEN
+	   CALL TTWSTR('***Error opening LSL$HPINPUT:')
+	   GOTO 995
+	ENDIF
+C
+C Plotter on, set up xon/xoff handshaking, initialise
+	CALL FLWRTF('%C.Y%C.I81;;17:%C.N;19:IN;',ESC,ESC,ESC)
+C
+C Obtain limits
+C Only output the request 'OH' if the device is a terminal
+C LIB$GETDVI will fail if translation of LSL$HP does not include
+C a valid device name (e.g. just a filename) - assume not a terminal
+	OK = LIB$GETDVI(DVI$_DEVCLASS,,'LSL$HP:',CLASS)
+	IERR = LIB$GETDVI(DVI$_DEVCLASS,,'LSL$HPINPUT:',CLASS2)
+	IF (OK.AND.IERR) THEN
+	   IF (CLASS.EQ.DC$_TERM.AND.CLASS2.EQ.DC$_TERM
+     &						) CALL FLWSTR('OH;')
+	ENDIF
+	OK = FLRLIN(HPBUF,HPPTR,HPMAX,IERR)
+	IF (.NOT.OK) GOTO 990
+	OK = 1
+	CALL DCPSAV(SAVDP)		! save user's decode pointer
+	CALL SETAUX(HPBUF,HPPTR)	! use HPBUF as decode buffer
+	IF (HPPTR.EQ.0) GOTO 990	! blank line
+	DO 10 I=1,4
+	   IF (RDCHS(CH)) GOTO 990
+	   IF (CH.NE.',') CALL BSCH
+	   IF (RDLONG(LIMIT(I))) GOTO 990
+10	CONTINUE
+	CALL BSLN			! back to normal buffer
+	CALL DCPSET(SAVDP)		! restore decode pointer
+C
+C and close input unit
+	CALL FLRCLO(HPILUN)
+	CALL LIB$FREE_LUN(HPILUN)
+C
+C Obtain plotting area in mm
+	MAXX = (LIMIT(3)-LIMIT(1))*0.025
+	MAXY = (LIMIT(4)-LIMIT(2))*0.025
+C
+C Copy origin to common
+	IXORG = LIMIT(1)
+	IYORG = LIMIT(2)
+C
+C Unset current position
+	CURX = -99999
+	NEWX = CURX
+	CURY = -99999
+	NEWY = CURY
+C
+C Nothing in buffer
+	HPPTR = 0
+C
+C Select pen 1
+	CALL PEN(1)
+	GOTO 999
+C
+C******************************************************************************
+C
+C Switch off
+C Select pen 0 (store pen)
+500	CALL PEN(0)
+	CALL LDWAIT
+	CALL FLWRTF('%C.Z',ESC)	! plotter off
+C
+C and close output unit
+	CALL FLWCLO(HPOLUN)
+	CALL LIB$FREE_LUN(HPOLUN)
+	GOTO 999
+C
+990	CALL BSLN			! back to normal buffer
+	CALL DCPSET(SAVDP)		! restore decode pointer
+	CALL TTWSTR('***Error reading limits from LSL$HPINPUT:')
+995	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(OK)
+	   IF (OK.EQ.LSL__SYSOPEN) CALL LSL_ADDMSG(IERR)
+	ENDIF
+C
+999	RETURN
+	END
+C
+	SUBROUTINE LDFPPM(NULL1,NULL2,DCMAXX,DCMAXY)
+C
+***	MODULE	LDFPPM
+***	IDENT	26SE86
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C Return drawing area in mm
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'HERE:HP.CMN'
+C
+C arguments
+	INTEGER	NULL1,NULL2
+	REAL	DCMAXX,DCMAXY
+C
+	DCMAXX = MAXX
+	DCMAXY = MAXY
+C
+	RETURN
+	END
+C
+	SUBROUTINE PEN(N)
+C
+***	MODULE	PEN
+***	IDENT	26SE86
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C Select pen N
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'HERE:HP.CMN'
+C
+C arguments
+	INTEGER	N
+C
+	THSLIN = .FALSE.
+	CALL EXPAND('PU;SP%N;',N)
+	CALL HP_BUFFER
+C
+	RETURN
+	END
+C
+	SUBROUTINE MOVTO(X,Y)
+C
+***	MODULE	MOVTO
+***	IDENT	26SE86
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C Move to X,Y
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'HERE:HP.CMN'
+C
+C arguments
+	REAL	X,Y
+C
+	NEWX = IXORG+X*40000.0	! convert metres to plotter counts
+	NEWY = IYORG+Y*40000.0
+C
+	RETURN
+	END
+C
+	SUBROUTINE LINTO(X,Y)
+C
+***	MODULE	LINTO
+***	IDENT	26SE86
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C Line to X,Y
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'HERE:HP.CMN'
+C
+C arguments
+	REAL	X,Y
+C
+C workspace
+	INTEGER		IX,IY
+C
+C Line to X,Y
+C
+	IX = IXORG+X*40000.0	! convert metres to plotter counts
+	IY = IYORG+Y*40000.0
+	IF (IX.NE.NEWX.OR.IY.NE.NEWY) THEN	! something to do
+	   IF (NEWX.NE.CURX.OR.NEWY.NE.CURY) THEN	! invisible move
+	      THSLIN = .FALSE.
+	      CALL EXPAND('PU;')			! pen-up
+	      CALL HP_BUFFER
+	      THSLIN = .TRUE.
+	      CALL EXPAND('%N %N;',NEWX,NEWY)		! move
+	      CALL HP_BUFFER
+	      LSTLIN = .FALSE.
+	   ENDIF
+	   IF (.NOT.LSTLIN) THEN
+	      THSLIN = .FALSE.
+	      CALL EXPAND('PD;')		! pen-down
+	      CALL HP_BUFFER
+	   ENDIF
+	   THSLIN = .TRUE.
+	   CALL EXPAND('%N %N',IX,IY)
+	   CALL HP_BUFFER
+	   CURX = IX
+	   NEWX = IX
+	   CURY = IY
+	   NEWY = IY
+	ENDIF
+	RETURN
+	END
+C
+	SUBROUTINE LDWAIT
+C
+***	MODULE	LDWAIT
+***	IDENT	26SE86
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C Flush buffer
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'HERE:HP.CMN'
+C
+	THSLIN = .FALSE.
+	CALL EXPAND('PU;')	! raise the pen
+	CALL HP_BUFFER
+	CALL HP_FLUSH
+C
+	RETURN
+	END
+C
+C No-op routines
+	SUBROUTINE	DASHED
+C
+***	MODULE	DASHED
+***	IDENT	26SE86
+C
+	ENTRY		DOTTED
+	ENTRY		PCFRAM
+	ENTRY		ORIGIN
+	ENTRY		UNITS
+	ENTRY		THICK
+	ENTRY		DIFRAM
+	ENTRY		CHARS
+	ENTRY		CHSIZE
+	RETURN
+	END
+C
+	SUBROUTINE HP_FLUSH
+C
+***	MODULE	HP_FLUSH
+***	IDENT	26SE86
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C Flush buffer
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'HERE:HP.CMN'
+C
+	IF (HPPTR.GT.0) THEN
+	   CALL FLWSEL(HPOLUN)
+	   CALL FLWLIN(HPBUF,HPPTR)
+	   HPPTR = 0
+	ENDIF
+C
+	RETURN
+	END
+C
+	SUBROUTINE HP_BUFFER
+C
+***	MODULE	HP_BUFFER
+***	IDENT	26SE86
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C Buffer up characters
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE	'HERE:HP.CMN'
+C
+C workspace
+	INTEGER	I
+C
+	IF (LSTLIN.AND.(.NOT.THSLIN.OR.EXPLEN.GT.HPMAX-HPPTR-3)) THEN
+	   HPPTR = HPPTR+1
+	   HPBUF(HPPTR) = ';'			! add terminator
+	   LSTLIN = .FALSE.
+	ENDIF
+	IF (EXPLEN.GT.HPMAX-HPPTR-3) CALL HP_FLUSH
+	IF (THSLIN) THEN
+	   IF (LSTLIN) THEN
+	      HPPTR = HPPTR+1
+	      HPBUF(HPPTR) = ' '		! add a space
+	   ELSE
+	      HPPTR = HPPTR+1
+	      HPBUF(HPPTR) = 'P'		! add a plot absolute
+	      HPPTR = HPPTR+1
+	      HPBUF(HPPTR) = 'A'
+	   ENDIF
+	ENDIF
+	DO 10 I=1,EXPLEN
+	   HPPTR = HPPTR+1
+	   HPBUF(HPPTR) = EXPBUF(I)
+10	CONTINUE
+	LSTLIN = THSLIN			! just buffer a PA line
+C
+	RETURN
+	END

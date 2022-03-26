@@ -1,0 +1,232 @@
+        INTEGER*4  FUNCTION GETF()
+C
+***	MODULE	GETF
+***	IDENT	05JN87
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,England
+C
+CMOD	LSLLIB's IFFOPEN used				TJH  05-Jun-1987
+C	Created.					TJH  20-Aug-1986
+C
+C Get input IFF file and open on lun IFFLUN. Also opens the
+C MOSS output file using FORTRAN on lun MOSLUN. Luns are defined
+C in PARAMS.PAR
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$CMNI2MOSS:PARAMS.PAR'
+	INCLUDE 'LSL$CMNI2MOSS:I2MOSSMSG.PAR'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+C
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNLSL:MTOVCM.CMN'
+	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'LSL$CMNI2MOSS:COMMAND.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+C
+C System parameters
+	INCLUDE		'($DCDEF)/NOLIST'
+	INCLUDE 	'($DVIDEF)/NOLIST'
+	INCLUDE		'($MTDEF)/NOLIST'
+	INCLUDE 	'($SSDEF)/NOLIST'
+C
+C Functions:
+C
+	INTEGER*4	IFFOPEN		! open IFF file for readonly
+	INTEGER		LIB$GETDVI
+	INTEGER		MTONIT		! init magtape
+	INTEGER		MTOSPC		! space forward through magtape
+	INTEGER		MTOEOV		! find end of volume
+	INTEGER		MTORWD		! rewind magtape
+C
+C Workspace:
+	INTEGER		VAL
+	LOGICAL		START,EOF
+	LOGICAL		NORWND
+	INTEGER*4	IERR		! for error return	
+	INTEGER*4	OK		! for error return	
+C
+C
+C ......................................................................
+C
+C
+	GETF=SS$_NORMAL
+C
+C Open IFF input file
+C
+	GETF=IFFOPEN(IFFLUN,P1_FIL(:P1_LEN),,HAD_LOG)
+C
+	IF (GETF) THEN
+C
+C Flag that we have got the input file open
+	   INOPN=.TRUE.
+	ELSE
+	   GOTO 30
+	ENDIF
+C
+C
+C ......................................................................
+C
+C Open MOSS output file
+C
+C
+C Note: the filename has already been parsed into the RDFLN common block
+C if no device, then assume a filename (should not happen)
+C
+	IF (HAD_DEV) THEN
+C
+C Check that we are not dealing with a magtape on a serial line 
+C (specified via /SERIAL_MAGTAPE qualifier)
+C
+	   IF (.NOT.SERMAG) THEN
+C
+C Check if output is a mag tape unit
+C
+	      GETF=LIB$GETDVI(DVI$_DEVCLASS,,STR_DEV(1:LEN_DEV),VAL,,)
+	      IF (.NOT.GETF) THEN
+	         CALL LSL_PUTMSG(I2MOSS__BADDEV,STR_DEV(1:LEN_DEV))
+	         CALL LSL_ADDMSG(GETF)
+	         GETF=I2MOSS__BADDEV
+	         GOTO 30
+	      ENDIF
+C
+	      ISTAPE=VAL.EQ.DC$_TAPE
+	   ELSE
+C
+C Serial line magtape
+C
+	      ISTAPE=.TRUE.
+	   ENDIF
+	ELSE
+	   ISTAPE = .FALSE.
+	ENDIF
+C
+C Initialize tape as output & rewind
+C
+	IF (ISTAPE) THEN
+C
+C Get name of device
+C
+	   GETF=LIB$GETDVI(DVI$_DEVNAM,,STR_DEV(1:LEN_DEV),,
+     &	               DEV_NAM,DEV_NAML)
+	   IF (.NOT.GETF) THEN
+	      CALL LSL_PUTMSG(I2MOSS__BADDEV,STR_DEV(1:LEN_DEV))
+	      CALL LSL_ADDMSG(GETF)
+	      GETF=I2MOSS__BADDEV
+	      GOTO 30
+	   ENDIF
+C
+C Find out if at beginning of tape if ordinary tape drive
+C
+	   IF (.NOT.SERMAG) THEN
+C
+	      GETF=LIB$GETDVI(DVI$_DEVDEPEND,,STR_DEV(1:LEN_DEV),VAL,,)
+	      IF (.NOT.GETF) THEN
+	         CALL LSL_PUTMSG(I2MOSS__BADDEV,STR_DEV(1:LEN_DEV))
+	         CALL LSL_ADDMSG(GETF)
+	         GETF=I2MOSS__BADDEV
+	         GOTO 30
+	      ENDIF
+C
+	      START=(VAL.AND.MT$M_BOT).NE.0
+	      EOF=(VAL.AND.MT$M_EOF).NE.0
+C
+	      IF (START.AND.REWIND) THEN
+	         NORWND=.TRUE.
+	      ELSE
+	         NORWND=.NOT.REWIND
+	      ENDIF
+	  ELSE
+C
+C Serial line magtape; we know nothing about its positioning.
+C
+	     START=.FALSE.
+	     EOF=.FALSE.
+	     NORWND=.NOT.REWIND
+	  ENDIF
+C	   
+C Initialise tape
+C
+	   GETF=MTONIT(DEV_NAM,PE1600,NORWND)
+	   IF (GETF.NE.LSL__NORMAL) THEN
+	      CALL LSL_PUTMSG(I2MOSS__MTOPEN,DEV_NAM(1:DEV_NAML))
+	      CALL LSL_ADDMSG(GETF)
+	      CALL LSL_ADDMSG(MTOERR)
+	      GETF=I2MOSS__MTOPEN
+	      GOTO 30
+	   ELSEIF (HAD_LOG) THEN		! tell user of success?
+	      GETF=I2MOSS__MOSOPNOUT		! yes
+	      CALL LSL_PUTMSG(GETF,P2_FIL(:P2_LEN))
+	   ENDIF
+C
+C Move to end of tape if not rewinding
+C
+	   IF (.NOT. REWIND) THEN
+C
+C If at EOF, then backspace one block, and read to EOV
+C otherwise rewind and read to EOV (which may take some time, so
+C output a message)
+C
+	      IF (EOF) THEN
+	         GETF=MTOSPC(-1)		! space back 1 block
+	      ELSE	         
+	         CALL LSL_PUTMSG(I2MOSS__NOTEOF)
+	         GETF=MTORWD()			! rewind tape
+	      ENDIF
+C
+C Check for error
+C
+	      IF (MTOERR.NE.0) THEN
+	         CALL LSL_PUTMSG(I2MOSS__MTOPEN,DEV_NAM(1:DEV_NAML))
+	         CALL LSL_ADDMSG(GETF)
+	         CALL LSL_ADDMSG(MTOERR)
+	         GETF=I2MOSS__MTOPEN
+	         GOTO 30
+	      ENDIF
+C
+	      GETF=MTOEOV()		! find end of volume
+C
+C Found two tape marks - end of volume. MTOSPC leaves us BETWEEN the
+C two tape marks ready to begin another file.
+C
+	      IF (GETF.NE.LSL__NORMAL) THEN
+	         CALL LSL_PUTMSG(I2MOSS__MTOPEN,DEV_NAM(1:DEV_NAML))
+	         CALL LSL_ADDMSG(MTOERR)
+	         GETF=I2MOSS__MTOPEN
+	         GOTO 30
+	      ENDIF
+	   ENDIF
+C
+C ......................................................................
+C
+C Or open MOSS disk file
+C
+	ELSE
+C
+	   OPEN (UNIT=MOSLUN,STATUS='NEW',CARRIAGECONTROL='LIST',
+     &	      FILE=P2_FIL(:P2_LEN),ERR=20)
+	   IF (HAD_LOG) THEN			! tell user of success?
+	      GETF=I2MOSS__MOSOPNOUT		! yes
+	      CALL LSL_PUTMSG(GETF,P2_FIL(:P2_LEN))
+	   ENDIF
+	ENDIF
+C
+C Flag that we have got the MOSS file open
+C 
+	MOSOPN=.TRUE.
+	GOTO 30
+C
+C Error opening MOSS file for output
+C
+20	CALL ERRSNS(,IERR,OK)
+	IF (OK.EQ.0) OK=IERR
+	GETF=I2MOSS__ERROPMOSS
+	CALL LSL_PUTMSG(GETF,P2_FIL(:P2_LEN))
+	CALL LSL_ADDMSG(OK)
+C
+C ......................................................................
+C
+30	IF (GETF) GETF=SS$_NORMAL        ! normal completion?
+	RETURN
+	END

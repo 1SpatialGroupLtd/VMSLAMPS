@@ -1,0 +1,406 @@
+	LOGICAL FUNCTION READ_GEOMETRY(COORDS,NUMPTS,MAXPTS,IN_GEOM_ID)
+C
+***     MODULE READ_GEOMETRY
+***     IDENT	21MR95
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author	IM	02-09-87
+C Reads and converts coordinates from the GEOMETRY1 record
+C
+CMOD	Modified						TJI 06-Oct-1987
+CMOD	Handle NTF 1.1						VLG 31-Oct-1989
+CMOD	Handle NTF level 3					VLG 31-Mar-1990
+CMOD	Read QPLAN field					VLG 08-Jun-1990
+CMOD	tidied source, introduced further meaningful names	SG 25-Jun-1991
+CMOD	make record with approprite GEOM_ID available immediately at
+C	level 3							SG 19-Jul-1991
+CMOD	bugfix to reading coordinate routines			SG 31-Jul-1991
+CMOD	note that the routine warning about QPLAN was removed since at level
+C	3 it may contain quality information which is not important. At level 1
+C	however, this field is important and if it has been set to anything 
+C	other than 1, warn the user				SG 12-sep-1991
+CMOD	bugfix to correct the above QPLAN warning		ST 21-Jul-1992
+CMOD	BS7567 (v2.0) support added (W93/13)			ST 02-Jun-1993
+CMOD	Fields at the end of a FIXED record are now checked	ST 20-Jul-1993
+C       in case they are blank (ie not there) and are read from
+C       the next line. (Mod 1256)
+CMOD    Take out long-standing error which only allows		ST 21-Mar-1995
+C	[GEOMETRY2] records at level 3. Mod 1475.
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER		MAXPTS			! the size of the buffer
+	REAL		COORDS(2,MAXPTS)	! buffer up our coordinates
+	INTEGER		NUMPTS			! the actual number of points
+	INTEGER		IN_GEOM_ID		! GEOM_ID of record
+C Common
+	INCLUDE 'NTF2IMSG.PAR'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE 'LUNS.PAR'
+	INCLUDE 'FILE_REC.CMN'
+C
+C Functions:
+	LOGICAL		RDINT			! read integer from buffer
+	LOGICAL		RDLONG			! read long integer from buffer
+	LOGICAL		READ_RECORD		! read the next record
+	LOGICAL		IS_CONTINUATION
+	LOGICAL		READ_CONTINUE		! read a continuation record
+	REAL		XCONVERT
+	REAL		YCONVERT
+	REAL		ZCONVERT
+C
+C Workspace:
+	LOGICAL		OK			! Success flag
+	INTEGER		I,J			! Loop counter
+	INTEGER		CPOS,OFF		! Current position in STRING
+	INTEGER		PT			! Current point index
+	INTEGER		X_COORD,Y_COORD,Z_COORD	! NTF coordinates
+C
+	CHARACTER*6	NTF$_GEOM_ID		! NTF$_GEOM_ID field
+	CHARACTER*4	NTF$_NUM_COORD		! NUM_COORD field
+	CHARACTER*2	NTF$_REC_DESCR
+	CHARACTER*10	NTF$_X_COORD
+	CHARACTER*10	NTF$_Y_COORD
+	CHARACTER*10	NTF$_Z_COORD
+	CHARACTER*1	NTF$_QPLAN
+	CHARACTER*10	BLANK
+C
+	LOGICAL		JUMPED
+	INTEGER		INITIAL_REC
+	INTEGER		IOS
+	INTEGER		DATA_INTERVAL		!interval in GEOMETRY record
+	REAL		Z_TMP
+C
+C##############################################################################
+C
+	OK = .TRUE.
+	INITIAL_REC = SEC_REC				!starting record
+	JUMPED = .FALSE.				!still with orig record
+	NTF$_GEOM_ID = '      '
+	BLANK = '          '
+C
+C------------------------------------------------------------------------------
+C If level 3, look up where geometry record is, keep as record in hand
+C
+	IF (LEVEL.EQ.3) THEN
+	  READ (GEOM_LUN, KEY=IN_GEOM_ID, KEYID =0, IOSTAT = IOS) ID_REC
+	  OK = IOS.EQ.0
+C
+C	  ....................................................................
+C	  record was looked-up successfuly, read it in
+C
+	  IF (OK) THEN
+	     SEC_REC = ID_REC.RECORD_NUM -1		! set record number
+	     OK = READ_RECORD()				! read next record
+C
+C	     .................................................................
+C	     everything ok, then set various flags
+C
+	     IF (OK) THEN
+	       JUMPED = .TRUE.
+	       REC_IN_HAND = .TRUE.
+	       NTF$_GEOM_ID = STRING(3:8)
+C
+C	     .................................................................
+C	     couldnt read the record, but did on the first pass, **ERROR**
+C
+	     ELSE
+	       CALL WRITEF('%%NTF2I-E-MISC, unable to get GEOMETRY record')
+	       CALL WRITEF('-NTF2I-W-MISC, data files corrupt')
+	     ENDIF
+C
+C	  ....................................................................
+C	  record doesn't exist or there was a file error
+C
+	  ELSE
+	    CALL WRITEF('%%NTF2I-E-MISC, unable to find record for GEOM_ID')
+	    CALL WRITEF('-NTF2I-I-MISC, GEOM_ID was "%I"',IN_GEOM_ID)
+	  ENDIF
+C
+	ELSE
+C
+C         ---------------------------------------------------------------------
+C	  below level 3, We must read the next record,  should be a GEOMETRY1
+C
+	  
+	  IF (.NOT.REC_IN_HAND) THEN			! havent record in hand
+	    OK = READ_RECORD()				! get record
+	    IF (.NOT.OK) GOTO 999			! check for errors
+	    REC_IN_HAND = .TRUE.			! now have record
+	  ENDIF
+C
+C This check is completely WRONG!
+C The NTF v1.0 and v2.0 (BS7567) specs permit [GEOMETRY1] and [GEOMETRY2]
+C records at levels 1 and above. [GEOMETRY1] and [GEOMETRY2] records may be
+C mixed in a data set.
+C
+C	  IF ( STRING(1:2).NE.REC$_GEOMETRY1 ) THEN	!not GEOMETRY1
+C	    CALL LSL_PUTMSG(NTF2I__NOGEOMETRY)
+C	    IF (LEVEL.NE.3) CALL LSL_ADDMSG(NTF2I__UNEXPREC,STRING(1:2),
+C     &		 SEC_REC)
+C	    OK = .FALSE.
+C	  ENDIF
+C
+	ENDIF
+	IF (.NOT.OK) GOTO 999
+C
+C------------------------------------------------------------------------------
+C have we got a geometry1 or 2?
+C
+	NTF$_REC_DESCR = STRING(1:2)
+	IF (NTF$_REC_DESCR.EQ.REC$_GEOMETRY1) THEN
+	  HAD_Z = .FALSE.
+	ELSEIF (NTF$_REC_DESCR.EQ.REC$_GEOMETRY2) THEN
+	  HAD_Z = .TRUE.
+	  ZMAX = -1.0E37
+	ELSE
+	   CALL LSL_PUTMSG(NTF2I__NOGEOMETRY)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Find out how many points there are
+C
+	NTF$_NUM_COORD = STRING(10:13)
+	CALL SETAUX(%REF(NTF$_NUM_COORD),4)
+	OK = .NOT.RDINT(NUMPTS)				! read NUM_COORD field	
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)	!error
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'NTF$_NUM_COORD')
+	   CALL LSL_ADDSTR(NTF$_NUM_COORD)
+	   GOTO 999
+	ENDIF
+C
+	IF ( NUMPTS.GT.MAXPTS ) THEN			! too many points
+	   CALL LSL_PUTMSG(NTF2I__TOOMNYPTS,NTF$_GEOM_ID,NUMPTS)
+	   CALL LSL_ADDMSG(NTF2I__TRUNCATED,MAXPTS)
+	   NUMPTS = MAXPTS
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Read data from record
+C
+	PT  = 0					! No coordinates in COORDS yet
+	CPOS=14					! Where the coordinates start
+C
+C	.....................................................................
+C	for as many points as there are in the Geometry record
+C
+	DO WHILE ( (OK).AND.(PT.LT.NUMPTS) )
+C
+C See if X coord is on the line and read it
+C
+	   OFF = CPOS
+C
+100	   IF ((OFF+XYLEN).GT.LENGTH-1) THEN !no space for data
+	      OK = IS_CONTINUATION(STRING,LENGTH)
+	      IF (OK) THEN				! should be continue
+		 OK = READ_CONTINUE('GEOMETRY1') 	! get it
+		 IF (OK) THEN				! sucess
+		    CPOS =3				! set new position
+		    OFF = CPOS
+		 ELSE					! continue not found
+		    CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+		 ENDIF
+	      ELSE					! missing continuation
+		 CALL LSL_PUTMSG(NTF2I__GEOMETRY, NTF$_GEOM_ID, SEC_REC)
+		 CALL LSL_ADDMSG(NTF2I__NOTALL)
+	      ENDIF
+	   ENDIF
+	   IF (.NOT.OK) GOTO 999
+	   NTF$_X_COORD(1:XYLEN) = STRING(OFF:OFF+XYLEN-1)
+C
+C For fixed records, there maybe blanks at the end before the continuation
+C flag that should accomodate the coord. Ordnance Survey are inconsistent
+C here, because under CITF and NTF v2.0 they INSIST that as many fields as
+C possible are crammed onto a line but do not do so for OSCAR 1.1 data.
+C
+	   IF (FIXED .AND. NTF$_X_COORD(1:XYLEN).EQ.BLANK(1:XYLEN)) THEN
+	      OFF = 80		! force the reading of the next line
+	      GOTO 100
+	   ENDIF
+	   OFF = OFF + XYLEN
+C
+C Get Y coord
+C
+200	   IF ((OFF+XYLEN).GT.LENGTH-1) THEN !no space for data
+	      OK = IS_CONTINUATION(STRING,LENGTH)
+	      IF (OK) THEN				! should be continue
+		 OK = READ_CONTINUE('GEOMETRY1') 	! get it
+		 IF (OK) THEN				! sucess
+		    CPOS =3				! set new position
+		    OFF = CPOS
+		 ELSE					! continue not found
+		    CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+		 ENDIF
+	      ELSE					! missing continuation
+		 CALL LSL_PUTMSG(NTF2I__GEOMETRY, NTF$_GEOM_ID, SEC_REC)
+		 CALL LSL_ADDMSG(NTF2I__NOTALL)
+	      ENDIF
+	   ENDIF
+	   IF (.NOT.OK) GOTO 999
+	   NTF$_Y_COORD(1:XYLEN) = STRING(OFF:OFF+XYLEN-1)
+	   IF (FIXED .AND. NTF$_Y_COORD(1:XYLEN).EQ.BLANK(1:XYLEN)) THEN
+	      OFF = 80		! force the reading of the next line
+	      GOTO 200
+	   ENDIF
+	   OFF = OFF + XYLEN
+C
+C Get QPLAN
+C
+	   IF ((OFF+1).GT.LENGTH-1) THEN 		!no space for data
+	      OK = IS_CONTINUATION(STRING,LENGTH)
+	      IF (OK) THEN				! should be continue
+		 OK = READ_CONTINUE('GEOMETRY1') 	! get it
+		 IF (OK) THEN				! sucess
+		    CPOS =3				! set new position
+		    OFF = CPOS
+		 ELSE					! continue not found
+		    CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+		 ENDIF
+	      ELSE					! missing continuation
+		 CALL LSL_PUTMSG(NTF2I__GEOMETRY, NTF$_GEOM_ID, SEC_REC)
+		 CALL LSL_ADDMSG(NTF2I__NOTALL)
+	      ENDIF
+	   ENDIF
+	   IF (.NOT.OK) GOTO 999
+	   NTF$_QPLAN(1:1) = STRING(OFF:OFF)
+	   OFF = OFF + 1
+C
+C Get Z coord
+C
+300	   IF (NTF$_REC_DESCR.EQ.REC$_GEOMETRY2) THEN
+	      IF ((OFF+ZLEN).GT.LENGTH-1) THEN 		!no space for data
+		 OK = IS_CONTINUATION(STRING,LENGTH)
+		 IF (OK) THEN				! should be continue
+		    OK = READ_CONTINUE('GEOMETRY1')	! get it
+		    IF (OK) THEN 			! sucess
+		       CPOS =3				! set new position
+		       OFF = CPOS
+		    ELSE				! continue not found
+		       CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+		    ENDIF
+		 ELSE					! missing continuation
+		    CALL LSL_PUTMSG(NTF2I__GEOMETRY, NTF$_GEOM_ID, SEC_REC)
+		    CALL LSL_ADDMSG(NTF2I__NOTALL)
+		 ENDIF
+	      ENDIF
+	      IF (.NOT.OK) GOTO 999
+	      NTF$_Z_COORD(1:ZLEN) = STRING(OFF:OFF+ZLEN-1)
+	      IF (FIXED .AND. NTF$_Z_COORD(1:ZLEN).EQ.BLANK(1:ZLEN)) THEN
+		 OFF = 80	! force the reading of the next line
+		 GOTO 300
+	      ENDIF
+	      OFF = OFF + ZLEN
+C
+C Allow for {QHT} field (and ignore it)
+C
+	      OFF = OFF + 1
+	   ENDIF
+C
+	   CPOS = OFF
+C
+C	  ...................................................................
+C	  check that at level 1 the QPLAN field is '0'
+C
+	  IF (LEVEL.EQ.1) THEN
+	     IF (NTF$_QPLAN.NE.' ') THEN
+		IF (PT.EQ.0) THEN
+		   IF (NTF$_QPLAN.NE.'0') THEN
+		      CALL WRITEF('%%NTF2I-W-MISC, QPLAN field not set to "0"')
+		      CALL WRITEF('-NTF2I-I-MISC, RECORD %I, QPLAN = "%S1"',
+     &			   SEC_REC,NTF$_QPLAN)
+		   ENDIF
+		ELSE
+		   IF (NTF$_QPLAN.NE.'1') THEN
+		      CALL WRITEF('%%NTF2I-W-MISC, QPLAN field not set to "1"')
+		      CALL WRITEF('-NTF2I-I-MISC, RECORD %I, QPLAN = "%S1"',
+     &			   SEC_REC,NTF$_QPLAN)
+		   ENDIF
+		ENDIF
+	     ENDIF
+	  ENDIF
+C
+C	  ...................................................................
+C	  read the data from the fields that we have cut out from the strings
+C
+	  CALL SETAUX(%REF(NTF$_X_COORD),XYLEN)
+	  OK = .NOT.RDLONG(X_COORD)
+	  IF (OK) THEN
+C
+C	     .................................................................
+C	     read y-coord from pair from Y_COORD field
+C
+	     CALL SETAUX(%REF(NTF$_Y_COORD),XYLEN)
+	     OK = .NOT.RDLONG(Y_COORD)
+	     IF (OK) THEN
+C
+C		..............................................................
+C		read the coordinates successfully, store them
+C
+		PT = PT+1
+		COORDS(1,PT) = XCONVERT(X_COORD)
+		COORDS(2,PT) = YCONVERT(Y_COORD)
+C
+C		..............................................................
+C		read maximum height and get prepared to store it in AC
+C		later we intend to store the Z_COORD field and output as CB
+C
+		IF (NTF$_REC_DESCR.EQ.REC$_GEOMETRY2) THEN
+		  CALL SETAUX(%REF(NTF$_Z_COORD),ZLEN)
+		  OK = .NOT.RDLONG(Z_COORD)
+		  IF (OK) THEN
+		     ZMAX = MAX( ZMAX , ZCONVERT(Z_COORD) )		    
+		  ELSE
+		     CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+		     CALL LSL_ADDMSG(NTF2I__ERRORRD,'Z_COORD')
+		     CALL LSL_ADDSTR(NTF$_Z_COORD(1:ZLEN))
+		  ENDIF
+		ENDIF
+C
+C	     .................................................................
+C	     error reading y coordinate field
+C
+	     ELSE
+		CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+		CALL LSL_ADDMSG(NTF2I__ERRORRD,'Y_COORD')
+		CALL LSL_ADDSTR(NTF$_Y_COORD(1:XYLEN))
+	     ENDIF
+C
+C	  ...................................................................
+C	  error in x-coordinate field
+C
+	  ELSE
+	     CALL LSL_PUTMSG(NTF2I__GEOMETRY,NTF$_GEOM_ID,SEC_REC)
+	     CALL LSL_ADDMSG(NTF2I__ERRORRD,'X_COORD')
+	     CALL LSL_ADDSTR(NTF$_X_COORD(1:XYLEN))
+	  ENDIF
+C
+	END DO
+C
+C-----------------------------------------------------------------------------
+C ignore any other continuation records
+C
+	DO WHILE ( IS_CONTINUATION(STRING,LENGTH) )
+	  OK = READ_CONTINUE('GEOMETRY1')
+	END DO
+
+C	
+C###############################################################################
+C get back to the original record if we jumped
+C
+999	IF(JUMPED) THEN
+	  SEC_REC = INITIAL_REC -1			!go back whence we came
+	  CALL READ_RECORD()
+	ENDIF
+C
+	REC_IN_HAND = .FALSE.
+	READ_GEOMETRY=OK
+	RETURN
+	END

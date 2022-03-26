@@ -1,5 +1,5 @@
 	LOGICAL FUNCTION WRITE_CB
-CDEC$	IDENT	'03OC94'
+CDEC$	IDENT	'11OC94'
 C
 C	Copyright (C)			Laser-Scan Ltd., Cambridge
 C
@@ -50,50 +50,63 @@ C Curve sections have new points inserted to constrain the corners and
 C straight sections
 C
 	IF (INTERP(FC_INDEX).EQ.INTERP_CURVE) THEN
-	   NUM_IN = 1
-	   LINE_IN(1,NUM_IN) = LINE_OUT(1,1)
-	   LINE_IN(2,NUM_IN) = LINE_OUT(2,1)
-	   LINE_IN_Z(NUM_IN) = LINE_OUT_Z(1)
-	   LINE_IN_FLAGS(NUM_IN) = LINE_OUT_FLAGS(1)
-	   DO 50 I = 2, NUM_OUT
+	   NUM_IN = 0
+	   DO 50 I = 1, NUM_OUT
+C
+C If the second point is curved and we are dealing with the first then we
+C don't want an inserted point near the first.
+C
+	      IF (((LINE_OUT_FLAGS(2).AND.'0004'X).EQ.4).AND.I.EQ.1) THEN
+		 NUM_IN = 1
+		 LINE_IN(1,NUM_IN) = LINE_OUT(1,1)
+		 LINE_IN(2,NUM_IN) = LINE_OUT(2,1)
+		 LINE_IN_Z(NUM_IN) = LINE_OUT_Z(1)
+		 LINE_IN_FLAGS(NUM_IN) = LINE_OUT_FLAGS(1)
+		 GOTO 50
+	      ENDIF
 C
 C Is the current point a straight section?
 C
 	      IF ((LINE_OUT_FLAGS(I).AND.'0004'X).NE.4) THEN
-		 PREV_PT(1) = LINE_OUT(1,I-1)
-		 PREV_PT(2) = LINE_OUT(2,I-1)
-		 PREV_PT(3) = LINE_OUT_Z(I-1)
+C
+C Don't create a point previous to first point as there isn't one!
+C
+		 IF (I.GT.1) THEN
+		    PREV_PT(1) = LINE_OUT(1,I-1)
+		    PREV_PT(2) = LINE_OUT(2,I-1)
+		    PREV_PT(3) = LINE_OUT_Z(I-1)
 C
 C Generate point before current point
 C
-		 CALL INSERT_CONTROL_PT(PREV_PT(1),PREV_PT(2),PREV_PT(3),
-     &		 			LINE_OUT(1,I),LINE_OUT(2,I),
-     &			 		LINE_OUT_Z(I),NEW_PT)
-		 NUM_IN = NUM_IN + 1
-		 WRITE_CB = .NOT.OVER_LIMIT(NUM_IN)
-		 IF (.NOT.WRITE_CB) GOTO 999
-		 LINE_IN(1,NUM_IN) = NEW_PT(1)
-		 LINE_IN(2,NUM_IN) = NEW_PT(2)
-		 LINE_IN_Z(NUM_IN) = NEW_PT(3)
+		    CALL INSERT_CONTROL_PT(PREV_PT(1),PREV_PT(2),PREV_PT(3),
+     &			 LINE_OUT(1,I),LINE_OUT(2,I),
+     &			 LINE_OUT_Z(I),NEW_PT)
+		    NUM_IN = NUM_IN + 1
+		    WRITE_CB = .NOT.OVER_LIMIT(NUM_IN)
+		    IF (.NOT.WRITE_CB) GOTO 999
+		    LINE_IN(1,NUM_IN) = NEW_PT(1)
+		    LINE_IN(2,NUM_IN) = NEW_PT(2)
+		    LINE_IN_Z(NUM_IN) = NEW_PT(3)
 C
 C Make it an interpolated point (with `I' flag)
 C
-		 LINE_IN_FLAGS(NUM_IN)='0008'X
+		    LINE_IN_FLAGS(NUM_IN)='0008'X
 C
 C If two adjacent points have 'L' flag, then interpolated point should also
 C have it.
 C
-		 IF (((LINE_OUT_FLAGS(I-1).AND.'0002'X).EQ.2).AND.
-     &		     ((LINE_OUT_FLAGS(I)  .AND.'0002'X).EQ.2)) THEN
-		    LINE_IN_FLAGS(NUM_IN)=LINE_IN_FLAGS(NUM_IN).OR.'0002'X
-		 ENDIF
+		    IF (((LINE_OUT_FLAGS(I-1).AND.'0002'X).EQ.2).AND.
+     &			 ((LINE_OUT_FLAGS(I)  .AND.'0002'X).EQ.2)) THEN
+		       LINE_IN_FLAGS(NUM_IN)=LINE_IN_FLAGS(NUM_IN).OR.'0002'X
+		    ENDIF
 C
 C If two adjacent points have 'H' flag, then interpolated point should also
 C have it.
 C
-		 IF (((LINE_OUT_FLAGS(I-1).AND.'0001'X).EQ.1).AND.
-     &		     ((LINE_OUT_FLAGS(I)  .AND.'0001'X).EQ.1)) THEN
-		    LINE_IN_FLAGS(NUM_IN)=LINE_IN_FLAGS(NUM_IN).OR.'0001'X
+		    IF (((LINE_OUT_FLAGS(I-1).AND.'0001'X).EQ.1).AND.
+     &			 ((LINE_OUT_FLAGS(I)  .AND.'0001'X).EQ.1)) THEN
+		       LINE_IN_FLAGS(NUM_IN)=LINE_IN_FLAGS(NUM_IN).OR.'0001'X
+		    ENDIF
 		 ENDIF
 C
 C Copy over current point

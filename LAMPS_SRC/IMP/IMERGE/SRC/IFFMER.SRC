@@ -1,0 +1,512 @@
+	LOGICAL*4 FUNCTION IFFMER
+C
+***	MODULE	IFFMER
+***	IDENT	08JN93
+C
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	From the original MER.SRC by Paul Hardy		TJH  27-Jan-1986
+CMOD	IFF file opened using new IFFOPEN function	TJH  31-Oct-1986
+CMOD	IFF_START made a function			TJH  09-Dec-1986
+CMOD	Now sets input revision level to 1 to deal
+C	with new CB entries				TJH  03-Dec-1987
+CMOD    Prevent initial range being that of the first
+C       input file in case their MD offsets differ	ST   26-Mar-1993
+CMOD    Mod 1235. Use MH2ARR in MHOSGB common to hold the map header in
+C	case it is an MH 4 which could be 10000 long.	ST   08-Jun-1993
+C
+C
+C Routine open the output file(s) and set things up for the actual
+C work of merging which is done by routines SELMER and RESTMER.
+C
+C Function returns one of 7 condition codes:
+C
+C	SS$_NORMAL		-   all is well
+C	IMERGE__EONOTFND	-   end overlay entry not found
+C				    (probably duff EO address in NO 
+C				    entry)
+C	IMERGE__UNEXPEOF	-   unexpected end of IFF file.
+C	IMERGE__UNEXPENT	-   unexpected entry in IFF file.
+C	IMERGE__INVALCP		-   invalid CP entry in file for /CP
+C	LSL__IFFPARSE           -   IFFOPEN unable to parse file-spec
+C	LSL__IFFOPEN            -   IFFOPEN failed to open file
+C
+C
+	IMPLICIT NONE
+C
+C
+C Parameters:
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL
+	INCLUDE		'LSL$CMNIMERGE:PARAMS.PAR'
+	INCLUDE		'LSL$CMNIMERGE:IMERGEMSG.PAR'
+C
+C Common:
+	INCLUDE   'LSL$CMNIFF:COEFFS.CMN'
+	INCLUDE   'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE   'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE   'LSL$CMNIFF:MHOSGB.CMN'
+	INCLUDE	  'LSL$CMNIMERGE:COMMAND.CMN'
+	INCLUDE	  'LSL$CMNIMERGE:MERGE.CMN'
+	INCLUDE	  'LSL$CMNIMERGE:OVLST.CMN'
+	INCLUDE	  'LSL$CMNIMERGE:OVRS.CMN'
+	INCLUDE	  'LSL$CMNLSL:STATUS.CMN'
+C
+C
+C Integer*2:
+	INTEGER*2 IECODE	! entry code for the entry-in-hand
+	INTEGER*2 IELEN		! length of the entry-in-hand
+C
+C Longword:
+	INTEGER	  I,J,ILOOP,JLOOP ! temp. variables
+	INTEGER	  MDTYPE	! 1 = type 1 IFF MD, 2 = type 2 IFF MD
+C
+C Logical:
+	LOGICAL	  DEFCP		! .T. we used 1st file CPs for /CP
+	LOGICAL	  DONINI	! .T. we have not output RA,MH---CP yet
+	LOGICAL	  GOTRA		! prevent INSUFHD messge now not checking HADRA
+C
+C Functions:
+	INTEGER	  IFFCREATE	! create and open IFF file
+	INTEGER	  IFFOPEN	! open IFF file for readonly
+	INTEGER	  IFF_START	! write IFF header entries to output
+	INTEGER	  SELMER	! does merging of selected layers
+	INTEGER	  RESTMER	! does merging of rest of layers
+C
+C Init. CP values:
+	DATA CPTS/16*0.0/
+C
+C ......................................................................
+C
+C Assume the best
+	IFFMER=%LOC(SS$_NORMAL)
+C
+C We have no output file(s) open at present
+	OUTIFO=.FALSE.	
+	SPLIFO=.FALSE.	
+C
+C Determine minimum X, minimum Y origin offset from the input files
+C and use this as the output file origin offset. Then calc. the local
+C file offsets relative to this. The local file offsets are placed in
+C /COMMAND/LOCOFF().
+C
+	CALL RELOFF
+C
+C Set up range etc
+10	RANGE(1)=1.0E37
+	RANGE(3)=RANGE(1)
+	RANGE(2)=-RANGE(1)
+	RANGE(4)=RANGE(2)
+	HADRA=.FALSE.
+	HADMH=.FALSE.
+	HADMD=.FALSE.
+	HADNS=.FALSE.
+	HADCC=.FALSE.
+	HADCP=.FALSE.
+	DONINI=.FALSE.
+	GOTRA=.FALSE.
+C
+C ......................................................................
+C
+C Now set up control-points buffer for changes to follow. Only do this
+C if /CP_EXPANSION was set
+C
+	IF (NEWCP) CALL INICP(TEMPCP)
+C
+C ......................................................................
+C
+C First we want the RA,MH etc from the 1st input file.
+C
+20	DO 170 I=1,NUMPAR
+C
+C Get the input filename.
+	   CINFIL=INFILE(I)(:LENFIL(I))
+	   CINLEN=LENFIL(I)
+C
+C Are we dealing with the special case of merging the file to itself?
+C ie outfile equal to single infile.
+	   IF (SPECAL) GOTO 30
+C
+C No. Attempt to open it using file identification.
+	   IFFMER=IFFOPEN(INLUN,CINFIL,FID(1,I))
+C
+C Did the file open OK?
+	   IF (.NOT.IFFMER) GOTO 320
+C
+C Set a flag to say we have an input file open. Just in case of failure.
+	   INIFO=.TRUE.	
+C
+C And dragoon the IFF input revision level to 1 - treat all CB, ST and
+C ZS entries as if they are CBs 
+	   CALL IFFIRV(1)
+C
+C Rewind the infile.
+	   CALL IFFRWD
+C
+C ......................................................................
+C
+C Loop for entries outside of layers.
+C
+C See if everything has already been obtained
+30	   CALL IFFSEL(INLUN)
+C
+C Get next IFF entry
+	   CALL IFFNXT(IECODE,IELEN)
+	   IF (IELEN.EQ.-1) GOTO 290
+C
+C Despatch on value of IECODE
+	   IF(IECODE.EQ.'RA') GOTO 60
+	   IF(IECODE.EQ.'CP') GOTO 110
+	   IF(IECODE.EQ.'HI') GOTO 30
+	   IF(IECODE.EQ.'NO') GOTO 160
+	   IF(IECODE.EQ.'CC') GOTO 100
+	   IF(IECODE.EQ.'MH') GOTO 70
+	   IF(IECODE.EQ.'MD') GOTO 80
+	   IF(IECODE.EQ.'NS') GOTO 90
+	   IF(IECODE.EQ.'VO') GOTO 30
+	   IF(IECODE.EQ.'EJ') GOTO 290
+	   IF(IECODE.EQ.'SH') GOTO 30
+	   IF(IECODE.EQ.'JP') GOTO 30
+C
+C Unexpected entry code
+50	   CALL LSL_PUTMSG(IMERGE__UNEXPENT,IECODE,LPOSH,
+     &						CINFIL(:CINLEN))
+	   GOTO 30
+C
+C RA - Range entry
+60	   CONTINUE
+	   GOTRA = .TRUE.
+C
+C Don't set the RANGE from these values in case the origin offset are different
+C for the input files.
+C Always best to calculate the range from the coords.
+C
+C	   HADRA=.TRUE.
+C	   CALL EIHRR(RDATA,4,1)
+C	   IF(RDATA(1).LT.RANGE(1)) RANGE(1)=RDATA(1)
+C	   IF(RDATA(2).GT.RANGE(2)) RANGE(2)=RDATA(2)
+C	   IF(RDATA(3).LT.RANGE(3)) RANGE(3)=RDATA(3)
+C	   IF(RDATA(4).GT.RANGE(4)) RANGE(4)=RDATA(4)
+	   GOTO 30
+C
+C MH - Map Header.
+70	   IF (HADMH) GOTO 30
+	   HADMH=.TRUE.
+	   IF (I.GT.1) THEN
+	      CALL LSL_PUTMSG(IMERGE__MISSMH)
+	      CALL LSL_ADDMSG(IMERGE__USE,IECODE,CINFIL(:CINLEN))
+	   ENDIF
+	   MHACTL=MIN0(IELEN,MH2LEN)
+	   CALL EIHRI(MH2ARR,MHACTL,1)
+	   GOTO 30
+C
+C MD - Map Descriptor.
+80	   IF (HADMD) GOTO 30
+	   HADMD=.TRUE.
+	   IF (I.GT.1) THEN
+	      CALL LSL_PUTMSG(IMERGE__NOMD,CINFIL(:CINLEN))
+	      CALL LSL_ADDMSG(IMERGE__USE,IECODE,CINFIL(:CINLEN))
+	   ENDIF
+C
+C Read MD, taking note of type 1 or type 2
+	   MDTYPE=2
+	   IF (IELEN.LT.MD2LEN) MDTYPE=1
+	   CALL EIHR(MD2ARR,MIN(IELEN,MD2LEN),1)
+	   IF (MATV2.EQ.0.OR.MATV2.EQ.1) MDTYPE=1
+	   GOTO 30
+C
+C NS - New Section.
+90	   IF (HADNS) GOTO 30
+	   HADNS=.TRUE.
+	   IF (I.GT.1) THEN
+	      CALL LSL_PUTMSG(IMERGE__MISSNS)
+	      CALL LSL_ADDMSG(IMERGE__USE,IECODE,CINFIL(:CINLEN))
+	   ENDIF
+	   CALL EIHR(IDATA,IELEN,1)
+	   IDATA(IELEN+1)=0
+	   GOTO 30
+C
+C CC - Cubic Coefficients.
+100	   IF (HADCC) GOTO 30
+	   HADCC=.TRUE.
+	   IF (I.GT.1) THEN
+	      CALL LSL_PUTMSG(IMERGE__MISSCC)
+	      CALL LSL_ADDMSG(IMERGE__USE,IECODE,CINFIL(:CINLEN))
+	   ENDIF
+	   CALL EIHRR(CFT,20,1)
+	   GOTO 30
+C
+C CP - Control Points.
+C
+C Are we to expand control-points?
+110	   IF (NEWCP) THEN
+C
+C Yes. Read them in from the current IFF infile.
+	      CALL EIHRR(CPTS,16,1)
+C
+C Check that we have not got CP entry missing from first file or that
+C default (0.0, 0.0) values were read for all 4 corners. /CP_EXPANSION
+C would be a farce!
+	      IF (
+     &		 (I.NE.1.AND..NOT.HADCP)
+     &			.OR.
+     &		 (ABS(CPTS(1,1)).LT.1.0E-6.AND.ABS(CPTS(1,3)).LT.1.0E-6)
+     &							) THEN
+	          IF (I.NE.1.AND..NOT.HADCP) THEN
+		     CINFIL=INFILE(1)(:LENFIL(1))
+		     CINLEN=LENFIL(1)
+		 ENDIF
+	         GOTO 310
+	      ENDIF
+              HADCP=.TRUE.
+C
+C Adjust them to be relative to the origin offset of the output 
+C file.
+	      IF (ABS(LOCOFF(1,I)).GT.1.0E-6
+     &	      .OR.
+     &	      ABS(LOCOFF(2,I)).GT.1.0E-6) THEN
+	         DO 130 ILOOP=1,4
+	            DO 120 JLOOP=1,2
+	               CPTS(JLOOP,ILOOP)=CPTS(JLOOP,ILOOP)
+     &				+LOCOFF(JLOOP,I)
+	               CPTS(JLOOP+2,ILOOP)=CPTS(JLOOP,ILOOP)
+120	            CONTINUE
+130	         CONTINUE	
+	      ENDIF	      
+C
+C And test whether these necessitate CP expansion. CPTS() contains the
+C CP values read from the current file, TEMPCP will come back adjusted
+C to the expanded CP values as appropriate.
+C
+	      CALL MERCPX(CPTS,TEMPCP)
+C
+	   ELSE
+C
+	      IF (HADCP) GOTO 30	! get CP from first file
+C
+C CP entry missing from first input file
+	      IF (I.GT.1) THEN
+	         CALL LSL_PUTMSG(IMERGE__MISSCP)
+	         CALL LSL_ADDMSG(IMERGE__USE,IECODE,CINFIL(:CINLEN))
+	      ENDIF
+	      HADCP=.TRUE.
+	      CALL EIHRR(CPTS,16,1)
+C
+C Adjust the CPs to be relative to the local origin offset of the output
+C file.
+	      IF (ABS(LOCOFF(1,I)).GT.1.0E-6
+     &	      .AND.
+     &	      ABS(LOCOFF(2,I)).GT.1.0E-6) THEN
+	         DO 150 ILOOP=1,4
+	            DO 140 JLOOP=1,2
+	               CPTS(JLOOP,ILOOP)=CPTS(JLOOP,ILOOP)
+     &							+LOCOFF(JLOOP,I)
+	               CPTS(JLOOP+2,ILOOP)=CPTS(JLOOP,ILOOP)
+140	            CONTINUE
+150	         CONTINUE	
+	      ENDIF
+	   ENDIF
+	   GOTO 30
+C
+C Are we dealing with the special case of merging the file to itself?
+C If so we can leave the current (and only!) infile open.
+C
+160	   IF (SPECAL) GOTO 190
+C
+C No. So we must close down the current infile.
+C
+	   CALL IFFCLO(INLUN)
+	   INIFO=.FALSE.
+170	CONTINUE
+C
+C Now close current file if necessary and obtain position in
+C first file at first overlay.
+	GOTO 190
+C
+180	IF (.NOT.SPECAL) THEN
+	   CALL IFFCLO(INLUN)
+	   INIFO=.FALSE.
+	ENDIF
+C
+C Check that we have had all header entries from input file(s). If
+C not set suitable defaults in IFF_START()
+C190	IF (.NOT. (HADRA .AND. HADMH .AND. HADMD .AND. HADNS .AND.
+190	IF (.NOT. (GOTRA .AND. HADMH .AND. HADMD .AND. HADNS .AND.
+     &	   HADCC .AND. HADCP)) THEN
+	   CALL LSL_PUTMSG(IMERGE__INSUFHD)
+	   CALL LSL_ADDMSG(IMERGE__DEF,OUTFIL(:OUTLEN))
+	ENDIF
+C
+C Are we dealing with the special case of merging the file to itself?
+C If so the one (and only) input file is already open. If not, re-open
+C the first input file.
+	IF (.NOT.SPECAL) THEN
+	   CINFIL=INFILE(1)(:LENFIL(1))
+	   CINLEN=LENFIL(1)
+	   IFFMER=IFFOPEN(INLUN,CINFIL,FID(1,1))
+	   IF (.NOT.IFFMER) GOTO 320
+	ENDIF
+C
+C Select and rewind the first input file, special case or not.
+	CALL IFFSEL(INLUN)
+	CALL IFFRWD
+C
+C Again look out for the special case of outfile equal to single infile
+	IF (.NOT.SPECAL) THEN
+C
+C Now check to see if valid corner-points have been created
+	   IF (NEWCP) THEN
+	      DO 210 I=1,4
+	         DO 200 J=1,4
+	            IF (ABS(TEMPCP(J,I)).EQ.1.0E37) DEFCP=.TRUE.
+200	         CONTINUE
+210	      CONTINUE
+C
+C Now put expanded corner points into CPTS. If DEFCP is .T. we couldn't
+C expand the control poins using /CP_EXPANSION so will default to the CP
+C entry of the first input file
+C
+	      IF (DEFCP) THEN
+C
+C CP entries not suitable for /CP switch
+C
+	        IFFMER=IMERGE__INAPPCPS
+	        CALL LSL_PUTMSG(IFFMER)		 ! warn user ...
+	        CALL LSL_ADDMSG(IMERGE__FIRSTCP) ! tell of default
+		CALL IFFNXC('CP',IELEN)		 ! find first file CP
+	        IF (IELEN.EQ.-1) GOTO 290	 ! found ok?
+		CALL EIHRR(CPTS,16,1)		 ! just read CP entry
+C
+	      ELSE
+C
+C CP entries suitable for /CP switch
+C
+	        DO 230 I=1,4
+	          DO 220 J=1,4
+	            CPTS(J,I)=TEMPCP(J,I)	! copy from expanded CP 
+220	          CONTINUE
+230	        CONTINUE
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C Jump to the start of the first layer of the first input file
+C
+	CALL IFFNXC('NO',IELEN)
+C
+C ......................................................................
+C
+C Have we already opened and initialised the output file(s)?
+C
+240	IF (DONINI) GOTO 250
+C
+C No. Open the selections output file.
+	DONINI=.TRUE.
+	IFFMER=IFFCREATE(OUTLUN,OUTFIL(:OUTLEN),
+     &					'Layer: select',,HAD_LOG)
+C
+C Did it open OK?
+	IF (.NOT.IFFMER) GOTO 320
+	OUTIFO=.TRUE.	
+C
+C If /LOG then reassure the user
+	IF (HAD_LST) THEN
+	   CALL FLWRTF(' ')
+	   CALL FLWRTF
+     &		('****************************************'//
+     &		 '****************************************')
+	   CALL FLWRTF
+     &	   ('Output file for selected layers is %S',OUTFIL(:OUTLEN))
+	ENDIF
+C
+C If /SPLIT open the output file for the rest of the layers not selected
+	IF (HAD_SPLIT) THEN
+	  IFFMER=IFFCREATE(RESTLUN,SPLIT_FILE(:SPLIT_LEN)
+     &					,'Layers: rest',,HAD_LOG)
+C
+C Did it open OK?
+	  IF (.NOT.IFFMER) GOTO 320
+	  SPLIFO=.TRUE.	
+C
+C If /LOG then reassure the user
+	  IF (HAD_LST) THEN
+	    CALL FLWRTF
+     &		('Output file for remaining layers is %S'
+     &		,SPLIT_FILE(:SPLIT_LEN))
+	  ENDIF
+	ENDIF
+C
+C Now output everything in the correct sequence, RA,MH,MD,NS,CC,CP,
+C NO etc, first to the selections output file ...
+	IFFMER=IFF_START(OUTLUN,MDTYPE)
+	IF (.NOT.IFFMER) GOTO 320
+C
+C ... and (if required), again to the rest output file
+	IF (HAD_SPLIT) THEN
+	   IFFMER=IFF_START(RESTLUN,MDTYPE)
+	   IF (.NOT.IFFMER) GOTO 320
+	ENDIF
+C
+C Are we dealing with the special case of merging the file to itself?
+C ie outfile equal to single infile.
+250	IF (SPECAL) GOTO 260
+C
+C If not close the current input file
+	CALL IFFCLO(INLUN)
+	INIFO=.FALSE.
+C
+C ......................................................................
+C
+C Get next overlay and then cycle through all the input files doing all
+C the merging. First for the selected layers.
+C
+260	IFIL=0
+	NOVR=0
+	OVPTR=OVROOT
+C
+C Initialise for NXTOV
+	NOPTR=OVLST(2,OVPTR)
+C
+C And then start the merging process
+	IFFMER=SELMER()
+	IF (.NOT.IFFMER) GOTO 320
+C
+C ......................................................................
+C
+C Then for the ones not selected
+C
+	IF (HAD_SPLIT) THEN
+	   IFIL=0
+	   NOVR=0
+	   REST_OVPTR=REST_OVROOT
+C
+C Initialise for NXT_REST_OV
+	   REST_NOPTR=REST_OVLST(2,REST_OVPTR)
+	   IFFMER=RESTMER()
+	ENDIF
+C
+C ......................................................................
+C
+C And return to calling program
+	GOTO 320
+C
+C ......................................................................
+C 
+C Something went wrong.
+C
+C
+C Error - unexpected end of input IFF file
+290	IFFMER=IMERGE__UNEXPEOF
+	CALL LSL_PUTMSG(IFFMER,CINFIL(:CINLEN))
+	GOTO 320
+C
+C If we had default CP values give up gracefully; /CP_EXPANSION
+C would be a farce
+310	IFFMER=IMERGE__INVALCP
+	CALL LSL_PUTMSG(IFFMER,CINFIL(:CINLEN))
+C
+C ......................................................................
+C
+320	RETURN
+	END

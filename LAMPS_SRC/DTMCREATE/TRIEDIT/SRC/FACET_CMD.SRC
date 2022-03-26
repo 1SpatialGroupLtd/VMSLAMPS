@@ -1,0 +1,348 @@
+	LOGICAL FUNCTION FACET_CMD(IZOOM)
+C
+***	MODULE	FACET_CMD
+***	IDENT	27MR92
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C	Created						TJH 19-Apr-1988
+C
+C Function to get an IFF file-spec from the command line:
+C
+C 		FACET file-spec
+C
+C and then write the triangles as 3 pt features in an IFF file.
+C Each point in the triangle feature will be given a z-value
+C and a flag to indicate breakline status.
+C
+C Function returns .T. if all is well.
+C
+	IMPLICIT NONE
+C
+C Argument:
+	INTEGER		IZOOM		! current zoom
+C
+C Parameters:
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNTRIEDIT:TRIEDITMSG.PAR'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$CMNTRIEDIT:DIMS.PAR'
+C
+C sizes of arrays:
+	INTEGER*2	 MHLEN
+	PARAMETER	(MHLEN = 350)	! map header length
+C
+C IFF CB structure definition:
+	INCLUDE   'LSL$CMNIFF:CB.STR'
+C
+C Common:
+	INCLUDE 'LSL$CMNTRIEDIT:CONTR.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:COMMAND.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:DATQ.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:IOLUNS.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:DTMJPI.CMN'
+	INCLUDE 'LSL$DTMCREATESYS:MESSAGE.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TTTYPE.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TPOLGY.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:RCONVI.CMN'
+
+	INCLUDE 'LSL$CMNTRIEDIT:IFCTRL.CMN'
+C
+C W/s:
+	INTEGER		I,J
+	INTEGER*2 	IECODE		! entry code of entry-in-hand
+	INTEGER*2 	IELEN		! length of the entry-in-hand
+	INTEGER		LPOSRA		! address of RA entry
+	LOGICAL		EOF		! end of file?
+	INTEGER		NODE		! current node
+	INTEGER		KNODE		! its 1st neighbour
+	INTEGER		KPLUS		!     2nd neighbour
+	INTEGER		NUMBER		! number of neighbours
+	LOGICAL		OK		! function return
+	REAL		TFLG(3)		! node type flags
+	LOGICAL*1	WINNOD(3)	! node formed by window
+	INTEGER*4	LFTNUM		! FSN as longword (temp)
+	INTEGER*2	WFTNUM		! FSN as word 
+	INTEGER*2	ISEQ		! for feature seq no
+	INTEGER*2	ISTAT(4)	! for IFFFS (preset)
+	INTEGER		NAYS(NTMSIZ)
+	RECORD		/IFF_CBH/CBH	! CB header
+	RECORD		/IFF_CBD/CBD	! CB data
+	INTEGER		XYCOL(4)	! X, Y, Z & flag in CBD
+	BYTE		CH		! for RDCHS
+	CHARACTER*128	FACFIL		! file-spec
+	INTEGER*2	MAPHED(MHLEN)	! map header
+	DATA		MAPHED/350*0/
+	REAL		CCARR(2,10)	! calib coeffs
+	DATA		CCARR/0.0,1.0,8*0.0,2*0.0,1.0,7*0.0/
+	INTEGER		IERR		! error return
+	REAL		TRIBUF(3,3)	! X,Y,X for each tri. vertex
+C
+C Functions:
+	LOGICAL		GETFILNAM	! get file spec from TXTBUF
+	LOGICAL  	RDCHS		! read character from TXTBUF
+	INTEGER		SIGCHS		! significant chars (LSLLIB)
+	LOGICAL		TTRSTR		! read from TT:
+C
+C ......................................................................
+C
+	FACET_CMD=.TRUE.		! assume sucess
+	IF (RDCHS(CH)) THEN		! any file-spec argument?
+	   IF (TTIN) THEN
+	      TXTPTR=80
+	      IF (VT100) THEN
+	         OK=TTRSTR(,,'IFF file? ',IERR)
+	         IF (.NOT.OK) THEN
+	            IF (OK.EQ.LSL__EOF) GOTO 60
+	            CALL LSL_GETMSG(OK,MESSAGE,MESLEN)
+	            CALL OUTOPT(MESSAGE(1:MESLEN))
+	            CALL LSL_GETMSG(IERR,MESSAGE,MESLEN)
+	            CALL OUTOPT(MESSAGE(1:MESLEN))
+	            GOTO 60	
+	         ENDIF
+	         IF (TXTPTR.EQ.0) GOTO 60
+	      ELSE
+	         CALL TEXTOT('IFF file? ',0)
+	         CALL TEXTIN(TXTDSC,EOF)
+	         IF (EOF) GOTO 60
+	      ENDIF
+	      CALL BSLN
+	      IF (RDCHS(CH)) GOTO 60
+	   ELSE
+	      CALL OUTOPT(ERROR//
+     &		'The FACET command requires an IFF file-spec argument')
+	      CALL OUTOPT(' ')
+	      GOTO 60
+	   ENDIF
+	ENDIF
+	CALL BSCH
+	OK=GETFILNAM(FACFIL,I,'LSL$IF:IFF.IFF',.TRUE.,' ')
+	IF (.NOT.OK.OR.I.LE.0) THEN
+	   CALL OUTOPT(WARNING//'error reading IFF file-spec')
+	   GOTO 70			! give up -> nxt cmnd
+	ELSE
+	   CALL STR$UPCASE(FACFIL,FACFIL)
+	ENDIF
+C
+C Are there any points in the window store?
+	IF (NPINW.LE.0) GOTO 70
+C
+C Set the MD flag to say that we have a set type 2 Map Descriptor
+C
+	MATV2=2
+C
+C Put the origin offset into the OO field of the MD
+C
+	MD2LOC(1)=VMIN(1)
+	MD2LOC(2)=VMIN(2)
+C
+C Calculate the current window limits for the IFF range
+	CALL IFF_VALUE(RANGE(1),JSC,1)
+	CALL IFF_VALUE(RANGE(2),JFC,1)
+	CALL IFF_VALUE(RANGE(3),JSR,2)
+	CALL IFF_VALUE(RANGE(4),JFR,2)
+	CPARR(1,1)=RANGE(1)
+	CPARR(2,1)=RANGE(4)
+	CPARR(1,2)=RANGE(1)
+	CPARR(2,2)=RANGE(3)
+	CPARR(1,3)=RANGE(2)
+	CPARR(2,3)=RANGE(3)
+	CPARR(1,4)=RANGE(2)
+	CPARR(2,4)=RANGE(4)
+	DO 20 I=1,4
+	   DO 10 J=1,2
+	      CPARR(J+2,I) = CPARR(J,I)
+10	   CONTINUE
+20	CONTINUE
+C
+C Open the IFF file and put the range etc into it
+	CALL IFFORV(1)		! set output rivision level to CBs
+	CALL IFFERM(.FALSE.) 	! turn IFFLIB error reporting off
+	CALL IFFOPN(LGC4,FACFIL)
+	IF (IERCD.EQ.0) THEN
+	   CALL IFFRWD
+	   CALL SCNCLR		! clear the screen
+	   CALL OUTOPT(' ')
+	   CALL EXPAND('IFF file %S opened for write', 
+     &		FACFIL(1:SIGCHS(FACFIL)))
+	   CALL OUTOPT(EXPDSC)
+	ELSE
+	   CALL OUTOPT(ERROR//'opening IFF file')
+	   CALL LSL_GETMSG(LSL__IFFCREATE,MESSAGE,MESLEN)
+	   CALL EXPAND('%'//MESSAGE(1:MESLEN),FACFIL(1:SIGCHS(FACFIL)))
+	   CALL OUTOPT(EXPDSC)
+	   CALL IFFERM(.TRUE.) 	! turn IFFLIB error reporting back on
+	   CALL LSL_WAIT(2,2)	! wait for 2 secs.
+	   FACET_CMD=.FALSE.
+	   GOTO 70
+	ENDIF
+C
+C Set up the CB header
+	CBH.FLAGS=0				! pen up
+	CBH.GTYPE = 1				! graphical type = line
+	CBH.NROW = 3				! 3 pts in triangle!	
+	CBH.NCOL = 4				! Z,Y,Z,flag
+	CBH.COLH(1) = IFF_C_X			! col 1 is X	
+	CBH.COLH(2) = IFF_C_Y			! col 2 is Y
+	CBH.COLH(3) = IFF_C_Z			! col 3 is Z	
+	CBH.COLH(4) = 94			! col 4 is ZB	
+	CBH.NATT  = 0				! no fixed attributes
+C
+C Fill array of CB column headers
+	XYCOL(1) = IFF_C_X			! X
+	XYCOL(2) = IFF_C_Y			! Y
+	XYCOL(3) = IFF_C_Z			! Z
+	XYCOL(4) = 94				! ZB
+C
+C Init NF counter and FC
+	FTNUM=0
+	ISTAT(1)=LINK_FC
+C
+C Put the standard stuff into IFF file
+	LPOSRA=LPOSE
+	CALL IFFRA(RANGE)
+	CALL IFFHI
+C
+C Assume a non-customer dependent MH entry
+	CALL IFFMH(MAPHED, MHLEN)
+C
+	CALL IFFMD(MD2ARR, MD2LEN)
+C
+C Make a suitable NS entry
+	CALL EXPAND('Created by %S using TRIEDIT',USERNAME(1:USERLEN))
+	CALL IFFNS(EXPBUF)
+	CALL IFFCC(CCARR)
+	CALL IFFCP(CPARR)
+C
+C Record position of NO
+	LPOSNO=LPOSE
+	CALL IFFNO(LAYER,0,0)
+C
+C Set the line object to frame/border for anti-kick bar
+	CALL NEWOBJ(3)
+	CALL BAR (NPINW,0,5)			! start a bar
+C
+C ......................................................................
+C 			M A I N    L O O P
+C
+	DO 40 J=1,NPINW
+	   CALL BAR (NPINW,J,5)
+	   NODE=INWNPT(J)
+C
+C Check this is not an imaginary or deleted point
+	   IF (NODE.LE.LIMPOL.OR.IABS(MAC(5,NODE)).EQ.1) GOTO 40
+C
+C For each in-window point in turn get its neighbours from random
+C memory/disk file
+	   CALL GETNAY(NODE,NAYS,NTMSIZ,NUMBER)
+	   DO 30 I=1,NUMBER-1
+	      KNODE=NAYS(I)
+	      KPLUS=NAYS(I+1)
+C
+C Check for and reject imaginary or deleted node
+	      IF (KNODE.LE.LIMPOL.OR.IABS(MAC(5,KNODE)).EQ.1) GOTO 30
+	      IF (KPLUS.LE.LIMPOL.OR.IABS(MAC(5,KPLUS)).EQ.1) GOTO 30
+C
+C Check for duplicate triangle
+	      IF (KNODE.LT.NODE.OR.KPLUS.LT.NODE) GOTO 30
+C
+C Get (X,Y,Z) for 1st vertex.
+	      CALL IFF_VALUE(TRIBUF(1,1),MAC(1,KNODE),1)
+	      CALL IFF_VALUE(TRIBUF(2,1),MAC(2,KNODE),2)
+	      CALL IFF_VALUE(TRIBUF(3,1),MAC(3,KNODE),3)
+	      RANGE(1)=AMIN1(RANGE(1),TRIBUF(1,1))
+	      RANGE(2)=AMAX1(RANGE(2),TRIBUF(1,1))
+	      RANGE(3)=AMIN1(RANGE(3),TRIBUF(2,1))
+	      RANGE(4)=AMAX1(RANGE(4),TRIBUF(2,1))
+C ... and its node type flag
+	      TFLG(1)=1.0			! unflagged
+	      IF (TPOLGY(KNODE).EQ.1) THEN
+		TFLG(1)=2.0			! river
+	      ELSEIF (TPOLGY(KNODE).EQ.2) THEN
+		TFLG(1)=3.0			! ridgeline
+	      ENDIF
+	      IF (MAC(3,KNODE).LT.0) THEN
+	         TFLG(1)=-TFLG(1)		! breakline
+	      ENDIF
+C
+C Get (X,Y,Z) for 2nd vertex
+	      CALL IFF_VALUE(TRIBUF(1,2),MAC(1,NODE),1)
+	      CALL IFF_VALUE(TRIBUF(2,2),MAC(2,NODE),2)
+	      CALL IFF_VALUE(TRIBUF(3,2),MAC(3,NODE),3)
+	      RANGE(1)=AMIN1(RANGE(1),TRIBUF(1,2))
+	      RANGE(2)=AMAX1(RANGE(2),TRIBUF(1,2))
+	      RANGE(3)=AMIN1(RANGE(3),TRIBUF(2,2))
+	      RANGE(4)=AMAX1(RANGE(4),TRIBUF(2,2))
+C ... and its node type flag
+	      TFLG(2)=1.0			! unflagged
+	      IF (TPOLGY(NODE).EQ.1) THEN
+		TFLG(2)=2.0			! river
+	      ELSEIF (TPOLGY(NODE).EQ.2) THEN
+		TFLG(2)=3.0			! ridgeline
+	      ENDIF
+	      IF (MAC(3,NODE).LT.0) THEN
+	         TFLG(2)=-TFLG(2)		! breakline
+	      ENDIF
+C Get (X,Y,Z) for 3rd vertex
+	      CALL IFF_VALUE(TRIBUF(1,3),MAC(1,KPLUS),1)
+	      CALL IFF_VALUE(TRIBUF(2,3),MAC(2,KPLUS),2)
+	      CALL IFF_VALUE(TRIBUF(3,3),MAC(3,KPLUS),3)
+	      RANGE(1)=AMIN1(RANGE(1),TRIBUF(1,3))
+	      RANGE(2)=AMAX1(RANGE(2),TRIBUF(1,3))
+	      RANGE(3)=AMIN1(RANGE(3),TRIBUF(2,3))
+	      RANGE(4)=AMAX1(RANGE(4),TRIBUF(2,3))
+C ... and its node type flag
+	      TFLG(3)=1.0			! unflagged
+	      IF (TPOLGY(KPLUS).EQ.1) THEN
+		TFLG(3)=2.0			! river
+	      ELSEIF (TPOLGY(KPLUS).EQ.2) THEN
+		TFLG(3)=3.0			! ridgeline
+	      ENDIF
+	      IF (MAC(3,KPLUS).LT.0) THEN
+	         TFLG(3)=-TFLG(3)		! breakline
+	      ENDIF
+C
+C Fill up the CB structure with X,Y,Z
+	      CALL IFS_CB_WRITE(CBH,CBD,TRIBUF,3,XYCOL,1,3)
+C
+C Fill up the CB structure with ZB
+	      CALL IFS_CB_WRITE(CBH,CBD,TFLG,1,XYCOL(4),1,3)
+	      FTNUM=FTNUM+1
+	      IF (FTNUM.GT.65535) THEN
+	         CALL LSL_GETMSG(TRIEDIT__TOMNYTRI,MESSAGE,MESLEN)
+	         CALL OUTOPT(MESSAGE(1:MESLEN))
+	         FACET_CMD=.FALSE.
+	         GOTO 50
+	      ENDIF
+	      LFTNUM=FTNUM
+	      IF (FTNUM.GT.32767) LFTNUM=FTNUM-65536
+	      WFTNUM = LFTNUM			! cvt long to word
+	      ISEQ=0
+	      CALL IFFNF(WFTNUM,ISEQ)
+	      CALL IFFFS(ISTAT)
+	      CALL IFFCB(CBH,CBD)
+	      CALL IFFEF		 
+30	   CONTINUE
+40	CONTINUE
+C
+C Do tidy IFF close down, poke back to the remembered position of the
+C IFF RA entry 
+50	CALL IFFPKE(IECODE,IELEN,LPOSRA)
+C
+C And patch in the calculated new range values
+	CALL EIHWR(RANGE,4,1)
+	CALL IFFUNO(LPOSNO)
+	CALL IFFEO
+	CALL IFFEM
+	CALL IFFEJ
+	CALL IFFCLO
+	CALL IFFCLO(LGC4)
+	GOTO 70
+60	FACET_CMD=.FALSE.
+70	CALL UPDATE(2,IZOOM)
+	RETURN
+	END

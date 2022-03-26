@@ -1,0 +1,369 @@
+	LOGICAL FUNCTION RDMAG()
+C
+***	IDENT	19MY88
+***	MODULE	RDMAG
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs,  1 March 1983
+C
+C Adapted for practical purposes by M. Dhillon, 20 June 1983.
+C
+CMOD	Modernised to use LSLLIB and other recent developments
+C						JMB 22-Mar-1988
+C
+C
+C Function to read from a DLMS DFAD (Digital Land Mass Simulation
+C Digital Feature Analysis Data) mag tape, and assemble the the last
+C header block read into the buffer in /DFAD/ for later use, it returns
+C .FALSE. if succesful.
+C
+C The tape is written by a Univac 1108 computer. This means that the
+C basic word length is 36 bits, and that stripes are written in the
+C opposite order to that expected by the VAX. Thus we must read each
+C block, reverse the order of the stripes, and split the whole thing up
+C into manageable portions (ie 18 bit chunks, which we can store in
+C 32 bit longwords).
+C
+C It also means that the words on the tape are in 1s complement form.
+C This has 2 main effects - firstly, we get two zeroes (+ and -),
+C and secondly we must add 1 to a negative 1s complement number to
+C convert it to 2s complement (which the VAX uses).
+C We do no such conversion in here, because we don't know for which
+C words this must be done.
+C
+C Before the data proper, we may find an ICL header block (27 stripes),
+C but for the moment we shall not do anything about this
+C
+C The tape proper starts with a header block of 6 36bit words (ie 27
+C stripes on the tape), then lots of data blocks, each of 602 36bit
+C words (ie 2709 stripes on the tape) and we finish with a 6 36bit word
+C trailer block
+C
+C For CHANGE 3 tapes, after the manuscript header, we get DSI and ACC
+C blocks. The DSI block is 648 stripes long, the ACC block is 2700
+C stripes long, where both are composed of 8 bit bytes, so must not
+C be restructured into DFABUF!
+C
+C Also note that blocks of 5 and 601 words may be found, on tapes
+C straight from the Univac (ie 23 or 2705 stripes)
+C
+C Henceforward, 'word' shall mean a 36bit word, and 'byte' a standard
+C 8 bit byte ('longword' will mean a VAX 32 bit longword)
+C
+C The optional ICL header block is of variable length
+C
+C The header/trailer blocks are 6 words long:
+C	words 1-4 contain bitcoded info,
+C	word 5 contains a checksum,
+C	word 6 is zero
+C
+C The data blocks are 602 words long:
+C	words 1-600 contain data,
+C	word 601 contains a checksum,
+C	word 602 is zero
+C
+C
+	IMPLICIT NONE
+C
+	INCLUDE		'SYS$LIBRARY:FORSYSDEF($SSDEF)'
+C
+C
+C common blocks
+C
+***	COMMON/HERE:SCRIPT/		! for MANNUM
+***	COMMON/LSL$CMNDLMS:DFAD/	! DFAD storage, BYTBUF too
+***	COMMON/HERE:STATE/		! what state we are in - BLKTYP
+***	COMMON/HERE:PARAMS/		! for something
+***	COMMON/HERE:I2DFADMSG.PAR/	! for messages
+***	COMMON/LSL$CMNLSL:MTOVCM/	! input buffering
+C
+C functions in use
+C
+	INTEGER*4	MTORDB		! read a block off magtape
+	INTEGER*4	LIB$EXTZV	! extract a bitfield (0 extend)
+C
+C workspace
+C
+	INTEGER*2	DUPMAX		! max size of duplicate buffer
+	PARAMETER	(DUPMAX = 12)
+	INTEGER*4	DUPBUF(DUPMAX)	! duplicate buffer
+	INTEGER*2	DUPPTR		! offset into duplicate buffer
+	INTEGER*4	ERROR		! result from MTIRDB, etc
+	INTEGER*4	OERR		! for widening errors into
+	INTEGER*4	CHUNK(4)	! for Univac word assembly
+	INTEGER*4	CHKSUM(2)	! for checksum assembly
+	INTEGER*2	BASE		! count of longwords
+	INTEGER*2	I,J		! DO loop count
+	INTEGER*2	CHPTR		! for copying chunks
+	INTEGER*2	CHKTOP		! when to stop checksumming
+C
+C Assume disaster awaits along the next few steps of destiny's 
+C invisible path.
+C
+	RDMAG = .TRUE.
+C
+C and we must unset our checksum...
+C
+	CHKSUM(1) = 0
+	CHKSUM(2) = 0
+C
+C and unset any idea of what sort of block this might be
+C
+	BLKTYP = -1			! unknown/error block
+C
+C first, let us actually read that block...
+C
+	ERROR = MTORDB( BYTBUF, INLEN, BYTCNT )
+C
+	IF (.NOT.ERROR) THEN
+	   IF (MTOERR.EQ.SS$_ENDOFFILE) THEN
+	      BLKTYP = TAPEMK		! we read a tapemark
+	      RDMAG = .FALSE.
+	   ELSE
+	      OERR = MTOERR
+	      CALL LSL_PUTMSG( ERROR )
+	      CALL LSL_ADDMSG( OERR )	! and explain the problem
+	   ENDIF
+	   RETURN			! and back to main program
+	ENDIF
+C
+C otherwise we have the block safe in our hands
+C
+C NOTE - the mystical value 'A2'X is how HDDR looks when it is
+C 4 into 3 packed into 8 bit stripes. This value comes at the start
+C of an ICL header
+C
+	IF (BYTCNT.EQ.648) THEN
+C
+	   BLKTYP = DSIHED		! DSI block found
+C
+	ELSEIF (BYTCNT.EQ.2700) THEN
+C
+	   BLKTYP = ACCHED		! ACC block found
+C
+	ELSEIF (BYTCNT.EQ.2709.OR.BYTCNT.EQ.2705) THEN
+C
+	   CHKTOP = 600*2		! word 601 is checksum
+	   BLKTYP = FTRBLK		! so it's a feature block
+C
+	ELSEIF (BYTCNT.EQ.27.OR.BYTCNT.EQ.23) THEN
+C
+	   CHKTOP = 4*2			! word 5 is checksum
+	   BLKTYP = MANHED		! and it is a header
+C
+C	 but if first block, check for ICL header just in case
+C
+	   IF (MTONBL.EQ.1.AND.BYTBUF(1).EQ.'A2'X) BLKTYP = ICLHED
+C
+	ELSE
+C
+C	 an unknown block length - if it is the first block
+C	 then check if it is an ICL header
+C
+	   IF (MTONBL.EQ.1.AND.BYTBUF(1).EQ.'A2'X) THEN
+	      BLKTYP = ICLHED			! was a header
+	   ELSE
+	      BLKTYP = -1			! unknown block size
+	   ENDIF
+C
+	ENDIF
+C
+C now, should we abandon processing at this level?
+C We do so if it is not written with 36 bit words, or if we don't know
+C what it is
+C
+	IF ( BLKTYP.EQ.DSIHED .OR. BLKTYP.EQ.ACCHED .OR.
+     &	     BLKTYP .EQ. FTRBLK .OR.
+     &	     BLKTYP.EQ.ICLHED .OR. BLKTYP.EQ.-1 ) THEN
+	   IF (BLKTYP.EQ.-1) THEN
+	      CALL WRITEF('Unrecognised block length %N',BYTCNT)
+	   ENDIF
+	   RDMAG = .FALSE.
+	   RETURN			! to deal with the problem
+	ENDIF
+C
+C if we are skipping to a particular manuscript, we shall only
+C process this block (below) if it is a manuscript header, since
+C data blocks are being ignored
+C
+	IF (BLKTYP.NE.MANHED) THEN
+	   RETURN			! and leave it at that
+	ENDIF
+C
+C So by this stage we actually DO want to do things with it -
+C let us proceed
+C
+C However we have no way of knowing if the block being processed is
+C a header block or a trailer at this stage, so it is desirable to
+C duplicate the current contents of the first six words and then copy
+C them back later on if the present block is found to be a trailer, and
+C consequently not wanted.
+C
+	DO 300 DUPPTR=1,12
+	   DUPBUF(DUPPTR) = DFABUF(DUPPTR)
+300	CONTINUE
+C
+C Univac have the unfortunate habit (apart from using 36 bit words) of
+C regarding the most significant stripe (in VAX terms) as the least
+C significant. Thus we must reverse the order of the stripes in the
+C buffer - each set of 1,2,3,4,... must become a set of ...,4,3,2,1
+C
+C Note that thus we reverse blocks of 9 stripes (2 words) which has the
+C additional result of reversing the order of the words
+C
+	CALL SWAP( BYTBUF, BYTCNT, .FALSE. )	! do the swapping
+C
+C so we now have our buffer containing stripes in a sensible order,
+C but words in reversed pairs.
+C
+C we must now abstract 18 bit CHUNKs to insert into the buffer in
+C /DFAD/ for future use, elsewhere in the program
+C
+C the sequence is really quite simple, and relies on the fact that
+C 9*8 = 2*36 = 72  -  ie 9 bytes are equivalent to 2 Univac words
+C and we can ensure that we unpack every 9 bytes into 4 CHUNKs
+C
+C word 2 comes first...
+C chunk3 <-                byte1, byte2, bottom 2 bits of byte3
+C chunk4 <-  top 6 bits of byte3, byte4, bottom 4 bits of byte5
+C
+C words 1 comes after it...
+C chunk1 <-  top 4 bits of byte5, byte6, bottom 6 bits of byte7
+C chunk2 <-  top 2 bits of byte7, byte8, byte9
+C
+C Note that when we extract our 18 bits, we do NOT sign extend
+C
+C as we read words, we add them to the checksum. When we read the
+C checksum off the tape (last but one word, the last word is zero),
+C we compare it with our calculated value. Thus we must not add the
+C last two words into our calculated checksum - we work out the value
+C that DFALEN will have when we reach the checksum,zero pair of words.
+C
+C we start with nowt in the buffer
+C
+	DFALEN = 0			! zero 1/2 word pointer
+C
+	DO 500 BASE = 1,BYTCNT,9
+C
+C	 get the second word of 36 bits from the buffer
+C
+	   CHUNK(3) = LIB$EXTZV( 0, 18, BYTBUF(BASE)  )	! low 1/2
+	   CHUNK(4) = LIB$EXTZV( 2, 18, BYTBUF(BASE+2) )! high 1/2
+C
+C	 and get the first 36 bit word from the buffer
+C
+	   CHUNK(1) = LIB$EXTZV( 4, 18, BYTBUF(BASE+4) )! low 1/2
+	   CHUNK(2) = LIB$EXTZV( 6, 18, BYTBUF(BASE+6) )! high 1/2
+C
+C	 we must now consider our checksum - we add the words we've
+C	 worked out to the checksum, unless they are the last two
+C	 words of the block, which are always checksum value and zero
+C
+	   IF ( DFALEN.EQ.CHKTOP ) THEN
+C
+C	    we have our checksum calculated - compare it with the value
+C	    we've obtained from adding up all those words off tape
+C
+	      IF ( CHKSUM(1).NE.CHUNK(1) .OR.
+     &		   CHKSUM(2).NE.CHUNK(2) ) THEN
+		 CALL WRITEF(
+     &		'In block %^L%N, checksum is incorrect',MTONBL)
+		 CALL EXPAND(
+     &		'    1/2 words are: recorded %P0%^L%X5/%^L%X5, ',
+     &					 CHUNK(2),  CHUNK(1)  )
+		 CALL WRITAP('calculated %^L%X5/%^L%X5',
+     &					 CHKSUM(2), CHKSUM(1) )
+	      ENDIF
+C
+C	    and we have finished reading everything of meaning in this
+C	    block - we have no need to transfer the checksum to the
+C	    buffer (and especially there's no point in making sure its
+C	    not negative!), so we skip out to the bottom of the loop
+C
+	      GOTO 500			! finished assembling buffer
+C
+	   ELSE
+C
+C	    we must add these words to the checksum we are calculating
+C
+	      CALL CHECK( CHUNK(1), CHKSUM )
+	      CALL CHECK( CHUNK(3), CHKSUM )
+C
+	   ENDIF
+C
+C	 and copy them over to the waiting buffer
+C
+	   DO 400 CHPTR = 1,4
+C
+	      DFABUF( DFALEN+CHPTR ) = CHUNK( CHPTR )
+400	   CONTINUE
+C
+	   DFALEN = DFALEN + 4		! increase our chunk count
+C
+500	CONTINUE		! and loop for the next pair of words
+C
+C Now check that what is in there is indeed a manuscript header and
+C not a trailer block.
+C
+	IF (DFALEN .NE. 8) THEN
+	   CALL LSL_PUTMSG(I2D__UNRDBLK,'header')
+	   RETURN
+	ENDIF
+C
+C Now reset the pointer into DFABUF
+C	DFAPTR = 1
+	IF ( DFABUF(DFAPTR+1).EQ.'3F000'X .AND.
+     &	     DFABUF(DFAPTR).EQ.0 ) THEN
+C
+C	 we have bits 1-6 (Univac) of the first word set, so this
+C	 looks like it should be a trailer - let's check as much
+C
+	   DO 150 I = 2,6,2
+	      IF ( DFABUF(DFAPTR+I).NE.0 .OR.
+     &		   DFABUF(DFAPTR+I+1).NE.'3F000'X ) THEN
+		 CALL WRITEF(
+     &	       'word %^W%N of trailer label corrupt (manuscript %^L%N)',
+     &			  I/2,					MANNUM)
+		 CALL WRITEF('    1/2 words are %P0%^L%X5/%^L%X5',
+     &				DFABUF(DFAPTR+I),DFABUF(DFAPTR+I+1) )
+	      ENDIF
+150	   CONTINUE
+C So we have a trailer, recopy the contents of the last manuscript 
+C header from the duplicate buffer, declare the block to be a trailer
+C and return.
+C
+	   DO 600 DUPPTR=1,12
+	      DFABUF(DUPPTR)=DUPBUF(DUPPTR)
+600	   CONTINUE
+	   BLKTYP = TRAILR
+	   RDMAG = .FALSE.
+	   RETURN
+	END IF
+C
+C	IF (DIAG) THEN
+C
+C	 - describe our buffer's start...
+C
+C	   CALL WRITEF(' ')
+C	   CALL WRITEF('.Block %^L%N, %N ''words'' of data',
+C     &					MTONBL,(DFALEN+1)/2)
+C	   CALL WRITEF('.First few words are:')
+C
+C	   DO 1200 CHPTR = 1,12,4
+C	      CALL WRITEF(' %P0%^L%X5 / %^L%X5,   %^L%X5 / %^L%X5',
+C     &		   DFABUF(CHPTR+1), DFABUF(CHPTR), DFABUF(CHPTR+3),
+C     &		   DFABUF(CHPTR+2) )
+C1200	   CONTINUE
+C
+C	   CALL WRITEF(' ')
+C	ENDIF
+C
+C So that's all over, and we have our buffer in hand.
+C Point to the first word as the next one to be read...
+C
+	DFAPTR = 1
+	RDMAG = .FALSE.
+C
+	RETURN
+	END

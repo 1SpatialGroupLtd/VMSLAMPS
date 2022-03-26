@@ -1,0 +1,197 @@
+	.TITLE	VSVG
+ 
+	.IDENT	/29SE82/
+ 
+	.PSECT	VSCODE
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+ 
+; Author:	Susan Manning
+ 
+; VS11  'Vector Generator'
+ 
+; Flush moves
+V.FLSH::BBCC	#VFLG_V_VUPTD,VSFLAG,VFLRTS	; branch if already up to date
+VFLSH:	MOVF	VSSAVX,R6
+	CLRW	R10
+	MOVF	VSSAVY,R8
+	BSBB	VSMVGN			; generate the move
+VFLRTS:	RSB
+ 
+ 
+; Generate a move
+$VSMOV::TSTW	R10			; branch if bright
+	BNEQ	VSUPTD
+	MOVF	R6,VSSAVX		; preserve endpoints
+	BISL2	#VFLG_M_VUPTD,VSFLAG	; remember not up to date
+	MOVF	R8,VSSAVY
+	RSB				; nothing generated in this case
+ 
+ 
+; Visible move - any moves not up to date ?
+VSUPTD:	BBCC	#VFLG_V_VUPTD,VSFLAG,VSMVGN	; branch if already are
+	PUSHL	R6			; preserve move-in-hand
+	PUSHL	R10
+	PUSHL	R8
+	BSBB	VFLSH			; flush out buffered invisible
+	MOVF	(SP)+,R8		; restore move-in-hand
+	MOVF	(SP)+,R10
+	MOVF	(SP)+,R6
+; Fall through to generate move-in-hand
+; converts R6,R8 => R7,R9 (VS11 pixels)
+ 
+VSMVGN:	ADDF2	VSCEN,R6		; convert to pixels relative to
+	ADDF2	VSCEN,R8		; 	bottom left hand corner
+	CVTRFL	R6,R7			; to integer pixels
+	BGEQ	30$
+	CLRW	R7			; force in range at bottom
+30$:	CMPW	R7,#VSEXT
+	BLEQ	40$
+	MOVW	#VSEXT,R7		; force in range at top
+40$:	CVTRFL	R8,R9			; now same for Y
+	BGEQ	50$
+	CLRW	R9
+50$:	CMPW	R9,#VSEXT
+	BLEQ	60$
+	MOVW	#VSEXT,R9
+60$:	MOVL	#3,R0			; no. of words to be buffered
+	BBCC	#VFLG_V_FRCABS,VSFLAG,70$   ; branch if not forced absol. mode
+ 
+; Output Absolute Point Data Word
+	MOVW	#ABSPT,R4		; o/p set absolute mode word if needed
+	BSBW	SETMODE			; and check room in buffer for coords
+	ASHL	#1,R7,R6		; full screen resolution = 1024 pts
+	BISW3	R10,R6,R4		; buffer X data word
+	BSBW	$VSBFW
+	ASHL	#1,R9,R8		; full screen res. = 1024 pts
+	MOVW	R8,R4			; and then Y
+	BSBW	$VSBFW
+	BRB	PRESRV			; common exit, saving new current pos.
+ 
+; Determine whether Short or Long Vector Mode must be used
+70$:	CLRL	R11			; for negative Y marker
+	SUBW3	VSRHXC,R7,R6		; subtract previous position
+	BGEQ	80$
+	MNEGW	R6,R6			; get mod. of relative move
+	BISL2	#VSNEG,R10		; remembering direction of move
+80$:	SUBW3	VSRHYC,R9,R8		; ditto for Y
+	BGEQ	90$
+	MNEGW	R8,R8
+	BISL2	#VSNEG,R11
+90$:	CMPW	R6,#31			; use Short Vector ?
+	BGTR	LONG			; no
+	CMPW	R8,#31
+	BGTR	LONG			; no
+ 
+; Output Short Vector Data Word
+SHORT:	MOVW	#SVECT,R4		; change mode if necessary
+	DECL	R0			; one less word in this case
+	BSBB	SETMODE			; and check room in buffer
+	INSV	R6,#SXPOS,#SCSIZ,R10	; R10 has X direction, insert X move
+	INSV	R8,#SYPOS,#SCSIZ,R10	; insert Y move
+	BITL	#VSNEG,R11		; Y move negative ?
+	BEQL	100$			; no
+	BISL2	#SYNEG,R10		; yes, insert Y direction
+100$:	MOVW	R10,R4			; buffer data word
+	BSBW	$VSBFW
+	BRB	PRESRV			; common exit, saving new current pos.
+ 
+; Output Long Vector X and Y Data Words
+LONG:	MOVW	#LVECT,R4		; change mode if necessary
+	BSBB	SETMODE			; and check room in buffer
+	ASHL	#1,R6,R6		; full screen res. = 1024 pts
+	BISW3	R10,R6,R4		; inc. INT and X dir. into X move
+	BSBB	$VSBFW			; buffer X move
+	ASHL	#1,R8,R8		; (1024 pts)
+	BISW3	R11,R8,R4		; buffer Y move
+	BSBB	$VSBFW
+ 
+; Common exit, preserving new current position
+PRESRV:	MOVW	R7,VSRHXC
+	MOVW	R9,VSRHYC
+	RSB
+ 
+ 
+; Compares the mode passed in R4 with the current mode, VSMOD and outputs a
+; Set Mode Control word if necessary.
+; The colour control bits are sent only if colour selection has changed.
+; (N.B. colour change forces a new mode control word by clearing the apparent
+;       current mode)
+SETMODE:MOVW	R4,-(SP)
+	BSBB	$VSCHKBF		; ensure >= 5 free words in buffer
+	MOVW	(SP)+,R4
+SETMODC::CMPW	R4,VSMOD		; requested mode = current mode ?
+	BEQL	15$			; yes, get out quick
+	MOVW	R4,VSMOD		; save new mode
+	CMPW	R4,#CHARCT
+	BNEQ	5$			; branch unless character mode
+	MOVW	#SCBASE,R4
+	BSBB	$VSBFW			; o/p set character base control word
+	MOVW	#SCMEM,R4		; and its data word (mem, rel start)
+	BSBB	$VSBFW
+	MOVW	VSMOD,R4		; restore R4
+	BISL2	#VFLG_M_FRCABS,VSFLAG	; force next move to be in abs.pt.mode
+5$:	BBCC	#VFLG_V_SETCOL,VSFLAG,10$  ; determine whether to include
+	BISW2	#C,R4		; colour selection and enable it
+	INSV	VSCOLR,#CPOS,#CLEN,R4	; select new colour
+10$:	BSBB	$VSBFW			; buffer Set Mode Control word
+15$:	RSB
+ 
+ 
+; Buffer the word in R4 into the main display file
+$VSCBFW::MOVL 	#2,R0			; checked entry point
+	BSBB	$VSCHKBF
+$VSBFW::MOVAL	VSBPTR,R1		; unchecked entry point
+	MOVL	(R1),R5			; word pointer
+	MOVW	R4,(R5)+		; put word into buffer
+	MOVL	R5,(R1)			; restore pointer
+	RSB
+ 
+ 
+; Check that there are R0 free words in the main display file (plus 1 for stop)
+$VSCHKBF::INCL	R0			; include stop word
+	ASHL	#1,R0,R0		; convert to bytes
+	SUBL3	VSBPTR,VSBFLIM,R1		; calc. no. of bytes free
+	CMPL	R0,R1
+	BLEQ	10$			; branch if enough free words
+	BSBB	$VFLUSH			; flush out the buffer
+10$:	RSB
+ 
+ 
+ 
+; Flush the VS11 buffer, wait for completion then continue
+$VFLUSH::MOVW	#L.AS!ESTOP,R4		; STOP / ENABLE INT
+	BSBB	$VSBFW
+	MOVL	#IO$_START,VO.FUNC	; store function
+	SUBL3	#VSBUF,VSBPTR,VO.LEN	; store length
+	TSTB	VSENBL			; enabled ?
+	BEQL	$VSSET			; no - don't output
+$VSSEND:$QIOW_G	VO.DPB			; send data buffer
+	BITW	#VST,VSSTATUS+6		; test status
+	BNEQ	ERRVS
+	EXTZV	#28,#3,VSSTATUS+4,R0	; extract interrupt status
+	CMPL	R0,#VS$CR_STOP		; test it
+	BNEQ	ERRINT
+$VSSET:	MOVAW	VSBUF,VSBPTR		; reset ptr to start of buffer
+	RSB				; continue
+ 
+ERRVS::	EXTZV	#12,#4,VSSTATUS+4,VSERR
+	MOVL	#SS$_DEVREQERR,R0
+	BRB	VSERRSIG
+ 
+ERRINT:	BBC	#VFLG_V_JSENB,VSFLAG,10$ ; br if JS interrupt inhibited
+	CMPL	R0,#VS$CR_SWITCH	; stop due to JS interrupt ?
+	BNEQ	10$			; branch if not
+	BISL2	#VFLG_M_JSINT,VSFLAG	; mark had it
+	MOVL	#IO$_RESUME,VO.FUNC	; resume function
+	BRB	$VSSEND			; and reissue QIO
+10$:	MOVL	R0,VSINTERR
+	MOVL	#SS$_TIMEOUT,R0
+ 
+VSERRSIG::PUSHL	R0
+	CALLS	#1, G^LIB$SIGNAL
+	RSB
+ 
+ 
+	.END
+	

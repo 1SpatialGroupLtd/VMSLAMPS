@@ -1,0 +1,341 @@
+	SUBROUTINE GETSTR(PUCK,ON)
+C
+***	MODULE	GETSTR
+**	IDENT	22DE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    06-Aug-1986
+C
+	IMPLICIT NONE
+C
+C This subroutine is called when the START (or MOVE command button 0)
+C has been issued
+C either from the puck button or the terminal.  
+C It outputs a digitised string to the output IFF file.
+C The END command terminates the digitised feature and control is
+C returned to the main program.
+C 
+CArgument 
+	LOGICAL	PUCK
+	LOGICAL ON	!To allow cursor positioning without recording
+			! a point	
+C
+	INCLUDE	'LSL$CMNROVER:GKSPAR.PAR'
+C
+	INCLUDE	'LSL$CMNROVER:COLCMN.CMN'
+	INCLUDE	'LSL$CMNROVER:IFFCMN.CMN'
+	INCLUDE	'LSL$CMNROVER:DIGCMN.CMN'
+	INCLUDE	'LSL$CMNROVER:DTICMN.CMN'
+	INCLUDE	'LSL$CMNROVER:FPPDAT.CMN'
+	INCLUDE	'LSL$CMNROVER:GKS.CMN'
+	INCLUDE	'LSL$CMNROVER:ROVCMN.CMN'
+	INCLUDE	'LSL$CMNROVER:TAB.CMN'
+	INCLUDE	'LSL$CMNROVER:DTIQIO.CMN'
+	INCLUDE	'LSL$CMNROVER:TRANS.CMN'
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C Functions
+	INTEGER*4	RDCOMM
+	LOGICAL		READ_PUCK
+	LOGICAL		HAD_PUCK
+	LOGICAL		WAIT_INPUT
+C
+	EXTERNAL	END_CMD_TABLE
+C
+C Local variables
+	INTEGER*4	I		!counting variable
+	INTEGER*2	ISTAT(4)	!FS array
+	INTEGER*4	CMD		!command number
+	REAL		PX(2),PY(2)	!2 pt strings for GPL
+	REAL		STBUF(2,200)	!string buffer
+	INTEGER*2	IENDS		!pen up pen down
+	REAL		CURSX,CURSY	!cursor position
+	REAL		X_DTI,Y_DTI	!position in DTI coords
+	REAL		X_OUTDTI,Y_OUTDTI !position in DTI UNITS 
+	LOGICAL		LAST_PT
+	INTEGER*2	ISQ
+	LOGICAL		FLSHED
+	LOGICAL 	ABANDN
+	LOGICAL		PSONLY
+	INTEGER*4	POSN
+C
+C
+	IF ((.NOT.PLOT_IFF ).AND. (.NOT.ON))THEN
+	   CALL WRITEF
+     &	   ('%S No output file has been specified',EBELL)
+	   GOTO 1000
+	END IF
+C
+	IF (.NOT.HADIFF(1)) THEN
+	   WIND(1,1,IFFCHAN) = DTI_WINDOW_SWX(DTICHAN)
+	   WIND(1,2,IFFCHAN) = DTI_WINDOW_SWY(DTICHAN)
+	   WIND(2,1,IFFCHAN) = DTI_WINDOW_NEX(DTICHAN)
+	   WIND(2,2,IFFCHAN) = DTI_WINDOW_NEY(DTICHAN)
+	END IF
+C
+C	IF (DIVIDED .AND. (.NOT.HADPOS)) THEN
+C	   IF (CURPOS .EQ. 1) THEN
+C	      POSN = 4
+C	   ELSE
+C	      POSN = CURPOS - 1
+C	   END IF
+C	ELSE
+	   POSN = CURPOS
+C	END IF
+C
+C set GKS transformation
+C switch on cursor at current position
+	CALL LSG_SET_CURSOR(WKID,ZOOMX,ZOOMY,.TRUE.)
+	CALL INIGKS(POSN,DTICHAN)
+	CALL LSG_PLANE_SELECT(WKID,.NOT.PLANE_MASK) ! select picture 2
+	CALL LSG_PLANE_OFFSET(WKID,NOPLNS)
+	CALL LSG_PLANE_VISIBLE(WKID,-1)		! all visible
+	CALL GSPLCI(1)				! colour 1
+	CALL GSLWSC(1.0)			! thin lines
+	CALL GUWK(WKID,GSUPP)
+C
+	IF (PLOT_IFF) THEN
+	   CALL IFFSEL(1)
+	END IF
+C
+C initialise feature
+	I = 0
+	IENDS = 0
+	LAST_PT = .FALSE.
+	ISTAT(1) = CURFC
+	ISTAT(2) = 0
+	ISTAT(3) = 0
+	ISTAT(4) = 0
+	ISQ = 0
+	FLSHED = .FALSE.
+	ABANDN  = .FALSE.
+	PSONLY = ON
+	PX(2) = 0
+	PY(2) = 0
+C	
+C If START command was issued from terminal then we don't have any 
+C coordinates yet
+
+	IF (PUCK) GOTO 20
+C
+10	TTOPRO = .TRUE.
+	ERR = (.NOT.WAIT_INPUT('Digitise Point'))
+	IF (ERR) GOTO 900
+C
+	IF (HAD_PUCK(IERR)) THEN
+	   ERR = READ_PUCK(BUTTON,X_TAB,Y_TAB,IERR)
+	    IF (ERR) THEN
+	       CALL SHOW_ERROR(IERR)
+	       GOTO 900
+	    ELSE IF (.NOT.TRACKING) THEN
+	       CALL WRITEF('%S No Map has been registered',EBELL)
+	       GOTO 900
+	    END IF
+	    IF(BUTTON .EQ. 1) THEN
+	       CALL WRITEF 
+     &      ('%S invalid command in digitise mode',EBELL)
+	       GOTO 10
+	    END IF
+	    IF(BUTTON .EQ. 2) GOTO 200		!ENLARGE
+	    IF(BUTTON .EQ. 3) GOTO 300		!REDUCE
+	    IF (BUTTON .EQ. 5) LAST_PT = .TRUE.
+	    IF (BUTTON .EQ. 0) PSONLY = .TRUE.
+	    IF (BUTTON .EQ. 'F'X) THEN
+	        ABANDN = .TRUE.
+	     	GOTO 70		!abandon
+	    END IF
+	ELSEIF (HAD_VDU) THEN
+	    GOTO 50
+	END IF
+C 
+C get DTI coords from table coords
+C
+20	CALL TRANSF(DTICHAN+4,X_TAB,Y_TAB,X_DTI,Y_DTI)
+     	IF (HADIFF(IFFCHAN)) THEN
+C
+C get IFF coords from table coords
+C
+	    CALL TRANSF(IFFCHAN,X_TAB,Y_TAB,X_IFF,Y_IFF)
+C
+C Check not outside window
+C 
+	    IF (X_IFF.LT. WIND(1,1,IFFCHAN)
+     &       .OR.X_IFF.GT.WIND(2,1,IFFCHAN).OR.
+     &	    Y_IFF.LT.WIND(1,2,IFFCHAN).OR.
+     &	    Y_IFF.GT.WIND(2,2,IFFCHAN)) THEN
+	      CALL WRITEF('%S IFF coords outside window',EBELL)
+	      CALL WRITEF('Point Ignored')
+	      GOTO 10			! try again
+	    END IF
+	ELSE
+C
+C IFF file not open - forced to use DTI transformation
+C
+	    X_IFF = X_DTI
+	    Y_IFF = Y_DTI
+C
+C Check not outside window
+C 
+	    IF (X_IFF.LT.DTI_WINDOW_SWX(DTICHAN)
+     &	    .OR.X_IFF.GT.DTI_WINDOW_NEX(DTICHAN)
+     &	    .OR.Y_IFF.LT.DTI_WINDOW_SWY(DTICHAN)
+     &	    .OR.Y_IFF.GT.DTI_WINDOW_NEY(DTICHAN)) THEN
+	      CALL WRITEF('%S IFF coords outside window',EBELL)
+	      CALL WRITEF('Point Ignored')
+	      GOTO 10			! try again
+	    END IF
+        END IF
+C
+	IF (PSONLY) GOTO 40		!don't record point if position
+C					!command
+	IF (.NOT.PLOT_IFF) THEN
+	   CALL WRITEF('%S Output file not specified',WBELL)
+	   CALL WRITEF('Point is not recorded')
+	   GOTO 40
+	END IF
+C 200 points max in strings
+C
+	IF (I .EQ. 200) THEN
+	   IF (.NOT.FLSHED) THEN
+	      CALL IFFNF(FTNO,ISQ)
+	      CALL IFFFS(ISTAT)
+	      FLSHED = .TRUE.
+	   END IF
+	   CALL IFFST(STBUF,200,IENDS)
+	   IENDS = 1
+	   I = 0
+	END IF
+C
+	I = I+1 
+C
+C put coords in string
+	IF(HADIFF(IFFCHAN)) THEN
+	   STBUF(1,I) = X_IFF
+	   STBUF(2,I) = Y_IFF
+	ELSE
+	   CALL TRANSFORM_DTI(DTICHAN,X_IFF,Y_IFF,X_OUTDTI,Y_OUTDTI)
+	   STBUF(1,I) = X_OUTDTI
+	   STBUF(2,I) = Y_OUTDTI
+	ENDIF
+C
+C update the range
+	RUNNING_RANGE(1,IFFCHAN) 
+     &	= MIN(RUNNING_RANGE(1,IFFCHAN),STBUF(1,I))
+	RUNNING_RANGE(2,IFFCHAN) 
+     &	= MAX(RUNNING_RANGE(2,IFFCHAN),STBUF(1,I))
+	RUNNING_RANGE(3,IFFCHAN) 
+     &  = MIN(RUNNING_RANGE(3,IFFCHAN),STBUF(2,I))
+	RUNNING_RANGE(4,IFFCHAN) 
+     &  = MAX(RUNNING_RANGE(4,IFFCHAN),STBUF(2,I))
+C
+C draw line joining current point to last on the screen
+C		
+	PX(1) = PX(2)
+	PY(1) = PY(2)
+	PX(2) = X_IFF
+	PY(2) = Y_IFF
+	IF ((I .GT. 1).OR.(FLSHED))THEN
+	   CALL GPL(2,PX,PY)
+ 	END IF
+C
+C draw cursor on screen at current point 
+C
+C
+40	ZOOMX = SIGSWX(POSN) + 
+     &          (X_DTI-DTI_WINDOW_SWX(DTICHAN)+1)*SF(DTICHAN)
+	ZOOMY = SIGSWY(POSN) + 
+     &          (Y_DTI-DTI_WINDOW_SWY(DTICHAN)+1)*SF(DTICHAN)
+C
+	CALL LSG_SET_CURSOR(WKID,X_IFF,Y_IFF,.TRUE.)
+	CALL GUWK(WKID,GSUPP)
+C
+	IF (.NOT.LAST_PT) THEN
+	   PSONLY = .FALSE.
+	   GOTO 10
+	ELSE
+	   GOTO 60
+	END IF
+C
+C  commands from terminal
+C
+50	CMD = RDCOMM(END_CMD_TABLE)
+	IF (CMD .NE. 1.AND. CMD .NE. 2 ) THEN
+	   CALL WRITEF
+     &	 ('%S Only the END or ABANDON commands valid during '
+     &	  //'digitising operation',EBELL)
+	   GOTO 10
+	END IF
+	IF(CMD .EQ. 2) THEN
+	   ABANDN = .TRUE.
+	   GOTO 70
+	END IF
+C
+60	IF (.NOT.FLSHED) THEN
+	   IF (I .EQ. 0) GOTO 70	!no points recorded
+	   CALL IFFNF(FTNO,ISQ)
+	   CALL IFFFS(ISTAT)
+	   FLSHED = .TRUE.
+	END IF
+	CALL IFFST(STBUF,I,IENDS)	!output string
+C
+70	IF (FLSHED) THEN
+	   IF (ABANDN) THEN
+	      CALL WRITEF
+     & ('%S A string with more than 200 points has been' 
+     &	   //'written to file',WBELL)
+	   END IF
+	   CALL IFFEF			!close string
+	   FTNO = FTNO +1
+	END IF
+	INFT = .FALSE.
+	GOTO 900
+C
+C---------------------------------------------------------------
+C ENLARGE
+C	
+200	IF (ZOOMF.EQ.1) ZOOMF=0
+	ZOOMF=ZOOMF+2			!increment zoom factor
+	IF(ZOOMF.GT.16)THEN
+	  CALL WRITEF('Display is at maximum magnification')
+	  ZOOMF=16
+	ELSE
+	  CALL LSG_ZOOM_IMAGE(WKID,X_IFF,Y_IFF,ZOOMF)
+	END IF
+	GOTO 10
+C
+C------------------------------------------------------------------
+C REDUCE
+300	IF (ZOOMF.EQ.2) ZOOMF=3
+	ZOOMF=ZOOMF-2			!decrement zoom factor
+	IF(ZOOMF.LE.0)THEN		!already at minimum zoom
+	  CALL WRITEF('Display is at minimum magnification')
+	  ZOOMF=1
+	  GOTO 10
+	END IF
+	IF(ZOOMF.EQ.1)THEN
+	  CALL RESGKS
+	  CALL LSG_ZOOM_IMAGE(
+     &		WKID,FLOAT(RASTSZ(1)/2),FLOAT(RASTSZ(2)/2),1)
+	  CALL INIGKS(POSN,DTICHAN)
+	  CALL LSG_SET_CURSOR(WKID,X_IFF,Y_IFF,.TRUE.)
+	  CALL GUWK(WKID,GSUPP)
+	  GOTO 10
+	END IF
+	CALL LSG_ZOOM_IMAGE(WKID,X_IFF,Y_IFF,ZOOMF)
+	GOTO 10
+C
+C
+C---------------------------------------------------------------------
+C
+900	CONTINUE
+C
+C disable cursor
+	CALL RESGKS			!restore GKS transformation
+	CALL LSG_SET_CURSOR(WKID,ZOOMX,ZOOMY,.FALSE.)
+C
+1000	RETURN
+	END	

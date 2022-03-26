@@ -1,0 +1,942 @@
+C
+C Fill area functions
+C ===================
+C
+C *********************************************************************
+C
+C	Fill area OUTPUT PRIMITIVE
+C	==========================
+C
+	SUBROUTINE	GFA(N,PX,PY)
+C
+**	MODULE	GFA
+**	IDENT	02SE94
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C FILL AREA
+C
+	IMPLICIT NONE
+C
+***	COMMON/GFABUF/
+C
+C Arguments
+	INTEGER N			! number of points
+	REAL	PX(N)			! X coords of points in WC
+	REAL	PY(N)			! Y coords of points in WC
+C
+C Functions called
+	LOGICAL	GKS_INIT_FILL_MEM     	! gets virtual memory for workspace
+C
+C this is a jacket routine that calls the real routine passing it
+C the work space arrays (having made sure that they have been created)
+C
+C first time through, get the memory
+	IF (MEMORY_FAIL) GOTO 9999
+C
+	IF (GFAMAX .EQ.0) THEN
+	   MEMORY_FAIL = GKS_INIT_FILL_MEM()
+	   IF (MEMORY_FAIL) GOTO 9999
+	ENDIF	      
+C
+C now call the real routine
+	CALL GFA_SUB(N,PX,PY,GFAMAX,GFASCT,
+     &	             %VAL(PTS_ADDR),%VAL(SIDES_ADDR),
+     &	             %VAL(SIDPTR_ADDR),%VAL(INTSCT_ADDR),
+     &	             %VAL(INTPTS_ADDR),%VAL(PTX_ADDR),
+     &	             %VAL(PTY_ADDR))
+C
+9999	RETURN
+C
+C
+	ENTRY	LSG_END_AREA
+C
+C FILL AREA - end composite area
+	CALL LSG_END_AREA_SUB(GFAMAX,GFASCT,
+     &	             %VAL(PTS_ADDR),%VAL(SIDES_ADDR),
+     &	             %VAL(SIDPTR_ADDR),%VAL(INTSCT_ADDR),
+     &	             %VAL(INTPTS_ADDR),%VAL(PTX_ADDR),
+     &	             %VAL(PTY_ADDR))
+C
+	RETURN
+C
+	ENTRY	LSG_BEGIN_AREA
+C
+C FILL AREA - begin composite area
+C
+	CALL LSG_BEGIN_AREA_SUB
+	RETURN
+C
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	GFA_SUB(N,PX,PY,GFAMAX,GFASCT,
+     &	                        PTS,SIDES,SIDPTR,INTSCT,INTPTS,PTX,PTY)
+C
+**	MODULE	GFA_SUB
+**	IDENT	24FE92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C FILL AREA
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+***	COMMON/GFADAT1/
+C
+C Arguments
+	INTEGER N   		! number of points
+	REAL	PX(N)  		! X coords of points in WC
+	REAL	PY(N)		! Y coords of points in WC
+	INTEGER	GFAMAX		! maximum number of points in an area
+	INTEGER	GFASCT		! maximum number of intersections on a line
+	REAL	PTS(2,GFAMAX)	! buffer array
+	REAL	PTX(GFAMAX)	! X array
+	REAL	PTY(GFAMAX)	! Y array
+	REAL	SIDES(4,GFAMAX)	! array to hold sides of it
+	INTEGER	SIDPTR(GFAMAX)	! pointer into that
+	REAL	INTSCT(4,GFASCT)! store for sides intersected
+	REAL	INTPTS(GFASCT)	! store for intersection points
+C
+C Functions
+	LOGICAL	GKCLIP			! clips a straight line to
+					! rectangular boundaries
+C
+C local parameter for calls to GFAIPL
+	INTEGER		DEV
+	PARAMETER	(DEV=1)
+C
+C Internal variables
+	INTEGER		I			! loop variable
+	INTEGER		NPTS			! points in buffer
+	REAL		TMPX(2),TMPY(2)		! X and Y coordinates
+	REAL		T1,T2			! other temporary reals
+	LOGICAL		OPEN			! is polygon open
+	LOGICAL		TOOBIG			! is it too big to draw
+	INTEGER		STYLE			! internal style to use
+	INTEGER		HATSTX			! hatch style index
+	REAL		HATANG			! hatch angle
+	REAL		NOMSEP			! nominal separation
+	LOGICAL		AREA			! in composite area
+	LOGICAL		ENDAREA			! ending composite
+	INTEGER		FAIL_POINTS
+	LOGICAL		POINTS_FLUSHED
+	LOGICAL		DRAW_OUTLINE,HATCH_OUTLINE
+	SAVE		NPTS,TOOBIG,AREA,ENDAREA,POINTS_FLUSHED
+	REAL		TORAD
+	PARAMETER	(TORAD=3.14159265/180.)
+C
+	DATA		POINTS_FLUSHED/.FALSE./
+C
+C we can draw a filled polygon of up to GFAMAX points (closed) -
+C above that we must draw it hollow
+C
+	ENDAREA = .FALSE.		! not ending composite area
+C
+C check things for non-composite area
+	IF (.NOT.AREA) THEN
+C
+	   IF (N.LT.3) THEN
+	      CALL GKSERR(100,'GFA')	! number of points is invalid
+	      GOTO 9999
+	   ENDIF
+C
+C and do we have too large a polygon to draw?
+	   NPTS = 0
+	   OPEN = PX(1).NE.PX(N) .OR. PY(1).NE.PY(N)
+	   IF (OPEN) THEN
+	      TOOBIG = (N+1).GT.GFAMAX
+	   ELSE
+	      TOOBIG = N.GT.GFAMAX
+	   ENDIF
+	ENDIF
+C
+C transfer our points into the FILL_SIDE array
+	IF (N.GT.GFAMAX-NPTS) THEN
+	   TOOBIG = .TRUE.
+	   PTS(1,GFAMAX) = PX(N)	! just save last point
+	   PTS(2,GFAMAX) = PY(N)	! for closing line
+C
+C and first point if it has not been saved yet
+	   IF (NPTS .EQ.0) THEN
+	      PTS(1,1) = PX(1)
+	      PTS(2,1) = PY(1)
+	   ELSEIF (POINTS_FLUSHED) THEN
+C
+C save points that have not been output as a poly line
+	      DO 20, I = 1,NPTS
+	         PTX(I) = PTS(1,I)
+	         PTY(I) = PTS(2,I)
+20	      CONTINUE
+	      FAIL_POINTS = NPTS
+	   ENDIF
+C
+	   NPTS = GFAMAX
+	ELSE
+	   DO 100 I = 1,N
+	      PTS(1,NPTS+I) = PX(I)
+	      PTS(2,NPTS+I) = PY(I)
+100	   CONTINUE
+	   POINTS_FLUSHED = .TRUE.
+	   NPTS = NPTS+N
+	ENDIF
+C
+C ensure that the polygon is closed
+	IF (.NOT.AREA) THEN
+	   IF ( OPEN ) THEN
+	      NPTS = NPTS+1
+	      PTS(1,NPTS) = PX(1)
+	      PTS(2,NPTS) = PY(1)
+	   ENDIF
+	   IF (NPTS.LE.3) THEN
+	      CALL GKSERR(100,'GFA')		! number of points is invalid
+	      GOTO 9999
+	   ENDIF
+	ENDIF
+C
+C draw the fill area on the workstation
+C
+C is this workstation active? - if not ignore it
+199	IF (.NOT.WSACT) GOTO 200
+C
+C ensure that our transformation is up to date
+	IF (UPTRN) CALL GUPTRN
+C
+C is everything clipped (ie nothing visible)
+	IF (CLPALL) GOTO 200
+C
+C get polyline attributes up to data
+C (i.e. get correct tracked symbol, and tangential control)
+	IF (UPLIN) CALL GUPLIN
+C
+C ensure that our fill area attributes are up to date
+	IF (UPFA) CALL GUPFA
+C
+C decide what sort of fill we must do
+	IF (TOOBIG) THEN
+	   STYLE = GHOLOW		! can always draw as hollow
+	ELSE
+	   STYLE = CFASTY
+	ENDIF
+C
+C have we drawn an outline up to now?
+	HATCH_OUTLINE =
+     &		((CFASTY.EQ.GHATCH).AND.
+     &		 ((CFASTX.GT.100.AND.CFASTX.LE.106).OR.
+     &		  (CFASTX.GE.20000)))
+	DRAW_OUTLINE = (CFASTY.EQ.GHOLOW).OR.HATCH_OUTLINE
+C
+C and draw it
+	IF ( STYLE.EQ.GHOLOW .OR. HATCH_OUTLINE ) THEN
+C
+C assume fill hollow - draw as polyline
+	   IF (.NOT.ENDAREA) THEN
+C
+C draw any points that have been output to PTS array in previous calls
+	      IF (TOOBIG.AND.POINTS_FLUSHED.AND..NOT.DRAW_OUTLINE) THEN
+	         CALL GFAIPL(DEV,FAIL_POINTS,PTX,PTY)
+	         POINTS_FLUSHED = .FALSE.
+	      ENDIF
+C
+	      CALL GFAIPL(DEV,N,PX,PY)
+	   ENDIF
+C
+C ensure that it is closed
+	   IF (OPEN.AND..NOT.AREA) THEN
+	      TMPX(1) = PTS(1,NPTS-1)
+	      TMPX(2) = PTS(1,NPTS)
+	      TMPY(1) = PTS(2,NPTS-1)
+	      TMPY(2) = PTS(2,NPTS)
+	      CALL GFAIPL(DEV,2,TMPX,TMPY)
+	   ENDIF
+	ENDIF
+C
+	IF (AREA) GOTO 200
+C
+	IF ( STYLE.EQ.GHATCH ) THEN
+C
+C set the hatch index
+	   HATANG = 0.0
+	   HATSTX = CFASTX
+	   IF (HATSTX.GE.101.AND.HATSTX.LE.106) THEN
+	      HATSTX = HATSTX-100
+	   ELSEIF (HATSTX.GE.10000) THEN
+	      IF (HATSTX.GE.20000) HATSTX = HATSTX-10000
+	      HATANG = (HATSTX-10000)/10.0*TORAD
+	      HATSTX = 1
+	   ENDIF
+C
+C work out line separation in world coordinates
+	   CALL GD2W( WKIDS, GFAGAP, GFAGAP, T1,T2)
+	   NOMSEP = MIN(T1,T2)
+C
+C fill with lines at the nominated spacing
+	   CALL FILL_SIDE( NPTS, PTS, SIDES, SIDPTR,
+     &			         GFASCT, INTSCT, INTPTS,
+     &			         HATSTX, NOMSEP,
+     &			         DEV, IFAROT+HATANG )
+C
+	ELSEIF (STYLE.EQ.GSOLID) THEN
+C
+C work out our nominal line separation in world coordinates
+	   CALL GD2W( WKIDS, GNOMSEP, GNOMSEP, T1,T2)
+	   NOMSEP = MIN(T1,T2)
+C
+C fill with lines spaced to leave no gaps
+C - note that the linewidth should already have
+C   been set to the nominal linewidth
+C - leave off angle here, probably best if solid fill is horiz.
+	   CALL FILL_SIDE( NPTS, PTS, SIDES, SIDPTR,
+     &			         GFASCT, INTSCT, INTPTS,
+     &			         1,      NOMSEP,
+     &			         DEV )
+C
+	ENDIF
+C
+	IF (DEFER .EQ. GASAP) CALL GUWK(WKIDS,0)
+C
+200	CONTINUE
+C
+9999	CONTINUE
+	IF (ENDAREA) POINTS_FLUSHED = .FALSE.
+	RETURN
+C
+	ENTRY	LSG_END_AREA_SUB(GFAMAX,GFASCT,
+     &	                        PTS,SIDES,SIDPTR,INTSCT,INTPTS,PTX,PTY)
+C
+C FILL AREA - end composite area
+C
+	AREA = .FALSE.
+C
+C and do we have too large a polygon to draw?
+	OPEN = PTS(1,1).NE.PTS(1,NPTS) .OR. PTS(2,1).NE.PTS(2,NPTS)
+C
+C ensure that the polygon is closed
+	IF ( OPEN ) THEN
+	   IF (NPTS.GE.GFAMAX) THEN
+	      TOOBIG = .TRUE.
+	      NPTS = GFAMAX-1
+	      PTS(1,NPTS) = PTS(1,NPTS+1)	! copy last point for
+	      PTS(2,NPTS) = PTS(2,NPTS+1)	! closing line
+	   ENDIF
+	   NPTS = NPTS+1
+	   PTS(1,NPTS) = PTS(1,1)
+	   PTS(2,NPTS) = PTS(2,1)
+	ENDIF
+C
+	IF (NPTS.LE.3) THEN
+	   CALL GKSERR(100,'GFA')	! number of points is invalid
+	   GOTO 9999
+	ENDIF
+C
+	ENDAREA = .TRUE.
+	GOTO 199
+C
+	ENTRY	LSG_BEGIN_AREA_SUB
+C
+C FILL AREA - begin composite area
+C
+	NPTS = 0		! no points in buffer
+	AREA = .TRUE.		! in composite area
+	TOOBIG = .FALSE.	! not too many points yet
+	POINTS_FLUSHED = .FALSE.!  no points in PTS array yet
+	RETURN
+C
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	GFAIPL(DEV,N,PX,PY)
+C
+**	MODULE	GFAIPL
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created			Ron Russell	16-July-1987
+C
+C FILL AREA - internal polyline routine
+C
+	IMPLICIT NONE
+C
+C This subroutine is called to fill a polygon HOLLOW - that is
+C it effectively duplicates GPL, but with additions due to this
+C being part of FILL AREA
+C
+***	COMMON/GKSDAT1/
+C
+C Arguments
+	INTEGER		DEV		! workstation to draw on
+	INTEGER		N		! number of points
+	REAL		PX(N)		! X coords of points in WC
+	REAL		PY(N)		! Y coords of points in WC
+C
+C Functions
+	LOGICAL	GKCLIP			! clips a straight line to
+C
+C Internal variables
+	INTEGER	I			! loop variable
+	INTEGER	SAVP			! saved PPTR
+	REAL	PX1,PX2,PY1,PY2		! X and Y coordinates
+	REAL	CURX,CURY		! current position
+C
+C unset current position to force move
+	CURX = 1E38
+	CURY = 1E38
+C
+C Loop for each segment of this outline
+	DO 90 I = 1, N-1
+	   PX1 = PX(I)
+	   PY1 = PY(I)
+	   PX2 = PX(I+1)
+	   PY2 = PY(I+1)
+	   IF (ENCLIP) THEN
+	      IF (GKCLIP(PX1,PY1,PX2,PY2)) GOTO 90
+	   ENDIF
+C
+C transform World Coordinates to Device Coordinates
+	   PX1 = (PX1*SCALEX)+OFFX
+	   PX2 = (PX2*SCALEX)+OFFX
+	   PY1 = (PY1*SCALEY)+OFFY
+	   PY2 = (PY2*SCALEY)+OFFY
+	   IF (PX1.NE.CURX.OR.PY1.NE.CURY) CALL AEG_MOVTO(PX1,PY1)
+	   CALL AEG_LINTO(PX2,PY2)
+	   CURX = PX2		! update current position
+	   CURY = PY2
+90	CONTINUE
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	LSG_SET_ROTATION(ANGLE)
+C
+**	MODULE	LSG_SET_ROTATION
+**	IDENT	08JN87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	 8-Jun-1987
+C
+C Set plot rotation (for the benefit of hatching angle)
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C Arguments:
+C
+	REAL	ANGLE			! angle (a/c, radians)
+C
+	IFAROT = ANGLE
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+C	Fill area OUTPUT ATTRIBUTES
+C	===========================
+C
+	SUBROUTINE	GSFAI(INDEX)
+C
+**	MODULE	GSFAI
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C SET FILL AREA INDEX
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C Arguments
+	INTEGER	INDEX			! fill area index
+C
+	IF (INDEX.LT.1 .OR. INDEX.GT.FAMAX) THEN
+	   CALL GKSERR(75,'GSFAI')	! fill area index is invalid
+	ELSEIF (INDEX.NE.FAIND) THEN	! not current - make it so
+	   FAIND  = INDEX		! change the current index
+	   UPFA = .TRUE.		! attributes need updating
+	ENDIF
+C
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	GSFAIS(STYLE)
+C
+**	MODULE	GSFAIS
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C SET FILL AREA INTERNAL STYLE
+C
+C styles are:	0	HOLLOW		GHOLOW
+C		1	SOLID		GSOLID
+C		2	PATTERN		GPATRN - not supported
+C		3	HATCH		GHATCH
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C Arguments
+	INTEGER	STYLE			! internal style
+C
+	INTEGER	ERR
+C
+	IF (STYLE.EQ.GPATRN) THEN	! internal style PATTERN is not
+	   ERR = 83			! supported on this workstation
+	ELSEIF (STYLE.LT.0 .OR. STYLE.GT.3) THEN
+	   ERR = 77		! specified fill area internal
+C				! style not supported on this w/s
+	ELSE
+	   ERR = 0
+	   IFASTY = STYLE		! remember internal style
+	   UPFA = .TRUE.		! attributes need updating
+	ENDIF
+	IF (ERR.NE.0) CALL GKSERR(ERR,'GSFAIS')
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	GSFASI(INDEX)
+C
+**	MODULE	GSFASI
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C SET FILL AREA STYLE INDEX
+C
+C only relevant for HATCH - we don't support PATTERN (NB - we also
+C can't set PATTERN with GSFAIS, so don't need to check for it)
+C
+C indices are:	1	horizontal hatching
+C		2	vertical   hatching
+C		3	45 degrees hatching - ie ////
+C		4	opposite to (3)     - ie \\\\
+C		5	cross-hatching - using (1) and (2)
+C		6	cross-hatching - using (3) and (4)
+C
+C 		101-106 as above but draw perimeter as well
+C		10000-13600 horizontal plus angle in deg/10
+C		20000-23600 as above but draw perimeter
+C
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C Arguments
+	INTEGER	INDEX			! fill area style index
+C
+	INTEGER	ERR
+C
+	IF (INDEX.LE.0) THEN
+	   ERR = 78		! style (pattern or hatch) index is
+C				! less than or equal to 0
+	ELSEIF ((INDEX.GT.6 .AND. INDEX.LT.101) .OR.
+     &		(INDEX.GT.106 .AND. INDEX.LT.10000) .OR.
+     &		(INDEX.GT.13600 .AND. INDEX.LT.20000) .OR.
+     &		(INDEX.GT.23600)) THEN
+	   ERR = 80		! specified hatch index is not
+C				! supported on this workstation
+	ELSE
+	   ERR = 0
+	   IFASTX = INDEX	! remember fill area style index
+	   UPFA = .TRUE.	! attributes need updating
+	ENDIF
+	IF (ERR.NE.0) CALL GKSERR(ERR,'GSFASI')
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	GSFACI(COLI)
+C
+**	MODULE	GSFACI
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C SET FILL AREA COLOUR INDEX
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C Arguments
+	INTEGER	COLI			! fill area colour index
+C
+	IF (COLI.LT.0) THEN
+	   CALL GKSERR(85,'GSFACI')	! colour index less than 0
+	ELSE
+	   IFACOL = COLI		! fill area colour index set
+	   UPFA = .TRUE.		! attributes need updating
+	ENDIF
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	GSFAR(WKID,FAI,STYLE,INDEX,COLI)
+C
+**	MODULE	GSFAR
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C SET FILL AREA REPRESENTATION
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/
+C
+C Arguments
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	FAI			! fill area index
+	INTEGER	STYLE			! interior style
+	INTEGER	INDEX			! style index
+	INTEGER	COLI			! colour index
+C
+	INTEGER	ERR
+C
+	IF (FAI.LT.1 .OR. FAI.GT.FAMAX) THEN
+	   ERR = 75		! fill area index is invalid
+	ELSEIF (STYLE.EQ.GPATRN) THEN
+	   ERR = 77		! specified fill area interior style
+C				! is not supported on this w/s
+	ELSEIF (STYLE.LT.0 .OR. STYLE.GT.3) THEN
+	   ERR = 77		! same error again
+	ELSEIF ( INDEX.LE.0 .OR.
+     &		(INDEX.GT.6 .AND. INDEX.LT.101) .OR.
+     &		(INDEX.GT.106 .AND. INDEX.LT.10000) .OR.
+     &		(INDEX.GT.13600 .AND. INDEX.LT.20000) .OR.
+     &		(INDEX.GT.23600) ) THEN
+	   ERR = 75		! specified fill area index is invalid
+	ELSEIF (COLI.LT.0 ) THEN
+	   ERR = 86		! colour index is invalid
+	ELSE
+	   ERR = 0
+	   FAISTY(FAI) = STYLE	! FA internal style
+	   FASTYI(FAI) = INDEX	! FA style index
+	   FACOL(FAI)  = COLI	! FA colour index
+	   IF (FAI.EQ.FAIND) THEN
+	      UPFA = .TRUE.	! update current attributes
+	   ENDIF
+	ENDIF
+	IF (ERR.NE.0) CALL GKSERR(ERR,'GSFAR')
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+C	Fill area INQUIRY FUNCTIONS
+C	===========================
+C
+C	SUBROUTINE GQFAF - this subroutine is not implemented
+C
+C**********************************************************************
+C
+	SUBROUTINE GQFAIS(ERRIND,STYLE)
+C
+***	MODULE	GQFAIS
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C INQUIRE FILL AREA INTERNAL STYLE
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+C Arguments
+	INTEGER	ERRIND		! Error indicator
+	INTEGER	STYLE		! internal style
+C
+	ERRIND = 0		! no error indication
+	STYLE = IFASTY
+C
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GQFASI(ERRIND,INDEX)
+C
+***	MODULE	GQFASI
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C INQUIRE FILL AREA STYLE INDEX
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+C Arguments
+	INTEGER	ERRIND		! Error indicator
+	INTEGER	INDEX		! style index
+C
+	ERRIND = 0		! no error indication
+	INDEX = IFASTX
+C
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GQFACI(ERRIND,COL)
+C
+***	MODULE	GQFACI
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C INQUIRE FILL AREA COLOUR INDEX
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+C Arguments
+	INTEGER	ERRIND		! Error indicator
+	INTEGER	COL		! colour index
+C
+	ERRIND = 0		! no error indication
+	COL = IFACOL
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+C	Fill area GKSAEGLIB internal routines
+C	====================================
+C
+	SUBROUTINE GUPFA
+C
+***	MODULE	GUPFA
+**	IDENT	16JL87
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	16-July-1987
+C
+C Update the fill area attributes
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT1/		! GKS data structures
+C
+C local variables
+	INTEGER	NINDEX,NCOLI
+	REAL	NSTYLE
+C
+C establish whether each attribute is to be taken as bundled
+C or individual
+	IF (GASF(11).EQ.GBUNDL) THEN	! interior style
+	   NSTYLE = FAISTY(FAIND)
+	ELSE
+	   NSTYLE = IFASTY
+	ENDIF
+C
+	IF (GASF(12).EQ.GBUNDL) THEN	! style index
+	   NINDEX = FASTYI(FAIND)
+	ELSE
+	   NINDEX = IFASTX
+	ENDIF
+C
+	IF (GASF(13).EQ.GBUNDL) THEN	! colour index
+	   NCOLI = FACOL(FAIND)
+	ELSE
+	   NCOLI = IFACOL
+	ENDIF
+C
+C now update the current values for each thing
+	IF (NSTYLE.NE.CFASTY) THEN
+	   CFASTY = NSTYLE		! update fill area style
+	ENDIF
+C
+	IF (NINDEX.NE.CFASTX) THEN
+	   CFASTX = NINDEX		! update fill area style index
+	ENDIF
+C
+C Colour is ignored
+C
+C and check whether we have the right line style
+C - polyline settings may have changed these under our feet
+C
+	IF (CLTYPE.NE.FALTYP) THEN		! check line type
+	   CLTYPE = FALTYP
+	   CALL AEG_LTYPE(CLTYPE)
+	   UPLIN  = .TRUE.			! clobbers polyline?
+	ENDIF
+C
+	UPFA = .FALSE.		! fill area now up to date
+	RETURN
+	END
+C
+C*****************************************************************************
+C
+	LOGICAL FUNCTION GKS_INIT_FILL_MEM
+C
+***	MODULE	GKS_INIT_FILL_MEM
+***	IDENT	12FE92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Ron Russell	12 February,1992
+C
+C to initialise the memory for the fill areas
+C returns FALSE for success and TRUE if no virtual memory available
+C
+	IMPLICIT NONE
+C
+***	COMMON/GFABUF/
+C
+C functions called
+C
+	INTEGER		LIB$GET_VM
+	INTEGER		TRNALL		! LSLLIB, translate logical name
+	LOGICAL		RDLONG
+	LOGICAL		RDCHS
+C
+C w/s
+	INTEGER		LENGTH
+	INTEGER		PTS_LENGTH,SIDES_LENGTH,SIDPTR_LENGTH
+	INTEGER		INTSCT_LENGTH,INTPTS_LENGTH
+	CHARACTER*8	TRAN
+	INTEGER		COND
+	BYTE		CH
+C
+	DATA	PTS_LENGTH,SIDES_LENGTH,SIDPTR_LENGTH,INTSCT_LENGTH,
+     &	        INTPTS_LENGTH/5*0/
+C
+C assume failure
+	GKS_INIT_FILL_MEM = .TRUE.
+C
+C get the maximum number of fill area points to be used
+	GFAMAX = DEFAULT_GFAMAX
+	IF (TRNALL('LSL$FILL_POINTSMAX',TRAN)) THEN
+	   LENGTH = LEN(TRAN)
+	   CALL SETAUX(%REF(TRAN),LENGTH)
+	   IF (RDLONG(GFAMAX)) GFAMAX = DEFAULT_GFAMAX
+	   IF (.NOT.RDCHS(CH)) GFAMAX = DEFAULT_GFAMAX
+	   GFAMAX = GFAMAX + 1 		! one more than the user expected!!!
+	ENDIF
+C
+C don't allow too few points
+	GFAMAX = MAX(100,GFAMAX)
+C
+C get the maximum number of intersections to be allowed
+C
+	GFASCT = DEFAULT_GFASCT
+	IF (TRNALL('LSL$FILL_CUTSMAX',TRAN)) THEN
+	   LENGTH = LEN(TRAN)
+	   CALL SETAUX(%REF(TRAN),LENGTH)
+	   IF (RDLONG(GFASCT)) GFASCT = DEFAULT_GFASCT
+	   IF (.NOT.RDCHS(CH)) GFASCT = DEFAULT_GFASCT
+	ENDIF
+C
+C don't allow too few intersections
+	GFASCT = MAX(10,GFASCT)
+C
+C now get memory for all the arrays
+C
+C 1) PTS array (real*4 x 2 x GFAMAX)
+	PTS_LENGTH = 4 * 2 * GFAMAX
+	COND = LIB$GET_VM(PTS_LENGTH,PTS_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   PTS_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C 2) SIDES array (real*4 x 4 x GFAMAX)
+	SIDES_LENGTH = 4 * 4 * GFAMAX
+	COND = LIB$GET_VM(SIDES_LENGTH,SIDES_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   SIDES_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C 3) SIDPTR array (integer*4 x 1 x GFAMAX)
+	SIDPTR_LENGTH = 4 * 1 * GFAMAX
+	COND = LIB$GET_VM(SIDPTR_LENGTH,SIDPTR_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   SIDPTR_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C 4) INTSCT array (real*4 x 4 x GFASCT)
+	INTSCT_LENGTH = 4 * 4 * GFASCT
+	COND = LIB$GET_VM(INTSCT_LENGTH,INTSCT_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   INTSCT_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C 5) INTPTS array (real*4 x 1 x GFASCT)
+	INTPTS_LENGTH = 4 * 1 * GFASCT
+	COND = LIB$GET_VM(INTPTS_LENGTH,INTPTS_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   INTPTS_LENGTH = 0
+	   GOTO 9990
+	ENDIF
+C
+C set up equivalences
+	PTX_ADDR = SIDES_ADDR
+	PTY_ADDR = SIDES_ADDR + (4 * GFAMAX)
+C
+	GKS_INIT_FILL_MEM = .FALSE.			! success
+	GOTO 9999
+C
+9990	CONTINUE
+	CALL WRITEF('GKS GFA - Failed to get virtual memory for fill areas')
+	IF (INTPTS_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(INTPTS_LENGTH,INTPTS_ADDR,FILL_ZONE)	
+	IF (INTSCT_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(INTSCT_LENGTH,INTSCT_ADDR,FILL_ZONE)	
+	IF (SIDPTR_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(SIDPTR_LENGTH,SIDPTR_ADDR,FILL_ZONE)	
+	IF (SIDPTR_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(SIDPTR_LENGTH,SIDPTR_ADDR,FILL_ZONE)	
+	IF (PTS_LENGTH.NE.0)
+     &	         CALL LIB$FREE_VM(PTS_LENGTH,PTS_ADDR,FILL_ZONE)	
+C
+9999	RETURN
+	END

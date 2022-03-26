@@ -1,0 +1,4 @@
+$!
+$ if f$type(SIF2IFF) .eqs. "" then @lsl$com:convertini
+$!
+$SIF2IFF/SCALE=1250/LOG/PAR=THERE:LRT.PAR_PLUS_ARCS_CIRCLES THERE:LUKEYCRAP.ASC JMC_JUNK

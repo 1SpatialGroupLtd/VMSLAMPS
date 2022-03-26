@@ -1,0 +1,422 @@
+	LOGICAL*4 FUNCTION RESTMER
+C
+***	MODULE	RESTMER
+***	IDENT	12FE90
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	New qualifier /UNIQUE_FSN added			PP   09-Feb-1990
+CMOD	Now sets input revision level to 1 to deal
+C	with new CB entries. Bug in output file
+C	selection also fixed - formerly tried to write
+C	offset STs and ZSs to the selections output
+C	file!						TJH  03-Dec-1987
+CMOD	Output addresses as 8 hex digits, left padded
+C	with 0s 					TJI  31-Oct-1986
+CMOD	IFF file opened using new IFFOPEN function	TJH  31-Oct-1986
+CMOD	New TS entries added (they got forgotten!)      TJH  31-Oct-1986
+C	Created						TJH  15-Aug-1986
+C
+C Routine to do the actual work of merging for rest of layers that were
+C not selected. Only operates if /SPLIT was specified.
+C
+C Function returns one of 6 condition codes:
+C
+C	SS$_NORMAL		-   all is well
+C	IMERGE__EONOTFND	-   end overlay entry not found
+C				    (probably duff EO address in NO 
+C				    entry)
+C	IMERGE__NONOTFND	-   new overlay entry not found
+C	IMERGE__UNEXPEOF	-   unexpected end of IFF file.
+C	LSL__OPENED		-   IFFOPEN failed to open IFF file
+C       LSL__IFFPARSE           -   IFF file parse failed
+C
+C
+	IMPLICIT NONE
+C
+C
+C
+C Parameters:
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL
+	INCLUDE		'LSL$CMNIMERGE:PARAMS.PAR'
+	INCLUDE		'LSL$CMNIMERGE:IMERGEMSG.PAR'
+C
+C IFF CB structure definition:
+	INCLUDE   'LSL$CMNIFF:CB.STR'
+C
+C Common:
+	INCLUDE   'LSL$CMNIFF:COEFFS.CMN'
+	INCLUDE   'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE	  'LSL$CMNIMERGE:COMMAND.CMN'
+	INCLUDE	  'LSL$CMNIMERGE:MERGE.CMN'
+	INCLUDE	  'LSL$CMNIMERGE:OVLST.CMN'
+	INCLUDE	  'LSL$CMNIMERGE:OVRS.CMN'
+	INCLUDE	  'LSL$CMNLSL:STATUS.CMN'
+C
+C W/s
+	INTEGER*2 IECODE	! entry code for the entry-in-hand
+	INTEGER*2 IELEN		! length of the entry-in-hand
+	INTEGER*2 LSTFNO	! last feature number
+	INTEGER*2 CURRFNO	! current feature number
+	INTEGER*2 SENDFNO	! new feature number for output
+	INTEGER	  I,J,ILOOP,JLOOP ! temp. variables
+	RECORD	/IFF_CBH/CBH	! CB header
+	RECORD	/IFF_CBD/CBD	! CB data
+	INTEGER	XYCOL(2)	! for extracting X and Y from CBD
+	REAL	XY(2)		! R*4 XY
+C
+C Function:
+	INTEGER    IFFOPEN	! open IFF file for readonly
+C
+C ......................................................................
+C
+C Assume the best
+	RESTMER=%LOC(SS$_NORMAL)
+C 
+C ......................................................................
+C
+C Tell the user of our progress?
+C
+	IF (HAD_LOG.AND.HAD_SPLIT) THEN
+	   CALL LSL_PUTMSG(IMERGE__WRESTLAY,SPLIT_FILE(:SPLIT_LEN))
+	ENDIF
+C
+C Init things. Begin by resetting file-open number and closing any 
+C vagrant input file.
+C
+	IFIL=0
+	LSTFNO=0
+	CURRFNO=0
+	SENDFNO=0
+	IF (INIFO) CALL IFFCLO(INLUN)
+C
+C and reset the "output overlay open" flag
+C
+	HADNO=.FALSE.
+C
+C Fill array of CB column headers
+C
+	XYCOL(1) = IFF_C_X
+	XYCOL(2) = IFF_C_Y
+C
+C
+C Initialise for NXT_REST_OV
+C
+	REST_OVPTR=REST_OVROOT
+	REST_NOPTR=REST_OVLST(2,REST_OVPTR)
+C
+C ......................................................................
+C
+C Remember the file that (is open/we have just got a layer from)
+C
+10	LSTFIL=IFIL
+C
+C and remember the layer number that we have just been handling
+C
+	LSTOVR=NOVR
+C
+C Get a new layer
+C
+	CALL NXT_REST_OV(IFIL,NOPOS,NOVR)
+C
+	IF (DEBUG) CALL WRITEF('Layer %N, File %N, Address %^L%P0%X8'
+     &			,NOVR	   ,IFIL	,NOPOS)
+C
+C Continuation of same overlay?
+C
+	IF (NOVR.EQ.LSTOVR) GOTO 20  
+C
+C First file?
+C
+	IF (LSTFIL.NE.0) THEN
+	   CALL IFFSEL(RESTLUN)
+C
+C Do we need to output a trailing empty NF 0 feature to compensate for
+C outside feature TCs? If we do, zero internal sequence number for IFFNF
+C call.
+	   IF (TRAIL) THEN
+	      INTSEQ=0
+	      CALL IFFNF(0,INTSEQ)
+	      CALL IFFEF
+	   ENDIF
+C
+C
+C Patch into NO entry the address of ...
+C
+	   IF (.NOT.HAD_RLAY) THEN
+	      CALL IFFUNO(LPOSNO)
+C
+C ... the corresponding EO
+C
+	      CALL IFFEO
+	      TRAIL=.FALSE.
+	   ENDIF
+	ENDIF
+C
+C Have we run out of input files to us and therefore finished?
+C
+	IF (IFIL.EQ.0) GOTO 120
+C
+C Reset "new output overlay" flag, providing we didn't specify 
+C /SINGLE_LAYER
+C
+	IF (.NOT.HAD_RLAY) HADNO=.FALSE.
+C
+C Are we dealing with another overlay from the same file
+C
+20	IF (IFIL.EQ.LSTFIL) GOTO 30
+C
+C First file?
+C
+	IF (LSTFIL.NE.0) THEN
+	   CALL IFFCLO(INLUN)
+	   INIFO=.FALSE.
+	ENDIF
+C
+C Unless we have the special case of output file equals single input 
+C file ...
+C
+	IF (.NOT.SPECAL) THEN
+C
+C Get and open the next input file
+C
+	   CINFIL=INFILE(IFIL)(:LENFIL(IFIL))
+	   CINLEN=LENFIL(IFIL)
+	   RESTMER=IFFOPEN(INLUN,CINFIL(:CINLEN),FID(1,IFIL))
+C
+C Did it open OK?
+	   IF (.NOT.RESTMER) GOTO 180
+C
+C Set the IFF input revision level to 1 - treat all CB, ST and
+C ZS entries as if they are CBs 
+	   CALL IFFIRV(1)
+	   INIFO=.TRUE.
+	ENDIF
+	CALL IFFSEL(INLUN)
+C
+C ......................................................................
+C
+C Output file has been opened and initialised by writing all the header
+C entries to it. We can now write entries of layer and lower status.
+C
+30	IF (HADNO) GOTO 40
+	HADNO=.TRUE.
+	CALL IFFSEL(RESTLUN)
+C
+C Remember position of NO for EO ptr., then write out a new overlay
+C
+	LPOSNO=LPOSE
+C
+C If we specified /REST_LAYER force all output into our specified
+C layer. Else use the input layer number that is in hand.
+C
+	IF (HAD_RLAY) THEN
+	   CALL IFFNO(RLAYER,0,0)
+	ELSE
+	   CALL IFFNO(NOVR,0,0)
+	ENDIF
+	IF (HAD_LOG) THEN
+	   IF (HAD_RLAY) THEN
+	      CALL WRITEF('Writing layer %^W%N',RLAYER)
+	   ELSE	  
+	      CALL WRITEF('Writing layer %^W%N',NOVR)
+	   ENDIF
+	ENDIF
+C
+C Re-select input file and then jump to the required layer
+C
+40	CALL IFFSEL(INLUN)
+	CALL IFFPKE(IECODE,IELEN,NOPOS)
+	IF (IELEN.EQ.-1.OR.IECODE.NE.'NO') THEN
+	   GOTO 170		! report problem then return
+	ENDIF
+C
+C ......................................................................
+C
+C Main loop
+C
+50	CALL IFFSEL(INLUN)
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 150
+C
+C Dispatch on value of IECODE
+C
+	IF(IECODE.EQ.'NF') GOTO 70
+	IF(IECODE.EQ.'FS') GOTO 60
+	IF(IECODE.EQ.'CB') GOTO 90
+	IF(IECODE.EQ.'TH') GOTO 60
+	IF(IECODE.EQ.'EF') GOTO 110
+	IF(IECODE.EQ.'TC') GOTO 60
+	IF(IECODE.EQ.'TS') GOTO 60
+	IF(IECODE.EQ.'TX') GOTO 60
+	IF(IECODE.EQ.'RO') GOTO 60
+	IF(IECODE.EQ.'AC') GOTO 60
+	IF(IECODE.EQ.'EO') GOTO 10
+	IF(IECODE.EQ.'CS') GOTO 60
+	IF(IECODE.EQ.'SS') GOTO 60
+	IF(IECODE.EQ.'SL') GOTO 60
+	IF(IECODE.EQ.'CH') GOTO 60
+C
+	GOTO 50
+C
+C
+C ......................................................................
+C
+C FS,ST(sometimes),EF,TC,TS,TX,SS,SL,CS,RO,TH or CH entries.
+C
+60	CALL EIHCPY(RESTLUN)
+	TRAIL=.TRUE.
+	GOTO 50
+C
+C
+C ......................................................................
+C
+C NF - new feature
+C
+70	CALL EIHRI(FEATNO,1,1)
+	INTSEQ=0
+	IF(FEATNO(1).EQ.0) GOTO 80
+C
+        IF(HAD_UNIQUE_FSN) THEN
+	   IF(IFIL.EQ.1) THEN 
+	      SENDFNO=FEATNO(1)
+	      IF(FEATNO(1).LE.LSTFNO) THEN
+	         CALL LSL_PUTMSG(IMERGE__UNSORTFSN,NOVR,FEATNO(1))
+              ELSE
+	         LSTFNO=FEATNO(1)
+		 IF(SENDFNO.GT.CURRFNO) THEN
+		    CURRFNO=SENDFNO
+		 ELSE
+	            CURRFNO=CURRFNO+1
+		    SENDFNO=CURRFNO
+		 ENDIF
+	      ENDIF
+           ELSE
+	      CURRFNO=CURRFNO+1
+	      SENDFNO=CURRFNO
+           ENDIF
+	ELSE
+           SENDFNO=FEATNO(1)
+        ENDIF
+C
+	CALL IFFSEL(RESTLUN)
+	CALL IFFNF(SENDFNO,INTSEQ)
+	TRAIL=.TRUE.
+	GOTO 50
+C
+C Ignore NF 0
+C
+80	CALL IFFNXC('EF',IELEN)
+	GOTO 50
+C
+C
+C
+C ......................................................................
+C
+C CB (ZS or ST) all are treated as CBS under revision levle one.
+C If the coordinates in the string are relative to a different origin
+C offset than to output file origin offset we have to handle carefully.
+C If not we can use EIHCPY. If we haven't had a range entry (input file
+C duff) we have to do it the hard way too. 
+C
+90	IF (HADRA.AND.(ABS(LOCOFF(1,IFIL)).LT.1.0E-6
+     &		.AND.
+     &		ABS(LOCOFF(2,IFIL)).LT.1.0E-6)) GOTO 60	  ! use EIHCPY
+C
+C We must take the differing origin offsets into account. First read the
+C CB.
+	CALL EIHRCB_HEAD(CBH)
+	CALL EIHRCB_DATA(CBD)
+	DO 95 I=1,CBH.NROW
+C
+C read an XY pair from CB
+	   CALL IFS_CB_READ(CBH,CBD,XY,2,XYCOL,I,I)
+C
+C add local origin offset to X and Y
+	   XY(1) = XY(1) + LOCOFF(1,IFIL)
+	   XY(2) = XY(2) + LOCOFF(2,IFIL)
+	   IF (XY(1).LT.RANGE(1)) RANGE(1)=XY(1)
+	   IF (XY(1).GT.RANGE(2)) RANGE(2)=XY(1)
+	   IF (XY(2).LT.RANGE(3)) RANGE(3)=XY(2)
+	   IF (XY(2).GT.RANGE(4)) RANGE(4)=XY(2)
+C
+C write it back to CB 
+	   CALL IFS_CB_WRITE(CBH,CBD,XY,2,XYCOL,I,I)
+95	CONTINUE
+C
+C Select rest outfile and write the modified CB to it.
+	CALL IFFSEL(RESTLUN)
+	CALL IFFCB(CBH,CBD)
+	GOTO 50
+C
+C ......................................................................
+C
+C EF - cannot use EIHCPY on EF.
+C
+110	CALL IFFSEL(RESTLUN)
+	CALL IFFEF
+	TRAIL=.FALSE.
+	GOTO 50
+C
+C ......................................................................
+C
+C Final exit
+C
+120	CALL IFFSEL(RESTLUN)
+C
+C IF /SINGLE_LAYER we will have to write the EO explicitly here, as
+C the normal code for writing the EO is carefully avoided if 
+C concatenating all the input layers into one. Take care to patch into 
+C NO entry the address of the EO.
+C
+	IF (HAD_RLAY) THEN
+	   CALL IFFUNO(LPOSNO)
+	   CALL IFFEO
+	ENDIF
+C
+C Write End MAP and End Job entries
+C
+	CALL IFFEM
+	CALL IFFEJ
+C
+C Then poke back to the remembered position of the IFF RA entry
+C
+	CALL IFFPKE(IECODE,IELEN,RAPOS)
+C
+C And patch in the calculated new range values
+C
+	CALL EIHWR(RANGE,4,1)
+C
+C ......................................................................
+C
+C Close down the /SPLIT output file.
+130	IF (RESTMER) RESTMER=%LOC(SS$_NORMAL)
+	CALL IFFCLO(RESTLUN,RESTMER)
+	SPLIFO=.FALSE.
+C
+C And return to calling program
+C
+	GOTO 180
+C
+C ......................................................................
+C 
+C Something went wrong.
+C
+C
+C Error - unexpected end of input IFF file
+C
+150	RESTMER=IMERGE__UNEXPEOF
+	CALL LSL_PUTMSG(RESTMER,CINFIL(:CINLEN))
+	GOTO 130
+C
+C Error - NO  not found where expected
+C
+170	RESTMER=IMERGE__NONOTFND
+	CALL LSL_PUTMSG(RESTMER,CINFIL(:CINLEN))
+	GOTO 130
+C
+C ......................................................................
+C
+180	RETURN
+	END

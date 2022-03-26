@@ -17,6 +17,10 @@ $! 24-Oct-1988	R J Hulme (Laser-Scan Labs)
 $! renamed from LSLINI.COM, 
 $! LSL$IMENU_INITIALISE now points to LSLIMI_MENU_INI.COM
 $! ............................................................................
+$! 13-Feb-1995	Steve Townrow (Laser-Scan Ltd.)
+$! Updated to cope with the AXP platfrom. Mod 1468.
+$! ............................................................................
+$!
 $!
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $! Announce ourselves
@@ -29,6 +33,16 @@ $	   ws "	     Defining the LSL INFORMAP translation environment"
 $	   ws ""
 $do_it_quietly:
 $!
+$!
+$!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+$! See what platform we are running on
+$!
+$	ARCH_NAME=F$GETSYI("ARCH_NAME")
+$	SUFFIX=""
+$	AXP_SUFFIX=""
+$	IF ARCH_NAME.EQS."Alpha" THEN SUFFIX="_TV"
+$	IF ARCH_NAME.EQS."Alpha" THEN AXP_SUFFIX="_AXP"
+$!
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $! Define the logical names that we require
 $!
@@ -40,8 +54,9 @@ $	define/nolog	LSL$EXE		STI_ROOT:[LSL.EXE]
 $	define/nolog	LSL$LIBRARY	STI_ROOT:[LSL.LIB]
 $	define/nolog	LSL$LOOKUP	STI_ROOT:[LSL.LOOKUP]
 $!
-$	define/nolog	LSL$IFFSHR	LSL$LIBRARY:IFFSHR
-$	define/nolog	LSL$LSLSHR	LSL$LIBRARY:LSLSHR
+$	define/nolog	LSL$IFFSHR'SUFFIX'	LSL$LIBRARY:IFFSHR'SUFFIX'
+$	define/nolog	LSL$LSLSHR'SUFFIX'	LSL$LIBRARY:LSLSHR'SUFFIX'
+$	define/nolog	LSL$FRTSHR'SUFFIX'	LSL$LIBRARY:FRTSHR'SUFFIX'
 $!
 $! - now those specific to the menu system
 $!
@@ -59,19 +74,19 @@ $! Set up symbols for the CONVERT package executables
 $!
 $! module IFFIMAP
 $!
-$	I2IMAP	== "$LSL$EXE:I2IMAP"		! IFF to IMAP convertor
-$	IMAP2I	== "$LSL$EXE:IMAP2I"		! IMAP to IFF convertor
+$	I2IMAP	== "$LSL$EXE:I2IMAP''AXP_SUFFIX'"	! IFF to IMAP convertor
+$	IMAP2I	== "$LSL$EXE:IMAP2I''AXP_SUFFIX'"	! IMAP to IFF convertor
 $!
 $! module IFFNTF
 $!
-$	I2NTF	== "$LSL$EXE:I2NTF"		! IFF to NTF convertor
-$	NTF2I	== "$LSL$EXE:NTF2I"		! NTF to IFF convertor
+$	I2NTF	== "$LSL$EXE:I2NTF''SUFFIX'"		! IFF to NTF convertor
+$	NTF2I	== "$LSL$EXE:NTF2I''SUFFIX'"		! NTF to IFF convertor
 $!
 $! module IFFOSTF
 $!
-$	I2OSTF	  == "$LSL$EXE:I2OSTF"		! IFF to OSTF convertor
-$	OSTF2I	  == "$LSL$EXE:OSTF2I"		! OSTF to IFF convertor
-$	OSTFINDEX == "$LSL$EXE:OSTFINDEX"	! Read the OSTF index
+$	I2OSTF	  == "$LSL$EXE:I2OSTF''SUFFIX'"		! IFF to OSTF convertor
+$	OSTF2I	  == "$LSL$EXE:OSTF2I''SUFFIX'"		! OSTF to IFF convertor
+$	OSTFINDEX == "$LSL$EXE:OSTFINDEX''SUFFIX'"	! Read the OSTF index
 $!
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $!

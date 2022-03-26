@@ -1,0 +1,163 @@
+	LOGICAL FUNCTION WAIT_INPUT(PROMPT,WANT_TABLE,WANT_VDU)
+C
+***	IDENT	20AP88
+***	MODULE	WAIT_INPUT
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C
+C	Author	  : Andrew Morris
+C	Created   : Jan 1985
+C
+	IMPLICIT NONE
+C
+C 	Arguments:
+	CHARACTER*(*)		PROMPT	! prompt
+	LOGICAL*1		WANT_TABLE	! table input wanted
+	LOGICAL*1		WANT_VDU	! VDU input wanted
+C
+C 	System parameters
+	INCLUDE '($IODEF)'
+C
+***	PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/HERE:PROQIO/
+***	COMMON/HERE:TAB/
+C***	COMMON/HERE:PROFILE/
+C
+C 	Functions
+	EXTERNAL	CTRLCAST	!
+	INTEGER		SYS$QIO		! "queue" an input requeuest
+	INTEGER		SYS$ASSIGN	! assign I/O channels
+	INTEGER		TTRSTR		! read line from SYS$INPUT
+	LOGICAL		HAD_ERROR	! had table input error?
+	LOGICAL		READ_ERROR	! read error message
+	INTEGER		TEST_TERM
+C
+C workspace
+	BYTE		ERRBUF(80)	! error message buffer
+	INTEGER*2	ERRLEN		! error message length
+	INTEGER		ERRNOM		! error number
+	INTEGER		IERR		! error return
+	INTEGER		OK
+	LOGICAL		OTERM
+C
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C Prompts and waits for input from table or keyboard.
+C
+C Function result is	.FALSE. for ^Z or possibly fatal read error,
+C			.TRUE. otherwise.
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C
+	WAIT_INPUT = .FALSE.	! assume error
+C
+10	IF (CMDFIL) THEN		! commands from command file?
+	  OK = TTRSTR()			! read next line from SYS$INPUT
+	  IF (.NOT.OK) THEN
+	    CALL TTWSTR('*** End of command file ***')
+C
+C Switch to SYS$COMMAND
+	    OK = TEST_TERM('SYS$COMMAND',OTERM,IERR)
+	    IF (.NOT.OK) THEN
+	      IF (OK.EQ.LSL__SYSERR) THEN
+	        CALL LSL_PUTMSG(IERR)
+	      ELSE
+	        CALL LSL_PUTMSG(OK)
+	      ENDIF
+	    ELSE
+	      CMDFIL = .NOT.OTERM		! input from command file
+	    ENDIF
+C
+C set up control/C handler
+	    IF (CMDFIL) GOTO 20		! not a terminal so give up
+	    CALL SET_OUTBAND_AST(CTRLCAST,8,,'SYS$COMMAND')
+	    IERR = SYS$ASSIGN('SYS$COMMAND',IN_CHAN,,)
+	    IF (.NOT.IERR) THEN
+	      CALL LSL_PUTMSG(IERR)
+	      GOTO 20			! as for ^Z
+	    ENDIF
+	    GOTO 10			! take commands from terminal
+	  ENDIF
+C
+	  CALL WRITEF('%S> %S',PROMPT,TXTDSC)	! echo command
+	  HAD_VDU = .TRUE.
+	  GOTO 18			! input is a text command line
+	ENDIF
+C
+C Write the prompt - TTWSTR eventually calls our VIO$PUT_OUTPUT in
+C OUTPUT.SRC, which takes account of PROING
+	TTOPRO = .TRUE.
+	CALL TTWSTR(PROMPT//'> ')
+C
+C queue input requeuest
+	IF (.NOT.HADQIO) THEN
+	  IERR = SYS$QIO
+     +	  	(
+     +		%VAL(EF_VDU),		! event flag to be set
+     +  	%VAL(IN_CHAN),		! input channel number
+     +  	%VAL(IO$_READVBLK),	! I/O function
+     +  	ISB,			! I/O status block
+     +  	,			! AST address
+     +  	,			! AST parameters
+     +  	TXTBUF,			! p1 is buffer
+     +  	%VAL(TXTLIM-1),		! p2 is max buffer length
+     +    	,			! p3 is default timeout period
+     +  	,			! p4 is default terminator
+     +  	,			! p5 is prompt string
+     +  				! p6 is prompt length
+     +  	)
+C
+C QIO successful?
+	  IF (.NOT.IERR) THEN
+	    CALL LSL_PUTMSG(IERR)
+	    GOTO 10			! try again
+	  ENDIF
+	  HADQIO = .TRUE.		! now had a QIO
+	ENDIF
+C
+C wait for keyboard or table input
+	IF (TABLE) THEN
+	   CALL WFLOR(EF_POINT,EF_ERROR,EF_VDU)
+	ELSE
+	   CALL SYS$WAITFR(%VAL(EF_VDU))
+	ENDIF
+	HAD_VDU = ISB_STATUS.NE.0
+C
+C input from keyboard?
+	IF (HAD_VDU) THEN		! had keyboard input?
+	  HADQIO = .FALSE.		! no QIO now
+	  TTIDON = .TRUE.		! had some input
+	  IF (.NOT.ISB_STATUS) THEN
+	    CALL LSL_PUTMSG(ISB_STATUS)	! debug
+	    GOTO 10			! try again
+	  ENDIF
+	  IF (ISB_TSIZ.EQ.1.AND.ISB_TRM.EQ.26) GOTO 20	! ctrl/Z
+	  TXTPTR = ISB_TOFF
+C
+C was VDU actually wanted
+	  IF (WANT_VDU) GOTO 18		! yes so OK
+	  CALL TTWSTR('Input must be from table')
+	  GOTO 10
+	ENDIF
+C
+C so must be from the table, check for error
+	IF (HAD_ERROR(IERR)) THEN
+	  CALL READ_ERROR(ERRBUF,ERRLEN,ERRNOM,IERR)
+	  GOTO 10			! try again
+	ENDIF
+C
+C was table input actually wanted
+	IF (.NOT.WANT_TABLE) THEN
+	  CALL TTWSTR('Input must be from keyboard')
+	  CALL READ_PUCK(BUTTON,OK,OK,IERR)	! ditch the input
+	  GOTO 10
+	ENDIF
+C
+18	IF (HAD_VDU) THEN		! had keyboard input?
+	  IF (TXTPTR.EQ.0) GOTO 10	! try again if blank line
+	  CALL BSLN
+	ENDIF
+C
+	WAIT_INPUT = .TRUE.		! success
+C
+20	RETURN
+	END

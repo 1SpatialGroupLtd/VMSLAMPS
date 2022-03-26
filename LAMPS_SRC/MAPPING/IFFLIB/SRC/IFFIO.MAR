@@ -1,0 +1,114 @@
+	.TITLE	$IFFIO
+	.IDENT	'05OC93'
+;
+; Copyright  Laser-Scan Laboratories Limited, Cambridge, England.
+;
+; Author: Paul Hardy after PDP11 version by P. Cross.
+;
+;Mod	Make B.VBNx long not word to allow big IFF files	PGH  23-Jul-1992
+
+; I F F   b a s i c  I / O
+
+	CODE_PSECT	IFF
+
+; IF$TRF - is just IF$TRN with AST disable brackets
+
+IF$TRF::$SETAST_S	#0		; disable AST recognition
+	BSBB	IF$TRN			; common code
+	$SETAST_S	#1		; allow ASTs again
+	RSB
+
+; IF$TRN - initiate next disc transfer (if any) for IFCB R9
+;   called from transfer-done AST, or from mainline with ASTs disabled
+; no action if busy (status is RMS$_PENDING)
+; When a read completes, the appropriate event flag is set, in case
+;  caller is waiting for it
+
+IF$TRN::PUSHR	#^M<R2,R3,R4>		; save registers will use
+	MOVAL	I.RAB(R9),R2		; current RAB
+	TSTL	RAB$L_STS(R2)		; disc still active ?
+	BNEQ	2$			; no so can do something
+	BRW	99$			; yes - do nowt
+2$:	MOVL	RAB$L_RBF(R2),R4	; last buffer address
+	BEQL	10$			; called from idle
+	CLRL	RAB$L_RBF(R2)		; in case going idle now
+	MOVAL	B.BUFL-B.BUF(R4),R4	; address of buffer control block
+	BLBC	B.WTG(R4),4$		; if was writing then just clear flag
+	CLRL	B.WTG(R4)
+	BRB	5$
+; here with was reading
+4$:	CLRL	B.RDG(R4)		; clear read-in-progress flag
+	MOVL	B.VBNR(R4),B.VBNW(R4)	; block address for writing back
+; here to set event flag to signal completion
+; note RSX version used WTSIG and only set EF on read.
+5$:	$SETEF_S	EFN=IFFEF	; signal read/write complete
+; scan buffers for this file to see if owt to do
+10$:	MOVAL	IFBHD,R3		; buffer head
+20$:	MOVL	(R3),R4			; next buffer
+	BEQL	99$			; none left
+	MOVL	R4,R3			; for next one
+	CMPL	R9,B.IFCB(R4)		; ours ?
+	BNEQ	20$			; no - keep looking
+; here with a buffer to consider
+	BLBC	B.WTR(R4),40$		; skip if no write requested
+	BLBS	B.RDR(R4),35$		; if read and write then force write
+	BLBS	B.1ST(R4),20$		; if primary buffer then dont write
+; here with a buffer to write
+35$:	MOVW	#IFBKSZ,RAB$W_RSZ(R2)	; block size
+	MOVAL	B.BUF(R4),RAB$L_RBF(R2)	; data area of buffer
+	MOVL	B.VBNW(R4),RAB$L_BKT(R2); virtual block number
+	CLRL	B.WTR(R4)		; reset requested
+	MOVL	#1,B.WTG(R4)		; and set writing
+	$WRITE	RAB=R2,SUC=IF$AOK,ERR=IF$WER
+99$:	POPR	#^M<R2,R3,R4>		; restore regs
+	RSB				; done
+
+; here with buffer to read perhaps
+40$:	BLBC	B.RDR(R4),20$		; if dont want read then skip
+	MOVW	#IFBKSZ,RAB$W_USZ(R2)	; block size
+	MOVAL	B.BUF(R4),RAB$L_UBF(R2)	; data address
+	MOVL	B.VBNR(R4),RAB$L_BKT(R2); virtual block number
+	CLRL	B.VBNW(R4)		; write posn no longer valid
+	CLRL	B.RDR(R4)		; clear requested
+	MOVL	#1,B.RDG(R4)		; and set reading
+	$READ	RAB=R2,SUC=IF$AOK,ERR=IF$RER
+	BRB	99$			; done
+
+; AST routines
+
+; Success AST
+
+	.ENTRY	IF$AOK,^M<R2,R3,R4,R9>
+	MOVL	4(AP),R2		; parameter is RAB address
+	MOVL	R2,INAST		; mark as in AST state
+	MOVAL	I.FCBL-I.RAB(R2),R9	; derive address of IFCB
+	JSB	IF$TRN			; owt else to do ?
+ASTX:	CLRL	INAST			; no longer in AST
+	RET
+
+; write error AST
+	.ENTRY	IF$WER,^M<>
+	MOVL	#^A'WRIT',IERCD		; error code letters
+ASTERR:	MOVL	4(AP),R0		; parameter is RAB address
+	MOVL	R0,INAST		; mark as in AST state
+	MOVL	RAB$L_STS(R0),IERNM	; VMS error code
+	JSB	IF$ERR			; moan
+; clear outstanding requests and back to tidy via AST exit
+	MOVAL	IFBHD,R0		; buffer chain head
+20$:	MOVL	(R0),R0			; next buffer
+	BEQL	ASTX			; none left
+	CLRL	B.WTR(R0)		; clear requests
+	CLRL	B.RDR(R0)
+	CLRL	B.WTG(R0)
+	CLRL	B.RDG(R0)
+	CLRL	B.1ST(R0)
+	BRB	20$			; keep looking
+
+; Read error AST
+
+	.ENTRY	IF$RER,^M<>
+	MOVL	#^A'READ',IERCD		; error code letters
+	BRW	ASTERR			; common up to write error
+
+	.PSECT
+	.END

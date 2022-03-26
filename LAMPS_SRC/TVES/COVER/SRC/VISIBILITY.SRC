@@ -1,0 +1,457 @@
+     	LOGICAL FUNCTION VISIBILITY(XFROM,YFROM,
+     &                              XTO,YTO,OBSERVER_HEIGHT)
+C
+***	MODULE	VISIBILITY
+***	IDENT	07AP93
+C
+C	Copyright : Laser-Scan, Cambridge, England
+C	Created   : 11 November 1987
+C	Author    : D R Catlow
+C
+CMOD1189					JB 18-Feb-1993
+C	Use REAL's for observer positions to preserve accuracy
+C	NB. Only uses WORD DTI files
+C
+C	Routine to determine the visibility of the point XTO
+C	and YTO from observation point XFROM and YFROM.
+C	Function returns true if the point is visible and false
+C	the point is hidden.
+C	Optionally earth curvature and terrestrial refraction
+C	are taken into account, and additional information on
+C	the height of surface features is extracted from a
+C	second grid file.
+C	The DTM is opened on DTILUN 1, the second grid file on
+C	DTILUN 7.
+C
+	IMPLICIT NONE
+C
+C	Arguments
+	REAL		XFROM		!observer  matrix x coord
+	REAL		YFROM		!observer  matrix y coord
+	INTEGER*4	XTO		!target matrix x and
+	INTEGER*4	YTO		!y coordinates
+	REAL		OBSERVER_HEIGHT	!height at observer point
+C
+C commons:
+***	COMMON/HERE:COVER /
+***	COMMON/HERE:TARGET/
+C
+C DTILIB Parameters
+***	COMMON/LSL$CMNDTI:DTILIBMSG.PAR/
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C Locals
+	REAL		DISTANCE        ! dist of sample pt from ob.
+	REAL		HEIGHT          ! height at sample pt
+	REAL		DIFFX		! x diff XFROM and current pt
+	REAL		DIFFY		! y diff YFROM and current pt
+	REAL		ANGLE		! angle sample pt / observer
+	REAL		XIN		! scan line x and y
+	REAL		YIN		! intersection points.
+	REAL		RDIFFX		! abs diff between XFROM, XTO
+	REAL		RDIFFY		! abs diff between YFROM, YTO
+C
+	INTEGER*4	START
+	INTEGER*4	POINT_VISIBILITY !is pt visible or not
+	INTEGER*4	INSECTS		! number of intersection pts
+	INTEGER*4	COL		! column number in DTM
+	INTEGER*4	ROW		! row number in DTM
+	INTEGER*4	XPOS		! column number in second grid
+	INTEGER*4	YPOS		! row number in second grid
+	INTEGER*4	RETVAL		! function return call
+	INTEGER*4	STEP		! scan line incremental step
+	INTEGER*4	SAMPLE		! scan line X
+	INTEGER*4	LINE		! and Y counters
+	INTEGER*4	I		! loop counter
+	INTEGER*4	HGT(2)		! DTM heights
+	INTEGER*2	CULTURE_HEIGHT	! height from second matrix
+	INTEGER*2	VALUE
+C
+C DTILIB Function
+	INTEGER*4	DTI_READ_WORD_DATA
+C
+C**********************************************************************
+C	Assume initially that the point is not visible
+	VISIBILITY = .FALSE.
+C
+C----------------------------------------------------------------------
+C	Determine x and y components of vector
+	RDIFFX=ABS(XFROM-XTO)
+	RDIFFY=ABS(YFROM-YTO)
+C
+C	Check if we are dealing with a single point (just in case)
+	IF (RDIFFX.EQ.0 .AND. RDIFFY.EQ.0) THEN
+	  VISIBILITY=.TRUE.
+	  GOTO 9999
+	ENDIF
+C
+C---------------------------------------------------------------------
+C	If culture option has been selected then
+C	modify target height by adding height of surface feature.
+C	This is only done for the target position if the option
+C	ADD_TARGET is selected.
+C
+	IF (CULTRE .AND. ADD_CULT_HEIGHT) THEN
+	  COL = XTO-MAT_XOFFSET
+	  ROW = YTO-MAT_YOFFSET
+	  IF (COL.LE.0 .OR. COL.GT.X_EXTENT(7) .OR.
+     &	      ROW.LE.0 .OR. ROW.GT.Y_EXTENT(7)) GOTO 50
+C
+	   RETVAL=DTI_READ_WORD_DATA (7,CULTURE_HEIGHT,COL,ROW)
+	   IF (RETVAL.NE.DTI__NORMAL) THEN
+             CALL LSL_PUTMSG(RETVAL)
+	     GOTO 9999
+	   ENDIF
+C
+	   IF (CULTURE_HEIGHT.EQ.-32767) GOTO 50
+C
+	   TARGET_HEIGHT = TARGET_HEIGHT+CULTURE_HEIGHT
+	ENDIF	
+C
+C---------------------------------------------------------------------
+C	Adjust height at target point if we are compensating for earth 
+C	curvature and terrestrial refraction
+C
+50	IF (ECURVE) TARGET_HEIGHT = TARGET_HEIGHT -
+     &		((TARGET_DISTANCE/1000.0)**2) * ((1-REFRACT)/12.756)
+C
+C---------------------------------------------------------------------
+C
+	IF (RDIFFX.EQ.0) GOTO 400
+C
+C	Find intersections of line of sight with columns
+C
+	START = NINT(XFROM)
+	STEP  = 2					! ----->
+C
+	IF (START.GT.XTO) STEP = -2			! <-----
+C
+150	DO 300 SAMPLE = START,XTO,STEP	
+C
+C	Don't consider cell at observer or target position
+C
+	   IF (SAMPLE.EQ.XFROM .OR. SAMPLE.EQ.XTO) GOTO 300	  
+C
+C	Only consider points in currently defined area of interest 
+C
+	   IF (SAMPLE.LT.X_MIN .OR. SAMPLE.GT.X_MAX) GOTO 300
+C
+C	Calculate intersection of sample line SAMPLE with a line
+C	connecting vertex cells XFROM,YFROM and XTO,YTO.
+C
+C	Intersection y = y + dx * (DY/DX)
+C
+	   YIN = YFROM + (FLOAT(SAMPLE)-XFROM) *
+     &				(YTO-YFROM)/(XTO-XFROM)
+C
+C	Calculate distance of sample point from observer
+C
+	   DIFFX = (SAMPLE - XFROM)*X_GRID(1)
+	   DIFFY = (YIN    - YFROM)*Y_GRID(1)	   
+	   DISTANCE = SQRT(DIFFX*DIFFX + DIFFY*DIFFY)
+C
+C	Linearly interpolate height, using heights of points above
+C	and below the intersection point
+C	Point below = HGT(1)
+C
+	   COL = SAMPLE
+	   IF (COL.LT.X_MIN .OR. COL.GT.X_MAX) GOTO 300
+C
+	   ROW = INT(YIN)			! row below intersection
+	   IF (ROW.LT.Y_MIN .OR. ROW.GT.Y_MAX) GOTO 300
+C
+	   RETVAL = DTI_READ_WORD_DATA (1,VALUE,COL,ROW)
+	   IF (RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     GOTO 9999
+	   ENDIF
+C
+	   IF (VALUE.EQ.-32767) GOTO 300
+	   HGT(1) = VALUE
+C
+C	Modify height by adding height in surface matrix height
+C	if the CULTURE option is selected.
+C
+	   IF (CULTRE) THEN
+	     XPOS = COL-MAT_XOFFSET
+	     YPOS = ROW-MAT_YOFFSET
+	     IF (XPOS.LT.1 .OR. XPOS.GT.X_EXTENT(7) .OR.
+     &		 YPOS.LT.1 .OR. YPOS.GT.Y_EXTENT(7)) GOTO 230
+C
+	     RETVAL = DTI_READ_WORD_DATA (7,CULTURE_HEIGHT,XPOS,YPOS)
+	     IF (RETVAL.NE.DTI__NORMAL)THEN
+	       CALL LSL_PUTMSG(RETVAL)
+	       GOTO 9999
+	     ENDIF
+C
+	     IF (CULTURE_HEIGHT.EQ.-32767) GOTO 230
+	     HGT(1) = HGT(1)+CULTURE_HEIGHT
+	   ENDIF
+C
+C	Point above = HGT(2) unless intersection point is directly
+C	on a node
+C
+230	   IF (FLOAT(ROW).EQ.YIN) THEN
+	     HEIGHT=HGT(1)
+	   ELSE
+             ROW = ROW+1
+	     RETVAL = DTI_READ_WORD_DATA(1,VALUE,COL,ROW)
+	     IF (RETVAL.NE.DTI__NORMAL) THEN
+	       CALL LSL_PUTMSG(RETVAL)
+	       GOTO 9999
+	     ENDIF
+C
+	     IF (VALUE.EQ.-32767) GOTO 300
+	     HGT(2)=VALUE
+C
+C	Modify height by adding height in surface matrix height
+C	if the CULTURE option is selected.
+C
+	     IF (CULTRE) THEN
+ 	       XPOS = COL-MAT_XOFFSET
+	       YPOS = ROW-MAT_YOFFSET
+	       IF (XPOS.LT.1 .OR. XPOS.GT.X_EXTENT(7) .OR.
+     &             YPOS.LT.1 .OR. YPOS.GT.Y_EXTENT(7)) GOTO 240
+C
+	       RETVAL = DTI_READ_WORD_DATA (7,CULTURE_HEIGHT,XPOS,YPOS)
+	       IF (RETVAL.NE.DTI__NORMAL)THEN
+	         CALL LSL_PUTMSG(RETVAL)
+	         GOTO 9999
+	       ENDIF
+C
+	       IF (CULTURE_HEIGHT.EQ.-32767)GOTO 240
+	       HGT(2) = HGT(2)+CULTURE_HEIGHT
+	     ENDIF
+C
+C	Do we need to interpolate?
+C
+240	     IF (HGT(1).EQ.HGT(2)) THEN
+		HEIGHT = HGT(1)
+	     ELSE
+C
+C	Interpolate to get height at intersection point
+		HEIGHT = HGT(2) + (HGT(1)-HGT(2)) * (ROW-YIN)
+	     ENDIF	
+	   ENDIF
+C
+C	Modify height for earth curvature and terrestrial
+C	refraction is option is selected
+C
+	   IF (ECURVE) HEIGHT = HEIGHT -
+     &			((DISTANCE/1000.0)**2) * ((1-REFRACT)/12.756)
+C
+C	Is the point higher than both the observer and target heights.
+C	In which case it must obscure the target point, and we don't
+C	need to consider any other sample points along the profile.
+C
+	   IF (HEIGHT.GT.OBSERVER_HEIGHT .AND.
+     &         HEIGHT.GT.TARGET_HEIGHT) GOTO 9999
+C
+C	Is the point below both the observer and target heights.
+C	In which case it won't effect visibility.
+C
+	   IF (HEIGHT.LE.OBSERVER_HEIGHT .AND.
+     &         HEIGHT.LE.TARGET_HEIGHT) GOTO 300
+C
+C	Calculate angle of sample point from observer
+C
+	   IF (HEIGHT.EQ.OBSERVER_HEIGHT) THEN
+	     ANGLE=0.0
+	   ELSE
+	     ANGLE=ATAN(ABS(OBSERVER_HEIGHT-HEIGHT)/DISTANCE)
+	     IF (HEIGHT.LT.OBSERVER_HEIGHT) ANGLE = -ANGLE
+	   ENDIF
+C
+C	Compare ANGLE against TARGET_ANGLE
+C	If greater, then we need not consider any more sample
+C	points along this profile, since this point obscures
+C	the target point.
+C
+	   IF (ANGLE.GT.TARGET_ANGLE)GOTO 9999
+C
+300	CONTINUE
+C
+	IF (START.EQ.XFROM) THEN
+	  IF (XFROM.GT.XTO) THEN
+            START=START-1
+	  ELSE
+	    START=START+1
+	  ENDIF
+C
+	  GOTO 150
+	ENDIF
+C
+C---------------------------------------------------------------------
+C
+400	IF (RDIFFY.EQ.0) GOTO 1000
+C
+C	Find intersections of line of sight with rows
+C
+	START = NINT(YFROM)
+	STEP  = 2			! up
+C
+	IF (START.GT.YTO) STEP = -2	! down
+C
+450	DO 500 ROW = START,YTO,STEP	
+C
+C	Don't consider cell at observer or target position
+C
+	   IF (ROW.EQ.YFROM .OR. ROW.EQ.YTO) GOTO 500	  
+C
+C	Only consider points in currently defined area of
+C	interest
+C
+	   IF (ROW.LT.Y_MIN .OR. ROW.GT.Y_MAX)GOTO 500
+C
+C	Calculate intersection of sample line SAMPLE with a line
+C	connecting vertex cells XFROM,YFROM and XTO,YTO.
+C
+C	Intersection x = x + dy * (DX/DY)
+C
+	   XIN = XFROM + (FLOAT(ROW)-YFROM) *
+     *				(XTO-XFROM)/(YTO-YFROM)
+C
+C	Calculate distance of intersection point from observer
+C
+	   DIFFX = (XIN-XFROM)*X_GRID(1)
+	   DIFFY = (ROW-YFROM)*Y_GRID(1)
+	   DISTANCE = SQRT(DIFFX*DIFFX + DIFFY*DIFFY)
+C
+C	Linearly interpolate height, using heights of points to the
+C	left and right of the intersection point
+C	Point below = HGT(1)
+C
+	   COL    = INT(XIN)			! column to left
+	   IF (COL.LT.X_MIN .OR. COL.GT.X_MAX) GOTO 300
+C
+	   RETVAL = DTI_READ_WORD_DATA (1,VALUE,COL,ROW)
+	   IF (RETVAL.NE.DTI__NORMAL)THEN
+	     CALL LSL_PUTMSG(RETVAL)
+	     GOTO 9999
+	   ENDIF
+C
+	   IF (VALUE.EQ.-32767) GOTO 500
+	   HGT(1)=VALUE
+C
+C	Modify height by adding height in surface matrix height
+C	if the CULTURE option is selected.
+C
+	   IF (CULTRE) THEN
+	     XPOS = COL-MAT_XOFFSET
+	     YPOS = ROW-MAT_YOFFSET
+	     IF (XPOS.LT.1 .OR. XPOS.GT.X_EXTENT(7) .OR.
+     &           YPOS.LT.1 .OR. YPOS.GT.Y_EXTENT(7)) GOTO 460
+C
+	     RETVAL=DTI_READ_WORD_DATA (7,CULTURE_HEIGHT,XPOS,YPOS)
+	     IF (RETVAL.NE.DTI__NORMAL)THEN
+	       CALL LSL_PUTMSG(RETVAL)
+	       GOTO 9999
+	     ENDIF
+C
+	     IF (CULTURE_HEIGHT.EQ.-32767) GOTO 460
+	     HGT(1) = HGT(1)+CULTURE_HEIGHT
+	   ENDIF
+C
+C	Point above = HGT(2) unless intersection point is directly
+C	on a node
+C
+460	   IF (FLOAT(COL).EQ.XIN) THEN
+	     HEIGHT=HGT(1)
+	   ELSE
+             COL = COL+1
+C
+             RETVAL=DTI_READ_WORD_DATA(1,VALUE,COL,ROW)
+             IF(RETVAL.NE.DTI__NORMAL)THEN
+               CALL LSL_PUTMSG(RETVAL)
+               GOTO 9999
+             ENDIF
+C
+	     IF (VALUE.EQ.-32767) GOTO 500
+	     HGT(2) = VALUE
+C
+C	Modify height by adding height in surface matrix height
+C	if the CULTURE option is selected.
+C
+	     IF (CULTRE) THEN
+	       XPOS = COL-MAT_XOFFSET
+	       YPOS = ROW-MAT_YOFFSET
+	       IF (XPOS.LT.1 .OR. XPOS.GT.X_EXTENT(7) .OR.
+     &             YPOS.LT.1 .OR. YPOS.GT.Y_EXTENT(7)) GOTO 470
+C
+	       RETVAL=DTI_READ_WORD_DATA (7,CULTURE_HEIGHT,XPOS,YPOS)
+	       IF(RETVAL.NE.DTI__NORMAL)THEN
+	         CALL LSL_PUTMSG(RETVAL)
+	         GOTO 9999
+	       ENDIF
+C
+	       IF (CULTURE_HEIGHT.EQ.-32767) GOTO 470
+	       HGT(2) = HGT(2) + CULTURE_HEIGHT
+	     ENDIF
+C
+C	Do we need to interpolate?
+C
+470	     IF (HGT(1).EQ.HGT(2)) THEN
+	       HEIGHT=HGT(1)
+	     ELSE
+C
+C	Interpolate to get height at intersection point
+               HEIGHT = HGT(2) + (HGT(1)-HGT(2)) * (COL-XIN)
+	     ENDIF
+	   ENDIF	
+C
+C	Modify height for earth curvature and terrestrial
+C	refraction is option is selected
+C
+	   IF (ECURVE) HEIGHT = HEIGHT -
+     &		 ((DISTANCE/1000.0)**2)*((1-REFRACT)/12.756)
+C
+C	Is the point higher than both the observer and target heights.
+C	In which case it must obscure the target point, and we don't
+C	need to consider any other sample points along the profile.
+C
+	   IF (HEIGHT.GT.OBSERVER_HEIGHT .AND.
+     &         HEIGHT.GT.TARGET_HEIGHT) GOTO 9999
+C
+C	Is the point below both the observer and target heights.
+C	In which case it won't effect visibility.
+C
+	   IF (HEIGHT.LE.OBSERVER_HEIGHT .AND.
+     &         HEIGHT.LE.TARGET_HEIGHT) GOTO 500
+C
+C	Calculate angle of sample point from observer
+C
+	   IF (HEIGHT.EQ.OBSERVER_HEIGHT) THEN
+	     ANGLE = 0.0
+	   ELSE
+	     ANGLE = ATAN(ABS(OBSERVER_HEIGHT-HEIGHT)/DISTANCE)
+	     IF (HEIGHT.LT.OBSERVER_HEIGHT) ANGLE = -ANGLE
+	   ENDIF
+C
+C	Compare ANGLE against TARGET_ANGLE
+C	If greater, then we need not consider any more sample
+C	points along this profile, since this point obscures
+C	the target point.
+C
+	   IF (ANGLE.GT.TARGET_ANGLE) GOTO 9999
+C
+500	CONTINUE
+C
+	IF (START.EQ.YFROM)THEN
+	  IF(YFROM.GT.YTO)THEN
+            START=START-1
+	  ELSE
+	    START=START+1
+	  ENDIF
+	  GOTO 450
+	ENDIF
+C
+C-------------------------------------------------------------------------
+C	Target point must therefore be visible
+C
+1000	VISIBILITY=.TRUE.
+C
+C-------------------------------------------------------------------------
+C
+9999	RETURN				
+	END
+C

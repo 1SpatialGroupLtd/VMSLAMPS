@@ -1,0 +1,307 @@
+	SUBROUTINE MATCH(FSTCON,CONGOT,TSTANG,TSTDST)
+C
+***	MODULE	MATCH
+***	IDENT	28MY86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Converged; tidied			 DM	28-May-1986
+CMOD	No longer sets up IU and IV		 DM	18-Mar-1986
+CMOD	Use /ANACOM/ to resolve apexes		 DM	25-Sep-1985
+CMOD	Bug fix in BIAS correction; tidied	 DM	04-Sep-1985
+CMOD	Apexes may be longer than width again!	WJJ	15-Jun-1983
+CMOD	Tidies, and comments			AJW	29-Apr-1983
+CMOD	Look for apexes and wides etc even if
+CMOD	  .NOT.TSTDST				WJJ	22-Nov-1982
+CMOD	Apexes must not be longer than width	WJJ	18-Nov-1982
+CMOD	Don't modify width of short chains	 DM	09-Nov-1982
+CMOD	Recognise reverse apexes (CONNCT(4)=6)	PGH	16-Jun-1982
+CMOD	Tidied					AJW	27-Jan-1981
+CMOD	Created					MCF	26-May-1977
+C
+C See if the track has another segment nearby.
+C Looks at all line segments visible and sorts them in order of angle
+C to track, length of segment and nearness to the end of our track with
+C a bias to give preference to the left or right (depending on the
+C parameter BIAS.)
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+C parameters:
+***	PARAMETER/PARAMS/
+C
+C arguments:
+	INTEGER   FSTCON	! first connection
+	INTEGER   CONGOT	! number of connections made
+	LOGICAL*1 TSTANG	! check acuteness of corner
+	LOGICAL*1 TSTDST	! check length of gap
+C
+C common blocks:
+***	COMMON/ANACOM/
+***	COMMON/LINKS/
+***	COMMON/LKFOLL/
+***	COMMON/LKPARM/
+***	COMMON/MPEP/
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+C
+C local workspace:
+	REAL      BEARNG(MAXCON)	! the bearings of the segments
+	REAL      CLOSE2	! closeness (for backtrack) squared
+	REAL      COSALF	! angle between segment and track
+	REAL      DELWTH	! fractional change in width
+	REAL      DISLE(2)	! distance from LSTONE to ends of ICHN
+	REAL      DOT11,DOT22,DOT33
+	REAL      DU,DV		! vector 1st pnt of chain to last point
+	REAL      DW		! change in width
+	REAL      DX(4),DY(4)	! various vectors (see code)
+	REAL      GAPSQ		! constant - GAPSIZ**2
+	REAL      RRR		! temporary variable
+	REAL      SECT		! secant(theta) -
+C				! (apparent)/(real) track width
+	REAL      SEGMIN	! constant - (SMLLNS*IPIT)**2
+	REAL      VECLE(2,2)	! vector from LSTONE to each end of ICHN
+	REAL      W1		! width of first end of chain
+	REAL      WID1N,WID2N	! normalised widths of both ends
+	REAL      WIDCOR	! width correction
+	INTEGER   CEND		! end to connect by
+	INTEGER   CNCTN		! current connection
+	INTEGER   ICHN		! DO loop counter loops through chains
+	INTEGER   III		! temporary
+	INTEGER   ISEG		! segment 
+	INTEGER   IW		! width info of encounter
+	INTEGER   LFTMST	! the left-most segment
+	INTEGER   NDENDC(2)	! node(the two ends of chain ICHN)
+	INTEGER   NMIN,NMAX	! arguments of ONTRK - limits of MPs to 
+C				! be considered for backtrack checking
+	LOGICAL*1 APEX
+	LOGICAL*1 EDGE
+	LOGICAL*1 REVAPX
+	LOGICAL*1 SEGPOL	! polarity of segment
+	LOGICAL*1 WIDE
+C
+C statement function:
+	REAL DOT
+	DOT(III,IW)=DX(III)*DX(IW) + DY(III)*DY(IW)
+C
+C ......................................................................
+C
+C N.B. U direction is along the scan, V is across it.
+	IF (.NOT.BAKCHK) GO TO 10
+C
+C if checking for backtracking, set up some variables.
+	NMIN=MAX(1,NMP(1)-NMPBAK)
+	NMAX=NMP(1)
+	CLOSE2=MPNEAR*MPNEAR
+C
+10	GAPSQ=GAPSIZ**2
+	SEGMIN=(SMLLNS*IPIT)**2
+C
+C LSTONE, NXTLST are two master points got by GTLST2 in ASSESS.
+C DX,DY(1) is the vector between them.
+C DX,DY(4) is the vector 90 degrees clockwise from (1).
+	DX(1)=LSTONE(X)-NXTLST(X)
+	DY(1)=LSTONE(Y)-NXTLST(Y)
+	DX(4)= DY(1)
+	DY(4)=-DX(1)
+C
+	CONGOT=0				! none yet
+	LFTMST=0				! leftmost segment
+C
+C**********************************************************************
+C
+C loop for all chains.
+	DO 90 ICHN=1,MAXCHN			! look at all chains
+	  IF (CHAIN(ICHN) .LE.0) GO TO 90	! ensure it exists
+	  IF (LENGTH(ICHN).LE.1) GO TO 90	! and that is > 1 point
+C
+	  CNCTN=FSTCON + CONGOT
+	  IF (CNCTN.GT.MAXCON) GO TO 100	! no room for more
+C
+	  EDGE=.FALSE.
+	  WIDE=.FALSE.
+	  APEX=.FALSE.
+	  REVAPX=.FALSE.			! reset connection types
+C
+	  NDENDC(1)=NODE(FIRST(ICHN))
+	  NDENDC(2)=NODE(LAST (ICHN))
+C
+C (DU,DV) is vector from first point of chain to last point.
+	  DV=ENCBUF(IV,NDENDC(2)) - ENCBUF(IV,NDENDC(1))
+	  DU=ENCBUF(IU,NDENDC(2)) - ENCBUF(IU,NDENDC(1))
+C
+	  SECT=1.0
+	  RRR=SQRT(DU**2 + DV**2)		! BODGE !!
+	  IF (RRR.GT.TRKWID) SECT=RRR/ABS(DU)
+C
+C get width info about first end of chain.
+	  IW=ENCBUF(W,NDENDC(1)).AND.NEGWID
+	  WIDCOR=0.0
+C
+C is it edge info ?
+	  IF (IW.LT.NEGNEG.OR.IMOD.EQ.0) GO TO 20
+C
+C yes - do we need to consider it ?
+	  IF (.NOT.EDGING) GO TO 90		! end of do loop
+	  IF (TRKWID.LE.0.) GO TO 90		! no width info
+	  EDGE=.TRUE.
+	  WIDCOR=TRKWID*SECT*0.5
+	  IF (IW.EQ.NEGNEG) WIDCOR=-WIDCOR
+C
+20	  DO 30 III=1,2
+	    VECLE(IU,III)=ENCBUF(IU,NDENDC(III))-LSTONE(IU)
+	    VECLE(IV,III)=ENCBUF(IV,NDENDC(III))-LSTONE(IV)+WIDCOR
+	    DISLE(III)   =VECLE(X,III)*VECLE(X,III)+
+     &                    VECLE(Y,III)*VECLE(Y,III)
+30	  CONTINUE
+C
+	  CEND=1				! end to connect by
+	  IF (DISLE(2).LT.DISLE(1)) CEND=2
+C
+	  DELWTH=0.0
+C
+	  IF (.NOT.ELF) THEN
+	    IF (EDGE.OR.TRKWID.LE.0) GO TO 50
+C
+C get width and normalised width of first end.
+	    W1=(ENCBUF(W,NDENDC(CEND)).AND.NEGWID)
+	    WID1N=W1/SECT
+C
+C and normalised width of last end.
+	    WID2N=(ENCBUF(W,NDENDC(3-CEND)).AND.NEGWID)/SECT
+	    DW=WID1N-TRKWID
+	    DELWTH=ABS(DW)/TRKWID  	! fractional change in width
+C
+	    IF (DELWTH.LT.WIDDIF) GO TO 40	! width ok
+	    IF (DW.LT.0) GO TO 50	! narrow line, ok for moment
+C
+	    WIDE=.TRUE.
+	    APEX=(WID2N.LT.WID1N*WGHT(3))	! tapered chain is apex
+	    IF (APEX.AND.ANLYZD.GE.0)
+     &	       APEX=(JOILST(3-CEND,CHNEDG(1,ICHN)).EQ.CHNEDG(2,ICHN))
+	    WIDCOR=DW*SECT*0.5
+C
+C try a guess at true centre.
+	    IF (APEX) WIDCOR=W1/4.0 + 0.5
+C
+C get width correction for connected end of line.
+	    IF (VECLE(IV,CEND).GT.0) WIDCOR=-WIDCOR
+	    VECLE(IV,CEND)=VECLE(IV,CEND)+WIDCOR
+C
+C recompute distance.
+	    DISLE(CEND)=VECLE(X,CEND)*VECLE(X,CEND)+
+     &                    VECLE(Y,CEND)*VECLE(Y,CEND)
+	    GO TO 50
+	  ENDIF
+C
+C is it a reversed apex ??
+40	  IF (.NOT.JNCING) GO TO 50
+	  DW = WID2N - TRKWID
+	  IF (DW.LT.0) GO TO 50				! other end thin
+	  IF (ABS(DW)/TRKWID.LT.WIDDIF) GO TO 50	! normal variatn
+C
+C then other end is WIDE.
+C is it a tapered chain (reverse apex) ?
+	  REVAPX = (WID1N.LT.WID2N*WGHT(3))
+C
+50	  DX(2)=VECLE(X,CEND)
+	  DY(2)=VECLE(Y,CEND)
+	  DOT22=DISLE(CEND)
+C
+C prevent jumps.
+	  IF (TSTDST.AND.
+     &        (DISLE(CEND).GT.GAPSQ) ) GO TO 90	! too long
+C
+	  DX(3)=ENCBUF(X,NDENDC(3-CEND))-ENCBUF(X,NDENDC(CEND))
+	  DY(3)=ENCBUF(Y,NDENDC(3-CEND))-ENCBUF(Y,NDENDC(CEND))
+	  DOT33=DOT(3,3)
+C
+C prevent short segments being attached.
+	  IF (DOT33.LT.SEGMIN) GO TO 90		! too small
+C
+C if ELF, only attach edges of correct polarity.
+	  IF (ELF) THEN
+	    SEGPOL=(IW.EQ.NEGNEG).XOR.(IU.EQ.1).XOR.
+     &             ((ENCBUF(IU,NDENDC(3-CEND))-
+     &               ENCBUF(IU,NDENDC(CEND))).GT.0)
+	    IF (TRKPOL.NE.0.AND.
+     &          ((TRKPOL.GT.0).XOR.SEGPOL)) GO TO 90
+	  ENDIF
+C
+C calculate angle between segment and track.
+	  DOT11=DOT(1,1)
+	  COSALF=0.0
+	  RRR=DOT11*DOT33
+	  IF (RRR.NE.0) COSALF=DOT(1,3)/SQRT(RRR)
+C
+C prevent backtracking - cheap check for corner.
+	  IF (.NOT.TSTANG) GO TO 60
+	  IF (COSALF.LT.SHRPNS) GO TO 90		! too sharp
+C
+C prevent backtracks - expensive test.
+	  III=0
+	  IF (BAKCHK) CALL ONTRAK(START(X)+ENCBUF(X,NDENDC(CEND)),
+     &                            START(Y)+ENCBUF(Y,NDENDC(CEND)),
+     &                            START(X)+ENCBUF(X,NDENDC(3-CEND)),
+     &                            START(Y)+ENCBUF(Y,NDENDC(3-CEND)),
+     &                            NMIN,NMAX,CLOSE2,III)
+	  IF (III.NE.0) GO TO 90			! backtrack
+C
+C prevent track jumping, if segment nearly parallel to track.
+	  IF (COSALF.LT.PRLLNS.OR.
+     &        DOT22.LT.(NEARNS*IPIT)**2) GO TO 60
+C
+C check angles - is it too stepped ?
+	  IF (DOT(1,2)/SQRT(DOT11*DOT22).LT.BETA.OR.
+     &        DOT(2,3)/SQRT(DOT22*DOT33).LT.BETA) GO TO 90
+C
+60	  QUALTY(CNCTN)=WGHT(4) - (DISLE(CEND)/GAPSQ)*DSTWGT +
+     &			COSALF*ANGWGT +
+     &			(DOT33/SEGMIN)*LENWGT -
+     &			DELWTH*WTHWGT
+	  BEARNG(CNCTN)=DOT(4,2)
+C
+	  IF (ELF) THEN
+	    IF (     SEGPOL) CONNCT(1,CNCTN)=1
+	    IF (.NOT.SEGPOL) CONNCT(1,CNCTN)=-1
+	  ELSE
+	    CONNCT(1,CNCTN)=INT(WIDCOR)
+	  ENDIF
+	  CONNCT(2,CNCTN)=ICHN
+	  CONNCT(3,CNCTN)=CEND
+	  IF (.NOT.EDGING) APEX=.FALSE.
+	  III=0
+	  IF (EDGE) III=1
+	  IF (WIDE) III=2
+	  IF (APEX) III=3
+	  IF (REVAPX) III=6
+	  CONNCT(4,CNCTN)=III		! set connection type code
+C
+C set NXTBST to hold the segments in BEARNG order.
+	  III=0
+	  ISEG=LFTMST
+70	  IF (ISEG.LE.0) GO TO 80
+	    IF (BEARNG(CNCTN).LT.BEARNG(ISEG)) GO TO 80
+	    III=ISEG
+	    ISEG=NXTBST(ISEG)
+	  GO TO 70
+80	  NXTBST(CNCTN)=ISEG
+	  IF (III.EQ.0) LFTMST=CNCTN
+	  IF (III.NE.0) NXTBST(III)=CNCTN
+	  CONGOT=CONGOT + 1
+90	CONTINUE
+C
+C add the bias.
+100	IF (BIAS.EQ.0.0) GO TO 120
+	RRR=(CONGOT-1)*BIAS*0.5
+	ISEG=LFTMST
+110	IF (ISEG.LE.0) GO TO 120
+	  QUALTY(ISEG)=QUALTY(ISEG) + RRR
+	  ISEG=NXTBST(ISEG)
+	  RRR=RRR - BIAS
+	GO TO 110
+C
+120	RETURN
+	END

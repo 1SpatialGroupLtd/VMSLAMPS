@@ -1,0 +1,836 @@
+	SUBROUTINE	DISP_RAS
+C
+***	MODULE	DISP_RAS
+***	IDENT	13MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To draw the raster backdrop
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:PLOT/
+***	COMMON/CMN:SETUP/
+***	COMMON/CMN:WORKS/
+C
+C workspace
+	INTEGER	OV,IM
+	INTEGER	OW
+	EQUIVALENCE (OW,OVERLAY_WORKSTATION)	! abbreviation
+	INTEGER	WKID
+	LOGICAL	SHR			! share primary and secondary
+	LOGICAL	REAC			! reactivate workstation
+C
+C set up for plot/display
+	REAC = .FALSE.
+	IF (PLOT_ON) THEN
+	   WKID = PLOT_WKID
+	   SHR = .FALSE.
+C
+C set the pixel size if plotting
+C (NB - if warping images, need a pixel size from somewhere - rather
+C  arbitrary - can draw as many as the user wants!)
+	   CALL LSG_PIXEL_SIZE(WKID,PIXELSIZE(1),PIXELSIZE(2))
+	ELSE
+	   WKID = OW
+	   IF (.NOT.WKAC(WKID)) WKID = 3-WKID
+	   IF (WKAC(WKID).AND.WKAC(3-WKID)) THEN
+	      CALL GDAWK(3-WKID)
+	      WKAC(3-WKID) = .FALSE.
+	      REAC = .TRUE.
+	   ENDIF
+	   SHR = OVERLAY_SHARE.AND.WKAC(3-WKID)
+	ENDIF
+C
+	IF (SETUP.AND..NOT.WARP_TO_IMAGE) THEN
+	   CALL DISP_RAS_WARP(WKID,OW)		! warped image
+	ELSE
+C
+C For each possible overlay...
+	   DO 1000 OV=1,MAXOVER
+	      IF (.NOT.OVERLAY_IMAGE(OV)) GOTO 1000
+C
+C For each possible image...
+	      DO 900 IM=1,MAXIMAGE
+	         IF (IMAGE_TYPE(IM).EQ.0) GOTO 900	! doesn't exist
+	         IF (.NOT.O_IMSEL(IM,OV)) GOTO 900	! not selected
+	         IF (.NOT.IMAGE_DRAW(IM)) GOTO 900	! not to be drawn
+	         IF (IMAGE_NUMBER(IM).EQ.0) GOTO 900	! no bits
+	         CALL DISP_IMG(IM,OV,WKID,OW,SHR)
+900	      CONTINUE
+1000	   CONTINUE	! end of images, overlays
+	ENDIF
+C
+	CALL LSG_PLANE_SELECT(WKID,-1)
+	CALL LSG_PLANE_OFFSET(WKID,0)
+	IF (SHR) THEN
+	   CALL LSG_PLANE_SELECT(3-WKID,-1)
+	   CALL LSG_PLANE_OFFSET(3-WKID,0)
+	ENDIF
+	IF (REAC) THEN
+	   CALL GACWK(3-WKID)
+	   WKAC(3-WKID) = .TRUE.
+	ENDIF
+C 
+	RETURN
+	END
+C
+	SUBROUTINE	DISP_IMG(IM,OV,WKID,OW,SHR)
+C
+***	MODULE	DISP_IMG
+***	IDENT	17JN93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To draw a particular image into the raster backdrop
+C
+	IMPLICIT NONE
+C
+***	COMMON/CMN:STDBFC/
+C
+C arguments
+	INTEGER	IM,OV
+	INTEGER	WKID,OW
+	LOGICAL	SHR
+C
+C This is a jacket routine, that calls the routine that does the work
+C passing it some working space
+C Use 65536 (8*STDBFM) bytes of the graphics buffer for now 
+C (i.e. overlay on STDBFY and STDBFZ)
+C N.B. Beware the DTIB array crashing into the bottom of this buffer
+C - OK at present
+C
+	CALL DISP_IMG_SUB(IM,OV,WKID,OW,SHR,
+     &			  DTI_BMAX,DTI_WMAX,DTI_LMAX,
+     &	                  %VAL(DTIB_ADDR),%VAL(DTIW_ADDR),
+     &	                  %VAL(DTIL_ADDR),
+     &	                  STDBFM*8,%VAL(STDBFY_ADDR))
+C
+	RETURN
+	END
+
+
+	SUBROUTINE	DISP_IMG_SUB(IM,OV,WKID,OW,SHR,
+     &				     DTI_BMAX,DTI_WMAX,DTI_LMAX,
+     &	                             DTIB,DTIW,DTIL,
+     &	                             WORK_LENGTH,WORK)
+C
+***	MODULE	DISP_IMG_SUB
+***	IDENT	14FE92
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C To draw the raster backdrop
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:GKSPAR/
+***	PARAMETER/CMN:MOANMESS/
+***	COMMON/LSL$CMNDTI:DTIHDR/
+***	COMMON/CMN:IMAGE/
+***	COMMON/CMN:LSRLIB/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:OVERLAY/
+***	COMMON/CMN:PLOT/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:WORKS/
+C
+C arguments
+	INTEGER	IM,OV
+	INTEGER	WKID,OW	! draw on WKID, use overlays of OW
+	LOGICAL	SHR
+	INTEGER	        DTI_BMAX
+	INTEGER	        DTI_WMAX
+	INTEGER	        DTI_LMAX
+	BYTE		DTIB(DTI_BMAX)
+	INTEGER*2	DTIW(DTI_WMAX)
+	INTEGER*4	DTIL(DTI_LMAX)
+	INTEGER		WORK_LENGTH
+	BYTE		WORK(WORK_LENGTH)
+C
+C functions
+	LOGICAL	HADBREAK
+	INTEGER	DTI_COPY_LONG_DATA,DTI_COPY_REAL_DATA
+	INTEGER	DTI_COPY_WORD_DATA,DTI_COPY_BYTE_DATA
+	INTEGER	DTI_COPY_BIT_DATA
+	INTEGER	LDTI_COPY_LONG_DATA
+	INTEGER	LDTI_COPY_WORD_DATA,LDTI_COPY_BYTE_DATA
+	INTEGER	LDTI_COPY_BIT_DATA
+	INTEGER	LDTI_COPY_BIT_DATA_PRIO
+	INTEGER	AREA$USER_SETUP,AREA$USER_ACCESS
+	INTEGER	CALLR
+	INTEGER	TRNALL
+	LOGICAL	RDLONG
+C
+C workspace
+	REAL	XPOS,YPOS
+	REAL	PX(2),PY(2)
+	EQUIVALENCE	(PX,XPOS),(PY,YPOS)
+	REAL	XSTEP,YSTEP
+	INTEGER	XSIGN,DIR
+	INTEGER	IX,IY,I,IIX
+	INTEGER	RET,ERR
+	INTEGER	ROW1,COL1
+	INTEGER	NROW,NCOL,MCOL,MROW,COLS,ROWS
+	INTEGER	SWPIX(2),NEPIX(2)
+	INTEGER	NUMPIX(2)
+	INTEGER	FIRST_ROW,FIRST_COL
+	INTEGER	NROW8
+	INTEGER*4 BLOC
+	LOGICAL	FINISH
+	INTEGER*4 IBITL,IDIVL,MASKL
+	INTEGER*2 IBITW,IDIVW,MASKW
+	BYTE	  IBITB,IDIVB,MASKB
+	EQUIVALENCE	(IBITL,IBITW,IBITB),(IDIVL,IDIVW,IDIVB)
+	EQUIVALENCE	(MASKL,MASKW,MASKB)
+	INTEGER	VIEW
+	REAL*8		DX(2),DY(2)
+	INTEGER*4	DDX(2,2),DDY(2,2)
+	EQUIVALENCE	(DX,DDX),(DY,DDY)
+	REAL*8		EX(2),EY(2)
+	INTEGER		PLOT_MODE
+	INTEGER		BPP
+C
+C number of pixels in each direction
+	NUMPIX(1) = IMAGE_NEPIX(1,IM)-IMAGE_SWPIX(1,IM)+1
+	NUMPIX(2) = IMAGE_NEPIX(2,IM)-IMAGE_SWPIX(2,IM)+1
+C
+C position to draw SW corner pixel of desired area
+	XPOS = (IMAGE_SWPIX(1,IM)-1-0.5+0.5/IMAGE_ZOOM)*
+     &		PIXELSIZE(1)+IMAGE_ORIGIN(1,IM)-LITES2ORG(1)
+	YPOS = (IMAGE_SWPIX(2,IM)-1-0.5+0.5/IMAGE_ZOOM)*
+     &		PIXELSIZE(2)+IMAGE_ORIGIN(2,IM)-LITES2ORG(2)
+	XSTEP = 0.0
+	YSTEP = 0.0
+C
+C select bit planes for this overlay
+	MASKL = 0
+	CALL LIB$INSV(-1,
+     &		OVERLAY_OFFSET(OV,OW),OVERLAY_PLANES(OV,OW),MASKL)
+	CALL LSG_PLANE_SELECT(WKID,MASKL)
+	CALL LSG_PLANE_OFFSET(WKID,OVERLAY_OFFSET(OV,OW))
+	IF (SHR) THEN
+	   CALL LSG_PLANE_SELECT(3-WKID,MASKL)
+	   CALL LSG_PLANE_OFFSET(3-WKID,OVERLAY_OFFSET(OV,OW))
+	ENDIF
+C
+C clear the area to be drawn into (not if plotting)
+	PX(2) = PX(1) + (NUMPIX(1)-1.0/IMAGE_ZOOM)*PIXELSIZE(1)
+	PY(2) = PY(1) + (NUMPIX(2)-1.0/IMAGE_ZOOM)*PIXELSIZE(2)
+	IF (.NOT.PLOT_ON) THEN
+	   CALL GSFAIS(GSOLID)			! solid fill
+	   CALL GSFACI(0)			! in colour 0
+	   CALL LSG_FILL_RECTANGLE(PX,PY)	! clear rectangle
+	ENDIF
+C
+C now select as many bit planes of the overlay as we are using, and
+C a plane offset to allow for the base plane from IMAGE BITS
+	IF (.NOT.IMAGE_CLASSIFY(IM)) THEN
+	   MASKL = 0
+	   CALL LIB$INSV(-1,
+     &		OVERLAY_OFFSET(OV,OW),
+     &		MIN(OVERLAY_PLANES(OV,OW),IMAGE_NUMBER(IM)),
+     &		MASKL)
+	   CALL LSG_PLANE_SELECT(WKID,MASKL)
+	   CALL LSG_PLANE_OFFSET(WKID,
+     &		OVERLAY_OFFSET(OV,OW)-IMAGE_BASE(IM))
+	   IF (SHR) THEN
+	      CALL LSG_PLANE_SELECT(3-WKID,MASKL)
+	      CALL LSG_PLANE_OFFSET(3-WKID,
+     &			OVERLAY_OFFSET(OV,OW)-IMAGE_BASE(IM))
+	   ENDIF
+	ENDIF
+C
+	IF (IMAGE_TYPE(IM).EQ.TYPE_LSI) GOTO 600	! deal with LSI
+	IF (IMAGE_TYPE(IM).EQ.TYPE_LSR) GOTO 700	! deal with LSR
+C
+C deal with DTI file
+C
+C Set up drawing direction
+	DIR = 1
+	IF (IMAGE_DIRECTION(IM).EQ.DTI_ORDER_CLOCKWISE) DIR = -1
+	GOTO (300,320,340,360),IMAGE_CORNER(IM)+1	! SW,NW,NW,SE
+C
+C these all OK for direction clockwise
+C
+C First pixel in SW corner
+300	XSIGN = 1
+	IF (DIR.EQ.1) THEN
+	   COL1 = IMAGE_SWPIX(2,IM)
+	   ROW1 = IMAGE_SWPIX(1,IM)
+	   YSTEP = PIXELSIZE(2)
+	ELSE
+	   COL1 = IMAGE_SWPIX(1,IM)
+	   ROW1 = IMAGE_SWPIX(2,IM)
+	   XSTEP = PIXELSIZE(1)
+	ENDIF
+	IF (DIR.EQ.1) GOTO 370
+	GOTO 350
+C
+C First pixel in NW corner
+320	YPOS = PY(2)
+	IF (DIR.EQ.1) THEN
+	   COL1 = IMAGE_SWPIX(1,IM)
+	   ROW1 = Y_EXTENT(IMAGE_LUN(IM))/IMAGE_VIEW-IMAGE_NEPIX(2,IM)+1
+	   XSTEP = PIXELSIZE(1)
+	   XSIGN = -1
+	ELSE
+	   COL1 = X_EXTENT(IMAGE_LUN(IM))/IMAGE_VIEW-IMAGE_NEPIX(2,IM)+1
+	   ROW1 = IMAGE_SWPIX(1,IM)
+	   YSTEP = -PIXELSIZE(2)
+	   XSIGN = 1
+	ENDIF
+	IF (DIR.EQ.1) GOTO 350
+	GOTO 370
+C
+C First pixel in NE corner
+340	XPOS = PX(2)
+	YPOS = PY(2)
+	XSIGN = -1
+	IF (DIR.EQ.1) THEN
+	   COL1 = X_EXTENT(IMAGE_LUN(IM))/IMAGE_VIEW-IMAGE_NEPIX(2,IM)+1
+	   ROW1 = Y_EXTENT(IMAGE_LUN(IM))/IMAGE_VIEW-IMAGE_NEPIX(1,IM)+1
+	   YSTEP = -PIXELSIZE(1)
+	ELSE
+	   COL1 = X_EXTENT(IMAGE_LUN(IM))/IMAGE_VIEW-IMAGE_NEPIX(1,IM)+1
+	   ROW1 = Y_EXTENT(IMAGE_LUN(IM))/IMAGE_VIEW-IMAGE_NEPIX(2,IM)+1
+	   XSTEP = -PIXELSIZE(1)
+	ENDIF
+	IF (DIR.EQ.1) GOTO 370
+350	NCOL = NUMPIX(1)
+	NROW = NUMPIX(2)
+	CALL LSG_ROTATION_MODE(WKID,.TRUE.)! S,N rotated
+	IF (SHR) CALL LSG_ROTATION_MODE(3-WKID,.TRUE.)
+	GOTO 380
+C
+C First pixel in SE corner
+360	XPOS = PX(2)
+	IF (DIR.EQ.1) THEN
+	   COL1 = X_EXTENT(IMAGE_LUN(IM))/IMAGE_VIEW-IMAGE_NEPIX(1,IM)+1
+	   ROW1 = IMAGE_SWPIX(2,IM)
+	   XSTEP = -PIXELSIZE(1)
+	   XSIGN = 1
+	ELSE
+	   COL1 = IMAGE_SWPIX(2,IM)
+	   ROW1 = Y_EXTENT(IMAGE_LUN(IM))/IMAGE_VIEW-IMAGE_NEPIX(1,IM)+1
+	   YSTEP = PIXELSIZE(2)
+	   XSIGN = -1
+	ENDIF
+	IF (DIR.EQ.1) GOTO 350
+370	NCOL = NUMPIX(2)
+	NROW = NUMPIX(1)
+	CALL LSG_ROTATION_MODE(WKID,.FALSE.)! W,E not rot
+	IF (SHR) CALL LSG_ROTATION_MODE(3-WKID,.FALSE.)
+	GOTO 380
+C
+380	IBITL = 0
+	CALL LIB$INSV(-1,0,IMAGE_NUMBER(IM),IBITL)
+	IBITL = .NOT.IBITL
+	IDIVL = 2**IMAGE_BASE(IM)
+	CALL LSG_PACKING_MODE(WKID,8)
+	IF (SHR) CALL LSG_PACKING_MODE(3-WKID,8)
+	FIRST_ROW = 0
+	NROW8 = NROW
+C
+C modify ROW1 and NROW so that we read byte aligned for bit data
+	IF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_BIT .AND.
+     &      IMAGE_VIEW.EQ.1) THEN
+	   FIRST_ROW = MOD(ROW1-1,8)
+	   ROW1 = ROW1-FIRST_ROW
+	   NROW8 = NROW+FIRST_ROW
+	   I = MOD(NROW8,8)
+	   IF (I.NE.0) NROW8 = NROW8+8-I
+	ENDIF
+C
+C calculate how many columns we can do at a time
+	IF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_BYTE) THEN
+	   MCOL = DTI_BMAX/NROW
+	ELSEIF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_WORD) THEN
+	   MCOL = DTI_BMAX/2/NROW
+	ELSEIF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_LONG .OR.
+     &	        DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_REAL) THEN
+	   MCOL = DTI_BMAX/4/NROW
+	ELSEIF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_BIT) THEN
+	   MCOL = DTI_BMAX*8/NROW8
+	ENDIF
+C
+	IF (MCOL.LE.0) THEN
+	   CALL MOAN(MSG_BUFTOOSMALL,'DTI')
+	   GOTO 1000
+	ENDIF
+C
+	DO 500 IX = COL1,COL1+NCOL-1,MCOL
+C
+	  COLS = MIN(MCOL,COL1+NCOL-IX)
+C
+C read bytes in
+	  IF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_BYTE) THEN
+	    IF (IMAGE_VIEW.EQ.1) THEN
+	      RET=DTI_COPY_BYTE_DATA(IMAGE_LUN(IM),
+     &	        DTIB,.FALSE.,IX,ROW1,COLS,NROW,ERR)
+	    ELSE
+	      RET=LDTI_COPY_BYTE_DATA(Y_EXTENT(IMAGE_LUN(IM)),0,
+     &	        DTIB,IX,ROW1,COLS,NROW,IMAGE_VIEW,
+     &		%VAL(SEC_ADDR(IMAGE_LUN(IM))+DATA_OFFSET(IMAGE_LUN(IM))) )
+	    ENDIF
+	    IF (.NOT.RET) GOTO 510
+C
+            IF (IMAGE_CLASSIFY(IM)) THEN
+	      CALL CLASSIFY(IM,NROW*COLS,DTI_BMAX,DTIB,DTI_WMAX,DTIW,
+     &	                    DTI_LMAX,DTIL)
+	    ENDIF
+C
+C read words in
+	  ELSEIF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_WORD) THEN
+	    IF (IMAGE_VIEW.EQ.1) THEN
+	      RET=DTI_COPY_WORD_DATA(IMAGE_LUN(IM),
+     &	        DTIW,.FALSE.,IX,ROW1,COLS,NROW,ERR)
+	    ELSE
+	      RET=LDTI_COPY_WORD_DATA(Y_EXTENT(IMAGE_LUN(IM)),0,
+     &	        DTIW,IX,ROW1,COLS,NROW,IMAGE_VIEW,
+     &		%VAL(SEC_ADDR(IMAGE_LUN(IM))+DATA_OFFSET(IMAGE_LUN(IM))) )
+	    ENDIF
+	    IF (.NOT.RET) GOTO 510
+C
+C and process into byte array
+            IF (IMAGE_CLASSIFY(IM)) THEN
+	      CALL CLASSIFY(IM,NROW*COLS,DTI_BMAX,DTIB,DTI_WMAX,DTIW,
+     &	                    DTI_LMAX,DTIL)
+	    ELSE
+	      CALL LSG_PLANE_OFFSET(WKID,OVERLAY_OFFSET(OV,OW))
+	      IF (SHR) CALL LSG_PLANE_OFFSET(3-WKID,
+     &					OVERLAY_OFFSET(OV,OW))
+	      DO 420 I=1,NROW*COLS
+	        MASKW = (DTIW(I)/IDIVW).AND..NOT.IBITW
+	        DTIB(I) = MASKB
+420	      CONTINUE
+	    ENDIF
+C
+C read longs/reals in
+	  ELSEIF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_LONG .OR.
+     &	          DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_REAL) THEN
+	    IF (IMAGE_VIEW.EQ.1) THEN
+	      IF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_LONG) THEN
+	        RET=DTI_COPY_LONG_DATA(IMAGE_LUN(IM),
+     &			DTIL,.FALSE.,IX,ROW1,COLS,NROW,ERR)
+	      ELSE
+	        RET=DTI_COPY_REAL_DATA(IMAGE_LUN(IM),
+     &			DTIL,.FALSE.,IX,ROW1,COLS,NROW,ERR)
+	      ENDIF
+	    ELSE
+	      RET=LDTI_COPY_LONG_DATA(Y_EXTENT(IMAGE_LUN(IM)),0,
+     &	        DTIL,IX,ROW1,COLS,NROW,IMAGE_VIEW,
+     &		%VAL(SEC_ADDR(IMAGE_LUN(IM))+DATA_OFFSET(IMAGE_LUN(IM))) )
+	    ENDIF
+	    IF (.NOT.RET) GOTO 510
+C
+C and process into byte array
+            IF (IMAGE_CLASSIFY(IM)) THEN
+	      CALL CLASSIFY(IM,NROW*COLS,DTI_BMAX,DTIB,DTI_WMAX,DTIW,
+     &	                    DTI_LMAX,DTIL)
+	    ELSE
+	      CALL LSG_PLANE_OFFSET(WKID,OVERLAY_OFFSET(OV,OW))
+	      IF (SHR) CALL LSG_PLANE_OFFSET(3-WKID,
+     &					OVERLAY_OFFSET(OV,OW))
+	      DO 430 I=1,NROW*COLS
+	        MASKL = (DTIL(I)/IDIVL).AND..NOT.IBITL
+	        DTIB(I) = MASKB
+430	      CONTINUE
+	    ENDIF
+C
+C read bits in
+	  ELSEIF (DATA_TYPE(IMAGE_LUN(IM)) .EQ. DATA_BIT) THEN
+	    IF (IMAGE_VIEW.EQ.1) THEN
+	      RET=DTI_COPY_BIT_DATA(IMAGE_LUN(IM),
+     &	        DTIB,.FALSE.,IX,ROW1,COLS,NROW8,ERR)
+	    ELSE
+	      RET=LDTI_COPY_BIT_DATA(Y_EXTENT(IMAGE_LUN(IM)),0,
+     &	        DTIB,IX,ROW1,COLS,NROW8,IMAGE_VIEW,
+     &		%VAL(SEC_ADDR(IMAGE_LUN(IM))+DATA_OFFSET(IMAGE_LUN(IM))) )
+	    ENDIF
+	    IF (.NOT.RET) GOTO 510
+	    CALL LSG_PACKING_MODE(WKID,1)
+	    IF (SHR) CALL LSG_PACKING_MODE(3-WKID,1)
+	  ENDIF
+C
+C Output this row of pixel values
+	  CALL LSG_PIXEL_ARRAY(
+     &		XPOS,YPOS,
+     &		XSIGN*NROW8,DIR*XSIGN*COLS,
+     &		FIRST_ROW+1,FIRST_ROW+NROW,1,COLS,
+     &		IMAGE_ZOOM,
+     &		IMAGE_ZOOM,
+     &		DTIB)
+          XPOS = XPOS + XSTEP*COLS
+          YPOS = YPOS + YSTEP*COLS
+C
+C has CTRL/C been pressed
+	  IF (HADBREAK()) GOTO 1000
+500	CONTINUE
+	GOTO 1000
+C
+510	CALL NASTY(MSG_ERRDIMG,IM,'DTI')
+	CALL LITES2_SIGNAL(RET)
+	GOTO 1000
+C
+C deal with LSI file
+C set up mask for required levels
+600	MASKL = 0
+	CALL LIB$INSV(-1,
+     &		IMAGE_BASE(IM),
+     &		MIN(OVERLAY_PLANES(OV,OW),IMAGE_NUMBER(IM)),
+     &		MASKL)
+	IF (MASKB.EQ.0) GOTO 1000	! no levels wanted!!
+C
+C set up required area, view, and level mask
+	CALL LIB$FFS(0,32,IMAGE_VIEW,VIEW) ! i.e. LOG2
+	RET = AREA$USER_SETUP(IMAGE_SWPIX(1,IM)-1,IMAGE_SWPIX(2,IM)-1,
+     &			      IMAGE_NEPIX(1,IM)-1,IMAGE_NEPIX(2,IM)-1,
+     &			      VIEW,MASKB)
+	IF (.NOT.RET) GOTO 620
+C
+C set packing mode
+	IF (IMAGE_LEVELS(IM).GE.0) THEN
+	   CALL LSG_PACKING_MODE(WKID,1)! bit for ordinary image
+	   IF (SHR) CALL LSG_PACKING_MODE(3-WKID,1)
+	ELSE
+	   CALL LSG_PACKING_MODE(WKID,8)! byte for grey scale
+	   IF (SHR) CALL LSG_PACKING_MODE(3-WKID,8)
+	ENDIF
+C
+C LSI never rotated
+	CALL LSG_ROTATION_MODE(WKID,.FALSE.)
+	IF (SHR) CALL LSG_ROTATION_MODE(3-WKID,.FALSE.)
+C
+C access area until no more
+610	RET = AREA$USER_ACCESS(SWPIX(1),SWPIX(2),NEPIX(1),NEPIX(2),
+     &			       I,BLOC,FINISH)
+	IF (.NOT.RET) GOTO 620
+	IF (FINISH) GOTO 1000
+C
+C select bit plane for this level (not for grey scale)
+	IF (IMAGE_LEVELS(IM).GE.0) THEN
+	   I = I+OVERLAY_OFFSET(OV,OW)
+	   CALL LSG_PLANE_SELECT(WKID,2**I)
+	   CALL LSG_PLANE_OFFSET(WKID,I)
+	   IF (SHR) THEN
+	      CALL LSG_PLANE_SELECT(3-WKID,2**I)
+	      CALL LSG_PLANE_OFFSET(3-WKID,I)
+	   ENDIF
+	ENDIF
+C
+C Output this area
+	NUMPIX(1) = NEPIX(1)-SWPIX(1)+1
+	NUMPIX(2) = NEPIX(2)-SWPIX(2)+1
+	XSTEP = XPOS + (SWPIX(1)+1-IMAGE_SWPIX(1,IM))*PIXELSIZE(1)
+	YSTEP = YPOS +
+     &		(SWPIX(2)+1-IMAGE_SWPIX(2,IM)+NUMPIX(2)-1.0/IMAGE_ZOOM)*
+     &							PIXELSIZE(2)
+	CALL LSG_PIXEL_ARRAY(
+     &		XSTEP,YSTEP,
+     &		NUMPIX(1),-NUMPIX(2),1,NUMPIX(1),1,NUMPIX(2),
+     &		IMAGE_ZOOM,
+     &		IMAGE_ZOOM,
+     &		%VAL(BLOC))
+C
+C has CTRL/C been pressed
+	IF (HADBREAK()) GOTO 1000
+	GOTO 610
+C
+620	CALL NASTY(MSG_ERRDIMG,IM,'LSI')
+	CALL LITES2_SIGNAL(RET)
+	GOTO 1000
+C
+C deal with LSR file
+C set packing mode
+700	TXTPTR = 32
+	PLOT_MODE = 0
+	IF (TRNALL(LSR_PLOT_MODE_LOG_NAME,TXTDSC)) THEN
+	   CALL BSLN
+	   IF (RDLONG(PLOT_MODE)) PLOT_MODE = 0
+	ENDIF
+C
+C valid values are:
+C 0 - default. Draw tiled, or swathed if sub-sampled
+C 1 - plot swathed even if not sub-sampled
+C 2 - plot in tiles as large as fit in LSl$FILL_POINTSMAX buffer
+C >100 - plot in tiles of the specified size (if possible)
+	IF (PLOT_MODE.LT.0.OR.
+     &	    (PLOT_MODE.GT.2.AND.PLOT_MODE.LE.100)) PLOT_MODE = 0
+	IF (IMAGE_LEVELS(IM).EQ.1) THEN
+	   CALL LSG_PACKING_MODE(WKID,1)! bit image
+	   IF (SHR) CALL LSG_PACKING_MODE(3-WKID,1)
+	ELSE
+	   CALL LSG_PACKING_MODE(WKID,8)! otherwise byte
+	   IF (SHR) CALL LSG_PACKING_MODE(3-WKID,8)
+	ENDIF
+C
+C LSR never rotated
+	CALL LSG_ROTATION_MODE(WKID,.FALSE.)
+	IF (SHR) CALL LSG_ROTATION_MODE(3-WKID,.FALSE.)
+C
+C if plotting, and plot mode set to 1, then do swathing
+	IF (IMAGE_VIEW.GT.1 .OR.
+     &	    (PLOT_ON.AND.PLOT_MODE.GT.0)) GOTO 800 ! reduced view
+C
+C set up required area
+	RET = CALLR(
+     &		%VAL(IMAGE_PREG(IM)),
+     &		%VAL(LSR_ADDRESSES(XLSR_RESET_PTR_REG)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C calculate the corners of the area of interest in the LSR file's
+C own coordinate system (i.e. using the file's original origin
+C and pixelsize)
+	DX(1) = (IMAGE_SWPIX(1,IM)-1)*
+     &		IMAGE_OPIXELSIZE(1,IM)+IMAGE_OORIGIN(1,IM)
+	DX(2) = DX(1) + NUMPIX(1)*IMAGE_OPIXELSIZE(1,IM)
+	DY(1) = (IMAGE_SWPIX(2,IM)-1)*
+     &		IMAGE_OPIXELSIZE(2,IM)+IMAGE_OORIGIN(2,IM)
+	DY(2) = DY(1) + NUMPIX(2)*IMAGE_OPIXELSIZE(2,IM)
+	IF (.NOT.IMAGE_AREA(IM)) THEN
+	   DX(2) = DX(2)-IMAGE_OPIXELSIZE(1,IM)
+	   DY(2) = DY(2)-IMAGE_OPIXELSIZE(2,IM)
+	ENDIF
+C
+C Can't pass a REAL*8 by value, so pass its two 4-byte halves (equivalenced
+C onto it) as two consecutive arguments
+	RET = CALLR(
+     &		%VAL(IMAGE_PREG(IM)),
+     &		%VAL(DDX(1,1)),%VAL(DDX(2,1)),
+     &		%VAL(DDY(1,1)),%VAL(DDY(2,1)),
+     &		%VAL(DDX(1,2)),%VAL(DDX(2,2)),
+     &		%VAL(DDY(1,2)),%VAL(DDY(2,2)),
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_REG_EXT_IN)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+	IF (DIAOPT) CALL TTWSTR(
+     &	'Drawing LSR file using the tiles stored in the file')
+C
+C access area until no more
+710	RET = CALLR(
+     &		%VAL(IMAGE_PREG(IM)),
+     &		BLOC,DX(1),DY(1),DX(2),DY(2),
+     &		BPP,NUMPIX(1),NUMPIX(2),I,	! dummy BPP, and I (pixel order)
+     &		%VAL(LSR_ADDRESSES(XLSR_GET_REG_PTR)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+	IF (BLOC.EQ.0) GOTO 1000
+C
+C Output this area
+C Calculate which (bottom left) pixel we have been returned
+	SWPIX(1) = NINT((DX(1)-IMAGE_OORIGIN(1,IM))/IMAGE_OPIXELSIZE(1,IM))
+	SWPIX(2) = NINT((DY(1)-IMAGE_OORIGIN(2,IM))/IMAGE_OPIXELSIZE(2,IM))
+C
+C Position to top left of this tile
+	XSTEP = XPOS + (SWPIX(1)+1-IMAGE_SWPIX(1,IM))*PIXELSIZE(1)
+	YSTEP = YPOS +
+     &		(SWPIX(2)+1-IMAGE_SWPIX(2,IM)+NUMPIX(2)-1.0/IMAGE_ZOOM)*
+     &							PIXELSIZE(2)
+C
+	CALL LSG_PIXEL_ARRAY(
+     &		XSTEP,YSTEP,
+     &		NUMPIX(1),-NUMPIX(2),1,NUMPIX(1),1,NUMPIX(2),
+     &		IMAGE_ZOOM,
+     &		IMAGE_ZOOM,
+     &		%VAL(BLOC))
+C
+C has CTRL/C been pressed
+	IF (HADBREAK()) GOTO 1000
+	GOTO 710
+C
+720	CALL NASTY(MSG_ERRDIMG,IM,'LSR')
+	RET = CALLR(%VAL(RET),%VAL(LSR_ADDRESSES(XLSR_PRINT_MESSAGE)))
+	CALL WRITEF
+	GOTO 1000
+C
+C reduced view of LSR
+800	CONTINUE
+C
+C set up the buffer for the copy region - could be done in DOIMAG
+	RET = CALLR(
+     &		%VAL(IMAGE_CREG(IM)),
+     &		WORK,%VAL(WORK_LENGTH),
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_REG_EXTERN_BUFFER)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+	MCOL = NUMPIX(1)	! assume swathe of full width
+	IF (PLOT_ON.AND.PLOT_MODE.GE.2) THEN
+	   IF (PLOT_MODE.EQ.2) THEN
+C
+C get maximum square tile (pixels)
+	      MCOL = INT(SQRT(FLOAT(WORK_LENGTH*8/IMAGE_LEVELS(IM))))
+C
+C get number of subsampled columns this is
+	      MCOL = MCOL/IMAGE_VIEW
+C
+C for bit images, make this a multiple of 8 to give us a chance of rows
+C with a whole number of bytes
+	      IF (IMAGE_LEVELS(IM).EQ.1) MCOL = (MCOL/8)*8
+	   ELSE
+C
+C use specified tile size
+	      MCOL = PLOT_MODE
+	   ENDIF
+C
+C but not more than whole width of image
+	   MCOL = MIN(MCOL,NUMPIX(1))
+	ENDIF
+C
+C calculate the number of rows we can fit in the buffers at a time
+C allow 16 extra pixels - possible 1 each end for PIXEL_EXTENDED
+C alignment, and 7 for byte alignment
+C
+C First get number of bytes in a single scan line of un-sampled file
+	MROW = ((MCOL*IMAGE_VIEW+16)*IMAGE_LEVELS(IM)-1)/8+1
+C
+C and now the number of these that will fit in the buffer
+	MROW = (WORK_LENGTH) / MROW
+C
+C and now the number of sampled rows that these will make
+C (need complete blocks for subsample priority)
+	IF (IMAGE_LEVELS(IM).EQ.1 .AND. IMAGE_SUBPRI(IM)) THEN
+	   MROW = MROW/IMAGE_VIEW
+	ELSE
+	   MROW = (MROW-1)/IMAGE_VIEW + 1
+	ENDIF
+C
+C are square tiles required?
+	IF (PLOT_ON.AND.PLOT_MODE.GT.100) MROW = MIN(MROW,PLOT_MODE)
+C
+	IF (MCOL.LE.0.OR.MROW.LE.0) THEN
+	   CALL MOAN(MSG_BUFTOOSMALL,'LSR')
+	   GOTO 1000
+	ENDIF
+C
+C ensure that sampled data will fit in buffer after sampling
+	IF (IMAGE_VIEW.GT.1) MROW = MIN(MROW,
+     &			(DTI_BMAX*8/IMAGE_LEVELS(IM))/MCOL)
+C
+C for bit image, try to begin rows on byte boundaries, but only
+C if we have got more than one 'tile' across the image, since the
+C first 'tile' will be misaligned anyway
+	FIRST_COL = IMAGE_SWPIX(1,IM)
+	IF (IMAGE_LEVELS(IM).EQ.1.AND.MCOL.LT.NUMPIX(1)) THEN
+810	   IF (MOD((FIRST_COL-1)*IMAGE_VIEW,8).NE.0) THEN
+	      FIRST_COL = FIRST_COL-1
+	      GOTO 810
+	   ENDIF
+	ENDIF
+C
+	IF (DIAOPT) THEN
+	   CALL EXPAND('Drawing LSR in ')
+	   IF (MCOL.EQ.NUMPIX(1)) THEN
+	      CALL APPEND('swathes')
+	   ELSE
+	      CALL APPEND('tiles')
+	   ENDIF
+	   CALL WRITAP(' of size %N by %N',MCOL,MROW)
+	ENDIF
+C
+	DO 820 IY = IMAGE_NEPIX(2,IM),IMAGE_SWPIX(2,IM),-MROW
+C
+	  ROWS = MIN(MROW,IY-IMAGE_SWPIX(2,IM)+1)
+
+	DO 820 IX = FIRST_COL,IMAGE_NEPIX(1,IM),MCOL
+C
+	  IIX = IX
+	  COLS = MCOL
+	  IF (IIX.LT.IMAGE_SWPIX(1,IM)) THEN
+	    COLS = COLS - (IMAGE_SWPIX(1,IM)-IIX)
+	    IIX = IMAGE_SWPIX(1,IM)
+	  ENDIF
+	  COLS = MIN(COLS,IMAGE_NEPIX(1,IM)-IIX+1)
+C
+C calculate the corners of the area of interest in the LSR file's
+C own coordinate system (i.e. using the file's original origin
+C and pixelsize)
+	DX(1) = ((IIX-1)*IMAGE_VIEW)*
+     &		IMAGE_OPIXELSIZE(1,IM)+IMAGE_OORIGIN(1,IM)
+	DX(2) = DX(1) + COLS*IMAGE_VIEW*IMAGE_OPIXELSIZE(1,IM)
+	DY(1) = ((IY-ROWS)*IMAGE_VIEW)*
+     &		IMAGE_OPIXELSIZE(2,IM)+IMAGE_OORIGIN(2,IM)
+	IF (IMAGE_LEVELS(IM).EQ.1 .AND. IMAGE_SUBPRI(IM)) THEN
+	   DY(2) = DY(1) + ROWS*IMAGE_VIEW*IMAGE_OPIXELSIZE(2,IM)
+	ELSE
+	   DY(2) = DY(1) + ((ROWS-1)*IMAGE_VIEW+1)*IMAGE_OPIXELSIZE(2,IM)
+	ENDIF
+	IF (.NOT.IMAGE_AREA(IM)) THEN
+	   DX(2) = DX(2)-IMAGE_OPIXELSIZE(1,IM)
+	   DY(2) = DY(2)-IMAGE_OPIXELSIZE(2,IM)
+	ENDIF
+C
+C Can't pass a REAL*8 by value, so pass its two 4-byte halves (equivalenced
+C onto it) as two consecutive arguments
+	RET = CALLR(
+     &		%VAL(IMAGE_CREG(IM)),
+     &		%VAL(DDX(1,1)),%VAL(DDX(2,1)),
+     &		%VAL(DDY(1,1)),%VAL(DDY(2,1)),
+     &		%VAL(DDX(1,2)),%VAL(DDX(2,2)),
+     &		%VAL(DDY(1,2)),%VAL(DDY(2,2)),
+     &		%VAL(LSR_ADDRESSES(XLSR_SET_REG_EXT_IN)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C read area into buffer
+	RET = CALLR(
+     &		%VAL(IMAGE_CREG(IM)),
+     &		BLOC,EX(1),EY(1),EX(2),EY(2),
+     &		BPP,NUMPIX(1),NUMPIX(2),I,	! dummy BPP, and I (pixel order)
+     &		%VAL(LSR_ADDRESSES(XLSR_GET_REG_COPY)))
+	IF (RET.NE.GOTH__NORMAL) GOTO 720
+C
+C sample the buffer
+	COL1 = NINT((DX(1)-EX(1))/IMAGE_OPIXELSIZE(1,IM))
+C	
+C only here without subsampling if using swathed plotting mode
+	IF (IMAGE_VIEW.GT.1) THEN
+	   IF (IMAGE_LEVELS(IM).EQ.1) THEN
+	      IF (IMAGE_SUBPRI(IM)) THEN
+	      RET=LDTI_COPY_BIT_DATA_PRIO(NUMPIX(1),COL1,DTIB,
+     &		1,1,ROWS,COLS,IMAGE_VIEW,IMAGE_PRIVAL(IM),
+     &		%VAL(BLOC) )
+	      ELSE
+	         RET=LDTI_COPY_BIT_DATA(NUMPIX(1),COL1,DTIB,
+     &		1,1,ROWS,COLS,IMAGE_VIEW,
+     &		%VAL(BLOC) )
+	      ENDIF
+	   ELSE
+	      RET=LDTI_COPY_BYTE_DATA(NUMPIX(1),COL1,DTIB,
+     &		1,1,ROWS,COLS,IMAGE_VIEW,
+     &		%VAL(BLOC) )
+	   ENDIF
+	ENDIF
+C
+C Output this area
+C Position to top left
+	XSTEP = XPOS +
+     &		(IIX-IMAGE_SWPIX(1,IM))*PIXELSIZE(1)
+	YSTEP = YPOS +
+     &		(IY-IMAGE_SWPIX(2,IM)-1.0/IMAGE_ZOOM)*PIXELSIZE(2)
+C
+	IF (IMAGE_VIEW.EQ.1) THEN
+	   CALL LSG_PIXEL_ARRAY(
+     &		XSTEP,YSTEP,
+     &		NUMPIX(1),-ROWS,COL1+1,COL1+COLS,1,ROWS,
+     &		IMAGE_ZOOM,
+     &		IMAGE_ZOOM,
+     &		%VAL(BLOC))
+	ELSE
+	   CALL LSG_PIXEL_ARRAY(
+     &		XSTEP,YSTEP,
+     &		COLS,-ROWS,1,COLS,1,ROWS,
+     &		IMAGE_ZOOM,
+     &		IMAGE_ZOOM,
+     &		DTIB)
+	ENDIF
+C
+C has CTRL/C been pressed
+	IF (HADBREAK()) GOTO 1000
+820	CONTINUE
+C 
+1000	RETURN
+	END

@@ -1,0 +1,339 @@
+	INTEGER*4 FUNCTION SUBACC(TO,NOFTRS,STRLEN)
+C
+***  	IDENT 23JA96
+***	MODULE SUBACC
+C
+C Copyright Laser-Scan Ltd, Cambridge, England.
+C
+C Author CC Brunt, 1 November 1983
+C from originals by M Dhillon, 25 May 1983.
+C
+CMOD1518 To use spaces, instead of the default 'NULL' characters  5-Dec-1995
+C
+C Modified for use with LSLLIB
+C
+C A function to create accuracy subregions in a DMA DTED ACC record
+C It returns FALSE if successful
+C It is similar to that of the same name in I2DFAD
+C
+	IMPLICIT NONE
+C
+C Parameter for formats
+***	PARAMETER/LSL$CMNDLMS:FORMAT/
+***	PARAMETER/HERE:DTEDIFFMSG/
+C
+C Common blocks
+***	COMMON /HERE:PARAMS/
+***	COMMON /LSL$CMNIFF:IFFHAN/
+***	COMMON /LSL$CMNIFF:MHMCE/
+***	COMMON /LSL$CMNLSL:TXTC/
+C
+C we are passed
+	BYTE		TO (9 * (8+8+2 + 14*(9+10)) )	! destination
+	INTEGER*2	NOFTRS		! no. of features in overlay 0
+	INTEGER*2	STRLEN		! length of field per
+					! sub-region in chars
+C Functions called
+	LOGICAL 	GETSAC		! get sub-region accuracy
+	INTEGER*4	ADDANG		! .1 secs to DDMMSS
+C
+C Workspace
+	INTEGER		I		! do loop counter
+	INTEGER		PTR		! pointer into ACC
+	REAL		STBUF(2,15)	! for the points
+	INTEGER*4	OK		! function return
+	INTEGER*4	STLEN		! length of ST entry
+	INTEGER*2	THINT		! TH entry value
+	LOGICAL		HADNF1		! had NF 1
+	LOGICAL		HADEF		! had EF entry
+	LOGICAL		HADAC		! had AC entry
+	LOGICAL		HADST		! had ST entry
+	INTEGER*2	ACTYPE		! AC type of feature
+	INTEGER*2	NPTS		! no. of points in ST entry
+	INTEGER*2	IENDS		! IFF end of ST parameter
+	LOGICAL		FTRONE		! true if in feature one
+	LOGICAL		FTRCLO		! true if feature closed
+	LOGICAL		BKEFNF		! true if back to EF from NF
+	LOGICAL		BKEFEO		! true if back to EF from EO
+	INTEGER*2	IECODE		! feature code of entry in hand
+	INTEGER*2	IELEN		! length of entry in hand
+	INTEGER*2	LSTFAC		! last feature analysis code
+	INTEGER*2	FSTATE		! FS entry parameter
+	INTEGER*4	ABSHSF		! absolute horizontal accuracy
+	INTEGER*4	ABSVSF		! absolute vertical accuracy
+	INTEGER*4	RELHSF		! relative horizontal accuracy
+	INTEGER*4	RELVSF		! relative vertical accuracy
+	LOGICAL		HADEO		! true if had EO
+	INTEGER*4	TEMP		! temporary
+	INTEGER*4	SAVED_LPOSH	! saved entry in hand pointer
+C
+C----------------------------------------------------------------------
+C Blank for TO output
+C
+	DO 7 I = 1,2556
+	   TO(I) = ICHAR(' ')
+7	CONTINUE
+C
+	PTR = 1
+C
+C There are no features as yet
+	NOFTRS = 0
+	LSTFAC = 0
+C
+C Work out the total length of the accuracy subregion data...
+C this is the length of the accuracy fields + blank fills, plus the
+C field for how many points, followed by 14 coordinate pairs (not all
+C necessarily full)
+C
+	STRLEN = 8+8+2 + 14*(9+10)
+C
+C At this point we have just entered layer 0 within the IFF file, the
+C first accuracy sub-region feature is the next entry in the file.
+C
+5	CALL IFFNXT(IECODE,IELEN)
+C
+	IF (IELEN .EQ. -1) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__UNEXPEOF)
+	   GOTO 1000
+	ENDIF
+C
+	IF (IELEN .LT. 0) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__IFFREAD)
+	   GOTO 1000
+	ENDIF
+C
+C It is not necessary to have any features at all in layer 0, if this
+C is the case the next entry will be an EO entry.
+C
+	IF (IECODE .EQ. 'EO') THEN
+	   HADEF = .TRUE.
+	   GOTO 900
+	ENDIF
+C
+	IF (IECODE .EQ. 'VO') GOTO 5
+C
+	IF (IECODE .NE. 'NF') THEN
+	   CALL LSL_PUTMSG(DTEDIFF__ACCNOTNF)
+	   GOTO 1000
+	ENDIF
+C
+	GOTO 100		! proceed if all is well
+C
+C and onto the other entries in layer 0
+C
+10	CALL IFFNXT(IECODE,IELEN)
+C
+	IF (IELEN .EQ. -1) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__UNEXPEOF)
+	   GOTO 1000
+	ENDIF
+C
+	IF (IELEN .LT. 0) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__IFFREAD)
+	   GOTO 1000
+	ENDIF
+C
+C ....and take appropriate action
+C
+	IF (IECODE .EQ. 'NF') GOTO 100
+	IF (IECODE .EQ. 'AC') GOTO 300
+	IF (IECODE .EQ. 'ST') GOTO 700
+	IF (IECODE .EQ. 'EF') GOTO 800
+	IF (IECODE .EQ. 'EO') GOTO 900
+C
+	GOTO 10
+C	
+C NF - New feature entry
+C
+C Look ahead to see if its a registration mark
+C
+100	SAVED_LPOSH=LPOSH
+	CALL IFFNXC('FS',IELEN)
+C
+	IF (IELEN.EQ.-1) THEN
+	  CALL LSL_PUTMSG(DTEDIFF__UNEXPEOF)
+	  GOTO 1000
+	ENDIF
+C
+	IF (IELEN.LT.0) THEN
+	  CALL LSL_PUTMSG(DTEDIFF__IFFREAD)
+          GOTO 1000
+	ENDIF
+C
+	CALL EIHRI(FSTATE,1,1)
+	IF(FSTATE.EQ.300)THEN
+	  CALL IFFNXC('EF',IELEN)
+C
+C Skip any registration marks (feature code 300)
+	  IF(IELEN.EQ.-1)THEN
+	    CALL LSL_PUTMSG(DTEDIFF__UNEXPEOF)
+	    GOTO 1000
+	  ENDIF
+C
+	  IF (IELEN.LT.0) THEN
+	    CALL LSL_PUTMSG(DTEDIFF__IFFREAD)
+            GOTO 1000
+	  ENDIF
+C
+	  GOTO 10
+	ENDIF
+C
+C Set back pointer
+	CALL IFFPKE(IECODE,IELEN, SAVED_LPOSH)
+C
+	NOFTRS = NOFTRS + 1
+C
+	IF (NOFTRS.GT.9) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__ACCTOOMNYREGS)
+	ENDIF
+C
+120	CALL EIHRI(FAC,1,1)
+C
+	HADEF = .FALSE.
+	HADAC = .FALSE.			! no AC yet
+	HADST = .FALSE.			! no ST yet
+	STLEN = 0
+	FTRCLO = .FALSE.
+C
+	GOTO 10
+C
+C AC - Ancillary code entry
+300	CALL EIHRI(ACTYPE,1,1)
+	IF (ACTYPE.NE.FADACC) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__ACCBADREGION)
+	   GOTO 10
+	ENDIF
+C
+	CALL EIHR(TXTBUF,IELEN-3,4)
+	TXTPTR = (IELEN - 3)*2
+	HADAC = .TRUE.
+	GOTO 10
+C
+C ST - Co-ordinate STring entry (there may be more than one per ftr)
+C First obtain the no. of points in the entry
+C
+700	HADST = .TRUE.
+	CALL EIHRS(NPTS,IENDS)
+C
+	IF ((STLEN+NPTS).GT.15) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__ACCTOOMNYPTS)
+	   GOTO 1000
+	ENDIF
+C
+C ...and now get the actual co-ords into STBUF
+	CALL EIHRR(STBUF(1,STLEN+1),NPTS*2,1)
+	STLEN = STLEN + NPTS
+C
+	GOTO 10
+C
+C EF - End of feature entry
+C
+800	HADEF = .TRUE.
+C
+	IF (HADAC) THEN
+C Ensure the we do not allow RDCOMM to try to process any nulls
+	   DO 810 I = 1,TXTPTR
+	      IF (TXTBUF(I) .EQ. 0) THEN
+	         TXTPTR=I-1
+	         GOTO 820
+	      ENDIF
+810	   CONTINUE
+C
+820	   IF (.NOT.GETSAC(ABSHSF,ABSVSF,RELHSF,RELVSF)) THEN
+	      CALL LSL_PUTMSG(DTEDIFF__ACCBADAC)
+	   ENDIF
+C
+	ELSE
+	   CALL LSL_PUTMSG(DTEDIFF__ACCNOAC)
+	   ABSHSF = 0
+	   ABSVSF = 0
+	   RELHSF = 0
+	   RELVSF = 0
+	ENDIF
+C
+	CALL EXPAND('%W%P0%I4%I4%I4%I4', TO(PTR),
+     &		 	ABSHSF, ABSVSF, RELHSF,	RELVSF)
+	PTR = PTR + 16
+C
+	IF (.NOT.HADST) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__ACCNOST)
+	   GOTO 850
+	ENDIF
+C
+C Check to see if the last point is the same as the first, ie: it is
+C only there to close the feature and must not be written out to the 
+C magtape
+C
+	IF (STBUF(1,STLEN).EQ.STBUF(1,1) .AND.
+     &	    STBUF(2,STLEN).EQ.STBUF(2,1)) THEN
+	   FTRCLO = .TRUE.
+	   STLEN  = STLEN - 1
+	ENDIF
+C
+850	CALL EXPAND('%W%P0%I2', TO(PTR), STLEN)
+	PTR = PTR + 2
+C
+C Now the co-ordinates must be output in the form:
+C 		DDMMSS.SH		Latitude
+C		DDDMMSS.SH		Longitude
+C
+C The convention used was that X corresponds to longitude, and Y to
+C latitude.
+C The IFF co-ordinates are in tenths of a second, therefore they must
+C be converted to degrees, minutes, and seconds before output
+C Start with latitude.
+C
+	DO 860 I=1,STLEN 
+C
+C First the latitude
+	   TEMP = STBUF(2,I) + MHLAMO
+	   OK = ADDANG( TO(PTR), TEMP, DD, TENTH, HEMI )
+	   PTR = PTR + 9
+C
+C and now the longitude
+	   TEMP = STBUF(1,I) + MHLOMO
+	   OK = ADDANG( TO(PTR), TEMP, DDD, TENTH, HEMI )
+	   PTR = PTR + 10
+860	CONTINUE
+C
+C The DTED format expects upto 14 co-ordinate pairs, therefore it is 
+C important to blank fill the remaining co-ordinates. If the feature
+C was closed be careful to add an extra co-ordinate pair.
+C
+	PTR = PTR + (14-STLEN)*19
+	IF (BKEFNF) THEN
+	   BKEFNF = .FALSE.
+	   GOTO 120
+C
+	ELSE IF (BKEFEO) THEN
+	   BKEFEO = .FALSE.
+	   GOTO 950
+	ENDIF
+C
+	GOTO 10
+C
+C EO - End of overlay entry
+C
+900	HADEO = .TRUE.
+C
+	IF (NOFTRS.EQ.0)GOTO 950
+C
+	IF (.NOT.HADEF) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__MISSINGEF)
+	   BKEFEO = .TRUE.
+	   GOTO 800
+	ENDIF
+C
+C .....and finish here
+C
+950	IF (.NOT.(HADEO)) THEN
+	   CALL LSL_PUTMSG(DTEDIFF__MISSINGEO)
+	   GOTO 900
+	ENDIF
+C
+C Set to success
+	SUBACC=DTEDIFF__NORMAL
+C
+1000	RETURN
+	END
+C

@@ -1,0 +1,338 @@
+	LOGICAL FUNCTION IFFHDR
+C
+***	MODULE	IFFHDR
+***	IDENT	01MR93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England
+C Author Clarke Brunt
+C
+C Written February 1984
+C
+C To read the RA, NS, MH, CP entries of an open IFF file
+C Returns .TRUE. for fatal errors
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:MAPS/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/LSL$CMNIFF:MHDEF/
+***	COMMON/LSL$CMNIFF:MHOSGB/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:STATE/
+***	COMMON/CMN:TRANSFORM/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+	EXTERNAL	TTWSTR
+C
+C functions
+	LOGICAL		GEOG_TRANS_RANGE
+C
+C w/s
+	INTEGER	  I
+	LOGICAL*1 HADRA,HADNS,HADMH,HADCP,HADMD,HADMD2
+	INTEGER*2 IECODE,IELEN
+	INTEGER	  MHORG(2),MHSCL	! scale and origin from MH
+	REAL*8	  MDORG(2),MDSCL	! scale and origin from MD
+	INTEGER   MD_FROM_MAP_NO	! map that map descriptor taken from
+	SAVE	  MD_FROM_MAP_NO	! (the first valid one)
+C
+C Initialise
+	IFFHDR=.FALSE.				! assume success
+	HADRA=.FALSE.
+	HADNS=.FALSE.
+	HADMH=.FALSE.
+	HADCP=.FALSE.
+	HADMD=.FALSE.
+	HADMD2=.FALSE.
+C
+	MHORG(1)  = 0	! integers
+	MHORG(2)  = 0
+	MHSCL     = 0
+C
+	MDORG(1)  = 0.0	! R*8s
+	MDORG(2)  = 0.0
+	MDSCL     = 0.0
+C
+	IF (MAPCUR.EQ.0) THEN		! initialise geographical work
+	   MHLEN_FIRST = 0
+	   MD_OK = DO_FLY_TRANS
+	   PROJXY(1) =  -1E38
+	   PROJXY(2) =  -1E38
+	ENDIF
+C
+C set output revision level in bitmap
+	CALL LIB$INSV(ORVLEV,MAPCUR,1,MAP_ORLEV_B_MAP)
+C
+C print some facts about this IFF file
+	CALL IFFVER(TTWSTR)
+C
+C Search IFF file for range info and new section header
+10	IF (HADRA.AND.HADNS.AND.HADMH.AND.HADCP.AND.HADMD) GOTO 100
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 90
+	IF (IECODE.EQ.'RA') GOTO 20
+	IF (IECODE.EQ.'NS') GOTO 30
+	IF (IECODE.EQ.'MH') GOTO 40
+	IF (IECODE.EQ.'CP') GOTO 50
+	IF (IECODE.EQ.'MD') GOTO 60
+	IF (IECODE.EQ.'EJ'.OR.IECODE.EQ.'NO') GOTO 90
+	GOTO 10
+C
+C RA - range info
+20	HADRA=.TRUE.
+	CALL EIHRR(RANGE(1,MAPCUR),4,1)
+C
+C check it
+	IF (RANGE(1,MAPCUR).GE.RANGE(2,MAPCUR) .OR.
+     &	    RANGE(3,MAPCUR).GE.RANGE(4,MAPCUR) ) THEN
+	   CALL MOAN(MSG_IFFRANGE)
+	   IFFHDR = .TRUE.				! fatal
+	ENDIF
+	GOTO 10
+C
+C NS - start of new section
+30	IF (HADNS.OR.IELEN.EQ.0) GOTO 31
+	IELEN = MIN(IELEN,(CTXMAX+1)/2)		! allow 255 characters
+	CALL EIHR(TXTBUF,IELEN,1)
+	IF (IELEN.LT.40) TXTBUF(IELEN*2+1)=0
+	CALL INFORM(MSG_IFFIDENT,TXTBUF)
+31	HADNS = .TRUE.
+	GOTO 10
+C
+C MH - map header information
+40	CALL EIHRI(MHARR,MIN(IELEN,MHLEN),1)	! map header
+	IF (MHDESC(2).EQ.0.OR.MHDESC(2).EQ.2) THEN	! assume OS if unset
+	   CALL OSHEAD(MHSCL,MHORG)
+	ELSEIF (MHDESC(2).EQ.1) THEN
+	   CALL MCEHEA(MHSCL,MHORG)
+	ELSEIF (MHDESC(2).GT.2) THEN
+C
+C remember if we have had a writable new type OS map header so that we
+C can stop an OPERATION OS_MH command being given
+	   IF (.NOT.MAPRO(MAPCUR)) THEN
+	      HAD_NEW_OS_MH = .TRUE.
+C
+C give warning if this map is writable, and have had an OPERATION OS command
+	      IF (OS_MH_EDIT.AND..NOT.OS_MH_INITIALISED) THEN
+	         CALL MOAN(MSG_NEWMHNOTABLE)
+	         CALL MOAN(MSG_NEWMHNOTABLE1)
+	         IFFHDR = .TRUE.		! don't accept this map
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C NOTE: don't get scale and origin from MAP HEADER if type 3 or 4
+C       (which are new OS type map headers)
+C
+	HADMH = .TRUE.
+C
+C save MH from first map - for system variables
+	IF (MAPCUR.EQ.0) THEN
+	   CUST=MHDESC(2)   			! see MHDEF common block
+	   IF (CUST.LE.2) THEN
+	      MHLEN_FIRST = MIN(IELEN,MHLEN)
+	   ELSE           			! new OS common block
+	      MHLEN_FIRST = MIN(IELEN,MH2LEN)
+	   ENDIF
+	   IF (MHLEN_FIRST.GT.0)
+     &	         CALL EIHRI(MHARR_FIRST,MHLEN_FIRST,1)
+	   MHLEN_FIRST = MHLEN_FIRST/2
+	ENDIF
+	GOTO 10
+C
+C CP - corner points
+50	CALL EIHRR(CRNPTS(1,1,MAPCUR),16,1)	! read corner pts
+	HADCP=.TRUE.
+	GOTO 10
+C
+C MD - descriptor information - only if type2 and ENABLE DESCRIPTOR
+60	HADMD = .TRUE.
+C
+C cannot use this file if the map descriptor is not set up properly
+	IF (IELEN.EQ.MD2LEN) THEN
+	   CALL EIHRI(MD2ARR,MD2LEN,1)
+	   IF (DESOPT .OR. DO_FLY_TRANS) THEN
+	      MDSCL    = MD2SCL
+	      MDORG(1) = MD2LOC(1)
+	      MDORG(2) = MD2LOC(2)
+	   ENDIF
+	   HADMD2 = .TRUE.
+	ENDIF
+	GOTO 10
+C
+C here on NO or EJ or unexpected EOF
+90	IF (.NOT.HADRA) THEN
+	   CALL MOAN(MSG_MISSENT,'RA')
+	   IFFHDR = .TRUE.			! fatal
+	ENDIF
+	IF (.NOT.HADNS) CALL MOAN(MSG_MISSENT,'NS')
+	IF (.NOT.HADMD) CALL MOAN(MSG_MISSENT,'MD')
+	IF (.NOT.HADMH) CALL MOAN(MSG_MISSENT,'MH')
+	IF (.NOT.HADCP) CALL MOAN(MSG_MISSENT,'CP')
+C
+C sort out scale and origin of this map - use values from MD if they
+C are not zero, otherwise use values from map header if they seem more
+C sensible
+C
+100	IF (IFFHDR) GOTO 999
+	MAPSCL(MAPCUR) = MDSCL
+	IF (MDSCL.LE.0.0.AND.MHSCL.GT.0) THEN
+	   MAPSCL(MAPCUR) = MHSCL
+	ENDIF
+	MAPORG(1,MAPCUR) = MDORG(1)
+	MAPORG(2,MAPCUR) = MDORG(2)
+	IF (MDORG(1).EQ.0.0.AND.MDORG(2).EQ.0.0.AND.
+     &	    (MHORG(1).NE.0.OR.MHORG(2).NE.0)) THEN
+	   MAPORG(1,MAPCUR) = MHORG(1)
+	   MAPORG(2,MAPCUR) = MHORG(2)
+	ENDIF
+C
+C initialise projection transformation with this data if it is the first
+	MAP_RANGE_OK(MAPCUR) = .FALSE.
+	IF (HADMD2) THEN
+	   IF (DO_FLY_TRANS) THEN
+	      IF (MATV2.NE.2.OR.MD2PRJ.EQ.0) THEN
+	         IFFHDR = .TRUE.
+	         CALL MOAN(MSG_NOMDSETUP)
+C
+C it is important that different maps are all on the same spheroid
+	      ELSEIF ((MD2SPH .NE. FIRSTSPH) .OR.
+     &                (MD2USP(1) .NE. FIRSTUSP(1)) .OR.
+     &                (MD2USP(2) .NE. FIRSTUSP(2))) THEN
+	         CALL MOAN(MSG_DIFFSPHEROID,IFFNAM(1,MAPCUR))
+	         IFFHDR = .TRUE.
+C
+C initialise the parameters that specify the characteristics of
+C this file's coordinate space
+C
+	      ELSE
+	         CALL CALLR(MD2ARR,MAP_SYS(MAPCUR),MAP_ZONE(MAPCUR),
+     &	                    MAP_PARAMS(1,MAPCUR),MAP_UNIT(MAPCUR),
+     &	                    %VAL(GEOG_ADDRESSES(XGCTP_PARINIT)))
+	      ENDIF
+	   ELSE
+	      IF (MATV2.EQ.2.AND.MD2PRJ.NE.0.AND.MD2UNT.NE.0) THEN
+C
+C if map descriptor set up, set up variables for transformation, and
+C save the relevant parts of the map descriptor
+	         IF (.NOT.MD_OK) THEN	   
+	            CALL CPYPAK(MD2LEN/2,MD2ARR,FIRSTMD2ARR)
+	            FIRSTPRJ = MD2PRJ
+	            FIRSTUNT = MD2UNT
+	            FIRSTSPH = MD2SPH
+	            FIRSTUSP(1) = MD2USP(1)
+	            FIRSTUSP(2) = MD2USP(2)
+	            CALL CPYPAK(30,MD2PAR,FIRSTPAR)
+	            MD_OK = .TRUE.	
+	            MD_FROM_MAP_NO = MAPCUR
+	            GEOG_INI = .FALSE.	! GCTPLIB not yet initialised
+C
+C check that this map descriptor is same as first good one we had
+	         ELSE
+	            IF (FIRSTPRJ.NE.MD2PRJ.OR.FIRSTUNT.NE.MD2UNT.OR.
+     &	                FIRSTSPH.NE.MD2SPH .OR.
+     &	                FIRSTUSP(1).NE.MD2USP(1).OR.
+     &	                FIRSTUSP(2).NE.MD2USP(2)) THEN
+	                   CALL INFORM(MSG_INCONSTMD1)
+	                   CALL INFORM(MSG_INCONSTMD2,
+     &	                               IFFNAM(1,MD_FROM_MAP_NO))
+	            ELSE
+	               DO 62, I = 1,15
+	                  IF (FIRSTPAR(I).NE.MD2PAR(I)) THEN
+	                     CALL INFORM(MSG_INCONSTMD1)
+	                     CALL INFORM(MSG_INCONSTMD2,
+     &	                                 IFFNAM(1,MD_FROM_MAP_NO))
+	                     GOTO 67
+	                  ENDIF
+62	               CONTINUE
+67	               CONTINUE
+	            ENDIF
+	         ENDIF
+	      ENDIF	     
+	   ENDIF
+C
+C we have got enough information for doing transformations on the fly
+	ELSEIF (DO_FLY_TRANS) THEN
+	   IFFHDR = .TRUE.
+	   CALL MOAN(MSG_NOMDSETUP)
+	ENDIF
+	IF (IFFHDR) GOTO 999
+C
+C for multiple maps, check that scale is same as for first one
+C (this is only required when ENABLE EXTERNAL has been given)
+C
+	IF (MAPCUR.GT.0.AND.EXTOPT.AND..NOT.DO_FLY_TRANS) THEN
+	   IF (MAPSCL(MAPCUR).NE.MAPSCL(0)) THEN
+	      CALL MOAN(MSG_INCONSTSCL,IFFNAM(1,0))
+	      CALL LEARN (MSG_USEMAP0)
+	   ENDIF
+	ENDIF
+C
+C if reading map in READY state, check that it will fit in current range
+	IF (SINDEX.NE.STATE_INITIAL) THEN
+C
+C if first map, then can adjust the working area
+	   IF (MAPTOP.EQ.0) THEN
+	      CALL INIORG			! initialize origin
+	      CALL INISEC(.FALSE.)		! set up sectoring
+	      CALL INIGKS(.FALSE.)		! set up GKS
+	      CALL INISCL			! set up scaling
+	   ELSE
+	      IF (.NOT.DO_FLY_TRANS) THEN
+C
+C set MAPORG relative to LITES2 workspace
+	         MAPORG(1,MAPCUR)=MAPORG(1,MAPCUR)-LITES2ORG(1)
+	         MAPORG(2,MAPCUR)=MAPORG(2,MAPCUR)-LITES2ORG(2)
+C
+C (NOTE: check against LIMITS rather than ABS_LIMITS, as it is slightly
+C        larger, and it is petty not to allow this extra - but also
+C        note that LIMITS will not be extended. (message uses absolute
+C        limits))
+	         IF ((RANGE(1,MAPCUR)+MAPORG(1,MAPCUR)).LT.LIMITS(1).OR.
+     &	       (RANGE(2,MAPCUR)+MAPORG(1,MAPCUR)).GT.LIMITS(2).OR.	   
+     &	       (RANGE(3,MAPCUR)+MAPORG(2,MAPCUR)).LT.LIMITS(3).OR.
+     &	       (RANGE(4,MAPCUR)+MAPORG(2,MAPCUR)).GT.LIMITS(4)) THEN
+	            CALL MOAN(MSG_MAPOUTRANGE,IFFNAM(1,MAPCUR),
+     &	                   ABS_LIMITS(1),ABS_LIMITS(2),
+     &	                   ABS_LIMITS(3),ABS_LIMITS(4))
+	            IFFHDR = .TRUE.
+	         ENDIF
+	      ELSE
+C
+C  get the range in LITES2 coordinate space
+	         IF (GEOG_TRANS_RANGE(MAPCUR)) THEN
+	            MAP_RANGE_OK(MAPCUR) = .TRUE.
+	            IF (RANGE(1,MAPCUR).LT.LIMITS(1).OR.
+     &	                RANGE(2,MAPCUR).GT.LIMITS(2).OR.	   
+     &	                RANGE(3,MAPCUR).LT.LIMITS(3).OR.
+     &	                RANGE(4,MAPCUR).GT.LIMITS(4)) THEN
+	               CALL MOAN(MSG_MAPOUTRANGE,IFFNAM(1,MAPCUR),
+     &	                   ABS_LIMITS(1),ABS_LIMITS(2),
+     &	                   ABS_LIMITS(3),ABS_LIMITS(4))
+	               IFFHDR = .TRUE.
+	            ENDIF
+	         ELSE
+	            IFFHDR = .TRUE.
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	ENDIF
+	IF (IFFHDR) GOTO 999
+C
+C set bitmap for update flags for this map to 0
+	IF (.NOT.IFFHDR) THEN
+	   DO 200, I=1,OS_MH_FL_BMAP_SIZ
+	      OS_MH_FL_BMAP(I,MAPCUR) = 0
+200	   CONTINUE	
+	ENDIF
+C
+999	RETURN
+	END

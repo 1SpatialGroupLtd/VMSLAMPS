@@ -1,0 +1,238 @@
+	SUBROUTINE GET_FEATURE
+C
+***	IDENT	06NO86
+***	MODULE	GET_FEATURE
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C
+C Author TJ Ibbs, 21 July 1986
+C
+C called when an NF entry has been passed, to set up the current entry in
+C the /POSITION/ common file, and to get the NF number into /ENTRY/ for
+C showing on the status lines
+C
+	IMPLICIT NONE
+C
+C **********************************************************************
+C parameter files
+C
+	INCLUDE	'HERE:IPATCHMSG.PAR'	! error numbers
+C
+C common files
+C
+	INCLUDE	'LSL$CMNIFF:IFFHAN.CMN'	! for IFF addresses
+	INCLUDE	'HERE:POINTERS.CMN'	! for current entry positions
+	INCLUDE	'HERE:SWITCHES.CMN'	! for DONE_SCAN_FILE
+	INCLUDE	'HERE:ENTRY.CMN'	! for IECODE
+C
+C functions
+C
+	LOGICAL		MOVE_TO_ADDRESS	! uses IFFPKE
+	LOGICAL		BINARY_CHOP	! to search for an NF position
+C
+C workspace
+C
+	INTEGER		POSN		! record of LPOSH
+	INTEGER		TOP,BOT,MID	! for simple binary chop
+	INTEGER*2	ENT_CODE	! the next,... entry
+	INTEGER*2	ENT_LEN		! its size
+	INTEGER*2	OLD_IECODE	! current entry
+	INTEGER		I		! for DO loops
+	LOGICAL		SAME_NF		! true if we are in same feature
+C
+C and a useful parameter
+C
+	INTEGER*2	NF
+	PARAMETER	(NF='NF')
+C
+C **********************************************************************
+C if we haven't yet scanned the file, then we can do nothing
+C
+	IF ( .NOT.DONE_SCAN_FILE ) GOTO 9000
+C
+C if we are at or beyond the top of the table, then we are not yet
+C supporting PREVIOUS at this part of the file
+C
+	IF ( LPOSH.GE.HIGHWATER ) GOTO 9000
+C
+C we will assume that we have sufficient room for all of the entries in
+C this feature, and that we aren't after the MAX_ENTRIES'th
+C
+	AFTER_MAX_ENTRIES = .FALSE.
+C
+C remember where we are
+C
+	POSN = LPOSH
+	OLD_IECODE = IECODE
+C
+C and we expect to move from the 'current' feature
+C
+	SAME_NF = .FALSE.
+C
+C if CURRENT_NF is unset, then this is the first GET_FEATURE since
+C we did SCAN_FILE, and we don't have any current position information
+C
+	IF ( CURRENT_NF.EQ.-1 ) GOTO 1000	! start from scratch
+C
+C **********************************************************************
+C start by checking whether we are in the same feature, or have simply
+C moved either forwards or backwards by one feature.
+C
+C - firstly, are we in the same feature (in which case we already
+C   have its entries in our array)
+C
+	IF ( LPOSH.GE.NF_PTR(CURRENT_NF) .AND.
+     &	     LPOSH.LT.NF_PTR(CURRENT_NF+1) ) THEN
+	   SAME_NF = .TRUE.
+	   GOTO 6050
+	ENDIF
+C
+C - otherwise, are we in the next feature?
+C
+	IF ( CURRENT_NF.LE.LAST_NF .AND.
+     &	     LPOSH.GE.NF_PTR(CURRENT_NF+1) .AND.
+     &	     LPOSH.LT.NF_PTR(CURRENT_NF+2) ) THEN
+	   CURRENT_NF = CURRENT_NF+1
+	   GOTO 4000
+	ENDIF
+C
+C - or the previous (if it exists)
+C
+	IF ( CURRENT_NF.GT.0 .AND.
+     &	     LPOSH.GE.NF_PTR(CURRENT_NF) .AND.
+     &	     LPOSH.LT.NF_PTR(CURRENT_NF+1) ) THEN
+	   CURRENT_NF = CURRENT_NF-1
+	   GOTO 4000
+	ENDIF
+C
+C **********************************************************************
+C otherwise, try a simple binary chop
+C
+1000	IF ( BINARY_CHOP( LPOSH, CURRENT_NF ) ) THEN
+	   DONE_SCAN_FILE = .FALSE.
+	   GOTO 9000
+	ENDIF
+C
+C **********************************************************************
+C so move to the appropriate position in the file for a scan
+C (note that we are aware that the first start-of-feature entry
+C  is not an NF)
+C
+4000	IF ( CURRENT_NF.EQ.0 ) THEN
+   	   IF ( MOVE_TO_ADDRESS( NF_PTR(0), 0,
+     &				 IPATCH__XXGONE, .TRUE. )
+     &	      ) GOTO 6000
+	ELSE
+   	   IF ( MOVE_TO_ADDRESS( NF_PTR(CURRENT_NF), NF,
+     &				 IPATCH__NFGONE, .TRUE. )
+     &	      ) GOTO 6000
+	ENDIF
+C
+C and remember the NF entry itself (note that for CURRENT_ENTRY=0
+C we would actually expect this to be the start of file)
+C
+	ENTRY_PTR(0) = LPOSH
+	ENTRY_NAM(0) = IECODE
+C
+C prepare our index
+C
+	LAST_ENTRY = 0
+C
+C **********************************************************************
+C so we have the right feature
+C - first of all, read the NF's data in, for the status lines
+C   (remembering that CURRENT_NF=0 means start of file, not an NF!)
+C
+5000	IF ( CURRENT_NF.NE.0 ) CALL READ_NF
+C
+C - and now scan through the feature's entries
+C
+5500	CALL IFFNXT( ENT_CODE, ENT_LEN )
+C
+C if we have found the next NF, then go off to tidy up
+C - note our assumption that there are no NFs not in NF_PTR
+C
+	IF ( ENT_CODE.EQ.'NF' ) GOTO 6000
+C
+C otherwise, remember the entry and its address
+C - first, check if there is room...
+C
+	IF ( LAST_ENTRY.GE.MAX_ENTRIES ) THEN
+	   CALL TOO_MANY_ENTRIES	! to fit in our array
+	   GOTO 6000			! back to the original entry
+	ENDIF
+C
+C there is, so use it
+C (we remember the entry's code so that we have some extra check that
+C  our use of IFFPKE to get to it has worked)
+C
+	LAST_ENTRY = LAST_ENTRY+1
+	ENTRY_PTR(LAST_ENTRY) = LPOSH
+	ENTRY_NAM(LAST_ENTRY) = ENT_CODE
+C
+C if that 'entry' was the end-of-file, then that's it
+C
+	IF ( ENT_LEN.EQ.-1 ) GOTO 6000
+C
+C and get the next one
+C
+	GOTO 5500
+C
+C **********************************************************************
+C and when we have all of the entries for this feature, move back to
+C the original entry
+C
+6000	CALL MOVE_TO_ADDRESS( POSN, OLD_IECODE, IPATCH__GOBACK, .TRUE. )
+C
+C and work out which one it is
+C - if we are at the start of a feature, then all is simple
+C
+6050	IF ( LPOSH.EQ.NF_PTR(CURRENT_NF) ) THEN
+	   CURRENT_ENTRY = 0
+	   GOTO 9000
+	ENDIF
+C
+C if we are after the last entry in our array, then we can't do
+C anything useful, so just ignore the entry...
+C
+	IF ( LPOSH.GT.ENTRY_PTR(LAST_ENTRY) ) THEN
+	   AFTER_MAX_ENTRIES = .TRUE.
+	   GOTO 9000
+	ENDIF
+C
+C if we have not left the feature we were in before, then check for
+C having moved by only one (or zero)
+C
+	IF ( SAME_NF ) THEN
+	   IF ( LPOSH.EQ.ENTRY_PTR(CURRENT_ENTRY) ) THEN
+	      GOTO 9000
+	   ELSEIF ( CURRENT_ENTRY.LT.LAST_ENTRY .AND.
+     &		    LPOSH.EQ.ENTRY_PTR(CURRENT_ENTRY+1) ) THEN
+	      CURRENT_ENTRY = CURRENT_ENTRY+1
+	      GOTO 9000
+	   ELSEIF ( CURRENT_ENTRY.GT.1 .AND.
+     &		    LPOSH.EQ.ENTRY_PTR(CURRENT_ENTRY-1) ) THEN
+	      CURRENT_ENTRY = CURRENT_ENTRY-1
+	      GOTO 9000
+	   ENDIF
+	ENDIF
+C
+C otherwise, just search through the array
+C
+	DO 6100 I = 1,LAST_ENTRY
+	   IF ( LPOSH.EQ.ENTRY_PTR(I) ) THEN
+	      CURRENT_ENTRY = I
+	      GOTO 9000
+	   ENDIF
+6100	CONTINUE
+C
+C if we reach here, then the entry isn't in our array
+C - presumably we used FIND to go to some address that is not sensible
+C
+	CALL LSL_PUTMSG( IPATCH__NOTENTRY, IECODE, LPOSH )
+C
+C **********************************************************************
+C and return
+C
+9000	RETURN
+	END

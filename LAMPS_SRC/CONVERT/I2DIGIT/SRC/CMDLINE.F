@@ -36,7 +36,8 @@ C
 	LOGICAL		DCL_STARTUP		! Command line read and parse
 	LOGICAL		DCL_FILE		! Get file name
 	LOGICAL		DCL_QUAL		! Get a qualifier 
-	LOGICAL		DCL_INT			! Get an integer parameter
+	LOGICAL		DCL_INT			! Get an integer
+	LOGICAL		DCL_REAL		! Get an real
 	LOGICAL		DCL_STR			! Get a string arg
 	LOGICAL		TTWSTR			! Write to terminal
 	LOGICAL		PARFILN			! Parse filename
@@ -132,7 +133,7 @@ C
 C
 C *****************************************************************************
 C
-C Get the DIGIT output filename
+C Get the DIGIT output device name
 C
 	STATUS = DCL_FILE( 'DIGIT_TAPE_DEVICE',	! qualifier name
      &	                   ' ',			! default filename
@@ -214,9 +215,11 @@ C
      &			      .TRUE. )		! deal with errors itself
 	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
 C
-	   IF (IARRAY(1).GE.10 .AND. IARRAY(1).LE.100) THEN
+	   IF (IARRAY(1).GE.1 .AND. IARRAY(1).LT.100) THEN
 	      RESOLUTION = IARRAY(1)
+	      HAD_RES = .TRUE.
 	   ELSE
+	      RESOLUTION = 32
 	      CALL LSL_PUTMSG(I2DIGIT__DEFRES,RESOLUTION)
 	   ENDIF
 	ENDIF
@@ -404,16 +407,260 @@ C
 C
 C Check partition name for invalid characters like underscores
 C
-	DO 900 I = 1,10
+	CH=PARTNAME(1:1)
+	IF (.NOT.((CH.GE.'A'.AND.CH.LE.'Z') .OR.
+     &	          (CH.GE.'a'.AND.CH.LE.'z') .OR.
+     &	          (CH.EQ.' '))) THEN
+	   STATUS = I2DIGIT__INVNAME
+	   CALL LSL_PUTMSG(STATUS,PARTNAME(1:10))
+	   GOTO 999
+	ENDIF
+	DO 900 I = 2,10
 	   CH=PARTNAME(I:I)
 	   IF (.NOT.((CH.GE.'A'.AND.CH.LE.'Z') .OR.
      &		     (CH.GE.'a'.AND.CH.LE.'z') .OR.
+     &		     (CH.GE.'0'.AND.CH.LE.'9') .OR.
      &		     (CH.EQ.' '))) THEN
 	      STATUS = I2DIGIT__INVNAME
 	      CALL LSL_PUTMSG(STATUS,PARTNAME(1:10))
 	      GOTO 999
 	   ENDIF
 900	CONTINUE
+C
+C **********************************************************************
+C /SCALE_IFF - number of ground mm represented by 1 IFF file unit
+C
+	STATUS= DCL_QUAL( 'SCALE_IFF',		! qualifier name
+     &		           HAD_QUAL,		! out - globally there
+     &		           PRESENT,		! out - locally there
+     &		           NEGATED,		! out - true if negated
+     &		           .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+	SCALEIFF = 1000.0			! default to metres
+C
+ 	IF ( HAD_QUAL ) THEN
+	   STATUS = DCL_REAL( 'SCALE_IFF',	! qualifier name
+     &			      .TRUE. )		! deal with errors itself
+C
+	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+	   SCALEIFF = RARRAY(1)
+	   HAD_SCALEIFF = .TRUE.
+	   IF (SCALEIFF.LE.0.0) THEN
+	      CALL LSL_PUTMSG(I2DIGIT__BADSCALE,'IFF scale')
+	      STATUS = .FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C **********************************************************************
+C /SCALE_SHEET - number of ground units represented by 1 sheet unit
+C
+	STATUS= DCL_QUAL( 'SCALE_SHEET',	! qualifier name
+     &		           HAD_QUAL,		! out - globally there
+     &		           PRESENT,		! out - locally there
+     &		           NEGATED,		! out - true if negated
+     &		           .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+ 	IF ( HAD_QUAL ) THEN
+	   STATUS = DCL_REAL( 'SCALE_SHEET',	! qualifier name
+     &			      .TRUE. )		! deal with errors itself
+C
+	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+	   SCALESHEET = RARRAY(1)
+	   HAD_SCALESHEET = .TRUE.
+	   IF (SCALESHEET.LE.0.0) THEN
+	      CALL LSL_PUTMSG(I2DIGIT__BADSCALE,'SHEET scale')
+	      STATUS = .FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C Default value is taken from Map Descriptor
+C
+C **********************************************************************
+C /SCALE_FACTOR - number of sheet mm represented by 1 IFF file unit
+C
+	STATUS= DCL_QUAL( 'SCALE_FACTOR',	! qualifier name
+     &		           HAD_QUAL,		! out - globally there
+     &		           PRESENT,		! out - locally there
+     &		           NEGATED,		! out - true if negated
+     &		           .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+	SCALEFACTOR = 1.0			! default to 1
+C
+ 	IF ( HAD_QUAL ) THEN
+	   STATUS = DCL_REAL( 'SCALE_FACTOR',	! qualifier name
+     &			      .TRUE. )		! let routine complain itself
+	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+C If no argument given, SCALEFACTOR will remain as 1.
+C If an argument is given, check that it is valid.
+C
+	   IF (NUMREA.GT.0) THEN
+	      SCALEFACTOR = RARRAY(1)
+	      IF (SCALEFACTOR.LE.0.0) THEN
+		 CALL LSL_PUTMSG(I2DIGIT__BADSCALE,'SCALE_FACTOR')
+		 STATUS = .FALSE.
+		 GOTO 999
+	      ENDIF
+	   ENDIF
+	   HAD_SCALEFACTOR = .TRUE.
+	ENDIF
+C
+C **********************************************************************
+C /OFFSET=(integer,integer) - set the DIGIT pixel offset.
+C
+	STATUS = DCL_QUAL( 'OFFSET',		! qualifier name
+     &		            HAD_QUAL,		! out - globally there
+     &		            PRESENT,		! out - locally there
+     &		            NEGATED,		! out - true if negated
+     &		            .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+C Set default offset
+C
+	OFFSET(1) = 1
+	OFFSET(2) = 1
+C
+C and read its value into the CLD common block
+C
+ 	IF ( HAD_QUAL ) THEN
+	   STATUS = DCL_INT( 'OFFSET',		! qualifier name
+     &			      .TRUE. )		! deal with errors itself
+	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+	   IF (NUMINT.NE.2) THEN
+	      CALL LSL_PUTMSG(I2DIGIT__TWONUMS)
+	      STATUS = .FALSE.
+	      GOTO 999	      
+	   ENDIF
+	   IF (IARRAY(1).LT.1 .OR. IARRAY(2).LT.1) THEN
+	      CALL LSL_PUTMSG(I2DIGIT__MINOFFSET)
+	      STATUS = .FALSE.
+	      GOTO 999	      
+	   ENDIF
+	   OFFSET(1) = IARRAY(1)
+	   OFFSET(2) = IARRAY(2)
+	   HAD_OFFSET = .TRUE.
+	ENDIF
+C
+C **********************************************************************
+C /BORDER=integer - set the border width in DIGIT pixels.
+C
+	STATUS = DCL_QUAL( 'BORDER',		! qualifier name
+     &		            HAD_QUAL,		! out - globally there
+     &		            PRESENT,		! out - locally there
+     &		            NEGATED,		! out - true if negated
+     &		            .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+C Set default border
+C
+	BORDER = 0
+C
+C and read its value into the CLD common block
+C
+ 	IF ( HAD_QUAL ) THEN
+	   STATUS = DCL_INT( 'BORDER',		! qualifier name
+     &			      .TRUE. )		! deal with errors itself
+	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+	   IF (IARRAY(1).LT.0) THEN
+	      CALL LSL_PUTMSG(I2DIGIT__BADBORDER)
+	      STATUS = .FALSE.
+	      GOTO 999	      
+	   ENDIF
+	   BORDER = IARRAY(1)
+	   HAD_BORDER = .TRUE.
+	ENDIF
+C
+C **********************************************************************
+C /XMIN - minimum X coord of area
+C
+	STATUS= DCL_QUAL( 'XMIN',		! qualifier name
+     &		           HAD_QUAL,		! out - globally there
+     &		           PRESENT,		! out - locally there
+     &		           NEGATED,		! out - true if negated
+     &		           .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+ 	IF ( HAD_QUAL ) THEN
+	   STATUS = DCL_REAL( 'XMIN',		! qualifier name
+     &			      .TRUE. )		! deal with errors itself
+C
+	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+	   XMIN = RARRAY(1)
+	   HAD_XMIN = .TRUE.
+	ENDIF
+C
+C **********************************************************************
+C /XMAX - maximum X value of area
+C
+	STATUS= DCL_QUAL( 'XMAX',		! qualifier name
+     &		           HAD_QUAL,		! out - globally there
+     &		           PRESENT,		! out - locally there
+     &		           NEGATED,		! out - true if negated
+     &		           .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+ 	IF ( HAD_QUAL ) THEN
+	   STATUS = DCL_REAL( 'XMAX',		! qualifier name
+     &			      .TRUE. )		! deal with errors itself
+C
+	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+	   XMAX = RARRAY(1)
+	   HAD_XMAX = .TRUE.
+	ENDIF
+C
+C **********************************************************************
+C /YMIN - minimum Y value of area
+C
+	STATUS= DCL_QUAL( 'YMIN',		! qualifier name
+     &		           HAD_QUAL,		! out - globally there
+     &		           PRESENT,		! out - locally there
+     &		           NEGATED,		! out - true if negated
+     &		           .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+ 	IF ( HAD_QUAL ) THEN
+	   STATUS = DCL_REAL( 'YMIN',		! qualifier name
+     &			      .TRUE. )		! deal with errors itself
+C
+	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+	   YMIN = RARRAY(1)
+	   HAD_YMIN = .TRUE.
+	ENDIF
+C
+C **********************************************************************
+C /YMAX - maximum Y value of area
+C
+	STATUS= DCL_QUAL( 'YMAX',		! qualifier name
+     &		           HAD_QUAL,		! out - globally there
+     &		           PRESENT,		! out - locally there
+     &		           NEGATED,		! out - true if negated
+     &		           .TRUE. )		! deal with errors itself
+C
+	IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+C
+ 	IF ( HAD_QUAL ) THEN
+	   STATUS = DCL_REAL( 'YMAX',		! qualifier name
+     &			      .TRUE. )		! deal with errors itself
+C
+	   IF ( .NOT.STATUS ) GOTO 999		! failed - give up with status
+	   YMAX = RARRAY(1)
+	   HAD_YMAX = .TRUE.
+	ENDIF
 C
 C **********************************************************************
 C

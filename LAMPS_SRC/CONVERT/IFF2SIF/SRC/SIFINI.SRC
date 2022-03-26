@@ -1,0 +1,216 @@
+	LOGICAL FUNCTION SIFINI( FILNAM, UNIT )
+C
+***	MODULE	SIFINI
+***	IDENT	17NO87
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Paul Hardy (FRTLIB version - FRTINI), 16 June 1984
+C Stolen and modified for IFF2SIF by TJ Ibbs, 29 January 1985
+C
+C returns FALSE if it succeeds in opening, reading, and closing
+C the specified SIF representation file, called FILNAM
+C
+C The contents of the file are left set up in the common block
+C in /SIFCOM/
+C
+	IMPLICIT NONE
+C
+C Argument
+C
+	CHARACTER*(*)	FILNAM			! filename
+	INTEGER		UNIT			! unit to open it on
+C
+C parameters
+C
+	INTEGER		 TXTBFS
+	PARAMETER	(TXTBFS=132)		! increased TXTBUF size
+	BYTE		 PLING
+	PARAMETER	(PLING ='!')		! comment delimitor
+C
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+C
+***	COMMON/HERE:SIF/
+***	COMMON/HERE:SIFCOM/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/LSL$CMNLSL:CMDCOM/
+C
+C functions called
+C
+	LOGICAL		FLROPN		! open file for read
+	LOGICAL		FLRCLO		! close it again
+	LOGICAL		FLRLIN		! read a line from it
+	INTEGER		RDCOMM		! read a command from the line
+	LOGICAL		RDCHS		! read a (non-space) character
+	LOGICAL		RDFC		! read a feature code defn line
+	LOGICAL		RDPTSIZ		! read point size arguments
+	LOGICAL		RDCATEGORY	! read category/level arguments
+C
+C command table
+C
+	INTEGER		SDF_CMD_TABLE
+	EXTERNAL	SDF_CMD_TABLE
+C
+C workspace
+C
+	INTEGER		IERR		! another
+	LOGICAL		OK
+	INTEGER		I		! DO loop counter
+	INTEGER		LASTFC		! previous FC
+	INTEGER		LINE		! line in cmd file
+	INTEGER		CMD		! command number from RDCOMM
+	LOGICAL		GIVEUP		! true if to give up file
+	LOGICAL		IN_METRES	! are units metres on t'ground?
+	INTEGER		TXLSAV		! save TXTLIM
+	BYTE		CHAR		! last-read character
+C
+C extend TXTBUF
+C
+	TXLSAV = TXTLIM			! save TXTLIM
+	CALL SET_TXTLIM( TXTBFS )	! extend the buffer
+C
+C *********************************************************************
+C
+	SIFINI = .TRUE.		! assume failure
+C
+C init things
+C
+	SIFCNT = 0		! no feature codes defined yet
+	LASTFC = -1		! no previous FC
+	USED_MM = .FALSE.	! haven't given UNITS MM_ON_SHEET cmd
+	HAD_AC = .FALSE.	! not had an AC entry
+C
+C unset the point sizes
+C
+	DO 10 I = 1,MAX_PTSIZ
+	   PTSIZ(PT_HT,I) = -1.0
+	   PTSIZ(PT_WD,I) = -1.0
+10	CONTINUE
+C
+C unset the category table
+C
+	DO 20 I = 0,MAX_CATEGORY
+	   CATEGORY_LEVEL(I) = -1
+20	CONTINUE
+C
+C open up the file
+C
+	OK = FLROPN( UNIT, FILNAM, IERR )	! open command file
+	IF ( .NOT.OK ) THEN
+	   CALL MOAN( MSG__OPENSIF, FILNAM, UNIT )
+	   CALL LSL_ADDMSG(OK)
+	   IF ( OK.EQ.LSL__SYSOPEN ) CALL LSL_ADDMSG(IERR)
+	   GOTO 9999
+	ENDIF
+C
+C open for business now
+C
+	LINE = 0			! no lines read yet
+	GIVEUP = .FALSE.		! assume don't give up yet
+	IN_METRES = .TRUE.		! default units
+C
+C *********************************************************************
+C
+C now we read it in, line by line, and obey each line
+C
+50	LINE = LINE+1				! next line 
+	OK = FLRLIN(TXTBUF,TXTPTR,TXTBFS,IERR) ! read into TXT
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      SIFINI = .FALSE.		! presumably success
+	   ELSE
+	      CALL MOAN( MSG__SIFLINE )
+	      CALL MOAN( MSG__INLINE, LINE, FILNAM )
+	      CALL LSL_ADDMSG(OK)
+	      IF (OK.EQ.LSL__SYSREAD) CALL LSL_ADDMSG(IERR)
+	   ENDIF
+	   GOTO 9000
+	ENDIF
+C
+C *********************************************************************
+C
+C we have a line - what is it ?
+C
+	CALL BSLN				! start of line
+	IF (RDCHS(CHAR)) GOTO 50		! empty line
+	IF (CHAR.EQ.PLING) GOTO 50		! comment starting "!"
+	CALL BSCH				! something there
+C
+C now, was that a command, or a feature code, starting the line
+C
+	IF (CHAR.GE.'0' .AND. CHAR.LE.'9') THEN
+C
+C	 it was a number - so read the feature code
+C
+	   IF ( RDFC( GIVEUP, LASTFC, IN_METRES ) ) THEN
+	      CALL MOAN( MSG__INLINE, LINE, FILNAM )
+	      IF ( GIVEUP ) GOTO 9000		! give up if need to
+	   ENDIF
+C
+	ELSE
+C
+C	 otherwise, read the (presumed) command on the line
+C
+	   NOMESS = .TRUE.
+	   CMD = RDCOMM( SDF_CMD_TABLE )
+	   NOMESS = .FALSE.
+C
+	   IF ( CMD.EQ.0 ) THEN			! command in error
+C
+	      CALL MOAN( MSG__RDCOMM )
+	      CALL LSL_CMDERR
+	      CALL MOAN( MSG__INLINE, LINE, FILNAM )
+C
+	   ELSEIF ( CMD.EQ.1 ) THEN		! *** UNITS
+C
+	      IF ( SECMDN.EQ.1 ) THEN
+	         IN_METRES = .TRUE.		! metres_on_ground
+	      ELSEIF ( SECMDN.EQ.2 ) THEN
+	         IN_METRES = .FALSE.		! mm_on_sheet
+		 USED_MM   = .TRUE.		! note we've done it
+	      ELSE
+	         CALL MOAN( MSG__BADUNITCMD, SECMDN )
+	         CALL MOAN( MSG__INLINE, LINE, FILNAM )
+	      ENDIF
+C
+	   ELSEIF ( CMD.EQ.2 ) THEN		! *** POINTSIZE
+C
+	      IF ( RDPTSIZ(IN_METRES) ) THEN
+	         CALL MOAN( MSG__INLINE, LINE, FILNAM )
+	      ENDIF
+C
+	   ELSEIF ( CMD.EQ.3 ) THEN		! *** CATEGORY
+C
+	      IF ( RDCATEGORY() ) THEN
+	         CALL MOAN( MSG__INLINE, LINE, FILNAM )
+	      ENDIF
+C
+	   ELSE
+C
+	      CALL MOAN( MSG__BADCMD, CMD )
+	      CALL MOAN( MSG__INLINE, LINE, FILNAM )
+C
+	   ENDIF
+C
+	ENDIF
+C
+C and off to read the next line in
+C
+	GOTO 50
+C
+C *********************************************************************
+C
+C and finally, come here to close the file
+C
+9000	OK = FLRCLO( UNIT, IERR )
+	IF ( .NOT.OK ) THEN
+	   CALL MOAN( MSG__FILCLOSE, FILNAM )
+	   CALL LSL_ADDMSG(OK)
+	   IF ( OK.EQ.LSL__SYSCLOSE ) CALL LSL_ADDMSG(IERR)
+	ENDIF
+C
+C that's all
+C
+9999	SIF_FC  = -1			! no FC selected
+	CALL SET_TXTLIM( TXLSAV ) 	! restore TXTLIM
+	RETURN
+	END

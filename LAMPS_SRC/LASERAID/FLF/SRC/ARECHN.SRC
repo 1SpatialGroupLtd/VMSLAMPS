@@ -1,0 +1,343 @@
+	SUBROUTINE ARECHN(SURFCE,UNUSED,N,M,NLO,NHI,MLO,MHI,HT)
+C
+***	MODULE	ARECHN
+***	IDENT	23MY83
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Authors: D. Meader and B.R. Heap (NPL) 
+C
+C	Created from CHNPIX (better array access) DM	20-May-1983
+C
+C Grows, smooths and crushes chains.
+C The 'raw' chains are grown from merged pixel data (obtained from two
+C orthogonal scans) by means of a contouring technique devised by
+C B.R. Heap (NPL report NAC47, 1974; algorithm (1)).
+C The data (i.e. scanner grey levels) are provided on a rectangular mesh
+C held in array SURFCE with dimensions N (horizontal) by M (vertical).
+C Typically, only part of this array will contain data; this 'window'
+C being defined by NLO, NHI, MLO and MHI.
+C Each contour is traced in turn through the mesh, the points where it
+C crosses the mesh lines being found using inverse linear interpolation.
+C 
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+***	PARAMETER/PARAMS/
+	PARAMETER POSEDG='37774'O
+C
+***	COMMON/LINKS/
+***	COMMON/LKPARM/
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+C
+	INTEGER	  COUNT			! counter used in crushing
+	INTEGER	  HT			! contour height
+	INTEGER	  I,IA,IC,ID		! miscellaneous variables
+	INTEGER	  J,JA,JC,JD
+	INTEGER   I2,J2,I3,J3,I4,J4
+	INTEGER   K,KA,KB
+	INTEGER	  MHM1,MLP1,NHM1,NLP1
+	INTEGER   M,N			! array dimensions
+	INTEGER	  MLO,MHI,NLO,NHI	! region of array being used
+	INTEGER   NCHAIN		! current chain number
+	INTEGER	  NPT			! current point no. (ENCBUF etc)
+	INTEGER	  Z,ZA,ZB,ZC		! values of SURFCE
+	LOGICAL*1 FRSTPT,LASTPT		! first, last point of contour ?
+	LOGICAL*1 OPCONT		! open contour ?
+	LOGICAL*1 SURFCE(N,M)		! data (rectangular mesh)
+	LOGICAL*1 UNUSED(N,M)		! data point still relevant ?
+	LOGICAL*1 WASFST		! last pnt was 1st in new chain
+	REAL	  COSINE		! cos of angle between vectors
+	REAL	  E2,D2			! ETA**2,CRUDIS**2
+	REAL	  PIT			! pitch of the scans
+	REAL	  T			! interpolation factor
+	REAL	  VEC12(2),VEC13(2)	! components of two vectors
+	REAL	  XBACK(3),YBACK(3)	! backlogged pnts (for crushing)
+	REAL	  XOFF,YOFF		! offsets for ENCBUF
+	REAL	  XRAW,YRAW		! coords of point on contour
+	REAL	  XSAV,YSAV		! saved XRAW,YRAW
+	REAL	  XSMT,YSMT		! smoothed coordinate pair
+C
+C function:
+	REAL	  VECCOS		! finds angle between 2 vectors
+C
+C ......................................................................
+C
+C ... initialise everything.
+	CALL SETCHN
+	NCHAIN=0
+	NPT=0
+	PIT=FLOAT(IPIT)
+	D2=(CRUDIS/PIT)**2
+	E2=(ETA/PIT)**2
+	XOFF=FLOAT((NHI - NLO + 1)/2)*PIT
+CCC	YOFF=FLOAT((MHI - MLO + 1)/2)*PIT
+	YOFF=0.0
+C
+	MLP1=MLO + 1
+	MHM1=MHI - 1
+	NLP1=NLO + 1
+	NHM1=NHI - 1
+C
+C ... UNUSED(J,I) is true if a contour of the required height crosses
+C ... the line joining (J,I-1) to (J,I) in the direction of increasing J
+C ... with high ground on the right.
+	DO 15 I=MLP1,MHI
+	   DO 10 J=NLP1,NHM1
+	      UNUSED(J,I)=(SURFCE(J,I-1).LT.HT).AND.(SURFCE(J,I).GE.HT)
+10	   CONTINUE
+15	CONTINUE
+C
+C ... search for open contours.
+C ... start by scanning the edge J=NLO; if a contour is found it is
+C ... traced using the code starting at label 100.
+	OPCONT=.TRUE.
+	J=NLO
+	IA=-1
+	JA=0
+	KA=1
+	DO 20 I=MLP1,MHI
+	   IF (SURFCE(J,I-1).LT.HT .AND. SURFCE(J,I).GE.HT) GO TO 100
+20	CONTINUE
+C
+C ... scan the edge I=MHI for the start of an open contour.
+	I=MHI
+	IA=0
+	JA=-1
+	KA=2
+	DO 30 J=NLP1,NHI
+	   IF (SURFCE(J-1,I).LT.HT .AND. SURFCE(J,I).GE.HT) GO TO 100
+30	CONTINUE
+C
+C ... scan the edge J=NHI for the start of an open contour.
+	J=NHI
+	IA=1
+	JA=0
+	KA=3
+	DO 40 I=MHM1,MLO,-1
+	   IF (SURFCE(J,I+1).LT.HT .AND. SURFCE(J,I).GE.HT) GO TO 100
+40	CONTINUE
+C
+C ... scan the edge I=MLO for the start of an open contour.
+	I=MLO
+	IA=0
+	JA=1
+	KA=4
+	DO 50 J=NHM1,NLO,-1
+	   IF (SURFCE(J+1,I).LT.HT .AND. SURFCE(J,I).GE.HT) GO TO 100
+50	CONTINUE
+C
+C ... now search for closed contours.
+C ... UNUSED is scanned for any element that is true. If the element
+C ... (J,I) is true, a closed contour starts from the line joining
+C ... (J,I-1) to (J,I). It is then traced as above.
+	OPCONT=.FALSE.
+	IA=-1
+	JA=0
+	KA=5
+	DO 65 I=MHI,MLP1,-1
+	   DO 60 J=NHM1,NLP1,-1
+	      IF (UNUSED(J,I)) GO TO 100
+60	   CONTINUE
+65	CONTINUE
+C
+C ... finished.
+	NEGOT=NPT
+	NODTOP=NPT + 1
+	RETURN
+C
+C ......................................................................
+C
+C ... a contour starts on the line joining O (J,I) to A (J+JA,I+IA).
+C ... the surface heights Z and ZA at these points are extracted, and
+C ... the values of I, J, IA and JA are stored.
+C ... FRSTPT and LASTPT record whether the point being considered is the
+C ... first or last point on the contour.
+100	IC=I
+	JC=J
+	ID=IA
+	JD=JA
+	FRSTPT=.TRUE.
+	LASTPT=.FALSE.
+	Z=SURFCE(J,I)
+	I2=I + IA
+	J2=J + JA
+	ZA=SURFCE(J2,I2)
+C
+C ... the point where the contour crosses the line is determined using
+C ... inverse linear interpolation.
+110	T=FLOAT(Z - HT)/FLOAT(Z - ZA)
+	XRAW=FLOAT(J - NLO) + T*FLOAT(JA)
+	YRAW=FLOAT(MHI - I) - T*FLOAT(IA)
+C
+C ... if the contour is closed and this is the last point on the contour
+C ... (i.e. IA=-1 and the appropriate entry in UNUSED is false) a jump
+C ... is made to label 140.
+C ... if not, go to label 150 (if IA=-1) or label 160.
+	IF (OPCONT) GO TO 120
+	IF (FRSTPT) GO TO 150
+	IF (IA.NE.-1) GO TO 160
+	IF (.NOT.UNUSED(J,I)) GO TO 140
+	GO TO 150
+C
+C ... open contours are tested to see if they have hit the edge of the
+C ... mesh (i.e. the point is the last point on the contour).
+C ... if so, go to label 140. If not, go to label 150 (if IA=-1) or 160.
+120	IF (FRSTPT) GO TO 160
+	IF (JA.NE.0) GO TO 130
+	IF (J.EQ.NLO .OR. J.EQ.NHI) GO TO 140
+	IF (IA.NE.-1) GO TO 160
+	GO TO 150
+130	IF (I.EQ.MLO .OR. I.EQ.MHI) GO TO 140
+	GO TO 160
+C
+C ... this is the last point on the contour.
+140	LASTPT=.TRUE.
+	GO TO 160
+C
+C ... the contour is crossing the line joining (J,I-1) to (J,I) in the
+C ... direction of increasing J. The entry in UNUSED is set false.
+150	UNUSED(J,I)=.FALSE.
+C
+C ......................................................................
+C
+C ... grow, smooth and crush chains.
+160	IF (.NOT.FRSTPT) GO TO 161
+	WASFST=.TRUE.		! need 2nd point before we can smooth
+	XSAV=XRAW
+	YSAV=YRAW
+	COUNT=0
+	GO TO 168		! one point chains get lost
+C
+C ... smooth the chain as we grow it (get rid of staircase effects).
+161	XSMT=0.5*(XRAW + XSAV)
+	YSMT=0.5*(YRAW + YSAV)
+	XSAV=XRAW		! save last contoured point
+	YSAV=YRAW
+	IF (.NOT.WASFST) GO TO 162
+C
+	NCHAIN=NCHAIN + 1	! start new chain
+	IF (NCHAIN.GT.MAXCHN) GO TO 300
+	NPT=NPT + 1
+	IF (NPT.GT.NESIZE) GO TO 400
+	ENCBUF(W,NPT)=POSEDG
+	ENCBUF(X,NPT)=INT(XSMT*PIT - XOFF)
+	ENCBUF(Y,NPT)=INT(YSMT*PIT - YOFF)
+	NODE(NPT)=NPT		! interface (messily) with laseraid
+	NXT(NPT)=0
+	CHAIN(NCHAIN)=0
+	LAST(NCHAIN)=0
+	FIRST(NCHAIN)=NPT
+	CHNSNS(NCHAIN)=.TRUE.
+	CLOCHN(NCHAIN)=.NOT.OPCONT
+	LENGTH(NCHAIN)=1
+	WASFST=.FALSE.
+C
+C ... remove unwanted points.
+162	COUNT=COUNT + 1
+	XBACK(COUNT)=XSMT
+	YBACK(COUNT)=YSMT
+	IF (COUNT.EQ.3) GO TO 163	! can't crush with < 3 points
+	IF (COUNT.EQ.2.AND.LASTPT) GO TO 165	! 2 point chain
+	GO TO 168
+C
+163	VEC13(X)=XBACK(3) - XBACK(1)	! vector from pts 1 to 3 (COUNT)
+	VEC13(Y)=YBACK(3) - YBACK(1)
+	IF (VEC13(X)**2+VEC13(Y)**2.GT.D2) GO TO 165
+	VEC12(X)=XBACK(2) - XBACK(1)	! vector from points 1 to 2
+	VEC12(Y)=YBACK(2) - YBACK(1)
+	COSINE=ABS(VECCOS(VEC13,VEC12))	! cos of angle between vectors
+	IF (COSINE.LT.CRUCOS) GO TO 165	! angle too big ?
+	IF ((VEC12(X)**2+VEC12(Y)**2)*(1.0-COSINE**2).GE.E2) GO TO 165
+C
+C ... the old pnt 3 becomes the new pnt 2 (the old pnt 2 is discarded).
+	XBACK(2)=XBACK(3)
+	YBACK(2)=YBACK(3)
+	COUNT=2
+	IF (.NOT.LASTPT) GO TO 169	! always put in last point
+C
+C ... add point 2 to the chain
+165	LENGTH(NCHAIN)=LENGTH(NCHAIN) + 1
+	NPT=NPT + 1
+	IF (NPT.GT.NESIZE) GO TO 350
+	ENCBUF(W,NPT)=POSEDG
+	ENCBUF(X,NPT)=INT(XBACK(2)*PIT - XOFF)
+	ENCBUF(Y,NPT)=INT(YBACK(2)*PIT - YOFF)
+	NODE(NPT)=NPT
+	NXT(NPT)=NPT - 1
+	XBACK(1)=XBACK(2)		! shuffle backlogged points down
+	YBACK(1)=YBACK(2)
+	XBACK(2)=XBACK(3)
+	YBACK(2)=YBACK(3)
+	COUNT=2
+C
+C ......................................................................
+C
+C ... last point in contour ?
+168	IF (LASTPT) GO TO 190
+C
+C ... no - the contour crosses into the rectangle OABC.
+C ... the height at B is extracted to see if the contour crosses the
+C ... line OB. If so, ZA, IA and JA are updated and we go to 110.
+169	FRSTPT=.FALSE.
+	I3=I + JA
+	J3=J - IA
+	ZB=SURFCE(J3,I3)
+	IF (ZB.GE.HT) GO TO 170
+	ZA=ZB
+	KB=IA
+	IA=JA
+	JA=-KB
+	GO TO 110
+C
+C ... the height at C is extracted to see which of the lines BC or AC
+C ... the contour crosses.
+C ... if it's BC then Z, ZA, I and J are updated and we go to 110.
+170	I4=I + IA + JA
+	J4=J - IA + JA
+	ZC=SURFCE(J4,I4)
+	IF (ZC.GE.HT) GO TO 180
+	Z=ZB
+	ZA=ZC
+	I=I3
+	J=J3
+	GO TO 110
+C
+C ... the contour crosses AC.
+C ... Z, I, J, IA and JA are updated and we go to label 110.
+180	Z=ZC
+	I=I4
+	J=J4
+	KB=JA
+	JA=IA
+	IA=-KB
+	GO TO 110
+C
+C ... the contour is completed. 
+C ... the values of I, J, IA and JA are restored to their former values
+C ... and we use KA to go back to the appropriate place to look for the
+C ... next contour.
+190	I=IC
+	J=JC
+	IA=ID
+	JA=JD
+C
+C ... remove short chains.
+	IF (WASFST.OR.LENGTH(NCHAIN).LT.INT(LIMIT(20))) GO TO 200
+	CHAIN(NCHAIN)=NPT		! finish off the chain
+	LAST(NCHAIN)=NPT
+C
+200	GO TO (20,30,40,50,60),KA
+C
+C ... we've bitten off more than we can chew.
+300	CALL WRITEF('ARECHN: Too many chains - remainder ignored')
+	RETURN
+350	IF (.NOT.WASFST) CLOCHN(NCHAIN)=.FALSE.		! just in case
+400	CALL WRITEF('ARECHN: Too many points - remainder ignored')
+	IF (WASFST) RETURN
+	CHAIN(NCHAIN)=NPT - 1		! finish off the chain
+	LAST(NCHAIN)=NPT - 1
+	RETURN
+	END

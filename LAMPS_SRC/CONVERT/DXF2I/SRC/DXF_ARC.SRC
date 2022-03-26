@@ -1,0 +1,775 @@
+	LOGICAL*4 FUNCTION DXF_ARC()
+C
+***	MODULE DXF_ARC
+***	IDENT 06DE94
+C
+C ©Copyright Laser-Scan Ltd, Cambridge, England.
+C
+C Author  : P. Pan 					13 Mar 1990
+C Modified: P. Pan					 7 Jun 1990
+C
+CMOD961     J Barber					30 Jan 1991
+C	    Add 3d coord reading into ZS entries and group 38 heights
+C	    into AC type 3 
+C	    Correct coordinate calculations from start and end angles
+C	    Change program action on DXF2I__MISENTCOL error to
+C	    continue to transfer the coordinate data regardless
+C
+CMOD1004    J Barber 					13 Jun 1991
+C	    Convert coordinates with any scale factors and x,y offsets
+C	    from the parameter file if an EXPAND 'symbol' entry exists
+C	    there and this routine was called from within the BLOCKS 
+C	    section
+C
+CMOD1156    J Barber 					13 Oct 1992
+C	    Add ABS coord changes
+C
+CMOD1226    J Barber 					10 Jun 1993
+C	    Add /SCAN facility
+C
+CMOD1402    J Barber 					10 Sep 1994
+C	    Cope with missing layer linetype name when
+C	    the DXF file specifies linetype by layer.
+C
+CMOD1439    Jon Barber				 	06 Dec 1994
+C	    Use IFF_ABSENT as a 'real' number in its absence from
+C	    the DXF file
+C
+C To read and translate DXF ARC entity to IFF feature
+C
+	IMPLICIT NONE
+C
+	INCLUDE  'LSL$CMNIFF:CB.STR'		! for IFF_ABSENT
+	INCLUDE  'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE  'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE  'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE  'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE  'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE  'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE  'LSL$CMNDXFPAR:LOOKUP.CMN'
+	INCLUDE  'HERE:DXF2I.CMN'
+	INCLUDE  'HERE:DXF2IMSG.PAR'
+C
+C Functions
+	INTEGER		RDDBLE		! Get a double
+	INTEGER		RDREAL		! Get a real
+	INTEGER		RDINT		! Get an integer
+	INTEGER		READSTR		! Get a string
+	INTEGER		FLRLIN		! Read a line from file
+	INTEGER		FLWSTR		! Write a line to file
+	INTEGER*2	EXPAND
+	LOGICAL		FRTFGT		! Get FC for GT
+C
+C Workspace
+	CHARACTER*255	STRING		! Any old string
+	INTEGER*4	LEN		! Length of character string
+	CHARACTER*255	ENTITY_OUT	! output string
+	INTEGER*2	EXPLEN		! expanded string length
+	CHARACTER*20	STYLE_NAME
+C
+	CHARACTER*255	LAST_ENTITY_OUT	! last output string
+	INTEGER*2	LAST_EXPLEN	! last expanded string length
+	SAVE		LAST_ENTITY_OUT	! keep last output string 
+	SAVE		LAST_EXPLEN	! keep last expanded string length
+C
+	INTEGER*2       FC(4)           ! Feature code 
+	INTEGER*2	GT		! graphical type
+C
+	INTEGER*4	NCOORX		! Number of x coords in string
+	INTEGER*4	NCOORY		! Number of y coords in string
+	INTEGER*2	COLNUM		! Feature colour
+C
+	LOGICAL		HAD_RAD 	! Had radius?
+	LOGICAL		HAD_LAY		! Had layer value?
+	LOGICAL		HAD_COL 	! Had colour? 
+	LOGICAL 	HAD_LIN		! had line type?
+	LOGICAL		HAD_X		! Had x coord?
+	LOGICAL		HAD_Y		! Had y coord?
+	LOGICAL		HAD_Z		! Had z coord?
+	LOGICAL		HAD_3D		! Had 3d coord?
+	LOGICAL		HAD_HT		! Had AC height?
+	LOGICAL		HAD_STA		! Had starting angle
+	LOGICAL		HAD_END		! Had ending angle
+C
+	LOGICAL		ERRCOD		! ok?
+	INTEGER		IERR		! error code
+        INTEGER		I,COUNTER	! local counter
+	CHARACTER*255	LINTYPNAM	! line type name
+	INTEGER		LINTYPLEN	! line type name's length
+	CHARACTER*255	LAYERNAM	! layer name
+	INTEGER		LAYERLEN	! layer name's length
+	INTEGER		ARCNUMLIN	! line position for arc
+C
+	REAL*4		RADIUS		! radius
+	REAL*4		RO
+	REAL*4		TH
+	REAL*4		ANGSTA
+        REAL*4		ANGEND
+	REAL*4		ANGMID		! middle angle, for GT 4
+        REAL*4		HEIGHT
+	REAL*4		X,Y,Z,SCL	! EXPAND variables
+C
+	INTEGER		INT_EQUIV	! for IFF_ABSENT
+	REAL		REAL_EQUIV
+	EQUIVALENCE	(INT_EQUIV,REAL_EQUIV)
+C
+C---------------------------------------------------------------------
+C ARC
+C---------------------------------------------------------------------
+C Set defaults
+C
+	SELENTTYP = DXFARC
+	SELENTIND = 1
+	HAD_LAY = .FALSE.
+	HAD_LIN = .FALSE.
+	HAD_COL = .FALSE.
+	HAD_X   = .FALSE.
+	HAD_Y   = .FALSE.
+	HAD_Z   = .FALSE.
+	HAD_3D  = .FALSE.
+	HAD_HT  = .FALSE.
+	HAD_RAD = .FALSE.
+	HAD_STA	= .FALSE.
+	HAD_END	= .FALSE.
+C
+C---------------------------------------------------------------------
+C read the entity
+C
+	ARCNUMLIN = NUMLIN
+C
+99	DXF_ARC = FLRLIN()
+	IF (.NOT.DXF_ARC) GOTO 999
+C
+	CALL BSLN
+	NUMLIN = NUMLIN+1
+	LEN = READSTR(STRING,,ON_EOL)
+C
+C..............................................................................
+C '8' Layer 
+C..............................................................................
+C
+	IF (STRING(1:LEN).EQ.'8') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   LAYERLEN = READSTR(LAYERNAM,,ON_EOL)
+C
+C if an empty layer name is supplied, output error message
+C
+	   IF (LAYERLEN.EQ.0) THEN
+	      CALL LSL_PUTMSG(DXF2I__ERRLAYNAM,NUMLIN)
+C
+C and use default from $CLAYER if present
+C
+	      IF (HAD_LAYER_NAME) THEN
+	         LAYERLEN = DEF_LAYER_NAME_LEN
+	         LAYERNAM = DEF_LAYER_NAME(1:DEF_LAYER_NAME_LEN)
+		 IF (.NOT.HAD_QUIET) CALL LSL_ADDMSG(DXF2I__DEFLAYNAM,
+     &				    LAYERNAM(1:LAYERLEN),ARCNUMLIN)
+	      ELSE
+		 DXF_ARC = DXF2I__UNACONT
+		 IF (.NOT.HAD_SCAN) GOTO 1000
+	      ENDIF
+	   ENDIF
+C
+	   HAD_LAY = .TRUE.
+	   GOTO 99
+C
+C..............................................................................
+C '6' LINE TYPE
+C..............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'6') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 1000
+	   NUMLIN = NUMLIN+1
+C
+C if linetype by layer, ignore entity linetype
+C
+	   IF (LTYPE_BY_LAYER) GOTO 99
+C
+	   CALL BSLN
+	   LINTYPLEN = READSTR(LINTYPNAM,,ON_EOL)
+C
+C if an empty line type is supplied, output error message and use default
+C
+	   IF (LINTYPLEN.EQ.0) THEN
+	      CALL LSL_PUTMSG(DXF2I__ERRLINTYP,NUMLIN)
+	      IF (.NOT.HAD_QUIET) 
+     &			CALL LSL_ADDMSG(DXF2I__DEFLINTYP,ARCNUMLIN)
+	      LINTYPLEN = 10
+	      LINTYPNAM = 'CONTINUOUS'
+	   ENDIF
+C
+	   HAD_LIN = .TRUE.
+C
+C if it's not empty, go and look for the first appearence within the 
+C PARAMETER lookup table
+C
+	   DO 5001 COUNTER = 1,CURRENTIND
+	      IF (SELENTTYP.EQ.DXFENTTYP(COUNTER)) THEN
+		 IF (LINTYPNAM(1:LINTYPLEN).EQ.DXFENTNAM(COUNTER)
+     &			      (1:DXFENTLEN(COUNTER))) THEN
+                    SELENTIND = COUNTER
+		    GOTO 99
+		 ENDIF
+	      ENDIF
+5001	   CONTINUE
+C
+C output error message when there is no match, even for /SCAN -
+C it's too late to output the layer now so just give the message
+C
+	   IF (.NOT.HAD_SCAN) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRMATLIN,
+     &				LINTYPNAM(1:LINTYPLEN),ARCNUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   GOTO 99
+C..............................................................................
+C '38' - CONTOUR HEIGHT
+C..............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'38') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDREAL(HEIGHT)
+           IF (ERRCOD) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTACVAL,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+	   HAD_HT = .TRUE.
+	   GOTO 99
+C
+C..............................................................................
+C '62' - COLOUR
+C..............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'62') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 999
+	   NUMLIN = NUMLIN+1
+C
+C if colour is by layer then colour entry is irrelevant
+C
+	   IF (BY_LAYER) GOTO 99
+C
+	   CALL BSLN
+	   ERRCOD = RDINT(COLNUM)
+           IF (ERRCOD) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTCOL,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   HAD_COL = .TRUE.
+	   SELCOLOUR = COLNUM
+	   GOTO 99
+C
+C...............................................................................
+C '10' = X1
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'10') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDDBLE(DST(1,2))
+	   IF (ERRCOD) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTCOOR,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   IF (HAD_ABS) THEN
+	      ST(1,2) = DST(1,2)-MD2LOC(1)
+	   ELSE
+	      ST(1,2) = DST(1,2)
+	   ENDIF
+C
+C Initialise the third coord in case it's missing
+	   INT_EQUIV = IFF_ABSENT
+	   ZS(3,2)   = REAL_EQUIV
+C
+	   HAD_X = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '20' = Y1
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'20') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDDBLE(DST(2,2))
+	   IF (ERRCOD) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTCOOR,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   IF (HAD_ABS) THEN
+	      ST(2,2) = DST(2,2)-MD2LOC(2)
+	   ELSE
+	      ST(2,2) = DST(2,2)
+	   ENDIF
+C
+C Initialise the third coord in case it's missing
+	   INT_EQUIV = IFF_ABSENT
+	   ZS(3,2)   = REAL_EQUIV
+C
+	   HAD_Y = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '30' = Z1
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'30') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDREAL(ZS(3,2))
+	   IF (ERRCOD) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTCOOR,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   ZS(3,1) = ZS(3,2)
+	   ZS(3,3) = ZS(3,2)
+	   HAD_3D = .TRUE.
+	   HAD_Z  = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '40' = radius
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'40') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDREAL(RADIUS)
+	   IF (ERRCOD) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTRAD,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+	   HAD_RAD = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '50' = starting angle
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'50') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDREAL(ANGSTA)
+	   IF (ERRCOD) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTANG,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+	   HAD_STA = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '51' = ending angle
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'51') THEN
+	   DXF_ARC = FLRLIN()
+	   IF (.NOT.DXF_ARC) GOTO 999
+C
+	   CALL BSLN
+	   NUMLIN = NUMLIN+1
+	   ERRCOD = RDREAL(ANGEND)
+	   IF (ERRCOD) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__ERRENTANG,NUMLIN)
+	      GOTO 1000
+	   ENDIF
+C
+	   HAD_END = .TRUE.
+	   GOTO 99
+C
+C...............................................................................
+C '0'- write feature
+C...............................................................................
+C
+	ELSEIF (STRING(1:LEN).EQ.'0') THEN		! end of entity
+C
+C Check that we have had all of the necessary bits
+C had layer?
+C
+	   IF (.NOT.HAD_LAY) THEN
+	      CALL LSL_PUTMSG(DXF2I__MISENTLAY,ARCNUMLIN)
+C
+C and use default from $CLAYER if present
+C
+	      IF (HAD_LAYER_NAME) THEN
+	         LAYERLEN = DEF_LAYER_NAME_LEN
+	         LAYERNAM = DEF_LAYER_NAME(1:DEF_LAYER_NAME_LEN)
+		 IF (.NOT.HAD_QUIET) CALL LSL_ADDMSG(DXF2I__DEFLAYNAM,
+     &				    LAYERNAM(1:LAYERLEN),ARCNUMLIN)
+	      ELSE
+		 DXF_ARC = DXF2I__UNACONT
+		 IF (.NOT.HAD_SCAN) GOTO 1000
+	      ENDIF
+	   ENDIF
+C
+C if it's not empty, go and look for the corresponding IFF layer no.
+C in the PARAMETER lookup table
+C
+	   DO 4000 COUNTER = 1,CURRLAYIND
+	      IF (LAYERNAM(1:LAYERLEN).EQ.
+     &		    DXFLAYNAM(COUNTER)(1:DXFLAYLEN(COUNTER))) THEN
+		 SELLAYIND = COUNTER
+		 GOTO 4001
+	      ENDIF
+4000	   CONTINUE
+C
+C output error message when there is no match, and give up if not had SCAN
+C
+	   IF (.NOT.HAD_SCAN) THEN
+	     DXF_ARC = DXF2I__UNACONT
+	     CALL LSL_PUTMSG(DXF2I__ERRMATLAY,
+     &				LAYERNAM(1:LAYERLEN),ARCNUMLIN)
+	     GOTO 1000
+	   ELSE
+	     CALL LSL_PUTMSG(DXF2I__ERRSCANLAY,
+     &				LAYERNAM(1:LAYERLEN),ARCNUMLIN)
+	   ENDIF
+C
+4001	   CONTINUE
+C
+C now get the colour with priority
+C BY LAYER will have higher preference than '62' entry
+C
+	   IF (BY_LAYER) THEN
+              SELCOLOUR = DXFLAYCOL(SELLAYIND)
+              HAD_COL   = .TRUE.
+           ENDIF
+C
+	   IF (LTYPE_BY_LAYER) THEN
+	      IF (DXFLAYLTLEN(SELLAYIND) .EQ. 0) THEN
+		DXFLAYLTLEN(SELLAYIND) = 10
+		DXFLAYLTYPE(SELLAYIND) = 'CONTINUOUS'
+		IF (.NOT.HAD_QUIET)
+     &			CALL LSL_PUTMSG(DXF2I__DEFLINTYP,ARCNUMLIN)
+	      ENDIF
+C
+	      LINTYPLEN = DXFLAYLTLEN(SELLAYIND)
+	      LINTYPNAM = DXFLAYLTYPE(SELLAYIND)(1:LINTYPLEN)
+C
+	      SELENTIND = 1
+              HAD_LIN   = .TRUE.
+           ENDIF
+C
+C had line type?
+C
+	   IF (.NOT.HAD_LIN) THEN
+	      IF (.NOT.HAD_QUIET) 
+     &			CALL LSL_PUTMSG(DXF2I__DEFLINTYP,ARCNUMLIN)
+	      HAD_LIN = .TRUE.
+	      LINTYPLEN = 10
+	      LINTYPNAM = 'CONTINUOUS'
+	      SELENTIND = 1
+	   ENDIF
+C
+C had colour?
+C
+	   IF (.NOT.HAD_COL) THEN
+	      IF (.NOT.HAD_QUIET) 
+     &			CALL LSL_PUTMSG(DXF2I__MISENTCOL,ARCNUMLIN)
+C
+C Allow coord entries to be read even if colour entry missing
+C
+	   ENDIF
+C
+C had x, y?
+C
+	   IF (.NOT.HAD_X .OR. .NOT.HAD_Y) THEN 
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG (DXF2I__MISCOOR,ARCNUMLIN)
+	      IF (.NOT.HAD_SCAN) GOTO 1000
+	   ENDIF
+C
+C had radius?
+C
+	   IF (.NOT.HAD_RAD) THEN
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG(DXF2I__MISENTRAD,ARCNUMLIN)
+	      IF (.NOT.HAD_SCAN) GOTO 1000
+	   ENDIF
+C
+C had starting and ending angle?
+C
+	   IF (.NOT.HAD_STA .OR. .NOT.HAD_END) THEN 
+	      DXF_ARC = DXF2I__UNACONT
+	      CALL LSL_PUTMSG (DXF2I__MISARCANG,ARCNUMLIN)
+	      IF (.NOT.HAD_SCAN) GOTO 1000
+	   ENDIF
+C
+C Don't match FC or anything if SCAN
+C
+	   IF (HAD_SCAN) THEN		! write entity entry to scanfil
+C
+C Write out entity name to SCAN parameter file if required
+C
+C Get first suitable FC from FRT file
+C
+	     IF (.NOT.HAD_ARC_FC) THEN
+		IF (.NOT.FRTFGT(CIRTYP,ARC_FC)) THEN	! circle arc
+		   HAD_ARC_FC = .TRUE.
+		ENDIF
+	     ENDIF
+C
+	     IF (.NOT.HAD_ARC_FC) THEN
+		IF (.NOT.FRTFGT(CLOTYP,ARC_FC)) THEN	! clockwise circle arc
+		   HAD_ARC_FC = .TRUE.
+		ENDIF
+	     ENDIF
+C
+	     IF (.NOT.HAD_ARC_FC) THEN
+		IF (.NOT.FRTFGT(ANTTYP,ARC_FC)) THEN	! a-clockwise circle arc
+		   HAD_ARC_FC = .TRUE.
+		ENDIF
+	     ENDIF
+C
+C Format layers shorter then 20 characters
+C
+	      IF (LINTYPLEN.LE.20) THEN
+		 CALL EXPAND('%WS% %S20',STYLE_NAME,LINTYPNAM(1:LINTYPLEN))
+C
+		 EXPLEN = EXPAND('%WS% ENTITY ARC       %S%  %N%  %^W%N',
+     &				ENTITY_OUT,
+     &				STYLE_NAME(1:20),
+     &				SELCOLOUR,ARC_FC)
+C
+	      ELSE
+		 EXPLEN = EXPAND('%WS% ENTITY ARC       %S%  %N%  %^W%N',
+     &				ENTITY_OUT,
+     &				LINTYPNAM(1:LINTYPLEN),
+     &				SELCOLOUR,ARC_FC)
+	      ENDIF
+C
+C Check same as last one output
+C
+	      IF (EXPLEN.EQ.LAST_EXPLEN) THEN
+		 IF (ENTITY_OUT(1:EXPLEN) .EQ.
+     &			LAST_ENTITY_OUT(1:LAST_EXPLEN)) GOTO 1000
+	      ENDIF
+C
+C Not the same as last one output, so search the entity list for a match
+C
+	      DO 4002 I = 1,ENTITY_CNT
+		IF (EXPLEN.EQ.ENTITY_LEN(I)) THEN	! matched length
+		  IF (ENTITY_OUT(1:EXPLEN) .EQ.		! match entity
+     &				 ENTITY(I)(1:ENTITY_LEN(I)) ) THEN
+			GOTO 1000
+		  ENDIF
+		ENDIF
+4002	      CONTINUE
+C
+C No match, so output it
+C
+	      DXF_ARC = FLWSTR(ENTITY_OUT(1:EXPLEN),IERR)
+C
+	      IF (.NOT.DXF_ARC) THEN
+		 CALL LSL_PUTMSG(DXF_ARC)
+		 IF (DXF_ARC.EQ.LSL__SYSERR) CALL LSL_ADDMSG(IERR)
+		 GOTO 1000
+	      ENDIF
+C
+	      IF (ENTITY_CNT.EQ.MAXSCAN) THEN
+		 CALL LSL_PUTMSG(DXF2I__TOOMNYENTS,MAXSCAN)
+		 GOTO 1000
+	      ENDIF
+C
+	      ENTITY_CNT = ENTITY_CNT + 1
+C
+	      ENTITY_LEN(ENTITY_CNT) 	   = EXPLEN
+	      ENTITY(ENTITY_CNT)(1:EXPLEN) = ENTITY_OUT(1:EXPLEN)
+C
+	      LAST_EXPLEN 		     = EXPLEN
+	      LAST_ENTITY_OUT(1:LAST_EXPLEN) = ENTITY_OUT(1:EXPLEN)
+C
+	      GOTO 1000
+	   ENDIF
+C
+C Now get hold of the FC from parameter lookup table
+C
+	   DO 4003 COUNTER = SELENTIND,CURRENTIND
+	      IF (SELENTTYP.EQ.DXFENTTYP(COUNTER)) THEN
+		 IF (LINTYPNAM(1:LINTYPLEN).EQ.DXFENTNAM(COUNTER)
+     &			      (1:DXFENTLEN(COUNTER))) THEN
+		    IF (HAD_COL .AND. SELCOLOUR.NE.ENTCOLOUR(COUNTER))
+     &							 GOTO 4003
+		    FC(1) = IFFFCCODE(COUNTER)
+		    GT    = FRTGTTYPE(COUNTER)
+		    GOTO 4005
+                 ENDIF
+              ENDIF
+4003	   CONTINUE
+C
+C No match, exit
+C
+	   DXF_ARC = DXF2I__UNACONT
+	   CALL LSL_PUTMSG(DXF2I__ERRMATFC,ARCNUMLIN)
+	   GOTO 1000
+C
+C now consider IFF GT
+C
+4005	   CONTINUE
+C
+C---------------------------------------------------------------------
+C Set angles - start and end angles stored in anti-clockwise 
+C (normal maths) order in DXF
+C
+	   ANGSTA = ANGSTA*PI/180
+	   ANGEND = ANGEND*PI/180
+C
+C Clockwise arc: reverse the order that they are written to the coord array 
+C so that arcs are clockwise.
+C
+           IF (GT.EQ.2) THEN
+	      ST(1,1) = ST(1,2) + RADIUS*COS(ANGEND)
+	      ST(2,1) = ST(2,2) + RADIUS*SIN(ANGEND)
+	      ST(1,3) = ST(1,2) + RADIUS*COS(ANGSTA)
+	      ST(2,3) = ST(2,2) + RADIUS*SIN(ANGSTA)
+C
+C Anti-clockwise arc
+C
+           ELSEIF (GT.EQ.3) THEN
+	      ST(1,1) = ST(1,2) + RADIUS*COS(ANGSTA)
+	      ST(2,1) = ST(2,2) + RADIUS*SIN(ANGSTA)
+	      ST(1,3) = ST(1,2) + RADIUS*COS(ANGEND)
+	      ST(2,3) = ST(2,2) + RADIUS*SIN(ANGEND)
+C
+C Circum-circle arc, use mid-point at half start and end angles
+C
+           ELSEIF (GT.EQ.4) THEN
+	      ANGMID = (ANGSTA + ANGEND) / 2.0
+	      ST(1,1) = ST(1,2) + RADIUS*COS(ANGSTA)
+	      ST(2,1) = ST(2,2) + RADIUS*SIN(ANGSTA)
+	      ST(1,3) = ST(1,2) + RADIUS*COS(ANGEND)
+	      ST(2,3) = ST(2,2) + RADIUS*SIN(ANGEND)
+C
+	      ST(1,2) = ST(1,2) + RADIUS*COS(ANGMID)
+	      ST(2,2) = ST(2,2) + RADIUS*SIN(ANGMID)
+	   ENDIF
+C
+C final setting for output
+C
+	   IF (IN_LAYER .AND. IFFOLAYNO(SELLAYIND).NE.LSTIFFLAY) THEN
+	      CALL IFFUNO(LPOSNO)
+	      CALL IFFEO
+	   ENDIF
+C
+	   IF (.NOT.IN_LAYER .OR. IFFOLAYNO(SELLAYIND).NE.LSTIFFLAY) THEN
+	      LSTIFFLAY = IFFOLAYNO(SELLAYIND)
+	      LPOSNO = LPOSE
+	      CALL IFFNO(LSTIFFLAY,0,0)
+	      IN_LAYER = .TRUE.
+	   ENDIF
+C
+	   NF = NF+1
+	   CALL IFFNF(NF,NF)
+	   CALL IFFFS(FC)	 	! write the FC
+	   IF (HAD_HT) CALL IFFAC (3,HEIGHT)
+C
+	   IF (FROM_BLOCKS) THEN
+	      IF (EXPAND_XSCL(EXPAND_INDEX) .NE. 1) THEN
+		 SCL = EXPAND_XSCL(EXPAND_INDEX)
+		 DO 122 I = 1,3
+		    ST(1,I) = ST(1,I) * SCL
+122		 CONTINUE
+	      ENDIF
+C
+	      IF (EXPAND_YSCL(EXPAND_INDEX) .NE. 1) THEN
+		 SCL = EXPAND_YSCL(EXPAND_INDEX)
+		 DO 123 I = 1,3
+		    ST(2,I) = ST(2,I) * SCL
+123		 CONTINUE
+	      ENDIF
+C
+	      IF (HAD_Z .AND. EXPAND_ZSCL(EXPAND_INDEX) .NE. 1) THEN
+		 SCL = EXPAND_ZSCL(EXPAND_INDEX)
+		 DO 126 I = 1,3
+		    ZS(3,I) = ZS(3,I) * SCL
+126		 CONTINUE
+	      ENDIF
+C
+	      IF (EXPAND_XOFF(EXPAND_INDEX) .NE. 0) THEN
+		 X = EXPAND_XOFF(EXPAND_INDEX)
+		 DO 124 I = 1,3
+		    ST(1,I) = ST(1,I) + X
+124		 CONTINUE
+	      ENDIF
+C
+	      IF (EXPAND_YOFF(EXPAND_INDEX) .NE. 0) THEN
+		 Y = EXPAND_YOFF(EXPAND_INDEX)
+		 DO 125 I = 1,3
+		    ST(2,I) = ST(2,I) + Y
+125		 CONTINUE
+	      ENDIF
+C
+	      IF (HAD_Z .AND. EXPAND_ZOFF(EXPAND_INDEX).NE.0) THEN
+		 Z = EXPAND_ZOFF(EXPAND_INDEX)
+		 DO 127 I = 1,3
+		    ZS(3,I) = ZS(3,I) + Z
+127		 CONTINUE
+	      ENDIF
+	   ENDIF
+C
+	   CALL CHECK_RANGE(ST,3)	! check the range
+C
+C Get into 3D block if necessary
+C
+	   IF (HAD_3D) THEN
+	      ZS(1,1) = ST(1,1)
+	      ZS(2,1) = ST(2,1)
+	      ZS(1,2) = ST(1,2)
+	      ZS(2,2) = ST(2,2)
+	      ZS(1,3) = ST(1,3)
+	      ZS(2,3) = ST(2,3)
+C
+	      CALL IFFZS(ZS,3,0)	! write ZS entry
+	   ELSE
+	      CALL IFFST(ST,3,0)	! write ST entry
+	   ENDIF
+C
+	   CALL IFFEF			! and end feature
+	   GOTO 1000
+	ENDIF
+C
+	GOTO 99
+C...............................................................................
+C
+999	CALL LSL_PUTMSG(DXF2I__RDLINERR,NUMLIN)
+C
+1000	RETURN
+	END
+C

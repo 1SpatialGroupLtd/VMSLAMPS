@@ -1,0 +1,181 @@
+	LOGICAL FUNCTION READ_GRIDREC(COLUMN)
+C
+***     MODULE READ_GRIDREC
+***     IDENT  06AU97
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author						IM 07-Apr-1988
+C 	Reads the grid data record
+C
+CMOD	Replaced XYLEN with FIELD_WIDTH since XYLEN cannot be used to
+C	define field width of the raster information 	SG 10-Sep-1991 
+C
+CMOD	Multiply Z values by Z_MULT for DTI column	JB 29-Oct-1991
+C
+CMOD1119 Read Version 1.1 NTF data			JB 25-May-1992	
+C
+CMOD1242 Read Version 2.0 NTF data			JB 21-Jun-1993	
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'HERE:NTF2DTIMSG.PAR'
+C
+C Commons:
+	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE	'HERE:FILENAME.CMN'
+C
+	INCLUDE 'HERE:COMMANDS.CMN'
+	INCLUDE	'HERE:RECORD.CMN'
+	INCLUDE	'HERE:NTFDATA.CMN'
+	INCLUDE	'HERE:LUNS.PAR'
+C
+C Functions:
+	LOGICAL		RDINT		! read an integer from input buffer
+	LOGICAL		RDLONG		! read an integer from input buffer
+	LOGICAL		READ_NTF_RECORD	! read the next record from tape
+C
+C Arguments:
+	INTEGER*4	COLUMN(*)	! The column we are going to fill
+C
+C Workspace:
+	INTEGER		OK		! Success flag
+	INTEGER		NCHS		! Number of chars read by FLRSTR
+	INTEGER		IERR		! Error code
+	INTEGER		NUM		! To RDINT into
+	INTEGER		I		! DO loop counter
+	INTEGER		ROW		! How far up the col. we are
+	INTEGER		POS		! Offset within record
+	CHARACTER*1	LAST		! Continuation flag from last rec
+	CHARACTER*80	NUM_STR
+C
+C###############################################################################
+C We already have the GRIDREC read in so pull the relevent values from it
+C Read the start and end of the columns
+C
+        IF (NUM_FIELD.EQ.12) THEN
+           COL_START = 1
+	   ROW_START = 1
+           COL_END = N_COLUMNS
+           ROW_END = N_ROWS
+           FIELD_WIDTH = 5 	! HARD CODED FOR NOW!!! 
+	   POS = 19
+	   ROW = 0
+	   GOTO 100
+	ENDIF
+C
+	CALL SETAUX( %REF(STRING(27:30)), 4 )
+	IF (RDINT(COL_START)) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__GRIDREC,'COL_START')
+	   CALL LSL_ADDSTR(STRING(27:30))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+	CALL SETAUX( %REF(STRING(31:34)), 4 )
+	IF (RDINT(COL_END)) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__GRIDREC,'COL_END')
+	   CALL LSL_ADDSTR(STRING(31:34))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C ..................................................................
+C And of the rows
+C
+	CALL SETAUX( %REF(STRING(35:38)), 4 )
+	IF (RDINT(ROW_START)) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__GRIDREC,'ROW_START')
+	   CALL LSL_ADDSTR(STRING(35:38))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+	CALL SETAUX( %REF(STRING(39:42)), 4 )
+	IF (RDINT(ROW_END)) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__GRIDREC,'ROW_END')
+	   CALL LSL_ADDSTR(STRING(39:42))
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+C ..................................................................
+C Read the remaining flags
+C note that all the inversion flags must be unset and the INTERP must be numeric
+C
+	POS = 51
+C
+	IF (STRING(POS:POS).NE.'0') CALL LSL_PUTMSG(NTF2DTI__COLINV)
+	IF (STRING(POS+1:POS+1).NE.'0') CALL LSL_PUTMSG(NTF2DTI__ROWINV)
+C
+	POS = POS+1				! skip PLAne inversion flag
+C 	IF (STRING(POS+3:POS+3).NE.'1')	CALL LSL_PUTMSG(NTF2DTI__INTERPRET)	
+C
+C Get continuation record for Versions 1.1 or 2.0
+C
+	IF (INTVER.EQ.110 .OR. INTVER.EQ.200) THEN
+	   OK = READ_NTF_RECORD()
+	   IF (.NOT.OK) GOTO 999
+	ENDIF
+C
+C ..................................................................
+C Now get the values. We put them into a 1x32767 array and exit 
+C when we have a complete column i.e. full from 1 to N_COLUMNS
+C
+	OK=READ_NTF_RECORD()
+	IF (.NOT.OK) GOTO 999
+C
+	POS=3						! Start of data line
+	ROW=0						! Bottom of array
+C
+100	CONTINUE
+C
+C	.......................................................................
+C	get data for next row
+C
+20	ROW = ROW+1					! Increment row counter
+C
+	NUM_STR(1:FIELD_WIDTH) = STRING(POS:POS+FIELD_WIDTH-1)
+	CALL SETAUX( %REF( NUM_STR(1:FIELD_WIDTH) ), FIELD_WIDTH )
+C
+	OK = .NOT.RDLONG(COLUMN(ROW))
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2DTI__GRIDREC,'GRIDVAL')
+	   CALL LSL_ADDSTR( NUM_STR(1:FIELD_WIDTH) )
+	   GOTO 999
+	ENDIF
+C
+	COLUMN(ROW) = COLUMN(ROW) * Z_MULT
+C
+C	.......................................................................
+C	reposition for next data element
+C
+	IF (ROW.LT.N_ROWS) THEN				! need more data
+C
+	  POS = POS+FIELD_WIDTH				! move to next value
+C
+	  IF ( (POS+FIELD_WIDTH-1).GT.LENGTH-1) THEN	! If we are at the end
+	     OK = READ_NTF_RECORD()			! read the next one in
+	     IF (.NOT.OK) GOTO 999
+	     IF (STRING(1:2).NE.'00') THEN		! Its not a continuation
+		CALL LSL_PUTMSG(NTF2DTI__NOTCONTINUE,'GRIDREC',51)
+		CALL LSL_ADDMSG(NTF2DTI__NOTALL,ROW,N_ROWS)
+		OK=.FALSE.
+		GOTO 999
+	     ELSE
+	       POS=3					! move to new data
+	     ENDIF
+	  ENDIF
+	  GOTO 20					! Back for next value
+	ENDIF
+C
+C###############################################################################
+C rejoin errors
+C
+999	READ_GRIDREC=OK
+C
+	RETURN
+	END
+C

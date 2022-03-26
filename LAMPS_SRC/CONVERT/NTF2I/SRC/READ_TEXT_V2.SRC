@@ -1,0 +1,356 @@
+	LOGICAL FUNCTION READ_TEXT_V2()
+C
+***     MODULE READ_TEXT_V2
+***     IDENT	14NO96
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+C Author						ST	04-June-1993
+C
+C This was based on routine READ_NAMEREC and processes the TEXTREC, TEXTPOS and
+C TEXTREP record at level 3 NTF (v2.0 only)
+C Note, we current assume:
+C       NUM_SEL = '01'
+C       SELECT  = '00'
+C       NUM_ATT = '01'
+C
+	IMPLICIT NONE
+C
+C Messages:
+C
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Commons:
+C
+	INCLUDE 'LUNS.PAR'
+	INCLUDE	'ATTRIBUTE.CMN'		! Att. desc. table
+	INCLUDE	'ATTCMN.CMN'		! Atribute data for feature
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'FILE_REC.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+	INCLUDE	'LOOKUP.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+C
+C Functions:
+C
+	LOGICAL		RDINT			! read an integer
+	LOGICAL		RDLONG
+	LOGICAL		READ_CONTINUE
+	LOGICAL		READ_ATTREC
+	LOGICAL		READ_TEXTPOS
+	LOGICAL		READ_RECORD		! read the next record
+	LOGICAL		IS_CONTINUATION
+C
+C Workspace:
+C
+	CHARACTER*6	NTF$_TEXT_ID
+	CHARACTER*2	NTF$_NUM_SEL
+	CHARACTER*2	NTF$_SELECT
+	CHARACTER*4	NTF$_TEXT_CODE
+	CHARACTER*6	NTF$_TEXP_ID
+	CHARACTER*2	NTF$_NUM_ATT
+	CHARACTER*6	NTF$_ATT_ID
+C
+	LOGICAL		OK			! Success flag
+	LOGICAL		MATCH
+	INTEGER		I,INDEX			! loop counter
+	INTEGER*4	TEXT_ID
+	INTEGER*4	INITIAL_RECORD
+	INTEGER*4	TEXP_ID
+	INTEGER*4	ATT_ID
+	INTEGER		IOS
+	LOGICAL		JUMPED
+	INTEGER		MCOORDS		! Max no. coords read by GEOMETRY
+	PARAMETER	(MCOORDS=2)
+	REAL	  	TEMP_COORDS(2,MCOORDS)
+	REAL		POSN(2)			! IFF coordinates for the text
+	BYTE		FC_CODE(4)
+	LOGICAL		IS_LAB
+	INTEGER		TEMP,CATEGORY		! Text category
+	INTEGER		FONT			! The text font
+	INTEGER		DIGPOS			! Digitised location (0-8)
+	INTEGER		NTF_FC			! The NTF feat. code from file
+	INTEGER		FC			! The IFF feature code
+	INTEGER*2	ISTAT(4)		! The FS entry
+	INTEGER*2	HEIGHT			! The text height
+	INTEGER		NUMPOINTS		! Num of points read by GEOMETRY
+	REAL		ACTUAL_HT		! Text height in mm
+	REAL		ROTATE			! The angle of the text
+	INTEGER		TEXTLEN			! The length of text field
+	CHARACTER*99	TEXTSTR			! text string 
+	REAL		COORDS(2,MCOORDS)	! Coords read by GEOMETRY
+	INTEGER		LONGWORD
+	INTEGER*2	WORD
+	EQUIVALENCE	(LONGWORD,WORD)
+C	
+C ........................................................................
+C Initialisations
+C 
+	IS_LAB = .FALSE.
+	OK=.TRUE.
+	NTF$_TEXT_ID	= STRING(3:8)
+	NTF$_NUM_SEL	= STRING(9:10)
+	NTF$_SELECT	= STRING(11:12)
+	NTF$_TEXT_CODE	= STRING(13:16)
+	NTF$_TEXP_ID	= STRING(17:22)
+	NTF$_NUM_ATT	= STRING(23:24)
+	NTF$_ATT_ID	= STRING(25:30)
+C
+C ........................................................................
+C
+	OK=.TRUE.
+	INITIAL_RECORD = SEC_REC
+	JUMPED = .FALSE.
+C
+C 	..................................................................
+C	Get the feature code
+C
+	MATCH = .FALSE.					! default
+	NTF_FC = 0						! default FC =0
+C
+	CALL SETAUX(%REF(NTF$_TEXT_CODE),4) ! Feature code
+	OK = .NOT. RDINT(NTF_FC)
+C
+C	  ..................................................................
+C	  couldn't read feature code as a number, may be its a label
+C
+	IF (.NOT.OK) THEN				! error while reading
+	   INDEX = 0					!initialise
+	   DO WHILE( (.NOT.MATCH).AND.(INDEX.LT.N_FCNAMES) )
+	      INDEX = INDEX+1				! increment
+	      MATCH =  (NTF$_TEXT_CODE .EQ. FCNAMES(INDEX)) ! compare
+	   END DO
+C
+	   IF (.NOT.MATCH) THEN				! not matched
+	      CALL LSL_PUTMSG(NTF2I__UNKNFC,NTF$_TEXT_CODE,RECNUM) ! warn
+	      NTF_FC = 0				! reset to 0
+	   ELSE
+	      NTF_FC = 28				! FC = OS text
+	      DO  100 INDEX = 1,4
+		 FC_CODE(INDEX) = ICHAR(NTF$_TEXT_CODE(INDEX:INDEX))
+ 100	      CONTINUE
+	      IS_LAB = .TRUE.				!not true FC
+	   ENDIF
+	ENDIF
+C
+C Optionally translate NTF FC to IFF FC. Disallow translation from FC 28 if
+C using OS data, to avoid awful complications later on. Do not attempt
+C translation if FC is not numeric.
+C
+        FC = NTF_FC					! Transfer to IFF copy
+        IF (HAD_FC_LOOKUP .AND. (.NOT.IS_LAB)) THEN
+          IF (OS_DATA .AND. (NTF_FC.EQ.28)) THEN	! Disallow?
+            IF (TRN_NTF_28)				! Yes, warn user if
+     &        CALL LSL_PUTMSG( NTF2I__NTF28NOTTRN )	! necessary
+          ELSE
+            CALL FC_TRANS(%VAL(LUT_BASE_ADDR), NTF_FC, FC) ! Translate
+          ENDIF
+        ENDIF
+C
+C 	..................................................................
+C 	Get the TEXP_ID for the TEXTPOS record
+C
+	CALL SETAUX(%REF(NTF$_TEXP_ID),6)			! TEXP_ID
+	OK = .NOT.RDLONG(TEXP_ID)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__TEXTREC,TEXP_ID,RECNUM)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'TEXP_ID')
+	   CALL LSL_ADDSTR(NTF$_TEXP_ID)
+	   GOTO 999
+	ENDIF
+C
+C 	..................................................................
+C 	Get the ATT_ID for the attribute containing the text string
+C
+	CALL SETAUX(%REF(NTF$_ATT_ID),6)			! ATT_ID
+	OK = .NOT.RDLONG(ATT_ID)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__TEXTREC,ATT_ID,RECNUM)
+	   CALL LSL_ADDMSG(NTF2I__ERRORRD,'ATT_ID')
+	   CALL LSL_ADDSTR(NTF$_ATT_ID)
+	   GOTO 999
+	ENDIF
+C
+C---------------------------------------------------------------------------
+C Find the TEXTPOS record
+C
+	READ(TEXP_LUN,KEY=TEXP_ID,KEYID=0, IOSTAT=IOS) ID_REC
+	OK = IOS.EQ.0				! was return status 0
+	IF (OK) THEN				! yes, then ok
+C
+C          ...............................................................
+C	   jump to the actual record
+C
+	   SEC_REC = ID_REC.RECORD_NUM -1 	! set record number
+	   OK = READ_RECORD()			! get the record
+	   IF (OK) THEN
+	      JUMPED = .TRUE.
+	      REC_IN_HAND = .TRUE. 		! this is the TEXTREC
+	   ELSE
+	      CALL WRITEF('%%NTF2I-E-MISC, unable to get TEXTPOS')
+	      CALL WRITEF('-NTF2I-W-MISC, temporary data files corrupt')
+	      GOTO 999
+	   ENDIF
+	ELSE
+	   CALL WRITEF('%%NTF2I-E-MISC, unable to find record for TEXP_ID')
+	   CALL WRITEF('-NTF2I-I-MISC, TEXP_ID was "%I"',TEXP_ID)
+	   GOTO 999
+	ENDIF
+C
+C Get all the info out of the TEXTPOS
+C
+	OK = READ_TEXTPOS(FONT, HEIGHT, DIGPOS, TEMP_COORDS, ROTATE,
+     &			  NUMPOINTS, ACTUAL_HT)
+	IF (.NOT.OK) THEN
+	  CALL WRITEF('%%NTF2I-E-MISC, error reading the TEXTPOS record')
+	  GOTO 999
+	ENDIF
+C
+C---------------------------------------------------------------------------
+C Deduce the required coordinates - depends on /LOWER_LEFT and DIGPOS
+C
+	IF (LOWER_LEFT.AND.(DIGPOS.NE.0)) THEN
+	   IF (NUMPOINTS.EQ.2) THEN			! Use second coord pair
+	      POSN(1) = TEMP_COORDS(1,2)
+	      POSN(2) = TEMP_COORDS(2,2)
+	      DIGPOS = 0
+	   ELSE						! One coord pair
+	      IF (MD2SCL.EQ.0) THEN			! calculate lower left
+	         CALL LSL_PUTMSG(NTF2I__NOSCALE,SEC_REC)
+	      ELSE
+	         CALL LSL_PUTMSG(NTF2I__NOLEFTPOS,FSN)
+	         CALL NEWSTART(	TEMP_COORDS(1,1), TEMP_COORDS(2,1),
+     &				POSN(1), POSN(2), DIGPOS,ROTATE,
+     &				ACTUAL_HT, TEXTLEN, %REF(TEXTSTR))
+	         DIGPOS = 0
+	      ENDIF
+	   ENDIF
+	ELSE
+	   POSN(1) = TEMP_COORDS(1,1)	! Use first coord pair
+	   POSN(2) = TEMP_COORDS(2,1)
+	ENDIF
+C
+C	.......................................................................
+C	work out the Feature Status FC,font and category entries
+C
+	IF (OS_DATA.AND.(FC.NE.28).AND.(FC.LT.1000)) THEN   !invalid text FC
+	   ISTAT(1) = 28			! Set ouput to 28
+	   TEMP = ISHFT(FC,6)			! Use FC as category
+C
+	ELSEIF (OS_DATA.AND.(LEVEL.LT.3).AND.(FC.GE.1000).AND.(FC.LE.1020)) THEN
+	   ISTAT(1) = 28			! Set ouput to 28
+	   CATEGORY = FC - 1000			! work out category
+	   IF ( FONT.GT.3 .OR. FONT.LT.0 ) THEN	! validate font
+	      CALL LSL_PUTMSG(NTF2I__FONT,0,63,FONT,SEC_REC)
+	      FONT = 1
+	   ENDIF
+C
+C	   ....................................................................
+C	   put FONT into bits 4-5 and category into bits 6-11 in ISTAT(3)
+C
+	   TEMP = ISHFT(FONT,4).OR.ISHFT(CATEGORY,6)
+C
+	ELSE
+	   ISTAT(1) = FC
+	   IF ( FONT.GT.63 .OR. FONT.LT.0 ) THEN
+	      CALL LSL_PUTMSG(NTF2I__FONT,0,63,FONT,SEC_REC)
+	      FONT = 1
+	   ENDIF
+	   TEMP = ISHFT(FONT,6)				!use FONT as category
+	ENDIF
+C
+C	......................................................................
+C	work out rest of ISTAT entry
+C
+	ISTAT(2)=0				! only used by LASERAID
+	LONGWORD = DIGPOS			! digitised position bits 0-3
+     &		  .OR.TEMP			! font,category: bits 4-5, 6-11
+     &		  .OR.'8000'X 			! bit 15 set - text feature
+	ISTAT(3) = WORD				! extract the low word of that
+	ISTAT(4)=0				! User dependent data
+	FSN = FSN + 1
+	CALL IFFNF(FSN,FSN)			! NF entry (ISN==FSN)
+	CALL IFFFS(ISTAT)			! FS entry	
+	IF (IS_LAB) CALL IFFAC(1,0,FC_CODE,4)	! alphanumeric FC
+C
+C Jump to the associated attribute record
+C
+	READ(ATTR_LUN,KEY=ATT_ID,KEYID=0, IOSTAT=IOS) ID_REC
+	OK = IOS.EQ.0				! was return status 0
+	IF (OK) THEN				! yes, then ok
+C
+C          ...............................................................
+C	   jump to the actual record
+C
+	   SEC_REC = ID_REC.RECORD_NUM -1 	! set record number
+	   OK = READ_RECORD()			! get the record
+	   IF (OK) THEN
+	      JUMPED = .TRUE.
+	      REC_IN_HAND = .TRUE. 		! this is the TEXTREC
+	   ELSE
+	      CALL WRITEF('%%NTF2I-E-MISC, unable to get ATTREC')
+	      CALL WRITEF('-NTF2I-W-MISC, temporary data files corrupt')
+	      GOTO 900
+	   ENDIF
+	ELSE
+	   CALL WRITEF('%%NTF2I-E-MISC, unable to find record for ATT_ID')
+	   CALL WRITEF('-NTF2I-I-MISC, ATT_ID was "%I"',ATT_ID)
+	   GOTO 900
+	ENDIF
+C
+C Assume the TX mnemonic is not found
+C
+	HAD_TXTSTRING = .FALSE.
+	IS_TEXTREC = .TRUE.
+C
+C Write any attributes. If the TX is in there, it is not written as an
+C attribute and will be held elsewhere
+C
+	OK = READ_ATTREC()
+	IS_TEXTREC = .FALSE.
+	IF (.NOT.OK) GOTO 900
+C
+C Check that a TX mnemonic was actually found. If not we can't build a text
+C feature.
+C
+	IF (.NOT.HAD_TXTSTRING) THEN
+	   CALL LSL_PUTMSG(NTF2I__NOTX,ATT_ID)
+	   GOTO 900
+	ENDIF
+C
+C---------------------------------------------------------------------------
+C
+	CALL IFFTH(HEIGHT)				! Text height
+	CALL IFFST(POSN,1,0)				! Coordinates
+	CALL IFFRO(ROTATE)
+	CALL IFFTX(%REF(TXTSTRING(1:TXTSTRING_LEN)),TXTSTRING_LEN)
+	CALL IFFEF
+	GOTO 999
+C
+C ........................................................................
+C
+C Something when wrong, delete the current feature
+C
+900	CALL IFFDEL
+	FSN = FSN - 1
+C
+C rejoin errors
+C
+999	READ_TEXT_V2 = OK
+	IF (JUMPED) THEN			!return from whence we came
+	  SEC_REC = INITIAL_RECORD -1
+	  OK = READ_RECORD()
+	  IF (.NOT.OK) THEN
+	    CALL WRITEF('%%NTF2I-E-MISC, unable to return to TEXTREC record')
+	    CALL WRITEF('-NTF2I-W-MISC, temporary data files are corrupt')
+	    READ_TEXT_V2 = OK
+	  ENDIF
+	ENDIF
+	REC_IN_HAND = .FALSE.
+C
+C Return
+C
+	RETURN
+	END

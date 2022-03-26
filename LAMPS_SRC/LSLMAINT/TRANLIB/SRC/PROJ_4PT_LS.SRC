@@ -1,0 +1,221 @@
+	LOGICAL*4 FUNCTION PROJ_4PT_LS(NPTS,PTS,COEFFS,RESID,XMAX,YMAX,
+     &				  XRMS,YRMS)
+C
+***	MODULE	PROJ_4PT_LS
+***	IDENT	04SE90
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: R.W. Russell (based on routines by D. Meader, W.J. James etc)
+C
+C	Created 				 RWR	23-Aug-1990
+C
+C Performs a 'projective' transformation.
+C This routine uses a generalised version of PROJ4PT which performs a
+C least squares fit of the specified points to functions of the form:
+C
+C                  X' = (A.X+B.Y+C)/(G.X+H.Y+1)
+C 	           Y' = (D.X+E.Y+F)/(G.X+H.Y+1)
+C
+C .. which is rearranged to
+C		X' = A.X + B.Y + C                - G.X.X' - H.Y.X'
+C		Y' =                D.X + E.Y + F - G.X.Y' - H.Y.Y'
+C
+C PROJ_4PT_LS takes an array of NPTS sets of coordinates, with each set
+C arranged in the order:
+C
+C		 Xmeasured Ymeasured Xtarget Ytarget
+C
+C The (2*NPTS) observation equations formed from the above equations are
+C reduced to NORMAL equations of the form:
+C
+C	[xx]	[xy]	[x]	0	0	0	-[xxX]	-[xyX]	= [xX]
+C       
+C	[xy]	[yy]	[y]	0	0	0	-[xyX]	-[yyX]	= [yX]
+C
+C	[x]	[y]	NPTS	0	0	0	-[xX]	-[yX]	= [X]
+C
+C	0	0	0	[xx]	[xy]	[x]	-[xxY]	-[xyY]	= [xY]
+C
+C	0	0	0	[xy]	[yy]	[y]	-[xyY]	-[yyY]	= [yY]
+C
+C	0	0	0	[x]	[y]	NPTS	-[xY]	-[yY]	= [Y]
+C
+C	-[xxX]	-[xyX]	-[xX]	-[xxY]	-[xyY]	-[xY]	ZZZ1	ZZZ2	= -ZZZ4
+C
+C	-[xyX]	-[yyX]	-[yX]	-[xyY]	-[yyY]	-[yY]	ZZZ2	ZZZ3	= -ZZZ5
+C
+C where ZZZ1 = [xxXX] + [xxYY]
+C       ZZZ2 = [xyXX] + [xyYY]
+C       ZZZ3 = [yyXX] + [yyYY]
+C	ZZZ4 = [xXX]  + [xYY]
+C	ZZZ5 = [YXX]  + [yYY]
+C
+C A set of coefficients (COEFFS) is calculated which will transform the
+C 'measured' coordinate system into the 'target' one. X and Y residuals
+C are returned in the user array RESID, and the maximum and RMS errors
+C are also calculated.
+C
+C If PROJ_4PT_LS is .TRUE. then we may have tried to do the impossible. For
+C example the point distribution may be inappropriate (e.g. all points
+C nearly collinear) or the 'measured' and 'target' spaces simply may not
+C be related by this transformation. In any case the transformation
+C coefficients are suspect.
+C
+CCCCCC	IMPLICIT NONE
+C
+	INTEGER	  UNKNOWN		! number of unknowns
+	PARAMETER (UNKNOWN = 8)
+C
+	INTEGER*4 NPTS			! number of points
+	REAL	  PTS(4,NPTS)		! measured & target coordinates
+	REAL*8	  COEFFS(UNKNOWN)	! returned transform coeffs
+	REAL	  RESID(2,NPTS)		! X,Y residuals (target space)
+	REAL	  XMAX,YMAX		! max residuals    "      "
+	REAL	  XRMS,YRMS		! RMS residuals    "      "
+C
+	INTEGER	  I,J
+	REAL	  DX,DY			! temporary X,Y residuals
+	REAL*8	  A(UNKNOWN,UNKNOWN)	! temporary matrix for SOLVE
+	REAL*8	  CRIT			! criterion for rejection of fit
+C
+	REAL*8	  X
+	REAL*8	  Y
+	REAL*8	  XP
+	REAL*8	  YP
+	REAL*8	  XX
+	REAL*8	  XY
+	REAL*8	  YY
+C
+C ......................................................................
+C ... set up normal equations,
+	A(3,1)	=  0.0
+	A(1,1)	=  0.0
+	A(3,2)	=  0.0
+	A(2,2)	=  0.0
+	A(1,2)	=  0.0
+	A(7,1)	=  0.0
+	A(8,1)	=  0.0
+	A(8,2)	=  0.0
+	A(7,3)	=  0.0
+	A(8,3)	=  0.0
+	A(7,4)	=  0.0
+	A(8,4)	=  0.0
+	A(8,5)	=  0.0
+	A(7,6)	=  0.0
+	A(8,6)	=  0.0
+	A(7,7)	=  0.0
+	A(8,7)	=  0.0
+	A(8,8)	=  0.0
+	COEFFS(3) = 0.0
+	COEFFS(6) = 0.0
+	COEFFS(7) = 0.0
+	COEFFS(8) = 0.0
+C
+	DO 10, I = 1,NPTS
+	   X  = PTS(1,I)
+	   Y  = PTS(2,I)
+	   XP = PTS(3,I)
+	   YP = PTS(4,I)
+	   XX = X*X
+	   YY = Y*Y
+	   XY = X*Y
+C
+	   A(3,1)	= A(3,1) + X
+	   A(1,1)	= A(1,1) + XX
+	   A(3,2)	= A(3,2) + Y
+	   A(2,2)       = A(2,2) + YY
+	   A(1,2)	= A(1,2) + XY
+	   A(7,1)	= A(7,1) - XX*XP
+	   A(8,1)	= A(8,1) - XY*XP
+	   A(8,2)	= A(8,2) - YY*XP
+	   A(7,3)	= A(7,3) - X*XP
+	   A(8,3)	= A(8,3) - Y*XP
+	   A(7,4)	= A(7,4) - XX*YP
+	   A(8,4)	= A(8,4) - XY*YP
+	   A(8,5)	= A(8,5) - YY*YP
+	   A(7,6)	= A(7,6) - X*YP
+	   A(8,6)	= A(8,6) - Y*YP
+	   A(7,7)	= A(7,7) + XX*XP*XP + XX*YP*YP
+	   A(8,7)	= A(8,7) + XY*XP*XP + XY*YP*YP
+	   A(8,8)	= A(8,8) + YY*XP*XP + YY*YP*YP
+	   COEFFS(3)	= COEFFS(3) + XP
+	   COEFFS(6)	= COEFFS(6) + YP
+	   COEFFS(7) 	= COEFFS(7) - X*XP*XP - X*YP*YP
+	   COEFFS(8) 	= COEFFS(8) - Y*XP*XP - Y*YP*YP
+10	CONTINUE
+C
+C ... fill relevant values in A
+	A(2,1) = A(1,2)
+	A(4,1) = 0.0
+	A(5,1) = 0.0
+	A(6,1) = 0.0
+	A(3,2) = A(3,2)
+	A(4,2) = 0.0
+	A(5,2) = 0.0
+	A(6,2) = 0.0
+	A(7,2) = A(8,1)
+	A(3,3) = NPTS
+	A(4,3) = 0.0
+	A(5,3) = 0.0
+	A(6,3) = 0.0
+	A(4,4) = A(1,1)
+	A(5,4) = A(1,2)
+	A(6,4) = A(3,1)
+	A(5,5) = A(2,2)
+	A(6,5) = A(3,2)
+	A(7,5) = A(8,4)
+	A(6,6) = NPTS
+C
+C ... that was UR triangle of A, now fill in BL triangle
+	DO 20, J = 2,UNKNOWN
+	   DO 20, I = 1,J-1
+	      A(I,J) = A(J,I)
+	   CONTINUE
+20	CONTINUE
+C
+C ... and rest of RHS
+	COEFFS(1) = - A(7,3)
+	COEFFS(2) = - A(8,3)
+	COEFFS(4) = - A(7,6)
+	COEFFS(5) = - A(8,6)
+C
+C ... now call SOLVE to give us the transform array C in COEFFS.
+	CALL SOLVE(A,COEFFS,UNKNOWN,1,0,UNKNOWN,UNKNOWN)
+C
+C ... analyse the eigenvalues of A (now triangular).
+C ... examine the first and last eigenvalues; if the fit is good these
+C ... will have 'similar' magnitudes (one day I may get round to proving
+C ... this, until then take my word for it !!)
+C ... return .TRUE. if we don't believe the fit is any good.
+C ... N.B. we are more tolerant than in FIT, since we must allow fairly
+C ... weird points to be used if required.
+	CRIT=1.0D6			! rather arbitrary, this !
+	PROJ_4PT_LS=DABS(A(1,1)/A(UNKNOWN,UNKNOWN)).GT.CRIT
+C
+C ... now test the goodness of fit by applying the transform to the
+C ... measured values.
+	XRMS=0.0
+	YRMS=0.0
+	XMAX=0.0
+	YMAX=0.0
+	DO 40 I=1,NPTS
+	   DX=ABS(
+     &	      PTS(1,I)*COEFFS(1) + PTS(2,I)*COEFFS(2) + COEFFS(3)
+     &	      - PTS(1,I)*PTS(3,I)*COEFFS(7)- PTS(2,I)*PTS(3,I)*COEFFS(8)
+     &	      - PTS(3,I)) ! error in target space
+	   DY=ABS(
+     &	      PTS(1,I)*COEFFS(4) + PTS(2,I)*COEFFS(5) + COEFFS(6)
+     &	      - PTS(1,I)*PTS(4,I)*COEFFS(7)- PTS(2,I)*PTS(4,I)*COEFFS(8)
+     &	      - PTS(4,I)) ! error in target space
+	   RESID(1,I)=DX			! return all residuals
+	   RESID(2,I)=DY
+	   XRMS=XRMS + DX*DX			! and RMS and MAX errors
+	   YRMS=YRMS + DY*DY
+	   IF (DX.GT.XMAX) XMAX=DX
+	   IF (DY.GT.YMAX) YMAX=DY
+40	CONTINUE
+	XRMS=SQRT(XRMS/FLOAT(NPTS))
+	YRMS=SQRT(YRMS/FLOAT(NPTS))
+	RETURN
+	END

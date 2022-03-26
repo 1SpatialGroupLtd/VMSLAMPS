@@ -1,0 +1,251 @@
+	INTEGER*4 FUNCTION DTI_EXTEND_HEADER( DTI_LUN,
+     &            NUMBER_BYTES, RETVAL )
+C
+***	IDENT	30SE91
+***	MODULE	DTI_EXTEND_HEADER
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C	Created   : 01AU88 
+C
+C	Modified  : 04AU88 DRC to check whether the existing mapped
+C	            file is in fact large enough to accommodate the
+C		    extended header (since a file can only be
+C		    extended in 512 byte blocks). AND COCK IT UP!!
+C
+CMOD1045	  : 30SE91  JB don't extend header by a negative number
+C
+C-----------------------------------------------------------------------
+C	DTILIB Function.   
+C
+C	Extends the header of the file opened on DTI_LUN by the 
+C	specified number of bytes.  This operation is only possible
+C	on ALVY or LSLA type headers, and is used for example to
+C	insert a projection record into a file that doesn't 
+C	currently have one!  The file must have been opened with
+C	write access.
+C	Note as well as simply extending the total size of the 
+C	mapped file, the routine must shift all the data values.
+C
+C	The function returns true if successful; in the event of
+C	failure any system routine errors are returned in RETVAL.
+C
+C	The function interfaces directly with the LSLLIB function
+C	VIO$EXTEND_SEC.
+C
+C-----------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters
+	INCLUDE '($SSDEF)'
+C
+***	PARAMETER/LSL$CMNDTI:DTIDEF/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C arguments
+	INTEGER*4		DTI_LUN		!LUN on which to extend file
+	INTEGER*4		NUMBER_BYTES	!number of bytes by which
+C						!to extend the header
+	INTEGER*4		RETVAL		!system error condition
+C
+C functions
+	INTEGER*4		VIO$EXTEND_SEC	!to map file into virtual mem
+C
+C local variables
+	INTEGER*4		VIO_LUN		!passed to VIO$EXTEND_SEC
+	INTEGER*4		SECTION_ADDR	!address of mapped file
+	INTEGER*4		SECTION_SIZE	!size of mapped file
+	INTEGER*4		DATA_SIZE	!size of extended data area
+	INTEGER*4		NEW_DTISIZ	!calculated size of extended
+C						!DTI file
+	INTEGER*4		XSIZE		!extended x size
+	INTEGER*4		YSIZE		!extended y size
+	INTEGER*4		EXTEND_SIZE	!size in blocks by which
+C						!to extend the file
+	INTEGER*4		ERROR		!sytem error
+	INTEGER*4		IERR		!function return value
+	INTEGER*4		DATA_VALUE_OFFSET !byte offset for copy
+	INTEGER*4		COPY_SIZE	!number of bytes to transfer
+C
+	INTEGER*4	LONGWORD_VALUE		!signed word value	
+	INTEGER*2	WORD_VALUE		!word value
+	EQUIVALENCE	(WORD_VALUE,LONGWORD_VALUE)
+C
+C	Functions:
+	INTEGER*4		VIOCLR		!to initialise part of the
+C						!mapped file
+	INTEGER*4		VIOMV3		!to transfer bytes
+C
+	INTEGER*4	DTI_WRITE_WORD_HEADER	!to write new data offset
+C						!to the mapped file
+C****************************************************************************
+C
+C	Test if the supplied LUN number is valid
+	IF(DTI_LUN.LT.1.OR.DTI_LUN.GT.MAX_DTI)THEN
+	  DTI_EXTEND_HEADER=DTI__BADLUN		! LUN out of range
+	  GOTO 999				! Return
+	ENDIF
+C
+C	Test of the supplied LUN is in use (ie. is there a file to extend!)
+	IF(.NOT.DTILUN_INUSE(DTI_LUN))THEN
+	  DTI_EXTEND_HEADER=DTI__LUNUNUSED 	! LUN not in use
+	  GOTO 999				! Return
+	ENDIF
+C
+C	Test the file on DTI_LUN has been opened for write access.
+C	A mapped file may only be extended if this is the case
+	IF(READ_ONLY(DTI_LUN))THEN 
+	  DTI_EXTEND_HEADER=DTI__READONLY
+	  GOTO 999
+	ENDIF
+C
+C	Test if the file opened on DTI_LUN is the correct sort
+C	ie. a LSLA type file
+	IF(HEADER_TYPE(DTI_LUN).NE.DTI_LSLA)THEN
+	  DTI_EXTEND_HEADER=DTI__BADHEADER
+	  GOTO 999
+	ENDIF
+C
+C	Test if the number of bytes is valid
+	IF(NUMBER_BYTES.LE.0.OR.
+     &     (DATA_OFFSET(DTI_LUN)+NUMBER_BYTES).GT.MAX_HEADER)THEN
+	  DTI_EXTEND_HEADER=DTI__BADHEADSIZE	! Bad argument
+	  GOTO 999
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C	How many blocks do we wish to extend by ie.
+C	work out total size, and compare with current size of mapped file.
+C
+C	Work out the size of the new DTI section in bytes
+C	ie. data area + header
+	XSIZE=X_EXTENT(DTI_LUN)
+	YSIZE=Y_EXTENT(DTI_LUN)
+C
+	IF     (DATA_TYPE(DTI_LUN).EQ.DATA_BYTE)THEN
+	   DATA_SIZE=XSIZE*YSIZE	
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_WORD)THEN
+	   DATA_SIZE=(XSIZE*YSIZE)*2
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_LONG.OR.
+     &          DATA_TYPE(DTI_LUN).EQ.DATA_REAL)THEN
+	   DATA_SIZE=(XSIZE*YSIZE)*4
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_BIT)THEN
+	   DATA_SIZE=(XSIZE*YSIZE)/8
+	ENDIF
+C
+	NEW_DTISIZ=(DATA_OFFSET(DTI_LUN)+NUMBER_BYTES+
+     &              DATA_SIZE+511)/512	!in blocks
+C
+C	Work out difference between new and old block values
+	EXTEND_SIZE=NEW_DTISIZ-(SEC_SIZE(DTI_LUN)/512)
+C
+C	Do we actually need to extend the file, or is the
+C	existing file already large enough
+C	IF(EXTEND_SIZE.EQ.0)GOTO 50
+C
+	IF(EXTEND_SIZE.LE.0)GOTO 50
+C
+C	Now let's try extending the file 
+C
+	SECTION_ADDR=SEC_ADDR(DTI_LUN)
+	SECTION_SIZE=SEC_SIZE(DTI_LUN)
+C
+	VIO_LUN=DTI_LUN-1
+	IERR  = VIO$EXTEND_SEC
+     &  (EXTEND_SIZE,			! Number of blocks to extend by
+     &	SECTION_ADDR,			! Address of mapped file
+     &	SECTION_SIZE,			! Size of mapped file (bytes)
+     &	VIO_LUN)			! LUN to open the file on
+C
+	IF (IERR.NE.SS$_CREATED) THEN	! Unsuccessful
+	  DTI_EXTEND_HEADER=DTI__SYSERR
+	  RETVAL=IERR			! Pass back system error
+	  GOTO 999
+	END IF
+C
+C	Update mapped file details in DTIHDR 
+	SEC_ADDR(DTI_LUN)	=SECTION_ADDR		
+	SEC_SIZE(DTI_LUN)	=SECTION_SIZE
+C
+C----------------------------------------------------------------------------
+C	Now shift the data values so that the first data value starts at
+C	the end of the new header. This has to be done in chunks since
+C	the mamimum number of bytes that may be moved by LIB$MOVC3 (which
+C	VIOMV3 interfaces with) is 65535 (unsigned word).
+C	We work from the end of the mapped file to the start of the 
+C	mapped file.
+C
+C	If the number of bytes to transfer is less than or equal to
+C	65535, then only one call to VIOMV3 is required.
+C
+50	IF(DATA_SIZE.LE.65535)THEN
+	  ERROR=VIOMV3(%VAL(SEC_ADDR(DTI_LUN)+DATA_OFFSET(DTI_LUN)),
+     &                 DATA_SIZE,
+     &                 %VAL(SEC_ADDR(DTI_LUN)+DATA_OFFSET(DTI_LUN)+
+     &                 NUMBER_BYTES))
+	  IF(ERROR.NE.SS$_NORMAL)THEN
+	    DTI_EXTEND_HEADER=DTI__SYSERR
+	    RETVAL=ERROR
+	    GOTO 999
+	  ENDIF
+C
+	ELSE
+C	Work out the position of the last data value (nb. we use the
+C	header size before extension for this).
+	  DATA_VALUE_OFFSET=DATA_OFFSET(DTI_LUN)+DATA_SIZE
+	  COPY_SIZE=65535
+C
+C	Work out the byte offset of the first chunk.
+100	  DATA_VALUE_OFFSET=DATA_VALUE_OFFSET-COPY_SIZE
+C
+	  ERROR=VIOMV3(%VAL(SEC_ADDR(DTI_LUN)+DATA_VALUE_OFFSET),
+     &                 COPY_SIZE,
+     &                 %VAL(SEC_ADDR(DTI_LUN)+DATA_VALUE_OFFSET
+     &                 +NUMBER_BYTES))
+	  IF(ERROR.NE.SS$_NORMAL)THEN
+	    DTI_EXTEND_HEADER=DTI__SYSERR
+	    RETVAL=ERROR
+	    GOTO 999
+	  ENDIF
+C	
+	  IF(DATA_VALUE_OFFSET.EQ.DATA_OFFSET(DTI_LUN))GOTO 200
+	  COPY_SIZE=MIN(65535,DATA_VALUE_OFFSET-DATA_OFFSET(DTI_LUN))
+	  GOTO 100
+C
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C	Initialise the extended part of the header area
+200	ERROR=VIOCLR(%VAL(SEC_ADDR(DTI_LUN)+DATA_OFFSET(DTI_LUN)),
+     &               NUMBER_BYTES,,)
+	
+	IF(ERROR.NE.SS$_NORMAL)THEN
+	  DTI_EXTEND_HEADER=DTI__SYSERR
+	  RETVAL=ERROR
+	  GOTO 999
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C	Update the common block variables
+	LONGWORD_VALUE=DATA_OFFSET(DTI_LUN)+NUMBER_BYTES
+	DATA_OFFSET(DTI_LUN)=WORD_VALUE
+C
+C	and also write to the mapped file in case the user forgets
+	IERR=DTI_WRITE_WORD_HEADER
+     &	    (DTI_LUN,WORD_VALUE,DTI_LSLA_DATA,ERROR)
+	IF(IERR.NE.DTI__NORMAL)THEN
+	  DTI_EXTEND_HEADER=DTI__SYSERR
+	  RETVAL=ERROR
+	  GOTO 999
+	ENDIF
+C
+C----------------------------------------------------------------------
+	DTI_EXTEND_HEADER=DTI__NORMAL	! signal success
+C
+999	RETURN
+C
+	END

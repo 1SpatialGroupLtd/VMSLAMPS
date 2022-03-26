@@ -1,0 +1,233 @@
+	LOGICAL*4 FUNCTION GET_FCP()
+ 
+***	IDENT	09FE95
+***	MODULE	GET_FCP
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C	Author	  : Andrew Morris				Sep-1986
+C
+CMOD	Made a function, comments delimited by "!" now
+C	supported.					TJH  28-May-1987
+CMOD	Changed to use INT_RIPPLESORT in place of COSORT,
+C	so that this can be called from LSLLIB when/if
+C	INT_RIPPLESORT is standardised.			ACM  12-Aug-1987
+CMOD	Max number of FC pairs increased to allow all possible
+C	combinations of FCs (was MAXFCS before)		ACM   3-Mar-1988
+c
+CMOD1055 Ensure that the arrays FCS4 and PRO are not exceeded
+C							 JB  24-Oct-1991
+CMOD1319 Pass flag from RDRANG to signal a comment has
+C	 started and reading ended			 JB  26-Nov-1993
+C
+CMOD1466 Max number of FC pairs increased in ILINK.CMN	 JB  09-Feb-1995
+
+	IMPLICIT	NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+	INCLUDE		'LSL$CMNLSL:LSLLIBMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE		'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE		'LSL$CMNLSL:EXCEPTION.CMN'
+	INCLUDE		'LSL$CMNLSL:CLD.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINKCHAR.CMN'
+
+C Functions
+	LOGICAL*4	INSET
+	LOGICAL*4	RDCHS
+	LOGICAL*4	RDRANG
+	LOGICAL*4	RDLONG
+	INTEGER*4	FLROPN,FLRLIN,FLRCLO
+
+C Workspace
+	INTEGER*4	IERR			! error return
+	INTEGER*4	I,J,I1,I2,FC4
+	INTEGER*4	FC4_FROM,FC4_TO
+	INTEGER*4	ROW,COL			! 2D array indices
+	INTEGER*4	N_FCPRS			! No. of FC pairs
+	INTEGER*4	FCPR(2,MAXFCPRS)	! FC pairs
+	INTEGER*4	IDX(MAXFCS)		! FCS index array
+c
+c	INTEGER*4	FCMIN,FCMAX		! min & max FCs
+c
+	INTEGER*4	OK			! ret code
+	INTEGER*4	LINE_NUM		! FCP-file line No.
+
+	LOGICAL*4	PRO(MAXFCS,MAXFCS)	! process fc-pair?
+	LOGICAL*4	ERROR			! error?
+	LOGICAL*4	END			! comment started?
+	BYTE		CH			! a character
+ 
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Reads FC-pairs from FCP FILE and sets up corresponding logical
+C	array for QUADSCAN
+C
+C	File has free-format as below on every line:
+C
+C		fc1 fc2[:fc3] <,fc4[:fc5]>
+C
+C	This specifies that features with code fc1 will be pair-wise
+C	processed against all features in the list that follows.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	GET_FCP = SS$_NORMAL
+
+C Open /FCP file 
+
+	OK = FLROPN(1,FCPFILE(:FCP_LEN),IERR)
+	IF (.NOT.OK) THEN
+	  GET_FCP = ILINK__OPNFCP
+	  CALL LSL_PUTMSG(GET_FCP,FCPFILE(:FCP_LEN))
+	  CALL LSL_ADDMSG(OK)
+	  CALL LSL_ADDMSG(IERR)
+	  GOTO 110
+	ENDIF
+
+	N_FCPRS = 0
+	LINE_NUM = 0
+
+10	OK = FLRLIN(,,,IERR)
+	LINE_NUM = LINE_NUM+1
+	IF (OK.EQ.LSL__EOF) GOTO 50	! end of file read
+	IF (.NOT.OK) THEN
+	  GET_FCP = ILINK__BADFCPLIN
+	  CALL LSL_PUTMSG(GET_FCP,LINE_NUM,FCPFILE(:FCP_LEN))
+	  CALL LSL_ADDMSG(OK)
+	  CALL LSL_ADDMSG(IERR)
+	  GOTO 110
+	ENDIF
+
+	CALL BSLN
+	IF (RDCHS(CH)) GOTO 10		! empty line?
+	IF (CH.EQ.'!') GOTO 10		! comment
+
+	CALL BSCH			! backspace
+	IF (RDLONG(FC4_FROM)) THEN
+	  GET_FCP = ILINK__BADFCPLIN
+	  CALL LSL_PUTMSG(GET_FCP,LINE_NUM,FCPFILE(:FCP_LEN))
+	  IF (ERRNUM.NE.LSL__UNEXPEOL) THEN
+	    CALL LSL_ADDMSG(ERRNUM)
+	    IF (ERRNUM.EQ.LSL__HADEXCP) CALL LSL_ADDMSG(LSL_EXCP)
+	  ENDIF
+	  GOTO 110
+	ENDIF
+
+C Get rest of number range 
+
+20	IF (RDRANG(I1,I2,END)) THEN
+	  DO 30 FC4_TO = I1,I2
+	    IF (N_FCPRS.GE.MAXFCPRS) THEN
+	      GET_FCP = ILINK__TOOMNYFCPRS
+	      CALL LSL_PUTMSG(GET_FCP,MAXFCPRS)
+	      GOTO 110
+	    ENDIF
+C
+	    N_FCPRS = N_FCPRS+1
+	    FCPR(1,N_FCPRS) = FC4_FROM
+	    FCPR(2,N_FCPRS) = FC4_TO
+30	  CONTINUE
+
+	  IF (.NOT.END) GOTO 20
+	ENDIF
+C
+	GOTO 10				! read next line from FCP file
+C
+50	CALL FLRCLO(1)
+ 
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Form array containing one of each FC from FC-pairs given
+ 
+	N_FCS = 0
+	HAD_FCP = N_FCPRS.GT.0
+	IF (.NOT.HAD_FCP) GOTO 110	! return
+ 
+	FC4     = FCPR(1,1)
+	N_FCS   = 1
+	FCS4(1) = FC4
+
+c	FCMIN   = FC4
+c	FCMAX   = FC4
+
+	DO 80 I = 1,N_FCPRS		! for each pair do
+	  FC4 = FCPR(1,I)		! first FC in FC-pair
+C
+C Find ROW where FCS4(ROW) = FC4
+C
+	  IF (INSET(FCS4,N_FCS,FC4,ROW)) GOTO 60
+C
+	  N_FCS = N_FCS+1		! count unmatched FC
+
+c	  FCMIN = MIN(FC4,FCMIN)
+c	  FCMAX = MAX(FC4,FCMAX)
+
+	  IF (N_FCS.GT.MAXFCS) THEN
+	    GET_FCP = ILINK__TOOMNYFCS
+	    CALL LSL_PUTMSG(GET_FCP,MAXFCS)
+	    GOTO 110
+	  ENDIF
+C
+	  FCS4(N_FCS) = FC4		! add new FC 
+	  ROW = N_FCS
+
+60	  FC4 = FCPR(2,I)		! second FC in FC-pair
+C
+C Find COL where FCS4(COL) = FC4
+C
+	  IF (INSET(FCS4,N_FCS,FC4,COL)) GOTO 70
+	  N_FCS = N_FCS+1
+
+c	  FCMIN = MIN(FC4,FCMIN)
+c	  FCMAX = MAX(FC4,FCMAX)
+
+	  IF (N_FCS.GT.MAXFCS) THEN
+	    GET_FCP = ILINK__TOOMNYFCS
+	    CALL LSL_PUTMSG(GET_FCP,MAXFCS)
+	    GOTO 110
+	  ENDIF
+C
+	  FCS4(N_FCS) = FC4
+	  COL = N_FCS
+C
+C Check overrun of ROW,COL
+C
+	  IF (ROW.GT.MAXFCS .OR. COL.GT.MAXFCS) THEN
+	    GET_FCP = ILINK__TOOMNYFCS
+	    CALL LSL_PUTMSG(GET_FCP,MAXFCS)
+	    GOTO 110
+	  ENDIF
+C
+70	  PRO(ROW,COL) = .TRUE.
+80	CONTINUE
+ 
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Sort FCS array into increasing order so that binary search can be
+C used later for finding FC index from FC as each feature is read in
+ 
+	CALL INT_RIPPLESORT(FCS4,IDX,N_FCS,.TRUE.)
+ 
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C Set up corresponding LOGICAL   2D arrays for QUADSCAN,
+C	 = +1 (TRUE) if pair was entered in this order,
+C	 = -1 (TRUE) if pair was specified in reverse order,
+C	 =  0 (FALSE) if pair was not specified
+C Note that 2D fields not set will have value 0 (FALSE)
+ 
+	DO 100 ROW = 1,N_FCS
+	  DO 90 COL = 1,N_FCS
+	    IF (PRO(IDX(ROW),IDX(COL))) THEN
+	      FCPAIR(ROW,COL) = 1
+	      IF (ROW.NE.COL) FCPAIR(COL,ROW) = -1
+	    ENDIF
+90	  CONTINUE
+100	CONTINUE
+
+110	RETURN
+	END
+

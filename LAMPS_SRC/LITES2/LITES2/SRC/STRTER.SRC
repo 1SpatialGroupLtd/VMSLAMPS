@@ -1,0 +1,309 @@
+	LOGICAL	FUNCTION STRTER(ACTION,FLAG)
+C
+***	MODULE	STRTER
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+C Author:	Clarke Brunt				13-Nov-1984
+C
+C Starts a construction, or adds a point to one, or ends one
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:END/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***     PARAMETER/CMN:PROCESS/
+***	PARAMETER/CMN:STAPAR/
+***     PARAMETER/CMN:START/
+C
+***	COMMON/CMN:ACS/
+***	COMMON/CMN:ATTBTS/
+***	COMMON/CMN:CSTRCT/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:STATE/
+***	COMMON/CMN:STRIKE/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C arguments
+	INTEGER	ACTION			! action to perform
+	INTEGER	FLAG			! visibility etc. flags
+C
+C ACTION = START_INIT	 initialise
+C ACTION = START_ADD	 add a point
+C ACTION = START_END	 flush buffers
+C ACTION = START_BRIDGE	 same as 2 but don't start feature (END BRIDGE)
+C ACTION = START_REVERSE same as 3 but reverse points (END BRIDGE)
+C ACTION = START_REMOVE	 remove point
+C
+C functions called
+	INTEGER	FNDOVR,GENNF
+	LOGICAL	FRTFND,STRTFT,GENAUX
+	LOGICAL COPYDEF,ADDDEF
+	LOGICAL	CHKDUPL
+	REAL	LENGTH
+C
+C w/s
+	LOGICAL*1	DEL,NEWCON
+	PARAMETER	(DEL=.FALSE.)		! no feature to delete
+						! when complete
+	PARAMETER	(NEWCON=.TRUE.)		! new feature
+C
+	INTEGER	I
+	LOGICAL DUM			! dummy argument to ADDDEF
+	INTEGER LASTZ
+C
+	STRTER = .TRUE.			! assume failure
+C
+C If already constructing, go and try to add point
+	IF (ACTION.NE.START_INIT) GOTO 500
+C
+C Start new construction
+C
+C If Bridging then copy object in hand pack
+	IF (SINDEX.EQ.STATE_CONSTRUCT.AND.NDMODE.EQ.END_BRIDGE) THEN
+	   CALL CPYPAK(PAKLEN,IHPAK,COIPAK)
+	   GOTO 400
+	ENDIF
+C
+C Otherwise set up from construction variables
+C Does construction map exist
+	IF (CONMAP.GT.MAPTOP.OR..NOT.MAP_EXIST(CONMAP)) THEN
+	   CALL MOAN(MSG_MAPNOTEXIST,CONMAP+1)
+	   GOTO 999
+	ENDIF
+C
+C Is it readonly
+	IF (MAPRO(CONMAP)) THEN
+	   CALL MOAN(MSG_MAPREADONLY,CONMAP+1)
+	   GOTO 999
+	ENDIF
+	COIPAK(PAKMAP) = CONMAP
+C
+C Does construction layer exist
+	I = FNDOVR(CONLAY)
+	IF (I.LT.0) THEN
+	   CALL MOAN(MSG_LAYNOTEXIST,CONLAY)
+	   GOTO 999
+	ENDIF
+	COIPAK(PAKOVL) = I
+C
+C Does construction feature code exist
+	IF (FRTFND(CONFC)) THEN
+	   CALL MOAN(MSG_BADCODE,CONFC)
+	   GOTO 999
+	ENDIF
+C
+C Check FC valid if starting a generated feature
+	IF (CONGEN .AND. (FRTARC .OR. FRTTEX .OR. 
+     &	   (FRTSYM .AND. (FRTGT .NE. STRTYP)))) THEN
+	   CALL MOAN(MSG_INVALFC)
+	   GOTO 999
+	ENDIF
+C
+C Check not trying to start a text feature
+	IF (FRTTEX) THEN
+	   CALL MOAN(MSG_NOSTARTTEXT)
+	   CALL LEARN(MSG_STARTTEXT)
+	   GOTO 999
+	ENDIF
+	COIPAK(PAKFC) = CONFC
+C
+C set the GT
+	COIPAK(PAKGT) = FRTGT
+C
+C We don't have a segment for this feature yet
+400	COIPAK(PAKSEG) = 0
+C
+C Take ACs and TCs from current attribute set
+	CONTC = -1
+	CONAC = -1
+C
+C set up an CONTH entry
+	CONTH=0				! presently only valid for texts
+C
+	COIPAK(PAKFLG) = 0		! default flag
+C
+C Set up an FS entry
+	CONFS(1) = COIPAK(PAKFC)
+	CONFS(2) = 0
+C
+C set appropriate process code
+	IF (CONGEN.AND..NOT.CONRECT) THEN
+	   IF (CONCIR) THEN
+	      IF (CONCLO) THEN
+		 CONFS(3) = WHOLE_CIRCLE
+	      ELSE
+		 CONFS(3) = PART_CIRCLE
+	      ENDIF
+	   ELSE
+	      IF (CONCLO) THEN
+		 CONFS(3) = WHOLE_POLYGON
+	      ELSE
+		 CONFS(3) = PART_POLYGON
+	      ENDIF
+	   ENDIF
+	ELSEIF (CONGEN.AND.CONRECT) THEN
+	   CONFS(3) = WHOLE_RECTANGLE
+	ELSE
+	   CONFS(3) = 0
+	ENDIF
+	CONFS(4) = 0
+	IF (COIPAK(PAKGT).GE.UNOTYP.AND.COIPAK(PAKGT).LE.SCATYP) THEN
+C
+C constructing symbol
+	   CONFS(3)=CONFS(3).OR.'4000'X
+	   CALL STSYTX(DEL,NEWCON)
+	ELSE
+C
+C not symbol or text, so must be starting a linear feature
+	   CONIND = 0			! no points in CONXY
+	   CONFST = .TRUE.		! nothing ADCORDed yet
+	   CONLEN = 0.0			! length is zero
+	   IF (COIPAK(PAKGT).EQ.STRTYP) THEN	! get size into COIAUX
+	      IF ( GENAUX(
+     &	CONIND,CONXY,COIAUX,COIDSC,COIANG,CONFS,COIPAK,CONFS)) GOTO 999
+	   ENDIF
+	ENDIF
+	GOTO 998
+C
+C here to add a point to the current construction, or remove one
+500	CONTINUE
+C
+C Are we removing a point?
+	IF (ACTION.EQ.START_REMOVE) THEN
+	   IF (CONIND.GT.1) THEN
+	      CONIND = CONIND-1		! remove point
+	      CONLEN = CONLEN-LENGTH(2,CONXY(1,CONIND))
+C
+C stop inserting, if just removed the point put in with INSERT
+	      IF (INSRTING.AND.(CONIND.LE.FIRST_INSERT+1)) THEN
+	         INSRTING = .FALSE.
+	      ENDIF
+	      GOTO 998
+	   ELSE
+	      CALL MOAN(MSG_CANTREMOVE)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C if adding a point, clear JUSTIN flag
+	IF (ACTION.EQ.START_ADD) JUSTIN=.FALSE.
+C
+C If adding a point, check for duplicated points
+	IF (ACTION .EQ. START_ADD .AND. CONIND .GT. 0) THEN
+	   IF (ZOPT) CALL GETZ_LIST(LASTZ,CONLST(CONIND))
+C
+C Zs don't matter, if not ZOPT
+	   IF (CHKDUPL(CONXY(1,CONIND),CSXY,LASTZ,CSZI)) THEN
+	      CALL MOAN(MSG_DUPLPOINT)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C Is the buffer full, or is it end - if so then flush some points
+	IF (CONIND.EQ.CONFUL.OR.ACTION.GE.START_END) THEN
+C
+C if nothing ADCORDed so far, then start the feature
+	   IF (CONFST.AND.ACTION.LT.START_BRIDGE) THEN
+	      IF (CONFSN.NE.0) THEN
+	         COIPAK(PAKFSN) = CONFSN	! from SET FSN
+	         IF (CONFSN.GT.MAXNF(COIPAK(PAKMAP)))
+     &					MAXNF(COIPAK(PAKMAP)) = CONFSN
+	      ELSE
+	         COIPAK(PAKFSN) = GENNF(COIPAK)	! generate an FSN
+	      ENDIF
+C
+	      IF (STRTFT(COIPAK,CONTC,CONFS,CONAC,CONTH)) THEN
+	         CALL COLAPS(202)
+	         GOTO 999
+	      ENDIF
+C
+C turn off output drawing if feature not being ended now
+	      IF (ACTION.EQ.START_ADD) OIDRAW = .FALSE.	      
+	   ENDIF
+C
+C Generate constructed feature points and add them to the output item
+	   IF (CONGEN) THEN
+	      IF (.NOT.CONRECT) THEN
+	         CALL STCIRC(COIAUX,.FALSE.,COIC_DEFINED,COICOEFFS)
+	      ELSE
+	         CALL STRECT(CONXY,COIC_DEFINED,COICOEFFS)
+	      ENDIF
+C
+C Add line to the output item
+	   ELSE
+	      CALL ADDLIN(ACTION)
+	   ENDIF
+C
+	   IF (ACTION.GE.START_END) THEN	! end
+C
+C NB CONFST=.TRUE. prevents ABACON from abandoning the construction
+	      CONFST = .TRUE.
+	      GOTO 998			! that's all
+	   ENDIF
+C
+C Shift down remaining points
+	   DO 600 I=CONFLS+1,CONIND
+	      CONXY(1,I-CONFLS) = CONXY(1,I)
+	      CONXY(2,I-CONFLS) = CONXY(2,I)
+	      CONFLG(I-CONFLS) = CONFLG(I)
+	      CONZI(I-CONFLS) = CONZI(I)
+	      CALL DELDEF(CONLST(I-CONFLS))
+	      CONLST(I-CONFLS) = CONLST(I)
+	      CONLST(I) = 0
+600	   CONTINUE
+C
+	   CONIND = CONIND-CONFLS	! new fill index
+	   IF (INSRTING) FIRST_INSERT = FIRST_INSERT-CONFLS
+	   CONFST = .FALSE.		! part feature now in IFF file
+	ENDIF
+C
+C add new point
+	IF (CONFST) THEN		! on first buffer
+	   IF (CONIND.EQ.0) THEN
+	      COTHIS(1,1) = CSXY(1)	! remember first point
+	      COTHIS(2,1) = CSXY(2)
+	      CALL PUTLNG(CSXY(3),COTHISZ(1))
+	   ELSEIF (CONIND.EQ.1) THEN
+	      COTHIS(1,2) = CSXY(1)	! and second point
+	      COTHIS(2,2) = CSXY(2)
+	      CALL PUTLNG(CSXY(3),COTHISZ(2))
+	   ENDIF
+	ENDIF
+	CONIND = CONIND+1
+	CONXY(1,CONIND) = CSXY(1)
+	CONXY(2,CONIND) = CSXY(2)
+	CONFLG(CONIND) = FLAG
+	CONZI(CONIND) = CSZI
+	IF (CONIND.GT.1) CONLEN = CONLEN + LENGTH(2,CONXY(1,CONIND-1))
+C
+C copy list of attributes from attribute set
+	IF (.NOT.COPYDEF(CONDEF,CONLST(CONIND))) GOTO 999
+C
+C use Z position of cursor if Z enabled, and there is a value
+	IF (ZOPT.AND.CSZI.NE.IFF_ABSENT) THEN
+	   IF (.NOT.ADDDEF(CONLST(CONIND),IFF_C_Z,CSXY(3),DUM)) GOTO 999
+	ENDIF
+C
+C got enough data for any intersections?
+	IF (INSRTING.AND.CONIND.EQ.(FIRST_INSERT+3)) CALL INSERT
+C
+C and lose any cursor constraint
+	IF (ROLING) CALL FRECUR
+C
+C that's all for now
+998	STRTER = .FALSE.		! succeeded
+C
+999	RETURN
+	END

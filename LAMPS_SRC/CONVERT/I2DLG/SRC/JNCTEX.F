@@ -1,26 +1,7 @@
-C
-C * This file is part of the LAMPS distribution, released as a software
-C * preservation project to archive digital history for future historians.
-C * Copyright (c) 1980-2002 Laser-Scan Ltd, 1Spatial Group Ltd
-C *
-C * Timestamp of this file for the 2002 release was: 1992-01-20 12:17:50.000000000 +0000
-C *
-C * This program is free software: you can redistribute it and/or modify
-C * it under the terms of the GNU General Public License as published by
-C * the Free Software Foundation, version 3.
-C *
-C * This program is distributed in the hope that it will be useful, but
-C * WITHOUT ANY WARRANTY; without even the implied warranty of
-C * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-C * General Public License for more details.
-C *
-C * You should have received a copy of the GNU General Public License
-C * along with this program. If not, see http://www.gnu.org/licenses/.
-C
 	LOGICAL FUNCTION JNCTEX( RPOSX, RPOSY, NARMS)
 C
 C
-CDEC$	IDENT	'19JA92'
+CDEC$	IDENT	'31OC89'
 C
 C 	Copyright Laser-Scan Laboratories Ltd.,England
 C
@@ -50,7 +31,6 @@ C Workspace:
 	INTEGER*2	NPTS
 	INTEGER*2	IENDS
 C
-	REAL		NODE_ST(2) ! node coordinate
 	INTEGER		SAVE_LPOSH
 	INTEGER		SAVE_OFFSET
 	INTEGER		LSTRP
@@ -120,13 +100,9 @@ C
 C
 C Haven't found any point features so count this node
 C
-C ... and save coords
-	   CALL EIHRR(NODE_ST,2,1)
 	   NODE_COUNT = NODE_COUNT + 1
 	   NODE_POS(NODE_COUNT,1) = SAVE_LPOSH
 	   NODE_POS(NODE_COUNT,2) = SAVE_OFFSET
-	   NODE_COORD(1,NODE_COUNT) = NODE_ST(1) 
-           NODE_COORD(2,NODE_COUNT) = NODE_ST(2) 
 C
 	ENDIF
 C

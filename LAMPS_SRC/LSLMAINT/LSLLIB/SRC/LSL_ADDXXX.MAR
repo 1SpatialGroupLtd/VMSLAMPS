@@ -1,0 +1,121 @@
+	.TITLE	LSL_ADDXXX
+	.IDENT	/31OC86/
+;
+; Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+;
+; Author TJ Ibbs, 30 October 1986 (modified from VIOTTW.MAR)
+;
+; two routines are supplied
+;
+;	ok = LSL_ADDSTR( [string], [start], [end], [ierr] )
+;	ok = LSL_ADDBUF( [buffer], [nchs], [start], [end], [ierr] )
+;
+; both output (the relevant part of) the given text surrounded
+; by "/" characters
+;
+; if the text is not specified, then it is taken from /TXTC/
+;
+; This module MUST be assembled with TXTC.MAR and LSLLIBMSG.MAR
+;
+;*******************************************************************************
+
+	DATA_PSECT	LSL
+
+SLASH = 92	; ASCII "\" character
+
+LSL_ADDDSC:				; string descriptor
+LSL_ADDLEN:	.BLKW	1		; string length
+		.BYTE	0,0		; class & type
+LSL_ADDPTR:	.BLKL	1		; pointer to buffer (unset)
+
+SLASH_DSC:				; descriptor for VIO$PUT_OUTPUT
+SLASH_LEN:	.BLKW	  1		; string length
+		.BYTE	  0,0		; class and type
+SLASH_PTR:	.ADDRESS  SLASH_BUF	; address of buffer
+                                     
+SLASH_BUF:	.BYTE	SLASH		; "\" at start of string
+SLASH_RST:	.BLKB	MAX_TXTLIM+1	; rest of string - allow room for
+					; another backslash at the end
+
+ONE:		.LONG	1		; the constant value "1"
+;
+;*******************************************************************************
+; Registers
+;
+;	R2-R5	trampled on by MOVC3 (nb R3 = address of one byte beyond
+;					      the destination string)
+;	R6	the address of the string to be output
+;	R7	the start offset in that string
+;	R8	the end offset
+;	R11	used by VIO$GNA for argument count
+;
+
+	CODE_PSECT	LSL
+
+	.ENTRY	LSL_ADDSTR,^M<R2,R3,R4,R5,R6,R7,R8,R11>
+	JSB	VIO$1ST			; basic init for arg handling
+	MOVAL	TXTDSC,R0		; default string is in /TXTC/
+	JSB	VIO$GNA			; first arg is string to write
+	MOVL	R0,R6			; arg is string descriptor address
+	BRB	GOT_DSC			; jump to common code
+
+	.ENTRY	LSL_ADDBUF,^M<R2,R3,R4,R5,R6,R7,R8,R11>
+	JSB	VIO$1ST			; basic init for arg handling
+	MOVAB	TXTBUF,R0		; default buffer is TXTBUF
+	JSB	VIO$GNA			; first arg is buffer to write 
+	MOVL	R0,LSL_ADDPTR		; set buffer address
+	MOVAW	TXTPTR,R0		; default for second arg is TXTPTR
+	JSB	VIO$GNA			; get second arg - length of buffer
+	MOVW	(R0),LSL_ADDLEN		; set it in the descriptor
+	MOVAL	LSL_ADDDSC,R6		; use our manufactured descriptor
+;
+; so we come here with the address of our descriptor in R7
+; - we may have to extract part of our string
+;
+GOT_DSC:
+	MOVAL	ONE,R0			; default start = 1
+	JSB	VIO$GNA			; get the argument (if any)
+	CVTWL	(R0),R7			; and this is the start offset
+	DECW	R7			; reduce it from 1... to 0...
+;
+	MOVL	R6,R0			; address of length of string
+	JSB	VIO$GNA			; get the argument (if any)
+	CVTWL	(R0),R8			; and this is the end offset
+;
+	SUBL2	R7,R8	    		; length := end - start
+;
+; so copy the relevant part of the string over into SLASH_BUF
+;	1) we are copying R8 characters
+;	2) we add 4 to R6, which leaves us pointing to the address
+;	   of the start of the buffer. We then index that by R7 bytes,
+;	   which leaves us pointing to the address of the start of the
+;	   part we want to copy
+;	3) we are copying to the buffer at SLASH_RST
+;
+	MOVC3	R8, @B^4(R6)[R7], SLASH_RST
+;
+; conveniently, R3 is returned with the address of the character after
+; the last one we've written, which is just where we want to put our
+; closing "\"
+;
+	MOVB	#SLASH,(R3)		; set the next character
+	ADDW3	#2,R8,SLASH_LEN		; and set the string length
+;
+; so we can now output our finished string
+;
+	PUSHAL	SLASH_DSC		; put the string address on the stack
+	CALLS	#1,G^VIO$PUT_OUTPUT	; print it
+	BLBC	R0,99$			; deal with error separately
+	MOVL	#LSL__NORMAL,R0		; success
+10$:	RET				; return code from VIO$ call
+
+; here with error in write     
+99$:	MOVL	R0,R2			; save against GNA
+	BSBW	VIO$GNA			; is there an IERR argument?
+	BCS	98$			; branch if no IERR
+	MOVL	R2,(R0)			; return actual error
+98$:	MOVL	#LSL__SYSERR,R0		; system error
+	BRB	10$			; back for return
+
+	.PSECT
+	.END

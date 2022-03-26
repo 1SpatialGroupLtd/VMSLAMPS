@@ -1,0 +1,3423 @@
+C	=================
+C
+	SUBROUTINE	GOPKS(ERRFIL)
+C
+**	MODULE	GOPKS
+**	IDENT	19DE01
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+	IMPLICIT NONE
+C
+	EXTERNAL GKSBLK		! ensure that block data is linked in
+C
+C OPEN GKS	- includes initialising of data structures and variables
+C
+C Arguments:
+	INTEGER	ERRFIL			! error message file
+C
+	EXTERNAL GUIS_TMRAST
+C
+	INCLUDE	'($SSDEF)'
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/			! GKS data structures
+***	COMMON/GKSESL/			! GKS error state list
+***	COMMON/GKSRF/			! refresh stuff
+***	COMMON/GFABUF/
+C
+C workspace
+	INTEGER	FUNC
+	CHARACTER*20 TRAN
+	INTEGER	COND
+	BYTE	CH
+	INTEGER	CLASS
+	INTEGER	XIMAGE_ADDR
+	RECORD/X$VISUAL_INFO/VISUAL_INFO
+	INTEGER	DISPLAY
+	INTEGER VALUE
+C
+C functions called
+	INTEGER	TRNALL
+	INTEGER	RDLONG
+	INTEGER	LIB$GET_VM
+	LOGICAL	RDCHS
+	INTEGER	GKS_COUNT_BITS
+	INTEGER XOpenDisplay
+	INTEGER	XCreateImage
+	LOGICAL textren_initialise
+C
+C Set up initial indices and  default modes
+	GKSERR 	= 0		! no errors yet
+	TRNCUR	= 1		! use normalisation transformation 0
+	PLIND	= 1		! use polyline bundle table 1
+	ENCLIP	= .TRUE.	! enable clipping
+	CALL LIB$GET_EF(TMREFN)		! get refresh timer flag
+	TMRADR = %LOC(GUIS_TMRAST)	! set AST location
+C
+C Always initialise text rendering, if required. This only needs
+C to be done once (not per display like display postsrcipt). It
+C is closed down in GCLKS
+C
+	VALUE = 0	
+	XUSE_TEXT_RENDER = .FALSE.
+	IF (TRNALL('LSL$DECW_TEXT_RENDER',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),20)
+	   IF (RDLONG(VALUE)) GOTO 50
+	ENDIF
+	IF (VALUE.NE.1) GOTO 50
+C     
+C to use text rendering there must be a fonts file
+C
+	IF (TRNALL('LSL$DPS_FONTLIST',TRAN).NE.SS$_NOLOGNAM) THEN
+	   IF (TEXTREN_INITIALISE().NE.1) GOTO 50
+	   CALL GKS_SET_DPS_FONT(-1,'LSL$DPS_FONTLIST')
+	   XUSE_TEXT_RENDER = .TRUE.
+	   XTEXT_RENDER_HGT = -1.0
+	   XTEXT_RENDER_ANG = -1.0
+ 	ELSE
+	   CALL WRITEF('To use text rendering, a fontlist file is required')
+	ENDIF
+C
+50	CONTINUE
+C
+C initialise DECwindows toolkit
+	IF (XTOP.NE.0) GOTO 9999	! already done
+C
+C check for if opening the display is going to fail anyway
+C (similar to code in MOTIF:TSTWK in LITES2)
+C
+C check if this computer is a workstation
+	IF (TRNALL('DECW$DISPLAY',TRAN).EQ.SS$_NOLOGNAM) GOTO 9999
+C
+C logical name exists. Try a trial XOpenDisplay
+	DISPLAY = XOpenDisplay(%VAL(0))
+	IF (DISPLAY.EQ.0) GOTO 9999
+C
+C and if it succeeded, the close it again
+	CALL XCloseDisplay(%VAL(DISPLAY))
+C
+	CALL GOPKS_C(XTOP,XDISPLAY,XSCREEN)
+C
+C get atoms for later use
+	XATOM_WM_PROTOCOLS = X$INTERN_ATOM(XDISPLAY,
+     &				'WM_PROTOCOLS',.FALSE.)
+	XATOM_WM_TAKE_FOCUS = X$INTERN_ATOM(XDISPLAY,
+     &				'WM_TAKE_FOCUS',.FALSE.)
+	XCURSOR = 0
+C
+	XDMAP = X$DEFAULT_COLORMAP_OF_SCREEN(XSCREEN)
+	CALL X$DEFAULT_VISUAL_OF_SCREEN(XSCREEN,XVISUAL)
+	XDEFAULT = .TRUE.	! assume using default
+C
+C see if we want a non-default visual - logical name LSL$DECW_VISUAL_INFO
+C may translate to a string with two integer depth, class (optionally
+C comma separated) - depth is the desired depth in bits, and class is the
+C visual class in the range 0-5.
+C (This stuff does not actually work because one cannot change a window's
+C  colormap to one with an incompatible visual - the window would have to
+C  be created with it in the first place - which is difficult because the
+C  toolkit creates the window. The code has been left in anyway.)
+	IF (TRNALL('LSL$DECW_VISUAL_INFO',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),200)
+	   IF (RDLONG(XDEPTH)) GOTO 100
+	   IF (RDCHS(CH)) GOTO 100
+	   IF (CH.NE.',') CALL BSCH
+	   IF (RDLONG(CLASS)) GOTO 100
+	   COND = X$MATCH_VISUAL_INFO(XDISPLAY,X$DEFAULT_SCREEN(XDISPLAY),
+     &			XDEPTH,CLASS,VISUAL_INFO)
+	   IF (.NOT.COND) GOTO 100
+C
+C found a visual - first check if it is in any case the default one - if not
+C then move it from the visual_info structure to the
+C actual visual structure (lack of C pointers here!)
+	   IF ( VISUAL_INFO.X$L_VISL_VISUAL_ID .EQ. 
+     &		    XVISUAL.X$L_VISU_VISUALID ) GOTO 100	! default
+	   CALL VIOMV3(%VAL(VISUAL_INFO.X$A_VISL_VISUAL),X$C_VISU_SIZE,
+     &			XVISUAL)
+	   XDEFAULT = .FALSE.
+	   GOTO 200
+	ENDIF
+C
+C no fancy visual - so use the default one
+100	XDEPTH = X$DEFAULT_DEPTH_OF_SCREEN(XSCREEN)
+C
+C check if the visual is one of the types with a decomposed colour map
+200	XSTATIC = .FALSE.
+	XDECOMP = .FALSE.
+	XRGBDEPTH = XDEPTH
+	XRGBMASK(1) = 2**XDEPTH - 1
+	IF (XVISUAL.X$L_VISU_CLASS .NE. X$C_GRAY_SCALE .AND.
+     &	    XVISUAL.X$L_VISU_CLASS .NE. X$C_PSEUDO_COLOR .AND.
+     &	    XVISUAL.X$L_VISU_CLASS .NE. X$C_DIRECT_COLOR) THEN
+	   XSTATIC = .TRUE.
+	ENDIF
+	IF (XVISUAL.X$L_VISU_CLASS .EQ. X$C_DIRECT_COLOR .OR.
+     &	    XVISUAL.X$L_VISU_CLASS .EQ. X$C_TRUE_COLOR ) THEN
+	   XDECOMP = .TRUE.
+	   XRGBMASK(1) = XVISUAL.X$L_VISU_RED_MASK
+	   XRGBMASK(2) = XVISUAL.X$L_VISU_GREEN_MASK
+	   XRGBMASK(3) = XVISUAL.X$L_VISU_BLUE_MASK
+	   XRGBDEPTH = MIN(
+     &		GKS_COUNT_BITS(XRGBMASK(1)),
+     &		GKS_COUNT_BITS(XRGBMASK(2)),
+     &		GKS_COUNT_BITS(XRGBMASK(3)) )
+	ENDIF
+C
+C Get an image structure
+C DEC seem to have messed up the Fortran binding in Motif 2.1 - allocates
+C its own image, and does not return it to us. Use C instead, but copy the
+C result into our own structure, for ease of use.
+CCC	CALL X$CREATE_IMAGE(XDISPLAY,XVISUAL,
+CCC     &		XDEPTH,X$C_Z_PIXMAP,0,%VAL(0),0,0,8,0,XIMAGE)
+	XIMAGE_ADDR = XCreateImage(%VAL(XDISPLAY),XVISUAL,
+     &		%VAL(XDEPTH),%VAL(X$C_Z_PIXMAP),%VAL(0),%VAL(0),
+     &		%VAL(0),%VAL(0),%VAL(8),%VAL(0))
+	CALL VIOMV3(%VAL(XIMAGE_ADDR),X$C_IMAG_SIZE,XIMAGE)
+	CALL XDestroyImage(%VAL(XIMAGE_ADDR))
+C
+C these two defaulted OK on VAX X-servers, but on other platforms
+C expecting MSB_FIRST, bitmaps would draw incorrectly
+	XIMAGE.X$L_IMAG_BYTE_ORDER = X$C_LSB_FIRST
+	XIMAGE.X$L_IMAG_BITMAP_BIT_ORDER = X$C_LSB_FIRST
+	CALL GOPKS2_C(XIMAGE)
+C
+C
+C See whether synchronize wanted
+	IF (TRNALL('LSL$DECW_SYNC',TRAN).NE.SS$_NOLOGNAM
+     &			) CALL X$SYNCHRONIZE(XDISPLAY,1,FUNC)
+C
+C Update screen after how many vectors?
+	XLMAX = 1000		! default
+	IF (TRNALL('LSL$DECW_UPDATE',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),20)
+	   IF (RDLONG(XLMAX)) XLMAX = 1000
+	ENDIF
+C
+C Set drawing mode (experimental)
+C  - either perform all drawing to pixmap and copy entire pixmap to
+C    screen whenever update required
+C    Always draw whole screen after a series of exposures
+C  - draw to both pixmap and screen, pixmap only copied for exposure
+C    events, and then just copy area required for each event.
+	XMODE = 0
+	IF (TRNALL('LSL$DECW_MODE',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),20)
+	   IF (RDLONG(XMODE)) XMODE = 0
+	ENDIF
+	XMODE_SAV = XMODE
+C
+C allocate an X drawing buffer
+C assume same as maximum number of fill area points to be used
+	XBUFMAX = DEFAULT_GFAMAX
+	IF (TRNALL('LSL$FILL_POINTSMAX',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),20)
+	   IF (RDLONG(XBUFMAX)) XBUFMAX = DEFAULT_GFAMAX
+	   IF (.NOT.RDCHS(CH)) XBUFMAX = DEFAULT_GFAMAX
+	   XBUFMAX = XBUFMAX + 1 		! one more than the user expected!!!
+	ENDIF
+C
+C don't allow too few points
+	XBUFMAX = MAX(100,XBUFMAX)
+C
+C Don't allow more than X-server does
+C the -4 has been determined somewhat by experiment
+	XBUFMAX = MIN(XBUFMAX,X$MAX_REQUEST_SIZE(XDISPLAY)-4)
+	COND = LIB$GET_VM(XBUFMAX*4,XBUF_ADDR,FILL_ZONE)
+	IF (.NOT.COND) THEN
+	   XBUFMAX = 0
+	   CALL TTWSTR(
+     &	'GKS GOPWK - Failed to get memory for X drawing buffer')
+	ENDIF
+C
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GCLKS
+C
+**	MODULE	GCLKS
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C CLOSE GKS	
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSESL/
+***	COMMON/GKSRF/
+***	COMMON/GKSDECW/
+C
+C Functions called
+	INTEGER	textren_finish
+C
+C Local variables
+	INTEGER	RESULT
+C
+C close down text rendering
+C
+	IF (XUSE_TEXT_RENDER) THEN
+	   CALL GKS_C_FREE_FONTS
+	   RESULT = textren_finish()
+	ENDIF
+	GKSERR	= 0			! no errors
+	CALL LIB$FREE_EF(TMREFN)	! free refresh timer flag
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GUIS_SET_INFO(
+     &		DEV,WTYPE,COLS,SIZXY,POSXY,BORDER,TITLE,TITLEN)
+C
+**	MODULE	GUIS_SET_INFO
+**	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C set details of workstation about to be opened
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+	INTEGER	DEV			! workstation number
+	INTEGER	WTYPE			! workstation type
+	INTEGER	COLS			! number of colours
+	REAL	SIZXY(2)		! fractional size
+	REAL	POSXY(2)		! fractional position
+	LOGICAL	BORDER			! with border?
+	CHARACTER*(*) TITLE		! display title
+	INTEGER	TITLEN
+C
+	IF (DEV.LE.0.OR.DEV.GT.WSMAX) GOTO 999
+C
+	WORK_TYPE(DEV) = WTYPE
+	WORK_COLS(DEV) = COLS
+	WORK_SIZE(1,DEV) = SIZXY(1)
+	WORK_SIZE(2,DEV) = SIZXY(2)
+	WORK_POS(1,DEV) = POSXY(1)
+	WORK_POS(2,DEV) = POSXY(2)
+	WORK_BORDER(DEV) = BORDER
+	IF (TITLEN.LE.0) THEN
+	   WORK_TITLEN(DEV) = 1		! avoid problems later
+	   WORK_TITLE(DEV) = ' '
+	ELSE
+	   WORK_TITLEN(DEV) = TITLEN
+	   WORK_TITLE(DEV) = TITLE
+	ENDIF
+C
+999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GUIS_GET_INFO(
+     &		DEV,WTYPE,TITLE,TITLEN,SIZXY,POSXY,BORDER,HADCOL)
+C
+**	MODULE	GUIS_GET_INFO
+**	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C get details of workstation about to be opened
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'($SSDEF)'
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+	INTEGER	DEV			! device number
+	INTEGER	WTYPE			! workstation type
+	CHARACTER*(*) TITLE		! display title
+	INTEGER	TITLEN
+	REAL	SIZXY(2)		! fractional size
+	REAL	POSXY(2)		! fractional position
+	LOGICAL	BORDER			! with border?
+	LOGICAL	HADCOL			! explicit number of colours?
+C
+C functions called
+	INTEGER	TRNALL		! LSLLIB, translate logical name
+	INTEGER	RDLONG		! LSLLIB, read long integer
+C
+C Local variables
+	INTEGER		I
+	CHARACTER*4	TRAN
+	INTEGER		COLS
+C
+C defaults
+	TITLE = 'Graphics Window'
+	TITLEN = 15
+	SIZXY(1) = 1.0
+	SIZXY(2) = 1.0
+	POSXY(1) = 0.0
+	POSXY(2) = 0.0
+	BORDER = .TRUE.
+	COLS = 0		! flag value
+	HADCOL = .FALSE.	! not had explicit number of colours
+C
+C look up workstation type in table
+	DO 1 I=1,WSMAX
+	   IF (WTYPE.EQ.WORK_TYPE(I)) GOTO 2
+1	CONTINUE
+	GOTO 3
+C
+2	TITLE = WORK_TITLE(I)
+	TITLEN = WORK_TITLEN(I)
+	SIZXY(1) = WORK_SIZE(1,I)
+	SIZXY(2) = WORK_SIZE(2,I)
+	POSXY(1) = WORK_POS(1,I)
+	POSXY(2) = WORK_POS(2,I)
+	BORDER = WORK_BORDER(I)
+	COLS = WORK_COLS(I)
+	IF (COLS.GT.0) HADCOL = .TRUE.		! had explicit number of colours
+C
+C Determine number of colours available
+3	MAXCOL(DEV) = XRGBDEPTH
+	MAXCOL(DEV) = 2**MAXCOL(DEV)
+	USED_PLANES(DEV) = MAXCOL(DEV)-1	! mask for all planes
+C
+	IF (HADCOL) THEN
+	   MAXCOL(DEV) = MIN(MAXCOL(DEV),COLS)-1
+	   GOTO 14
+	ENDIF
+C
+C Create colour map
+C For an 8 or 12 plane system, then if WTYPE=7000, use colours 0-249 or
+C 0-4079 (leaving the reserved colours alone), unless logical name
+C LSL$DECW_MAX_COLOUR is set to some other maximum number of colours,
+C otherwise use 7 or 11 planes.
+	COLS = -1
+	I = TRNALL('LSL$DECW_MAX_COLOUR',TRAN)
+	IF (.NOT.I) I = TRNALL('LSL$UIS_MAX_COLOUR',TRAN)
+	IF (I) THEN
+	   CALL SETAUX(%REF(TRAN),4)
+	   IF (.NOT.RDLONG(I)) COLS = I
+	ENDIF
+C
+	IF (MAXCOL(DEV).GE.4096.AND.
+     &			(WTYPE.EQ.7000.OR.WKIDS(DEV).GT.2)) THEN
+	   IF (WKIDS(DEV).GT.2) GOTO 8
+	   IF (COLS.GT.4096.OR.COLS.LT.2) GOTO 8
+	   MAXCOL(DEV) = COLS-1
+	   HADCOL = .TRUE.		! had explicit number of colours
+	   GOTO 9
+8	   MAXCOL(DEV) = 4079		! allow 0-4079 (12 planes)
+9	   CONTINUE
+	ELSEIF (MAXCOL(DEV).GE.2048) THEN
+	   MAXCOL(DEV) = 2047		! allow 0-2047 (11 planes)
+	ELSEIF (MAXCOL(DEV).GE.256.AND.
+     &			(WTYPE.EQ.7000.OR.WKIDS(DEV).GT.2)) THEN
+	   IF (WKIDS(DEV).GT.2) GOTO 10
+	   IF (COLS.GT.256.OR.COLS.LT.2) GOTO 10
+	   MAXCOL(DEV) = COLS-1
+	   HADCOL = .TRUE.		! had explicit number of colours
+	   GOTO 11
+10	   MAXCOL(DEV) = 239		! allow 0-239 (8 planes)
+11	   CONTINUE
+	ELSEIF (MAXCOL(DEV).GE.128) THEN
+	   MAXCOL(DEV) = 127		! allow 0-127 (7 planes)
+C
+C For a 4 plane system, then if WTYPE=7000, use colours 0-15
+C unless logical name LSL$DECW_MAX_COLOUR
+C is set to some other maximum number of colours,
+	ELSEIF (MAXCOL(DEV).GE.16.AND.
+     &			(WTYPE.EQ.7000.OR.WKIDS(DEV).GT.2)) THEN
+	   IF (WKIDS(DEV).GT.2) GOTO 12
+	   IF (COLS.GT.16.OR.COLS.LT.2) GOTO 12
+	   MAXCOL(DEV) = COLS-1
+	   HADCOL = .TRUE.		! had explicit number of colours
+	   GOTO 13
+12	   MAXCOL(DEV) = 15		! allow 0-15 (4 planes)
+13	   CONTINUE
+	ELSEIF (MAXCOL(DEV).GE.8) THEN	! 4 plane system
+	   MAXCOL(DEV) = 7		! allow 0-7
+	ELSEIF (MAXCOL(DEV).GE.4) THEN
+	   MAXCOL(DEV) = 3
+	ELSE				! mono system
+	   MAXCOL(DEV) = 1		! allow 0-1
+	ENDIF
+C
+14	IF (USED_PLANES(DEV).LT.2*MAXCOL(DEV)) GOTO 15
+	USED_PLANES(DEV) = USED_PLANES(DEV)/2
+	GOTO 14
+C
+15	HWFILL = .TRUE.
+	IF (TRNALL('LSL$DECW_HW_FILL',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),4)
+	   IF (.NOT.RDLONG(I)) THEN
+	      IF (I.EQ.0) HWFILL = .FALSE.
+	   ENDIF
+	ENDIF
+	XINVERT(DEV) = .FALSE.
+	IF (TRNALL('LSL$DECW_INVERT',TRAN).NE.SS$_NOLOGNAM) THEN
+	   XINVERT(DEV) = .TRUE.
+	ENDIF
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GOPWK(WKID,CONID,WTYPE)
+C
+**	MODULE	GOPWK
+**	IDENT	28NO94
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-Jul-1983
+C Add initialise fill area update		TJI	27-Nov-1984
+C Add ability to o/p UIS file 			JHR	28-Sep-1988
+C  (ie the display-list meta-file)
+C
+C OPEN WORKSTATION   - sets up World Coordinates and Normalised Device
+C			  Coordinates to be 1 metre on the film with the
+C			  origin at the bottom left hand corner
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CONID			! connection-identifier
+	INTEGER	WTYPE			! workstation type
+C
+	INCLUDE	'($SSDEF)'
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+CCC
+CCC don't bother to include - we will EXTERNAL any functions as required
+CCC	INCLUDE	'SYS$LIBRARY:XDPS$DPSXCLIENT'
+***	COMMON/GFABUF/
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+***	COMMON/GKSRF/
+C
+C functions
+C the things with no '_' in are from the C binding - have had to use these
+C because of bugs in the Fortran binding
+	INTEGER XDPSCreateContext
+	INTEGER DPSCreateTextContext
+	EXTERNAL DPSDefaultTextBackstop
+	EXTERNAL DPSDefaultErrorProc
+	EXTERNAL GKS_TEXT_BACKSTOP
+	INTEGER	GKS_ALLOC_COLOR_CELLS
+C
+	INTEGER	TRNALL		! LSLLIB, translate logical name
+	INTEGER	RDLONG		! LSLLIB, read long integer
+	INTEGER	fopen		! i.e. C run-time routine
+	INTEGER	LIB$GET_VM
+C
+C Local variables
+	INTEGER	DEV
+	CHARACTER*32	TITLE
+	INTEGER		TITLEN
+	REAL	SIZXY(2),POSXY(2)
+	LOGICAL	BORDER			! with border?
+	INTEGER	PX,PY
+	RECORD/X$SET_WIN_ATTRIBUTES/SWDA
+	INTEGER	MASKS(12)
+	INTEGER I,NRES
+	INTEGER	NPLANES
+	INTEGER	GC_MASK
+	INTEGER	CDEV
+	LOGICAL	CREATED,TRYDEF
+	INTEGER	XCOL
+	LOGICAL	HADCOL			! explicit number of colours?
+	RECORD	/X$STANDARD_COLORMAP/ STANCM,CCUBE
+C
+	EXTERNAL	GKS_XERR	! error handler
+C
+C Since we have allowed GOPKS to complete without error even
+C though the display can't be opened, check here and signal
+C something sensible.
+	IF (XTOP.EQ.0) THEN
+	   CALL TTWSTR('X Toolkit Error: Can''t Open display')
+	   CALL LIB$SIGNAL(%VAL(SS$_NOSUCHDEV))
+	ENDIF
+C
+	AST_ON = AST_ON+1
+	GKSERR	= 0			! no errors
+C
+C find a free device slot to use
+	DO 10 DEV=1,WSMAX
+	   IF (WKIDS(DEV).LT.0) GOTO 20
+10	CONTINUE
+	GOTO 999	! error, no slots
+C
+C initialise lots of things for the device
+20	WKIDS(DEV) = WKID
+	WTYPES(DEV) = WTYPE
+	DEFER(DEV) = GASTI	! deferral mode is At Some TIme
+	REGEN(DEV) = GSUPPD	! implicit regeneration suppressed
+	UPTRN(DEV) = .TRUE.	! update transformation
+	UPLIN(DEV) = .TRUE.	! update polyline attributes
+	UPFA(DEV)  = .TRUE.	! update fill area attributes
+	UPTX(DEV)  = .TRUE.	! update text attributes
+	UPCA(DEV)  = .TRUE.	! update cell array attributes
+	WSWIN(1,DEV) = 0.0
+	WSWIN(2,DEV) = 1.0
+	WSWIN(3,DEV) = 0.0
+	WSWIN(4,DEV) = 1.0
+C should initialise bundle tables - never used
+	CLTYPE(DEV) = 1
+	CLWID(DEV) = -1
+	CCOLI(DEV) = -1
+	CJOIN(DEV) = -1
+	CCAP(DEV) = -1
+	CCHHGT(DEV) = -1.0
+	CCHANG(DEV) = 0.0
+	CCHFNT(DEV) = -1
+	CPCOLI(DEV) = -1
+	CFNTID(DEV) = -1
+	CFASTY(DEV) = GHOLOW
+	CFASTX(DEV) = 1
+	POFF(DEV) = 0
+	PSEL(DEV) = -1	! all bits set
+	PVIS(DEV) = -1	! all bits set
+	PIXROT(DEV) = .FALSE.
+	PACK(DEV) = 8
+	CMASK(DEV) = 0
+	CIMASK(DEV) = 0
+	CPMASK(DEV) = 0
+	CICOLI(DEV) = -1
+	USEPTR(DEV) = 0
+	XLINES(DEV) = 0
+	XUPTIM(1,DEV) = 0
+	XUPTIM(2,DEV) = 0
+	XDPSC(DEV) = 0
+	XDPS_DONE(DEV) = .FALSE.
+	XDPS_TEXT_LUN(DEV) = 0
+	XDPS_TEXT_CONTEXT(DEV) = 0
+	XLAST_GC(DEV) = -1
+ 	ICHCOMP = .FALSE.	! assume no composite characters
+C
+	CALL GUIS_GET_INFO(DEV,
+     &		WTYPE,TITLE,TITLEN,SIZXY,POSXY,BORDER,HADCOL)
+C
+C Obtain screen size and RX,RY (number of pixels/cm)
+	DCMAXX(DEV) = FLOAT(X$WIDTH_MM_OF_SCREEN(XSCREEN))
+	DCMAXY(DEV) = FLOAT(X$HEIGHT_MM_OF_SCREEN(XSCREEN))
+	RASTX(DEV) = X$WIDTH_OF_SCREEN(XSCREEN)
+	RASTY(DEV) = X$HEIGHT_OF_SCREEN(XSCREEN)
+C
+C set nominal line width (=pixel size in metres)
+	GNOMLW  = DCMAXX(DEV)/RASTX(DEV)/1000
+	GNOMSEP = GNOMLW
+C
+C set required position
+	IF (BORDER) THEN
+	   RASTX(DEV) = RASTX(DEV)*0.99
+	   RASTY(DEV) = RASTY(DEV)*0.97
+	   PX = RASTX(DEV)*(POSXY(1)+0.005/0.99)
+	   PY = RASTY(DEV)*(1-POSXY(2)-SIZXY(2)+0.025/0.97)
+	ELSE
+	   PX = RASTX(DEV)*(POSXY(1))
+	   PY = RASTY(DEV)*(1-POSXY(2)-SIZXY(2))
+	ENDIF
+C
+	CALL GOPWK_C(DEV,PX,PY,
+     &		     INT(RASTX(DEV)*SIZXY(1)),INT(RASTY(DEV)*SIZXY(2)),
+     &		     %REF(TITLE(:TITLEN)//CHAR(0)),
+     &		     BORDER,.TRUE.,
+     &		     DCB(DEV),XSWINDOW(DEV),
+     &		     WCB(DEV),XWINDOW(DEV))
+
+C
+C Get colour map - LITES2 cooperation - displays 1 and 2 share the
+C identical colour map, and are used for refresh
+	IF (WKID.LE.4) THEN
+	   RFWK(WKID) = .FALSE.
+	   RFCURS(WKID) = .FALSE.
+	   RFCOL(WKID) = -1
+	   RFDEV(WKID) = DEV
+	ENDIF
+C
+	IF (WKID.LE.2) THEN
+	   RFWK(WKID) = .TRUE.
+	   RFCURS(WKID) = .TRUE.
+C
+C check if other one already in use
+	   DO 21 I=1,WSMAX
+	      IF (WKIDS(I).EQ.3-WKID) THEN
+	         MAXCOL(DEV) = MAXCOL(I)
+	         USED_PLANES(DEV) = USED_PLANES(I)
+	         XCMAPS(DEV) = XCMAPS(I)
+	         XBACK(DEV) = XBACK(I)
+	         XOFF(1,DEV) = XOFF(1,I)
+	         XOFF(2,DEV) = XOFF(2,I)
+	         XOFF(3,DEV) = XOFF(3,I)
+	         XMASK(DEV) = XMASK(I)
+	         XMASKS(1,DEV) = XMASKS(1,I)
+	         XMASKS(2,DEV) = XMASKS(2,I)
+	         XMASKS(3,DEV) = XMASKS(3,I)
+	         XINVERT(DEV) = XINVERT(I)
+	         XALLOC_ALL(DEV) = XALLOC_ALL(I)
+	         CALL WRITEF(
+     &		'...device %N sharing colormap with device %N',DEV,I)
+	         GOTO 66
+	      ENDIF
+21	   CONTINUE
+	ENDIF
+C
+C Get slots in colour map
+	CALL LIB$FFC(0,12,USED_PLANES(DEV),NPLANES)
+C
+C Count from first device, not created own colormap yet,
+C and not tried default (pretend tried already if not using default)
+	CDEV = 1
+	CREATED = .FALSE.
+	TRYDEF = .NOT.XDEFAULT
+	XALLOC_ALL(DEV) = .FALSE.
+	CALL WRITEF('...allocating %N plane%m',NPLANES)
+C
+	IF (XSTATIC) THEN
+	   CALL TTWSTR('...device does not support user defined colours')
+	   XCMAPS(DEV) = 0
+	   XBACK(DEV) = 0
+	   IF (XDECOMP) THEN	! must be TRUE_COLOR
+	      CALL LIB$FFS(0,32,XRGBMASK(1),XOFF(1,DEV))
+	      CALL LIB$FFS(0,32,XRGBMASK(2),XOFF(2,DEV))
+	      CALL LIB$FFS(0,32,XRGBMASK(3),XOFF(3,DEV))
+	      XMASKS(1,DEV) = ISHFT( USED_PLANES(DEV), XOFF(1,DEV) )
+	      XMASKS(2,DEV) = ISHFT( USED_PLANES(DEV), XOFF(2,DEV) )
+	      XMASKS(3,DEV) = ISHFT( USED_PLANES(DEV), XOFF(3,DEV) )
+	      XMASK(DEV) = XMASKS(1,DEV).OR.XMASKS(2,DEV).OR.XMASKS(3,DEV)
+	   ELSE
+	      XMASK(DEV) = USED_PLANES(DEV)
+	      XOFF(1,DEV) = 0
+	   ENDIF
+	   GOTO 40
+	ENDIF
+C
+C try to use one of our existing maps
+25	DO 30 I=CDEV,WSMAX
+	   IF (I.NE.DEV.AND.WKIDS(I).GE.0) THEN
+	      XCMAPS(DEV) = XCMAPS(I)
+	      IF (XCMAPS(I).EQ.XDMAP) THEN
+	         IF (TRYDEF) GOTO 30	! tried default already
+	         TRYDEF = .TRUE.
+	         CALL TTWSTR('...trying default colormap')
+	      ELSE
+	         CALL WRITEF(
+     &			'...trying to share colormap with device %N',I)
+	      ENDIF
+	      CDEV = I+1
+	      GOTO 40
+	   ENDIF
+30	CONTINUE
+C
+C try default map if haven't already done so
+	IF (.NOT.TRYDEF) THEN
+	   TRYDEF = .TRUE.
+	   XCMAPS(DEV) = XDMAP
+	   CALL TTWSTR('...trying default colormap')
+	   GOTO 40
+	ENDIF
+C
+C if exhausted existing maps, then create a new one
+	IF (.NOT.CREATED) THEN
+	   CREATED = .TRUE.
+	   CALL TTWSTR('...trying a new colormap')
+C
+C For some reason, we do not seem to be allowed to allocate the
+C entire of a private colour map, except by using ALLOC_ALL in the
+C first place, so treat allocation of all planes as special case.
+	   IF (NPLANES.NE.XRGBDEPTH.OR.XSTATIC) THEN
+	      XCMAPS(DEV) = X$CREATE_COLORMAP(
+     &			XDISPLAY,XSWINDOW(DEV),XVISUAL,X$C_ALLOC_NONE)
+	   ELSE
+C
+C Allocate all the cells initially
+	      XCMAPS(DEV) = X$CREATE_COLORMAP(
+     &			XDISPLAY,XSWINDOW(DEV),XVISUAL,X$C_ALLOC_ALL)
+	      XALLOC_ALL(DEV) = .TRUE.
+	      XBACK(DEV) = 0
+	      IF (XDECOMP) THEN
+	         CALL LIB$FFS(0,32,XRGBMASK(1),XOFF(1,DEV))
+	         CALL LIB$FFS(0,32,XRGBMASK(2),XOFF(2,DEV))
+	         CALL LIB$FFS(0,32,XRGBMASK(3),XOFF(3,DEV))
+	         XMASKS(1,DEV) = ISHFT( USED_PLANES(DEV), XOFF(1,DEV) )
+	         XMASKS(2,DEV) = ISHFT( USED_PLANES(DEV), XOFF(2,DEV) )
+	         XMASKS(3,DEV) = ISHFT( USED_PLANES(DEV), XOFF(3,DEV) )
+	         XMASK(DEV) = XMASKS(1,DEV).OR.XMASKS(2,DEV).OR.XMASKS(3,DEV)
+	      ELSE
+	         XOFF(1,DEV) = 0
+	         XMASK(DEV) = USED_PLANES(DEV)
+	      ENDIF
+	      XINVERT(DEV) = .TRUE.
+C
+C Try to work out how many colours in the default colormap are used -
+C just check what is the first index we can allocate.
+C Use colours backwards if first free is in lower half, forwards
+C if it is in upper half
+C
+	      I = X$ALLOC_COLOR_CELLS(XDISPLAY,XDMAP,.FALSE.,
+     &			MASKS,0,NRES,1)
+	      IF (I) THEN
+	         CALL X$FREE_COLORS(XDISPLAY,XDMAP,NRES,1,0)
+	         IF (ISHFT(NRES.AND.XRGBMASK(1),-XOFF(1,DEV)).LE.
+     &			USED_PLANES(DEV)/2) THEN
+	            IF (XDECOMP) THEN
+	               NRES = MAX(
+     &			ISHFT(NRES.AND.XRGBMASK(1),-XOFF(1,DEV)),
+     &			ISHFT(NRES.AND.XRGBMASK(2),-XOFF(2,DEV)),
+     &			ISHFT(NRES.AND.XRGBMASK(3),-XOFF(3,DEV)) )
+	            ENDIF
+	            IF (.NOT.HADCOL) MAXCOL(DEV) = USED_PLANES(DEV)-NRES
+	         ELSE
+C
+C free colour is in top half, so work forwards from bottom
+	            XINVERT(DEV) = .FALSE.
+	            IF (XDECOMP) THEN
+	               NRES = MIN(
+     &			ISHFT(NRES.AND.XRGBMASK(1),-XOFF(1,DEV)),
+     &			ISHFT(NRES.AND.XRGBMASK(2),-XOFF(2,DEV)),
+     &			ISHFT(NRES.AND.XRGBMASK(3),-XOFF(3,DEV)) )
+	            ENDIF
+	            IF (.NOT.HADCOL) MAXCOL(DEV) = NRES-1
+	         ENDIF
+	      ENDIF
+C
+C read the first 'so many' colours from the default colormap and set
+C them in our map - actually instead just copy all the colours
+C
+	      NRES = USED_PLANES(DEV)+1		! used to do -MAXCOL(DEV)
+	      I = LIB$GET_VM(NRES*X$C_COLR_SIZE,XCOL)
+	      IF (I) THEN
+	         CALL GKS_COPY_COLORS(DEV,NRES,%VAL(XCOL))
+	         CALL LIB$FREE_VM(NRES*X$C_COLR_SIZE,XCOL)
+	         XCOL = 0
+	      ENDIF
+	      GOTO 65
+	   ENDIF
+	   GOTO 40
+	ENDIF
+C
+C everything has failed - panic!!?
+	CALL WRITEF(
+     &		'??? all attempts to allocate %N planes failed',NPLANES)
+	XCMAPS(DEV) = 0
+	XBACK(DEV) = 0
+	IF (XDECOMP) THEN
+	   CALL LIB$FFS(0,32,XRGBMASK(1),XOFF(1,DEV))
+	   CALL LIB$FFS(0,32,XRGBMASK(2),XOFF(2,DEV))
+	   CALL LIB$FFS(0,32,XRGBMASK(3),XOFF(3,DEV))
+	   XMASKS(1,DEV) = ISHFT( USED_PLANES(DEV), XOFF(1,DEV) )
+	   XMASKS(2,DEV) = ISHFT( USED_PLANES(DEV), XOFF(2,DEV) )
+	   XMASKS(3,DEV) = ISHFT( USED_PLANES(DEV), XOFF(3,DEV) )
+	   XMASK(DEV) = XMASKS(1,DEV).OR.XMASKS(2,DEV).OR.XMASKS(3,DEV)
+	ELSE
+	   XOFF(1,DEV) = 0
+	   XMASK(DEV) = USED_PLANES(DEV)
+	ENDIF
+	GOTO 65
+C
+40	IF (XSTATIC) GOTO 65
+C
+C use PLANES rather than CELLS here because I seemed to get back
+C masks with no 'green' bits set from CELLS, and pass 1 instead of
+C .TRUE. since this has been known to cause objections from X-servers
+	IF (XDECOMP) THEN
+	   I = X$ALLOC_COLOR_PLANES(XDISPLAY,XCMAPS(DEV),1,
+     &			XBACK(DEV),1,NPLANES,NPLANES,NPLANES,
+     &			MASKS(1),MASKS(2),MASKS(3))
+	ELSE
+	   I = X$ALLOC_COLOR_CELLS(XDISPLAY,XCMAPS(DEV),1,
+     &			MASKS,NPLANES,XBACK(DEV),1)
+	ENDIF
+	IF (.NOT.I) THEN
+C
+C Can't allocate the planes we wanted, so
+C see whether we can make do with less than the full complement
+C of colours
+C
+	   I = GKS_ALLOC_COLOR_CELLS(DEV,MASKS,HADCOL)
+	   IF (.NOT.I) GOTO 25
+	ENDIF
+C
+C OR the masks together to get a plane mask, and offset of first plane
+C (This first IF is due to the frig of using PLANES above - the testing
+C  of XDECOMP in the ELSE clause is now redundant, but has been left in)
+	IF (XDECOMP) THEN
+	   XMASKS(1,DEV) = MASKS(1)
+	   XMASKS(2,DEV) = MASKS(2)
+	   XMASKS(3,DEV) = MASKS(3)
+	   XMASK(DEV) = XMASKS(1,DEV).OR.XMASKS(2,DEV).OR.XMASKS(3,DEV)
+	ELSE
+	   XMASKS(1,DEV) = 0
+	   XMASKS(2,DEV) = 0
+	   XMASKS(3,DEV) = 0
+	   XMASK(DEV) = 0
+	   DO 60 I=1,NPLANES
+	      IF (XDECOMP) THEN
+	         XMASKS(1,DEV) = XMASKS(1,DEV).OR.(MASKS(I).AND.XRGBMASK(1))
+	         XMASKS(2,DEV) = XMASKS(2,DEV).OR.(MASKS(I).AND.XRGBMASK(2))
+	         XMASKS(3,DEV) = XMASKS(3,DEV).OR.(MASKS(I).AND.XRGBMASK(3))
+	      ELSE
+	         XMASK(DEV) = XMASK(DEV).OR.MASKS(I)
+	      ENDIF
+60	   CONTINUE
+	ENDIF
+	IF (XDECOMP) THEN
+	   XMASK(DEV) = XMASKS(1,DEV).OR.XMASKS(2,DEV).OR.XMASKS(3,DEV)
+	   CALL LIB$FFS(0,32,XMASKS(1,DEV),XOFF(1,DEV))
+	   CALL LIB$FFS(0,32,XMASKS(2,DEV),XOFF(2,DEV))
+	   CALL LIB$FFS(0,32,XMASKS(3,DEV),XOFF(3,DEV))
+	ELSE
+	   CALL LIB$FFS(0,32,XMASK(DEV),XOFF(1,DEV))
+	ENDIF
+C
+65	CALL WRITEF('...using colours 0-%N',MAXCOL(DEV))
+	IF (USEPTR(DEV).NE.0) CALL GKS_PRINT_EXCEPT(DEV,%VAL(USEPTR(DEV)))
+	IF (XDECOMP) THEN
+	   CALL WRITEF(
+     &		'...first allocated colour ''%X''X, plane offsets %N %N %N',
+     &			XBACK(DEV),XOFF(1,DEV),XOFF(2,DEV),XOFF(3,DEV))
+	ELSE
+	   CALL WRITEF('...first allocated colour %N, plane offset %N',
+     &					XBACK(DEV),XOFF(1,DEV))
+	ENDIF
+	IF (XINVERT(DEV)) CALL TTWSTR(
+     &		'...colours used in inverted order')
+C
+66	IF (XCMAPS(DEV).NE.0.AND.XCMAPS(DEV).NE.XDMAP) THEN
+	   SWDA.X$L_SWDA_COLORMAP = XCMAPS(DEV)
+	   GC_MASK = X$M_CW_COLORMAP	! routine modifies it!!
+	   CALL X$CHANGE_WINDOW_ATTRIBUTES(
+     &		XDISPLAY,XSWINDOW(DEV),GC_MASK,SWDA)
+	   GC_MASK = X$M_CW_COLORMAP	! routine modifies it!!
+	   CALL X$CHANGE_WINDOW_ATTRIBUTES(
+     &		XDISPLAY,XWINDOW(DEV),GC_MASK,SWDA)
+	ENDIF
+C
+C assert the colormap for the display
+	IF (XCMAPS(DEV).NE.0) CALL X$INSTALL_COLORMAP(
+     &					XDISPLAY,XCMAPS(DEV))
+C
+C get space for RGB arrays
+	I = LIB$GET_VM((MAXCOL(DEV)+1)*12,RGBPTR(DEV),FILL_ZONE)
+	IF (.NOT.I) THEN
+	   RGBPTR(DEV) = 0
+	   CALL TTWSTR(
+     &	'GKS GOPWK - Failed to get memory for colour array')
+	ENDIF
+	IF (RGBPTR(DEV).NE.0) CALL VIOCLR(
+     &			%VAL(RGBPTR(DEV)),(MAXCOL(DEV)+1)*12)
+C
+	IF (USEPTR(DEV).EQ.0) THEN
+	   I = LIB$GET_VM((MAXCOL(DEV)+1)*4,USEPTR(DEV),FILL_ZONE)
+	   IF (.NOT.I) THEN
+	      USEPTR(DEV) = 0
+	      CALL TTWSTR(
+     &'GKS GOPWK - Failed to get memory for colour usage array')
+	   ENDIF
+	   IF (USEPTR(DEV).NE.0) CALL VIOCLR(
+     &			%VAL(USEPTR(DEV)),(MAXCOL(DEV)+1)*4,-1)
+	ENDIF
+C
+	CALL LSG_SET_LUT(WKID,'LSL$DECW_COLOUR:')! load colour table
+C
+C Check actual size of viewport
+	CALL X$GET_GEOMETRY(
+     &		XDISPLAY,XWINDOW(DEV),,,,RASTX(DEV),RASTY(DEV),I)
+	DCMAXX(DEV) = RASTX(DEV)*GNOMLW
+	DCMAXY(DEV) = RASTY(DEV)*GNOMLW
+C
+C Set workstation viewport to entire area
+	CALL GSWKVP(WKID,0.0,DCMAXX(DEV),0.0,DCMAXY(DEV))
+C
+C Initialise line/area graphical context
+C Not sure if background here is used for anything -
+C n.b. 14SE92 - COPY_INVERTED inverts the background also (for bitmap
+C image) so leave it set to 0 even for 8PLANE operation
+ 	XGCV.X$L_GCVL_BACKGROUND = 0
+	GC_MASK = X$M_GC_BACKGROUND
+	IF (XINVERT(DEV)) THEN
+CCC wrong...   XGCV.X$L_GCVL_BACKGROUND = XMASK(DEV)	! eg 255
+	   XGCV.X$L_GCVL_FUNCTION = X$C_GX_COPY_INVERTED
+	   GC_MASK = GC_MASK.OR.X$M_GC_FUNCTION
+	ENDIF
+	XGC(1,DEV) = X$CREATE_GC(XDISPLAY,XWINDOW(DEV),GC_MASK,XGCV)
+C
+C Initialise pixel graphical context
+	XGC(2,DEV) = X$CREATE_GC(XDISPLAY,XWINDOW(DEV),GC_MASK,XGCV)
+C
+C Initialise refresh graphical context
+C Get the bits to invert from logical name, defaulting to
+C all bits in the display. (I, NRES temporary)
+	I = -1
+	IF (TRNALL('LSL$DECW_REFRESH_BITS',TITLE)) THEN
+	   CALL SETAUX(%REF(TITLE),32)
+	   IF (RDLONG(I)) I = -1
+	ENDIF
+	IF (WKID.LE.4) RFCOL(WKID) = I
+	IF (XDECOMP) THEN
+	   NRES =
+     &		(ISHFT(I,XOFF(1,DEV)).AND.XMASKS(1,DEV)) .OR.
+     &		(ISHFT(I,XOFF(2,DEV)).AND.XMASKS(2,DEV)) .OR.
+     &		(ISHFT(I,XOFF(3,DEV)).AND.XMASKS(3,DEV))
+	ELSE
+	   NRES = ISHFT(I,XOFF(1,DEV)).AND.XMASK(DEV)
+	ENDIF
+	IF (NRES.EQ.0.AND.I.NE.0) NRES = XMASK(DEV)
+	XGCV.X$L_GCVL_FOREGROUND = -1
+	XGCV.X$L_GCVL_PLANE_MASK = NRES
+	XGCV.X$L_GCVL_FUNCTION = X$C_GX_XOR
+	GC_MASK = X$M_GC_FUNCTION.OR.
+     &		  X$M_GC_PLANE_MASK.OR.
+     &		  X$M_GC_FOREGROUND
+	XGC(3,DEV) = X$CREATE_GC(XDISPLAY,XWINDOW(DEV),GC_MASK,XGCV)
+C
+C Initialise a graphical context for copying pixmap->window
+	XGCV.X$L_GCVL_PLANE_MASK = XMASK(DEV)
+	GC_MASK = X$M_GC_PLANE_MASK
+	XGC(4,DEV) = X$CREATE_GC(XDISPLAY,XWINDOW(DEV),GC_MASK,XGCV)
+C
+C No PostScript context yet
+	XGC(5,DEV) = 0
+C
+C Set window background and clear the window to background colour
+	I = XBACK(DEV)
+	IF (XINVERT(DEV)) I = I.OR.XMASK(DEV)
+	CALL X$SET_WINDOW_BACKGROUND(XDISPLAY,XWINDOW(DEV),I)
+	CALL X$CLEAR_WINDOW(XDISPLAY,XWINDOW(DEV))
+C
+C Create a pixmap as backing store
+C Attempt to trap BadAlloc error if it happens - do this by
+C   clearing flag
+C   setting error handler
+C   calling routine
+C   synchronize Xlib
+C   cancel error handler
+C   check for error
+	XERROR = .FALSE.
+	CALL X$SET_ERROR_HANDLER(GKS_XERR)
+	XPIXMAP(DEV) = X$CREATE_PIXMAP(XDISPLAY,XWINDOW(DEV),
+     &	   RASTX(DEV),RASTY(DEV),XDEPTH)
+	CALL X$SYNC(XDISPLAY,.FALSE.)
+	CALL X$SET_ERROR_HANDLER(%VAL(0))
+	IF (XERROR) XPIXMAP(DEV) = 0	! flag no pixmap
+C
+C did we succeed?
+	IF (XPIXMAP(DEV).EQ.0) CALL WRITEF(
+     &'...unable to create backing store pixmap for device %N',DEV)
+C
+C and clear the pixmap
+	CALL GCLRWK(WKID,0)
+C
+C perform main loop to handle events
+	CALL GUIS_MAIN_LOOP(.FALSE.)
+C
+C Need to do an XT$POPUP before POPDOWN will work, so...
+	VISIBLE(DEV) = .FALSE.
+	CALL GUIS_REVEAL_VIEWPORT(WKID)
+C
+C push this viewport to back (only first one)
+	IF (WKID.EQ.1) CALL GUIS_PUSH_VIEWPORT(WKID)
+C
+C if using text rendering, do not use Display PostScript
+C
+	IF (XUSE_TEXT_RENDER) THEN
+C
+C but create the graphical context to use when plotting the text
+ 	   XGCV.X$L_GCVL_BACKGROUND = 0
+	   GC_MASK = X$M_GC_BACKGROUND
+	   IF (XINVERT(DEV)) THEN
+ 	      XGCV.X$L_GCVL_FUNCTION = X$C_GX_COPY_INVERTED
+	      GC_MASK = GC_MASK.OR.X$M_GC_FUNCTION
+	   ENDIF
+ 	   XGC(5,DEV) = X$CREATE_GC(XDISPLAY,XWINDOW(DEV),GC_MASK,XGCV)
+	   GOTO 70
+	ENDIF
+C
+C Try to create Display PostScript context
+	I = 0
+      	IF (TRNALL('LSL$DECW_DPS',TITLE)) THEN
+	   CALL SETAUX(%REF(TITLE),32)
+	   IF (RDLONG(I)) I = 0
+	ENDIF
+	IF (I.EQ.0) GOTO 75	! not wanted
+C     
+C Set a single step gray ramp for now, pixel values 0 and 1
+	STANCM.X$L_SCMP_COLORMAP = XCMAPS(DEV)
+	STANCM.X$L_SCMP_RED_MAX = 1
+	STANCM.X$L_SCMP_RED_MULT = 1
+	STANCM.X$L_SCMP_GREEN_MAX = 0
+	STANCM.X$L_SCMP_GREEN_MULT = 1
+	STANCM.X$L_SCMP_BLUE_MAX = 0
+	STANCM.X$L_SCMP_BLUE_MULT = 1
+	STANCM.X$L_SCMP_BASE_PIXEL = 0
+	STANCM.X$L_SCMP_VISUAL_ID = XVISUAL.X$L_VISU_VISUALID
+C
+C and a spurious colour cube which should never be used,
+C but might keep newer releases of DPS happy (we used to
+C pass NULL as this argument)
+	CCUBE.X$L_SCMP_COLORMAP = XCMAPS(DEV)
+	CCUBE.X$L_SCMP_RED_MAX = 1
+	CCUBE.X$L_SCMP_RED_MULT = 1
+	CCUBE.X$L_SCMP_GREEN_MAX = 1
+	CCUBE.X$L_SCMP_GREEN_MULT = 1
+	CCUBE.X$L_SCMP_BLUE_MAX = 1
+	CCUBE.X$L_SCMP_BLUE_MULT = 1
+	CCUBE.X$L_SCMP_BASE_PIXEL = 0
+	CCUBE.X$L_SCMP_VISUAL_ID = XVISUAL.X$L_VISU_VISUALID
+C
+CCC It is not obvious to me why we pass a pointer to a pointer to STANCM.
+CCC I suspect this is a bug in the Fortran binding.
+CCC Also the %LOC on the passed routines are necessary because otherwise
+CCC is dereferences the passed address (getting the entry mask + 2 bytes).
+CCC The C default routines have to be used, because the Fortran ones
+CCC are not called with appropriate arguments.
+C Create with no drawable or GC - set them later
+CCC	XDPSC(DEV) = XDPS$CREATE_CONTEXT(
+CCC     &		XDISPLAY,0,0,0,RASTY(DEV),
+CCC     &		0,%LOC(STANCM),0,0,
+CCC     &		%LOC(DPSDEFAULTTEXTBACKSTOP),
+CCC     &		%LOC(DPSDEFAULTERRORPROC), 0)
+	XDPSC(DEV) = XDPSCreateContext(
+     &		%VAL(XDISPLAY),%VAL(0),%VAL(0),%VAL(0),%VAL(RASTY(DEV)),
+     &		%VAL(0),STANCM,CCUBE,%VAL(0),
+     &		DPSDefaultTextBackstop,
+     &		DPSDefaultErrorProc, %VAL(0))
+C
+	IF (XDPSC(DEV).EQ.0) THEN
+	   CALL TTWSTR(
+     &		'...X server does not support Display PostScript')
+	   GOTO 75
+	ENDIF
+C
+C check for debugging PostScript output on LSL$DPS_TEXT_CONTEXT
+	IF (TRNALL('LSL$DPS_TEXT_CONTEXT',TITLE).EQ.SS$_NOLOGNAM) GOTO 68
+C
+C try to open the file
+	XDPS_TEXT_LUN(DEV) = fopen(%REF('LSL$DPS_TEXT_CONTEXT'//CHAR(0)),
+     &				   %REF('w'//CHAR(0)) )
+	IF (XDPS_TEXT_LUN(DEV).EQ.0) GOTO 68
+C
+C try to create the text context
+	XDPS_TEXT_CONTEXT(DEV) = DPSCreateTextContext(
+     &		GKS_TEXT_BACKSTOP,
+     &		DPSDefaultErrorProc)
+	IF (XDPS_TEXT_CONTEXT(DEV).EQ.0) THEN
+	   CALL FLWCLO(XDPS_TEXT_LUN(DEV))
+	   CALL LIB$FREE_LUN(XDPS_TEXT_LUN(DEV))
+	   XDPS_TEXT_LUN(DEV) = 0
+	ENDIF
+C
+C chain it (don't bother checking for error)
+	CALL DPSChainContext(%VAL(XDPSC(DEV)),
+     &			     %VAL(XDPS_TEXT_CONTEXT(DEV)))
+C
+C create a graphical context for use of PostScript
+68	GC_MASK = 0
+	XGC(5,DEV) = X$CREATE_GC(XDISPLAY,XWINDOW(DEV),GC_MASK,XGCV)
+C
+	CALL GWRAP_INIT(%VAL(XDPSC(DEV)))
+	IF (XPIXMAP(DEV).EQ.0) THEN
+CCC
+CCC surely this routine should take INTEGERs for the last two args,
+CCC but it actually takes FLOATs and what is more then converts them
+CCC to double and passes them to a routine expecting INTEGERs.
+CCC Call the C version instead
+CCC	CALL DPS$SET_X_GC_DRAWABLE(
+CCC     &		XDPSC(DEV),
+CCC     &		X$GCONTEXT_FROM_GC(XGC(5,DEV)),
+CCC     &		XWINDOW(DEV),
+CCC     &		FLOAT(0),FLOAT(RASTY(DEV)))
+CCC
+C we need the XID from the GC structure
+	   CALL GWRAP_SET_GC_DRAWABLE(
+     &		%VAL(XDPSC(DEV)),
+     &		%VAL(X$GCONTEXT_FROM_GC(XGC(5,DEV))),
+     &		%VAL(XWINDOW(DEV)),
+     &		%VAL(0),%VAL(RASTY(DEV)))
+	ELSE
+	   CALL GWRAP_SET_GC_DRAWABLE(
+     &		%VAL(XDPSC(DEV)),
+     &		%VAL(X$GCONTEXT_FROM_GC(XGC(5,DEV))),
+     &		%VAL(XPIXMAP(DEV)),
+     &		%VAL(0),%VAL(RASTY(DEV)))
+	ENDIF
+C
+C check for font list LSL$DPS_FONTLIST
+ 	IF (TRNALL('LSL$DPS_FONTLIST',TITLE).NE.SS$_NOLOGNAM) THEN
+	   CALL GKS_SET_DPS_FONT(DEV,'LSL$DPS_FONTLIST')
+	ENDIF
+C
+70	CONTINUE
+C
+C check for composite characters
+	I = 0
+	IF (TRNALL('LSL$COMPOSITE_CHARACTERS',TITLE)) THEN
+	   CALL SETAUX(%REF(TITLE),32)
+	   IF (RDLONG(I)) I = 0
+	ENDIF
+	IF (I.NE.0) ICHCOMP = .TRUE.
+C
+75	CONTINUE
+C
+999	AST_ON = AST_ON-1
+	RETURN
+	END
+C
+	SUBROUTINE GKS_COPY_COLORS(DEV,NRES,XCOL)
+C
+**	MODULE	GKS_COPY_COLORS
+**	IDENT	28AP95
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+C
+C Arguments:
+	INTEGER	DEV
+	INTEGER	NRES
+	RECORD/X$COLOR/XCOL(0:*)
+C
+C Local variables
+	INTEGER	I
+C
+	DO 45 I=0,NRES-1
+	   IF (XDECOMP) THEN
+	      XCOL(I).X$L_COLR_PIXEL =
+     &			ISHFT(I,XOFF(1,DEV)) .OR.
+     &			ISHFT(I,XOFF(2,DEV)) .OR.
+     &			ISHFT(I,XOFF(3,DEV))
+	   ELSE
+	      XCOL(I).X$L_COLR_PIXEL = I
+	   ENDIF
+	   XCOL(I).X$B_COLR_FLAGS =
+     &			X$M_DO_RED.OR.X$M_DO_GREEN.OR.X$M_DO_BLUE
+45	CONTINUE
+C
+C DECWindows MOTIF 1.0 put a bug in X$QUERY_COLORS (access violation
+C getting 3rd argument) so use C binding routine instead, with some %VALs
+	CALL XQueryColors(%VAL(XDISPLAY),%VAL(XDMAP),XCOL,%VAL(NRES))
+	CALL X$STORE_COLORS(XDISPLAY,XCMAPS(DEV),XCOL,NRES)
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GCLWK(WKID)
+C
+**	MODULE	GCLWK
+**	IDENT	10SE92
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C CLOSE WORKSTATION
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+***	COMMON/GKSRF/
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+C
+C functions called
+	INTEGER	GETDEV
+C
+C Local variables
+	INTEGER	DEV
+	INTEGER	I,IND,COL
+	LOGICAL	MAP_IN_USE
+C
+	AST_ON = AST_ON+1
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	IF (DEV.GT.WSMAX) THEN
+	   CALL GKS_CALL(%VAL(GKS_ADDR(XGCLWK)))
+	   WKIDS(DEV) = -1
+C
+C see if any auxiliary workstations remain open - if not then
+C auxiliary GKS is no longer in use
+	   DO 5 I=WSMAX+1,WSMAX+AUXMAX
+	      IF (WKIDS(I).GE.0) GOTO 6
+5	   CONTINUE
+	   GKS_INUSE = .FALSE.
+6	   GOTO 9999
+	ENDIF
+C
+	IF (WKID.LE.4) THEN
+	   IF (WKID.LE.2) CALL GUIS_RFSTOP
+	   RFWK(WKID) = .FALSE.
+	   RFCURS(WKID) = .FALSE.
+	ENDIF
+CCC
+CCC documentation suggests one should do DPS$DESTROY_SPACE here
+CCC (after DPS$SPACE_FROM_CONTEXT), but the latter routine doesn't
+CCC work (merely returns the address of its first arg, whereas what
+CCC is wanted is the second longword of the context struct.)
+CCC Instead call my C routine (defined in WRAPS.PSW)
+	IF (XDPSC(DEV).NE.0
+     &		) CALL GKS_DPS_DESTROY_SPACE(%VAL(XDPSC(DEV)))
+	XDPSC(DEV) = 0
+	IF (XDPS_TEXT_CONTEXT(DEV).NE.0) THEN
+	   CALL fclose(%VAL(XDPS_TEXT_LUN(DEV)))	! C routine
+	   XDPS_TEXT_LUN(DEV) = 0
+	   XDPS_TEXT_CONTEXT(DEV) = 0
+	ENDIF
+	IF (XPIXMAP(DEV).NE.0) CALL X$FREE_PIXMAP(XDISPLAY,XPIXMAP(DEV))
+	XPIXMAP(DEV) = 0
+	XWINDOW(DEV) = 0
+	CALL GCLWK_C(DCB(DEV))
+C
+	IF (XCMAPS(DEV).NE.0) THEN
+C
+C seem to get error trying to free the cells allocated by ALLOC_ALL,
+C so don't bother in this case
+C Don't free colours shared by primary/secondary
+	   IF (WKID.LE.2) THEN
+	      DO 7 I=1,WSMAX
+	         IF (WKIDS(I).EQ.3-WKID) GOTO 9
+7	      CONTINUE
+	   ENDIF
+	   IF (.NOT.XALLOC_ALL(DEV)) THEN
+	      DO 8 I=0,MAXCOL(DEV)
+	         IND = I
+	         CALL GKS_PUTLNG(%VAL(USEPTR(DEV)+I*4),IND)
+	         IF (.NOT.IND) GOTO 8	! not in use
+	         IND = I
+	         IF (XINVERT(DEV)) IND = USED_PLANES(DEV)-IND
+	         COL = ISHFT(IND,XOFF(1,DEV)).OR.XBACK(DEV)
+	         IF (XDECOMP) THEN
+	            COL = COL .OR.
+     &				ISHFT(IND,XOFF(2,DEV)) .OR.
+     &				ISHFT(IND,XOFF(3,DEV))
+	         ENDIF
+	         CALL X$FREE_COLORS(XDISPLAY,XCMAPS(DEV),COL,1,0)
+8	      CONTINUE
+	   ENDIF
+9	   IF (XCMAPS(DEV).NE.XDMAP) THEN
+	      MAP_IN_USE = .FALSE.
+	      DO 10 I=1,WSMAX
+	         IF (I.EQ.DEV) GOTO 10
+	         IF (WKIDS(I).LT.0) GOTO 10
+	         IF (XCMAPS(I).NE.XCMAPS(DEV)) GOTO 10
+	         MAP_IN_USE = .TRUE.
+10	      CONTINUE
+	      IF (.NOT.MAP_IN_USE) CALL X$FREE_COLORMAP(XDISPLAY,XCMAPS(DEV))
+	   ENDIF
+	   XCMAPS(DEV) = 0
+	ENDIF
+	CALL X$FREE_GC(XDISPLAY,XGC(1,DEV))
+	CALL X$FREE_GC(XDISPLAY,XGC(2,DEV))
+	CALL X$FREE_GC(XDISPLAY,XGC(3,DEV))
+	CALL X$FREE_GC(XDISPLAY,XGC(4,DEV))
+	IF (XGC(5,DEV).NE.0) CALL X$FREE_GC(XDISPLAY,XGC(5,DEV))
+	XGC(5,DEV) = 0
+	CALL X$FLUSH(XDISPLAY)	! ensure disappears immediately
+C
+C free space for RGB array
+	IF (RGBPTR(DEV).NE.0) CALL LIB$FREE_VM(
+     &			(MAXCOL(DEV)+1)*12,RGBPTR(DEV))
+	RGBPTR(DEV) = 0
+	IF (USEPTR(DEV).NE.0) CALL LIB$FREE_VM(
+     &			(MAXCOL(DEV)+1)*4,USEPTR(DEV))
+	USEPTR(DEV) = 0
+C
+C if no Display PostScript contexts remain, then free font info
+	DO 20 I=1,WSMAX
+	   IF (XDPSC(I).NE.0) GOTO 30
+20	CONTINUE
+	CALL GKS_C_FREE_FONTS
+C
+30	WKIDS(DEV) = -1
+C
+9999	AST_ON = AST_ON-1
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GACWK(WKID)
+C
+**	MODULE	GACWK
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C ACTIVATE WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C w/s
+	INTEGER DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+	IF (DEV.GT.WSMAX) THEN
+	   CALL GKS_CALL(%VAL(GKS_ADDR(XGACWK)))
+	ELSE
+	   WSACT(DEV) = .TRUE.
+	ENDIF
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GDAWK(WKID)
+C
+**	MODULE	GDAWK
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C DEACTIVATE WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C w/s
+	INTEGER DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+	IF (DEV.GT.WSMAX) THEN
+	   CALL GKS_CALL(%VAL(GKS_ADDR(XGDAWK)))
+	ELSE
+	   WSACT(DEV) = .FALSE.
+	ENDIF
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GCLRWK(WKID,COFL)
+C
+**	MODULE	GCLRWK
+**	IDENT	29FE84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					RD	14-Nov-1983
+C
+C CLEAR WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER COFL			! control flag
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C w/s
+	INTEGER DEV
+	INTEGER	GC_MASK
+	INTEGER	NCOLI
+C
+C function
+	INTEGER	GETDEV
+C
+	AST_ON = AST_ON+1
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	IF (DEV.GT.WSMAX) THEN
+	   CALL GKS_CALL(%VAL(GKS_ADDR(XGCLRWK)))
+	   GOTO 9999
+	ENDIF
+C
+	IF (WKID.LE.2) CALL GUIS_RFSTOP
+C
+	GC_MASK = 0
+	NCOLI = 0
+	IF (CCOLI(DEV).NE.NCOLI) THEN
+	   XGCV.X$L_GCVL_FOREGROUND = NCOLI
+	   GC_MASK = GC_MASK.OR.X$M_GC_FOREGROUND
+	   CCOLI(DEV) = NCOLI
+	ENDIF
+	IF (XMASK(DEV).NE.CMASK(DEV)) THEN
+	   XGCV.X$L_GCVL_PLANE_MASK = XMASK(DEV)
+	   GC_MASK = GC_MASK.OR.X$M_GC_PLANE_MASK
+	   CMASK(DEV) = XMASK(DEV)
+	ENDIF
+	IF (GC_MASK.NE.0) THEN
+	   CALL X$CHANGE_GC(XDISPLAY,XGC(1,DEV),GC_MASK,XGCV)
+	   UPLIN(DEV) = .TRUE.
+	   UPFA(DEV) = .TRUE.
+	   UPTX(DEV) = .TRUE.
+	   XLAST_GC(DEV) = 1	! text rendering uses different
+				! graphical context from lines etc
+	ENDIF
+C
+	IF (XDPS_DONE(DEV)) THEN
+	   XDPS_DONE(DEV) = .FALSE.
+	   CALL DPS$WAIT_CONTEXT(XDPSC(DEV))
+	ENDIF
+	IF (XPIXMAP(DEV).EQ.0) THEN
+	   CALL X$FILL_RECTANGLE(XDISPLAY,XWINDOW(DEV),XGC(1,DEV),
+     &		0,0,RASTX(DEV),RASTY(DEV))
+	ELSE
+	   CALL X$FILL_RECTANGLE(XDISPLAY,XPIXMAP(DEV),XGC(1,DEV),
+     &		0,0,RASTX(DEV),RASTY(DEV))
+	ENDIF
+C
+	XLINES(DEV) = XLINES(DEV)+1	! drawn something
+	CALL GUWK(WKID,0)		! temporary update here
+9999	AST_ON = AST_ON-1
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GUIS_EXPOSE(WIDGET,TAG,CB)
+C
+**	MODULE	GUIS_EXPOSE
+**	IDENT	16MY84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	16-May-1984
+C
+C Expose callback
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+***	COMMON/GKSRF/
+C
+C Arguments:
+	INTEGER	WIDGET,TAG
+	INTEGER	CB(*)	! actually a DWT$WINDOW_CB_ST
+C
+C function called
+	LOGICAL	GUIS_EXPOSE_C
+C
+C workspace
+	INTEGER	DEV
+	LOGICAL	SAVRF
+	INTEGER	COUNT
+	INTEGER	X,Y,WIDTH,HEIGHT
+C
+	AST_ON = AST_ON+1
+	DEV = %LOC(TAG)		! TAG is DEV passed by value
+C
+C if it is a real expose event (rather than an internal call
+C to repaint the window), then check if other events to follow,
+C and get the exposed region.
+	IF (GUIS_EXPOSE_C(CB,COUNT,X,Y,WIDTH,HEIGHT)) THEN
+	   IF (XMODE.NE.0) GOTO 10	! deal with each event
+	   IF (COUNT.NE.0) GOTO 9999	! only do last one
+	ENDIF
+C
+	X = 0
+	Y = 0
+	WIDTH = RASTX(DEV)
+	HEIGHT = RASTY(DEV)
+C
+C if pixmap doesn't yet exist, can't do anything
+10	IF (XPIXMAP(DEV).EQ.0) GOTO 9999
+C
+C Stop the refresh before writing pixmap
+C Could just set the variables so that refresh appeared to be
+C currently off, rather than undrawing it, but this easiest for now.
+	SAVRF = REFNG
+	IF (SAVRF) CALL GUIS_RFSTOP
+C
+	CALL X$COPY_AREA(
+     &		XDISPLAY,XPIXMAP(DEV),XWINDOW(DEV),XGC(4,DEV),
+     &		X,Y,WIDTH,HEIGHT,X,Y)
+C
+C start the refresh again
+	IF (SAVRF) CALL GUIS_REFRSH
+C
+9999	AST_ON = AST_ON-1
+	RETURN
+	END
+C
+C
+C***********************************************************************
+C
+	SUBROUTINE	GUWK(WKID,REGFL)
+C
+**	MODULE	GUWK
+**	IDENT	16MY84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	16-May-1984
+C
+C UPDATE WORKSTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	REGFL			! regeneration flag
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C function
+	INTEGER	GETDEV
+C
+C workspace
+	INTEGER	DEV
+	INTEGER*4	UPTIM(2)
+	INTEGER	LINES
+C
+	AST_ON = AST_ON+1
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	IF (DEV.GT.WSMAX) THEN
+	   CALL GKS_CALL(%VAL(GKS_ADDR(XGUWK)))
+	   GOTO 9999
+	ENDIF
+C
+C call expose routine to get the picture up to date - but
+C only if any graphics has actually been performed
+	LINES = XLINES(DEV)
+	IF (XLINES(DEV).GT.0) THEN
+	   IF (XDPS_DONE(DEV)) THEN
+	      XDPS_DONE(DEV) = .FALSE.
+	      CALL DPS$WAIT_CONTEXT(XDPSC(DEV))
+	   ENDIF
+	   CALL GUIS_EXPOSE(0,%VAL(DEV),0)
+	   XLINES(DEV) = 0
+	ENDIF
+C
+C Check for switch to/from mode 1 depending on update time.
+C Switch to mode 1 if time has not changed except in bottom 20 bits,
+C i.e. about 1 million, or 0.1 sec, and little drawn since last
+C
+	IF (XMODE_SAV.EQ.0) THEN
+	   CALL SYS$GETTIM(UPTIM)
+	   IF ( UPTIM(2).NE.XUPTIM(2,DEV) .OR.
+     &		(UPTIM(1)     .AND..NOT.'FFFFF'X).NE.
+     &		(XUPTIM(1,DEV).AND..NOT.'FFFFF'X) .OR.
+     &		LINES.GT.XLMAX .OR. LINES.LE.1 ) THEN
+	      XMODE = 0
+	   ELSE
+	      XMODE = 1
+	   ENDIF
+	   XUPTIM(1,DEV) = UPTIM(1)
+	   XUPTIM(2,DEV) = UPTIM(2)
+	ENDIF
+C
+C and deal with any events - the user is expected to wait in
+C GUIS_MAIN_LOOP, but this at least deals with events every now
+C and then while doing graphics.
+	CALL GUIS_MAIN_LOOP(.FALSE.)
+C
+9999	AST_ON = AST_ON-1
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSDS(WKID,DEFMOD,REGMOD)
+C
+**	MODULE	GSDS
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C SET DEFERRAL STATE
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	DEFMOD			! deferral mode
+	INTEGER	REGMOD			! implicit regeneration mode
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C w/s
+	INTEGER DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+	IF (DEV.GT.WSMAX) THEN
+	   CALL GKS_CALL(%VAL(GKS_ADDR(XGSDS)))
+	   GOTO 9999
+	ENDIF
+	IF (DEFMOD .LT. GASAP .OR. DEFMOD .GT. GASTI) GOTO 10
+	DEFER(DEV) = DEFMOD
+C
+C nasty call to GUWK (second argument ignored)
+	IF (DEFER(DEV).EQ.GASAP.AND.WSACT(DEV)) CALL GUWK(WKID,0)
+10	IF (REGMOD .LT. GSUPPD .OR. REGMOD .GT. GALLOW) GOTO 9999
+	REGEN(DEV) = REGMOD
+C
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSASF(LASF)
+C
+**	MODULE	GSASF
+**	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	26-April-1984
+C Update of fill area required, too	Tony J Ibbs	27-Nov-1984
+C
+C SET ASPECT SOURCE FLAGS
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments:
+	INTEGER	LASF(ASFMAX)			! list of flags
+C
+	INTEGER	I				! loop counter
+C
+	IF (GKS_INUSE) CALL GKS_CALL(%VAL(GKS_ADDR(XGSASF)))
+C
+	GKSERR = 0
+	DO 11 I=1,ASFMAX
+	   GASF(I) = LASF(I)
+11	CONTINUE
+	DO 5 I=1,WSMAX
+	   UPLIN(I) = .TRUE.	! polyline attributes need updating
+	   UPFA(I)  = .TRUE.	! also fill area attributes
+	   UPTX(I)  = .TRUE.	! also text attributes
+5	CONTINUE
+C
+	RETURN
+	END
+C
+	SUBROUTINE	GSCR(WKID,CI,RED,GREEN,BLUE)
+C
+**	MODULE	GSCR
+**	IDENT	26AU86
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	25-Jul-1985
+C
+C SET COLOUR REPRESENTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CI			! colour index
+	REAL	RED,GREEN,BLUE		! colour values
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C w/s
+	INTEGER	DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	IF (DEV.GT.WSMAX) THEN
+	   CALL GKS_CALL(%VAL(GKS_ADDR(XGSCR)))
+	   GOTO 9999
+	ENDIF
+C
+	IF (CI.LT.0.OR.CI.GT.MAXCOL(DEV))THEN
+	   GKSERR	= 93		! colour index is invalid
+	ELSEIF (RED.LT.0.0.OR.RED.GT.1.0.OR.
+     &		GREEN.LT.0.0.OR.GREEN.GT.1.0.OR.
+     &		BLUE.LT.0.0.OR.BLUE.GT.1.0) THEN
+	   GKSERR	= 96		! colour out of range
+	ELSE
+	   CALL GKS_PUTLNG(RED,%VAL(RGBPTR(DEV)+CI*12))
+	   CALL GKS_PUTLNG(GREEN,%VAL(RGBPTR(DEV)+CI*12+4))
+	   CALL GKS_PUTLNG(BLUE,%VAL(RGBPTR(DEV)+CI*12+8))
+C
+	   IF (PVIS(DEV).EQ.-1) THEN	! all planes visible
+	      CALL GKS_SET_COLORS(DEV,CI,1,%VAL(RGBPTR(DEV)+CI*12))
+	   ELSEIF ((CI.AND..NOT.PVIS(DEV)).EQ.0) THEN
+	      CALL LSG_PLANE_VISIBLE(WKID,PVIS(DEV))
+	   ENDIF
+	ENDIF
+C
+9999	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GKS_SET_COLORS(DEV,CI,N,RGB)
+C
+**	MODULE	GKS_SET_COLORS
+**	IDENT	28AP95
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	25-Jul-1985
+C
+C Utility to set colours for DECwindows
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	DEV			! workstation number
+	INTEGER	CI			! first colour index
+	INTEGER	N			! number of colours
+	REAL	RGB(3,0:*)
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDAT2/
+***	COMMON/GKSDECW/
+C
+C w/s
+	INTEGER		I
+	INTEGER		XCOL
+C
+C function
+	INTEGER		LIB$GET_VM
+C
+	IF (XCMAPS(DEV).EQ.0) GOTO 999
+	I = LIB$GET_VM(N*X$C_COLR_SIZE,XCOL)
+	IF (.NOT.I) GOTO 999
+	CALL GKS_SET_COLORS_SUB(DEV,CI,N,RGB,%VAL(USEPTR(DEV)),%VAL(XCOL))
+	CALL LIB$FREE_VM(N*X$C_COLR_SIZE,XCOL)
+	XCOL = 0
+999	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GKS_SET_COLORS_SUB(DEV,CI,N,RGB,USE,XCOL)
+C
+**	MODULE	GKS_SET_COLORS_SUB
+**	IDENT	28AP95
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	25-Jul-1985
+C
+C Utility to set colours for DECwindows
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDAT2/
+***	COMMON/GKSDECW/
+C
+C Arguments:
+	INTEGER	DEV			! workstation number
+	INTEGER	CI			! first colour index
+	INTEGER	N			! number of colours
+	REAL	RGB(3,0:*)
+	LOGICAL	USE(0:*)
+	RECORD/X$COLOR/XCOL(0:*)
+C
+C w/s
+	INTEGER		I
+	INTEGER		J
+	INTEGER		IND
+C
+C function
+	INTEGER*2	LIB$EXTV
+C
+	J = -1
+	DO 10 I=0,N-1
+	   IND = I+CI
+	   IF (.NOT.USE(IND)) GOTO 10
+	   IF (XINVERT(DEV)) IND = USED_PLANES(DEV)-IND
+	   J = J+1
+	   XCOL(J).X$L_COLR_PIXEL =
+     &				ISHFT(IND,XOFF(1,DEV)).OR.XBACK(DEV)
+	   IF (XDECOMP) THEN
+	      XCOL(J).X$L_COLR_PIXEL = XCOL(J).X$L_COLR_PIXEL .OR.
+     &		ISHFT(IND,XOFF(2,DEV)) .OR. ISHFT(IND,XOFF(3,DEV))
+
+	   ENDIF
+	   XCOL(J).X$W_COLR_RED = LIB$EXTV(0,16,INT(65535*RGB(1,I)))
+	   XCOL(J).X$W_COLR_GREEN =LIB$EXTV(0,16,INT(65535*RGB(2,I)))
+	   XCOL(J).X$W_COLR_BLUE = LIB$EXTV(0,16,INT(65535*RGB(3,I)))
+	   XCOL(J).X$B_COLR_FLAGS =
+     &			X$M_DO_RED.OR.X$M_DO_GREEN.OR.X$M_DO_BLUE
+10	CONTINUE
+	AST_ON = AST_ON+1
+	CALL X$STORE_COLORS(XDISPLAY,XCMAPS(DEV),XCOL,J+1)
+	AST_ON = AST_ON-1
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+C	TRANSFORMATION FUNCTIONS
+C	========================
+C
+C
+	SUBROUTINE	GSWN(TRN,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSWN
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C SET WINDOW 
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	TRN			! window number
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+	INTEGER	DEV
+	INTEGER TRNTMP			! temporary copy of TRN so as
+C					! not to pass back new value.
+C
+	IF (GKS_INUSE) CALL GKS_CALL(%VAL(GKS_ADDR(XGSWN)))
+C
+	GKSERR	= 0			! no errors yet
+	TRNTMP=TRN+1			! convert to Fortran index
+	IF (TRNTMP .LT. 1 .OR. TRNTMP .GT. TRNMAX) GOTO 10
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	WINDOW(1,TRNTMP) = XMIN
+	WINDOW(2,TRNTMP) = XMAX
+	WINDOW(3,TRNTMP) = YMIN
+	WINDOW(4,TRNTMP) = YMAX
+	DO 5 DEV=1,WSMAX
+	   UPTRN(DEV) = .TRUE.		! transformations need updating
+5	CONTINUE
+	GOTO 30
+C
+10	GKSERR	= 50			! transformation invalid
+	GOTO 30
+20	GKSERR	= 51			! rectangle definition invalid
+C
+30	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSVP(TRN,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSVP
+**	IDENT	27JL83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C SET VIEWPORT
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	TRN			! viewport number
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+	INTEGER	DEV
+	INTEGER TRNTMP			! temporary copy of TRN so as
+C					! not to pass back new value.
+C
+	IF (GKS_INUSE) CALL GKS_CALL(%VAL(GKS_ADDR(XGSVP)))
+C
+	GKSERR	= 0			! no errors yet
+	TRNTMP = TRN+1			! convert to Fortran index
+	IF (TRNTMP .LT. 1 .OR. TRNTMP .GT. TRNMAX) GOTO 10
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	IF (XMIN .LT. 0.0 .OR. XMAX .GT. 1.0 .OR.
+     &	    YMIN .LT. 0.0 .OR. YMAX .GT. 1.0) GOTO 30
+	VIEWPT(1,TRNTMP) = XMIN
+	VIEWPT(2,TRNTMP) = XMAX
+	VIEWPT(3,TRNTMP) = YMIN
+	VIEWPT(4,TRNTMP) = YMAX
+	DO 5 DEV=1,WSMAX
+	   UPTRN(DEV) = .TRUE.		! transformations need updating
+5	CONTINUE
+	GOTO 40
+C
+10	GKSERR	= 50		! transformation number invalid
+	GOTO 40
+20	GKSERR	= 51		! rectangle definition is invalid
+	GOTO 40
+30	GKSERR	= 53		! viewport not within NDC unit square
+C
+40	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSWKWN(WKID,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSWKWN
+**	IDENT	27OC83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					RD	27-Oct-1983
+C
+C SET WORKSTATION WINDOW
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C w/s
+	INTEGER	DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+	IF (DEV.GT.WSMAX) THEN
+	   CALL GKS_CALL(%VAL(GKS_ADDR(XGSWKWN)))
+	   GOTO 9999
+	ENDIF
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	IF (XMIN .LT. 0.0 .OR. XMAX .GT. 1.0 .OR.
+     &	    YMIN .LT. 0.0 .OR. YMAX .GT. 1.0) GOTO 30
+	WSWIN(1,DEV) = XMIN
+	WSWIN(2,DEV) = XMAX
+	WSWIN(3,DEV) = YMIN
+	WSWIN(4,DEV) = YMAX
+	UPTRN(DEV) = .TRUE.
+	GOTO 9999
+C
+20	GKSERR	= 51	! rectangle definition is invalid
+	GOTO 9999
+30	GKSERR	= 53	! workstation window not within NDC unit square
+C
+9999	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSWKVP(WKID,XMIN,XMAX,YMIN,YMAX)
+C
+**	MODULE	GSWKVP
+**	IDENT	27OC83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					RD	27-Oct-1983
+C
+C SET WORKSTATION VIEWPORT
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	REAL	XMIN,XMAX,YMIN,YMAX	! rectangular boundaries
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C w/s
+	INTEGER	DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+	IF (DEV.GT.WSMAX) THEN
+	   CALL GKS_CALL(%VAL(GKS_ADDR(XGSWKVP)))
+	   GOTO 9999
+	ENDIF
+	IF (XMAX .LE. XMIN .OR. YMAX .LE. YMIN) GOTO 20
+	IF (((XMAX-XMIN) .GT. DCMAXX(DEV)) .OR.
+     &	    ((YMAX-YMIN) .GT. DCMAXY(DEV))) GOTO 30
+	WSVIEW(1,DEV) = XMIN
+	WSVIEW(2,DEV) = XMAX
+	WSVIEW(3,DEV) = YMIN
+	WSVIEW(4,DEV) = YMAX
+	UPTRN(DEV) = .TRUE.
+	GOTO 9999
+C
+20	GKSERR = 51	! rectangle definition invalid
+	GOTO 9999
+30	GKSERR = 54	! workstation viewport not within display space
+C
+9999	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSELNT(TRN)
+C
+**	MODULE	GSELNT
+**	IDENT	27OC83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	27-July-1983
+C
+C SELECT NORMALISATION TRANSFORMATION
+C and set clipping limits to viewport
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	TRN			! transformation number
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+	INTEGER	DEV
+	INTEGER TRNTMP		! temporary copy of TRN so as not to
+C				! pass back new value
+	IF (GKS_INUSE) CALL GKS_CALL(%VAL(GKS_ADDR(XGSELNT)))
+C
+	GKSERR	= 0			! no errors yet
+	TRNTMP=TRN+1			! convert to Fortran index
+	IF (TRNTMP .LT. 1 .OR. TRNTMP .GT.TRNMAX) GOTO 10
+	TRNCUR	= TRNTMP		! set currently selected
+C					! normalisation transformation
+	DO 5 DEV=1,WSMAX
+	   UPTRN(DEV) = .TRUE.		! transformations need updating
+5	CONTINUE
+	GOTO 20
+C
+10	GKSERR	= 50			! transformation number invalid
+C
+20	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE	GSCLIP(CLSW)
+C
+**	MODULE	GSCLIP
+**	IDENT	31JL84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	31-July-1984
+C
+C SET CLIPPING INDICATOR
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	CLSW			! clipping indicator
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+	IF (GKS_INUSE) CALL GKS_CALL(%VAL(GKS_ADDR(XGSCLIP)))
+C
+	ENCLIP = (CLSW.EQ.GCLIP)
+	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+C	INQUIRY FUNCTIONS
+C	=================
+C
+	SUBROUTINE GQASF(ERRIND,LASF)
+C
+***	MODULE	GQASF
+***	IDENT	27NO84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	 1-May-1984
+C Allow up to ASFMAX returns now		TJI	17-Nov-1984
+C
+C INQUIRE ASPECT SOURCE FLAGS
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/		! GKS data structures
+***	COMMON/GKSESL/
+C
+C Arguments:
+	INTEGER	ERRIND		! Error indicator
+	INTEGER	LASF(ASFMAX)	! Aspect source flags
+C
+	INTEGER	I
+C
+	GKSERR = 0		! inquiry functions can't gen errors
+	ERRIND = 0		! only give indications of them !!
+C
+	DO 11 I=1,ASFMAX
+	   LASF(I) = GASF(I)
+11	CONTINUE
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GQMDS(WTYPE,ERRIND,COOUNI,RX,RY,LX,LY)
+C
+***	MODULE	GQMDS
+***	IDENT	14SE83
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					SCM	14-Sept-1983
+C
+C INQUIRE MAXIMUM DISPLAY SURFACE SIZE
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WTYPE		! Workstation type
+	INTEGER	ERRIND		! Error indicator
+	INTEGER	COOUNI		! Device Coordinate Units
+	REAL	RX,RY		! Max. display surface size in DC
+	INTEGER	LX,LY		! no. of device units in X and Y
+	CHARACTER*1	TRAN	! temporary
+C
+C functions called
+	INTEGER		TRNALL	! LSLLIB, translate logical name
+C
+	INCLUDE	'($SSDEF)'
+***	COMMON/GKSDAT2/		! GKS data structures
+***	COMMON/GKSESL/
+C
+C workspace
+	INTEGER	DEV
+C
+	GKSERR = 0		! inquiry functions can't gen errors
+	ERRIND = 0		! only give indications of them !!
+C
+C check if workstation exists
+	IF (TRNALL('DECW$DISPLAY',TRAN).EQ.SS$_NOLOGNAM) THEN
+	   ERRIND = 23		! workstation type does not exist
+	   GOTO 999
+	ENDIF
+C
+	DO 10 DEV=1,WSMAX
+	   IF (WKIDS(DEV).GE.0.AND.WTYPES(DEV).EQ.WTYPE) GOTO 20
+10	CONTINUE
+C
+CCC for anyone calling GQMDS before opening the workstation (to
+CCC perform the check on SYS$WORKSTATION) then rather than
+CCC returning an error, return some spurious size
+CCC	ERRIND = 23		! workstation type does not exist
+CCC	GOTO 999
+	DEV = 1
+C
+20	COOUNI = GMETRE		! units are in metres
+	RX = DCMAXX(DEV)	! film size in metres
+	RY = DCMAXY(DEV)
+	LX  = RASTX(DEV)	! and in pixels
+	LY  = RASTY(DEV)
+C
+999	RETURN
+	END
+C
+	SUBROUTINE	GQCR(WKID,CI,TYPE,ERRIND,RED,GREEN,BLUE)
+C
+**	MODULE	GQCR
+**	IDENT	26AU86
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	25-Jul-1985
+C
+C INQUIRE COLOUR REPRESENTATION
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	WKID			! workstation-identifier
+	INTEGER	CI			! colour index
+	INTEGER	TYPE			! type of values (unused)
+	INTEGER	ERRIND			! error indicator
+	REAL	RED,GREEN,BLUE		! colour values
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C function
+	INTEGER	GETDEV
+C
+C workspace
+	INTEGER	DEV
+C
+	ERRIND = GETDEV(DEV,WKID)
+	IF (ERRIND.NE.0) GOTO 9999
+	IF (DEV.GT.WSMAX) GOTO 9999
+C
+	IF (CI.LT.0.OR.CI.GT.MAXCOL(DEV))THEN
+	   ERRIND	= 86		! colour index is invalid
+	ELSE
+	   CALL GKS_PUTLNG(%VAL(RGBPTR(DEV)+CI*12),RED)
+	   CALL GKS_PUTLNG(%VAL(RGBPTR(DEV)+CI*12+4),GREEN)
+	   CALL GKS_PUTLNG(%VAL(RGBPTR(DEV)+CI*12+8),BLUE)
+	ENDIF
+C
+9999	RETURN
+C
+	END
+C
+C***********************************************************************
+C
+C	GKSLDLIB UTILITIES
+C	==================
+C
+	SUBROUTINE GUPTRN(DEV)
+C
+***	MODULE	GUPTRN
+***	IDENT	19SE84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	19-Sep-1984
+C
+C Update the tranformation
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/		! GKS data structures
+C
+C argument
+	INTEGER	DEV
+C
+C w/s
+	REAL	NDCSCX,NDCSCY	! scaling part of WC to NDC transform
+	REAL	NDCOFX,NDCOFY	! offset  part of WC to NDC transform
+	REAL	DCSC		! scaling part of NDC to DC transform
+	REAL	DCOFX, DCOFY	! offset  part of NDC to DC transform
+C
+C Work out the scaling factor and offset for WC to NDC transformation.
+C Effective formula for transforming a coord is:-
+C	XN = XVMIN + (XW-XWMIN) * ((XVMAX-XVMIN)/(XWMAX-XWMIN))
+C	YN = YVMIN + (YW-YWMIN) * ((YVMAX-YVMIN)/(YWMAX-YWMIN))
+C
+C This formula needs to be put into the form:-
+C	XN = (XW*NDCSCX) + NDCOFX
+C	YN = (YW*NDCSCY) + NDCOFY
+C
+	NDCSCX = (VIEWPT(2,TRNCUR)-VIEWPT(1,TRNCUR))
+     &		/(WINDOW(2,TRNCUR)-WINDOW(1,TRNCUR))
+	NDCSCY = (VIEWPT(4,TRNCUR)-VIEWPT(3,TRNCUR))
+     &		/(WINDOW(4,TRNCUR)-WINDOW(3,TRNCUR))
+	NDCOFX = VIEWPT(1,TRNCUR) - (WINDOW(1,TRNCUR)*NDCSCX)
+	NDCOFY = VIEWPT(3,TRNCUR) - (WINDOW(3,TRNCUR)*NDCSCY)
+C
+C A similar formula has to be used to transform NDC to DC with the
+C difference that the shape of the workstation window has to be
+C preserved within the workstation viewport (bottom left corner
+C is fixed).
+	DCSC = MIN(((WSVIEW(2,DEV)-WSVIEW(1,DEV))
+     &		   /(WSWIN (2,DEV)-WSWIN (1,DEV)))
+     &		  ,((WSVIEW(4,DEV)-WSVIEW(3,DEV))
+     &		   /(WSWIN (4,DEV)-WSWIN (3,DEV))))
+	DCOFX = WSVIEW(1,DEV) - (WSWIN(1,DEV)*DCSC)
+	DCOFY = WSVIEW(3,DEV) - (WSWIN(3,DEV)*DCSC)
+C
+C Both transformations have to be combined in the form:-
+C	XD = (((XW*NDCSCX*DCSC) + (NDCOFX*DCSC)+DCOFX
+C	YD = (((YW*NDCSCY*DCSC) + (NDCOFY*DCSC)+DCOFY
+C
+	SCALEX(DEV) = NDCSCX * DCSC
+	SCALEY(DEV) = NDCSCY * DCSC
+C
+C UIS version subtracted half a pixel from the offsets because UIS itself
+C rouded to nearest pixel. Since we truncate, there is no need.
+	OFFX(DEV) = (NDCOFX*DCSC) + DCOFX
+	OFFY(DEV) = (NDCOFY*DCSC) + DCOFY
+C
+C Work out the clipping limits.
+C These correspond to the area of overlap in NDC space between
+C the viewport and the workstation window transformations.
+C Logical variable CLPALL is set if there is no overlap.
+	CLPALL(DEV) = .FALSE.
+C Is there any overlap at all?
+	IF ((VIEWPT(1,TRNCUR).GT.WSWIN(2,DEV))
+     &  .OR.(VIEWPT(2,TRNCUR).LE.WSWIN(1,DEV))
+     &  .OR.(VIEWPT(3,TRNCUR).GT.WSWIN(4,DEV))
+     &  .OR.(VIEWPT(4,TRNCUR).LE.WSWIN(3,DEV))) GOTO 5
+C
+C Define the clipping limits to be the overlapping rectangle.
+	CLIPLO(1,DEV) = MAX(VIEWPT(1,TRNCUR),WSWIN(1,DEV))	! W
+	CLIPHI(1,DEV) = MIN(VIEWPT(2,TRNCUR),WSWIN(2,DEV))	! E
+	CLIPLO(2,DEV) = MAX(VIEWPT(3,TRNCUR),WSWIN(3,DEV))	! S
+	CLIPHI(2,DEV) = MIN(VIEWPT(4,TRNCUR),WSWIN(4,DEV))	! N
+C
+C Transform the clipping limits into WC space so that clipping can
+C be done before transforming coordinates. This is not GKS standard.
+C To do this we use the formulas:-
+C	XW = (XN-NDCOFX) / NDCSCX
+C	YW = (YN-NDCOFY) / NDCSCY
+C
+	CLIPLO(1,DEV) = (CLIPLO(1,DEV)-NDCOFX) / NDCSCX
+	CLIPHI(1,DEV) = (CLIPHI(1,DEV)-NDCOFX) / NDCSCX
+	CLIPLO(2,DEV) = (CLIPLO(2,DEV)-NDCOFY) / NDCSCY
+	CLIPHI(2,DEV) = (CLIPHI(2,DEV)-NDCOFY) / NDCSCY
+	GOTO 20
+C
+C No overlap
+5	CLPALL(DEV) = .TRUE.
+C
+C the transformation is now up to date
+20	UPTRN(DEV) = .FALSE.
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	LOGICAL FUNCTION GKCLIP(DEV,X1,Y1,X2,Y2)
+C
+***	MODULE	GKCLIP
+***	IDENT	23JL80
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Authors many and varied but mainly Paul Hardy based on algorithms
+C by P. Woodsford and P.Cross, with tidies by R.Fairbairns
+C
+C Created July 1980
+C
+C to clip a straight line to rectangular boundaries.
+C function value is TRUE if no visible result.
+C
+	IMPLICIT NONE
+C
+	INTEGER	DEV		! which clip limits to use
+	REAL X1,Y1,X2,Y2	! coords of ends of line
+C
+***	COMMON/GKSDAT2/		! contains boundaries
+C
+	PARAMETER X=1,Y=2	! for clarity
+C w/s
+	REAL P(2,2)		! our copies of the points
+	REAL D(2)		! DX,DY is line vector
+	REAL R			! temp variable
+	INTEGER DEP,INDEP	! X or Y depending which axis considered
+	INTEGER HIGH,LOW	! 1 or 2 to indicate ends of line
+C
+C set everything up
+	GKCLIP=.FALSE.			! assume visible result
+	P(X,1)=X1			! take copy of args
+	P(Y,1)=Y1
+	P(X,2)=X2
+	P(Y,2)=Y2
+	D(X)=X2-X1			! calculate vector
+	D(Y)=Y2-Y1
+C
+C now loop for both axes
+	DO 30 DEP=X,Y
+	   INDEP=3-DEP			! independent axis
+	   LOW=1			! guess which end lowest
+	   IF(D(INDEP).LT.0.0) LOW=2	! upside down
+	   HIGH=3-LOW			! the other end
+	   IF(P(INDEP,HIGH).LT.CLIPLO(INDEP,DEV)) GOTO 50 ! out bottom
+	   IF(P(INDEP,LOW ).GT.CLIPHI(INDEP,DEV)) GOTO 50 ! out top
+	   IF(D(INDEP).EQ.0.0) GOTO 30	! parallel to frame this axis
+C
+C here to consider low end
+	   R=P(INDEP,LOW)-CLIPLO(INDEP,DEV) ! distance from frame
+	   IF(R.GE.0.0) GOTO 20		! inside frame
+C
+C clip low end
+	   P(DEP,LOW)=P(DEP,LOW)-R*D(DEP)/D(INDEP) ! similar triangles
+	   P(INDEP,LOW)=CLIPLO(INDEP,DEV) ! push onto frame
+C
+C now lets consider the high end
+20	   R=CLIPHI(INDEP,DEV)-P(INDEP,HIGH) ! distance from frame
+	   IF(R.GE.0.0) GOTO 30		! inside frame
+C
+C clip high end
+	   P(DEP,HIGH)=P(DEP,HIGH)+R*D(DEP)/D(INDEP) ! similar triangles
+	   P(INDEP,HIGH)=CLIPHI(INDEP,DEV) ! push onto frame
+C
+30	   CONTINUE			! loop for both axes
+C
+C copy args back
+	X1=P(X,1)
+	Y1=P(Y,1)
+	X2=P(X,2)
+	Y2=P(Y,2)
+40	RETURN
+C
+C here with all invisible
+50	GKCLIP=.TRUE.
+	GOTO 40
+C
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE GKSW2D(WKID,WX,WY,DX,DY)
+C
+***	MODULE	GKSW2D
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created August 1984
+C
+C To convert world coordinate WX,WY to device coordinate DX,DY
+C on workstation WKID
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C arguments
+	INTEGER	WKID		! worstation identifier
+	REAL	WX,WY		! input world coordinate
+	REAL	DX,DY		! output device coordinate
+C
+C w/s
+	INTEGER	DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+C Make sure transformation is up to date
+	IF (UPTRN(DEV)) CALL GUPTRN(DEV)
+	DX = (WX*SCALEX(DEV))+OFFX(DEV)
+	DY = (WY*SCALEY(DEV))+OFFY(DEV)
+C
+9999	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GKSD2W(WKID,DX,DY,WX,WY)
+C
+***	MODULE	GKSD2W
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created February 1985
+C
+C To convert device coordinate DX,DY to world coordinate WX,WY
+C on workstation WKID
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C arguments
+	INTEGER	WKID		! worstation identifier
+	REAL	DX,DY		! input device coordinate
+	REAL	WX,WY		! output world coordinate
+C
+C w/s
+	INTEGER	DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+C Make sure transformation is up to date
+	IF (UPTRN(DEV)) CALL GUPTRN(DEV)
+C
+	WX = (DX-OFFX(DEV))/SCALEX(DEV)
+	WY = (DY-OFFY(DEV))/SCALEY(DEV)
+C
+9999	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GD2W(WKID,DX,DY,WX,WY)
+C
+***	MODULE	GD2W
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created August 1984
+C
+C To scale device coordinate lengths DX,DY to world coordinate WX,WY
+C on workstation WKID
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C arguments
+	INTEGER WKID
+	REAL	DX,DY		! input device coordinate
+	REAL	WX,WY		! output world coordinate
+C w/s
+	INTEGER	DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+C Make sure transformation is up to date
+	IF (UPTRN(DEV)) CALL GUPTRN(DEV)
+C
+	WX = DX / SCALEX(DEV)
+	WY = DY / SCALEY(DEV)
+C
+9999	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GW2D(WKID,WX,WY,DX,DY)
+C
+***	MODULE	GW2D
+***	IDENT	14MY84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created May 1985
+C
+C To scale world coordinate lengths WX,WY to device coordinate DX,DY
+C on workstation WKID
+C
+	IMPLICIT NONE
+C
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C arguments
+	INTEGER WKID
+	REAL	WX,WY		! input world coordinate
+	REAL	DX,DY		! output device coordinate
+C w/s
+	INTEGER	DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+C Make sure transformation is up to date
+	IF (UPTRN(DEV)) CALL GUPTRN(DEV)
+C
+	DX = WX*SCALEX(DEV)
+	DY = WY*SCALEY(DEV)
+C
+9999	RETURN
+	END
+C
+C***********************************************************************
+C
+	OPTIONS	/CHECK=NOOVERFLOW
+	SUBROUTINE GKSD2P(WKID,DX,DY,XP)
+C
+***	MODULE	GKSD2P
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created November 1989
+C
+C To convert device coordinate DX,DY to X point XP.
+C on workstation WKID
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C arguments
+	INTEGER WKID
+	REAL	DX,DY		! input device coordinate
+	RECORD/X$POINT/XP	! output X point
+C w/s
+	INTEGER	DEV
+C
+C function
+	INTEGER	GETDEV
+C
+	GKSERR = GETDEV(DEV,WKID)
+	IF (GKSERR.NE.0) GOTO 9999
+C
+	XP.X$W_GPNT_X = INT(DX/GNOMLW)
+	XP.X$W_GPNT_Y = INT((DCMAXY(DEV)-DY)/GNOMLW)
+C
+9999	RETURN
+	END
+C
+C**********************************************************************
+C
+	INTEGER FUNCTION GETDEV(DEV,WKID)
+C
+**	MODULE	GETDEV
+**	IDENT	18SE84
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	18-Sep-1984
+C
+C Get device corresponding to a particular workstation identifier
+C Returning 0 if successful, or 20 (GKS error specified workstation
+C identifier is invalid.
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	DEV			! device
+	INTEGER	WKID			! workstation-identifier
+C
+***	COMMON/GKSDAT2/
+C
+	GETDEV = 0
+	DO 10 DEV=1,WSMAX+AUXMAX
+	   IF (WKID.EQ.WKIDS(DEV)) GOTO 20
+10	CONTINUE
+	DEV = -1			! not found
+	GETDEV = 20
+C
+20	CONTINUE
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	OPTIONS	/CHECK=NOOVERFLOW
+	SUBROUTINE GKS_BUFFER(DEV,PX,PY,XBUF)
+C
+***	MODULE	GKS_BUFFER
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created November 1986
+C
+C To buffer up a single point
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+C
+C arguments
+	INTEGER	DEV
+	REAL	PX,PY		! input point
+	RECORD/X$POINT/XBUF(*)	! should be XBUFMAX long
+C
+	IF (XBUFMAX.EQ.0) GOTO 9999	! no memory for some reason
+	IF (XBUFPTR.EQ.XBUFMAX) THEN	! buffer full
+	   CALL GKS_FLUSH(DEV,XBUF)	! flush out
+	   XBUFPTR = 1
+C
+C preserve a continuity point
+	   XBUF(1).X$W_GPNT_X =	XBUF(XBUFMAX).X$W_GPNT_X
+	   XBUF(1).X$W_GPNT_Y =	XBUF(XBUFMAX).X$W_GPNT_Y
+	ENDIF
+	XBUFPTR = XBUFPTR+1
+	XBUF(XBUFPTR).X$W_GPNT_X = INT(PX/GNOMLW)
+	XBUF(XBUFPTR).X$W_GPNT_Y = INT((DCMAXY(DEV)-PY)/GNOMLW)
+9999	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GKS_FLUSH(DEV,XBUF)
+C
+***	MODULE	GKS_FLUSH
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Created November 1986
+C
+C To flush out buffer
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+***	COMMON/GKSRF/
+C
+C arguments
+	INTEGER	DEV
+	RECORD/X$POINT/XBUF(*)	! should be XBUFMAX long
+C
+	IF (XBUFPTR.NE.0) THEN
+	  IF (DIVRF.AND.WKIDS(DEV).LE.2) THEN
+	    CALL GUIS_RFBUF(WKIDS(DEV),XBUFPTR,XBUF)
+	  ELSE
+	    AST_ON = AST_ON+1
+C
+C flush out any DPS stuff before doing X drawing
+	    IF (XDPS_DONE(DEV)) THEN
+	      XDPS_DONE(DEV) = .FALSE.
+	      CALL DPS$WAIT_CONTEXT(XDPSC(DEV))
+	    ENDIF
+	    IF (XPIXMAP(DEV).NE.0) CALL X$DRAW_LINES(
+     &				XDISPLAY,XPIXMAP(DEV),XGC(1,DEV),
+     &				XBUF,XBUFPTR,X$C_COORD_MODE_ORIGIN)
+	    IF (XMODE.NE.0.OR.XPIXMAP(DEV).EQ.0) THEN
+	      CALL X$DRAW_LINES(XDISPLAY,XWINDOW(DEV),XGC(1,DEV),
+     &				XBUF,XBUFPTR,X$C_COORD_MODE_ORIGIN)
+	    ELSE
+C
+C accumulate the number of lines drawn, and perhaps flush out
+	      XLINES(DEV) = XLINES(DEV)+XBUFPTR
+	      IF (XLINES(DEV).GT.XLMAX) CALL GUWK(WKIDS(DEV),0)
+	    ENDIF
+	    AST_ON = AST_ON-1
+	  ENDIF
+	  XBUFPTR = 0
+	ENDIF
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GKS_XERR(DISP,ERROR)
+C
+***	MODULE	GKS_XERR
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C X error handler
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+C
+C arguments
+	INTEGER			DISP		! X display
+	RECORD/X$ERROR_EVENT/	ERROR		! event structure
+C
+C just set flag if an error has occurred
+	XERROR = .TRUE.
+C
+	RETURN
+	END
+C
+C *********************************************************************
+C
+	SUBROUTINE	GESC(ESCID,DATA)
+C
+**	MODULE	GESC
+**	IDENT	29MY86
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created				Clarke Brunt	9-May-1986
+C
+C ESCAPE
+C
+	IMPLICIT NONE
+C
+***	COMMON/GFADAT1/
+***	COMMON/GKSDAT2/
+***	COMMON/GKSESL/
+C
+C Arguments
+	INTEGER ESCID			! escape identifier
+	INTEGER	DATA(2)			! other data
+C
+C Workspace
+	INTEGER		IDATA
+	REAL		RDATA
+	LOGICAL*4	LDATA
+	EQUIVALENCE	(IDATA,RDATA,LDATA)
+	INTEGER		DEV
+C
+	IDATA = DATA(1)	! copy into integer version
+C
+C Despatch on escape type
+	IF (GKS_INUSE) CALL GKS_CALL(%VAL(GKS_ADDR(XGESC)))
+C
+	GKSERR = 0
+	GOTO (100,99999,300),ESCID
+	GOTO (1000,99999,3000),ESCID-100
+	GKSERR = 180			! function not supported
+	GOTO 99999
+C
+C Set 'marker type' for lines (as for GSMK)
+100	ISYM = IDATA
+	DO 105 DEV=1,WSMAX
+	   UPLIN(DEV) = .TRUE.		! attributes need updating
+	   UPFA(DEV) = .TRUE.		! attributes need updating
+105	CONTINUE
+	GOTO 99999
+C
+C Set fill area line width and spacing
+300	CONTINUE
+C
+C Zero width will cause the nominal width to be used
+C If spacing is less than width, then set a sensible value
+C
+	IF (RDATA.GE.0.0) GFAWID = RDATA
+	IDATA = DATA(2)
+	GFAGAP = RDATA
+	IF (GFAGAP.LT.GFAWID) GFAGAP = 2.0*GFAWID
+	GOTO 99999
+C
+C Inquire 'marker type' for lines (as for GSMK)
+1000	IDATA = ISYM
+	GOTO 9000
+C
+C Inquire fill area line width and spacing
+3000	RDATA = GFAGAP
+	DATA(2) = IDATA
+	RDATA = GFAWID
+	GOTO 9000
+C
+C Replace argument for inquiries
+9000	DATA(1) = IDATA
+C
+99999	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE LSG_BEGIN_FEATURE
+C
+***	MODULE	LSG_BEGIN_FEATURE
+***	IDENT	14DE93
+C
+	IMPLICIT NONE
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author  C C Brunt
+C
+C Created 					CCB	10-Dec-1993
+C
+C Mark that a feature is to be started (when we actually draw anything)
+C
+***	COMMON/GKSDAT2/
+C
+	IF (GKS_INUSE) CALL GKS_CALL(%VAL(GKS_ADDR(XLSG_BEGIN_FEATURE)))
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	SUBROUTINE LSG_END_FEATURE
+C
+***	MODULE	LSG_END_FEATURE
+***	IDENT	14DE93
+C
+	IMPLICIT NONE
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author  C C Brunt
+C
+C Created 					CCB	10-Dec-1993
+C
+C Mark that a feature is to be started (when we actually draw anything)
+C
+***	COMMON/GKSDAT2/
+C
+	IF (GKS_INUSE) CALL GKS_CALL(%VAL(GKS_ADDR(XLSG_END_FEATURE)))
+C
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	INTEGER FUNCTION GKS_COUNT_BITS(MASK)
+C
+***	MODULE	GKS_COUNT_BITS
+***	IDENT	10AU84
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Count bits set in an integer
+C
+	IMPLICIT NONE
+C
+C arguments
+	INTEGER	MASK
+C
+C workspace
+	INTEGER	I
+C
+	I = MASK
+	GKS_COUNT_BITS = 0
+10	IF (I.EQ.0) GOTO 999
+	IF (I) GKS_COUNT_BITS = GKS_COUNT_BITS+1 ! test lsb
+	I = ISHFT(I,-1)
+	GOTO 10
+C
+999	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GKS_PUTLNG(FROM,TO)
+C
+***	MODULE	GKS_PUTLNG
+***	IDENT	28AP95
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+	IMPLICIT NONE
+C
+C arguments
+	INTEGER	FROM,TO
+C
+	IF (%LOC(FROM).NE.0 .AND. %LOC(TO).NE.0) TO = FROM
+C
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GKS_TEXT_BACKSTOP(DPSC,BUF,COUNT)
+C
+***	MODULE	GKS_TEXT_BACKSTOP
+***	IDENT	23FE94
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author: Clarke Brunt
+C
+C Output debug text from Display PostScript text context
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GKSDECW/
+C
+C arguments
+	INTEGER	DPSC	! context by value
+	BYTE	BUF(*)	! the text
+	INTEGER	COUNT	! length by value
+C
+C workspace
+	INTEGER	I
+C
+	DO 10 I=1,XWS
+	   IF (%LOC(DPSC).EQ.XDPS_TEXT_CONTEXT(I)) GOTO 20
+10	CONTINUE
+	GOTO 999	! not found?
+C
+20	CALL fwrite(BUF,%VAL(1),COUNT,%VAL(XDPS_TEXT_LUN(I)))
+C
+999	RETURN
+	END
+C
+C**********************************************************************
+C
+	INTEGER FUNCTION GKS_ALLOC_COLOR_CELLS(DEV,MASKS,HADCOL)
+C
+**	MODULE	GKS_ALLOC_COLOR_CELLS
+**	IDENT	17SE96
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	17-Sep-1996
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	DEV			! device number
+	INTEGER	MASKS(12)		! returned masks
+	LOGICAL	HADCOL			! user has specified MAXCOL
+C
+	INCLUDE	'SYS$LIBRARY:DECW$XLIBDEF'
+***	COMMON/GFABUF/
+***	COMMON/GKSDECW/
+***	COMMON/GKSDAT2/
+C
+C functions
+	INTEGER	LIB$GET_VM
+	INTEGER	TRNALL
+	INTEGER	RDLONG
+C
+C workspace
+	INTEGER	NPLANES			! planes required
+	INTEGER	I,P
+	INTEGER	OFF
+	INTEGER	NCOL
+	INTEGER	PIX_ADDR
+	INTEGER	COL_ADDR
+	INTEGER	START,FREE,LOW,HIGH
+	INTEGER	BEST_START,BEST_FREE,BEST_LOW,BEST_HIGH
+	CHARACTER*4	TRAN
+	INTEGER	MIN_COLS,FREE_COLS
+C
+	GKS_ALLOC_COLOR_CELLS = 0	! failure
+	PIX_ADDR = 0
+	COL_ADDR = 0
+	CALL LIB$FFC(0,12,USED_PLANES(DEV),NPLANES)
+C
+C I can't cope with trying to do this with a decomposed
+C colour map (e.g. DirectColor), as there is no obvious way
+C of getting the free cells in any reasonable order
+	IF (XDECOMP) GOTO 9990
+C
+C first allocate as many cells as we can from the colour map
+	NCOL = 2**XRGBDEPTH
+	I = LIB$GET_VM(NCOL*4,PIX_ADDR,FILL_ZONE)
+	IF (.NOT.I) THEN
+	   CALL TTWSTR(
+     &'GKS GOPWK - Failed to get memory for pixel array')
+	   GOTO 9990
+	ENDIF
+C
+10	I = X$ALLOC_COLOR_CELLS(XDISPLAY,XCMAPS(DEV),0,
+     &			MASKS,0,%VAL(PIX_ADDR),NCOL)
+	IF (.NOT.I) THEN		! failed
+	   NCOL = NCOL-1		! try one less
+	   IF (NCOL.EQ.0) GOTO 9990
+	   GOTO 10
+	ENDIF
+C
+C we got NCOL cells - create a list in order
+	I = LIB$GET_VM((2**XRGBDEPTH)*4,COL_ADDR,FILL_ZONE)
+	IF (.NOT.I) THEN
+	   CALL TTWSTR(
+     &'GKS GOPWK - Failed to get memory for colour array')
+	   GOTO 9990
+	ENDIF
+	CALL VIOCLR(%VAL(COL_ADDR),(2**XRGBDEPTH)*4)
+C
+	CALL LIB$FFS(0,32,XRGBMASK(1),OFF)
+	DO 20 I=0,NCOL-1
+	   CALL GKS_PUTLNG(%VAL(PIX_ADDR+4*I),P)
+	   P = ISHFT(P.AND.XRGBMASK(1),-OFF)
+	   CALL GKS_PUTLNG(-1,%VAL(COL_ADDR+4*P))
+20	CONTINUE
+C
+C finished with pixel array
+	CALL LIB$FREE_VM((2**XRGBDEPTH)*4,PIX_ADDR)
+	PIX_ADDR = 0
+C
+C now look for suitable chunk in colour array
+	START = 0
+	BEST_FREE = 0
+30	FREE = 0
+	HIGH = -1
+	LOW = USED_PLANES(DEV)+1
+	I = 0
+C
+40	CALL GKS_PUTLNG(%VAL(COL_ADDR+4*(I+START)),P)
+	IF (P) THEN
+	   FREE = FREE+1
+	   IF (I.GT.HIGH) HIGH = I
+	   IF (I.LT.LOW) LOW = I
+	ENDIF
+	I = I+1
+	IF (I.LT.USED_PLANES(DEV)+1) GOTO 40
+C
+	IF (FREE.GT.BEST_FREE) THEN
+	   BEST_FREE = FREE
+	   BEST_START = START
+	   BEST_LOW = LOW
+	   BEST_HIGH = HIGH
+	ENDIF
+C
+	START = START + USED_PLANES(DEV)+1
+	IF (START.LT.2**XRGBDEPTH) GOTO 30
+C
+	IF (BEST_FREE.LE.0) GOTO 9990	! no cells found
+C
+C determine lowest number of cells acceptable (default half)
+	MIN_COLS = USED_PLANES(DEV)/2+1
+	IF (TRNALL('LSL$DECW_MIN_COLOUR',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),4)
+	   IF (.NOT.RDLONG(I)) THEN
+	      IF (I.GT.0) MIN_COLS = I
+	   ENDIF
+	ENDIF
+C
+C determine number of cells we wish to leave free (default 0)
+	FREE_COLS = 0
+	IF (TRNALL('LSL$DECW_FREE_COLOUR',TRAN)) THEN
+	   CALL SETAUX(%REF(TRAN),4)
+	   IF (.NOT.RDLONG(I)) THEN
+	      IF (I.GE.0) FREE_COLS = I
+	   ENDIF
+	ENDIF
+C
+	IF (BEST_FREE-FREE_COLS.LT.MIN_COLS) GOTO 9990	! not enough free
+C
+C so we have a chunk starting at BEST_START
+C decide whether to use it forwards or backwards by checking
+C which end has the first free colour
+	XINVERT(DEV) = .FALSE.
+	IF (USED_PLANES(DEV)-BEST_HIGH .LT. BEST_LOW) XINVERT(DEV) = .TRUE.
+C
+C set highest colour number (if not already specified)
+	IF (.NOT.HADCOL) THEN
+	   IF (XINVERT(DEV)) THEN
+	      MAXCOL(DEV) = USED_PLANES(DEV)-BEST_LOW-FREE_COLS
+	   ELSE
+	      MAXCOL(DEV) = BEST_HIGH-FREE_COLS
+	   ENDIF
+	ENDIF
+C
+C fill in arrays for return to caller
+	XBACK(DEV) = BEST_START		! background pixel
+	IF (XDECOMP) THEN
+CCC
+CCC stuff needed
+CCC MASKS(1) [and 2 and 3] shifted up into position
+CCC but we don't deal with XDECOMP anyway (see above)
+CCC
+	ELSE
+	   P = 1
+	   DO 50 I=1,NPLANES
+	      MASKS(I) = P
+	      P = P*2
+50	   CONTINUE
+	ENDIF
+C
+	I = LIB$GET_VM((MAXCOL(DEV)+1)*4,USEPTR(DEV),FILL_ZONE)
+	IF (.NOT.I) THEN
+	   USEPTR(DEV) = 0
+	   CALL TTWSTR(
+     &'GKS GOPWK - Failed to get memory for colour usage array')
+	   GOTO 9990
+	ENDIF
+C
+	DO 60 I=0,MAXCOL(DEV)
+	   P = I
+	   IF (XINVERT(DEV)) P = USED_PLANES(DEV)-P
+	   CALL GKS_PUTLNG(%VAL(COL_ADDR+(BEST_START+P)*4),
+     &		       %VAL(USEPTR(DEV)+4*I))
+	   CALL GKS_PUTLNG(0,%VAL(COL_ADDR+(BEST_START+P)*4))
+60	CONTINUE
+C
+	GKS_ALLOC_COLOR_CELLS = 1	! success
+C
+9990	CONTINUE
+C
+	IF (COL_ADDR.NE.0) THEN
+C
+C free the colours we haven't used
+	   DO 9991 I=0,2**XRGBDEPTH-1
+	      CALL GKS_PUTLNG(%VAL(COL_ADDR+4*I),P)
+	      IF (P) CALL X$FREE_COLORS(XDISPLAY,XCMAPS(DEV),I,1,0)
+9991	   CONTINUE
+	   CALL LIB$FREE_VM((2**XRGBDEPTH)*4,COL_ADDR)
+	   COL_ADDR = 0
+	ENDIF
+C
+	IF (PIX_ADDR.NE.0) THEN
+	   CALL LIB$FREE_VM((2**XRGBDEPTH)*4,PIX_ADDR)
+	   PIX_ADDR = 0
+	ENDIF
+C
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GKS_PRINT_EXCEPT(DEV,USE)
+C
+**	MODULE	GKS_PRINT_EXCEPT
+**	IDENT	19SE96
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	19-Sep-1996
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	DEV			! device number
+	LOGICAL	USE(0:*)
+C
+	INCLUDE	'LSL$CMNLSL:EXPC.CMN'
+***	COMMON/GKSDAT2/
+C
+C functions
+	INTEGER	EXPAND
+C
+C workspace
+	INTEGER	I
+	LOGICAL INUSE
+	INTEGER	START
+	INTEGER	TLEN
+C
+	TLEN = EXPAND('...except ')
+	INUSE = .TRUE.
+	DO 10 I=0,MAXCOL(DEV)
+	   IF (INUSE) THEN
+	      IF (.NOT.USE(I)) THEN
+	         START = I
+	         INUSE = .FALSE.
+	      ENDIF
+	   ELSE
+	      IF (USE(I)) THEN
+	         CALL GKS_PRINT_RANGE(START,I-1,TLEN)
+	         INUSE = .TRUE.
+	      ENDIF
+	   ENDIF
+10	CONTINUE
+	IF (.NOT.INUSE) CALL GKS_PRINT_RANGE(START,MAXCOL(DEV),TLEN)
+	IF (EXPLEN.GT.TLEN) CALL TTWSTR
+C
+	RETURN
+	END
+C
+C**********************************************************************
+C
+	SUBROUTINE GKS_PRINT_RANGE(FIRST,LAST,TLEN)
+C
+**	MODULE	GKS_PRINT_RANGE
+**	IDENT	19SE96
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C Created					CCB	19-Sep-1996
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNLSL:EXPC.CMN'
+C
+C Arguments:
+	INTEGER	FIRST,LAST,TLEN
+C
+C functions
+	IF (EXPLEN.GT.70) THEN
+	   CALL TTWSTR
+	   EXPLEN = TLEN
+	ENDIF
+C
+	IF (EXPLEN.GT.TLEN) CALL APPEND(',')
+	CALL APPEND('%N',FIRST)
+	IF (LAST.NE.FIRST) CALL APPEND('-%N',LAST)
+C
+	RETURN
+	END
+C
+C***********************************************************************
+C
+	INTEGER FUNCTION LSG_SET_PATTERN(LEN,MAJ,MIN,MAREP,MIREP,FLG)
+C
+**	MODULE	LSG_SET_PATTERN
+**	IDENT	24SE96
+C
+	IMPLICIT NONE
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author  C C Brunt
+C
+C Created 					CCB	26-Feb-1990
+C
+C Set up a hardware pattern.
+C Return non-zero index for GSLN if hardware pattern set up, 0 if not, in
+C which case it will be drawn by software.
+C
+C args
+	REAL	LEN		! overall length
+	REAL	MAJ		! major dash length
+	REAL	MIN		! minor dash length
+	INTEGER	MAREP		! major repeat count
+	INTEGER	MIREP		! minor repeat count
+	INTEGER	FLG		! pattern flags
+C
+***	COMMON/GKSDAT2/			! GKS data structures
+***	COMMON/GKSESL/			! GKS error state list
+C
+C function called
+	INTEGER	GKS_CALL
+C
+	GKSERR 	= 0		! no errors yet
+	IF (GKS_INUSE) THEN
+	   LSG_SET_PATTERN = GKS_CALL(%VAL(GKS_ADDR(XLSG_SET_PATTERN)))
+	ELSE
+	   LSG_SET_PATTERN = 0
+	ENDIF
+	RETURN
+	END

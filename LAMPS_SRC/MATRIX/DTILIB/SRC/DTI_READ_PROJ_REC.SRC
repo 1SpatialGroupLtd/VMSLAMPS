@@ -1,0 +1,511 @@
+	INTEGER*4 FUNCTION DTI_READ_PROJ_REC 
+     &            ( DTI_LUN, RETVAL )
+C
+***	IDENT	26NO91
+***	MODULE	DTI_READ_PROJ_REC
+C
+C	Copyright : Laser-Scan, Cambridge, England
+C	Author    : D R Catlow
+C
+CMOD1066Modified  : JB 25NO91 Use real versions of LATINT/LONINT to avoid
+C		    rounding down errors in the file extents LON/LATREC 
+CMOD1045Modified  : JB 12SE91 to take mod of 360 degrees (2*PI) for
+C		    LONINT, LATORI etc to avoid overflows
+CMOD	Modified  : DRC 15NO88 to fill out LATINT, LONINT, LATORI,
+C		    LONORI, LATREC, LONREC if proj. is Geographicals
+C		    and units are .1 seconds of arc or seconds of
+C		    arc, or degrees.
+C	Modified  : DRC 31AU88 to undo the previous mod. if input
+C                   units aren't metres or feet
+C	Modified  : DRC 25AP88 to transfer DTM origin offset values to
+C		    DTIHDR variables X_OFFSET and Y_OFFSET.
+C	Modified  : DRC 01AU88 for use with LSLA header (which may also
+C		    contain a Projection Record.
+C	Modified  : DRC 03AU88 to remove reference to DEFAULT_ALVY_HEADER
+C
+C	DTILIB Function.   
+C
+C	Reads a DTI Projection record from a file opened on DTI_LUN.
+C	Projection record details are extracted from the DTI header
+C	and placed in common DTIPROJ.
+C	Note: A DTI Projection record may only be present in an ALVY 
+C	or LSLA DTI file. The function returns an error condition if the
+C	DTI file is not of ALVY or LSLA type or no projection record is
+C	found.
+C
+C	The function returns true if successful.
+C	Any system error is returned in RETVAL.
+C
+C----------------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters
+***	PARAMETER/LSL$CMNDTI:DTIDEF/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+***	COMMON/LSL$CMNDTI:DTIPROJ/		!DTI Projection Record
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C arguments
+	INTEGER*4	DTI_LUN			!LUN on which to open file
+	INTEGER*4	RETVAL			!System error return code
+C
+C local
+	INTEGER*4	IERR			!function return status
+	INTEGER*4	ERROR			!system error return code
+	INTEGER*4	I			!counter
+	INTEGER*4	BYTE_OFFSET		!start of projection record
+	REAL*4		R_MOD
+	REAL*8		D_MOD
+	REAL*8		SF,TEMP,DL_MOD
+	REAL*8		DLATINT,DLONINT		! temp real versions
+C
+	REAL		PI
+	PARAMETER	(PI=3.141592654)
+C functions
+	INTEGER*4	DTI_FIND_PROJ_REC	!to return byte offset of
+C						!projection record
+	INTEGER*4	DTI_READ_LONG_HEADER 	!writes longword to header
+	INTEGER*4	DTI_READ_REAL_HEADER 	!writes real*4 to header
+	INTEGER*4	DTI_READ_REAL8_HEADER 	!writes real*8 to header
+C
+C****************************************************************************
+C	Test if the supplied LUN number is valid
+	IF(DTI_LUN.LT.1.OR.DTI_LUN.GT.MAX_DTI)THEN
+	  DTI_READ_PROJ_REC=DTI__BADLUN			!LUN out of range
+	  GOTO 999					!Return
+	ENDIF
+C
+C	Test of the supplied LUN is in use
+	IF(.NOT.DTILUN_INUSE(DTI_LUN))THEN
+	  DTI_READ_PROJ_REC=DTI__LUNUNUSED		!LUN not in use
+	  GOTO 999					!Return
+	ENDIF
+C
+C	Test if the file opened on the LUN is an ALVY file
+	IF(HEADER_TYPE(DTI_LUN).NE.DTI_ALVY.AND.
+     &     HEADER_TYPE(DTI_LUN).NE.DTI_LSLA)THEN
+	  DTI_READ_PROJ_REC=DTI__BADHEADER
+	  GOTO 999
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C	Test if the Header Record is large enough to contain a
+C	Projection Record.  If it isn't then there's no point in
+C	searching for a Projection Record identifier.
+	IF     (HEADER_TYPE(DTI_LUN).EQ.DTI_ALVY.OR.
+     &	        HEADER_TYPE(DTI_LUN).EQ.DTI_LSLA)THEN
+	  IF(DATA_OFFSET(DTI_LUN)-DEFAULT_LSLA_HEADER.LT.
+     &      DTIPROJ_RECORD_LENGTH)THEN
+	    DTI_READ_PROJ_REC=DTI__NOPROJREC
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C	Call routine to search for Projection Record Identifier.
+	IERR = DTI_FIND_PROJ_REC (DTI_LUN,
+     &                          DATA_OFFSET(DTI_LUN)-1,
+     &                          %VAL(SEC_ADDR(DTI_LUN)),
+     &                          BYTE_OFFSET,
+     &                          ERROR)
+	IF(IERR.NE.DTI__NORMAL)THEN
+	  DTI_READ_PROJ_REC=IERR	!signal failure - record not found
+	  RETVAL=ERROR
+	  GOTO 999
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C	Now check that the byte offset is sensible in relation to the
+C	total header length
+	IF(DATA_OFFSET(DTI_LUN)-BYTE_OFFSET.LT.
+     &    DTIPROJ_RECORD_LENGTH)THEN
+	  DTI_READ_PROJ_REC=DTI__HEADTOOSMALL
+	  GOTO 999
+	ENDIF
+C
+C--------------------------------------------------------------------------
+C	Transfer Projection Record Offset
+	DTIPROJ_RECORD_OFFSET(DTI_LUN)=BYTE_OFFSET
+C
+C--------------------------------------------------------------------------
+C	Read DTIPROJ values and place in common DTIPROJ
+C
+C	Origin Offset values (x and y)
+	IERR=DTI_READ_REAL8_HEADER(DTI_LUN,DTIPROJ_ORIGIN(1,DTI_LUN),
+     &                             BYTE_OFFSET+8,ERROR)
+	IF(IERR.NE.DTI__NORMAL)GOTO 900
+C
+	IERR=DTI_READ_REAL8_HEADER(DTI_LUN,DTIPROJ_ORIGIN(2,DTI_LUN),
+     &                             BYTE_OFFSET+16,ERROR)
+	IF(IERR.NE.DTI__NORMAL)GOTO 900
+C
+C	Sample x and y values
+	IERR=DTI_READ_REAL_HEADER(DTI_LUN,DTIPROJ_SAMPLE(1,DTI_LUN),
+     &                            BYTE_OFFSET+24,ERROR)
+	IF(IERR.NE.DTI__NORMAL)GOTO 900
+C
+	IERR=DTI_READ_REAL_HEADER(DTI_LUN,DTIPROJ_SAMPLE(2,DTI_LUN),
+     &                            BYTE_OFFSET+28,ERROR)
+	IF(IERR.NE.DTI__NORMAL)GOTO 900
+C
+C	Units code
+	IERR=DTI_READ_LONG_HEADER(DTI_LUN,DTIPROJ_UNITS(DTI_LUN),
+     &                            BYTE_OFFSET+32,ERROR)
+	IF(IERR.NE.DTI__NORMAL)GOTO 900
+C
+C	Spheroid Code
+	IERR=DTI_READ_LONG_HEADER(DTI_LUN,DTIPROJ_SPHEROID(DTI_LUN),
+     &                            BYTE_OFFSET+36,ERROR)
+	IF(IERR.NE.DTI__NORMAL)GOTO 900
+C
+C	User Spheroid Values (only if spheroid code is 101)
+	IF(DTIPROJ_SPHEROID(DTI_LUN).EQ.101)THEN
+	  IERR=DTI_READ_REAL8_HEADER(DTI_LUN,
+     &                               DTIPROJ_USER_SPHEROID(1,DTI_LUN),
+     &                               BYTE_OFFSET+40,ERROR)
+	  IF(IERR.NE.DTI__NORMAL)GOTO 900
+C
+	  IERR=DTI_READ_REAL8_HEADER(DTI_LUN,
+     &                               DTIPROJ_USER_SPHEROID(2,DTI_LUN),
+     &                               BYTE_OFFSET+48,ERROR)
+	  IF(IERR.NE.DTI__NORMAL)GOTO 900
+	ENDIF
+C
+C	Projection Code
+	IERR=DTI_READ_LONG_HEADER(DTI_LUN,DTIPROJ_PROJECTION(DTI_LUN),
+     &                            BYTE_OFFSET+56,ERROR)
+	IF(IERR.NE.DTI__NORMAL)GOTO 900
+C
+C	Transfer interval and origin values to DTIHDR variables
+C	if the proj. is Geographicals.
+C	Take mod of 360 degrees (2*PI) to avoid overflows
+C
+	IF (DTIPROJ_PROJECTION(DTI_LUN).EQ.100) THEN
+	  DL_MOD = 360*3600*10				!0.1secs in 360 deg
+C
+	  IF(DTIPROJ_UNITS(DTI_LUN).EQ.110)THEN		!0.1 seconds
+	    D_MOD = 360*3600*10
+	    R_MOD = D_MOD
+C
+	    IF (DTIPROJ_SAMPLE(2,DTI_LUN).GT.R_MOD) THEN
+		CALL LSL_PUTMSG(DTI__SAMPOVERRUN,
+     &				DTIPROJ_SAMPLE(2,DTI_LUN))
+	    	DTIPROJ_SAMPLE(2,DTI_LUN) = 
+     &			AMOD(DTIPROJ_SAMPLE(2,DTI_LUN),	R_MOD)
+	    ENDIF
+C
+	    DLATINT = DTIPROJ_SAMPLE(2,DTI_LUN)
+C This may be unacceptably rounded down
+	    LATINT(DTI_LUN) = DTIPROJ_SAMPLE(2,DTI_LUN)
+C
+	    IF (DTIPROJ_SAMPLE(1,DTI_LUN).GT.R_MOD) THEN
+		CALL LSL_PUTMSG(DTI__SAMPOVERRUN,
+     &				DTIPROJ_SAMPLE(1,DTI_LUN))
+		DTIPROJ_SAMPLE(1,DTI_LUN) = 
+     &			AMOD(DTIPROJ_SAMPLE(1,DTI_LUN),	R_MOD)
+	    ENDIF
+C
+	    DLONINT = DTIPROJ_SAMPLE(1,DTI_LUN)
+C This may be unacceptably rounded down
+	    LONINT(DTI_LUN) = DTIPROJ_SAMPLE(1,DTI_LUN)
+C
+	    IF (ABS(DTIPROJ_ORIGIN(2,DTI_LUN)).GT.D_MOD) THEN
+		CALL LSL_PUTMSG(DTI__ORIGOVERRUN,
+     &				DTIPROJ_ORIGIN(2,DTI_LUN))
+		DTIPROJ_ORIGIN(2,DTI_LUN) = 
+     &			DMOD(DTIPROJ_ORIGIN(2,DTI_LUN),	D_MOD)
+	    ENDIF
+	    LATORI(DTI_LUN) = DTIPROJ_ORIGIN(2,DTI_LUN)
+C
+	    IF (ABS(DTIPROJ_ORIGIN(1,DTI_LUN)).GT.D_MOD) THEN
+		CALL LSL_PUTMSG(DTI__ORIGOVERRUN,
+     &				DTIPROJ_ORIGIN(1,DTI_LUN))
+		DTIPROJ_ORIGIN(1,DTI_LUN) = 
+     &			DMOD(DTIPROJ_ORIGIN(1,DTI_LUN),	D_MOD)
+	    ENDIF
+	    LONORI(DTI_LUN) = DTIPROJ_ORIGIN(1,DTI_LUN)
+C
+	  ELSEIF (DTIPROJ_UNITS(DTI_LUN).EQ.3) THEN	!seconds
+	    D_MOD = 360*60*60
+	    R_MOD = D_MOD
+C
+	    IF (DTIPROJ_SAMPLE(2,DTI_LUN).GT.R_MOD) THEN
+		CALL LSL_PUTMSG(DTI__SAMPOVERRUN,
+     &				DTIPROJ_SAMPLE(2,DTI_LUN))
+		DTIPROJ_SAMPLE(2,DTI_LUN) = 
+     &			AMOD(DTIPROJ_SAMPLE(2,DTI_LUN),	R_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_SAMPLE(2,DTI_LUN)*10
+C
+	    DLATINT = DMOD(TEMP,DL_MOD)
+C This may be unacceptably rounded down
+	    LATINT(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	    IF (DTIPROJ_SAMPLE(1,DTI_LUN).GT.R_MOD) THEN
+		CALL LSL_PUTMSG(DTI__SAMPOVERRUN,
+     &				DTIPROJ_SAMPLE(1,DTI_LUN))
+		DTIPROJ_SAMPLE(1,DTI_LUN) = 
+     &			AMOD(DTIPROJ_SAMPLE(1,DTI_LUN),R_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_SAMPLE(1,DTI_LUN)*10
+C
+	    DLONINT = DMOD(TEMP,DL_MOD)
+C This may be unacceptably rounded down
+	    LONINT(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	    IF (ABS(DTIPROJ_ORIGIN(2,DTI_LUN)).GT.D_MOD) THEN
+		CALL LSL_PUTMSG(DTI__ORIGOVERRUN,
+     &				DTIPROJ_ORIGIN(2,DTI_LUN))
+		DTIPROJ_ORIGIN(2,DTI_LUN) =
+     &			DMOD(DTIPROJ_ORIGIN(2,DTI_LUN),D_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_ORIGIN(2,DTI_LUN)*10
+	    LATORI(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	    IF (ABS(DTIPROJ_ORIGIN(1,DTI_LUN)).GT.D_MOD) THEN
+		CALL LSL_PUTMSG(DTI__ORIGOVERRUN,
+     &				DTIPROJ_ORIGIN(1,DTI_LUN))
+		DTIPROJ_ORIGIN(1,DTI_LUN) = 
+     &			DMOD(DTIPROJ_ORIGIN(1,DTI_LUN),D_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_ORIGIN(1,DTI_LUN)*10
+	    LONORI(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	  ELSEIF (DTIPROJ_UNITS(DTI_LUN).EQ.4) THEN	!degrees
+	    D_MOD = 360
+	    R_MOD = 360
+	    SF    = 36000
+C
+	    IF (DTIPROJ_SAMPLE(2,DTI_LUN).GT.R_MOD) THEN
+		CALL LSL_PUTMSG(DTI__SAMPOVERRUN,
+     &				DTIPROJ_SAMPLE(2,DTI_LUN))
+		DTIPROJ_SAMPLE(2,DTI_LUN) = 
+     &			AMOD(DTIPROJ_SAMPLE(2,DTI_LUN),R_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_SAMPLE(2,DTI_LUN)*SF
+C
+	    DLATINT = DMOD(TEMP,DL_MOD)
+C This may be unacceptably rounded down
+	    LATINT(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	    IF (DTIPROJ_SAMPLE(1,DTI_LUN).GT.R_MOD) THEN
+		CALL LSL_PUTMSG(DTI__SAMPOVERRUN,
+     &				DTIPROJ_SAMPLE(1,DTI_LUN))
+		DTIPROJ_SAMPLE(1,DTI_LUN) = 
+     &			AMOD(DTIPROJ_SAMPLE(1,DTI_LUN),R_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_SAMPLE(1,DTI_LUN)*SF
+C
+	    DLONINT = DMOD(TEMP,DL_MOD)
+C This may be unacceptably rounded down
+	    LONINT(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	    IF (ABS(DTIPROJ_ORIGIN(2,DTI_LUN)).GT.D_MOD) THEN
+		CALL LSL_PUTMSG(DTI__ORIGOVERRUN,
+     &				DTIPROJ_ORIGIN(2,DTI_LUN))
+		DTIPROJ_ORIGIN(2,DTI_LUN) =
+     &			DMOD(DTIPROJ_ORIGIN(2,DTI_LUN),D_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_ORIGIN(2,DTI_LUN)*SF
+	    LATORI(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	    IF (ABS(DTIPROJ_ORIGIN(1,DTI_LUN)).GT.D_MOD) THEN
+		CALL LSL_PUTMSG(DTI__ORIGOVERRUN,
+     &				DTIPROJ_ORIGIN(1,DTI_LUN))
+		DTIPROJ_ORIGIN(1,DTI_LUN) =
+     &			DMOD(DTIPROJ_ORIGIN(1,DTI_LUN),D_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_ORIGIN(1,DTI_LUN)*SF
+	    LONORI(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	  ELSEIF(DTIPROJ_UNITS(DTI_LUN).EQ.5)THEN	!radians
+	    D_MOD = 2*PI
+	    R_MOD = 2*PI
+	    SF   = 36000*180.0/PI
+C
+	    IF (DTIPROJ_SAMPLE(2,DTI_LUN).GT.R_MOD) THEN
+		CALL LSL_PUTMSG(DTI__SAMPOVERRUN,
+     &				DTIPROJ_SAMPLE(2,DTI_LUN))
+		DTIPROJ_SAMPLE(2,DTI_LUN) =
+     &			AMOD(DTIPROJ_SAMPLE(2,DTI_LUN),R_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_SAMPLE(2,DTI_LUN)*SF
+C
+	    DLATINT = DMOD(TEMP,DL_MOD)
+C This may be unacceptably rounded down
+	    LATINT(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	    IF (DTIPROJ_SAMPLE(1,DTI_LUN).GT.R_MOD) THEN
+		CALL LSL_PUTMSG(DTI__SAMPOVERRUN,
+     &				DTIPROJ_SAMPLE(1,DTI_LUN))
+		DTIPROJ_SAMPLE(1,DTI_LUN) =
+     &			AMOD(DTIPROJ_SAMPLE(1,DTI_LUN),R_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_SAMPLE(1,DTI_LUN)*SF
+C
+	    DLONINT = DMOD(TEMP,DL_MOD)
+C This may be unacceptably rounded down
+	    LONINT(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	    IF (ABS(DTIPROJ_ORIGIN(2,DTI_LUN)).GT.D_MOD) THEN
+		CALL LSL_PUTMSG(DTI__ORIGOVERRUN,
+     &				DTIPROJ_ORIGIN(2,DTI_LUN))
+		DTIPROJ_ORIGIN(2,DTI_LUN) =
+     &			DMOD(DTIPROJ_ORIGIN(2,DTI_LUN),D_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_ORIGIN(2,DTI_LUN)*SF
+	    LATORI(DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	    IF (ABS(DTIPROJ_ORIGIN(1,DTI_LUN)).GT.D_MOD) THEN
+		CALL LSL_PUTMSG(DTI__ORIGOVERRUN,
+     &				DTIPROJ_ORIGIN(1,DTI_LUN))
+		DTIPROJ_ORIGIN(1,DTI_LUN) =
+     &			DMOD(DTIPROJ_ORIGIN(1,DTI_LUN),D_MOD)
+	    ENDIF
+	    TEMP = DTIPROJ_ORIGIN(1,DTI_LUN)*SF
+	    LONORI(DTI_LUN) = DMOD(TEMP,DL_MOD)
+	  ENDIF
+C
+C All in 0.1 secs now
+C
+C	S.W. corner
+	  LATREC(1,DTI_LUN)=LATORI(DTI_LUN)
+	  LONREC(1,DTI_LUN)=LONORI(DTI_LUN)
+C
+C	N.E. corner
+	  TEMP = DBLE(LATREC(1,DTI_LUN)) + 
+     &		 DLATINT * DBLE(Y_EXTENT(DTI_LUN)-1)
+	  LATREC(3,DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+	  TEMP = DBLE(LONREC(1,DTI_LUN)) + 
+     &		 DLONINT * DBLE(X_EXTENT(DTI_LUN)-1)
+	  LONREC(3,DTI_LUN) = DMOD(TEMP,DL_MOD)
+C
+C	N.W. corner
+	  LATREC(2,DTI_LUN)=LATREC(3,DTI_LUN)
+	  LONREC(2,DTI_LUN)=LONREC(1,DTI_LUN)
+C
+C	S.E. corner
+	  LATREC(4,DTI_LUN)=LATREC(1,DTI_LUN)
+	  LONREC(4,DTI_LUN)=LONREC(3,DTI_LUN)
+	ENDIF
+C
+C	Transfer origin values to the x and y offset variables
+C	in DTIHDR if units are metres or feet
+C
+C	IF(DTIPROJ_UNITS(DTI_LUN).EQ.1.OR.
+C     &     DTIPROJ_UNITS(DTI_LUN).EQ.2)THEN
+C
+	  X_OFFSET(DTI_LUN)=DTIPROJ_ORIGIN(1,DTI_LUN)
+	  Y_OFFSET(DTI_LUN)=DTIPROJ_ORIGIN(2,DTI_LUN)
+	  X_GRID(DTI_LUN)=DTIPROJ_SAMPLE(1,DTI_LUN)
+	  Y_GRID(DTI_LUN)=DTIPROJ_SAMPLE(2,DTI_LUN)
+C
+C	ENDIF
+C
+C	Projection Parameters  - Not required for Geographicals or
+C	U.K. National Grid
+C
+	IF(DTIPROJ_PROJECTION(DTI_LUN).EQ.100.OR.
+     &     DTIPROJ_PROJECTION(DTI_LUN).EQ.101)THEN
+	   DTI_READ_PROJ_REC=DTI__NORMAL
+	   GOTO 999
+	ENDIF
+C
+	BYTE_OFFSET=BYTE_OFFSET+60
+	DO 100 I=1,15
+	   IERR=DTI_READ_REAL8_HEADER(DTI_LUN,
+     &                                DTIPROJ_PROJ_PARAMS(I,DTI_LUN),
+     &                                BYTE_OFFSET,
+     &                                ERROR)
+	   IF(IERR.NE.DTI__NORMAL)GOTO 900
+	   BYTE_OFFSET=BYTE_OFFSET+8
+100	CONTINUE
+C
+	DTI_READ_PROJ_REC=DTI__NORMAL	! signal success
+	GOTO 999
+C	
+C-------------------------------------------------------------------------
+C	Error occured while reading the header details
+C
+900	DTI_READ_PROJ_REC=DTI__SYSERR
+	HAD_PROJ_RECORD(DTI_LUN)=.TRUE.
+	RETVAL=ERROR
+C
+999	RETURN
+	END
+C
+C****************************************************************************
+C
+	INTEGER*4 FUNCTION DTI_FIND_PROJ_REC
+     &  (WHICH_DTI,HEADER_SIZE,HEADER_ARRAY,B_OFF,SYSTEM_ERROR)
+C
+***	IDENT	22SE87
+***	MODULE	DTI_FIND_PROJ_REC
+C
+C	Copyright : Laser-Scan, Cambridge, England
+C	Author    : D R Catlow
+C
+C	Routine to look in the DTI header for the keyword identifying
+C	the start of the projection record.
+C	The byte offset of the projection record in the header is
+C	returned in B_OFF.  The identifying 8 character keyword is
+C	considered part of the Projection record.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+***	COMMON/LSL$CMNDTI:DTIPROJ/		!DTI Projection Record
+C
+C arguments
+	INTEGER*4	WHICH_DTI		!Which DTI file
+	INTEGER*4	HEADER_SIZE		!Size of header
+	BYTE		HEADER_ARRAY(0:HEADER_SIZE)!Byte header
+	INTEGER*4	B_OFF			!Byte offset in header
+	INTEGER*4	SYSTEM_ERROR		!System error condition
+C
+C local
+	INTEGER*4	I			!counter
+	INTEGER*4	VALUE			!longword value
+	INTEGER*4	IERR			!function return
+	INTEGER*4	START_BYTE		!byte offset in header 
+C					!from which to start record search
+C
+C function
+	INTEGER*4	DTI_READ_LONG_HEADER	!to read longword from header
+C
+C------------------------------------------------------------------------
+C	Search for * - indicating the presence of a possible
+C	Projection Record keyword.
+	START_BYTE=DEFAULT_LSLA_HEADER
+C
+	DO 100 I=START_BYTE,HEADER_SIZE
+	   IF(HEADER_ARRAY(I).EQ.'*')THEN
+C
+C	Test for match with the first part of Projection Record Ident.
+	     IERR=DTI_READ_LONG_HEADER(WHICH_DTI,VALUE,I,SYSTEM_ERROR)
+	     IF(IERR.NE.DTI__NORMAL)GOTO 999
+	     IF(VALUE.NE.DTIPROJ_IDENT1)GOTO 100
+C	Test for match with the second part of Projection Record Ident.
+	     IERR=DTI_READ_LONG_HEADER(WHICH_DTI,VALUE,I+4,SYSTEM_ERROR)
+	     IF(IERR.NE.DTI__NORMAL)GOTO 999
+	     IF(VALUE.EQ.DTIPROJ_IDENT2)GOTO 200	!found it
+	   ENDIF
+100	CONTINUE
+C
+C	If we fall through, then no Projection Record present
+	DTI_FIND_PROJ_REC=DTI__NOPROJREC
+	GOTO 999
+C
+200	B_OFF=I
+	DTI_FIND_PROJ_REC=DTI__NORMAL
+C	
+999	RETURN
+	END
+C

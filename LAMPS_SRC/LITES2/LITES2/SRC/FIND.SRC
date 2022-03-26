@@ -1,0 +1,1076 @@
+	LOGICAL FUNCTION FIND(PACK)
+C
+***	MODULE	FIND
+***	IDENT	18DE96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author  Clarke Brunt
+C based on that in LITES1 by R. Fairbairns
+C
+C Coded 13.iii.84
+C
+C The SCNSEC argument for GROPE
+C If the feature pointed at by PACK is a possible found object, then
+C its details are entered into the OBJ... arrays
+C
+C FIND is also called directly from GROPE in the case of SEARCH LAST
+C for which we have SPIRAL true, and SEAPAK.NE.0
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CONSTS/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:END/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+C
+***	COMMON/CMN:ACS/
+***	COMMON/CMN:CB/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:EDGE/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/CMN:LAYERS/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:STRIKE/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C argument
+	INTEGER*4	PACK(PAKLEN)	! the pack to search
+C
+C functions called
+	REAL	LDIST			! find distance to line segment
+	REAL	INTSCN			! find distance to intersection
+	LOGICAL	INTSCNA			! does arc intersect constraint?
+	INTEGER	SECTOR
+	LOGICAL GENAUX,EQACS
+	INTEGER	MINDEX			! INDEX for dummy strings
+	INTEGER	CPYSTR			! COPY for dummy strings
+	LOGICAL	PLANE
+	LOGICAL GEOG_TRANS_ARRAY
+C
+C w/s
+	INTEGER*2	IECODE, IELEN	! for IFF reading
+	INTEGER*2	ISTAT(4)	! feature status words
+	INTEGER*4	LPOSST		! ST position
+	INTEGER*4	LSAVST		! saved ST position
+	INTEGER		LSTTOP		! previous top index
+	INTEGER		IND		! index on RIXY
+	INTEGER		I		! loop
+	INTEGER		TXSIZE		! text size
+	REAL		ANG,XANG	! angles for circles
+	REAL		LENGTH,HEIGHT	! of symbols and texts
+	REAL		SCOS,SSIN	! cos and sin of angle
+	REAL		R		! current distance
+	REAL		MINR		! best distance so far
+	LOGICAL		OKMINR		! Flag valid value of MINR
+	INTEGER		MINI		! index of best point
+	INTEGER		HITPTR		! index on OBJ...
+	LOGICAL*1	ONVRTX		! best point a vertex?
+	LOGICAL*1	ARCSTRT,ARCEND	! at start or end of arc?
+	LOGICAL		OUTARC		! outside arc?
+	REAL		X1,Y1,X2,Y2,DX,DY,DS,DE	! temporaries
+	REAL		XXYY(2,2)		! ditto
+	REAL		Z1,Z2			! temporaries
+	INTEGER		Z1I,Z2I			! as integers
+	EQUIVALENCE	(Z1,Z1I),(Z2,Z2I)
+	LOGICAL		RDLAST		! read last vertex? (find ends)
+	INTEGER		FLG		! 'found flag' to set
+	INTEGER		AC,TC		! address of AC and TC entries
+	LOGICAL		HADTS		! looking at a composite text
+	LOGICAL		CIRCARC		! true when circle arc
+	LOGICAL		NO_Z		! true when no possible Z values
+	REAL		COEFFS(4)	! coefficients of plane of circle
+	INTEGER		TMPPAK(PAKLEN)	! temporary pack for genauxing
+					! texts
+C
+C Before SEARCH NEAREST, we used SPIRAL instead of ACCEPT to indicate
+C that we wanted first feature encountered. Now this only applies to
+C spiral searches when not doing SEARCH NEAREST
+	LOGICAL*1	ACCEPT
+C
+C stuff that should be in a common somewhere
+	REAL		RIAUX(AUXLEN)
+	REAL		RIANG
+C
+C assume we are not going to stop SCNSEC scanning
+	FIND = .TRUE.
+C
+C are we accepting first feature encountered?
+	ACCEPT = SPIRAL.AND..NOT.SEANEA
+C
+C if areas have their insides sectored (for drawing) these packs have
+C no ST pointer set. Ignore these packs here (may want to find these
+C areas at some later stage though). In fact, ignore zero for any GT
+C since change of FRT could get us here.
+C (used to test ENCOPT and GT.EQ.ARETYP as well)
+C
+	IF (PACK(PAKPST).EQ.0) GOTO 9999
+C
+C If in spiral search, and not doing a SEARCH LAST,
+C then check if feature can be rejected here.
+C NXTPAK will have rejected anything with FINFLG set for SEARCH.
+	IF (SPIRAL.AND.SEAPAK.EQ.0) THEN
+C
+C do we want text features?
+	   IF (FTXPTR.NE.0.AND.PACK(PAKGT).NE.TEXTYP) GOTO 9999
+C
+C assume we will be setting FINFLG at end of routine
+	   FLG = FINFLG
+	ENDIF
+C
+C If joining or tieing, then map must not be read only
+C If edgematching, then OK if TIEing to writable feature
+	IF (JOINNG.AND.MAPRO(PACK(PAKMAP))) THEN
+	   IF (.NOT.EDGING) GOTO 9998
+	   IF (NDMODE.EQ.END_JOIN) GOTO 9998
+	   IF (MAPRO(IHPAK(PAKMAP))) GOTO 9998
+	ENDIF
+C
+C Are we to find a particular FSN (spiral search, or joining)
+	IF ((SPIRAL.AND.NFRSTN.NE.0).OR.(JOINNG.AND.MATFSN)) THEN
+C
+C If not the one we want, then reject feature
+	   IF (JOINNG.AND.MATFSN) THEN	! join match takes precedence
+C
+C must match with object in hand
+	      IF (PACK(PAKFSN).NE.IHPAK(PAKFSN)) GOTO 9998
+	   ELSE
+C
+C must match particular restriction
+	      IF (PACK(PAKFSN).NE.NFRSTN .OR.
+     &		  (MPRSTN.GE.0 .AND. PACK(PAKMAP).NE.MPRSTN)
+     &			) GOTO 9998
+	   ENDIF
+	ENDIF
+C
+C check matches for join and tie
+	IF (JOINNG) THEN
+	   IF (MATFC .AND.(PACK(PAKFC).NE.IHPAK(PAKFC) )) GOTO 9998
+	   IF (MATLAY) THEN
+	      IF (OVNOS(PACK(PAKOVL)).NE.OVNOS(IHPAK(PAKOVL))) GOTO 9998
+	   ENDIF
+	   IF (MATMAP.AND.(PACK(PAKMAP).NE.IHPAK(PAKMAP))) GOTO 9998
+	ENDIF
+C
+C initialise best distance so far to something very large, but flag as invalid
+	MINR = 1E38
+	OKMINR = .FALSE.
+C
+	CIRCARC  = .FALSE.
+	ARCSTRT  = .FALSE.
+	ARCEND   = .FALSE.
+C
+C switch on data pack graphical type
+	GOTO (1,2,2,2,2,1,7,7,7,7,1,1), PACK(PAKGT)
+C
+C 1  - line-string pack
+C 6  - curve
+C 11 - symbol string
+C 12 - area
+1	CONTINUE
+C
+C if finding ends only, then check we have an 'ends' pack
+	IF (FINDND) THEN
+C
+C if doing SEARCH LAST, don't care if we have found feature before
+C but set RDLAST flag
+	   IF (SEAPAK.NE.0) THEN
+	      IF (IAND(PACK(PAKFLG),FSTFLG.OR.LSTFLG).NE.0) THEN
+	         IF (IAND(PACK(PAKFLG),FSTFLG).NE.0) THEN
+	            RDLAST = .TRUE. 	! take first end by preference
+	         ELSE
+	            RDLAST = .FALSE.
+	         ENDIF
+	      ELSE
+	         GOTO 9999		! should not happen - see DOSEAR
+	      ENDIF
+	      GOTO 30
+	   ENDIF
+C
+C Is it a 'last' pack?
+	   IF (IAND(PACK(PAKFLG),LSTFLG).NE.0) THEN
+C
+C pack is a 'last' pack - have we done 'that' end already?
+C If so, then see if it's a 'first' pack also
+	      IF (SPIRAL.AND.SRCHNG.AND.(IAND(PACK(PAKFLG),THAFLG).NE.0)
+     &								) GOTO 20
+	      FLG = THAFLG		! will have done 'that' end
+	      RDLAST = .FALSE.		! do need last vertex
+	      GOTO 30
+	   ENDIF
+C
+C Is it a 'first' pack?
+20	   IF (IAND(PACK(PAKFLG),FSTFLG).EQ.0) GOTO 9999
+C
+C pack is a 'first' pack only - have we done 'this' end already?
+	   IF (SPIRAL.AND.SRCHNG.AND.(IAND(PACK(PAKFLG),THIFLG).NE.0)
+     &							) GOTO 9999
+	   FLG = THIFLG			! will have done 'this' end
+	   RDLAST = .TRUE.		! don't need last vertex
+	ENDIF
+C
+C now need to access file, so select correct map
+30	CALL SELIF(PACK(PAKMAP))
+C
+C if matching PCs or ACs, do it now
+	IF (JOINNG.AND.(MATPC.OR.MATAC)) THEN
+	   TC=0
+	   AC=0
+C
+	   CALL IFFPKE(IECODE,IELEN,PACK(PAKPNF)) ! get onto NF
+C
+	   IF (IECODE.NE.'NF') THEN
+	      IF (IECODE.NE.'TC'.AND.IECODE.NE.'CH'
+     &			.AND.IECODE.NE.'VO') THEN
+	         CALL NASTY(MSG_BADPNF)
+	         CALL COLAPS(MSG_BADPNF)
+	         GOTO 9999
+	      ELSE
+	         TC=LPOSH		! position of TC entries
+	      ENDIF
+	   ENDIF
+C
+C and so onto the FS entry (which should be at least 3 words long)
+	   CALL IFFNXC('FS',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      CALL NASTY(MSG_NOFSENT)
+	      CALL COLAPS(MSG_NOFSENT)
+	      GOTO 9999
+	   ENDIF 
+	   IF (IELEN.LT.3) THEN
+	      ISTAT(3)=0
+	   ELSE
+	      CALL EIHRI(ISTAT(3),1,3)		! read the third word
+	   ENDIF
+C
+C now we can check if PC is correct
+	   IF (MATPC.AND.((ISTAT(3).AND.16383).NE.(IHFS(3).AND.16383)))
+     &	                GOTO 9998
+C
+C now check for matching ACs
+	   IF (MATAC) THEN
+	      CALL IFFNXT(IECODE,IELEN)		! see if any ACs
+	      IF (IELEN.EQ.-1) THEN
+	         CALL NASTY(MSG_UNEXPEIFF)
+	         CALL COLAPS(MSG_UNEXPEIFF)
+	         GOTO 9999
+	      ENDIF
+C
+	      IF (IECODE.EQ.'AC'.OR.IECODE.EQ.'VO') AC=LPOSH
+C
+C if there are any ACs or TCs then check with those of object in hand
+C
+	      CALL GETACS(PACK,TC,AC,FOMACD)
+	      IF (.NOT.EQACS()) GOTO 9998
+	   ENDIF
+	ENDIF
+C
+C position to the implicated ST
+	CALL IFFPKE( IECODE, IELEN, PACK(PAKPST) )
+	IF (IECODE.NE.'CB') THEN
+	   CALL NASTY(MSG_BADPST)
+	   CALL COLAPS(3)
+	   GOTO 9999
+	ENDIF
+C
+	LSAVST = LPOSH		! remember ST address
+	CALL EIHRCB_HEAD(CBH)
+C
+C read the vertices into RIXY
+C We read starting at the implicated vertex up to the end of the ST
+C positioning it as though the first point of the ST was in RIXY(,2).
+C This is just to save IFFLIB the trouble of reading points before
+C the ones we want.
+C If finding ends, then for first end, just get the first vertex,
+C for last end join symbol string code
+C
+	IF (FINDND) THEN	! finding end
+C
+C If this isn't a 'first' pack, or we are in a spiral search and want
+C 'that' end, then go for last point
+	   IF ((IAND(PACK(PAKFLG),FSTFLG).EQ.0) .OR.
+     &	         (SPIRAL.AND..NOT.RDLAST)) GOTO 1130
+	   RITOP = 2			! just read first vertex
+	ELSEIF (ACCEPT) THEN
+	   RITOP = PACK(PAKVRT)+1	! just read one vertex
+	ELSE
+	   RITOP = CBH.NROW+1		! read to end of ST
+	ENDIF
+	IND = PACK(PAKVRT)+1	! starting index
+	IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	   CALL EIHRCB_DATA(RIXY(1,2))
+	   NO_Z = .TRUE.
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract XY
+	   CALL IFS_CB_READ(CBH,CBD,RIXY(1,IND),2,COLHXY,
+     &				PACK(PAKVRT),PACK(PAKVRT)+RITOP-IND)
+	   IF (ZOPT) THEN
+	      CALL IFS_CB_READ(CBH,CBD,RIZ(IND),1,COLHZ,
+     &				PACK(PAKVRT),PACK(PAKVRT)+RITOP-IND)
+	      NO_Z = .FALSE.
+	   ELSE
+	      NO_Z = .TRUE.
+	   ENDIF
+	ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	IF (DO_FLY_TRANS) THEN
+	   IF(.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                         CURR_UNIT,CURR_ORG,
+     &	                         LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                         LITES2UNIT,LITES2ORG,
+     &	                         RITOP-IND+1,RIXY(1,IND))) GOTO 9998
+	ELSEIF (USE_ORG) THEN
+	   CALL ADDORG(ORGXY,RIXY(1,IND),RITOP-IND+1)
+	ENDIF
+	IF (FINDND) GOTO 1110	! deal with find first end
+C
+C unconditionally accept it if spiral
+	IF (ACCEPT) THEN
+	   MINR = 0.0		! pretend a direct hit
+	   OKMINR = .TRUE.	! flag valid value
+	   MINI = IND		! at first implicated vertex
+	   LPOSST = LSAVST	! the ST position
+	   ONVRTX = .TRUE.	! on a vertex
+	   X1 = RIXY(1,MINI)	! position
+	   Y1 = RIXY(2,MINI)
+	   IF (NO_Z) THEN
+	      Z1I = IFF_ABSENT
+	   ELSE
+	      Z1I = RIZI(MINI)
+	   ENDIF
+	   GOTO 1000
+	ENDIF
+C
+C Split code here for symbol strings
+	IF (PACK(PAKGT).EQ.STRTYP) GOTO 11
+C
+C check if we are on the last point in the array
+C If so, we need to read the next ST (if any)
+50	IF (IND.GE.RITOP) THEN		! should never be 'greater than'
+51	   CALL IFFNXT( IECODE, IELEN )
+	   IF (IECODE.EQ.'VO') GOTO 51		! void between CBs
+	   IF (IECODE.NE.'CB') GOTO 1000	! no more points
+	   CALL EIHRCB_HEAD(CBH)
+C
+C shift down last point to first in case we need it, then read in
+C all of the new ST
+	   RIXY(1,1) = RIXY(1,RITOP)
+	   RIXY(2,1) = RIXY(2,RITOP)
+C
+	   IF (NO_Z) THEN
+	      RIZI(1) = IFF_ABSENT
+	   ELSE
+	      RIZI(1) = RIZI(RITOP)
+	   ENDIF
+C
+	   LSTTOP = RITOP		! last top index
+	   RITOP = CBH.NROW+1		! new top index
+	   IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	      CALL EIHRCB_DATA(RIXY(1,2))
+	      NO_Z = .TRUE.
+	   ELSE
+	      CALL EIHRCB_DATA(CBD)! read into scratch, and extract XY
+	      CALL IFS_CB_READ(CBH,CBD,RIXY(1,2),2,COLHXY,1,CBH.NROW)
+	      IF (ZOPT) THEN
+	         CALL IFS_CB_READ(CBH,CBD,RIZ(2),1,COLHZ,1,CBH.NROW)
+	         NO_Z = .FALSE.
+	      ELSE
+	         NO_Z = .TRUE.
+	      ENDIF
+	   ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	   IF (DO_FLY_TRANS) THEN
+	      IF(.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                            CURR_UNIT,CURR_ORG,
+     &	                            LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                            LITES2UNIT,LITES2ORG,
+     &	                            CBH.NROW,RIXY(1,2))) GOTO 9998
+	   ELSEIF (USE_ORG) THEN
+	      CALL ADDORG(ORGXY,RIXY(1,2),CBH.NROW)
+	   ENDIF
+C
+C If the ST begins with an invisible, then don't try to find on the
+C joining segment from the previous ST, so start with the points from
+C this ST only. If visible, then begin with the last point of the
+C previous ST, and defer updating LSAVST until this segment checked.
+C
+	   IF ((CBH.FLAGS.AND.1).EQ.0) THEN	! invisible
+	      IND = 2			! start index
+	      LSAVST = LPOSH		! remember ST position
+	      GOTO 50			! allow for one point ST
+	   ELSE				! visible
+	      IND = 1			! so start with previous point
+	   ENDIF
+	ENDIF
+C
+	R=LDIST(RIXY(1,IND))		! get distance to line segment
+	IF (R.GT.CRITR2.AND..NOT.SPIRAL) GOTO 70	! too far away
+C
+C If cursor is constrained, then set R to the
+C best intersection of this line segment with the found object,
+C or with the cursor constraint
+	IF (ROLING) R = INTSCN(RIXY(1,IND),XXYY(1,1),RIZ(IND),.NOT.NO_Z)
+C
+C is this a possible hit?
+	IF (R.GE.MINR) GOTO 70		! worse than best so far
+C
+C new minimum, so deal with it
+	MINR = R			! distance (squared)
+	OKMINR = .TRUE.			! flag valid value
+	ONVRTX = NVRTX			! on a vertex?
+C
+C Are we trying for a new found object, or just an intersection?
+	IF (.NOT.ROLING.OR.FNDMDE.EQ.0) THEN	! new object
+	   MINI = IND			! index of found point
+	   IF (ONVRTX) THEN		! on a vertex
+	      IF (NSCND) THEN		! second of pair
+	         MINI = MINI+1
+	         IF (MINI.EQ.2) LSAVST = LPOSH	! first point of this ST
+	      ENDIF
+	   ELSE
+	      X2 = RIXY(1,MINI+1)	! second vertex
+	      Y2 = RIXY(2,MINI+1)
+	      IF (NO_Z) THEN
+	         Z2I = IFF_ABSENT
+	      ELSE
+	         Z2I = RIZI(MINI+1)
+	      ENDIF
+	   ENDIF
+C
+	ELSE				! don't wnat new FO (intersect)
+	   MINI = ITVRT+1 		! vertex on existing FO
+	ENDIF
+C
+C Get actual cursor position (or at least first point of line segment)
+	IF (ROLING) THEN		! intersect
+	   X1 = XXYY(1,1)		! intersection point
+	   Y1 = XXYY(2,1)
+	   CALL PUTLNG(XXYY(1,2),Z1)	! use third element of array
+	ELSE
+	   X1 = RIXY(1,MINI)		! first vertex of segment
+	   Y1 = RIXY(2,MINI)
+	   IF (NO_Z) THEN
+	      Z1I = IFF_ABSENT
+	   ELSE
+	      Z1I = RIZI(MINI)
+	   ENDIF
+	ENDIF
+C
+C If our selected point is the first in the array, then it is the last
+C point of the previous ST, else it is in this one, so amend
+C MINI as required.
+	IF (.NOT.ROLING.OR.FNDMDE.EQ.0) THEN	! new object
+	   IF (MINI.EQ.1) MINI = LSTTOP	! last point of previous ST
+	   LPOSST = LSAVST		! ST position
+	ENDIF
+C	
+70	IND = IND + 1			! and step to next vertex
+	IF (IND.EQ.2) LSAVST = LPOSH	! remember new ST
+C
+C See if we have left the sector of interest
+C FNDSEC is set for us in GROPE
+	IF (SECTOR(RIXY(1,IND),RIXY(2,IND)).EQ.FNDSEC) GOTO 50
+	GOTO 1000
+C
+C types 2-5, circle arcs
+2	IF (JOINNG) GOTO 9998		! no good for join or tie
+	IF (EDGING) GOTO 9998		! reject if edgmatching
+	CIRCARC = .TRUE.
+C
+C position onto start of feature
+	CALL SELIF(PACK(PAKMAP))
+	CALL IFFPKE(IECODE,IELEN,PACK(PAKPNF))
+	IF (IECODE.NE.'NF') THEN
+	   IF (IECODE.NE.'TC'.AND.IECODE.NE.'CH'.AND.IECODE.NE.'VO')THEN
+	      CALL NASTY(MSG_BADPNF)
+	      CALL COLAPS(MSG_BADPNF)
+	      GOTO 9999
+	   ENDIF
+	ENDIF
+	TXSIZE=0
+C
+C position onto the ST
+	CALL IFFNXC('CB',IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(20)
+	   GOTO 9999
+	ENDIF
+C
+	CALL EIHRCB_HEAD(CBH)
+C
+C read 3 coordinate pairs from it
+	IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	   CALL EIHRCB_DATA(RIXY)
+	   NO_Z = .TRUE.
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract XY
+	   CALL IFS_CB_READ(CBH,CBD,RIXY,2,COLHXY,1,3)
+	   IF (ZOPT) THEN
+	      CALL IFS_CB_READ(CBH,CBD,RIZ,1,COLHZ,1,3)
+	      NO_Z = .FALSE.
+	   ELSE
+	      NO_Z = .TRUE.
+	   ENDIF
+	ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	   IF (DO_FLY_TRANS) THEN
+	      IF(.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                            CURR_UNIT,CURR_ORG,
+     &	                            LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                            LITES2UNIT,LITES2ORG,
+     &	                            3,RIXY)) GOTO 9998
+	   ELSEIF (USE_ORG) THEN
+	      CALL ADDORG(ORGXY,RIXY,3)
+	   ENDIF
+C
+C generate auxiliary array
+	IF (GENAUX(3,RIXY,RIAUX,TXTDSC,RIANG,TXSIZE,PACK,ISTAT))
+     &							GOTO 9998
+C
+C generate the plane that its locating points define, if required
+	IF (.NOT.NO_Z) NO_Z = .NOT.PLANE(RIXY,RIZ,COEFFS)
+C
+C if SPIRAL, accept it unconditionally
+	IF (ACCEPT) THEN
+	   ANG = RIAUX(STAI)
+	   ARCSTRT = .TRUE.
+	   MINR = 0.0
+	   OKMINR = .TRUE.	! flag valid value
+	   GOTO 250
+	ENDIF
+C
+C calculate linear distance
+	X1 = CONTXY(1) - RIAUX(XCENI)
+	Y1 = CONTXY(2) - RIAUX(YCENI)
+	R = SQRT(X1*X1+Y1*Y1) - RIAUX(RADI)
+	MINR = R*R
+	OKMINR = .TRUE.		! flag valid value
+C
+C check linear distance
+	IF (MINR.GT.CRITR2.AND..NOT.SPIRAL) GOTO 9998
+C
+C deal with intersection
+	IF (ROLING) THEN
+	   IF (INTSCNA(RIAUX,COEFFS,.NOT.NO_Z,X1,Y1,Z1)) THEN
+	      MINR=(CONTXY(1)-X1)**2+(CONTXY(2)-Y1)**2	! amend MINR
+	      OKMINR = .TRUE.	! flag valid value
+	      GOTO 255			! got a point
+	   ENDIF
+	   GOTO 9998			! no intersection
+	ENDIF
+C
+C and angular distance
+	IF (Y1.EQ.0.0.AND.X1.EQ.0.0) THEN	! at centre of arc
+	   ANG = RIAUX(STAI)
+	ELSE
+	   ANG = ATAN2(Y1,X1)
+	ENDIF
+	IF (ANG.LT.0.0) ANG = ANG+TWOPI
+C
+C Calculate angle between start of arc, and our point
+	XANG = ANG - RIAUX(STAI)
+C
+C get XANG in the same direction as the arc
+	IF (RIAUX(TOTI).GE.0.0) THEN
+	   IF (XANG.LE.0.0) XANG = XANG + TWOPI
+	ELSE
+	   IF (XANG.GE.0.0) XANG = XANG - TWOPI
+	ENDIF
+C
+C get distances to end points of arc
+	X1 = CONTXY(1) - (RIAUX(XCENI)+RIAUX(RADI)*COS(RIAUX(STAI)))
+	Y1 = CONTXY(2) - (RIAUX(YCENI)+RIAUX(RADI)*SIN(RIAUX(STAI)))
+	DS = X1**2 + Y1**2
+	X1 = CONTXY(1) - (RIAUX(XCENI)+RIAUX(RADI)*COS(
+     &					RIAUX(STAI)+RIAUX(TOTI)))
+	Y1 = CONTXY(2) - (RIAUX(YCENI)+RIAUX(RADI)*SIN(
+     &					RIAUX(STAI)+RIAUX(TOTI)))
+	DE = X1**2 + Y1**2
+C
+C is point outside the arc?
+	OUTARC = .FALSE.
+	IF ( (XANG.GT.0.0.AND.XANG.GT.RIAUX(TOTI)) .OR.
+     &	     (XANG.LT.0.0.AND.XANG.LT.RIAUX(TOTI)) ) THEN
+C
+C it's outside, so the nearest point must be one of the ends
+	   MINR = MIN(DS,DE)
+	   OKMINR = .TRUE.		! flag valid
+	   IF (MINR.GT.CRITR2.AND..NOT.SPIRAL) GOTO 9998
+	   OUTARC = .TRUE.
+	ENDIF
+C
+C jump to end of arc?
+	IF (DS.LE.CRITR2 .OR. DE.LE.CRITR2 .OR. OUTARC) THEN
+	   IF (DS.LE.DE) THEN
+	      ANG = RIAUX(STAI)
+	      ARCSTRT = .TRUE.
+	   ELSE
+	      ANG = RIAUX(STAI)+RIAUX(TOTI)
+	      ARCEND = .TRUE.
+	   ENDIF
+	ENDIF	      
+C
+C all candidate circles pass through here
+C calculate proposed cursor position
+250	X1 = RIAUX(XCENI)+RIAUX(RADI)*COS(ANG)
+	Y1 = RIAUX(YCENI)+RIAUX(RADI)*SIN(ANG)
+C
+C calculate height this point by projecting onto plane
+	IF (NO_Z) THEN
+	   Z1I = IFF_ABSENT
+	ELSE
+	   XXYY(1,1) = X1
+	   XXYY(2,1) = Y1
+	   CALL PLANE_INTERPL(XXYY,COEFFS,Z1)
+	ENDIF
+C
+255	ONVRTX = ARCSTRT.OR.ARCEND
+C
+C set MINI and LPOSST, just to be tidy, unless it matters
+	LPOSST = 0
+C
+C Are we trying for a new found object, or just an intersection?
+	IF (.NOT.ROLING.OR.FNDMDE.EQ.0) THEN	! new object
+	   MINI = 1		! set these two just to be tidy
+C
+	ELSE				! don't wnat new FO (intersect)
+	   MINI = ITVRT+1 		! vertex on existing FO
+	ENDIF
+	GOTO 1000
+C
+C types 7-10, symbols and text
+7	HADTS = .FALSE.
+	RIANG = 0.0		! default angle
+	TXTPTR = 0		! no text so far
+	ISTAT(3)=0		! default text position 0
+	TXSIZE=DFTSIZ		! default text size
+C
+C set up relevant part of temporary pack (used for genauxing)
+	TMPPAK(PAKFC) = PACK(PAKFC)
+	IF (JOINNG) GOTO 9998	! no good for join or tie
+	IF (ROLING) GOTO 9998	! reject if constrained
+	IF (EDGING) GOTO 9998	! reject if edgmatching
+C
+C position onto start of feature
+	CALL SELIF(PACK(PAKMAP))
+C
+C if pack points to a text component, go to that component
+	IF (PACK(PAKPST).NE.-1) THEN
+	   CALL IFFPKE(IECODE,IELEN,PACK(PAKPST))
+	   IF (IECODE.NE.'TS') THEN
+	      CALL NASTY(MSG_BADPST)
+	      CALL COLAPS(MSG_BADPST)
+	      GOTO 9999
+	   ENDIF
+C
+C read TS entry
+	   CALL EIHR(ISTAT,MIN(IELEN,4),1)
+	   HADTS = .TRUE.
+	   TMPPAK(PAKFC) = ISTAT(1)	! for genauxing
+	ELSE
+	   CALL IFFPKE(IECODE,IELEN,PACK(PAKPNF))
+	   IF (IECODE.NE.'NF') THEN
+	      IF (IECODE.NE.'TC'.AND.IECODE.NE.'CH'
+     &	                        .AND.IECODE.NE.'VO')THEN
+	         CALL NASTY(MSG_BADPNF)
+	         CALL COLAPS(MSG_BADPNF)
+	         GOTO 9999
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C scan the feature for relevant items
+710	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(21)
+	   GOTO 9999
+	ENDIF
+	IF (IECODE.EQ.'CB') GOTO 720
+	IF (IECODE.EQ.'TX') GOTO 730
+	IF (IECODE.EQ.'TH') GOTO 735
+	IF (IECODE.EQ.'RO') GOTO 740
+	IF (IECODE.EQ.'FS') GOTO 745
+	IF (IECODE.EQ.'EF') GOTO 750
+	IF (IECODE.EQ.'TS') GOTO 750	! same as EF
+	GOTO 710		! ignore anything else
+C
+C ST
+720	CALL EIHRCB_HEAD(CBH)
+	IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	   CALL EIHRCB_DATA(RIXY)
+	   NO_Z = .TRUE.
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract XY
+	   CALL IFS_CB_READ(CBH,CBD,RIXY,2,COLHXY,1,CBH.NROW)
+	   IF (ZOPT) THEN
+	      CALL IFS_CB_READ(CBH,CBD,RIZ,1,COLHZ,1,CBH.NROW)
+	      NO_Z = .FALSE.
+	   ELSE
+	      NO_Z = .TRUE.
+	   ENDIF
+	ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	IF (DO_FLY_TRANS) THEN
+	   IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                         CURR_UNIT,CURR_ORG,
+     &	                         LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                         LITES2UNIT,LITES2ORG,
+     &	                         CBH.NROW,RIXY)) GOTO 9998
+	ELSEIF (USE_ORG) THEN
+	   CALL ADDORG(ORGXY,RIXY,CBH.NROW)
+	ENDIF
+	GOTO 710
+C
+C TX
+730	IF (IELEN.EQ.0) GOTO 9998		! null???
+	IELEN = MIN(IELEN,(CTXMAX+1)/2)
+	CALL EIHR(TXTBUF,IELEN,1)
+	TXTPTR = IELEN*2
+	IF (TXTBUF(TXTPTR).EQ.0) TXTPTR = TXTPTR-1
+	TXTPTR = MIN(TXTPTR,CTXMAX)
+	GOTO 710
+C
+C TH
+735	CALL EIHR(TXSIZE,1,1)
+	GOTO 710
+C
+C RO
+740	CALL EIHRR(RIANG,1,1)
+	GOTO 710
+C
+C FS
+745	CALL EIHR(ISTAT,MIN(IELEN,4),1)
+	GOTO 710
+C
+C EF
+750	CONTINUE
+C
+C are we looking for a particular text?
+	IF (SPIRAL.AND.FTXPTR.NE.0) THEN		! yes
+	   IF (TXTPTR.EQ.0) THEN	! no TX entry, or null???
+	      IF (IECODE.EQ.'EF') GOTO 9999	! don't stop searching
+	      GOTO 710
+	   ELSEIF (MINDEX(TXTDSC,FTXCHR(1:FTXPTR)).EQ.0) THEN  ! no match
+	      GOTO 9999			! don't stop searching
+	   ENDIF
+	ENDIF
+C
+	IF (GENAUX(CBH.NROW,RIXY,RIAUX,TXTDSC,RIANG,TXSIZE,TMPPAK,ISTAT))
+     &			GOTO 9998
+C
+C if in a spiral search, and feature not rejected by now,
+C then save ourselves the trouble of working of the distance
+	IF (ACCEPT) THEN
+	   MINR = 0.0			! pretend a direct hit
+	   OKMINR = .TRUE.		! flag valid value
+	   GOTO 771
+	ENDIF
+C
+C get distance from defining point to start us off
+	MINR = (CONTXY(1)-RIXY(1,1))**2+(CONTXY(2)-RIXY(2,1))**2
+	OKMINR = .TRUE.		! flag valid value
+	SCOS = RIAUX(COSI)
+	SSIN = RIAUX(SINI)
+	LENGTH = RIAUX(MAXXI) - RIAUX(MINXI)
+	HEIGHT = RIAUX(MAXYI) - RIAUX(MINYI)
+C
+C get lower left point
+	X1 = RIXY(1,1)+RIAUX(MINXI)*SCOS-RIAUX(MINYI)*SSIN
+	Y1 = RIXY(2,1)+RIAUX(MINXI)*SSIN+RIAUX(MINYI)*SCOS
+C
+C calculate lower right point, and set DX, DY to be the 'up vector'
+	X2 = X1 + LENGTH*SCOS
+	Y2 = Y1 + LENGTH*SSIN
+	DX = -HEIGHT*SSIN
+	DY = HEIGHT*SCOS
+C
+C now find distance from each side of box in turn
+	DO 770 I=1,4
+	   GOTO (761,762,763,764),I
+C
+C bottom edge of box
+761	   XXYY(1,1) = X1
+	   XXYY(2,1) = Y1
+	   XXYY(1,2) = X2
+	   XXYY(2,2) = Y2
+	   GOTO 765
+C
+C right-hand side
+762	   XXYY(1,1) = X2+DX
+	   XXYY(2,1) = Y2+DY
+	   GOTO 765
+C
+C top edge
+763	   XXYY(1,2) = X1+DX
+	   XXYY(2,2) = Y1+DY
+	   GOTO 765
+C
+C left-hand side
+764	   XXYY(1,1) = X1
+	   XXYY(2,1) = Y1
+C
+C get distance to this edge of box
+765	   R = LDIST(XXYY)		! distance to line segment
+	   IF (R.LT.MINR) THEN		! better than previous?
+	      MINR = R			! new best value
+	      OKMINR = .TRUE.		! flag valid
+	   ENDIF
+770	CONTINUE
+C
+771	ONVRTX = .TRUE.		! pretend we are on a vertex
+	MINI = 1		! set vertex to 1
+	X1 = RIXY(1,MINI)	! vertex itself
+	Y1 = RIXY(2,MINI)
+	IF (NO_Z) THEN
+	   Z1I = IFF_ABSENT
+	ELSE
+	   Z1I = RIZI(MINI)
+	ENDIF
+	LPOSST = PACK(PAKPST)	! set ST pointer to be -1, or pointing
+				! to TS entry
+	GOTO 1000
+C
+C type 11 - symbol string
+C come here with the points from the first ST already in RIXY
+C Part of this code is used for finding ends of other 'linear' features
+11	CONTINUE
+C
+C see if next point has left sector of interest
+	IF (SECTOR(RIXY(1,IND),RIXY(2,IND)).NE.FNDSEC) GOTO 1000
+C
+C just find distance from the points
+1110	R = (CONTXY(1)-RIXY(1,IND))**2 + (CONTXY(2)-RIXY(2,IND))**2
+	IF (R.LT.MINR) THEN	! better than previous best
+	   MINR = R
+	   OKMINR = .TRUE.		! flag valid
+	   MINI = IND
+	   ONVRTX = .TRUE.	! always on vertex
+	   X1 = RIXY(1,MINI)	! vertex itself
+	   Y1 = RIXY(2,MINI)
+	   IF (NO_Z) THEN
+	      Z1I = IFF_ABSENT
+	   ELSE
+	      Z1I = RIZI(MINI)
+	   ENDIF
+	   LPOSST = LSAVST	! address of implicated ST
+	ENDIF
+C
+	IF (FINDND) THEN	! finding ends
+	   IF (RDLAST) THEN
+	      GOTO 1000		! don't want last, so that's all
+	   ELSE
+	      GOTO 1130		! do want last
+	   ENDIF
+	ENDIF
+C
+	IND = IND+1			! step to next point
+	IF (IND.LE.RITOP) GOTO 11	! off end of array?
+C
+C try for next ST
+1120	CALL IFFNXT( IECODE, IELEN )
+	IF (IECODE.EQ.'VO') GOTO 1120	! perhaps voids between CB
+	IF (IECODE.NE.'CB') THEN	! no more points
+	   IF (FINDND) GOTO 1110	! try last vertex if finding end
+	   GOTO 1000			! otherwise that's all
+	ENDIF
+	LSAVST = LPOSH			! remember ST position
+	CALL EIHRCB_HEAD(CBH)
+C
+C If finding ends, then read last vertex of this ST,
+C but then try for the next ST in case this isn't the last one
+1130	IF (FINDND) THEN		! finding ends
+	   IND = CBH.NROW+1
+	   IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	      CALL EIHRCB_DATA(RIXY(1,2))
+	      NO_Z = .TRUE.
+	   ELSE
+	      CALL EIHRCB_DATA(CBD)! read into scratch, and extract XY
+	      CALL IFS_CB_READ(CBH,CBD,RIXY(1,IND),2,COLHXY,
+     &						CBH.NROW,CBH.NROW)
+	      IF (ZOPT) THEN
+	         CALL IFS_CB_READ(CBH,CBD,RIZ(IND),1,COLHZ,
+     &						CBH.NROW,CBH.NROW)
+	         NO_Z = .FALSE.
+	      ELSE
+	         NO_Z = .TRUE.
+	      ENDIF
+	   ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	   IF (DO_FLY_TRANS) THEN
+	      IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                            CURR_UNIT,CURR_ORG,
+     &	                            LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                            LITES2UNIT,LITES2ORG,
+     &	                            1,RIXY(1,IND))) GOTO 9998
+	   ELSEIF (USE_ORG) THEN
+	      CALL ADDORG(ORGXY,RIXY(1,IND),1)
+	   ENDIF
+	   RDLAST = .TRUE.		! remember last vertex read
+	   GOTO 1120			! and try for next ST
+	ENDIF
+C
+C Not finding ends, so read in the whole ST
+	RITOP = CBH.NROW+1		! new top index
+	IF (SIMPLE_XY) THEN	! read whole thing direct to RIXY
+	   CALL EIHRCB_DATA(RIXY(1,2))
+	   NO_Z = .TRUE.
+	ELSE
+	   CALL EIHRCB_DATA(CBD)! read into scratch, and extract XY
+	   CALL IFS_CB_READ(CBH,CBD,RIXY(1,2),2,COLHXY,1,CBH.NROW)
+	   IF (ZOPT) THEN
+	      CALL IFS_CB_READ(CBH,CBD,RIZ(2),1,COLHZ,1,CBH.NROW)
+	      NO_Z = .FALSE.
+	   ELSE
+	      NO_Z = .TRUE.
+	   ENDIF
+	ENDIF
+C
+C add origin of map, or transform into LITES2 space, if required
+	IF (DO_FLY_TRANS) THEN
+	   IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                         CURR_UNIT,CURR_ORG,
+     &	                         LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                         LITES2UNIT,LITES2ORG,
+     &	                         CBH.NROW,RIXY(1,2))) GOTO 9998
+	ELSEIF (USE_ORG) THEN
+	   CALL ADDORG(ORGXY,RIXY(1,2),CBH.NROW)
+	ENDIF
+	IND = 2				! start index
+	GOTO 11
+C
+C All routes join
+1000	IF (.NOT.OKMINR.OR.(MINR.GT.CRITR2.AND..NOT.SPIRAL)) GOTO 9998
+C
+C This item is, at worst, acceptable
+C have we had it before?
+	IF (HITITC.GT.0) THEN		! we have items already
+	   DO 1010 I = 1,HITITC
+	      IF ( PACK(PAKPNF).EQ.OBJPAK(PAKPNF,I) .AND.
+     &		   PACK(PAKMAP).EQ.OBJPAK(PAKMAP,I) ) THEN	! same
+	         IF (HITRAD(I).LE.MINR) GOTO 9998	! but worse
+C
+C better than previous hit on the item - overwrite
+	         WORST = I
+	         GOTO 1020
+	      ENDIF
+1010	   CONTINUE
+	ENDIF
+C
+C try entering this hit in the OBJ arrays
+	IF (HITITC.LT.OBJDEP) GOTO 1040		! space left
+C
+C array already full, so check if better than existing worst hit
+	IF (MINR.GE.HITRAD(WORST)) GOTO 9998	! worse still
+C
+C Replace WORST entry in OBJ arrays, remembering where we put it
+1020	HITPTR = WORST
+	HITRAD(HITPTR) = MINR
+C
+C now see what's the new worst
+	DO 1030 I = 1,HITITC
+	   IF (HITRAD(I).GT.MINR) THEN
+	      MINR = HITRAD(I)
+	      WORST = I
+	   ENDIF
+1030	CONTINUE
+	GOTO 1050
+C
+C Not yet got to the end of the OBJ arrays
+1040	HITITC = HITITC+1		! next free slot
+C
+C Set up HITITC entry in OBJ arrays, remembering where we put it
+	HITPTR = HITITC
+	HITRAD(HITPTR) = MINR
+C
+C Set WORST to point to the worst item in OBJ
+C If this is the first hit, then it must be the worst and best
+	IF (HITITC.EQ.1) THEN
+	   BEST = 1
+	ELSE
+	   IF (HITRAD(WORST).GE.MINR) GOTO 1050
+	ENDIF
+	WORST = HITITC
+C
+C enter the pack into the OBJ... arrays
+C replacing ST pointer and vertex to point to the hit point
+C Set BEST to point to the best item in OBJ
+1050	IF (HITRAD(BEST).GT.HITRAD(HITPTR)) BEST = HITPTR
+	CALL CPYPAK(PAKLEN,PACK,OBJPAK(1,HITPTR))
+	OBJPAK(PAKPST,HITPTR) = LPOSST
+	OBJPAK(PAKVRT,HITPTR) = MINI-1
+C
+C transfer auxiliary array (only for circles, symbols, and texts?)
+	CALL CPYPAK(AUXLEN,RIAUX,OBJAUX(1,HITPTR))
+C
+C transfer actual text
+	IF (PACK(PAKGT).EQ.TEXTYP)
+     &	   OBJPTR(HITPTR) = CPYSTR(TXTDSC,OBJTXT(HITPTR))
+C
+	OBJNVT(HITPTR) = ONVRTX		! on a vertex?
+	OBJSTRT(HITPTR)= ARCSTRT	! at start of arc?
+	OBJEND(HITPTR) = ARCEND		! at end of arc?
+C
+C If in a spiral search, then want to stop SCNSEC scanning, because
+C we have now found something
+	FIND = .NOT.ACCEPT
+C
+C Generate a cursor position
+	IF (ONVRTX.OR.ROLING.OR.CIRCARC) THEN
+C
+C put cursor on a vertex or on intersection point
+	   OBJCXY(1,HITPTR) = X1
+	   OBJCXY(2,HITPTR) = Y1
+	   CALL PUTLNG(Z1,OBJCXY(3,HITPTR))
+	ELSE
+C
+C do we need to interpolate Z?
+	   NO_Z = .NOT.ZOPT.OR.(Z1I.EQ.IFF_ABSENT.AND.Z2I.EQ.IFF_ABSENT)
+C
+C if interpolating Z, need to remember original vector
+	   IF (.NOT.NO_Z) THEN
+	      XXYY(1,1) = X1
+	      XXYY(2,1) = Y1
+	      XXYY(1,2) = X2
+	      XXYY(2,2) = Y2
+	   ENDIF
+C
+C put cursor to foot of perpendicular
+	   DX = X1-X2
+	   DY = Y1-Y2
+	   X2 = (Y1-CONTXY(2))*DX*DY
+	   Y2 = (X1-CONTXY(1))*DX*DY
+	   DX = DX*DX
+	   DY = DY*DY
+	   R = DX+DY
+	   OBJCXY(1,HITPTR) = (CONTXY(1)*DX-X2+X1*DY)/R
+	   OBJCXY(2,HITPTR) = (CONTXY(2)*DY-Y2+Y1*DX)/R
+C
+C get value for Z
+	   IF (NO_Z) THEN
+	      CALL PUTLNG(IFF_ABSENT,OBJCXY(3,HITPTR))
+	   ELSE
+	      CALL LINEAR_INTERPL(XXYY(1,1),XXYY(1,2),OBJCXY(1,HITPTR),
+     &	                           Z1,Z2,OBJCXY(3,HITPTR))
+	   ENDIF
+	ENDIF
+C
+C If in a spiral search, then set flags so we don't get this again.
+9998	IF (ACCEPT.AND.SRCHNG.AND.SEAPAK.EQ.0) 
+     &				CALL SETFTR(FLG,PACK(PAKLNK))
+C
+9999	RETURN
+	END

@@ -1,0 +1,286 @@
+	  INTEGER*4  FUNCTION IFFBDY()
+C
+***	MODULE	IFFBDY
+***	IDENT	24AU88
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,England
+C
+C Created.						FJB  02-Aug-1988
+C
+C Transfer input IFF file (open on lun IFFLUN) to MGD77 format.
+C
+	IMPLICIT NONE
+C
+C Parameters:                                          
+	INCLUDE 'LSL$CMNI2MGD:PARAMS.PAR'
+	INCLUDE 'LSL$CMNI2MGD:I2MGDMSG.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNI2MGD:COMMAND.CMN'
+	INCLUDE 'LSL$CMNI2MGD:DATABUF.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+C Word:
+	INTEGER*2	N,I,WORD	! temporary/loop variable
+	INTEGER*2	IENDS	! pen control for ST or ZS
+	INTEGER*2  	NPTS	! points in line
+	INTEGER*2  	IFC	! current feature code 
+	INTEGER*2	IELEN	! length of
+	INTEGER*2	IECODE  ! ... current iff entry
+	INTEGER*2	ITYPE	! current type of AC entry
+	INTEGER*2	NOVER	! layer number
+C
+C Longword:
+	INTEGER		OK,IERR	! for error return	
+	INTEGER		LPOSEO	! position of next EO entry
+	INTEGER*4	NFNUM(2)! feature number
+C
+C Logical:
+	LOGICAL		HAD_AC	! had AC entries for this feature
+	LOGICAL		HAD_ZS	! had correct ZS entry
+	LOGICAL		HAD_OFF	! had an origin offset from MD entry
+C
+C
+C Presets:
+	INTEGER*4 	SS$_NORMAL
+	EXTERNAL  	SS$_NORMAL	! normal successful completion
+C
+C Functions:
+	INTEGER		ACHEAD		! formats header block from AC's
+	INTEGER		ACDATA		! formats data block from AC's
+	INTEGER		CODATA		! formats cooordinates in data block
+	INTEGER		OUTREC		! writes block to tape
+C
+C ......................................................................
+C
+C Assume the best
+	IFFBDY=%LOC(SS$_NORMAL)
+C
+C
+C Initialise origin offset for IFF files with old type map descriptor
+	MD2LOC(1)=0.0D0
+	MD2LOC(2)=0.0D0
+	IRECORD = 0
+	SNUM = 17
+C
+C Rewind IFF file
+	CALL IFFRWD
+C
+C Enable Read Look Ahead
+	CALL IFFRLA(.TRUE.)
+C
+C ......................................................................
+C
+C			M A I N   L O O P
+C
+C Read the IFF file entry by entry and take action on certain types of entry
+C
+C Assumes:
+C	Features are in chronological order (as read in by MGD2I ).
+C	Features are all point features with specified FC (FS) value.
+C	Only ZS entries used for coords.
+C	"Header" feature is first feature with specified FC value in layer 0.
+C	"Data" features may be in any following layer.
+C	
+10	CALL IFFNXT(IECODE,IELEN)
+11	IF (IELEN.EQ.-1) GOTO 220
+	IF (IECODE.EQ.'NF') GOTO 50
+	IF (IECODE.EQ.'EF') GOTO 120
+	IF (IECODE.EQ.'FS') GOTO 60
+	IF (IECODE.EQ.'AC') GOTO 90
+	IF (IECODE.EQ.'ZS') GOTO 110
+	IF (IECODE.EQ.'MD') GOTO 20
+	IF (IECODE.EQ.'NO') GOTO 30
+	IF (IECODE.EQ.'EJ') GOTO 140
+	GOTO 10
+C
+C ......................................................................
+C
+C MD - Map Descriptor, be careful in case it is a new type MD with 
+C an origin offset. We must of course take this into account while 
+C reformatting to MGD77.
+C
+20	IF (IELEN.EQ.MD2LEN) THEN	! type 2 MD with origin offset?
+	   CALL EIHR(MD2ARR,MD2LEN,1)	! apparently yes,
+	   IF (MATV2.NE.2) THEN		! MD unavailable, as it is unset
+	     CALL LSL_PUTMSG(I2MGD__UNSETMD)
+	   ELSE				! use existing MD
+	     HAD_OFF=.TRUE.		! origin offset read
+	   ENDIF
+C
+C Must be in Geographicals (projection code 100)
+	   IF(MD2PRJ .NE. 100) GOTO 260
+C
+C Must be in Degrees ( unit code 4)
+	   IF(MD2UNT .NE. 4) GOTO 270
+C
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C NO - New Overlay
+C
+30	CALL EIHRI(NOVER,1,1)		! read layer number
+	CALL EIHRL(LPOSEO,1,3)		! & position of corresponding EO
+C
+C               
+	IF (HAD_DIAG) THEN
+	   CALL LSL_PUTMSG(I2MGD__LAYER,NOVER)
+	ENDIF
+	GOTO 10				! get next IFF entry
+C
+C ......................................................................
+C
+C NF - New Feature
+C
+50	CALL EIHRI(WORD,1,1)		! read feature serial number
+	NFNUM(1)=0			! clear longword
+	NFNUM(1)=WORD
+	CALL EIHRI(WORD,1,2)		! read internal seq. no.
+	NFNUM(2)=0			! clear longword
+	NFNUM(2)=WORD
+	HAD_AC=.FALSE.			! not yet had ACs for feature
+	HAD_ZS=.FALSE.			! reset had 3D string flag
+C
+C Put 'unknown' values into all fields
+	OUTRECD( 1:30) ='399999999999999999999999999999'
+	OUTRECD(31:60) ='999999999999999999999999999999'
+ 	OUTRECD(61:90) ='999999999999999999999999999999'
+	OUTRECD(91:120)='999999999999999999999999999999'
+C
+	GOTO 10				! get next IFF entry
+C
+C ......................................................................
+C
+C FS - Feature Code
+C
+60	CALL EIHRI(IFC,1,1)		! read feature code
+C
+C
+C Check that the current feature code does match the one
+C specified by the /FC qualifier
+C
+	IF (IFC.NE.FCTYPE) THEN		! no match found
+	   CALL IFFNXC('EF',IELEN)	! skip feature
+	   IF (IELEN.LT.0) GOTO 220
+	ENDIF
+	GOTO 10				! get next IFF entry
+C
+C ......................................................................
+C
+C AC - Ancillary Code
+C
+90	IF(NOVER .EQ .0)THEN
+C
+C Construct the header records 
+	   OK = ACHEAD(IECODE,IELEN)
+	   IF(.NOT. OK)THEN
+	      GOTO 280
+	   ELSE
+C
+C Skip to end of layer 0 once we have got the "header" details
+	      CALL IFFPKE(IECODE,IELEN,LPOSEO)	! skip to EO
+	      IF (IELEN.LT.0.OR.IECODE.NE.'EO') GOTO 220
+	      HAD_HEAD=.TRUE.
+	      GOTO 10
+	   ENDIF
+C
+C Construct a data record
+	ELSE
+	   OK = ACDATA(IECODE,IELEN)
+	   IF(.NOT. OK)THEN
+	      GOTO 280             
+	   ELSE
+	      HAD_AC = .TRUE.
+	      GOTO 11
+	   ENDIF
+	ENDIF
+C
+	GOTO 10
+C
+C ......................................................................
+C
+C ZS - string (3d)
+C
+C Put coordinate data into buffer
+110	IF(NOVER.EQ.0)GOTO 10		! ignore any coordinates in layer 0
+	OK = CODATA(IECODE,IELEN)
+	IF( .NOT. OK) GOTO 280  
+	IF(.NOT. HAD_AC)THEN
+	   CALL LSL_PUTMSG(I2MGD__MISSAC,NFNUM(1),NFNUM(2),NOVER)
+	ENDIF 
+	HAD_ZS=.TRUE.
+	GOTO 10
+C
+C ......................................................................
+C
+C EF - End Feature
+C
+120	GOTO 10
+C                        
+C ......................................................................
+C
+C EJ - End Job
+C
+C If a data block has been started fill with unspecified records
+140	IF(IRECORD.EQ.0) GOTO 1000
+C
+C Put 'unknown' values into all fields
+	OUTRECD( 1:30) ='399999999999999999999999999999'
+	OUTRECD(31:60) ='999999999999999999999999999999'
+ 	OUTRECD(61:90) ='999999999999999999999999999999'
+	OUTRECD(91:120)='999999999999999999999999999999'
+C
+C Fill block with unspecified records and flush out when full
+	DO 145,N=1,(16-IRECORD)
+	   OK = ACDATA(IECODE,IELEN)
+	   IF(.NOT. OK)GOTO 290
+	   OK = CODATA(IECODE,IELEN)
+	   IF(.NOT. OK)GOTO 290
+145	CONTINUE
+C
+	GOTO 1000
+C
+C ......................................................................
+C
+C			E R R O R S 
+C
+C Unexpected end of file
+220	IFFBDY=I2MGD__UNEXPEOF
+	CALL LSL_PUTMSG(IFFBDY)
+	GOTO 1000
+C
+C Map Descriptor has wrong projection
+C
+260	IFFBDY = I2MGD__BADPRJ
+	CALL LSL_PUTMSG(IFFBDY,MD2PRJ)
+	GO TO 1000
+C
+C Map Descriptor has wrong units
+C
+270	IFFBDY = I2MGD__BADUNT
+	CALL LSL_PUTMSG(IFFBDY,MD2UNT)
+	GOTO 1000
+C
+C Problem in feature
+C
+280	IFFBDY = I2MGD__BADFEAT
+	CALL LSL_PUTMSG(IFFBDY,NFNUM(1),NFNUM(2))
+	GOTO 1000
+C
+C Error filling last block
+290	IFFBDY = I2MGD__LASTBLK
+	CALL LSL_PUTMSG(IFFBDY)
+	GOTO 1000
+C
+C
+C ......................................................................
+C
+1000	IF (IFFBDY) IFFBDY=%LOC(SS$_NORMAL)
+	RETURN
+C
+C ......................................................................
+C
+	END

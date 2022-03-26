@@ -1,0 +1,389 @@
+	PROGRAM POLY
+C
+***	IDENT	11JA85
+***	MODULE	POLY
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 11 September 1984
+C
+C This is the test program for drawing fill areas
+C
+C Draws the IFF file using GKSLDLIB2
+C
+	IMPLICIT NONE
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/	! common for handling IFF files
+***	COMMON/LSL$CMNVIO:TXTC/		! and for the command line
+***	COMMON/LSL$CMNVIO:EXPC/		! to expand into
+C
+C functions
+C
+	INTEGER*2	TXTCML		! read command line
+	LOGICAL		RDFILN		! parse a file name
+	LOGICAL		RDYES		! ask a Yes/No question
+	LOGICAL		RDREAL		! read a real number
+	LOGICAL		RDLONG		! read a long integer
+	LOGICAL		RDCHS		! read a (non-blank) char
+	LOGICAL		HATCH
+C
+	PARAMETER	SIG = 1
+	PARAMETER	TEK = 2
+C
+C workspace
+C
+	INTEGER*2	IECODE		! IFF code read in
+	INTEGER*2	IELEN		! length of entry / end of file
+	INTEGER*2	IENDS		! pen up/down
+	INTEGER*2	IFFLUN		! lun to read IFF file on
+C
+	INTEGER*2	FSN		! feature serial number
+	INTEGER*2	NPTS		! number of points in ST
+	INTEGER*2	STPTR		! 'next free' pointer for STBUF
+	LOGICAL		STFULL		! have we filled STBUF?
+C
+	PARAMETER	STMAX = 1000	! arbitrary large number
+C
+	REAL		STBUF(2,STMAX)	! buffer for points from STs
+	REAL		XPTS(STMAX)	! GPL buffers
+	REAL		YPTS(STMAX)	! - for the same points
+C
+	REAL		SIDES(4,STMAX)		! buffer for sides
+	INTEGER		SIDPTR(0:STMAX-1)	! pointers into it
+C
+	REAL		RANGE(4)	! range of map coordinates
+C
+	PARAMETER	TEMPSIZ = 20		! for HATCH
+	REAL		TEMPBUF(TEMPSIZ)
+	BYTE		DELTA(TEMPSIZ)
+C
+	REAL		TEMP4BUF(TEMPSIZ*4)	! for HATCH
+C
+	REAL		BEFORE,AFTER	! for timing (real seconds)
+C
+	INTEGER*4	RETCOD		! return code from RDFILN
+	INTEGER*4	IERR		! system type error
+	INTEGER		I		! DO loop variable
+	INTEGER		LOOP		! DO loop upper bound
+	BYTE		ICH		! for RDCHS
+C
+	LOGICAL		OPNIFF		! is IFF file open?
+	LOGICAL		START		! is this first ST of feature?
+	LOGICAL		DOIT
+C
+	CHARACTER*80	IFFTIT		! IFF file name
+	INTEGER*2	IFFLEN		! length of file name
+C
+	REAL		SPACE		! spacing 'twixt lines
+	INTEGER		NHATCH		! style of hatch
+	INTEGER		LASF(13)	! aspect source flags
+C
+	INTEGER		DEV		! SIG or TEK
+	INTEGER		FREQ		! frequency of GUWK
+C
+	LOGICAL		SIGINI,TEKINI	! true if device initialised
+C
+	DATA	LASF/0,0,1,0,0,0,0,0,0,0,0,0,0/
+	DATA	SIGINI,TEKINI/2*.FALSE./
+C
+C set up for IFFLIB - choose a LUN, and set the 'tidy' state
+C
+	IFFLUN = 1
+	CALL IFFTDY
+	OPNIFF = .FALSE.
+C
+C find out what file we are to use
+C
+10	IERR = TXTCML( 'IFF file: ' )
+	IF (IERR.LT.0) THEN
+	   GOTO 9999
+	ELSEIF (IERR.EQ.0) THEN
+	   GOTO 10
+	ENDIF
+C
+C and read in the IFF file name
+C
+	IF ( RDFILN( IFFTIT, IFFLEN, TXTDSC, 'LSL$IF:.IFF',
+     &		     .TRUE., RETCOD, IERR ) ) THEN
+C
+C	 error in the file parsing
+C
+	   CALL ERRFLN( RETCOD, IERR )
+	   GOTO 10
+	ENDIF
+C
+C and then open the IFF file
+C	
+	CALL IFFOPN( IFFLUN, IFFTIT(1:IFFLEN), 0 )	! read only
+C
+	IF ( IERCD.NE.0 .OR. IERNM.NE.1 ) THEN
+	   CALL WRITEF('Can''t open file "%S"',IFFTIT(1:IFFLEN))
+	   GOTO 10
+	ENDIF
+C
+	OPNIFF = .TRUE.
+C
+C so let us initialise the display...
+C
+	CALL GOPKS(6)			! open GKS
+C
+	IF ( RDYES('Use Sigma ARGS') ) THEN
+	   CALL GOPWK( SIG, 7000, 7000 )
+	   CALL GACWK( SIG )
+	   SIGINI = .TRUE.
+	   DEV = SIG
+	ELSEIF ( RDYES('Use Tektronix ') ) THEN
+	   CALL GOPWK( TEK, 9900, 9900 )
+	   CALL GACWK( TEK )
+	   TEKINI = .TRUE.
+	   DEV = TEK
+	ENDIF
+C
+C set our aspect source flags
+C
+	CALL GSASF(LASF)		! line colour is INDIVIDUAL
+C
+C find out what spacing we are to use - read in the range entry of the
+C IFF file, to tell us what range the map has
+C
+1000	CALL IFFNXC('RA',IELEN)
+	IF (IELEN.LT.0) THEN
+	   CALL WRITEF('Cannot find RAnge entry')
+	   GOTO 9999
+	ENDIF
+C
+	CALL EIHRR(RANGE,4,1)		! read the range entry
+C
+C and tell the user about the map's extent
+C
+	CALL WRITEF('Map size is: horizontal %F, vertical %F',
+     &				RANGE(2)-RANGE(1), RANGE(4)-RANGE(3) )
+
+	CALL WRITEF('Hatch types are:')
+	CALL EXPAND('1 = horizontal, 2 = vertical, 3 = 45 degrees,')
+	CALL WRITAP(' 4 = -45 degrees')
+	CALL EXPAND('5 = crosshatch hoizontal/vertical, ')
+	CALL WRITAP('6 = crosshatch 45 degrees')
+C
+C *********************************************************************
+C
+C set the GKS window (using the range entry we read above)
+C
+	CALL GSWN( 1, RANGE(1), RANGE(2), RANGE(3), RANGE(4) )
+	CALL GSELNT( 1 )
+C
+C *********************************************************************
+C
+C and now read through the IFF file - entry by entry
+C
+20	CONTINUE
+C
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.LT.0) GOTO 9000	! unexpected end of IFF file
+C
+	IF (IECODE.EQ.'NO') GOTO 1500	! new overlay
+C
+	IF (IECODE.EQ.'NF') GOTO 2000	! start of next feature
+	IF (IECODE.EQ.'ST') GOTO 3000	! next ST entry
+	IF (IECODE.EQ.'EF') GOTO 4000	! end of feature
+C
+	IF (IECODE.EQ.'EJ') GOTO 8000	! end of job / file
+	GOTO 20				! ignore everything else
+C
+C *********************************************************************
+C
+C *** NO - new overlay - just tell about it
+C
+1500	CALL EIHRI( I, 1, 1 )
+	CALL WRITEF
+	CALL WRITEF('- Overlay number %N',I)
+	GOTO 20
+C
+C *********************************************************************
+C
+C *** NF - new feature - note as much
+C
+2000	CALL EIHRI( FSN, 1, 1 )
+	START  = .TRUE.			! next ST will be first
+	STFULL = .FALSE.		! and the point buffer is empty
+	STPTR  = 1			! start with first coord
+	GOTO 20
+C
+C *********************************************************************
+C
+C *** ST - string of coords to be drawn
+C
+3000	IF (STFULL) GOTO 20		! if buffer full, ignore it
+C
+	CALL EIHRS(NPTS,IENDS)		! find out how many points
+C
+C is this the first ST of a feature? - if so then we must filter out
+C anything with too few points (assume that this test works!)
+C
+	IF (START) THEN
+	   IF ( NPTS.LE.2 ) THEN	! ignore the feature
+	      CALL IFFNXC('EF',IELEN)	! move to next EF
+	      GOTO 20
+	   ELSE				! enough points to interest us
+	      START = .FALSE.		! and no longer first
+	   ENDIF
+	ENDIF
+C
+C is there room for the new points?
+C
+	IF ( (STPTR+NPTS).GE.STMAX ) THEN
+	   CALL WRITEF
+	   CALL WRITEF('Too many points in feature %N (at least %N)',
+     &						   FSN,  STPTR+NPTS-1 )
+	   CALL WRITEF('Not reading any more - already have %N',
+     &							    STPTR-1 )
+	   STFULL = .TRUE.
+	   GOTO 20
+	ENDIF
+C
+C read in the ST...
+C
+	CALL EIHRR( STBUF(1,STPTR), NPTS*2, 1 )
+C
+C and note that we have filled the ST buffer a bit more
+C
+	STPTR = STPTR + NPTS
+C
+	GOTO 20
+C
+C *********************************************************************
+C
+C *** EF - end feature - plot our accumulated STs
+C
+4000	CALL WRITEF
+	CALL WRITEF('Feature %N has %N points -',FSN,STPTR-1)
+	IF ( TXTCML('Exit (^Z), or draw it (return): ') .LT. 0 ) THEN
+	   GOTO 9999
+	ELSE
+	   CALL BSLN
+	   IF ( .NOT.RDCHS(ICH) ) THEN
+	      CALL WRITEF('I don''t understand your reply')
+	      GOTO 4000
+	   ENDIF
+	ENDIF
+C
+	CALL GCLRWK( DEV, 0 )
+C
+C now draw the outline of the figure - so the user can decide whether
+C to fill it or not
+C
+	DO 4005 I = 1,STPTR-1
+	   XPTS(I) = STBUF(1,I)
+	   YPTS(I) = STBUF(2,I)
+4005	CONTINUE
+C
+	CALL GSPLCI( 1 )		! colour 1
+	CALL GPL( STPTR-1, XPTS, YPTS )
+C
+	CALL GUWK( DEV, 0 )
+C
+C and do they want to fill it at all?
+C
+	IF ( .NOT.RDYES('Fill this area') ) GOTO 20	! skip if not
+C
+4050	IERR = TXTCML('Hatch  Spacing  Freq: ' )
+	IF (IERR.LT.0) THEN
+	   CALL WRITEF('Error reading your reply')
+	   GOTO 9999
+	ELSEIF (IERR.EQ.0) THEN
+	   GOTO 4050
+	ENDIF
+C
+	CALL BSLN
+	IF ( RDLONG(NHATCH) ) THEN
+	   CALL WRITEF('Error reading hatch number')
+	   GOTO 4050
+	ELSEIF (NHATCH.LT.1 .OR. NHATCH.GT.6) THEN
+	   CALL WRITEF('Illegal hatch number')
+	   GOTO 4050
+	ENDIF
+C
+	IF ( RDREAL(SPACE) ) THEN
+	   CALL WRITEF('Error reading spacing')
+	   GOTO 4050
+	ELSEIF (SPACE.LE.0.0) THEN
+	   CALL WRITEF('Illegal spacing')
+	   GOTO 4050
+	ENDIF
+C
+	CALL BSLN
+	IF ( RDLONG(FREQ) ) THEN
+	   CALL WRITEF('Error reading frequency number')
+	   GOTO 4050
+	ELSEIF (FREQ.LE.0) THEN
+	   CALL WRITEF('Illegal frequency number')
+	   GOTO 4050
+	ENDIF
+C
+	DO 4100 I = 1,2
+	   IF ( I.EQ.1 ) THEN
+	      DOIT = RDYES('With sides  algorithm')
+	   ELSE
+	      DOIT = RDYES('With simple algorithm')
+	   ENDIF
+C
+	   IF (.NOT.DOIT) GOTO 4100
+C
+C	 now do the fill
+C
+	   BEFORE = SECNDS(0.0)
+C
+C   call HATCH( alg, npts, pts, sides, sidptr,
+C		     temp_siz, temp_sides, temp_pts,
+C		     hatch, colour, spaces, linwid, device, freq )
+C
+	   IF ( HATCH( I, STPTR-1, STBUF, SIDES, SIDPTR,
+     &			  TEMPSIZ, TEMP4BUF, TEMPBUF,
+     &			  NHATCH, NHATCH+I, SPACE, 1.0,
+     &			  DEV,    FREQ ) ) THEN
+C
+	      CALL WRITEF('Error calling fill area routine')
+	   ENDIF
+C
+	   AFTER = SECNDS(BEFORE)
+C
+	   CALL WRITEF('Fill took %F7.3 seconds',
+     &				AFTER )
+C
+4100	CONTINUE
+C
+C and that is the end of this feature
+C
+	GOTO 20
+C
+C *********************************************************************
+C
+C *** EJ - end of job
+C
+8000	CALL WRITEF('EJ - End of file - no more features')
+	GOTO 9999
+C
+C *********************************************************************
+C
+C EOF - end of file
+C
+9000	CALL WRITEF('Unexpected end of IFF file')
+C
+C and here to close things down
+C
+9999	CALL WRITEF('Good-bye')
+	IF ( OPNIFF ) CALL IFFCLO(IFFLUN)
+C
+	IF ( SIGINI ) THEN
+	   CALL GDAWK(SIG)
+	   CALL GCLWK(SIG)
+	ENDIF
+C
+	IF ( TEKINI ) THEN
+	   CALL GDAWK(TEK)
+	   CALL GCLWK(TEK)
+	ENDIF
+C
+	CALL EXIT
+C
+	END

@@ -1,0 +1,175 @@
+	INTEGER*4 FUNCTION FLN_RETRIEVE_JOBS(OPERATOR,
+     &  WORKSTATION,PROJECT,JOBS,JOB_NAMES,NUM_JOB)
+C
+***	MODULE	FLN_RETRIEVE_JOBS
+***	IDENT	03SE91
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    14-Apr-1988
+C
+C retrieves all jobs that may be carried out by the specified operator
+C on the given workstation. It is assumed that both are authorised for
+C the supplied project.
+C Preferable job is first one in list - job operator last worked on
+C decreasing order of priority thro' array
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$CMNFLOWLINE:FLOW.PAR'
+	INCLUDE	'LSL$CMNFLOWLINE:FLOWLINEMSG.PAR'
+	INTEGER*4	SS$_NORMAL
+	EXTERNAL	SS$_NORMAL
+C
+C Arguments
+	CHARACTER*(*)	OPERATOR	! IN
+	CHARACTER*(*)   WORKSTATION	! IN
+	CHARACTER*(*)	PROJECT		! IN
+	INTEGER*4       JOBS(FLN_MAX_JOB) ! OUT - array of jobs
+	INTEGER*4	NUM_JOB		! OUT - number of jobs
+	CHARACTER*(*)   JOB_NAMES(FLN_MAX_JOB) ! OUT - array of jo names
+C
+C Functions
+	INTEGER*4	FLN_CHECK_OPERATOR_AUTH
+	INTEGER*4	FLN_CHECK_WORKSTATION_AUTH
+	INTEGER*4	FLN_RETRIEVE_CURRENT_JOB
+	INTEGER*4	EXPAND
+C
+C Local Variables
+	INTEGER*4	I
+	INTEGER*4	COUNT_JOB
+	CHARACTER*20	TEMP_FLNS(FLN_MAX_JOB)  !flowline array
+	CHARACTER*20	TEMP_NAMES(FLN_MAX_JOB) !name array
+	INTEGER*4	TEMP_JOBS(FLN_MAX_JOB)
+	LOGICAL		IS_AUTHORISED
+	INTEGER*4	JOBID
+	CHARACTER*20    JOBNAME
+	CHARACTER*20	FLOWLN
+	LOGICAL		THIS_JOB
+	INTEGER*4	LEN
+	INTEGER*4	NUM_ERR
+C
+&RDB&   DATABASE FILENAME 'LSL$FLN_DATABASE:FLOWLINE'
+C
+	FLN_RETRIEVE_JOBS  = %LOC(SS$_NORMAL)
+C
+C first have to get the job on which this operator last worked 
+	FLN_RETRIEVE_JOBS= FLN_RETRIEVE_CURRENT_JOB
+     &  (OPERATOR,PROJECT,JOBID,JOBNAME,FLOWLN,THIS_JOB)
+	IF (.NOT. FLN_RETRIEVE_JOBS) GOTO 999
+	IF (THIS_JOB) THEN
+	   TEMP_JOBS(1) = JOBID
+	   TEMP_NAMES(1) = JOBNAME
+	   TEMP_FLNS(1) = FLOWLN
+	   COUNT_JOB= 1
+	ELSE  
+	   COUNT_JOB= 0
+	   JOBID= 0
+	ENDIF
+C 
+C retrieve all the active jobs with the given project
+	NUM_ERR = 0
+20	CONTINUE
+&RDB&   START_TRANSACTION READ_ONLY RESERVING JOB, FLOWLINE
+&RDB&   FOR SHARED
+&RDB&   READ WAIT
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_RETRIEVE_JOBS = RDB$STATUS
+		 GOTO 999
+	      ENDIF
+C
+C try again - probably deadlock
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+C
+C retrieve all the jobs in the appropriate order, except the
+C one we may already have got
+C only retrieve FLN_MAX_JOB - 1 of them
+&RDB&   FOR FIRST 999 J IN JOB
+&RDB&   CROSS F IN FLOWLINE OVER FLOWLINE_ID
+&RDB&   WITH J.PROJECT_ID = PROJECT AND J.JOB_STATUS = 'Active'
+&RDB&   AND J.JOB_ID NE JOBID
+&RDB&   SORTED BY DESCENDING F.PRIORITY, DESCENDING J.PRIORITY,
+&RDB&   ASCENDING J.JOB_NAME
+&RDB&	   ON ERROR
+	      NUM_ERR = NUM_ERR+1
+	      IF (NUM_ERR .GT. 5) THEN
+		 FLN_RETRIEVE_JOBS = RDB$STATUS
+&RDB&	         ROLLBACK
+		 GOTO 999
+	      ENDIF
+&RDB&	      ROLLBACK
+C
+C try again - probably deadlock
+	      CALL LIB$WAIT(FLN_PSE)
+	      GOTO 20
+&RDB&	   END_ERROR
+	   COUNT_JOB = COUNT_JOB+1
+&RDB&      GET
+&RDB&	      ON ERROR
+	         NUM_ERR = NUM_ERR+1
+	         IF (NUM_ERR .GT. 5) THEN
+		    FLN_RETRIEVE_JOBS= RDB$STATUS
+&RDB&	            ROLLBACK
+		    GOTO 999
+	         ENDIF
+&RDB&	         ROLLBACK
+C
+C try again - probably deadlock
+	         CALL LIB$WAIT(FLN_PSE)
+	         GOTO 20
+&RDB&	      END_ERROR
+&RDB&         TEMP_JOBS(COUNT_JOB) = J.JOB_ID;
+&RDB&         TEMP_NAMES(COUNT_JOB) = J.JOB_NAME;
+&RDB&         TEMP_FLNS(COUNT_JOB) = J.FLOWLINE_ID;
+&RDB&      END_GET
+&RDB&   END_FOR   
+&RDB&   COMMIT
+C
+C for each of the jobs check the authorisation
+C
+	NUM_JOB= 0
+	DO 30 I = 1, COUNT_JOB
+C
+C operator authorisatiion for flowline
+	   FLN_RETRIEVE_JOBS= 
+     &	   FLN_CHECK_OPERATOR_AUTH
+     &	   ('FL',OPERATOR,TEMP_FLNS(I),IS_AUTHORISED)
+	   IF (.NOT. FLN_RETRIEVE_JOBS) GOTO 999
+	   IF (.NOT. IS_AUTHORISED) GOTO 30
+C
+C operator authorisation for job
+	   FLN_RETRIEVE_JOBS= 
+     &	   FLN_CHECK_OPERATOR_AUTH
+     &	   ('JB',OPERATOR,TEMP_NAMES(I),IS_AUTHORISED)
+	   IF (.NOT. FLN_RETRIEVE_JOBS) GOTO 999
+	   IF (.NOT. IS_AUTHORISED) GOTO 30
+C
+C workstation authorisation for FLOWLINE
+	   FLN_RETRIEVE_JOBS= 
+     &	   FLN_CHECK_WORKSTATION_AUTH
+     &	   ('FL',WORKSTATION,TEMP_FLNS(I),IS_AUTHORISED)
+	   IF (.NOT. FLN_RETRIEVE_JOBS) GOTO 999
+	   IF (.NOT. IS_AUTHORISED) GOTO 30
+C
+C workstation authorisation for job
+	   FLN_RETRIEVE_JOBS= 
+     &	   FLN_CHECK_WORKSTATION_AUTH
+     &	   ('JB',WORKSTATION,TEMP_NAMES(I),IS_AUTHORISED)
+	   IF (.NOT. FLN_RETRIEVE_JOBS) GOTO 999
+C
+	   IF ( IS_AUTHORISED) THEN
+	      NUM_JOB= NUM_JOB+1  
+	      JOBS(NUM_JOB) =  TEMP_JOBS(I)
+	      JOB_NAMES(NUM_JOB) = TEMP_NAMES(I)
+	   ENDIF
+30	CONTINUE
+C
+999	RETURN
+	END

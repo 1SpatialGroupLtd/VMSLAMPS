@@ -1,0 +1,157 @@
+	LOGICAL FUNCTION RDMAG (EOF)
+C
+***	IDENT	26JL91
+***	MODULE	RDMAG
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C  Author J Barber  11 May 1988
+C
+C to read from a IHO CEDD mag tape, or disc copy file and assemble 
+C  the block read into the buffer in /BUFFER/ for later use.
+C  RDCH here reads first 8 chars of a 1980 char record component,
+C  leaves pointer at 9th char ready for any subsequent reading if 
+C  required
+C  RDCH in RDLONG etc. reads the rest, skipping the first 8 chars 
+C  if of same record type till encountering a different record, or
+C  'DEL' padding char.
+C
+C If the end of file encountered then EOF = TRUE, RDMAG = FALSE:
+C    no block/record read
+C
+C If tapemark (FOREIGN)               EOF = TRUE, RDMAG = TRUE:
+C    block = tapemark
+C
+	IMPLICIT NONE
+C
+        LOGICAL         EOF             ! end of file? 
+C
+C common blocks
+C
+***     PARAMETER/HERE:CEDD2IMSG/
+***     PARAMETER/LSL$CMNLSL:LSLLIBMSG/ 
+***	COMMON/HERE:STATE/		! what state - BLKTYP
+***     COMMON/HERE:BUFFER/
+***	COMMON/HERE:PARAMS/		! for DIAG
+***	COMMON/LSL$CMNLSL:MTIVCM/	! input buffering
+C
+C functions in use
+C
+        INTEGER         FLRLIN          ! read record from file
+	INTEGER		MTIRDB		! read a block off magtape
+        LOGICAL         RDCH
+C
+C workspace
+C
+	INTEGER*4	RETVAL		! result from MTIRDB, etc
+	INTEGER*4	IERR		! for widening errors into
+	INTEGER*4	DMPPTR		! for outputting block dump
+        INTEGER         CHPTR           ! loop count
+        INTEGER         I
+C
+        BYTE            OUTBYT          ! for RDCH
+C
+C  ****************************************************************
+        RDMAG = .TRUE.
+        EOF = .FALSE.
+C
+C  first, let us actually read that block...
+C     put record into BYTBUF
+C
+1       IF (DEVICE) THEN
+           RETVAL = MTIRDB (MAX_BYTBUF, MAX_INLEN, BYTCNT)
+	   IF (.NOT.RETVAL) THEN
+C
+	      IF (RETVAL.EQ.LSL__EOF) THEN
+	         BLKTYP = TAPEMK               ! we read a tapemark
+                 IF (DIAG) CALL WRITEF 
+     &                           ('.Tapemark, tape block %N', MTINBL)
+                 LABEL = 'TMK'
+                 EOF = .TRUE.
+	      ELSE
+                 CALL LSL_PUTMSG (CEDD2I__TAPRDBERR, MTINBL)
+                 CALL LSL_PUTMSG (RETVAL)
+                 IF (RETVAL.EQ.LSL__SYSERR) CALL LSL_PUTMSG (MTIERR)
+                 LABEL = '   '
+                 RDMAG = .FALSE.
+              ENDIF
+	      GOTO 999			       ! and back to main 
+           ENDIF
+C
+           IF (DIAG) CALL WRITEF 
+     &  ('.Started tape block %N, block length: %N', MTINBL, BYTCNT)
+C
+C   has block included a 4 byte record control word ie >1984 bytes
+C
+           IF (BYTCNT.GE.LONG_INLEN) THEN
+              DO 2 I = 1,INLEN
+              MAX_BYTBUF(I) = MAX_BYTBUF(I+4)
+2             CONTINUE
+              BYTCNT = INLEN
+           ENDIF
+C
+        ELSE
+	   CALL FLRSEL(CEDLUN)
+           RETVAL = FLRLIN (BYTBUF, BUFCNT, BUFLEN, IERR)
+	   IF (.NOT.RETVAL) THEN  
+              IF (RETVAL.EQ.LSL__EOF) THEN
+                 EOF = .TRUE.
+              ELSE
+                 CALL LSL_PUTMSG (CEDD2I__FILRDERR)
+                 CALL LSL_PUTMSG (RETVAL)
+                 IF (RETVAL.EQ.LSL__SYSREAD) CALL LSL_PUTMSG (IERR)
+              ENDIF
+              RDMAG = .FALSE.
+              LABEL = '   '
+              GOTO 999
+           ENDIF
+           IF (DIAG) CALL WRITEF ('.Record length: %^W%N', BUFCNT)
+        ENDIF
+C
+        CALL SETAUX (BYTBUF, BUFLEN)
+C
+C   read first 8 chars of block/record
+C
+        IF (.NOT.RDCH (OUTBYT)) THEN              ! read record label
+           IF (DIAG) CALL WRITEF ('.Reading %S record', LABEL)
+        ELSE
+           CALL LSL_PUTMSG (CEDD2I__STRTBLKERR)
+           IF (CEDDAT) CALL WRITEF (' at record number %N', RECCNT)
+           IF (DEVICE) CALL WRITEF (' at tape block no. %N', MTINBL)
+           RDMAG = .FALSE.
+           GOTO 999
+        ENDIF
+C                                 ! check that record length was OK
+        IF (DEVICE) THEN
+           IF (CEDDAT .AND. (BYTCNT.NE.INLEN)) CALL LSL_PUTMSG 
+     &                            (CEDD2I__BYTNUMERR, BYTCNT)
+        ELSE
+           IF (CEDDAT .AND. (BUFCNT.NE.BUFLEN)) CALL LSL_PUTMSG 
+     &                         (CEDD2I__BUFNUMERR, BUFCNT)
+        ENDIF
+C
+C  dump it if wanted and if block is of known type
+C
+	IF (DEVICE.AND.DUMP.AND.DUMPOPN) THEN
+	   CALL FLWSEL (DUMPLUN)
+	   CALL FLWRTF
+	   CALL FLWRTF('.Block %N, %N  longwords of data',
+     &				      MTINBL, (BYTCNT+3)/4)
+	   CALL FLWRTF
+C
+C  dump contents of byte buffer as hexadecimal longwords
+C
+	   DO 10 CHPTR = 1, ((BYTCNT+3)/4), 4
+	      CALL EXPAND
+C
+	      DO 5 DMPPTR = CHPTR, MIN((CHPTR+3), ((BYTCNT+3)/4))
+	         CALL APPEND('%P0%X8  ', INTBUF(DMPPTR))
+5	      CONTINUE
+C
+	      CALL FLWSTR
+10	   CONTINUE
+	ENDIF
+C
+999	RETURN
+	END
+C

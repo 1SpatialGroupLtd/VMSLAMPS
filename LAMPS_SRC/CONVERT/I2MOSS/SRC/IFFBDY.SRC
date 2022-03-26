@@ -1,0 +1,412 @@
+	  INTEGER*4  FUNCTION IFFBDY()
+C
+***	MODULE	IFFBDY
+***	IDENT	06JL87
+C
+C 	Copyright Laser-Scan Laboratories Ltd.,England
+C
+CMOD 2/494 '080' record now uses correct columns	TJH  06-Jul-1987
+CMOD 2/489 UNDEFCLAB message now outputs correct FC	TJH  23-Jun-1987
+CMOD /IFFOK/ removed. LSL_ADDMSG added where
+C appropriate						TJH  05-Jun-1987
+C Created.						TJH  22-Aug-1986
+C
+C Transfer input IFF file (open on lun IFFLUN) to MOSS GENIO format.
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 'LSL$CMNI2MOSS:PARAMS.PAR'
+	INCLUDE 'LSL$CMNI2MOSS:I2MOSSMSG.PAR'
+C
+C Word:
+	INTEGER*2	I,WORD	! temporary/loop variable
+	INTEGER*2	IENDS	! pen control for ST or ZS
+	INTEGER*2	IFC	! current feature code 
+	INTEGER*2	IELEN	! length of
+	INTEGER*2	IECODE  ! ... current iff entry
+	INTEGER*2	ITYPE	! current type of AC entry
+	INTEGER*2	NOVER	! layer number
+	INTEGER*2	NPTS	! number of points in ST or ZS
+C
+C Longword:
+	INTEGER		IERR	! for error return	
+	INTEGER		IHEIGHT	! integer contour height
+	INTEGER		LPOSEO	! position of next EO entry
+	INTEGER		LONGHT	! the contour height for 2d string
+	INTEGER*4	NFNUM(2)! feature number
+	INTEGER		TOTPTS	! total points in feature
+C
+C Real*4:
+	REAL		DIM	 ! dimensionality of MOSS string
+	REAL		REALHT	 ! the contour height for 2d string
+	REAL	STBUFF(2,MAXPTS) ! all coordinates from all STs in feat.
+	REAL	ST3BUF(3,MAXPTS) ! all coordinates from all ZSs in feat.
+C
+	EQUIVALENCE (ST3BUF(1,1),STBUFF(1,1))
+C
+	REAL		X,Y,Z	! temporary variables for MOSCOD
+C
+C Logical:
+	LOGICAL		HAD_HT	! had required AC type for height
+	LOGICAL		HAD_OFF	! had an origin offset from MD entry
+	LOGICAL		HAD_ZS	! had a ZS entry in feature
+C
+C Common:
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNI2MOSS:COMMAND.CMN'
+	INCLUDE 'LSL$CMNI2MOSS:MAGBUF.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+C Character:
+	CHARACTER*4	LABEL		! MOSS string label
+C
+C Presets:
+	INTEGER*4 	SS$_NORMAL
+	EXTERNAL  	SS$_NORMAL	! normal successful completion
+C
+C Functions:
+	INTEGER		MOSCOD		! formats to MOSS card images
+	INTEGER		OUTREC		! writes card image to tape/file
+C
+C ......................................................................
+C
+C Assume the best
+	IFFBDY=%LOC(SS$_NORMAL)
+C
+C Write header to first MOSS card image
+C
+	WRITE (OUTSTR,1500) MODEL_NAME(:MOD_LEN)
+C
+C Init pointer into block buffer
+C
+	BLKPTR=1		! 1st byte in block
+C
+C Write card image to file or to the mag. tape block buffer
+C
+	IFFBDY=OUTREC(.FALSE.)
+	IF (.NOT.IFFBDY) GOTO 260
+C
+C Initialise origin offset for IFF files with old type map descriptor
+	MD2LOC(1)=0.0D0
+	MD2LOC(2)=0.0D0
+C
+C and MOSS string label
+	LABEL(:4)='    '
+C
+C Rewind IFF file
+	CALL IFFRWD
+C
+C ......................................................................
+C
+C			M A I N   L O O P
+C
+10	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 220
+	IF (IECODE.EQ.'NF') GOTO 50
+	IF (IECODE.EQ.'EF') GOTO 120
+	IF (IECODE.EQ.'FS') GOTO 60
+	IF (IECODE.EQ.'AC') GOTO 90
+	IF (IECODE.EQ.'ST') GOTO 100
+	IF (IECODE.EQ.'ZS') GOTO 110
+	IF (IECODE.EQ.'MD') GOTO 20
+	IF (IECODE.EQ.'NO') GOTO 30
+	IF (IECODE.EQ.'EJ') GOTO 140
+	GOTO 10
+C
+C ......................................................................
+C
+C MD - Map Descriptor, be careful in case it is a new type MD with 
+C an origin offset. We must of course take this into account while 
+C reformatting to MOSS.
+C
+20	IF (IELEN.EQ.MD2LEN) THEN	! type 2 MD with origin offset?
+	   CALL EIHR(MD2ARR,MD2LEN,1)	! apparently yes,
+	   IF (MATV2.NE.2) THEN		! MD unavailable, as it is unset
+	     CALL LSL_PUTMSG(I2MOSS__UNSETMD)
+	   ELSE				! use existing MD
+	     HAD_OFF=.TRUE.		! origin offset read
+	   ENDIF
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C NO - New Overlay
+C
+30	CALL EIHRI(NOVER,1,1)		! read layer number
+	CALL EIHRL(LPOSEO,1,3)		! & position of corresponding EO
+C
+C
+C Ignore layer 0 which contains grid and control point features
+	IF (NOVER.EQ.0) THEN
+	   CALL IFFPKE(IECODE,IELEN,LPOSEO)	! skip to EO
+	   IF (IELEN.LT.0.OR.IECODE.NE.'EO') GOTO 220
+	   GOTO 10
+	ENDIF
+C
+C Check that the current layer number does not match one of the ones
+C specified by the /NOLAYER qualifier
+C
+	IF (HAD_SKL) THEN
+	   DO 40 I=1,NUM_SKL
+	     IF (NOVER.EQ.SKIP_LAY(I)) THEN	! match found?
+	       CALL IFFPKE(IECODE,IELEN,LPOSEO)	! skip to EO
+	       IF (IELEN.LT.0.OR.IECODE.NE.'EO') GOTO 220
+	       IF (HAD_LOG) THEN
+	          CALL LSL_PUTMSG(I2MOSS__SKIPLYR,NOVER)
+	       ENDIF
+	       GOTO 10			! get next IFF entry
+	     ENDIF
+40	   CONTINUE
+	ENDIF
+	IF (HAD_LOG) THEN
+	   CALL LSL_PUTMSG(I2MOSS__LAYER,NOVER)
+	ENDIF
+	GOTO 10				! get next IFF entry
+C
+C ......................................................................
+C
+C NF - New Feature
+C
+50	CALL EIHRI(WORD,1,1)		! read feature serial number
+	NFNUM(1)=0			! clear longword
+	NFNUM(1)=WORD
+	CALL EIHRI(WORD,1,2)		! read internal seq. no.
+	NFNUM(2)=0			! clear longword
+	NFNUM(2)=WORD
+	HAD_HT=.FALSE.			! not yet had ht. AC for feature
+	HAD_ZS=.FALSE.			! reset had 3d string flag
+	ITYPE=-1			! reset AC type 
+	TOTPTS=0			!   "   total points in feature
+	GOTO 10				! get next IFF entry
+C
+C ......................................................................
+C
+C FS - Feature Code
+C
+60	CALL EIHRI(IFC,1,1)		! read feature code
+C
+C
+C Check that the current feature code does not match one of the ones
+C specified by the /NOFC qualifier
+C
+	IF (HAD_SKF) THEN
+	   DO 70 I=1,NUM_SKF
+	      IF (IFC.EQ.SKIP_FC(I)) THEN	! match found?
+	         CALL IFFNXC('EF',IELEN)	! skip feature
+	         IF (IELEN.LT.0) GOTO 220
+	         GOTO 10			! get next IFF entry
+	      ENDIF
+70	   CONTINUE
+	ENDIF
+C
+C Check if IFF to MOSS feature code to string label conversion is needed
+	IF (HAD_CROSS) THEN
+	   DO 80 I=1,NUMC			! for each cross tab.
+	      IF (IFC.EQ.CROSS_FC(I)) THEN	! check each label
+	         LABEL=CROSS_LAB(I)		! a hit!
+	         GOTO 10			! get next IFF entry
+	      ENDIF
+80	   CONTINUE
+C
+C If we fall through to here we have a feature code which is undefined
+C in the /CROSS_CODES file. This is presumably an error on the part of
+C the user so we will warn him and then give up tidily 
+C
+	   GOTO 230
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C AC - Ancillary Code
+C
+90	CALL EIHRI(ITYPE,1,1)		! read AC type
+C
+C Check that we have an AC of the specified type
+	IF (ITYPE.EQ.ACTYPE) THEN	! by default ACTYPE is 3
+	   IF (ITYPE.EQ.3) THEN		! read string height
+	      CALL EIHRR(REALHT,1,2)
+	   ELSE
+	      CALL EIHRL(LONGHT,1,2)
+	      REALHT=LONGHT
+	   ENDIF
+	   HAD_HT=.TRUE.
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C ST - STring (2d)
+C
+C Check that we have had an AC of the specified type for the height
+C of the string. (Default AC type is 3)
+100	IF (HAD_HT) THEN		! got a height OK?
+	   CALL EIHRS(NPTS,IENDS)	! yes, read ST header
+C
+C Check that we have room to buffer the coordinates
+C
+	   IF (TOTPTS+1+NPTS.GT.MAXPTS) THEN
+	      GOTO 250
+	   ENDIF
+C
+C Read and buffer the coordinates
+C
+	   CALL EIHRR(STBUFF(1,TOTPTS+1),NPTS*2,1) ! and coords
+	   TOTPTS=TOTPTS+NPTS		! increment tot. pts. in feat.
+	ELSE
+	   CALL LSL_PUTMSG(I2MOSS__MISSHT,NFNUM(1),NFNUM(2))
+	   CALL IFFNXC('EF',IELEN)		! skip feature
+	   IF (IELEN.LT.0) GOTO 220		! we hope!
+	   CALL LSL_ADDMSG(I2MOSS__SKIPFEAT,NFNUM(1),NFNUM(2))
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C ZS - string (3d)
+C
+110	CALL EIHRS(NPTS,IENDS)			! read string header
+C
+C Check that we have room to buffer the coordinates
+C
+	   IF (TOTPTS+1+NPTS.GT.MAXPTS) THEN
+	      GOTO 250
+	   ENDIF
+C
+C Read and buffer the coordinates
+	CALL EIHRR(ST3BUF(1,TOTPTS+1),NPTS*3,1)	! and coords
+	TOTPTS=TOTPTS+NPTS		! increment tot. pts. in feat.
+	HAD_ZS=.TRUE.				! had 3d string
+	GOTO 10
+C
+C ......................................................................
+C
+C EF - End Feature
+C
+120	IF (TOTPTS.GT.0) THEN			! empty feature?
+	   IF (HAD_ZS) THEN			! 3d string?
+	     DIM=3.0
+	     ST3BUF(1,TOTPTS+1)=TERMIN		! add MOSS string
+	     ST3BUF(2,TOTPTS+1)=TERMIN		! terminator
+	     ST3BUF(3,TOTPTS+1)=TERMIN
+C
+C Write MOSS 3d string header to card image
+C
+	     WRITE (OUTSTR,1800) LABEL(1:4),SNGL(MD2LOC(1)),
+     &			SNGL(MD2LOC(2)),DIM,TERMIN,TERMIN
+C
+C Write card image to file or to the mag. tape block buffer
+C
+	     IFFBDY=OUTREC(.FALSE.)
+	     IF (.NOT.IFFBDY) GOTO 260
+	   ELSE
+	     DIM=2.0				! 2d string
+	     STBUFF(1,TOTPTS+1)=TERMIN		! add MOSS string
+	     STBUFF(2,TOTPTS+1)=TERMIN		! terminator
+C
+C Write MOSS 2d string header to card image
+C
+	     WRITE (OUTSTR,1600) LABEL(1:4),REALHT,SNGL(MD2LOC(1)),
+     &				SNGL(MD2LOC(2)),DIM,TERMIN,TERMIN
+C
+C Write card image to file or to the mag. tape block buffer
+C
+	     IFFBDY=OUTREC(.FALSE.)
+	     IF (.NOT.IFFBDY) GOTO 260
+	   ENDIF
+C
+C Loop to check and send the coordinates to MOSCOD for formatting into 
+C card images
+C
+	   DO 130 I=1,TOTPTS+1
+	      IF (HAD_ZS) THEN
+	         X=ST3BUF(1,I)
+		 Y=ST3BUF(2,I)
+	         Z=ST3BUF(3,I)
+	      ELSE
+	         X=STBUFF(1,I)
+		 Y=STBUFF(2,I)
+	      ENDIF
+C
+C MOSS GENIO does not allow -ve coordinates if an origin offset is being
+C used. If using an origin offset, check each ordinate and if negative
+C report before quitting
+C
+	      IF (HAD_OFF) THEN
+	         IF (X.LT.-1.0E-24.OR.Y.LT.-1.0E-24) THEN
+	           GOTO 240			! whinge and give up
+	         ENDIF
+	      ENDIF
+	      IFFBDY=MOSCOD(X,Y,Z,HAD_ZS)	! produce card images
+	      IF (.NOT.IFFBDY) GOTO 260
+130	   CONTINUE
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C EJ - End Job
+C
+C Close down MOSS file. First write a "999" file terminator to MOSS file
+C card image
+140	WRITE (OUTSTR,2000)
+C
+C Write card image to file or to the mag. tape block buffer
+C
+	IFFBDY=OUTREC(.FALSE.)
+	IF (.NOT.IFFBDY) GOTO 260
+C
+C MOSS  "FINAL" card image
+C
+	WRITE (OUTSTR,2100)
+C
+C Write card image to file or to the mag. tape block buffer
+C
+	IFFBDY=OUTREC(.TRUE.)
+	GOTO 260
+C
+C ......................................................................
+C
+C			E R R O R S 
+C
+C Unexpected end of file
+220	IFFBDY=I2MOSS__UNEXPEOF
+	CALL LSL_PUTMSG(IFFBDY)
+	GOTO 260
+C
+C Feature code has undefined MOSS string label
+230	IFFBDY=I2MOSS__UNDEFCLAB
+	CALL LSL_PUTMSG(IFFBDY,IFC,NFNUM(1),NFNUM(2))
+	GOTO 260
+C
+C Feature has negative coordinates
+C
+240	IFFBDY=I2MOSS__NEGCOORD
+	CALL LSL_PUTMSG(IFFBDY,NFNUM(1),NFNUM(2))
+	GOTO 260
+C
+C Insufficient buffer space for coordinates
+C
+250	IFFBDY=I2MOSS__INSUFBUF
+	CALL LSL_PUTMSG(IFFBDY,NFNUM(1),NFNUM(2))
+C
+C ......................................................................
+C
+260	IF (IFFBDY) IFFBDY=%LOC(SS$_NORMAL)
+	RETURN
+C
+C ......................................................................
+C
+C			F O R M A T S
+C
+1500	FORMAT('GENIO   ',A)
+1600	FORMAT('080',A,8X,F8.3,2F10.3,F8.1,2F10.3)
+1700	FORMAT('080',A,8X,F8.3,20X,F8.1,2F10.3)
+1800	FORMAT('080',A,16X,2F10.3,F8.1,2F10.3)
+1900	FORMAT('080',A,36X,F8.1,2F10.3)
+2000	FORMAT('999')
+2100	FORMAT('FINISH')
+	END

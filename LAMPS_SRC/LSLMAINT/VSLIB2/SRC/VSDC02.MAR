@@ -1,0 +1,139 @@
+	.TITLE	VSDC
+	.IDENT	/20MY85/
+ 
+ 
+; Copyright Laser Scan Laboratories Ltd., Cambridge, England
+; Author Susan Manning from originals by R.Fairbairns
+; Coded April 1980
+; stolen from WOSPLIB for VSLIB by TJ Ibbs, 14 Oct 1982
+ 
+; Dot/dash/chain generation interface for VS11/Sigma ARGS display
+ 
+	CODE_PSECT	VS
+ 
+; cancel pattern
+VS$PTNOF::
+	TSTB	VS_PTNON	; pattern in fact now on?
+	BEQL	1$		; if EQ , no, so need do nowt
+	JSB	$VSMB0			; flush out backlog
+	BICL2	#VFLG_M_IFPAT,VSFLAG	; suppress pattern diversion
+	CLRB	VS_PTNON		; pattern no longer on
+1$:	RSB
+ 
+ 
+; entry VS_DASHED(N,D,D1,D2)
+ 
+.ENTRY	VS_DASHED,^M<R2,R4,R5,R6,R7,R8,R9,R10,R11>
+	BSBB	VSDSH		; simply convert
+	RET
+ 
+; 'internal' call for VS_DASHED
+VSDSH:	CVTWL	@4(AP),R10	; N as a longword
+	BEQL	VS$PTNOF	; N=0 - set pattern off
+	BGTR	1$
+	MNEGL	R10,R10		; absolute value R10
+1$:	MOVF	@8(AP),R6	; pattern size (D)
+	MOVF	@12(AP),R7	; major on (D1)
+	CMPL	R10,#1		; is it code 1 (dashed, rather than chain)
+	BNEQ	2$		; if NE, no
+	CLRF	R8		; suppress minor on
+	BRB	3$
+2$:	MOVF	@16(AP),R8	; chain-type - minor on (D2)
+3$:	SUBF2	R7,R6		; take major on from pattern
+	SUBF2	R8,R6		;   and minor on
+				; leaving allowance for gap
+	BLEQ	VS$PTNOF	; none! - switch pattern off
+	MULF2	#^F0.5,R6	; divide gap into two constituents
+	CLRL	R10		; set line style on
+ 
+; set pattern on
+; R6 = gap
+; R7 = major on
+; R8 = minor on
+; R10 =0 => 'line style'
+;      =1 => 'scrub'
+ 
+VS$SETPTN::
+	PUSHL	R8		; preserve registers
+	PUSHL	R6		; (NB order, for later)
+	PUSHL	R7
+	JSB	$VSMB0		; tidy every outstanding performance
+	TSTB	VS_PTNON	; pattern already on?
+	BNEQ	1$		; if NE, yes
+	BISL2	#VFLG_M_IFPAT,VSFLAG	; enable pattern diversion
+	DECB	VS_PTNON		; pattern now deemed on
+1$:	MOVAB	VS_DDCMAJ,R1
+; copy common values to common block
+	MOVF	(SP)+,(R1)+	; VS_DDCMAJ
+	MOVF	(SP)+,(R1)+	; VS_DDCGAP
+	MOVF	(SP)+,(R1)	; VS_DDCMIN
+	CLRW	VS_DDCPTR	; no buffered points yet
+	CLRF	VS_DDCRES	; no residue yet
+; and now clear the pattern generator stuff -
+	MOVC5	#0,B^1$,#0,#18,VS_DREPOS
+;		above clears from VS_DREPOS to VS_DSUBSL in /VSDDCP/
+	MOVW	#4,VS_DDCSTG	; stage 4 forces major on first
+	JSB	$VSMB0		; get to start of line
+	RSB
+ 
+ 
+; entry to buffer one point
+ 
+; input:
+;  R10      =0  => invisible
+;        non-0  => visible
+; R7,R9 hold (X,Y) of endpoint of move
+ 
+VS.DDC::TSTW	R10
+	BEQL	VS.INVIS
+ 
+; visible - buffer
+	INCW	VS_DDCPTR	; up pointer
+2$:	MOVZWL	VS_DDCPTR,R10	; set index
+	MOVF	R7,VS_DDCX[R10]	; preserve in buffer
+	MOVF	R9,VS_DDCY[R10]
+	CMPL	R10,#9		; filled buffer
+	BLSS	1$		; no
+	CLRW	R1		; (not calling because of move)
+	BSBW	VS.CALGEN	; call generator and
+	BRB	2$		; back again to buffer this point again at start
+ 
+; return, having buffered point - exit two levels out,
+;  to fortran interface code level
+1$:	MOVF	R7,VSRUX
+	MOVF 	R9,VSRUY
+	TSTL	(SP)+		 ; junk our link
+	RSB
+ 
+; invisible
+VS.INVIS:
+	TSTW	VS_DDCPTR	; anything in buffer?
+	BEQL	1$		; if EQl, not so
+	MOVB	#-1,R1		; (calling because of move)
+	BSBW	VS.CALGEN	; call generator
+1$:	MOVF	R7,VS_DDCX	; put this endpoint into buffer
+	MOVF	R9,VS_DDCY	;  as start of next sequence
+	CLRW	R10		; restore 'invisible' marker
+	RSB			; back to caller of $IFTHK
+				; (who will generate invisible move)
+ 
+ 
+; call, from the above, to the generator
+ 
+; preserves R7,R9
+ 
+VS.CALGEN:
+	PUSHL	R7
+	PUSHL	R9
+	BICL2	#VFLG_M_IFPAT,VSFLAG	; suppress pattern diversion
+	INCW	VS_DDCPTR	; convert to FORTRAN index
+	MOVB	R1,VS_MOVFLS	; remember whether call because of move
+	CALLS	#0,VSDDCG	; generate dot, dash, or chain lines
+				; if wan't something else, use FLAGW & BBC etc!
+	BISL2	#VFLG_M_IFPAT,VSFLAG	; restore pattern diversion
+	MOVF	(SP)+,R9
+	MOVF	(SP)+,R7
+	CLRW	VS_DDCPTR	; now nothing significant in buffer
+	RSB
+ 
+	.END

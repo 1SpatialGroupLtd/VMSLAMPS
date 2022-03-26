@@ -1,0 +1,206 @@
+	SUBROUTINE SELEAC(SEL)
+C
+***	IDENT	09SE89
+***	MODULE	SELEAC
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					CCB	19-May-1988
+C
+C	LITES2 cartographic editor SELECT AC command.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:CHARS/
+***     PARAMETER/CMN:MOANMESS/		! moan constants
+***	PARAMETER/LSL$CMNLSL:READSTR/
+C
+***     COMMON/CMN:ACSEL/
+***     COMMON/CMN:DOUT/		! command decoding output
+***     COMMON/CMN:FILES/
+***     COMMON/LSL$CMNFRT:FRTACD/
+***     COMMON/CMN:GLOBAL/
+***     COMMON/CMN:MASTER/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C Arguments
+	LOGICAL		SEL		! select or deselect
+C
+C Functions
+	EXTERNAL	SELECT_AC_CMD_TABLE
+	EXTERNAL	MOAN
+	LOGICAL		GET_ACTYPE,GET_ACVAL
+	LOGICAL		STORE_ACSEL
+	INTEGER		CPYSTR
+	INTEGER		READSTR
+	LOGICAL		RDCHS
+	INTEGER		CMPAC
+	INTEGER		FNDAC
+	INTEGER		CREATE_ACSEL
+C
+C Local Variables
+	INTEGER		AC
+	INTEGER		ACTYPE
+	INTEGER		VAL(2)
+	BYTE		CH
+	BYTE		INEQ
+	LOGICAL		RANGE
+	INTEGER		I
+	INTEGER		RET
+	CHARACTER*(MAX_ACTXTL)	TXT
+	INTEGER		TXTL
+	LOGICAL		TEXT
+C
+C can't decode until FRT file (or at least default ACDs) has been read
+	IF (.NOT.HADFRT) THEN
+	   IF (.NOT.HADACD) THEN
+	      CALL FRT_ACDINI
+	      HADACD = .TRUE.
+	   ENDIF
+	ENDIF
+C
+C copy into TXTBUF, instead of SETAUXing, as ACDFND_NAME resets decoding
+C back to TXTBUF
+	TXTPTR = TXTLIM
+	TXTPTR = CPYSTR(DSTR(:DSTRL),TXTDSC)
+	CALL BSLN
+C
+C decode the AC type
+	IF (.NOT.GET_ACTYPE(ACTYPE)) GOTO 990
+C
+	IF (RDCHS(CH)) THEN
+	   DPRIN = 1		! default to command 1, PRESENT
+	ELSE
+	   CALL BSCH
+C
+C rest of line back to DSTR
+	   DSTRL = READSTR(DSTR,CH,ON_EOL)
+C
+C get tertiary command
+	   CALL GET_COMMAND(DSTR(:DSTRL),SELECT_AC_CMD_TABLE)
+	   IF (MOANED) GOTO 990
+	ENDIF
+C
+	TEXT = .FALSE.			! not TEXT subcommand (yet)
+C
+C obey command
+	GOTO (100,200,300,400), DPRIN
+C
+C PRESENT
+C Create or update the AC selection record
+100	IF (SAACS) THEN			! if all ACs selected
+	   DO 110 I=1,MAX_ACGROUP	! zero all groups
+	      NACSEL(I) = 0
+110	   CONTINUE
+	   SAACS = .FALSE.		! not all selected shortly
+	ENDIF
+	AC = CREATE_ACSEL(NACSEL(ACGROUP),ACSEL(1,ACGROUP),
+     &				ACTYPE,SEL,TEXT,TXT,TXTL,.FALSE.)
+	IF (AC.EQ.0) GOTO 990
+	GOTO 1000
+C
+C CANCEL
+C DESELECT AC name CANCEL not allowed
+200	IF (.NOT.SEL) THEN
+	   CALL MOAN(MSG_NODESAC)
+	   GOTO 990
+	ENDIF
+210	AC = FNDAC(NACSEL(ACGROUP),ACSEL(1,ACGROUP),ACTYPE)! lookup type
+	IF (AC.NE.0) THEN		! remove it
+	   DO 220 I=AC+1,NACSEL(ACGROUP)
+	      ACSEL(I-1,ACGROUP) = ACSEL(I,ACGROUP)
+220	   CONTINUE
+	   NACSEL(ACGROUP)= NACSEL(ACGROUP)-1
+	   GOTO 210			! repeat for subsequent records
+	ENDIF
+C
+C check for all ACs selected
+	DO 230 I=1,MAX_ACGROUP
+	   IF (NACSEL(I).NE.0) GOTO 1000! some selections in force
+230	CONTINUE
+	SAACS = .TRUE.
+	GOTO 1000			! all selected
+C
+C VALUE
+300	CALL SETAUX(%REF(DSTR),DSTRL)
+C
+C join here for TEXT
+310	CALL RDINEQ(INEQ)			! read inequality
+	IF (.NOT.GET_ACVAL(VAL(1))) GOTO 990	! read first value
+	RANGE = .FALSE.
+	IF (.NOT.RDCHS(CH)) THEN ! check for and read second value
+	   CALL BSCH
+	   IF (.NOT.GET_ACVAL(VAL(2))) GOTO 990
+	   IF (INEQ.NE.0) THEN
+	      CALL MOAN(MSG_NOACRNG)
+	      GOTO 990
+	   ENDIF
+	   RANGE = .TRUE.
+	   CALL CHKTRM		! check nothing else on line
+	   IF (MOANED) GOTO 990	! rubbish on line
+	ENDIF
+C
+C check range is sensible (second > first)
+	IF (RANGE) THEN
+	   IF (CMPAC(VAL(1),VAL(2),ACD_DATA_TYPE).GE.0) THEN
+	      CALL MOAN(MSG_BADACRNG)
+	      GOTO 990
+	   ENDIF
+	ENDIF
+C
+C store the selected range of values
+	IF (SAACS) THEN			! if all ACs selected
+	   DO 320 I=1,MAX_ACGROUP	! zero all groups
+	      NACSEL(I) = 0
+320	   CONTINUE
+	   SAACS = .FALSE.		! not all selected shortly
+	ENDIF
+	AC = CREATE_ACSEL(NACSEL(ACGROUP),ACSEL(1,ACGROUP),
+     &				ACTYPE,SEL,TEXT,TXT,TXTL,.TRUE.)
+	IF (AC.EQ.0) GOTO 990
+	IF (.NOT.STORE_ACSEL(ACSEL(AC,ACGROUP),SEL,RANGE,INEQ,VAL)
+     &							) GOTO 990
+	GOTO 1000
+C
+C TEXT
+400	CALL SETAUX(%REF(DSTR),DSTRL)
+C
+C read text
+	CALL RDCHS(CH)
+	IF (CH.EQ.DQOT) THEN		! quoted string
+	   TXTL = READSTR(TXT,DQOT,ON_CHAR2,.FALSE.,RET)
+	ELSE				! read to end of line
+	   CALL BSCH
+	   TXTL = READSTR(TXT,,ON_SPACE,.FALSE.,RET)
+	ENDIF
+	IF (.NOT.RET) THEN
+	   CALL MOAN(MSG_ACSELTXT,MAX_ACTXTL)
+	   GOTO 990
+	ENDIF
+C
+C uppercase the text
+	IF (TXTL.GT.0) CALL STR$UPCASE(TXT(:TXTL),TXT(:TXTL))
+C
+C set datatype to integer for now
+	ACD_CODE = -1
+	ACD_DATA_TYPE = ACD_DATATYPE_I
+	ACD_MIN_MAX_I(1) = ACD_DEF_MINI
+	ACD_MIN_MAX_I(2) = ACD_DEF_MAXI
+C
+	TEXT = .TRUE.		! doing a TEXT command
+	IF (RDCHS(CH)) THEN
+	   IF (TXTL.EQ.0) THEN
+	      CALL MSGCMD(MOAN,MSG_EXPRESTCMD)
+	      GOTO 990
+	   ENDIF
+	   GOTO 100		! join PRESENT code
+	ENDIF
+	CALL BSCH
+	GOTO 310		! join VALUE code
+C
+990	CALL IGNCMD
+	GOTO 1001
+C
+1000	CHASEL = .TRUE.		! selections have changed
+1001	RETURN
+	END

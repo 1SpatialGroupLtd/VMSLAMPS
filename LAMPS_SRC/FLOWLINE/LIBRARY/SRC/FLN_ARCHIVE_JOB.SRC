@@ -1,0 +1,176 @@
+	INTEGER*4 FUNCTION FLN_ARCHIVE_JOB(JOB_ID)
+C
+***	MODULE	FLN_ARCHIVE_JOB
+***	IDENT	29SE88
+C
+C Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Author M.W.S. Reid
+C
+C 	Created					MWSR    30-Mar-1988
+C
+C routine to remove a task record from the JOB relation and put it in 
+C the JOB_HISTORY relation
+C returns SS$_NORMAL if all is well - otherwise an RDB return code
+C NB *** calling routine should have a transaction open
+C also deletes job specific command file
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$CMNFLOWLINE:FLOW.PAR'
+	INCLUDE	'LSL$CMNFLOWLINE:FLOWLINEMSG.PAR'
+	INTEGER*4	SS$_NORMAL
+	EXTERNAL	SS$_NORMAL
+C
+C Arguments
+	INTEGER*4	JOB_ID
+C
+C RDB return codes
+	INTEGER*4	RDB$_DEADLOCK
+	EXTERNAL	RDB$_DEADLOCK
+C
+C function
+	INTEGER*4	EXPAND
+	INTEGER*4	LIB$DELETE_FILE
+	INTEGER*4	SIGCHS
+	INTEGER*4	PARFILN
+C
+C Local Variables
+	INTEGER*4	DAY
+	INTEGER*4	TIME
+	INTEGER*4	LEN
+	CHARACTER*20	JOBSTR
+	CHARACTER*255   COMMAND_PROC
+	CHARACTER*255   PARSED_COMMAND_PROC
+	INTEGER*4	PARLEN		! length of parsed file
+	INTEGER*4	LENGTH
+C
+&RDB&   DATABASE FILENAME  'LSL$FLN_DATABASE:FLOWLINE'
+C
+C assume success
+	FLN_ARCHIVE_JOB= %LOC(SS$_NORMAL)
+C
+C get the current time
+	CALL FLN_GET_DAY_TIME(DAY,TIME)
+C
+&RDB&   FOR J IN JOB WITH J.JOB_ID = JOB_ID 
+&RDB&	   ON ERROR
+	      FLN_ARCHIVE_JOB = RDB$STATUS
+	      GOTO 999
+&RDB&	   END_ERROR
+C
+C first retrieve the command file spec that we are going to delete
+&RDB&      GET
+&RDB&	      ON ERROR
+	         FLN_ARCHIVE_JOB = RDB$STATUS
+	         GOTO 999
+&RDB&	      END_ERROR
+&RDB&         COMMAND_PROC = J.COMMAND_PROC;
+&RDB&      END_GET
+C
+	   LENGTH = SIGCHS(COMMAND_PROC)
+C
+	   IF (LENGTH .GT. 0) THEN
+C
+C 
+C parse job command file name to make sure we delete all versions
+	      CALL PARFILN(PARSED_COMMAND_PROC,
+     &	      PARLEN,COMMAND_PROC(:LENGTH),
+     &	     'LSL$FLN_WORK:JOB.COM;0',.TRUE.)
+C
+	      IF (.NOT. FLN_ARCHIVE_JOB) GOTO 999
+	      PARSED_COMMAND_PROC(PARLEN:PARLEN) = '*'
+C and delete it
+	      CALL
+     &	      LIB$DELETE_FILE(PARSED_COMMAND_PROC(:PARLEN),,,,,,,,)
+	   ENDIF
+C
+C now store stuff JOB_HISTORY
+C
+&RDB&      STORE JH IN JOB_HISTORY USING 
+C
+&RDB&	      ON ERROR
+	         FLN_ARCHIVE_JOB = RDB$STATUS
+	         GOTO 999
+&RDB&	      END_ERROR
+&RDB&         JH.JOB_ID = J.JOB_ID;
+&RDB&         JH.PROJECT_ID = J.PROJECT_ID;
+&RDB&         JH.JOB_NAME = J.JOB_NAME;
+&RDB&         JH.START_TIME = J.START_TIME;
+&RDB&         JH.START_DATE = J.START_DATE;
+&RDB&         JH.FINISH_TIME = TIME;
+&RDB&         JH.FINISH_DATE = DAY;
+&RDB&         JH.OUTER_TASK_ID = J.OUTER_TASK_ID;
+&RDB&         JH.PRIORITY = J.PRIORITY;
+&RDB&         JH.INITIATOR_ID = J.INITIATOR_ID;
+&RDB&         JH.FLOWLINE_ID = J.FLOWLINE_ID;
+&RDB&         JH.JOB_STATUS = J.JOB_STATUS;
+&RDB&      END_STORE
+C
+C now that its safely copied - delete the record from JOB
+C
+&RDB&      ERASE J
+&RDB&	   ON ERROR
+	      FLN_ARCHIVE_JOB = RDB$STATUS
+	      GOTO 999
+&RDB&	   END_ERROR
+&RDB&   END_FOR
+C
+C also want to delete all active wires for this job
+C
+&RDB&   FOR W IN WIRE_ACTIVE WITH W.JOB_ID = JOB_ID 
+&RDB&	ON ERROR
+	   FLN_ARCHIVE_JOB = RDB$STATUS
+	   GOTO 999
+&RDB&	END_ERROR
+C
+&RDB&      ERASE W
+&RDB&	   ON ERROR
+	      FLN_ARCHIVE_JOB = RDB$STATUS
+	      GOTO 999
+&RDB&	   END_ERROR
+&RDB&   END_FOR
+C
+C delete all authorisation records for this job
+	LEN=EXPAND('%WS%N',JOBSTR,JOB_ID)
+&RDB&   FOR O IN OPERATOR_AUTHORISATION WITH O.ID = JOBSTR(:LEN)
+&RDB&	ON ERROR
+	   FLN_ARCHIVE_JOB = RDB$STATUS
+	   GOTO 999
+&RDB&	END_ERROR
+&RDB&      ERASE O
+&RDB&	   ON ERROR
+	      FLN_ARCHIVE_JOB = RDB$STATUS
+	      GOTO 999
+&RDB&	   END_ERROR
+&RDB&   END_FOR
+C
+C simalarly workstation authorisations
+&RDB&   FOR W IN WORKSTATION_AUTHORISATION WITH W.ID = JOBSTR(:LEN)
+&RDB&	ON ERROR
+	   FLN_ARCHIVE_JOB = RDB$STATUS
+	   GOTO 999
+&RDB&	END_ERROR
+&RDB&      ERASE W
+&RDB&	   ON ERROR
+	      FLN_ARCHIVE_JOB = RDB$STATUS
+	      GOTO 999
+&RDB&	   END_ERROR
+&RDB&   END_FOR
+C
+C delete all global and external parameters for the job
+&RDB&   FOR G IN GLOBAL_PARAMETER WITH G.JOB_ID = JOB_ID
+&RDB&	ON ERROR
+	   FLN_ARCHIVE_JOB = RDB$STATUS
+	   GOTO 999
+&RDB&	END_ERROR
+&RDB&      ERASE G
+&RDB&	   ON ERROR
+	      FLN_ARCHIVE_JOB = RDB$STATUS
+	      GOTO 999
+&RDB&	   END_ERROR
+&RDB&   END_FOR
+C
+999	RETURN
+	END

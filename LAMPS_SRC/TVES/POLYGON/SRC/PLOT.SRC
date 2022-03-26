@@ -1,0 +1,324 @@
+	LOGICAL FUNCTION PLOT( IN_BUF,  IN_LEN, INSIDE,
+     &			       OUT_BUF, OUT_LEN )
+C
+***	IDENT	17OC84
+***	MODULE	PLOT
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs, 12 September 1984
+C
+C This function copies the points from IN_BUF into OUT_BUF,
+C according to the marks in INSIDE, and plots any polygons that
+C fit into the output buffer
+C
+C It returns TRUE if one of the sub-polygons we formed still has too
+C many points to be plotted in one go, and it returns FALSE if we have
+C plotted everything we were asked to succesfully
+C
+	IMPLICIT NONE
+C
+C passed
+C
+	INTEGER		IN_LEN		! size of input buffer
+	REAL		IN_BUF(2,IN_LEN)! point buffer - input
+C
+	BYTE		INSIDE(IN_LEN)	! marker buffer for above
+C
+	INTEGER		OUT_LEN		! size of output buffer
+	REAL		OUT_BUF(2,OUT_LEN)
+C
+C we obviously may not put more than OUT_LEN points into OUT_BUF
+C
+C for ease of use
+C
+	PARAMETER	X = 1
+	PARAMETER	Y = 2
+C
+C other parameters - our MARK_ things
+C
+***	PARAMETER/HERE:MARK/
+C
+C functions
+C
+	LOGICAL		NEXT_PTR
+	LOGICAL		PREV_PTR
+	LOGICAL		RESET_CIRCULAR
+	LOGICAL		FIRST_PLOT
+C
+C workspace
+C
+	INTEGER		PTR		! current posn in IN_BUF
+	INTEGER		POSSIBLE	! temporary memory of PTR
+	INTEGER		TEMP_PTR	! another one
+C
+	INTEGER		START_POSN	! where to start output from
+	INTEGER		OUT_PTR		! ditto for OUT_BUF
+	INTEGER		END_POSN	! where the output ended
+C
+	BYTE		VALUE		! MARK_ at this position
+C
+	INTEGER		I		! for DO loops
+C
+C *********************************************************************
+C
+C we will assume that (in general) our sub-polygons are small enough
+C to plot, and that it is therefore worth copying them over as we go
+C
+C our first operation must be to find the START of a polygon - since
+C a polygon is quite likely to be wrapped around the ends of our
+C buffer, this is not necessarily the same as the start of the buffer
+C
+C all points marked with MARK_PLOT are ignored - we do not 'SEE' them
+C
+C points marked with MARK_BELOW are not plotted, but may not occur in
+C a polygon - they may thus force the boundary of a polygon
+C
+C a polygon thus starts with either of
+C
+C	a MARK_TRANS followed by a MARK_IN
+C
+C	a MARK_IN    preceded by a MARK_BELOW
+C
+C where any MARK_PLOTs in between are ignored
+C
+C a polygon then ends with
+C
+C	a MARK_TRANS after  a MARK_IN
+C
+C	a MARK_IN    before a MARK_BELOW
+C
+C	a MARK_IN    before a MARK_PLOT
+C
+C note that the sequence MARK_TRANS  MARK_TRANS does not signify a
+C polygon of two points!
+C
+C significant events in scanning INSIDE are thus
+C
+C	looking for a plot -
+C
+C		encounter a MARK_TRANS - either ends or begins a plot
+C					 this point must be output
+C					 (NB - may end this plot and
+C					       also start the next one)
+C
+C		encounter a MARK_IN    - either starts or is in a plot
+C
+C		encounter a MARK_BELOW
+C		encounter a MARK_PLOT  - both of these are ignored
+C
+C	when in a plot -
+C
+C		encounter a MARK_TRANS - ends the plot
+C					 this point must be output
+C					 (NB - may also start the next)
+C
+C		encounter a MARK_BELOW - ends the plot
+C
+C		encounter a MARK_IN    - this point must be output
+C
+C		encounter a MARK_PLOT  - ends the plot, UNLESS it
+C					 occurs between any of the
+C					 start/end sequences
+C
+C NOTE that the last case means that MARK_PLOT is only ignored between
+C
+C		MARK_TRANS and MARK_IN
+C		MARK_BELOW and MARK_IN
+C		MARK_IN    and MARK_TRANS
+C		MARK_IN    and MARK_BELOW
+C
+C if whilst collecting points we fill our output buffer, and have not
+C terminated the polygon, then we must give up this polygon - it will
+C have to be divided again. We continue through the buffer, looking
+C for a new polygon. When we reach pur starting point, we return for
+C another polygon splitting operation in SCAN.
+C
+C after plotting a polygon, we change all the MARK_INs within that
+C polygon to be MARK_PLOTs. If there are bounding MARK_TRANS points,
+C and these are not part of an adjacent polygon (criteria as above),
+C then we also change them into MARK_PLOTs
+C
+C *********************************************************************
+C
+C NOTE - to make my life a whole lot simpler, INSIDE will be treated
+C	 as a circular buffer, and only ever accessed as such - this
+C	 removes any worries about end conditions from sight
+C
+C *********************************************************************
+C
+C we will assume that we do actually  succeed in plotting everything
+C
+	PLOT = .FALSE.
+C
+C *********************************************************************
+C
+C let us start by looking for something to plot...
+C
+1000	IF ( FIRST_PLOT( INSIDE, IN_LEN, VALUE, PTR ) ) THEN
+C
+C	 we have nothing to plot
+C
+	   CALL WRITEF('Plot - Nothing to plot')
+	   GOTO 9999
+C
+	ENDIF
+C	   
+C *********************************************************************
+C
+C so we are now positioned to the start of a plot - let us copy it into
+C the output buffer
+C
+2000	CONTINUE
+	CALL WRITEF('Start of sub-polygon - pos %N',PTR)
+C
+C copy the first point over
+C
+	START_POSN = PTR
+	OUT_PTR = 1
+	OUT_BUF(X,OUT_PTR) = IN_BUF(X,PTR)
+	OUT_BUF(Y,OUT_PTR) = IN_BUF(Y,PTR)
+C
+C and we now start to process the rest of the buffer
+C - inspect the next entry
+C
+2200	IF ( NEXT_PTR( INSIDE, IN_LEN, VALUE, PTR ) ) THEN
+C
+C	 if we have reached the end of the buffer, then we must have
+C	 found everything to plot (in fact, this should not happen)
+C
+	   CALL WRITEF(
+     &		'Plot error - end of buffer found in process scan')
+	   CALL WRITEF(
+     &		'           - assuming found all of plot')
+	   END_POSN = IN_LEN		! better than nowt
+	   GOTO 3000
+C
+	ELSEIF ( VALUE.EQ.MARK_IN ) THEN
+C
+C	 this is a point in the range - just add it in
+C	 if we have filled the buffer, then give up this polygon
+C
+	   OUT_PTR = OUT_PTR+1
+	   IF ( OUT_PTR.GT.OUT_LEN ) THEN
+	      PLOT = .TRUE.		! couldn't plot everything
+	      CALL WRITEF('Plot - too many points')
+C
+C	    so we must find the start of the next plot
+C
+	      GOTO 3200
+C
+	   ENDIF
+C
+	   OUT_BUF(X,OUT_PTR) = IN_BUF(X,PTR)
+	   OUT_BUF(Y,OUT_PTR) = IN_BUF(Y,PTR)
+	   GOTO 2200			! get the next entry
+C
+	ELSEIF ( VALUE.EQ.MARK_TRANS ) THEN
+C
+C	 this is a transition point - we add it in, and then
+C	 attempt to plot this polygon
+C	 if we have filled the buffer, then give up this polygon
+C
+	   OUT_PTR = OUT_PTR+1
+	   IF ( OUT_PTR.GT.OUT_LEN ) THEN
+	      PLOT = .TRUE.		! couldn't plot everything
+	      CALL WRITEF('Plot - too many points')
+C
+C	    so we must find the start of the next plot
+C
+	      GOTO 3200
+C
+	   ENDIF
+C
+	   OUT_BUF(X,OUT_PTR) = IN_BUF(X,PTR)
+	   OUT_BUF(Y,OUT_PTR) = IN_BUF(Y,PTR)
+C
+	   END_POSN = PTR		! note end of plot posn
+	   GOTO 3000			! off to plot it, and get next
+C
+	ELSEIF ( VALUE.EQ.MARK_BELOW .OR. VALUE.EQ.MARK_PLOT ) THEN
+C
+C	 this must terminate the current polygon - off to plot it
+C
+	   END_POSN = PTR-1		! note end of plot posn
+	   GOTO 3000			! off to plot it, and get next
+C
+	ELSE
+C
+C	 anything else is ignored - we just skip over it
+C
+	   GOTO 2200			! get the next entry
+C
+	ENDIF
+C
+C *********************************************************************
+C
+C and here, we plot the current polygon, and then look for the start
+C of the next one
+C
+3000	CONTINUE
+C
+	CALL WRITEF('- Plotting %^L%N points',OUT_PTR)
+C
+C for the moment, we shall 'pretend' to plot the thing - instead we
+C shall merely draw the outline
+C
+	CALL VSMTO( OUT_BUF(1,1), OUT_BUF(2,1) )
+C
+	DO 3020 I = 2,OUT_PTR
+	   CALL VSLTO( OUT_BUF(1,I), OUT_BUF(2,I) )
+3020	CONTINUE
+C
+	CALL VSLTO( OUT_BUF(1,1), OUT_BUF(2,1) )
+C
+	CALL VSGEN		! show them what we've done
+C
+C and mark the points as drawn
+C
+	IF ( END_POSN.LT.START_POSN ) THEN	! wraps around the ends
+	   DO 3030 I = START_POSN, IN_LEN	! of the buffer
+	      INSIDE(I) = MARK_PLOT
+3030	   CONTINUE
+	   DO 3040 I = 1, END_POSN
+	      INSIDE(I) = MARK_PLOT
+3040	   CONTINUE
+	ELSE
+	   DO 3050 I = START_POSN, END_POSN
+	      INSIDE(I) = MARK_PLOT
+3050	   CONTINUE
+	ENDIF
+C
+C and we must now find the start of the next plot - NB this is simpler
+C than normal, as we already know that we have just finished a plot
+C
+3200	IF ( NEXT_PTR( INSIDE, IN_LEN, VALUE, PTR ) ) THEN
+C
+C	 we have reached the end of the buffer, with no entry
+C
+	   GOTO 999		! no more data
+C
+	ELSEIF ( VALUE.EQ.MARK_IN .OR. VALUE.EQ.MARK_TRANS ) THEN
+C
+C	 this marks the beginning of a feature - add the point to
+C	 our buffer
+C
+	   CALL WRITEF('Plot - Start of sub-polygon, pos %N',PTR)
+C
+	   OUT_PTR = 1
+	   OUT_BUF(1,1) = IN_BUF(1,PTR)
+	   OUT_BUF(2,1) = IN_BUF(2,PTR)
+	   GOTO 2200			! carry on with it
+C
+	ELSE
+C
+C	 the next entry is of no interest - try again
+C
+	   GOTO 3200
+C
+	ENDIF
+C
+C *********************************************************************
+C
+9999	RETURN
+	END

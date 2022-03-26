@@ -1,0 +1,936 @@
+	SUBROUTINE WRTRIVS
+C
+***	IDENT	25SE86
+***	MODULE	WRTRIVS
+C
+C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
+C	Created   : ACM					Feb 1985
+C
+CMOD	IFF3D command option added			TJH  21-Mar-1986
+CMOD	treats ridges like rivers 
+CMOD	but ignores up/down etc				JMPW 08-07-86
+CMOD	Feature Status bit set if 2-d output		ATT  12-8-86
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/HERE:RIV3D/
+C
+C local parameters
+	INTEGER		MHLEN
+	INTEGER		MDLEN
+	PARAMETER(	MHLEN = 350)	! map header
+	PARAMETER(	MDLEN = 31)	!     descriptor
+	INTEGER*2	MAPHED(MHLEN)	! map header
+	INTEGER*2	MAPDES(MDLEN)	!     descriptor
+	INTEGER*4	LPOSNO		! IFF address of new layer 
+	REAL		MINSEP		! min spot separation
+	PARAMETER(	MINSEP = 0.01)
+	REAL		DH
+	PARAMETER(	DH = 0.1)
+C
+***	COMMON/HERE:RIV3D/
+***	COMMON/LSL$CMNVIO:EXPC/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+C
+C workspace
+	INTEGER*2	ISTAT(4)	! for IFFFS 
+	INTEGER*2	IENDS		! move pen or draw?
+	INTEGER*2	RLEN,NREV
+	INTEGER*2	NONUM		! IFF overlay number
+C
+	INTEGER		I,J,K,LOOP	! odd integers
+	INTEGER		FTNUM		! for IFFNS
+	INTEGER		ISQ		! internal feature sequence No.
+	INTEGER		I_RIV		! river index
+	INTEGER		NRPTS		! No. of river pts
+	INTEGER		IP		! river point RIV array index
+	INTEGER		IP_STA		! first point of river in RIV
+	INTEGER		IP_FIN		! last point of river in RIV
+	INTEGER		COMLEN		! command line length
+	INTEGER		NF_COUNT	! output feature count
+	INTEGER		CPU		! elapsed CPU time
+	INTEGER		HRS,MNS,SCS	! hours,mins,secs
+	INTEGER		IERR		! error code
+	INTEGER		NPTS		! No of pts in river output
+	INTEGER		TYP		! BRK feature type
+	INTEGER		N_SPOTS,TOTSPOTS! spot height count
+	INTEGER		SPOT_START,SPOT_FIN
+	INTEGER		I_XYZ,N_XYZ,I1,I2
+	INTEGER		INTPTR,PTR
+	INTEGER		N_EXTRA
+	INTEGER		I_START,I_FIN
+	INTEGER		SGN,LAST_SGN
+	INTEGER		INODE_1,INODE_2	! node indices
+C
+	REAL		CPARR(4,4)	! corner point info for CP entry
+	REAL		CCARR(2,10)	! calib coeffs
+	REAL		RANGE(4)	! coord ranges for RA entry
+	REAL		R(2)		! a point for IFFST
+	REAL		HGT,HSTA	! point height
+	REAL		XYZ(4,MAXPTS)	! 3D river points
+	REAL		DX,DY,DZ
+	REAL		SEP
+	REAL		LONG,DIST,TOT_DIST
+	REAL		X1,Y1,Z1
+	REAL		X2,Y2,Z2
+	REAL		SPOT(3,MAXPTS)
+	REAL		ZINT		! (N-)INTegerised height value
+C
+	LOGICAL		HAD_TIK		! have we had registration ticks
+	LOGICAL		TWO_INTS	! >= 2 ints in river/ridge?
+	LOGICAL		UP_DOWN		!
+	LOGICAL		FLAT		! 
+C	LOGICAL		HADNOD(MAXNODS)	! seen node already?
+C
+	BYTE	 	NSBUF(80)	! to be put in the NS entry
+C
+	CHARACTER*60	RSTRING
+	CHARACTER*20	DATIM
+	CHARACTER*3	EXTENSION	! OUTFILE extension
+C
+C functions
+	INTEGER		TXTCML		! read a command line
+	LOGICAL		RDFNAM		! read an IFF filename
+	INTEGER*2       FLWOPN		! open file for BRK output
+C
+C data
+	DATA		CCARR/0.0,1.0,8*0.0,2*0.0,1.0,7*0.0/
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Writes 3D rivers to OUTFILE which may be an IFF file or a
+C	BRK file.
+C
+C	For 2d IFF files, if there are more than MAXFSN spot heights,
+C	FSN will cycle.
+C
+C	If IFF3D is set output will be to IFF ZS 3d strings.
+C
+C	BRK files are of unlimited length and hold each 3D river as
+C	a single type 2 feature
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C if required, open and initialise file for Lites commands
+	IF (LITES) THEN
+	  IF (INDEX(OUTFILE,'.').EQ.0) THEN
+	    LITESFILE = OUTFILE(1:LEN(OUTFILE))//'.LCM'
+	  ELSE
+	    LITESFILE = OUTFILE(1:INDEX(OUTFILE,'.'))//'LCM'
+	  END IF
+	  CALL FLWOPN(LITES_LUN,LITESFILE)
+	  CALL FLWSEL(LITES_LUN)
+	  CALL FLWSEL(LOG_LUN)
+	END IF
+C
+C Init. flag for corner ticks
+	HAD_TIK=.FALSE.
+C
+C open output file
+10	IF (PANOUT) THEN
+C
+C open output BRK file
+	  IF (FLWOPN(OUT_LUN,OUTFILE,IERR).LT.0) THEN
+	    CALL WRITEF(
+     &      '*** WARNING - Can''t open output IFF file %S',OUTFILE)
+20	    COMLEN = TXTCML('Output filename> ')
+	    IF (COMLEN.EQ.-10) GOTO 20		! do not quit
+	    CALL BSLN
+	    GOT_OUTFILE = RDFNAM(OUTFILE)	! read filename
+	    IF (.NOT.GOT_OUTFILE) GOTO 20	! get another filename
+C
+C check OUTFILE extension
+	    I = INDEX(OUTFILE,'.')
+	    EXTENSION = OUTFILE(I+1:I+3)
+	    IF (EXTENSION.EQ.'IFF'.OR.EXTENSION.EQ.'iff')
+     &	      OUTFILE = OUTFILE(1:I)//'BRK'
+	    GOTO 10
+	  END IF
+C
+	  CALL DATE(DATIM)			! note date
+	  CALL TIME(DATIM(13:20))		! and time
+	ELSE
+C
+C IFF file output
+C
+C As we have left the river file open from GETRIVS we can quickly
+C extract the layer 0 or layer 32 from the river input file for
+C registration purposes 
+	  CALL IFFSEL(2)		! select input IFF file
+	  CALL IFFRWD			! rewind
+30	  CALL IFFNXC('NO',IELEN)	! find next overlay
+	  IF (IELEN.LT.0) GOTO 50	! no further overlays
+	  CALL EIHRI(NONUM,1,1)		! read overlay number
+	  IF (NONUM.EQ.0.OR.NONUM.EQ.32) GOTO 40
+	  GOTO 30
+C
+C we have either an layer 0 or 32. MINMAX will adjust our maxima and 
+C minima on the basis of coordinates found in this layer.
+40	  HAD_TIK=.TRUE.	! we have had corner ticks
+	  CALL EIHMK(1)		! mark posn. of current NO entry
+	  CALL MINMAX
+C
+50	  ISTAT(1) = 200	! initialise ISTAT for FS entries
+	  ISTAT(2) = 0
+	  ISTAT(3) = 0
+	  ISTAT(4) = 0
+C
+	  RANGE(1) = XMIN	! initialise RANGE for RA entry
+	  RANGE(2) = XMAX
+	  RANGE(3) = YMIN
+	  RANGE(4) = YMAX
+C
+	  XMIN = 1E8
+	  XMAX = -1E8
+	  YMIN = 1E8
+	  YMAX = -1E8
+C
+	  CPARR(1,1) = XMIN	! initialise CPARR for CP entry(s)
+	  CPARR(2,1) = YMAX
+	  CPARR(1,2) = XMIN
+	  CPARR(2,2) = YMIN
+	  CPARR(1,3) = XMAX
+	  CPARR(2,3) = YMIN
+	  CPARR(1,4) = XMAX
+	  CPARR(2,4) = YMAX
+C
+	  DO 70 J = 1,2
+	    DO 60 I = 1,4
+	      CPARR(J+2,I) = CPARR(J,I)
+60	    CONTINUE
+70	  CONTINUE
+C
+C open output IFF file
+	  CALL IFFOPN(1,OUTFILE)
+	  IF (IERCD.NE.0) THEN
+	    CALL WRITEF(
+     &      '*** WARNING - Can''t open output IFF file %S',OUTFILE)
+80	    COMLEN = TXTCML('Output filename> ')
+	    IF (COMLEN.EQ.-10) GOTO 80		! do not quit
+	    CALL BSLN
+	    GOT_OUTFILE = RDFNAM(OUTFILE)	! get filenm from TXTBUF
+	    IF (.NOT.GOT_OUTFILE) GOTO 30	! get another filename
+	    GOTO 10				! try this filename
+	  END IF
+C
+	  CALL DATE(DATIM)			! note date
+	  CALL TIME(DATIM(13:20))		! and time
+C
+C write standard initial IFF entries
+C
+	  CALL IFFSEL(1)			! select output IFF file
+	  CALL IFFRA(RANGE)			! initial RA entry
+	  IF (LITES) THEN
+	    CALL FLWSEL(LITES_LUN)
+	    CALL FLWRTF(
+     &	      '%%POS %P %F9.2 %P %F9.2',RANGE(1),RANGE(3))
+	    CALL FLWRTF(
+     &	      '%%POS %P %F9.2 %P %F9.2',RANGE(2),RANGE(4))
+	    CALL FLWSEL(LOG_LUN)
+	  ENDIF
+C
+C MH entry - copy from input IFF file if there, else improvise
+	  CALL IFFSEL(2)		! select input IFF file
+	  CALL IFFRWD			! rewind
+	  CALL IFFNXC('MH',IELEN)	! find MH entry
+	  IF (IELEN.LT.0) THEN
+	    CALL IFFSEL(1)		! select output IFF file
+	    CALL IFFMH(MAPHED, MHLEN)
+	  ELSE
+	    CALL EIHCPY(1)		! copy MH entry from input file
+	  END IF
+C
+C MD entry - copy from input IFF file if there, else improvise
+	  CALL IFFSEL(2)		! select input IFF file
+	  CALL IFFNXC('MD',IELEN)	! find MD entry
+	  IF (IELEN.LT.0) THEN
+	    CALL IFFSEL(1)		! select output IFF file
+	    CALL IFFMD(MAPDES, MDLEN)
+	  ELSE
+	    CALL EIHCPY(1)		! copy MD entry from input file
+	  END IF
+C
+C NS entry
+	  CALL IFFSEL(1)		! select output IFF file
+	  CALL EXPAND('Created by RIV3D on ')
+	  CALL DATE(EXPBUF(EXPLEN+1))
+	  EXPLEN = EXPLEN+9
+	  CALL APPEND(' at ')
+	  CALL TIME(EXPBUF(EXPLEN+1))
+	  EXPBUF(EXPLEN+9) = 0
+	  CALL EXPAND('%W%A80',NSBUF,EXPBUF)
+	  CALL IFFNS(EXPBUF)
+C
+C CC entry - copy from input IFF file if there, else improvise
+	  CALL IFFSEL(2)		! select input IFF file
+	  CALL IFFNXC('CC',IELEN)	! find CC entry
+	  IF (IELEN.LT.0) THEN
+	    CALL IFFSEL(1)		! select output IFF file
+	    CALL IFFCC(CCARR)		! Cubic coefficients
+	  ELSE
+	    CALL EIHCPY(1)		! copy CC entry from input file
+	  END IF
+C
+C CP entry - copy from input IFF file if there, else improvise
+	  CALL IFFSEL(2)		! select input IFF file
+	  CALL IFFNXC('CP',IELEN)	! find CP entry
+	  IF (IELEN.LT.0) THEN
+	    CALL IFFSEL(1)		! select output IFF file
+	    CALL IFFCP(CPARR)		! CP entry
+	  ELSE
+	    CALL EIHCPY(1)		! copy CP entry from input file
+	  END IF
+C
+C Copy the layer 0 or 32 found in the 'RIVFILE' into our RIV3D output
+C IFF file to act as registration marks for the user.
+	  IF (HAD_TIK) THEN
+	    CALL IFFSEL(2)		! select in-file
+	    CALL IFFRWM			! rewind to marked layer 0 or 32
+	    CALL IFFSEL(1)		! select RIV3D IFF out-file
+	    LPOSNO=LPOSE		! remember posn. of NO
+	    CALL IFFNO(NONUM,0,0)	! NO entry
+100	    CALL IFFSEL(2)
+	    CALL IFFNXT(IECODE,IELEN)
+	    IF (IELEN.LT.0) GOTO 230
+	    IF (IECODE.EQ.'EF') THEN
+	      CALL IFFSEL(1)
+	      CALL IFFEF
+	    ELSE IF (IECODE.EQ.'NF') THEN
+	      CALL EIHRI(NF_COUNT,1,1)
+	      ISQ = 0			! IFF oddity
+	      CALL IFFSEL(1)
+	      CALL IFFNF(NF_COUNT,ISQ)	! NF entry
+	    ELSE IF (IECODE.EQ.'EO') THEN
+	      CALL IFFCLO(2)		! finished now with in-file
+	      CALL IFFSEL(1)		! select out-file
+	      CALL IFFPKE(IECODE,IELEN,LPOSNO)
+	      IF (IELEN.LT.0.OR.IECODE.NE.'NO') GOTO 230	! fatal
+	      CALL EIHWL(LPOSE,1,3)	! patch in EO address
+	      CALL IFFEO		! write EO
+	      GOTO 110
+	    ELSE
+	      CALL EIHCPY(1)		! just copy to out-file
+	    ENDIF	    
+	    GOTO 100
+	  ENDIF				! end "HAD_TIK"?
+C
+110	  CALL IFFSEL(1)		! select RIV3D IFF out-file
+	  NF_COUNT = 0			! zero NF count
+	  NONUM = 1			! set first data overlay number
+	  LPOSNO=LPOSE			! remember posn. of NO
+	  CALL IFFNO(NONUM,0,0)		! NO entry
+	ENDIF				! end "PANOUT"?
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C now output the 3D river/ridge points
+C
+	IF (RIDGE) THEN
+	  TYP = 202	! BRK feature type is 2  with ridge FC of 200
+	ELSE
+	  TYP = 102	! BRK feature type is 2  with river FC of 100
+	ENDIF
+	IP_FIN = 0	! initialise "end of previous river" RIV index
+	TOTSPOTS = 0	! zero spot count
+C
+C for each river
+	DO 200 I_RIV = 1,N_RIVERS
+	  CALL FLWSEL(1)		! select log file
+	  IENDS = 0			! move to first point
+	  NPTS = 0
+	  UP_DOWN = .FALSE.
+	  IP_STA = IP_FIN+2
+	  NRPTS = RIVP(1,IP_STA-1)
+	  FSN   = RIVP(2,IP_STA-1)	! original FSN
+	  IP_FIN = IP_STA+NRPTS-1
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C put all contour intersection points for this river into array XYZ
+C
+	  I_XYZ = 0
+	  DO 140 IP = IP_STA,IP_FIN
+C
+C add original river point
+	    I_XYZ = I_XYZ+1
+	    XYZ(1,I_XYZ) = RIVP(1,IP)
+	    XYZ(2,I_XYZ) = RIVP(2,IP)
+	    XYZ(3,I_XYZ) = -1
+C
+C check consecutive int pts are not too close
+	    IF (I_XYZ.GT.1) THEN
+	      DX = XYZ(1,I_XYZ)-XYZ(1,I_XYZ-1)
+	      DY = XYZ(2,I_XYZ)-XYZ(2,I_XYZ-1)
+	      XYZ(4,I_XYZ) = SQRT(DX**2+DY**2)
+	      IF (XYZ(4,I_XYZ).LT.MINSEP) I_XYZ = I_XYZ-1
+	    ELSE
+	      XYZ(4,I_XYZ) = 0
+	    END IF
+C
+C add intersection points along this segment
+	    INTPTR = HEAD(IP)
+C
+130	    IF (INTPTR.EQ.NILL) GOTO 140
+	    I_XYZ = I_XYZ+1
+	    XYZ(1,I_XYZ) = INTP(1,INTPTR)
+	    XYZ(2,I_XYZ) = INTP(2,INTPTR)
+	    XYZ(3,I_XYZ) = INTP(3,INTPTR)
+C
+C check consecutive int pts are not too close
+	    IF (I_XYZ.GT.1) THEN
+	      DX = XYZ(1,I_XYZ)-XYZ(1,I_XYZ-1)
+	      DY = XYZ(2,I_XYZ)-XYZ(2,I_XYZ-1)
+	      XYZ(4,I_XYZ) = SQRT(DX**2+DY**2)
+	      IF (XYZ(4,I_XYZ).LT.MINSEP) I_XYZ = I_XYZ-1
+	    END IF
+C
+135	    INTPTR = INTP(4,INTPTR)
+	    GOTO 130
+140	  CONTINUE
+	  N_XYZ = I_XYZ
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C set heights for each original river point
+C
+C put node heights into XYZ  
+	  INODE_1 = ENDS(1,I_RIV)
+	  XYZ(3,1) = NODE(3,INODE_1)
+C
+	  INODE_2 = ENDS(2,I_RIV)
+	  XYZ(3,N_XYZ) = NODE(3,INODE_2)
+C
+C find first int pt
+	  TWO_INTS = .FALSE.
+	  I_XYZ = 0
+141	  I_XYZ = I_XYZ+1
+	  IF (I_XYZ.GT.N_XYZ) THEN
+C
+C here if ridge/river has no contour intersections
+C if no intersections then no spot heights
+	    CALL FLWSEL(LOG_LUN)
+	    CALL FLWRTF
+     &      ('*** WARNING - %S FSN = %^L%N is undefined - omitted',
+     &      LINE_TYPE,FSN)
+	    CALL FLWRTF
+     &	    ('    End points (%P %F9.2,%P %F9.2) - (%P %F9.2,%P %F9.2)',
+     &	       RIVP(1,IP_STA),RIVP(2,IP_STA),
+     &	       RIVP(1,IP_FIN),RIVP(2,IP_FIN))
+C
+C if required, write corresponding Lites-commands
+	    IF (.NOT.LITES) GOTO 666
+	    CALL FLWSEL(LITES_LUN)
+	    CALL FLWRTF('%%ABANDON')
+	    CALL FLWRTF			! give Lites warning
+     &        ('%%MESSAGE *** WARNING : %S FSN = %^L%N is undefined',
+     &	      LINE_TYPE,FSN)
+	    CALL FLWRTF			! move to start point
+     &	      ('%%POS %P %F9.2 %P %F9.2',RIVP(1,IP_STA),RIVP(2,IP_STA))
+	    CALL FLWRTF('%%PING')	! ping
+	    CALL FLWRTF('%%RESPOND')	! over to user
+	    CALL FLWRTF('%%ABANDON')
+	    CALL FLWRTF			! move to end point
+     &	      ('%%POS %P %F9.2 %P %F9.2',RIVP(1,IP_FIN),RIVP(2,IP_FIN))
+	    CALL FLWRTF('%%PING')	! ping
+	    CALL FLWRTF('%%RESPOND')	! over to user
+	    CALL FLWRTF('%%ABANDON')
+666	    CONTINUE
+C
+	    N0INTS = N0INTS+1	  	! count 0-int lines
+	    N_SPOTS = 0
+	    GOTO 195	  	  	! move on to next line
+	  END IF
+C
+	  IF (XYZ(3,I_XYZ).EQ.-1) GOTO 141
+	  X2 = XYZ(1,I_XYZ)
+	  Y2 = XYZ(2,I_XYZ)
+	  Z2 = XYZ(3,I_XYZ)
+	  I2 = I_XYZ
+	  I_START = I_XYZ
+142	  X1 = X2
+	  Y1 = Y2
+	  Z1 = Z2
+	  I1 = I2
+C
+C find next int pt, noting distance from first int
+	  TOT_DIST = 0
+143	  I_XYZ = I_XYZ+1
+	  IF (I_XYZ.GT.N_XYZ) GOTO 145
+	  TOT_DIST = TOT_DIST+XYZ(4,I_XYZ)
+	  IF (XYZ(3,I_XYZ).EQ.-1) GOTO 143
+	  TWO_INTS = .TRUE.
+	  X2 = XYZ(1,I_XYZ)
+	  Y2 = XYZ(2,I_XYZ)
+	  Z2 = XYZ(3,I_XYZ)
+	  I2 = I_XYZ
+C
+C interpolate heights for each original point along the ridge/river
+C between these two intersection points
+	  DIST = 0
+	  I_XYZ = I1
+144	  I_XYZ = I_XYZ+1
+	  IF (I_XYZ.EQ.I2) GOTO 142
+	  DIST = DIST+XYZ(4,I_XYZ)
+	  XYZ(3,I_XYZ) = (Z1*(TOT_DIST-DIST)+Z2*DIST)/TOT_DIST
+	  GOTO 144
+C
+145	  IF (.NOT.TWO_INTS) THEN
+C
+C if only one intersection then only one spot height
+	    CALL FLWSEL(LOG_LUN)
+	    CALL FLWRTF
+     &	 ('*** WARNING - %S FSN = %^L%N has only 1 estimated height',
+     &	      LINE_TYPE,FSN)
+	    CALL FLWRTF('    at (%P %F9.2,%P %F9.2)',X1,Y1)
+C
+C if required, write corresponding Lites-commands
+	    IF (.NOT.LITES) GOTO 146
+	    CALL FLWSEL(LITES_LUN)
+	    CALL FLWRTF('%%ABANDON')
+	    CALL FLWRTF
+     &	 ('%%MESSAGE *** WARNING : %S FSN = %^L%N has only 1 estimated
+     & height',LINE_TYPE,FSN)
+	    CALL FLWRTF('%%POS %P %F9.2 %P %F9.2',X1,Y1)! move to point
+	    CALL FLWRTF('%%PING')	! ping
+	    CALL FLWRTF('%%RESPOND')	! over to user
+	    CALL FLWRTF('%%ABANDON')
+146	    CONTINUE
+C
+	    N1INTS = N1INTS+1	  	! count 1-int lines
+	    N_SPOTS = 1
+	    SPOT(1,1) = XYZ(1,I_START)
+	    SPOT(2,1) = XYZ(2,I_START)
+	    SPOT(3,1) = XYZ(3,I_START)
+	    GOTO 170
+	  END IF
+C
+	  I_FIN = I2
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C place points to be output into array SPOT, interpolating as necessary
+C so that max horizontal distance between output spot heights is
+C >= MAXLEN
+C
+	  N_SPOTS = 0			! zero spot count
+C
+C get first intersection point
+	  I_XYZ = I_START
+	  X2 = XYZ(1,I_XYZ)
+	  Y2 = XYZ(2,I_XYZ)
+	  Z2 = XYZ(3,I_XYZ)
+C
+C get next int
+150	  I_XYZ = I_XYZ+1
+C
+C if there are no further int points, output last int point
+	  IF (I_XYZ.GT.I_FIN) THEN
+	    N_SPOTS = N_SPOTS+1
+	    SPOT(1,N_SPOTS) = X2
+	    SPOT(2,N_SPOTS) = Y2
+	    SPOT(3,N_SPOTS) = Z2
+	    GOTO 170	  	  	! move on to next line
+	  END IF
+C
+	  X1 = X2
+	  Y1 = Y2
+	  Z1 = Z2
+	  X2 = XYZ(1,I_XYZ)
+	  Y2 = XYZ(2,I_XYZ)
+	  Z2 = XYZ(3,I_XYZ)
+	  LONG = XYZ(4,I_XYZ)
+C
+C output first int
+	  N_SPOTS = N_SPOTS+1
+	  SPOT(1,N_SPOTS) = X1
+	  SPOT(2,N_SPOTS) = Y1
+	  SPOT(3,N_SPOTS) = Z1
+C
+C output interpolated points if int pt separation > MAXLEN
+	  IF (LONG.GT.MAXLEN) THEN
+	    N_EXTRA = LONG/MAXLEN
+	    SEP = LONG/(N_EXTRA+1)
+	    DX = (X2-X1)*SEP/LONG
+	    DY = (Y2-Y1)*SEP/LONG
+	    DZ = (Z2-Z1)*SEP/LONG
+	    DO 160 I = 1,N_EXTRA
+	      N_SPOTS = N_SPOTS+1
+	      SPOT(1,N_SPOTS) = X1+I*DX
+	      SPOT(2,N_SPOTS) = Y1+I*DY
+	      SPOT(3,N_SPOTS) = Z1+I*DZ
+160	    CONTINUE
+	  END IF
+C
+C goto get next int
+	  GOTO 150
+C
+170	  CONTINUE
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C write line of spot heights
+C check to see if this a ridge
+C
+C do nothing for empty strings
+	  IF (N_SPOTS.LT.1) GOTO 195
+C
+C
+C count rivers with no fall
+	  IF (N_SPOTS.LT.2) GOTO 175			!no point checking 1 ip
+	  FLAT = .TRUE.					!set flat to true and
+	  DO 171 I = 2, N_SPOTS				!try to disprove this by
+	     IF (ABS(SPOT(3,I)-SPOT(3,I-1)).GT.1E-3) FLAT = .FALSE.
+171	  CONTINUE					!checking all riv segs
+	  IF (FLAT) THEN				!write out a warning 
+	    NFLATS = NFLATS+1				!that the river/ridge is
+	    CALL FLWSEL(LOG_LUN)			!flat and inc counter
+	    CALL FLWRTF(
+     &  '*** WARNING - %S FSN = %^L%N is flat',LINE_TYPE,FSN)
+	    CALL FLWRTF('    at (%P %F9.2,%P %F9.2)',SPOT(1,2),SPOT(2,1))
+	    IF (LITES) THEN
+	      CALL FLWSEL(LITES_LUN)
+	      CALL FLWRTF('%%ABANDON')
+	      CALL FLWRTF(
+     &  '%%MESSAGE *** WARNING : %S FSN = %^L%N is flat',LINE_TYPE,FSN)
+	      CALL FLWRTF(
+     &	      '%%POS %P %F9.2 %P %F9.2',SPOT(1,1),SPOT(2,1))
+	      CALL FLWRTF('%%PING')
+	      CALL FLWRTF('%%RESPOND')
+	      CALL FLWRTF('%%ABANDON')
+	    ENDIF
+	  ENDIF
+C
+	  IF (.NOT.RIDGE) THEN
+C
+C check for sections of river changing direction of fall
+	    IF (N_SPOTS.LT.3) GOTO 175
+C
+	    DZ = SPOT(3,2)-SPOT(3,1)
+	    IF (ABS(DZ).GT.DH) THEN
+	      SGN = SIGN(1.0,DZ)
+	    ELSE
+	      SGN = 0
+	    END IF
+	    LAST_SGN = SGN
+C
+	    DO 172 I = 3,N_SPOTS
+	      IF (SGN.NE.0) LAST_SGN = SGN
+	      DZ = SPOT(3,I)-SPOT(3,I-1)
+	      IF (ABS(DZ).GT.DH) THEN
+	        SGN = SIGN(1.0,DZ)
+	      ELSE
+	        SGN = 0
+	      END IF
+	      IF (SGN*LAST_SGN.EQ.-1) THEN
+	        CALL FLWSEL(LOG_LUN)
+	        IF (.NOT.UP_DOWN) CALL FLWRTF
+     &	('*** WARNING - River FSN = %^L%N changes direction of fall',
+     &	FSN)
+	        CALL FLWRTF
+     &	('    at (%P %F9.2,%P %F9.2)',SPOT(1,I-1),SPOT(2,I-1))
+C
+	        IF (LITES) THEN
+	          CALL FLWSEL(LITES_LUN)
+	          CALL FLWRTF('%%ABANDON')
+	          IF (.NOT.UP_DOWN) CALL FLWRTF
+     &	('%%MESSAGE *** WARNING : River FSN = %^L%N changes direction
+     & of fall',FSN)
+	          CALL FLWRTF('%%ABANDON')
+	          CALL FLWRTF			! move to point
+     &	('%%POS %P %F9.2 %P %F9.2',SPOT(1,I-1),SPOT(2,I-1))
+	          CALL FLWRTF('%%PING')		! ping
+	          CALL FLWRTF('%%RESPOND')	! over to user
+	          CALL FLWRTF('%%ABANDON')
+	        END IF
+C
+                UP_DOWN = .TRUE.
+	      END IF
+172	    CONTINUE
+	  ENDIF
+C
+C check nodes common to >1 river are not output > once
+175	  SPOT_START = 1
+	  SPOT_FIN = N_SPOTS
+C	  IF (RIDGE) GOTO 777
+C
+C	  IF (SPOT(1,1).EQ.NODE(1,INODE_1).AND.
+C     &	      SPOT(2,1).EQ.NODE(2,INODE_1)) THEN
+C	    IF (HADNOD(INODE_1)) THEN
+C	      SPOT_START = 2
+C	    ELSE
+C	      HADNOD(INODE_1) = .TRUE.
+C	    END IF
+C	  END IF
+CC
+C	  IF (SPOT(1,N_SPOTS).EQ.NODE(1,INODE_2).AND.
+C     &	      SPOT(2,N_SPOTS).EQ.NODE(2,INODE_2)) THEN
+C	    IF (HADNOD(INODE_2)) THEN
+C	      SPOT_FIN = N_SPOTS-1
+C	    ELSE
+C	      HADNOD(INODE_2) = .TRUE.
+C	    END IF
+C	  END IF
+CC
+C777	  CONTINUE
+	  N_SPOTS = SPOT_FIN-SPOT_START+1
+	  IF (N_SPOTS.LT.1) GOTO 195
+C
+C BRK output
+	  IF (PANOUT) THEN
+	    CALL FLWSEL(OUT_LUN)		! select output LUN
+C
+C write BRK string header
+	    CALL FLWRTF('%I7%I7%I7',N_SPOTS,TYP,0) ! feature header
+C
+C write spots
+	    DO 180 IP = SPOT_START,SPOT_FIN
+	      HGT = SPOT(3,IP)
+	      IF (INT_Z) THEN		! (n-)integerise?
+	        HGT = INT(HGT)
+	      ELSE IF (NINT_Z) THEN
+	        HGT = NINT(HGT)
+	      END IF
+	      CALL FLWRTF
+     &	        ('%F10.2%F10.2%F10.2',SPOT(1,IP),SPOT(2,IP),HGT)
+180	    CONTINUE
+C
+	  ELSEIF (IFF3D) THEN
+C
+C IFF 3d output
+	    NF_COUNT = NF_COUNT+1	! increment NF_COUNT
+	    IF (NF_COUNT.GT.MAXFSN) NF_COUNT = 0
+	    ISQ = 0	  	  	! IFF anomaly
+	    CALL IFFNF(NF_COUNT,ISQ)	! NF entry
+	    ISTAT(1)=FCODE 		! use user supplied feature code
+	    CALL IFFFS(ISTAT)	  	! FS entry
+	    IF (INT_Z) THEN		! (n-)integerise?
+	      SPOT(3,I)= INT(SPOT(3,I))
+	    ELSE IF (NINT_Z) THEN
+	      SPOT(3,I)= NINT(SPOT(3,I))
+	    END IF
+	    IENDS = 0	  	  	! MOVE to first point
+	    LOOP = 0	  	  	! ST counter
+	    N_SPOTS = SPOT_FIN-SPOT_START+1
+189	    I=MIN(200,N_SPOTS)
+	    CALL IFFZS(SPOT(1,SPOT_START+(200*LOOP)),I,IENDS)
+	    LOOP=LOOP+1
+	    N_SPOTS=N_SPOTS-I
+	    IENDS = 1	  	  	! DRAW to all subsequent points
+	    IF (N_SPOTS.GT.0) GOTO 189
+	    CALL IFFEF	  		! EF entry
+	    DO 191 I=SPOT_START,SPOT_FIN
+	      XMIN = MIN(XMIN,SPOT(1,I))! note output coord range
+	      XMAX = MAX(XMAX,SPOT(1,I))
+	      YMIN = MIN(YMIN,SPOT(2,I))
+	      YMAX = MAX(YMAX,SPOT(2,I))
+191	    CONTINUE
+C
+	  ELSE
+C
+C IFF 2d output
+	    IENDS = 0	  	  	! MOVE to first point
+	    DO 190 I = SPOT_START,SPOT_FIN
+	      NF_COUNT = NF_COUNT+1	! increment NF_COUNT
+	      IF (NF_COUNT.GT.MAXFSN) NF_COUNT = 0
+	      ISQ = 0	  	  	! IFF anomaly
+	      CALL IFFNF(NF_COUNT,ISQ)	! NF entry
+	      IF (IFF3D) ISTAT(1)=FCODE ! use user supplied feature code
+	      ISTAT(3) = '40000'O	! Set symbol bit
+	      CALL IFFFS(ISTAT)	  	! FS entry
+	      HGT = SPOT(3,I)	  	! AC 3 hgt entry
+	      IF (INT_Z) THEN		! (n-)integerise?
+	        HGT = INT(HGT)
+	      ELSE IF (NINT_Z) THEN
+	        HGT = NINT(HGT)
+	      END IF
+	      CALL IFFAC(3,HGT)
+	      R(1) = SPOT(1,I)	  	! ST entry
+	      R(2) = SPOT(2,I)
+	      CALL IFFST(R,1,IENDS)
+	      CALL IFFEF	  	! EF entry
+	      IENDS = 1	  	  	! DRAW to all subsequent points
+	      XMIN = MIN(XMIN,R(1))	! note output coord range
+	      XMAX = MAX(XMAX,R(1))
+	      YMIN = MIN(YMIN,R(2))
+	      YMAX = MAX(YMAX,R(2))
+190	    CONTINUE
+	  END IF
+C
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+195	  TOTSPOTS = TOTSPOTS+N_SPOTS	! count tot No of spots output
+C
+C show progress
+	  IF (NOTBATCH) WRITE(*,'(1H+,I7,'' '')') I_RIV
+	  IF (UP_DOWN) UP_DOWNS = UP_DOWNS+1
+200	CONTINUE			! loop for next river
+C
+	IF (.NOT.NOTBATCH)
+     &	  WRITE(*,'(X,X,I7,'' 3D '',A,''S WRITTEN            TO '',A)')
+     &	  N_RIVERS,LINE_TYPE,OUTFILE(1:INDEX(OUTFILE,' '))
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C write standard final IFF entries and close IFF output file
+	IF (.NOT.PANOUT) THEN
+	  CALL IFFPKE(IECODE,IELEN,LPOSNO) 	! point NO to EO entry
+	  IF (IELEN.LT.0.OR.IECODE.NE.'NO') GOTO 240 ! fatal
+	  CALL EIHWL(LPOSE,1,3)		! patch in EO address
+	  CALL IFFEO			! write EO
+	  CALL IFFEM
+	  CALL IFFEJ
+C
+C go back and fill in RA entry
+	  CALL IFFRWD			! rewind
+	  CALL IFFNXC('RA',IELEN)	! find RA entry
+	  IF (IELEN.GE.0) THEN
+	    RANGE(1) = XMIN
+	    RANGE(2) = XMAX
+	    RANGE(3) = YMIN
+	    RANGE(4) = YMAX
+	    CALL EIHWR(RANGE,4,1)
+	  END IF
+	END IF
+C 
+C close file
+	IF (PANOUT) THEN
+	  CALL FLWCLO(OUT_LUN)		! close 3D river file
+	ELSE
+	  CALL IFFCLO(1)
+	END IF
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C log a few statistics
+	CALL FLWSEL(LOG_LUN)
+	RLEN = INDEX(OUTFILE,' ')
+	CALL FLWSEL(1)
+	CALL FLWRTF(' ')
+	CALL FLWRTF('***************************************************
+     &**************')
+	CALL FLWRTF(' ')
+	CALL FLWRTF
+     &	  (' Input %S file           : %S',LINE_TYPE,RIVFILE(1:RFLEN))
+	CALL FLWRTF
+     &	  (' Input contour file         : %S',CONFILE(1:CFLEN))
+	CALL FLWRTF('  ')
+	CALL FLWRTF
+     &	  (' Output 3D-%S file       : %S',LINE_TYPE,OUTFILE(1:RLEN))
+	CALL FLWRTF
+     &	  (' Created on                 : %S',DATIM)
+	IF (LITES) THEN
+	  CALL FLWRTF
+     &	  (' Lites command output       : yes')
+	ELSE
+	  CALL FLWRTF
+     &	  (' Lites command output       : no')
+	END IF
+	IF (PANOUT) THEN
+	  CALL FLWRTF
+     &	  (' Output format              : BRK')
+	ELSE
+	  CALL FLWRTF
+     &	  (' Format                     : IFF')
+	END IF
+C
+	CALL FLWRTF('  ')
+	CALL FLWRTF
+     &	  (' No. of input %SS        : %^L%I',LINE_TYPE,N_RIVERS)
+	IF (MAXLEN.LT.1E10) THEN
+	  CALL FLWRTF
+     &	    (' Max %S segment length   : %F9.2',LINE_TYPE,MAXLEN)
+	ELSE
+	  CALL FLWRTF
+     &	    (' Max %S segment length   : no limit',LINE_TYPE)
+	END IF
+C
+	IF (.NOT.RIDGE) THEN
+	  CALL FLWRTF
+     &	  (' RIVER end touch tolerance  : %F9.2',TCHDST)
+	ELSE
+	  CALL FLWRTF
+     &	  (' RIDGE end touch tolerance  : %F9.2',TCHDST)
+	ENDIF
+	CALL EXPAND
+     &	  (' %S feature codes used   :',LINE_TYPE)
+	IF (NRFC.LT.1) THEN
+	  CALL APPEND('    any')
+	  CALL FLWLIN()
+	ELSE
+	  CALL APPEND(' %I',RFC(1))
+	  CALL FLWLIN()
+	  DO 210 I = 2,NRFC
+210	  CALL FLWRTF('                              %I',RFC(I))
+	END IF
+C
+	CALL FLWRTF(' ')
+	CALL FLWRTF(' No. of input contours      : %^L%I',N_CONTOURS)
+	CALL EXPAND(' Contour feature codes used :')
+	IF (NCFC.LT.1) THEN
+	  CALL APPEND('    any')
+	  CALL FLWLIN()
+	ELSE
+	  CALL APPEND(' %I',CFC(1))
+	  CALL FLWLIN()
+	  DO 220 I = 2,NCFC
+220	  CALL FLWRTF('                              %I',CFC(I))
+	END IF
+	CALL FLWRTF(' ')
+	CALL FLWRTF(' No. of output spot heights : %^L%I',TOTSPOTS)
+	CALL FLWRTF('  ')
+	CALL FLWRTF
+     &	(' No. of 1-int. %SS       : %^L%I',LINE_TYPE,N1INTS)
+	CALL FLWRTF
+     &	(' No. of flat rivers         : %^L%I',NFLATS)
+	CALL FLWRTF
+     &	(' No. of up-down rivers      : %^L%I',UP_DOWNS)
+	CALL FLWRTF
+     &	(' No. of %SS undefined    : %^L%I',LINE_TYPE,N0INTS)
+C
+C show whether inegerising or nintegerising hgts
+	CALL FLWRTF('  ')
+	CALL EXPAND(' Real heights are           : ')
+	IF (NINT_Z) THEN
+	  CALL APPEND('rounded to nearest integer')
+	ELSE IF (INT_Z) THEN
+	  CALL APPEND('truncated to nearest integer')
+	ELSE
+	  CALL APPEND('not rounded or truncated')
+	END IF
+	CALL FLWLIN()
+C
+	CALL FLWRTF('  ')
+	CALL EXPAND(' CPU time                   : ')
+	CALL LIB$STAT_TIMER(2,CPU)	! find elapsed CPU time
+	HRS = CPU/(100*60*60)
+	CPU = CPU-HRS*100*60*60
+	MNS = CPU/(100*60)
+	CPU = CPU-MNS*100*60
+	SCS = CPU/100
+	CPU = CPU-SCS*100
+	CALL APPEND('%P0%I2:%P0%I2:%P0%I2.%P0%I2',HRS,MNS,SCS,CPU)
+	CALL FLWLIN()
+	CALL FLWRTF('  ')
+	CALL FLWRTF('***************************************************
+     &**************')
+	CALL FLWCLO(LOG_LUN)		! close LOG file
+	IF (LITES) THEN
+	  CALL FLWSEL(LITES_LUN)
+	  CALL FLWRTF('%%MESSAGE *** END OF LITES COMMAND FILE')
+	  CALL FLWRTF('%%PING')
+	  CALL FLWRTF('%%PING')
+	  CALL FLWCLO(LITES_LUN)	! close Lites file
+	END IF
+	RETURN
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C IFF errors
+230	CALL WRITEF
+     &		('*** FATAL - Unable to copy IFF registration marks.')
+	GOTO 250
+240	CALL WRITEF
+     &		('*** FATAL - Error patching IFF EO pointer.')
+250	CALL EXIT
+	END

@@ -1,6 +1,6 @@
 	SUBROUTINE WRITE_MD_CODE(WHICH_CODE)
 C
-CDEC$	IDENT	'26SE94'
+CDEC$	IDENT	'12OC94'
 C
 C	Copyright (C) Laser-Scan Ltd., Cambridge, England.
 C
@@ -19,11 +19,27 @@ C
 C
 C Arguments
 C
-	CHARACTER*(*)	WHICH_CODE	! MAPDATA code
+	CHARACTER*(*)		WHICH_CODE	! MAPDATA code
+C
+C Functions
+C
+	INTEGER*4		SIGCHS
+C
+C Local variables
+C
+	CHARACTER*7		MDCHAR		! MapData feature code
+	BYTE			MDCODE(7)	! MapData FC as byte array
+	EQUIVALENCE		(MDCHAR,MDCODE)
+C
+C------------------------------------------------------------------------------
+C Clear the byte array
+C
+	CALL VIOCLR(MDCODE,7,0)
+	MDCHAR(1:SIGCHS(WHICH_CODE)) = WHICH_CODE
 C
 C Just write the CODE entry.
 C
-	CALL FLWRTF('CODE %S',WHICH_CODE)
+	CALL FLWRTF('CODE %A',MDCODE)
 C
 C Return
 C

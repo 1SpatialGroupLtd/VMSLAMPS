@@ -1,0 +1,355 @@
+	LOGICAL FUNCTION CMPFRN(REG,CODE)
+C
+***     IDENT   10MY96
+***     MODULE  CMPFRN
+C
+C       Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C       Written                                 RWR 	16-Sep-1985
+C
+C Description
+C
+C	function to test the found feature against the specified
+C	region. The test is defined by the value of CODE
+C
+C NOTE:	it is the responsibility of the calling routine to ensure
+C	=========================================================
+C	that the region is valid and that there is a found object.
+C	==========================================================
+C
+        IMPLICIT NONE
+C
+C Included Parameter Files
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CTXS/
+***     PARAMETER/CMN:MOANMESS/         ! moan constants
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:REGPAR/
+C
+C Common Blocks
+C
+***	COMMON/CMN:CTXS/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:REGCMN/
+***	COMMON/CMN:STRIKE/
+C
+C arguments
+C
+	INTEGER*4	REG	! region to check against
+	INTEGER*4	CODE	! =1 check whole feature is inside
+				! =2 check whole feature is outside
+				! =3 check if feature cuts region
+C
+C Functions called
+C
+	LOGICAL		PINREG,CUTREG,ARCREG
+	LOGICAL		BOXCUTREG
+C
+C Local Variables
+C
+	LOGICAL		INSIDE		! starts inside
+	LOGICAL		RESOLVED	! have ambiguities been resolved?
+	LOGICAL		TEMP
+	INTEGER*4	I,J		! loop counters
+	INTEGER*4	V1		! control getting vertices
+	REAL		TMPXY(2)	! temporary
+	REAL		X1,Y1		! temporary coordinates
+	REAL*8		DLX,DLY
+	REAL		DIR
+	LOGICAL		F_INSIDE
+	INTEGER		ADDR
+C
+C branch on graphical type 
+C
+	GOTO (50,200,200,200,200,50,300,300,300,400,50,50),
+     &					FOPAK(PAKGT)
+	GOTO 1000
+C
+C ==============================================================
+C linear feature, - check each vector in it for crossing region
+C
+   50	CONTINUE
+C
+C first check if whole feature lies along region. The algorithm below
+C for this case is appalling, and this is well worth while.  In 99.99%
+C of cases very little time will be wasted.
+C
+C check first point of feature with first point of region
+C
+	CALL PUTLNG(%VAL(REGPTR(1,REG)+OFFX),X1)
+	CALL PUTLNG(%VAL(REGPTR(1,REG)+OFFY),Y1)
+	IF (X1.EQ.FOTHIS(1).AND.Y1.EQ.FOTHIS(2)) THEN	! a possibility!
+	   V1=1
+	   J=REGPTR(1,REG)
+C
+C get some more vertices from feature
+C
+   60	   CONTINUE
+	   CALL GETVRT(FOPAK,V1,FOLST)
+C
+C compare each vertex with the next point in region
+C
+	   DO 70, I=1,RITOP
+C
+C finished region?
+C
+	      IF (J.EQ.REGPTR(2,REG)) THEN	! at end of region
+	         IF ((V1+RITOP-1).EQ.FOLST.AND.	! last lot of vertices
+     &	             ((I.EQ.RITOP).OR.		! and feature not closed
+     &  	      (I.EQ.(RITOP-1).AND.	! or feature closed and
+     &	               FOTHIS(1).EQ.FOTHAT(1).AND. ! second last vertex
+     &	               FOTHIS(2).EQ.FOTHAT(2)))) THEN
+	            CMPFRN=CODE.EQ.1
+	            GOTO 1000			! inside
+	         ELSE
+	            GOTO 100			! have to test feature
+	         ENDIF
+	      ELSE
+	         CALL PUTLNG(%VAL(J+OFFX),X1)
+	         CALL PUTLNG(%VAL(J+OFFY),Y1)
+	         IF (X1.NE.RIXY(1,I).OR.Y1.NE.RIXY(2,I)) GOTO 100
+	         CALL PUTLNG(%VAL(J),J)
+	      ENDIF
+   70	   CONTINUE
+C
+C finished feature?
+C
+	   V1=V1+RITOP
+	   IF (V1.LE.FOLST) GOTO 60
+C
+C region is longer than feature, so must be inside
+C
+	   CMPFRN=CODE.EQ.1
+	   GOTO 1000			! inside
+	ENDIF
+C
+C initialise
+C
+  100	CONTINUE
+C
+C get some vertices from IFF file
+C
+	V1=1
+  110	CONTINUE
+	CALL GETVRT(FOPAK,V1,FOLST)
+C
+C if these are first vertices, find out if feature starts inside or
+C outside REG
+C
+	IF (V1.EQ.1) THEN
+C
+C use linewudth as increment
+C
+	   DLX=(DBLE(RIXY(1,2)) - DBLE(FOTHIS(1)))	! for 1 pt lines
+	   DLY=(DBLE(RIXY(2,2)) - DBLE(FOTHIS(2)))	! these are 0.0
+	   CALL PRPLIN(DLX,DLY,LINWDTH)
+C
+C check whether this is a big enough increment (to avoid problems of 
+C precision)
+C
+  111	   CONTINUE
+	   TMPXY(1) = DBLE(FOTHIS(1)) + DLX*2.0
+	   TMPXY(2) = DBLE(FOTHIS(2)) + DLY*2.0
+	   IF ((DLX.NE.0.0.OR.DLY.NE.0.0).AND.
+     &	       (ABS(TMPXY(1)-FOTHIS(1)).LT.LINWDTH).AND.
+     &	       (ABS(TMPXY(2)-FOTHIS(2)).LT.LINWDTH)) THEN
+	      DLX = DLX*2.0
+	      DLY = DLY*2.0
+	      GOTO 111
+	   ENDIF
+	   J=0
+	   TMPXY(1)=FOTHIS(1)
+	   TMPXY(2)=FOTHIS(2)
+	   RESOLVED = .FALSE.
+  115	   CONTINUE
+C
+C  point on boundary?
+C
+	   IF (PINREG(TMPXY,REG,INSIDE)) THEN
+	      IF (FOLST.GT.1) THEN		! if not, assume inside
+C
+C try another point a bit along the first vector
+C
+	         J=J+1
+	         TMPXY(1)=DBLE(FOTHIS(1)) + J*DLX
+	         TMPXY(2)=DBLE(FOTHIS(2)) + J*DLY
+	         IF (J.LT.100) GOTO 115		! only try 99 times
+						! then assume inside
+	      ENDIF
+	   ELSE
+	      RESOLVED = .TRUE.
+	   ENDIF
+	ENDIF
+C
+C gross check, for completely inside, or completely outside
+C
+	IF (RESOLVED.AND.((CODE.EQ.1.AND..NOT.INSIDE).OR.
+     &	    (CODE.EQ.2.AND.INSIDE))) THEN
+	   CMPFRN=.FALSE.
+	   GOTO 1000
+	ENDIF
+C
+	DO 120, I=1,RITOP-1
+	   IF (CUTREG(RIXY(1,I),REG,INSIDE,RESOLVED)) GOTO 900
+C
+C see if end point can reslove problem
+C
+	   IF (.NOT.RESOLVED) THEN
+	      IF (.NOT.PINREG(RIXY(1,I+1),REG,INSIDE)) RESOLVED = .TRUE.
+	   ENDIF
+  120	CONTINUE
+C
+C finished?
+C
+	V1=V1+RITOP-1
+	IF (V1.LT.FOLST) GOTO 110
+C
+C may now have resolved problem, and so do gross check again
+	IF (RESOLVED.AND.((CODE.EQ.1.AND..NOT.INSIDE).OR.
+     &	   (CODE.EQ.2.AND.INSIDE))) THEN
+	   CMPFRN = .FALSE.
+	   GOTO 1000
+	ELSEIF (RESOLVED.AND.((CODE.EQ.1.AND.INSIDE).OR.
+     &	   (CODE.EQ.2.AND..NOT.INSIDE))) THEN
+	   CMPFRN = .TRUE.
+	   GOTO 1000
+	ELSEIF (.NOT.RESOLVED) THEN	! assume inside
+	   CMPFRN = CODE.EQ.1
+	   GOTO 1000
+	ENDIF
+C
+	GOTO 800			! not changed sides, so
+					! no cut exit
+C
+C ===================================================================
+C for arcs and circles, see if arc cuts region
+C
+  200	CONTINUE
+C
+	IF (FOAUX(TOTI).GE.0.0) THEN
+	   DIR = 1.0
+	ELSE
+	   DIR = -1.0
+	ENDIF
+C
+C is first point inside or outside region?
+C if it lies on region boundary, move it slightly and try again
+C
+	DLX=LINWDTH/DBLE(FOAUX(RADI))*DIR
+	RESOLVED = .TRUE.
+	J=0
+  210	CONTINUE
+	DLY=DBLE(FOAUX(STAI)) + J*DLX
+	TMPXY(1)=DBLE(FOAUX(XCENI))+FOAUX(RADI)*COS(DLY)
+	TMPXY(2)=DBLE(FOAUX(YCENI))+FOAUX(RADI)*SIN(DLY)
+	IF (PINREG(TMPXY,REG,INSIDE)) THEN	! try a bit along arc
+	   J=J+1
+	   IF (J.GT.999) THEN
+	      RESOLVED = .FALSE.
+	      GOTO 215
+	   ENDIF
+	   GOTO 210
+	ENDIF
+C
+C is end point touching region? - if so move it a bit
+C
+  215	CONTINUE
+	J=0
+  220	CONTINUE
+	DLY = DBLE(FOAUX(STAI)) + DBLE(FOAUX(TOTI)) -J*DLX
+	TMPXY(1) = DBLE(FOAUX(XCENI))+FOAUX(RADI)*COS(DLY)
+	TMPXY(2) = DBLE(FOAUX(YCENI))+FOAUX(RADI)*SIN(DLY)
+	IF (PINREG(TMPXY,REG,TEMP)) THEN	! try a bit along arc
+	   J=J+1
+	   IF (J.GT.999) THEN
+	      RESOLVED = .FALSE.
+	      GOTO 230
+	   ENDIF
+	   GOTO 220
+	ENDIF
+C
+C gross check, for completely inside, or completely outside
+C
+  230	CONTINUE
+	IF (RESOLVED) THEN
+	   IF (INSIDE.NE.TEMP) THEN
+	      IF (CODE.EQ.1.OR.CODE.EQ.2) THEN
+	         CMPFRN=.FALSE.
+	         GOTO 1000
+	      ELSEIF (CODE.EQ.3) THEN
+	         CMPFRN = .TRUE.
+	         GOTO 1000
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C check if the arc cuts the region
+C
+	IF (ARCREG(FOAUX,FOARCBX,REG,INSIDE)) THEN
+	   GOTO 900			! cut exit
+	ELSE
+	   GOTO 800			! no cut exit
+	ENDIF
+C
+C ===================================================================
+C for symbols see if any of bounding sides cuts region
+C
+  300	CONTINUE
+C
+	RESOLVED = .FALSE.
+	IF (BOXCUTREG(FOTHIS(1),FOTHIS(2),FOAUX,REG,
+     &	                  INSIDE,RESOLVED)) GOTO 900
+C
+C nothing has changed, so go to no cut exit
+C
+	GOTO 800
+C
+C ==============================================================
+C for texts, see if any of bounding sides cuts region
+C
+  400	CONTINUE
+C
+	RESOLVED = .FALSE.
+	ADDR = FTRCTXD(CTXD_FSTCTX)
+410	CONTINUE
+	IF (BOXCUTREG(%VAL(ADDR+CTX_O_X),%VAL(ADDR+CTX_O_Y),
+     &	              %VAL(ADDR+CTX_O_AUX),REG,INSIDE,RESOLVED)) GOTO 900
+C
+	IF (ADDR.EQ.FTRCTXD(CTXD_FSTCTX)) THEN
+	   F_INSIDE = INSIDE
+	ELSEIF (F_INSIDE.NE.INSIDE) THEN
+	   GOTO 900	! one subtext inside, and one outside, so cut
+	ENDIF
+C
+C move onto next subtext
+	CALL PUTLNG(%VAL(ADDR+CTX_O_NXTPTR),ADDR)
+	IF (ADDR.NE.0) GOTO 410
+C
+C nothing has changed, so go to no cut exit
+C
+	GOTO 800
+C
+C ==============================================================
+C
+C exits
+C
+C no cut exit
+C
+  800	CONTINUE
+	IF (INSIDE) THEN
+	   CMPFRN = CODE.EQ.1
+	ELSE
+	   CMPFRN = CODE.EQ.2
+	ENDIF
+	GOTO 1000
+C
+C cut exit
+C
+  900	CONTINUE
+	CMPFRN=CODE.EQ.3
+C	
+ 1000	CONTINUE
+        RETURN
+        END

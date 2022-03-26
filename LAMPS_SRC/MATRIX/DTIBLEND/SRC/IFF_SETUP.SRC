@@ -1,0 +1,165 @@
+	LOGICAL FUNCTION IFF_SETUP()
+C
+***	MODULE	IFF_SETUP
+***	IDENT	20NO87
+C
+C	Copyright (C), Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	Created						TJH 20-Nov-1987
+C
+C Function to open all the IFF files specified for DTM underlay control.
+C The file ID's are stored for rapid opening/closing later. The type
+C 2 MD (Map-Descriptor) is read and stored in /DESCK/ in order that:
+C 1) checks that the files have consistent projection data can be made
+C 2) the files can be offset correctly relative to each other and the
+C DTI data using the IFF file's OO (Origin Offset) data modified to the
+C local datum held in /PROCESS/MINXOF,MINYOF. Each IFF file's 
+C shift relative to the local datum is held in LOCOFF.
+C
+C If the LIST option is selected, verbose information about the input
+C IFF files is sent to the listing. 
+C
+C Function returns .TRUE. if all is well
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE	'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNDTIBLEND:DTIBLENDMSG.PAR'
+	INCLUDE 'LSL$CMNDTIBLEND:PARAMS.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:DESCK.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:COMMAND.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:PROCESS.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:FILES.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+C
+C W/s
+	INTEGER*2    I,IFIL	! loop counters
+	INTEGER*2    IELEN	! length of the entry-in-hand
+C
+C Function:
+	INTEGER	     IFFOPEN	! open IFF file
+C
+C EIHPHI's output routine argument
+	EXTERNAL     FLWSTR
+C
+C ......................................................................
+C
+	IFF_SETUP=.FALSE.			! assume failure
+C
+C Did the user specify IFF underlay control files?
+	IF (NUM_IFF.EQ.0) GOTO 998
+C
+C For each IFF file in turn
+	DO 1000 IFIL=1,NUM_IFF
+C
+C Open the IFIL'th input file
+	   IFF_SETUP=IFFOPEN(IFIL,
+     &		IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)),,HAD_DIAG)
+C
+C Did it open OK?
+	   IF (.NOT.IFF_SETUP) GOTO 999
+C
+C Yes. Set "file is open" flag
+	   IFFLUN_INUSE(IFIL)=.TRUE.
+C
+C And dragoon the IFF input revision level to 1 - treat all CB, ST and
+C ZS entries as if they are CBs 
+	   CALL IFFIRV(1)
+C
+C And inquire file identification.
+	   CALL IFFID(FID(1,IFIL))
+	    IF (HAD_LIST) THEN
+	      CALL FLWSEL(LISLUN)
+	      CALL FLWRTF
+	      CALL FLWRTF
+     &		('------------------------------------------'//
+     &		 '--------------------------------------')
+	      CALL FLWRTF('IFF file #%^L%N is %S',
+     &		IFIL,IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)))
+	    ENDIF
+C
+C Determine the presence of an HI entry
+	    CALL IFFNXC('HI',IELEN)
+	    IF (IELEN.LT.0) THEN
+	      CALL LSL_PUTMSG(DTIBLN__NOIFFHI)
+	      IF (HAD_LIST) CALL FLWRTF('File has no IFF HI entry.')
+	      CALL IFFRWD
+	    ELSE
+C
+C Even if only one of the input files has a HI entry the user must have
+C an IMP generation IFF environment and is not running DTIBLEND on DAMP 
+C generation files only, (thus expecting no HI entry in the IFF file.)
+C Flag that we have had a HI entry in at least one of the input files
+C and when the time comes put a new HI entry in the output file(s).
+C
+	      IF (HAD_LIST) THEN
+		CALL FLWRTF
+		CALL FLWRTF('File history:')
+		CALL EIHPHI(FLWSTR)
+	      ENDIF
+	   ENDIF	  
+C
+C Next we must get the Map Descriptor in case it is a new type MD with 
+C an origin offset. We must of course take this into account while 
+C controlling the 2 DTI file blend
+	   CALL IFFNXC('MD',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      CALL LSL_PUTMSG(
+     &		DTIBLN__NOMD,IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)))
+	      CALL IFFRWD
+	   ELSE
+C
+C Check that entry is long enough for type 2 MD
+              IF (IELEN.NE.MD2LEN) THEN
+	         CALL LSL_PUTMSG(DTIBLN__NOV2MD,
+     &			 IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)))
+	         MDTYPE=1			! type 1 MD
+	      ELSE				! it is,
+	         CALL EIHR(MD2ARR,MD2LEN,1)	! read it
+	         IF (MATV2.EQ.2) THEN		! MD 2 found - good
+C
+C Transfer the origin offset to our origin offset array OFFSET()
+		   OFFSET(1,IFIL)=MD2LOC(1)
+	 	   OFFSET(2,IFIL)=MD2LOC(2)
+C
+C Calc. the IFF local offsets relative to our DTI local datum
+	   	   LOCOFF(1,IFIL)=SNGL(OFFSET(1,IFIL)-MINXOF)
+	   	   LOCOFF(2,IFIL)=SNGL(OFFSET(2,IFIL)-MINYOF)
+C
+C If we have a new type Map Descriptor we can check that the different 
+C files have common spheroid, units, and projection and MD2PAR data.
+C Collect these data.
+	           FLPROJ(IFIL)=MD2PRJ
+		   FLUNIT(IFIL)=MD2UNT
+		   FLUSPHE(1,IFIL)=MD2USP(1)
+		   FLUSPHE(2,IFIL)=MD2USP(2)
+		   FLSPHE(IFIL)=MD2SPH
+		   DO 5 I=1,15
+	              FLPAR(IFIL,I)=MD2PAR(I)
+5		   CONTINUE
+	         ELSEIF (MATV2.EQ.-1) THEN
+	           CALL LSL_PUTMSG(DTIBLN__UNSETMD,
+     &			IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)))
+	         ELSE
+	           CALL LSL_PUTMSG(DTIBLN__NOV2MD,
+     &			IFF_NAME(IFIL)(1:IFF_NAME_LENGTH(IFIL)))
+	           MDTYPE=1			! type 1 MD
+	         ENDIF
+	      ENDIF
+	   ENDIF
+C
+C The preliminaries over, take each feature in the file in turn.
+C
+C Close the IFIL'th input file
+	   CALL IFFCLO(IFIL)
+	   IFFLUN_INUSE(IFIL)=.FALSE.
+1000	CONTINUE
+998	IFF_SETUP=.TRUE.		! flag success
+999	RETURN
+	END

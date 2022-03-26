@@ -1,5 +1,5 @@
 	SUBROUTINE 	CONGAZ
-CDEC$	IDENT	'19AP91'
+CDEC$	IDENT	'19JL94'
 C
 C	Copyright (C)			Laser-Scan Ltd., Cambridge
 C	Created				11-Jun-1990	John Cadogan
@@ -42,6 +42,10 @@ C
 	REAL*8		X,Y
 	LOGICAL		FIRST_FEATURE
 	LOGICAL		OUTPUT
+C
+	BYTE		CHARBYTE
+	INTEGER*4	CHARINT
+	EQUIVALENCE	(CHARINT,CHARBYTE)
 C
 C Record types
 C
@@ -190,8 +194,13 @@ C
 	CALL IFFST(STBUF,1,0)
 	CALL IFFRO( ANGLE )
 C
+C Prevent an integer overflow by first assigning the result of ICHAR to a
+C 4 byte int since this can be negative for composite characters and use an
+C equivalenced byte when copying the character to the TXBUF array.
+C
 	DO 200 I = 1, NCHS
-	   TXBUF(I) = ICHAR(TEXT(I:I))
+	   CHARINT = ICHAR(TEXT(I:I))
+	   TXBUF(I) = CHARBYTE
 200	CONTINUE
 C
 	CALL IFFTX(TXBUF, NCHS)

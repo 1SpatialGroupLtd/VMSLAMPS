@@ -1,0 +1,286 @@
+	LOGICAL*4 FUNCTION CHKVEX1(PFTR,QFTR,IP,IQ)
+
+***	MODULE	CHKVEX1
+***	IDENT	13OC92
+
+C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
+
+CMOD	Returns error from INSERT_PT to fail ASAP	 JB 11-Mar-1991
+CMOD	Made a function					ACM 10-Sep-1987
+CMOD	Added arg to INTRNLERR message			ACM 14-Aug-1987
+CMOD	Should be a function but return status actually
+C	passed using /STATUS/CHKVEX1 as a temporary
+C	frig as QUALLIB is currently subroutine based	TJH 29-May-1987
+C
+C	Created   : ACM					       Dec 1986
+
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNLSL:STATUS.CMN'		! for temp. frig
+
+C Data in
+	INTEGER*4	PFTR,QFTR		! line indices
+	INTEGER*4	IP			! pt at start of P vec
+	INTEGER*4	IQ			! pt at start of Q vec
+
+C Workspace
+	REAL*4		P1X,P1Y,P2X,P2Y		! vector P end pts
+	REAL*4		Q1X,Q1Y,Q2X,Q2Y		! vector Q end pts
+	REAL*4		P1P2X,P1P2Y		! vec1 into node
+	REAL*4		Q1Q2X,Q1Q2Y		! vec2 into node
+	REAL*4		P2Q2X,P2Q2Y		! vec from P2 to Q2
+	REAL*4		P1Q1X,P1Q1Y		! vec from P1 to Q1
+	REAL*4		P_LENSQ,Q_LENSQ		! sq vec length
+	REAL*4		INT_X,INT_Y		! proection int pt
+	REAL*4		NEAR_X,NEAR_Y		! nearest pt
+	REAL*4		DISTSQ
+	REAL*4		E1X,E1Y,E2X,E2Y		! for VECINT
+
+	REAL*8		PF,QF			! scale factors
+
+	INTEGER*4	IPNXT,IQNXT
+	INTEGER*4	IEND1,IEND2		! for VECINT
+	INTEGER*4	IPT
+
+	LOGICAL*1	PARALLEL		! vecs parallel?
+	LOGICAL*1	PROPER_CUT		! vecs realy cross over?
+
+	LOGICAL*4	VECTORS_INTERSECT	! vecs intersect?
+	LOGICAL*4	CAN_INSERT
+	LOGICAL*4	P_IS_POINT		! PFTR if pt-ftr?
+	LOGICAL*4	Q_IS_POINT		! QFTR if pt-ftr?
+	LOGICAL*4	MARK			! mark inserted pts?
+
+C Functions
+	LOGICAL*4	VECINT			! do vecs intersect?
+	LOGICAL*4	INSERT_PT
+
+C Data
+	DATA		MARK/.FALSE./		! dont mark inserted pts
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	The nearest points to the end-points of one vector are inserted
+C	into the other vector where they are closer than JNTOL.
+C
+C	If vectors intersect then both have a point inserted at this
+C	intersection point also.
+C
+C	Vectors from the same feature are not processed.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	CHKVEX1 = SS$_NORMAL	! assume success
+
+C Do not check vectors from same feature
+
+	IF (PFTR.EQ.QFTR) CALL LSL_PUTMSG(ILINK__INTRNLERR,1,'CHKVEX1')
+
+C Check for vector boxes within tolerance
+
+	IPNXT = IP+1
+	IQNXT = IQ+1
+
+C	p1x = pt(1,ip)
+C	p2x = pt(1,ipnxt)
+	CALL ASSIGN_VAL(%VAL(PT_START+8*(IP-1)),P1X,4)
+	CALL ASSIGN_VAL(%VAL(PT_START+8*(IPNXT-1)),P2X,4)
+
+C	q1x = pt(1,iq)
+C	q2x = pt(1,iqnxt)
+	CALL ASSIGN_VAL(%VAL(PT_START+8*(IQ-1)),Q1X,4)
+	CALL ASSIGN_VAL(%VAL(PT_START+8*(IQNXT-1)),Q2X,4)
+
+	IF (MAX(P1X,P2X).LT.MIN(Q1X,Q2X)-JNTOL) GOTO 80	! return
+	IF (MIN(P1X,P2X).GT.MAX(Q1X,Q2X)+JNTOL) GOTO 80	! return
+
+C	p1y = pt(2,ip)
+C	p2y = pt(2,ipnxt)
+	CALL ASSIGN_VAL(%VAL(PT_START+8*(IP-1)+4),P1Y,4)
+	CALL ASSIGN_VAL(%VAL(PT_START+8*(IPNXT-1)+4),P2Y,4)
+
+C	q1y = pt(2,iq)
+C	q2y = pt(2,iqnxt)
+	CALL ASSIGN_VAL(%VAL(PT_START+8*(IQ-1)+4),Q1Y,4)
+	CALL ASSIGN_VAL(%VAL(PT_START+8*(IQNXT-1)+4),Q2Y,4)
+
+	IF (MAX(P1Y,P2Y).LT.MIN(Q1Y,Q2Y)-JNTOL) GOTO 80	! return
+	IF (MIN(P1Y,P2Y).GT.MAX(Q1Y,Q2Y)+JNTOL) GOTO 80	! return
+
+C Boxes are within tolerance
+
+C Check for vector intersection
+
+	IF (MAX(P1X,P2X).LT.MIN(Q1X,Q2X)-COORD_TOL) GOTO 60
+	IF (MIN(P1X,P2X).GT.MAX(Q1X,Q2X)+COORD_TOL) GOTO 60
+	IF (MAX(P1Y,P2Y).LT.MIN(Q1Y,Q2Y)-COORD_TOL) GOTO 60
+	IF (MIN(P1Y,P2Y).GT.MAX(Q1Y,Q2Y)+COORD_TOL) GOTO 60
+
+C If vectors intersect then insert intersection point(s) into both vecs
+
+	VECTORS_INTERSECT = VECINT(	P1X,P1Y,P2X,P2Y,
+     &					Q1X,Q1Y,Q2X,Q2Y,
+     &					PF,QF,INT_X,INT_Y,
+     &	           			PROPER_CUT,PARALLEL,IEND1,IEND2,
+     &					E1X,E1Y,E2X,E2Y,COORD_TOL)
+
+	IF (.NOT.VECTORS_INTERSECT) GOTO 60
+
+	IF (PARALLEL) THEN
+
+	  IF (IEND1) 10,30,20
+
+C E1 is an end pt of P-vec and not of Q-vec
+C insert E1 into Q-vec
+
+10	  CHKVEX1 = INSERT_PT(E1X,E1Y,QFTR,IQ,IPT,MARK)
+	  IF (.NOT.CHKVEX1) GOTO 80
+C
+	  GOTO 30
+
+C E1 is an end pt of Q-vec and not of P-vec
+C insert E1 into P-vec
+
+20	  CHKVEX1 = INSERT_PT(E1X,E1Y,PFTR,IP,IPT,MARK)
+	  IF (.NOT.CHKVEX1) GOTO 80
+
+30	  IF (IEND2) 40,60,50
+
+C E2 is an end pt of P-vec and not of Q-vec
+C insert E2 into Q-vec
+
+40	  CHKVEX1 = INSERT_PT(E2X,E2Y,QFTR,IQ,IPT,MARK)
+	  IF (.NOT.CHKVEX1) GOTO 80
+
+	  GOTO 60
+
+C E2 is an end pt of Q-vec and not of P-vec
+C insert E2 into P-vec
+
+50	  CHKVEX1 = INSERT_PT(E2X,E2Y,PFTR,IP,IPT,MARK)
+	  IF (.NOT.CHKVEX1) GOTO 80
+
+	ELSE IF (PROPER_CUT) THEN
+
+C Insert pt at (X,Y) into both P_vec and Q-vec
+
+	  CHKVEX1 = INSERT_PT(INT_X,INT_Y,PFTR,IP,IPT,MARK)
+	  IF (.NOT.CHKVEX1) GOTO 80
+	  CHKVEX1 = INSERT_PT(INT_X,INT_Y,QFTR,IQ,IPT,MARK)
+	  IF (.NOT.CHKVEX1) GOTO 80
+	END IF
+
+C Find and insert nearest points
+
+60	P1P2X = P2X-P1X					! vector P1P2
+	P1P2Y = P2Y-P1Y
+
+	Q1Q2X = Q2X-Q1X					! vector Q1Q2
+	Q1Q2Y = Q2Y-Q1Y
+
+C	P_LENSQ = P1P2X**2+P1P2Y**2
+C	Q_LENSQ = Q1Q2X**2+Q1Q2Y**2
+	P_LENSQ = P1P2X*P1P2X+P1P2Y*P1P2Y
+	Q_LENSQ = Q1Q2X*Q1Q2X+Q1Q2Y*Q1Q2Y
+
+C	p_is_point = pnt_ftr(pftr)
+C	q_is_point = pnt_ftr(qftr)
+	CALL ASSIGN_VAL(%VAL(PNT_FTR_START+(PFTR-1)),P_IS_POINT,1)
+	CALL ASSIGN_VAL(%VAL(PNT_FTR_START+(QFTR-1)),Q_IS_POINT,1)
+
+	P_IS_POINT = P_IS_POINT.OR.P_LENSQ.LT.COORD_TOL*COORD_TOL
+	Q_IS_POINT = Q_IS_POINT.OR.Q_LENSQ.LT.COORD_TOL*COORD_TOL
+
+	P1Q1X = Q1X-P1X					! vector P1Q1
+	P1Q1Y = Q1Y-P1Y
+
+	P2Q2X = Q2X-P2X					! vector P2Q2
+	P2Q2Y = Q2Y-P2Y
+
+	IF (Q_IS_POINT) GOTO 70
+
+C Find nearest pt on vec Q to pt P1
+
+	QF = -DBLE(Q1Q2X*P1Q1X+Q1Q2Y*P1Q1Y)/DBLE(Q_LENSQ)
+	IF (QF.GE.ZEROPLUS.AND.QF.LE.ONEMINUS) THEN
+	  NEAR_X = Q1X+QF*Q1Q2X
+	  NEAR_Y = Q1Y+QF*Q1Q2Y
+C
+C	  DISTSQ = (NEAR_X-P1X)**2+(NEAR_Y-P1Y)**2
+	  DISTSQ = (NEAR_X-P1X)*(NEAR_X-P1X) +
+     &		   (NEAR_Y-P1Y)*(NEAR_Y-P1Y)
+C
+	  CAN_INSERT = DISTSQ.LE.JNTOL_SQ
+	  IF (CAN_INSERT) THEN
+	    CHKVEX1 = INSERT_PT(NEAR_X,NEAR_Y,QFTR,IQ,IPT,MARK)
+	    IF (.NOT.CHKVEX1) GOTO 80
+	  END IF
+	END IF
+
+C Find nearest pt on vec Q to pt P2
+
+	QF = 1-DBLE(Q1Q2X*P2Q2X+Q1Q2Y*P2Q2Y)/DBLE(Q_LENSQ)
+	IF (QF.GE.ZEROPLUS.AND.QF.LE.ONEMINUS) THEN
+	  NEAR_X = Q1X+QF*Q1Q2X
+	  NEAR_Y = Q1Y+QF*Q1Q2Y
+C
+C	  DISTSQ = (NEAR_X-P2X)**2+(NEAR_Y-P2Y)**2
+	  DISTSQ = (NEAR_X-P2X)*(NEAR_X-P2X) +
+     &		   (NEAR_Y-P2Y)*(NEAR_Y-P2Y)
+C
+	  CAN_INSERT = DISTSQ.LE.JNTOL_SQ
+	  IF (CAN_INSERT) THEN
+	    CHKVEX1 = INSERT_PT(NEAR_X,NEAR_Y,QFTR,IQ,IPT,MARK)
+	    IF (.NOT.CHKVEX1) GOTO 80
+	  END IF
+	END IF
+
+70	IF (P_IS_POINT) GOTO 80
+
+C Find nearest pt on vec P to pt Q1
+
+	PF = DBLE(P1P2X*P1Q1X+P1P2Y*P1Q1Y)/DBLE(P_LENSQ)
+	IF (PF.GE.ZEROPLUS.AND.PF.LE.ONEMINUS) THEN
+	  NEAR_X = P1X+PF*P1P2X
+	  NEAR_Y = P1Y+PF*P1P2Y
+C
+C	  DISTSQ = (NEAR_X-Q1X)**2+(NEAR_Y-Q1Y)**2
+	  DISTSQ = (NEAR_X-Q1X)*(NEAR_X-Q1X) +
+     &		   (NEAR_Y-Q1Y)*(NEAR_Y-Q1Y)
+C
+	  CAN_INSERT = DISTSQ.LE.JNTOL_SQ
+	  IF (CAN_INSERT) THEN
+	    CHKVEX1 = INSERT_PT(NEAR_X,NEAR_Y,PFTR,IP,IPT,MARK)
+	    IF (.NOT.CHKVEX1) GOTO 80
+	  END IF
+	END IF
+
+C Find nearest pt on vec P to pt Q2
+
+	PF = 1+DBLE(P1P2X*P2Q2X+P1P2Y*P2Q2Y)/DBLE(P_LENSQ)
+	IF (PF.GE.ZEROPLUS.AND.PF.LE.ONEMINUS) THEN
+	  NEAR_X = P1X+PF*P1P2X
+	  NEAR_Y = P1Y+PF*P1P2Y
+C
+C	  DISTSQ = (NEAR_X-Q2X)**2+(NEAR_Y-Q2Y)**2
+	  DISTSQ = (NEAR_X-Q2X)*(NEAR_X-Q2X) +
+     &		   (NEAR_Y-Q2Y)*(NEAR_Y-Q2Y)
+C
+	  CAN_INSERT = DISTSQ.LE.JNTOL_SQ
+	  IF (CAN_INSERT) THEN
+	     CHKVEX1 = INSERT_PT(NEAR_X,NEAR_Y,PFTR,IP,IPT,MARK)
+	     IF (.NOT.CHKVEX1) GOTO 80
+	  END IF
+	END IF
+
+80	IF (CHKVEX1) CHKVEX1 = SS$_NORMAL
+	RETURN
+	END
+

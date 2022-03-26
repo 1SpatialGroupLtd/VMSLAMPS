@@ -1,0 +1,444 @@
+	PROGRAM DFAD2I
+C
+***	IDENT	21JN88
+***	MODULE	DFAD2I
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C 	Author TJ Ibbs,  1 March 1983
+C 	Modified:  CC Brunt, 26 August 1983 & 4 October 1983
+C	Modified:  Jon Barber, 11-March-88  To use LSLLIB and DCL 
+C		   command line decoding.
+C	Modified:  DRC to remove message concerning Change 3
+C		   manuscript
+C
+C This program reads a DMA DLMS DFAD (Defense Mapping Agency Digital
+C Land Mass Simulation Digital Feature Analysis Data) mag tape and
+C translates the information into an IFF file on disc.
+C
+C ie it produces an IFF file containing culture data 
+C
+	IMPLICIT NONE
+C
+C common blocks
+C
+***     PARAMETER/HERE:DFAD2IMSG/
+***     PARAMETER/LSL$CMNLSL:LSLLIBMSG/
+***	COMMON/HERE:IFFILE/	! IFF file maintenance
+***	COMMON/HERE:SCRIPT/	! for MANNUM
+***	COMMON/HERE:STATE/	! what state we are in (feature,etc)
+***	COMMON/HERE:DESCR/	! feature descriptor stuff (for FAC)
+***	COMMON/HERE:PARAMS/	! control stuff
+***	COMMON/LSL$CMNLSL:CMDCOM/	! for command reading
+***	COMMON/LSL$CMNLSL:MTIVCM/	! magtape common
+***	COMMON/LSL$CMNLSL:STATUS/	! contains LSL_STATUS
+***	COMMON/LSL$CMNDLMS:DFAD/	! Univac 1/2 word buffer
+C
+C functions called
+C
+	INTEGER   	GETCOMLIN  !decodes command line
+	INTEGER         MTIRWD  ! rewind
+	INTEGER		MTINIT	! init tape for input
+	INTEGER		MTIBCK	! backspace one block
+	LOGICAL		HEADER	! read header/trailer blocks
+	LOGICAL		STRTIF	! start a new IFF file
+	LOGICAL		RDDSI	! read a  DSI block
+	LOGICAL		RDACC	! read an ACC block
+C
+C workspace
+C
+	INTEGER*4	RETVAL	! for MTINIT etc
+	INTEGER*4	IERR	! to widen MTIERR into
+        INTEGER         CMLINE  ! read command line
+        LOGICAL         OPENED  ! opened IFF file
+C
+C----------------------------------------------------------------
+C
+	CALL LSL_INIT		! initialise LSLLIB     
+        CALL DLMS_INIT          ! initialise DLMSLIB 
+C
+C set up the IFF mechanism for fielding errors
+C
+	CALL IFFTDY
+C
+C get and decode command qualifiers
+C
+        CMLINE = GETCOMLIN()
+        IF (.NOT.CMLINE) THEN
+           LSL_STATUS = CMLINE
+           GOTO 5002
+        ENDIF 
+        IF (INVAL) GOTO 5002
+C
+C If everything has gone correctly in any previous run  we 
+C should be just before a manus header or trailer block
+C
+	MANNUM = 0           !present position on tape from start
+C                            ! of tape read (= manus no. on tape
+C                            ! if REWOUND)  
+        INIFF = .FALSE.      !-not at first manuscript
+        OPENED = .FALSE.     ! IFF file not opened
+	DUMPOPN = .FALSE.    !no dump file open yet
+        BLKTYP = 0           !block not read and labelled
+C
+C *****************************************************************
+C initialise the magtape drive... to BOT only if REWIND specified
+C
+	RETVAL = MTINIT( TAPEUN, .NOT.REWIND)
+        IF (.NOT.RETVAL)THEN             !error initialising TAPEUN
+  	   CALL LSL_PUTMSG(DFAD2I__TAPINTERR, TAPEUN)	
+           CALL LSL_PUTMSG(RETVAL)
+	   IERR = MTIERR	         ! widen the error return
+           IF(RETVAL.EQ.LSL__SYSERR)CALL LSL_PUTMSG(IERR)
+	   GOTO 5002		         ! and give up
+	ENDIF
+C
+	CALL WRITEF('Reading from mag tape unit %S', TAPEUN)
+        IF (REWIND) CALL WRITEF('Tape now rewound to BOT')
+C
+        IF (SERNUM) CALL WRITEF (
+     &            'Searching tape to find manuscript %N', SKIPTO )
+C
+C
+C *****************************************************************
+C
+C we start in a neutral state...
+C
+	INFTR  = .FALSE.		! not in a feature
+	INFHDR = .FALSE.		! thus not in its header
+C
+C
+C Here is the routine to cope with negative search and SKIPTO
+C It places you after the required manus. header, and then turns
+C SKIPping off
+C Works by backspacing till a manus header found, and when found
+C MANNUM is made more negative. When MANNUM = SKIPTO we have
+C found the right place and can proceed with the main program
+C  NB after reading a block, backspace twice 
+C  for the previous unread block
+C
+1000    IF ( SKIP .AND. (SKIPTO.LT.0)) THEN
+C
+1001       IF (BLKTYP .NE. 0) THEN ! blk read & labelled so need
+C                               ! to backspace twice to previous  
+C
+              RETVAL = MTIBCK()      ! attempt to backspace
+              IF (.NOT.RETVAL) THEN
+                 IF (RETVAL.EQ.LSL__ENDOFTAPE) THEN   ! reached BOT
+                    CALL LSL_PUTMSG(DFAD2I__ENDOFDSS) ! stay there 
+                    GOTO 5002                         ! and exit
+                 ENDIF
+C
+                 CALL LSL_PUTMSG(DFAD2I__BCKSPERR, MTINBL)
+                 CALL LSL_PUTMSG(RETVAL)
+                 IERR = MTIERR
+                 IF (RETVAL.EQ.LSL__SYSERR)CALL LSL_PUTMSG(IERR)
+                 GOTO 5000
+              ENDIF
+           ENDIF 
+C 
+           RETVAL = MTIBCK()         ! attempt to backspace
+           IF (.NOT.RETVAL) THEN
+              IF (RETVAL.EQ.LSL__ENDOFTAPE) THEN   ! reached BOT
+                 CALL LSL_PUTMSG(DFAD2I__ENDOFDSS) ! stay there 
+C                                                  ! and exit
+              ENDIF
+C
+              CALL LSL_PUTMSG(DFAD2I__BCKSPERR, MTINBL)
+              CALL LSL_PUTMSG(RETVAL)
+              IERR = MTIERR
+              IF (RETVAL.EQ.LSL__SYSERR)CALL LSL_PUTMSG(IERR)
+              GOTO 5002
+           ENDIF
+C
+           CALL RDMAG                  ! read block 
+C
+C                                      ! backspace till header/
+           IF (BLKTYP .NE. MANHED) GOTO 1001  ! trailer found
+C
+           MANNUM = MANNUM - 1         ! found a header block 
+C                                      
+           IF ( MANNUM .EQ. SKIPTO ) THEN
+              SKIP = .FALSE.
+              GOTO 1150                ! join main prog as normal
+           ELSE
+              GOTO 1001                ! go round again
+           ENDIF
+C
+        ENDIF
+C                                 
+C 
+C and here we read each block off the tape...
+C
+1100	CALL RDMAG			! get next block
+C
+C we have a block in hand - let us do with it what seems reasonable
+C *****************************************************************
+C
+C are we skipping? if so, then we ignore all except manuscript 
+C header/trailer blocks...
+C
+	IF ( SKIP .AND. BLKTYP.NE.MANHED      ! header/trailer 
+     &		  .AND. BLKTYP.NE.ICLHED ) THEN
+	   GOTO 1100		              ! ignore other blocks
+	ENDIF                                 ! till header found
+C
+C what sort of block do we have??
+C
+1150	IF ( BLKTYP.EQ.MANHED ) THEN          ! header/trailer
+C
+C	 this is a header/trailer block - let us read it as such
+C
+	   IF (DIAG_BRIEF) THEN
+	      CALL WRITEF('Reading Header Block  %N',MTINBL)
+	   ENDIF
+C
+C	 so read it in...
+C
+	   IF ( HEADER() ) THEN
+C
+C	    got a new header, so close any outstanding file, and
+C	    open a new one
+C
+	      IF ( INIFF ) THEN        ! this header for next map
+C                                      !  = trailer for the present
+                 CALL ENDIFF           ! end the old file
+                 LSL_STATUS = LSL__NORMAL
+                 GOTO 5000                             ! finished 
+              ENDIF
+C
+C	    if INIFF .F. we are to start a new manuscript
+C
+	      IF (SKIPTO.GE.0) MANNUM = MANNUM + 1     ! count it
+C
+C         if we are skipping to a particular manuscript, we must
+C         check to see if this is it, and also if we are skipping
+C         to a map with a particular origin, we must check for that
+C
+1155          IF ( .NOT.SKIP ) GOTO 1165
+C
+C ******************************************************************
+C
+C		we are skipping - are we at the right place?
+C               if SKIP, either SERNUM or SERLAT and/or SERLON
+C
+	      IF (SERNUM) THEN
+                 IF (MANNUM .NE. SKIPTO) GOTO 1100    ! search again
+                 SKIP = .FALSE.     ! at right place, stop searching
+                 GOTO 1165
+              ENDIF
+C
+              IF (SERLAT) THEN
+                 IF (SKLAT .NE. LAT0 ) GOTO 1100      ! search again
+              ENDIF
+              IF (SERLON) THEN
+                 IF (SKLONG .NE. LONG0) GOTO 1100     ! search again
+              ENDIF
+              SKIP = .FALSE.        ! at right place, stop searching
+C
+C ******************************************************************
+C
+C	    so we must output our manuscript - let us proceed...
+C	    assume that it is Change 2 (it will tell us if it isn't)
+C
+1165	      CHANGE = 2		! assume no DSI or ACC block
+C
+              OPENED = .NOT.STRTIF()    ! start the new IFF file
+	      IF ( .NOT.OPENED ) THEN	! failed to open IFF file
+C
+		 CALL LSL_PUTMSG(DFAD2I__STRTIFERR)	 
+                 RETVAL = MTIBCK()      ! attempt to backspace
+                 IF (.NOT.RETVAL) THEN
+                    CALL LSL_PUTMSG(DFAD2I__BCKSPERR, MTINBL)
+                    CALL LSL_PUTMSG(RETVAL)
+                    IERR = MTIERR
+                    IF (RETVAL.EQ.LSL__SYSERR)CALL LSL_PUTMSG(IERR)
+                 ENDIF
+                 GOTO 5002              ! to exit
+	      ENDIF
+C
+C	    let us describe this manuscript to the user...
+C
+	      CALL PRMHDR		! describe it
+C
+	   ELSE                         ! BLKTYP = TRAILR
+C
+C	    otherwise we have found a trailer block - the end of data
+C
+	      IF (DIAG_BRIEF) THEN
+	         CALL WRITEF('Reading Trailer Block')
+	      ENDIF
+	      BLKTYP = TRAILR		! it is a trailer block
+	      GOTO 1150			! so resubmit as trailer block
+	   ENDIF
+C
+C ********************************************************************
+C
+	ELSEIF ( BLKTYP.EQ.TRAILR ) THEN	! back as a trailer
+C
+C	 so here we have read a trailer block - deal with it
+C	 first check if we were searching for a particular manuscript
+C
+	   IF (SKIP) THEN			! yes, we were
+	      IF (SERNUM) THEN  ! manus SKIPTO not found in MANNUM mss 
+		 CALL LSL_PUTMSG(DFAD2I__SKIPTOERR, SKIPTO, MANNUM)
+	      ELSE                      ! required lat, long not found
+		 IF (SERLAT.AND..NOT.SERLON)
+     &                              CALL LSL_PUTMSG(DFAD2I__LATNOTFND)
+                 IF (SERLAT.AND.SERLON) 
+     &                              CALL LSL_PUTMSG(DFAD2I__LLNOTFND)
+		 IF (SERLON.AND..NOT.SERLAT)
+     &                              CALL LSL_PUTMSG(DFAD2I__LONGNTFND)
+	      ENDIF
+	      SKIP   = .FALSE.		! can't search after trailer
+	   ENDIF
+C
+C	 regardless, we should close any open IFF files
+C
+	   IF ( INIFF ) THEN
+              CALL ENDIFF	        ! so close any open file
+              LSL_STATUS = LSL__NORMAL           !  datasets
+           ENDIF
+C
+	   CALL RD2MKS			! read the 2 tape marks
+C
+           RETVAL = MTIBCK()
+           RETVAL = MTIBCK()     ! attempt to backspace for next run
+           IF (.NOT.RETVAL) THEN
+              CALL LSL_PUTMSG(DFAD2I__BCKSPERR, MTINBL)
+              CALL LSL_PUTMSG(RETVAL)
+              IERR = MTIERR
+              IF (RETVAL.EQ.LSL__SYSERR)CALL LSL_PUTMSG(IERR)
+           ENDIF
+C
+	   CALL LSL_PUTMSG(DFAD2I__ENDOFDSS)  ! end of tape datasets
+           IF ( OPENED ) LSL_STATUS = LSL__NORMAL
+           GOTO 5000                                 
+C
+	ELSEIF ( BLKTYP.EQ.ICLHED ) THEN
+C
+	   CALL LSL_PUTMSG(DFAD2I__RDICLHDR)    !ICL hdr encountered 
+C                                               ! & ignored
+	ELSEIF ( BLKTYP.EQ.DSIHED ) THEN
+C
+	   CHANGE = 3
+C	   CALL WRITEF('Change %N manuscript',CHANGE)
+C
+	   IF(DIAG_BRIEF)THEN
+	      CALL WRITEF('Reading DSI Block     %N',MTINBL)
+	   ENDIF
+C
+	   IF ( RDDSI() ) THEN
+	      CALL LSL_PUTMSG(DFAD2I__DSIRDERR) !DSI blk abandoned
+	   ENDIF
+C
+	ELSEIF ( BLKTYP.EQ.ACCHED ) THEN
+C
+	   CHANGE = 3
+C
+	   IF(DIAG_BRIEF)THEN
+	      CALL WRITEF('Reading ACC Block     %N',MTINBL)
+	   ENDIF
+C
+	   IF ( RDACC() ) THEN
+	      CALL LSL_PUTMSG(DFAD2I__ACCRDERR) !ACC blk abandoned
+	   ENDIF
+C
+	ELSEIF ( BLKTYP.EQ.FTRBLK ) THEN
+C
+C	 this is a data block...
+C
+	   IF ( DIAG_BRIEF ) THEN
+	      CALL WRITEF('Reading Feature Block %N',MTINBL)
+	   ENDIF
+C
+C	 so read it in
+C
+	   CALL FEATUR
+C
+	ELSEIF ( BLKTYP.EQ.TAPEMK ) THEN
+C
+C	 this was a tapemark - shouldn't be there
+C
+	   CALL LSL_PUTMSG(DFAD2I__UNEXPTMK, MTINBL)
+	   BLKTYP = -1		       ! resubmit as error block
+	   GOTO 1150
+C
+	ELSE
+C
+C some mistake - unknown type of block ( #MTINBL in manus MANNUM)
+C                     
+	   CALL LSL_PUTMSG(DFAD2I__MANBLKERR, MTINBL, MANNUM)
+C
+	   IF (SKIP) THEN
+C
+C	    we are skipping, so continue our search around this block
+C
+	      CALL LSL_PUTMSG(DFAD2I__CONTSERCH)   ! block ignored,
+C                                            ! attempt to continue
+C          ELSE
+C
+	      CALL LSL_PUTMSG(DFAD2I__BLKIGNORE)   ! block ignored
+C
+C	    check if we are in an IFF file, which we should terminate
+C
+	      IF ( INIFF ) THEN		! yes, in a file
+		 IF ( INFTR ) THEN	! and also in a feature
+		    CALL LSL_PUTMSG(DFAD2I__OUTFTR, FAC)  
+          	    CALL OUTFTR       ! forcing output of feature FAC
+		 ENDIF
+		 IF ( DONHDR ) CALL EOPTR     ! end the current layer
+		 CALL LSL_PUTMSG(DFAD2I__ENDIFF)  ! attempt to neatly
+		 CALL ENDIFF			  ! end the IFF file
+C
+C        and we must now find the next manuscript header for next run
+C
+		 CALL LSL_PUTMSG(DFAD2I__NXTMANUS)  ! attempt to find
+4000             CALL RDMAG                         ! next manuscript
+C
+                 IF ((BLKTYP.EQ.MANHED).OR.(BLKTYP.EQ.TRAILR))THEN
+                    MANNUM = MANNUM + 1
+                    IF (BLKTYP.EQ.TRAILR) THEN
+                       CALL WRITEF (
+     &                'Trailer for manuscript no. %N found', MANNUM)  
+                       CALL WRITEF ('No more datasets on tape')
+                    ENDIF
+                    IF (BLKTYP.EQ.MANHED) CALL WRITEF(
+     &                'Header for manuscript no. %N found', MANNUM)   
+                    GOTO 5000                     ! finish off
+                 ELSE
+                    GOTO 4000                     ! till find next
+                 ENDIF                            ! header or trailer
+C
+	      ENDIF
+C
+	   ENDIF
+C
+	ENDIF
+C
+	GOTO 1100			! get next block
+C
+C *******************************************************************
+C
+C and down here we actually wind up the program
+C
+5000    IF ((BLKTYP.EQ.MANHED).OR.(BLKTYP.EQ.TRAILR)) THEN 
+           RETVAL = MTIBCK()     ! attempt to backspace for next run
+           IF (.NOT.RETVAL) THEN
+              CALL LSL_PUTMSG(DFAD2I__BCKSPERR, MTINBL)
+              CALL LSL_PUTMSG(RETVAL)
+              IERR = MTIERR
+              IF (RETVAL.EQ.LSL__SYSERR)CALL LSL_PUTMSG(IERR)
+           ENDIF
+        ENDIF
+        CALL ENDIFF			! finish off any IFF file
+C
+C Close any open dump file
+C
+	IF (DUMPOPN) CALL FLWCLO(DUMPLUN)
+C
+C Exit from program
+C
+5002    CALL LSL_EXIT (LSL_STATUS)		! and leave the program
+C
+	END

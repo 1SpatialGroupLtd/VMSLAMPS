@@ -1,0 +1,181 @@
+	SUBROUTINE FUSNODS(LNK,NOD,NPOLY)
+C
+***	IDENT	16MY86
+***	MODULE	FUSNODS
+C
+C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
+C	Created   : ACM					Mar 1986
+C
+	IMPLICIT NONE
+C
+***	COMMON/HERE:VEC/
+C
+C parameters in
+	INTEGER		NPOLY			! No. of links and nodes
+	INTEGER		LNK(NPOLY)		! list of links
+	INTEGER		NOD(NPOLY)		! list of nodes
+C
+C workspace
+	INTEGER*2	STANOD		! index of latest node in sector
+	INTEGER*2	INODE			! node index
+	INTEGER		I,J,IPOLY,JPOLY
+	INTEGER		NARMS			! No of arms at a node
+	INTEGER		AMP(MAXRMS)		! array of ARm Pointers
+	INTEGER		IPTSTA,IPTNXT,IPTFIN	! link start,mid,end pts
+	INTEGER		ILINK,ABSILINK		! link index
+	INTEGER		IARM			! arm index
+	INTEGER		INARM(10)
+	REAL		ANG(MAXRMS),THT		! array of arm ANGles
+	REAL		DET			! determinant
+	REAL		XNODE,YNODE		! node coords
+	REAL		DX1,DY1,DX2,DY2		! vectors
+	REAL		X1,Y1,X2,Y2		! points
+	REAL		F			! factor
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Fuses all nodes in NOD into one single node and deletes all
+C	links (between these nodes) in LNK
+C
+C	Position of resulting node is determined by node positions in
+C	NOD and also by angles of arms coming into these nodes from
+C	outside
+C
+C	If there are less than 4 nodes, the position is determined by
+C	the intersection point between any two incoming arms, otherwise
+C	the position is just the node centre of gravity.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+	IF (NPOLY.LE.2) RETURN
+C
+C create new node record
+	N_NODES = N_NODES+1
+	IF (N_NODES.GT.MAXNODES) THEN
+	  CALL EXPAND('*** FATAL ERROR : TOO MANY NODES ***')
+	  CALL TTWLIN()
+	  CALL FLWLIN()
+	  CALL EXIT
+	END IF
+	INODE = N_NODES
+C
+C mark all links in LNK as deleted
+	DO 10 IPOLY = 1,NPOLY
+	  LINKPOS(1,LNK(IPOLY)) = NIL
+10	CONTINUE
+C
+C collect together list of all arms not deleted
+	NARMS = 0
+	DO 60 IPOLY = 1,NPOLY
+	  IARM = NDAT(AM_NDAT,NOD(IPOLY))	! first arm
+	  GOTO 30
+20	  IARM = ARM(AM_ARM,IARM)		! next arm
+30	  IF (IARM.EQ.NIL) GOTO 50		! no more arms
+	  ILINK = ARM(LI_ARM,IARM)		! directed link index
+	  IF (LINKPOS(1,ABS(ILINK)).EQ.NIL) GOTO 20
+	  NARMS = NARMS+1			! got a remaining arm
+	  AMP(NARMS) = IARM
+	  ANG(NARMS) = ANGLE(IARM)
+	  GOTO 20				! get next arm
+50	  IF (NARMS.EQ.0) THEN
+	    INARM(IPOLY) = NIL
+	  ELSE
+	    INARM(IPOLY) = AMP(NARMS)
+	  END IF
+60	CONTINUE
+C
+C redirect LINKENDS to new node for all remaining arms
+	DO 70 I = 1,NARMS
+	  ILINK = ARM(LI_ARM,AMP(I))
+	  IF (ILINK.GT.0) THEN
+	    LINKENDS(1,ILINK) = INODE
+	  ELSE
+	    LINKENDS(2,-ILINK) = INODE
+	  END IF
+70	CONTINUE
+C
+C sort resulting arm list clockwise from 3 o'clock
+	DO 90 I = 2,NARMS
+	  DO 80 J = I,2,-1
+	    IF (ANG(J).LE.ANG(J-1)) GOTO 90
+	    THT = ANG(J)
+	    IARM = AMP(J)
+	    ANG(J) = ANG(J-1)
+	    AMP(J) = AMP(J-1)
+	    ANG(J-1) = THT
+	    AMP(J-1) = IARM
+80	  CONTINUE
+90	CONTINUE
+C
+C transfer from local array into linked list for new node
+100	NDAT(AM_NDAT,INODE) = AMP(1)
+	DO 110 I = 2,NARMS
+110	ARM(AM_ARM,AMP(I-1)) = AMP(I)
+	ARM(AM_ARM,AMP(NARMS)) = NIL
+C
+C find new node position - this is the position of the intersection
+C of the first two consecutive arms which are not parallel if there
+C are less than 4 nodes, otherwise it is the node centre of gravity
+	IF (NPOLY.GE.4) GOTO 150
+C
+	IPOLY = 0
+120	IPOLY = IPOLY+1
+	IARM = INARM(IPOLY)
+	IF (IARM.EQ.NIL) GOTO 120
+	THT = ANGLE(IARM)
+	DX2 = -COS(THT)
+	DY2 = -SIN(THT)
+	X2 = NPOS(1,NOD(IPOLY))
+	Y2 = NPOS(2,NOD(IPOLY))
+130	DX1 = DX2
+	DY1 = DY2
+	X1 = X2
+	Y1 = Y2
+140	IF (IPOLY.EQ.NPOLY) GOTO 150
+	IPOLY = IPOLY+1
+	X2 = NPOS(1,NOD(IPOLY))
+	Y2 = NPOS(2,NOD(IPOLY))
+	IARM = INARM(IPOLY)
+	IF (IARM.EQ.NIL) GOTO 140
+	THT = ANGLE(IARM)
+	DX2 = -COS(THT)
+	DY2 = -SIN(THT)
+	DET = DY1*DX2-DX1*DY2
+	IF (ABS(DET).LT.RTOL) GOTO 130		! parallel
+	F = (DX2*(Y2-Y1)-DY2*(X2-X1))/DET
+	XNODE = X1+F*DX1
+	YNODE = Y1+F*DY1
+	GOTO 170
+C
+C here if node position cannot be found by projecting back consecutive
+C arms - so the node centre of gravity will be used instead
+150	XNODE = 0
+	YNODE = 0
+	DO 160 IPOLY = 1,NPOLY
+	  XNODE = XNODE+NPOS(1,NOD(IPOLY))
+	  YNODE = YNODE+NPOS(2,NOD(IPOLY))
+160	CONTINUE
+	XNODE = XNODE/NPOLY
+	YNODE = YNODE/NPOLY
+C
+C new node position is set
+170	NPOS(1,INODE) = XNODE
+	NPOS(2,INODE) = YNODE
+C
+C find which sector new node belogs to
+	IX_SECTOR = 1+XNODE/XMAX_SECTOR
+	IX_SECTOR = MIN(IX_SECTOR,NX_SECTORS)
+	IY_SECTOR = 1+YNODE/YMAX_SECTOR
+	IY_SECTOR = MIN(IY_SECTOR,NY_SECTORS)
+C
+C put new node at head of list of nodes for this sector
+	STANOD = NODELIST(1,IX_SECTOR,IY_SECTOR)
+	NODELIST(1,IX_SECTOR,IY_SECTOR) = N_NODES
+	NEXTNODE(N_NODES) = STANOD
+C
+C mark all nodes in NOD as deleted
+	DO 180 IPOLY = 1,NPOLY
+	  NDAT(AM_NDAT,NOD(IPOLY)) = NIL
+180	CONTINUE
+C
+	END

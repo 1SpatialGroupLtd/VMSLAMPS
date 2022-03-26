@@ -1,6 +1,6 @@
-	SUBROUTINE WRITE_MD_SEG(WHICH_SEG,TEXT_STRING)
+	SUBROUTINE WRITE_MD_SEG(WHICH_SEG)
 C
-CDEC$	IDENT	'27SE94'
+CDEC$	IDENT	'10OC94'
 C
 C	Copyright (C) Laser-Scan Ltd., Cambridge, England.
 C
@@ -17,14 +17,18 @@ C       Assumes the MAPDATA output file is already selected for writing.
 C
 	IMPLICIT NONE
 C
+C Common Blocks
+C
+	INCLUDE	'CMN:IFF.CMN'      		! IFF specific things
+C
 C Arguments
 C
 	INTEGER*4	WHICH_SEG	! segment number
-	CHARACTER*(*)	TEXT_STRING	! text string for attribute field
+!!!!	CHARACTER*(*)	TEXT_STRING	! text string for attribute field
 C
 C Just write the SEGMENT entry, including the text string.
 C
-	CALL FLWRTF('SEGMENT %N  **  %S  **',WHICH_SEG,TEXT_STRING)
+	CALL FLWRTF('SEGMENT %N  **  %A  **',WHICH_SEG,AC_BYTE)
 C
 C Return
 C

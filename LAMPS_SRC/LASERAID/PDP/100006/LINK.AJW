@@ -1,0 +1,885 @@
+	SUBROUTINE LINK(EC,RC,USEFND)
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+C Author M.C.Fulford
+C
+C	Created  1976
+C	Conditionalisation tidied MCF 20/May/80
+C	Moan about duff commands removed by AJW 31-July-1980
+C
+C Main routine for LINK digitising
+C
+C
+***	COMMON/PARAMS/
+C fixed commands
+	PARAMETER GOCOM = 8
+	PARAMETER SMFCOM = 9
+C
+	INTEGER EC	! entry code
+	INTEGER RC	! return code
+	LOGICAL*1 USEFND     ! Do auto find procedure (INI)
+C Codes are:-
+C EC:	1 - initialise
+C	2 - terminate
+C	3 - digitise feature
+C	4 - adjust mode
+C	5 - try "small feature" first
+C
+C RC:	0 - O.K. - open feature
+C	3 - O.K. - closed feature
+C	-1 - aborted
+C	<0 - various errors
+C
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+***	COMMON/SCCORR/
+***	COMMON/MASTER/
+***	COMMON/TEXTC/
+***	COMMON/LNKC/
+***	COMMON/LKPARM/
+***	COMMON/MPEP/
+***	COMMON/LINKS/
+***	COMMON/FORKS/
+***	COMMON/LKFOLL/
+***	COMMON/DIGC/
+***	COMMON/BLG/
+***	COMMON/TRKSEG/
+***	COMMON/DRWSCL/
+**	IF	ELF v JNCTN
+***	COMMON/ELFPAR/
+***	COMMON/JUNCTN/
+**	ENDC
+**	IF ELF
+***	COMMON/FTRLST/
+**	ENDC
+C
+C functions called
+	INTEGER APPSEG
+	INTEGER TOMP
+	LOGICAL TSTCON,SMLFTR
+	INTEGER RDCOMM
+	INTEGER NEWTIM
+	INTEGER GETMAC,SETMAC
+C
+C workspace:
+	INTEGER CWD
+	INTEGER OLDLST		!  used by REJECT command
+	INTEGER NMPIFF		! Number of Master Points in IFF file
+	INTEGER NMPCON		! Number of last CONfirmed Master Point
+	INTEGER SECID(2) 	! direction to be used for second half
+	REAL D(2),ROLPOS(2)
+	LOGICAL*1 BOOL,RDING,MANUAL,CLOSED,ROLING,NEAR,OLDDSP
+	LOGICAL*1 OUTPUT        ! points to be output to IFF
+
+	LOGICAL*1 SEQ,CUT	! used in DIG & CUT commands
+C				  which are in-built macro commands
+	LOGICAL*1 HADINI	! obeyed the INI macro
+	LOGICAL*1 SQARED        ! item has been squared
+	LOGICAL*1 BOX		! for small feature scans
+	INTEGER ININUM		! the macro for INI
+	INTEGER TOLD		! previous time zone
+	INTEGER NED(2),AUTCOM,NXTDIR
+C
+	INTEGER TF(-1:0)	! for neat output
+	INTEGER FSTLST(2), CONTYP(0:5)
+	INTEGER FSTCON,CONGOT			! arguments of USEJNC
+C
+	DATA TF(-1),TF(0)/32,45/
+	DATA FSTLST/3RFST,3RLST/
+	DATA CONTYP/3RLIN,3REDG,3RWID,3RAPX,3RPRE,3RJUN/
+C
+C Entry point
+C
+	RC = 0
+	ININUM = INICOM
+	HADINI=.NOT.USEFND
+	BOX = EC.EQ.5
+	RSEOFF(X) = 0
+	RSEOFF(Y) = 0
+	GOTO (50,70,100,100,60),EC
+	CALL WRITEF('LINK: EC of %N!',EC)
+	GOTO 9999
+C
+C Initialise
+C
+50	CALL IFFSYS(SAVLUN,2,RDING)
+	CALL SETMAC(4)
+	LNKFB = "100000
+	CALL CSWT(0.0,0.0)
+	NXTID(X) = 200
+	NXTID(Y) = 200
+	FBCODE(14) = 14
+	FBCODE(16) = 16
+	INIABO=.FALSE.
+	GOTO 100
+C
+C set up for small feature
+C
+60	ININUM = SMFCOM
+	HADINI = .FALSE.
+	CALL PARIO(4,PTYPE)
+	CALL CSRD(NEXT(X),NEXT(Y))
+	NXTID(X) = IDSIZE
+	NXTID(Y) = 0
+	CALL CSWT(NEXT(X)-NXTID(X)/2,NEXT(Y)-NXTID(Y)/2)
+	GOTO 100
+C
+C Terminate
+C
+70	IF(.NOT.INIABO) CALL IFFSYS(SAVLUN,1,RDING)
+	GOTO 9999
+C
+C start
+C
+90	CALL PARIO(4,LTYPE)	! reset to default type
+	BOX = .FALSE.		! for failed small features
+C Reset
+100	SECOND=.FALSE.
+	FIRSTP=.TRUE.
+	OUTPUT=EC.NE.4
+	NMP(1)=0
+	INDEX(1) = 0
+	NMPIFF = 0
+C second time around come here
+110	CALL CSRD(NEXT(X),NEXT(Y))
+	CALL SETCHN
+	CHNSEL = 0
+	LSTSEL = 0
+	TRKWID = -1.
+	TRKPOL = 0	! only used in ELA
+	NEOLD = 0
+	AUTCOM = 0
+	OLDLST = 0
+	MOVING = 2
+	NXTDIR = -1
+	DRWVEC=.TRUE.
+	PENUP = .TRUE.
+	NMPCON = 0
+	DUMB = .FALSE.
+	JUMPED = .FALSE.
+	MANUAL = .FALSE.
+	SCNND = .FALSE.
+	GROWN = .FALSE.
+	PACTED = .FALSE.
+	LISTED = .FALSE.
+	FORKED = .FALSE.
+	ASSED = .FALSE.
+	SPANED = .FALSE.
+	MERGED=.FALSE.
+	FAST = SECOND
+	VERY = .FALSE.
+	ROLING = .FALSE.
+	CLOSED=.FALSE.
+	SQARED = .FALSE.
+	CODPOS = 0
+	DISP=.TRUE.
+	OLDDSP=DISP
+C *** nasty frig for FB4 = GO !
+	FBCODE(4)=LNKCAL+GOCOM-1
+	LNKFB=LNKFB.OR."10
+C *** end of frig
+C
+C Display the general state of play
+C
+300	IF(DISP.EQ.OLDDSP) GOTO 305
+	OLDDSP=DISP
+	IF(DISP) CALL NEWTIM(THELP)  ! now in HELP mode
+	IF(.NOT.DISP) CALL NEWTIM(TFOLL)  ! now following
+305	IF (DISP) CALL LNKDRW(MANUAL,ROLING,MOVING,SQARED,ROLPOS,
+     &                        NXTDIR,BOX)
+	GOTO 400
+C
+C Refresh loop and commands
+390	DCPTR = -1
+	TXTPTR = -2
+	CODPOS = 0
+400	N = LNKFB
+	IF (MOVING .EQ. 1) N = N.OR."20000
+	CALL FBWT16(N)
+	SEQ = .FALSE.
+	N = ININUM		! do we want INI command ?
+	IF (N.LE.0 .OR. HADINI) GOTO 405	! if we don't
+	HADINI = .TRUE.
+	GOTO 705		! yes - go & get it
+C
+405	IF(RDING.AND.DCPTR.GE.TXTPTR) GOTO 420  ! get line from file
+	CWD = NXTCOM(N)
+	IF (CWD) 415,415,410
+410	IF (CWD .LE. LNKACT) GOTO 500
+	CALL INOUT(CWD-LNKACT)	! set, or type, something
+	GOTO 300	! DISP may have changed
+C blank line or error
+415	IF (DCPTR .LT. 0) GOTO 420
+	GOTO 390
+C See about the next line
+420	IF (.NOT.RDING) GOTO 422
+	CALL RDABO   ! to prevent it hanging
+	CALL IFFSYS(SAVLUN,3,RDING,TXTBUF,TXTPTR)
+	IF (.NOT.RDING) GOTO 9200  ! end of initialise
+	DCPTR = 1
+	IF (ECHO) CALL WRITEF('%S70',TXTBUF)
+C Move next scan with cursor
+422	IF (DISP .AND. ROLING) GOTO 450
+	IF (DISP) GOTO (423,426),MOVING
+	GOTO 400
+C change position
+423	CALL CSRD(NEXT(X),NEXT(Y))
+	GOTO 429
+C change angle
+426	CALL CSAJST(XC,YC)
+	D(X) = XC-NEXT(X)
+	D(Y) = YC-NEXT(Y)
+	R = SQRT(D(X)*D(X)+D(Y)*D(Y))
+	R1= 1.0
+	IF (R .GT. 30000.) R1 = 30000./R
+	NXTID(X) = D(X) * R1
+	NXTID(Y) = D(Y) * R1
+429	IF (MANUAL) GOTO 400
+	GOTO 300
+C Roll along the MP line
+450	CALL RALONG(NMPMIN,NMPMAX,1,ROLPOS)
+	GOTO 300
+C
+C Here for commands that do things
+C
+500	IF (CWD .LE. 16) CWD = FBCODE(CWD)
+	GOTO ( 400, 400, 400, 400,
+     *         400, 400, 400, 400,
+     *         400, 400, 400, 400,
+     *         400, 600, 400, 900,
+     *         700,700,700,700,700,700,700,700,700,
+     *         700,700,700,700,700,700,700,700,700,
+     *         700,700,700,700,700,700,700, ! MACNUM  of these
+     *         710,710,710,750,750,750,740,90,660,670,
+     *         755,760,770,780,
+**	IF	ELF|JNCTN
+     *         910,920,925,
+**	ENDC
+**	IF	JNCTN
+     *         930,
+**	ENDC
+     *         1000,1050,1100,1130,1140,
+     *        1150,1170,1180,1200,1205,1210,
+**	IF	ELF
+     *        1230,
+**	ENDC
+     *        1240,1250,1260,1270,1280,
+     *        1290,1300,1350,1360,1370,1375,1377,1380,400,1398,1399,
+     *         1400,1415,790,800,801,820,825,830,840,850,860,870,
+     *         9999),CWD
+	GOTO 400
+C
+C Out of context commands
+C
+550	CALL WRITEF('Out of context!')
+	GOTO 390
+C
+C change the action of the cursor
+C
+600	MANUAL = .FALSE.
+	IF (INTARG .NE. 0) MOVING = INTARG
+	GOTO (630,620),MOVING
+C
+620	MOVING = 1
+	CALL CSWT(NEXT(X),NEXT(Y))
+	GOTO 400
+C
+630	MOVING = 2
+	CALL CSWT(NEXT(X)+NXTID(X),NEXT(Y)+NXTID(Y))
+	NXTDIR = -1
+	GOTO 400
+C
+C Indicate the general context
+C
+660	CALL WRITEF('%CSCANNED %CGROWN %CPACTED %CLISTED',
+     *              TF(SCNND), TF(GROWN),TF(PACTED),TF(LISTED))
+	CALL WRITEF(' %CFORKED %CASSED %CMERGED %N points',
+     *     TF(FORKED),TF(ASSED),TF(MERGED),NMPIFF)
+	GOTO 400
+C
+C PAS n
+C Indicate our assessment, n = 0 -> verbose
+C
+670	CALL WRITEF('%CLOST %CVERY %CCON %CSCAN FRK %N COM %N PRD%N',
+     *     TF(LOST),TF(VERY),TF(CNFSED),TF(SCAN),LSTFRK,FRKCOM,NLOST)
+	CALL WRITEF('%CNOTAPP TRKWID %F0.1 TRKPOL %N',
+     *     TF(NOTAPP),TRKWID,TRKPOL)
+	IF (INTARG .NE. 0) GOTO 400
+	I = BSTCON
+	BOOL = .TRUE.
+675	IF (I .LE. 0) GOTO 400
+**	IF	ELF
+	  IF (BOOL) CALL WRITEF('POL END TYP  QUAL')
+**	IFF
+	  IF (BOOL) CALL WRITEF('OFF END TYP  QUAL')
+**	ENDC
+	  IF (BOOL) CALL WRITEF(' ')
+	  BOOL = .FALSE.
+	  CALL WRITEF('%I3 %R %R%F7.2',
+     *     CONNCT(1,I),FSTLST(CONNCT(3,I)),
+     *     CONTYP(CONNCT(4,I)),QUALTY(I))
+	  I = NXTBST(I)
+	  GOTO 675
+C
+C Call macro command
+C
+700	N = CWD-LNKCAL+1
+705	M = GETMAC(N)
+	GOTO 725
+C
+C Define,print and code macro commands
+C
+710	M = SETMAC(CWD-LNKDEF+1)
+725	GOTO (400,415,730),M
+730	IF (RDING) GOTO 420 ! for a new line
+	GOTO 390
+C
+C Track-dependant parameter mechanism
+C
+C TYPE (n)
+740	IF (INTARG.LE.0) INTARG = LTYPE
+	LTYPE = INTARG
+C fall through to join:
+C PAR,SET,PTY
+C
+750	CALL PARIO(CWD-LNKPAR+1,INTARG)
+	GOTO 400
+C
+C QUE n mmm - queue up command 'mmm' to occur 
+C             after n/100 seconds.
+C
+755	QUETIM = INTARG		! delay
+	QUECOM = NXTCOM()	! command number
+	IF (QUECOM) 415,415,400	! report any error
+C
+C PAU n mmm - test FBn (which is lit) to set not FAST.
+C	      Obey 'mmm' if not fast, else skip it.
+C
+760	I = ISHFT(1,INTARG-1)
+	LNKFB = LNKFB.OR.I
+	CALL FBRD(N)
+	FAST = FAST .AND. N.NE.INTARG
+	CWD  = NXTCOM(N)
+	IF (FAST) GOTO 400	! carry on
+	IF (CWD) 390,390,410
+C
+C FBX n - remove alias from FBn
+C       n<0 - apply to FB1 -> FBn
+C
+770	CWD = 0
+C
+C FB n mmm - 	define FBn to be synonymous with
+C		command 'mmm'. FBn lit.
+C		If 'mmm' illegal or missing, then
+C		as 'FBX n'
+C
+780	M = INTARG
+	IF (IABS(M).LE.16) GOTO 783
+	  CALL WRITEF('Illegal FB no %N',M)
+	  GOTO 390
+783	IF (CWD .NE. 0) CWD = NXTCOM(I)
+	IF (CWD .LT. 0) CWD = 0
+	DO 785 N=MAX(1,M),IABS(M)
+	  FBCODE(N) = CWD
+	  I = ISHFT(1,N-1)
+	  LNKFB = (LNKFB.AND..NOT.I).OR.((CWD.GT.0).AND.I)
+785	  CONTINUE
+	GOTO 400
+C
+C TXZ - clear Tektronix screen
+C
+790	CALL RDABO
+	CALL TXCLR
+	GOTO 400
+C
+C DRAW something
+C
+800	BOOL = .TRUE.	! "DRW" => set scale & draw scan
+	GOTO 802
+C
+801	BOOL = .FALSE.	! "DRN" => don't (uses existing scale)
+802	IF(DCPTR.GE.TXTPTR) GOTO 400  ! nothing to read
+	CWD = RDCOMM(LNKCM(DRWTAB))
+	IF (CWD.EQ.0) GOTO 400
+	CALL RDABO
+	CALL LNKTEK(BOOL,CWD)
+	GOTO 802
+C
+C add a Master Point
+C
+820	ROLING = .FALSE.
+	IF (.NOT.MANUAL) GOTO 823  ! first time ?
+	IF(NMP(1).GT.MAXMP-2) GOTO 822
+	CALL CSRD(XC,YC)
+	CALL BUNCH(XC,YC)
+	IF (NMP(1).GT.1) GOTO 300
+	SEC(X) = MP1(X,1)
+	SEC(Y) = MP1(Y,1)
+	GOTO 300
+C
+822	CALL WRITEF('No room for manual point')
+	MANUAL=.FALSE.
+	GOTO 300
+C First time, just set up
+823	MANUAL = .TRUE.
+	CHNSEL = 0	! drop selection
+	MOVING = 1
+	CALL FLUSH
+	GOTO 300
+C
+C BCC - come back by one master point, checking to ensure that
+C we do not come back past the last confirmed point.
+C DUMB is set false if we try do to this
+C
+825	IF (NMP(1) .GT. NMPCON) GOTO 830
+	DUMB = .FALSE.
+	GOTO 400
+C
+C come BACk by one master point
+C
+830	CALL BACK(1)
+	TRKWID = -1.
+	CLOSED=.FALSE.
+	ROLPOS(X)=MP1(X,NMP(1))
+	ROLPOS(Y)=MP1(Y,NMP(1))
+	CALL CSWT(ROLPOS(X),ROLPOS(Y))
+	GOTO 300
+C set ROLling mode
+840	CALL FLUSH
+	NMPMAX = NMP(1)
+	NMPMIN = 2
+	IF (NMPMAX .LE. NMPMIN) GOTO 850
+	ROLING=.TRUE.
+	CLOSED=.FALSE.
+	CALL CSWT(MP1(X,NMPMAX),MP1(Y,NMPMAX))
+	CALL CSAJST(ROLPOS(X),ROLPOS(Y))
+	GOTO 300
+C unset rolling mode
+850	IF(.NOT.ROLING) GOTO 300
+	ROLING=.FALSE.
+	IF(ABS(ROLPOS(X)-MP1(X,NMP(1)-1)).LT.E(1).AND.
+     &     ABS(ROLPOS(Y)-MP1(Y,NMP(1)-1)).LT.E(1)) NMP(1)=NMP(1)-1
+	MP1(X,NMP(1))=ROLPOS(X)  ! move to cursor
+	MP1(Y,NMP(1))=ROLPOS(Y)
+	GOTO 300
+C
+C align CURsor using the CLOse-up screen
+C
+860	CALL FAX(.TRUE.,50,15)
+	GOTO 300
+C
+C use close-up screen to MANually measure a series of points.
+C
+870	CALL FAX(.FALSE.,55,17)
+	CALL MANDIG(55,17)
+	GOTO 300
+C
+C Reset/abort/exit
+C
+900	GOTO (9100,9999,9000,9999,9000),EC
+C
+**	IF	ELF|JNCTN
+C
+C TWO	- scan twice & grow the results
+C
+910	START(X) = NEXT(X)
+	START(Y) = NEXT(Y)
+	ID(X)=MAX(ABS(NXTID(X)),ABS(NXTID(Y)))
+	ID(Y)=0
+**	IF	ELF
+C centre the scan 
+	START(X) = START(X) + ID(X)/2
+	START(Y) = START(Y) + ID(Y)/2
+**	ENDC
+	CALL ICHNIN(START,ID,HOLE,RIPPLE,IPIT)
+	IU=1			! remember hor. scan vector
+	IV=2
+	SCNND = .TRUE.
+	GROWN = .TRUE.
+	FORKED = .FALSE.
+	LISTED = .FALSE.
+	GOTO 300
+C
+C MER -	merge the results of TWO scans
+C
+920	CALL MERSCN(EPSLON, IFIX(SMLLNS+0.5))
+	MERGED=.TRUE.
+	LISTED=.TRUE.
+	GOTO 400
+C
+C CRUsh - similar to COMPACT
+C
+925	IF (.NOT.GROWN) GOTO 550
+	CALL CRUSH(ETA,CRUCOS,CRUDIS)
+	PACTED=.TRUE.
+	LISTED=.FALSE.
+	GOTO 400
+**	ENDC
+**	IF	JNCTN
+C
+C USE -look for a junction
+C
+930	IF (.NOT.LISTED) GOTO 550
+	CALL USEJNC(FSTCON,CONGOT)
+	GOTO 400
+**	ENDC
+C
+C DIGitise - scan,(clean,)grow,(smooth),compact,list
+C
+1000	SEQ = .TRUE.
+	CUT = .FALSE.
+	GOTO 1100
+C
+C CUT - scan,(clean,)fork,(smooth),compact,list
+C
+1050	SEQ = .TRUE.
+	CUT = .TRUE.
+C
+C Do a SCAn
+C
+1100	CALL DISMOD(0)
+	RSEOFF(X) = 0
+	RSEOFF(Y) = 0
+	START(X) = NEXT(X)
+	START(Y) = NEXT(Y)
+	ID(X) = NXTID(X)
+	ID(Y) = NXTID(Y)
+	IF(ID(X).EQ.0.AND.ID(Y).EQ.0) GOTO 550
+	IF (NMPIFF+NMP(1) .GT. 0) GOTO 1102
+	SECID(X) = -ID(X)
+	SECID(Y) = -ID(Y)
+1102	CALL MOVTO(START(X),START(Y))
+	IF (NXTDIR .LT. 0) GOTO 1105
+	IDIR = NXTDIR
+	IU = 2-IDIR
+	IV = 1+IDIR
+	GOTO 1110
+1105	CALL SETDIR(ID,IDIR,IU,IV)
+1110	CALL SCANBY(ID(X),ID(Y),1)
+	NEGOT = -NEOLD
+	SCNND = .TRUE.
+	GROWN = .FALSE.
+	SPANED = .FALSE.
+	MERGED=.FALSE.
+	FORKED = .FALSE.
+	LISTED = .FALSE.
+C rough check for closure
+	IF(OPEN) GOTO 1115
+	R=(SEC(X)-START(X))**2+(SEC(Y)-START(Y))**2
+	NEAR = R.LT.(S(1)+IDSIZE+IWID*CR(IV)*WAR)**2
+1115	CALL SCSET(0)
+	IF (.NOT.SEQ) GOTO 300
+C on to next item in sequence
+	IF (LINING) GOTO 1205
+	IF (CUT) GOTO 1200
+	GOTO 1130
+C
+C GROw alias REGrow (historical)
+C
+1130	CALL SETCHN
+	IF (.NOT.SCNND) GOTO 550
+	CALL GROW(CHWT,RGROW,IU,IV,EDGING)
+	PACTED = .FALSE.
+	LISTED = .FALSE.
+	FORKED = .FALSE.
+	SPANED = .FALSE.
+	MERGED=.FALSE.
+	CHNSEL = 0
+	LSTSEL = 0
+	GROWN = .TRUE.
+	IF (.NOT. SEQ) GOTO 400
+	IF (.NOT.SMOING) GOTO 1150
+C
+C SMOOTH all the chains
+C
+1140	IF(.NOT.GROWN) GOTO 550
+	 CALL SMOOTH
+	IF(.NOT.SEQ) GOTO 400
+C
+C COMPACT ALL THE CHAINS
+C
+1150	IF (.NOT.GROWN) GOTO 550
+	MAXSUP=S(1)*0.7071/IPIT   ! maximum number of points to suppress
+	MINSUP=LIMIT(14)
+	DO 1160 I=1,MAXCHN
+1160	  CALL CMPCT(I,ETA,IU,IV,MAXSUP,MINSUP)
+	PACTED = .TRUE.	! 'cos we've done it
+	LISTED = .FALSE. ! 'cos we've messed this up now
+	IF (.NOT.SEQ) GOTO 400
+C
+C CONVERT CHAINS TO LISTS
+C
+1170	IF (.NOT.GROWN) GOTO 550
+	CALL CHNLST
+	LISTED = .TRUE.
+	GOTO 300
+C
+C Append this bit to the MP1 points
+C
+1180	IF (INTARG.NE.0.AND.CHNSEL.EQ.0) GOTO 300
+	IF(INTARG.NE.0.AND.CLOSED) GOTO 300
+	IF (CHNSEL.EQ.0.OR..NOT.LISTED) GOTO 550
+C
+	N=APPSEG(NEAR,NMPIFF,OUTPUT)  !append TRKSEG to /MPEP/
+	CLOSED = N.LT.0
+	LSTSEL = CHNSEL
+	LSTWAY = CONNCT(3,CHNSEL)
+	CHNSEL = 0
+	ASSED = .FALSE.
+	JUMPED = .FALSE.
+	IF (N) 1190, 300, 1195
+C closed
+1190	CALL WRITEF('Feature %N closed %C',FNUM(OVRNUM),7)
+	FAST=.FALSE.
+	INDEX(1) = 0
+	GOTO 300
+C too big
+1195	CALL WRITEF('Feature %N full %C',FNUM(OVRNUM),7)
+	FAST = .FALSE.
+	INDEX(1) = 0
+	GOTO 300
+C
+C apply 'FORk' type chain growing
+C
+1200	IF (.NOT.SCNND) GOTO 550
+	CALL SETCHN
+	CALL CUTLER(IU,IV,HOLE,RIPPLE)
+	PACTED = .FALSE.
+	LISTED = .FALSE.
+	SPANED = .FALSE.
+	CHNSEL = 0
+	LSTSEL = 0
+	GROWN  = .TRUE.
+	FORKED = .TRUE.
+	IF (SEQ) GOTO 1140
+	GOTO 400
+C
+C turn edges to lines
+1205	IF(.NOT.SCNND) GOTO 550
+	IF(.NOT.LINING) GOTO 1207
+	CALL EDGLIN(IU,IV)
+	GROWN=.FALSE.
+	FORKED=.FALSE.
+	LISTED=.FALSE.
+	CHNSEL=0
+	LSTSEL=0
+1207	IF(.NOT.SEQ) GOTO 400
+	IF(CUT) GOTO 1200
+	GOTO 1130
+C
+C TSF -	 test for small feature, two sorts:
+C
+**	IF	ELF
+C edge mode small feature
+C
+1210	IF (.NOT.GROWN) GOTO 550
+	CALL EDGFTR(EPSLON,N)
+	IF (N.NE.0) CALL WRITEF('%N small feature%m found%C',N,7)
+	FTRSEL = 0
+	GOTO 300
+C
+C NXE -	fetch next edge mode feature from list
+C
+1230	IF (FTRSEL .NE. 0) FTRSEL = NXTFTR(FTRSEL)
+	IF (FTRSEL .EQ. 0) FTRSEL = BSTFTR
+	CALL GETFTR(START,FTRSEL,TRKPOL)
+	IF (FTRSEL .NE. 0) GOTO 1216
+	GOTO 300
+**	IFF
+C line mode small feature
+C
+1210	IF (.NOT.FORKED) GOTO 550
+	IF (SMLFTR(START(1),IU,IV)) GOTO 1215
+	NEXT(IU) = START(IU)+ID(IU)/2	! flip the scan
+	NEXT(IV) = START(IV)-ID(IU)/2
+	NXTID(IU) = ID(IV)
+	NXTID(IV) = ID(IU)
+	NXTDIR = -1
+	FRKCOM = SMFCOM		! try again or ...
+	IF (IDIR.EQ.0) FRKCOM = 5 ! ... call operator ("DUN" macro)
+	GOTO 300
+**	ENDC
+C it is one
+1215	CALL WRITEF('Small feature %N%C',FNUM(OVRNUM),7)
+1216	CLOSED = .TRUE.
+	SEC(X) = MP1(X,1)
+	SEC(Y) = MP1(Y,1)
+	FRKCOM = 5	! "DUN" => done a feature
+	GOTO 300
+C
+C DROP CHAIN SELECTION
+C
+1240	CHNSEL = 0	! easy
+	NOTAPP=.FALSE.
+	GOTO 300
+C
+C SELECT FIRST CHAIN
+C
+1250	CHNSEL = 0
+C
+C SELECT NEXT BEST
+C
+1260	IF (.NOT. ASSED) GOTO 550
+	IF (CHNSEL .NE. 0) CHNSEL = NXTBST(CHNSEL)
+	IF (CHNSEL .EQ. 0) CHNSEL = BSTCON
+1265	CALL NXTSEG		! to set up /TRKSEG/
+	NOTAPP = TSTCON(CHNSEL)		 ! Check appendability
+	GOTO 300
+C
+C FUMble about for a line, leaving the answers in CONNCT
+C
+1270	CALL FUMBLE
+CCC	SECID(X)=-NXTID(X)
+CCC	SECID(Y)=-NXTID(Y)
+	ASSED = .TRUE.
+	GOTO 400
+C
+C RETreat back from difficulty, in order to look at it better,
+C predict a scan to do this.
+C
+1280	CALL RTREAT(START(1),IDSIZE,NEXT(1),NXTID(1))
+	NXTDIR = -1
+	GOTO 300
+C
+C LOOp the feature in hand
+C
+1290	IF(CLOSED) GOTO 1190
+	CLOSED=.TRUE.
+	CHNSEL=0
+	NMP(1)=NMP(1)+1
+	MP1(X,NMP(1))=SEC(X)
+	MP1(Y,NMP(1))=SEC(Y)
+	GOTO 1190
+C
+C SQUare the feature in hand
+C
+1300	IF(SQUTOL.LE.0.0) GOTO 300
+	M=NMP(1)
+	IF(M+NMPIFF.GT.MAXMP) GOTO 1307
+	IF(M.LE.3) GOTO 1308
+	CALL SQUARE(MP1,NMP(1),SQUTOL,TRKWID,CLOSED)
+	SQARED=.TRUE.
+	CALL WRITEF('%N Points reduced to %N',M,NMP(1))
+	GOTO 300  ! display results
+1307	CALL WRITEF('Too big to square (%N)%C',M,7)
+	GOTO 300
+1308	CALL WRITEF('Too small to square (%N)%C',M,7)
+	GOTO 300
+C
+C END of feature
+C
+1350	IF(NMP(1).EQ.0) GOTO 1359
+**	IF	ELF
+	IF (.NOT.CLOSED) CALL WRITEF('Not closed!%C',7)
+**	ENDC
+	N = 0
+	RC=0
+	IF(SECOND) RC=RC.OR.8
+	IF(.NOT.CLOSED) GOTO 1355
+	IF(SQARED) GOTO 1355
+C pull last point back to start point
+	MP1(X,NMP(1))=SEC(X)
+	MP1(Y,NMP(1))=SEC(Y)
+	RC=3+8
+C output the points
+1355	CALL OUTMP1(N,THKNSS,PENUP,OUTPUT)
+	GOTO (400,400,1356,100,1356),EC
+C now go other way
+1356	IF(SECOND) GOTO 9999
+	IF (CLOSED .OR. .NOT.USEFND) GOTO 9999
+	SECOND=.TRUE.
+	CALL CSWT(SEC(X),SEC(Y))
+	NXTID(X)=SECID(X)
+	NXTID(Y)=SECID(Y)
+	NMP(1)=0
+	CALL BUNCH(SEC(X),SEC(Y))
+	GOTO 110
+C zero length feature
+1359	IF (SECOND) GOTO 9999	! allow null second half
+	CALL WRITEF('Nothing to accept')
+	GOTO 400
+C
+C JUMp to new bit of line
+C
+1360	JUMPED = .TRUE.
+	GOTO 400
+C
+C IFC -	IFF Check. Used after FUM or ASS, examines the data file and
+C	rejects any choices that lie on a previously digitised feature.
+C
+1370	IF (.NOT.ASSED) GOTO 550
+CCC	CALL CHKOLD(MPNEAR**2, 0)
+	GOTO 1240
+C
+C ASSess the situation
+C
+1375	IF (.NOT.LISTED) GOTO 550
+	OLDLST = NLOST
+	CALL ASSESS (IU, IV)
+	ASSED=.TRUE.
+	GOTO 1240	! Go and drop chain selection
+C
+C STEp & AUTo - decide the action and take it ...
+C
+1380	FAST = .TRUE.		! ('AUT' => fast)
+1377	AUTCOM = FRKCOM		! ('STE' implies nothing)
+	IF (AUTCOM .GT. 0) GOTO 1390	! USEFRK's set a command number
+	AUTCOM = 0
+	IF (SCAN) GOTO 1381		! new scan
+	IF (NOTAPP) GOTO 1386  ! can't append this connection
+	IF (CNFSED) GOTO 1383		! confused
+	IF (.NOT.LOST) GOTO 1384	! O.K.
+	IF (.NOT.VERY) GOTO 1382	! just a little lost
+	IF (JNCING.AND..NOT.MERGED) GOTO 1385 ! very lost, try junctions
+1387	AUTCOM = AUTCOM+1		! totally lost
+1386	AUTCOM = AUTCOM+1
+1385	AUTCOM = AUTCOM+1
+1384	AUTCOM = AUTCOM+1
+1383	AUTCOM = AUTCOM+1
+1382	AUTCOM = AUTCOM+1
+1381	AUTCOM = AUTCOM+1
+1390	N = AUTCOM
+	GOTO 705	! ... by calling a macro command
+C SLOW command
+1398	FAST=.FALSE.
+	GOTO 400
+C FAST command
+1399	FAST=.TRUE.
+	GOTO 400
+C
+C PREDICT new scan vector's position
+C
+1400	NLOST = 1
+C
+1405	CALL NEWVEC(NLOST,NXTDIR)
+	JUMPED = .FALSE.
+	MANUAL = .FALSE.
+	GOTO 300
+C
+C POKE about to find the lost line
+C
+1415	IF (INTARG .NE. 0)NLOST = INTARG
+	GOTO 1405
+C
+C EXITS
+C
+C ABOrt feature
+C
+9000	RC = -1
+	GOTO 9999
+C
+C Abort initialisation
+9100	INIABO=.TRUE.
+	CALL WRITEF('Init aborted - patch file will not be updated')
+	GOTO 9999
+C
+C finished initialisation - close patch file etc
+9200	CALL IFFSYS(SAVLUN,4)
+	GOTO 9999
+C
+C general exit
+9999	RETURN
+C
+C
+	END

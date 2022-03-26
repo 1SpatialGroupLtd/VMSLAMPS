@@ -1,0 +1,356 @@
+	LOGICAL FUNCTION GET_CMDS(GO_WRITE_TAPE)
+C
+***	MODULE	GET_CMDS
+***	IDENT	06JA90
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	Include MESPAR.PAR from 'LSL$DTMCONVERTSYS' now.FJB 21-Jun-1988
+C	Created   				FJB	11-Feb-1988
+C                                        
+C
+	IMPLICIT NONE
+C
+C Parameters:     
+	INCLUDE 'LSL$CMNDTI2DTED:DTI2DTEDMSG.PAR'!specific error messages
+	INCLUDE 'LSL$DTMCONVERTSYS:MESPAR.PAR'	! warning/error messages
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'	! for all messages
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'       	! text buffer                 
+C
+C Common blocks:
+	INCLUDE 'LSL$CMNDTI2DTED:OPTIONS.CMN'	! command variables
+	INCLUDE 'LSL$DTMCONVERTSYS:DTIFILE.CMN'   ! DTI file details
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'         ! command decoding
+	INCLUDE 'LSL$CMNLSL:MTOVCM.CMN'
+C                              
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C W/s:                  
+	BYTE		CH     		! for use with RDCHS
+	INTEGER		CMD     	! decoded command number
+	INTEGER*4	OK		! function return
+	INTEGER*4	IERR		! error code               
+	CHARACTER*80	INDFILE		! indirect command file
+	INTEGER		INDLEN		! file name length
+	LOGICAL		IS_MOUNTED	! tape mounted correctly?	
+C
+C Argument:
+	LOGICAL		GO_WRITE_TAPE	! ready to write the DTED tape
+C
+C Define command tables:                  
+	EXTERNAL	DTI2DTED_CMD_TABLE
+C                       
+C Functions:
+	INTEGER*4	GETFILNAM	! Read indirect command filename
+C
+C Local Functions:
+	LOGICAL	  	APPEND_CMD	! advance tape to end of current data
+	LOGICAL	  	DEVICE_CMD	! get output tape deck
+	LOGICAL		DISABLE_CMD	! decode disable keywords
+	LOGICAL		ENABLE_CMD	! decode enable keywords
+	LOGICAL		FILEIN_CMD	! get and open input files
+	LOGICAL	  	HELP_CMD	! give help
+	LOGICAL         SHOW_CMD	! show status
+	LOGICAL         SPAWN_CMD	! for DCL SPAWN
+C
+C Library Functions:
+	INTEGER*4	TTRSTR  	! read line from terminal
+	INTEGER*4	FLROPN		! open command file
+	INTEGER*4	FLRSEL		! select command file
+	INTEGER*4	FLRSTR		! read string
+	INTEGER*4	FLRCLO		! close indirect command file
+	LOGICAL  	RDCHS	      	! read character from line
+	LOGICAL  	RDCH		! read character from line
+	INTEGER*4	RDCOMM  	! read command from line
+	INTEGER*4	MTOEOF		! write final tapemark
+C                       
+C ......................................................................
+C
+C Initialise all the command flags
+	TTIN   		= .TRUE.	! assume reading from terminal
+	IS_MOUNTED	= .TRUE.        ! no fatal error when mounting tape
+	GO_WRITE_TAPE	= .TRUE.	! assume we want to read the tape
+C
+C ......................................................................
+C                   
+C Get an input line
+10	IF (TTIN) THEN                     ! from the terminal
+	   OK=TTRSTR(,,'DTI2DTED> ',IERR)
+	ELSE                               ! or from indirect file
+	   OK= FLRSEL(INDLUN)
+	   IF(OK)THEN   
+	      OK=FLRSTR(,,IERR)
+	   ENDIF
+	ENDIF
+C
+C Error?
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      IF (TTIN) THEN                        
+	         GOTO 70		! end of file = exit
+	      ELSE
+	         CALL WRITEF('%S Unexpected end of indirect command '//
+     &			'file detected',WARNING)
+	         CALL WRITEF('                RETURN command assumed '//
+     &				'- returning to terminal input')
+	         GOTO 105		! close indirect file etc.
+	      ENDIF     
+	   ENDIF
+	   CALL LSL_PUTMSG(OK)
+	   IF(OK .EQ. LSL__SYSERR)CALL LSL_ADDMSG(IERR)
+	   IF(OK .EQ. LSL__SYSREAD)CALL LSL_ADDMSG(IERR)
+	   GOTO 20
+	ENDIF
+C
+C echo and decode the line
+	IF (.NOT.TTIN) THEN
+	   CALL EXPAND('DTI2DTED> ')
+	   CALL APPEND(TXTDSC) ! echo indirect input
+	   CALL TTWSTR
+	ENDIF
+	CALL BSLN
+C                                 
+C Look for comment
+	IF (RDCHS(CH)) GOTO 10	! substantially empty line
+	IF (CH.EQ.'!') GOTO 10	! comment!
+C
+C Look for indirect file start
+	IF (TTIN) THEN
+	   IF (CH.EQ.'@') THEN
+	      IF (RDCHS(CH)) THEN	! substantially empty line
+	         CALL WRITEF('%S "@" must precede a file-spec',WARNING)
+	         GOTO 20
+	      ELSE        
+	         CALL BSCH
+	      ENDIF
+C
+C Name indirect command file
+	      OK=GETFILNAM(INDFILE,INDLEN,
+     &				'SYS$DISK:[].COM;0',.TRUE.,'!',)
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(OK)
+	         GOTO 20
+	      ENDIF
+C
+C and open it
+	      OK=FLROPN(INDLUN, INDFILE(:INDLEN), IERR)
+	      IF (OK) THEN
+		 TTIN = .FALSE.
+		 GOTO 10
+	      ELSE
+	         CALL WRITEF('%S Can''t open indirect command file %S'
+     &		      	  ,ERROR,INDFILE(:INDLEN))
+	         CALL LSL_PUTMSG(OK)
+	         IF(OK .EQ. LSL__SYSOPEN)CALL LSL_ADDMSG(IERR)
+	         GOTO 20                
+	      ENDIF
+	   ENDIF			! CH .. @
+	ENDIF
+	CALL BSCH			! un-read non-'@'
+C
+	CMD=RDCOMM(DTI2DTED_CMD_TABLE)
+	GOTO (	20,     ! error condition
+     &		30,	! append
+     &		40,	! device 	
+     &		50,	! disable		
+     &		60,	! enable
+     &		70,	! exit
+     &		80,	! filein		
+     &		90,	! help		
+     &		100,	! return		
+     &		110,	! show		
+     &		120,	! spawn		
+     &		130	! density
+     &	      		), CMD+1
+C
+C command number out of range
+	CALL WRITEF('Command not yet implemented')
+C
+C close indirect input following a duff command
+20	IF (.NOT.TTIN) THEN
+C
+	   CALL WRITEF(' ')
+	   CALL WRITEF('%S Indirect file error - returning to '//
+     &			'terminal input',WARNING)
+	   OK = FLRCLO(INDLUN,IERR)
+C
+C Error?
+	   IF(OK .NE. LSL__NORMAL) THEN
+		CALL LSL_PUTMSG(DTI2DTE__CLIND,INDFILE(:INDLEN))
+		CALL LSL_ADDMSG(OK)
+		IF(OK .EQ. LSL__SYSCLOSE)CALL LSL_ADDMSG(IERR)
+		GET_CMDS=SS$_ABORT      
+		GOTO 999
+	   ENDIF
+C
+ 	   TTIN=.TRUE.
+	ENDIF
+C
+C
+	GOTO 10
+C
+C ......................................................................
+C APPEND
+30	IF(APPEND_FILE)THEN
+	   CALL WRITEF('Already appending files')
+	   GOTO 10
+	ELSE
+  	   OK = APPEND_CMD()
+	   IF(.NOT. OK)THEN 	     ! fatal error whilst advancing tape
+	      CALL LSL_PUTMSG(DTI2DTE__ATEOV,DEVICE(:DEVLEN))
+	      GET_CMDS=SS$_ABORT                                  
+	      GOTO 999
+	   ELSE
+	      CALL WRITEF('At end-of-data')
+	      APPEND_FILE = .TRUE.
+	   ENDIF
+           GOTO 10
+	ENDIF
+C
+C ......................................................................
+C DEVICE [device name]
+40	IF (DTEDOPN) THEN  	! already had successful DEVICE?
+  	   CALL WRITEF(
+     &		'%S You have already specified a magnetic tape device'
+     &		,WARNING)
+	ELSE
+	   OK = DEVICE_CMD(IS_MOUNTED)
+	   IF (.NOT. IS_MOUNTED)THEN 	! fatal error whilst checking tape
+	       GET_CMDS=SS$_ABORT
+	       GOTO 999
+	   ENDIF
+	   IF( .NOT. OK) GOTO 20	! have another go at reading a command
+	   DTEDOPN = .TRUE.
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C DISABLE 'sub-command'
+C
+50	IF (.NOT. DISABLE_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C ENABLE 'sub-command'
+C
+60	IF (.NOT. ENABLE_CMD()) GOTO 20
+	GOTO 10
+C                                                   
+C ......................................................................
+C EXIT
+C
+C Close indirect file if in one
+70	IF (.NOT.TTIN) THEN
+C
+	   OK = FLRCLO(INDLUN,IERR)
+C
+C Error?
+	   IF(OK .NE. LSL__NORMAL) THEN
+		CALL LSL_PUTMSG(DTI2DTE__CLIND,INDFILE(:INDLEN))
+		CALL LSL_ADDMSG(OK)
+		IF(OK .EQ. LSL__SYSCLOSE)CALL LSL_ADDMSG(IERR)
+		GET_CMDS=SS$_ABORT      
+		GOTO 999
+	   ENDIF
+C
+ 	   TTIN=.TRUE.
+	ENDIF                                       
+C 
+C Terminate tape file if opened
+C
+	IF(DTEDOPN)THEN
+	   IF(APPEND_FILE)OK=MTOEOF()
+	   IF(.NOT.OK)THEN
+	      CALL LSL_PUTMSG(OK)
+	      IF(OK.EQ. LSL__SYSERR)CALL LSL_ADDMSG(MTOERR)
+	      GO_WRITE_TAPE = .FALSE.
+    	      GET_CMDS=SS$_ABORT
+	      GOTO 999
+	   ENDIF
+	   DTEDOPN = .FALSE.
+	ENDIF
+C
+        GO_WRITE_TAPE = .FALSE.
+    	GET_CMDS=SS$_NORMAL
+	GOTO 999
+C
+C ......................................................................
+C FILEIN [filespec]
+C
+80	IF (.NOT.FILEIN_CMD()) GOTO 20
+	GET_CMDS = SS$_NORMAL
+	GOTO 999
+C
+C ......................................................................
+C HELP
+90	IF (.NOT.HELP_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C RETURN - return to terminal input
+C
+100	IF (TTIN) THEN
+	   CALL WRITEF(
+     &		'RETURN command ignored - command '//
+     &			'input is already from terminal')
+	ELSE
+	   CALL WRITEF(
+     &		'RETURN command detected - returning to terminal input')
+	ENDIF
+C
+105	IF (.NOT.TTIN) THEN
+	   OK = FLRCLO(INDLUN,IERR)
+C
+C Error?
+	   IF(OK .NE. LSL__NORMAL) THEN
+		CALL LSL_PUTMSG(DTI2DTE__CLIND,INDFILE(:INDLEN))
+		CALL LSL_ADDMSG(OK)
+		IF(OK .EQ. LSL__SYSCLOSE)CALL LSL_ADDMSG(IERR)
+		GET_CMDS=SS$_ABORT         
+		GOTO 999
+	   ENDIF
+C
+ 	   TTIN=.TRUE.
+	ENDIF
+C
+	GOTO 10 
+C
+C ......................................................................
+C SHOW
+110	IF (.NOT.SHOW_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C SPAWN DCL process - primarily designed for file management
+C
+120	IF (.NOT.SPAWN_CMD()) GOTO 20
+	GOTO 10
+C
+C ......................................................................
+C DENSITY - set magtape density
+C
+130	IF (DTEDOPN) THEN
+	   CALL WRITEF(
+     &'%S Density cannot be changed after tape has been initialised',
+     &	   WARNING)
+	   GOTO 10
+	ENDIF
+C
+	IF (INTARG(1).EQ.800) THEN
+	   DENSITY = 0
+	ELSEIF (INTARG(1).EQ.1600) THEN
+	   DENSITY = -1
+	ELSEIF (INTARG(1).EQ.6250) THEN
+	   DENSITY = -2
+	ELSE
+	   CALL WRITEF('%S Invalid density - %N',WARNING,INTARG(1))
+	   CALL WRITEF('Available DENSITY numbers are: 800 1600 6250')
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C
+C Finish
+C
+999	RETURN
+	END

@@ -1,0 +1,559 @@
+
+                                                                 6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page   1
+                                                                 6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+00001   	LOGICAL FUNCTION READ_NTF_RECORD
+00002   C
+00003   C
+00004   C Copyright (C) Laser-Scan Ltd, Cambridge, England
+00005   C
+00006   C Author TJ Ibbs, 7 October 1987
+00007   C
+00008   C Modified for variable length records 
+00009   C	Iain McLeman, 21 August 1989
+00010   C
+00011   C	To read the next NTF record and its' length into /RECORD/
+00012   C	- returns TRUE if it succeeds, FALSE if it fails
+00013   C	NB end-of-file (tapemark) does not cause an error to be output,
+00014   C	but does cause FALSE to be returned
+00015   C
+00016   CMOD	Adjust for NTF files without CR at end of line
+00017   CMOD    Source moved from READ_RECORD			SG	09-Jul-1991
+00018   CMOD	Bug fix in reading from mag_tape	        SG	16-Jul-1991
+00019   CMOD	Cope with multiple tape volumes			JMC 	17-Dec-1992
+00020   C
+00021   CMOD	Copied to NTF2DTI from NTF2I for variable 
+00022   C	length records					JB	18-May-1992
+00023   C
+00024   	IMPLICIT NONE
+00025   C
+00026   C Message definitions
+00027   	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+00300   	INCLUDE	'HERE:NTF2DTIMSG.PAR'
+00405   C
+00406   C Common files
+00407   	INCLUDE	'LSL$CMNLSL:MTIVCM.CMN'		! for MTIERR, MTINBL
+00418   	INCLUDE	'HERE:COMMANDS.CMN'		! for IS_MAGTAPE
+00437   	INCLUDE	'HERE:RECORD.CMN'		! for STRING
+00460   	INCLUDE	'HERE:NTFDATA.CMN'
+00521   C
+00522   C Define the size of the blocks to be read from magnetic tape
+00523   C
+00524   	INTEGER 	BLOCKSIZE		!  num of bytes in each block 
+00525   	PARAMETER	(BLOCKSIZE=2000)
+00526   C
+00527   	CHARACTER*(BLOCKSIZE)	BUFFER		! Buffer to be output
+00528   	BYTE		BLOCK(BLOCKSIZE)
+00529   	EQUIVALENCE	(BLOCK,BUFFER)
+00530   C
+00531   	INTEGER*2	BUFFER_PTR		! Where we are
+00532   C 
+00533   C Save these value ( i.e. Local common )
+00534   C
+00535   	DATA		BUFFER_PTR / BLOCKSIZE /
+00536   	SAVE		BUFFER,	BUFFER_PTR
+00537   C
+00538   C Functions
+00539   	LOGICAL		MTIRDB				! read block from tape
+00540   	LOGICAL		FLRSTR				! read string from file
+00541   	LOGICAL		RECOGNISED			! IS REC_DESCR VALID
+00542   	LOGICAL		READ_VOLHDREC
+00543   C
+
+READ_NTF_RECORD                                                  6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page   2
+                                                                 6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+00544   C Workspace
+00545   	INTEGER		BYTCNT				! number of bytes read
+00546   	LOGICAL		OK				! function result
+00547   	LOGICAL		BUFFER_IS_EMPTY
+00548   	INTEGER		IERR				! ditto
+00549   	INTEGER		I				! Loop counter
+00550   	INTEGER		LASTSIG				! last significant char
+00551   C
+00552   C ************************************************************************
+00553   C
+00554   10	OK = .TRUE.		! assume the best
+00555   	RECNUM = RECNUM + 1	! count the record
+00556   C
+00557   C.........................................................................
+00558   C what are we reading from, tape or disk
+00559   C
+00560   C	---------------------------TAPE-----------------------------------
+00561   C	See if we need to read a new block, a space is used to signal a null
+00562   C	record used to pad out a block if there is no room for a new record
+00563   C
+00564   	IF (IS_MAGTAPE) THEN
+00565   C
+00566   C	  ................................................................
+00567   C	  is the buffer empty? do we need to read from tape
+00568   C
+00569   	   IF (BUFFER_PTR.GE.BLOCKSIZE-3) THEN
+00570   	     BUFFER_IS_EMPTY = .TRUE.
+00571   C
+00572   	   ELSEIF (BLOCK(BUFFER_PTR) .EQ. ' ') THEN
+00573   	     BUFFER_IS_EMPTY = .TRUE.
+00574   C
+00575   	   ELSE
+00576   	     BUFFER_IS_EMPTY = .FALSE.
+00577   	   ENDIF
+00578   C
+00579   20	   CONTINUE
+00580   C
+00581   	   IF (BUFFER_IS_EMPTY) THEN
+00582   C
+00583   	      OK = MTIRDB( %REF(BUFFER), BLOCKSIZE, BYTCNT )	
+00584   	      IF (.NOT.OK) THEN
+00585   		 CALL LSL_PUTMSG(NTF2DTI__READBLK,MTINBL)
+00586   		 CALL LSL_ADDMSG(OK)
+00587   		 IF (OK.EQ.LSL__SYSERR) CALL LSL_ADDMSG(MTIERR)
+00588   C
+00589   	      ELSEIF (BYTCNT.NE.BLOCKSIZE) THEN
+00590   		 CALL LSL_PUTMSG(NTF2DTI__SHORTBLK,MTINBL,BYTCNT)
+00591   		 OK = .FALSE.
+00592   	      ENDIF
+00593   C
+00594   	      BUFFER_PTR = 1
+00595   	   ENDIF
+00596   C
+00597   	   IF (RECNUM.EQ.1) THEN
+00598   	      IF (BUFFER(BUFFER_PTR:BUFFER_PTR+1).EQ.'01') THEN
+00599   C
+00600   C read the first record;
+
+READ_NTF_RECORD                                                  6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page   3
+                                                                 6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+00601   C we insist that this should be a volume header record (VOLHDREC) at a
+00602   C set length of 66 in a fixed or variable length record
+00603   C
+00604   	         STRING = BUFFER(1:66)
+00605   	         LENGTH = 66
+00606   C
+00607   	         OK = READ_VOLHDREC()
+00608   	         IF (.NOT.OK) GOTO 999
+00609   C
+00610   	      ELSE
+00611   	         NTF$_REC_DESCR = STRING(1:2)
+00612   	         CALL LSL_PUTMSG(NTF2DTI__NOVOLHDREC)
+00613   	         CALL LSL_ADDMSG(NTF2DTI__UNEXPREC,NTF$_REC_DESCR,RECNUM)
+00614   	         OK = .FALSE.
+00615   	         GOTO 999
+00616   	      ENDIF
+00617   	   ENDIF
+00618   C
+00619   C 	 ...................................................................
+00620   C we have a block read in - get a record
+00621   C variable length,try to find the end of the buffer
+00622   C
+00623   	   IF (FIXED) THEN			! fixed length
+00624   	      STRING = BUFFER(BUFFER_PTR:BUFFER_PTR+79)
+00625   	      LENGTH = 80
+00626   C
+00627   	   ELSE					! variable length
+00628   	      LASTSIG = 1
+00629   	      DO 100 I = BUFFER_PTR, MIN(BLOCKSIZE, BUFFER_PTR+80)
+00630   	         IF (BUFFER(I:I) .EQ. EOR_MARKER) THEN
+00631   C
+00632   C Ignore EOR declaration in VOLHDREC record
+00633   C
+00634   		    IF (RECNUM.EQ.1 .AND. I.LT.66) GOTO 100
+00635   C
+00636   		    GOTO 200
+00637   		 ENDIF
+00638   C
+00639   		 IF (BUFFER(I:I) .NE. ' ') LASTSIG = I
+00640   100	      CONTINUE
+00641   C
+00642   	      IF (.NOT.FIXED. AND. LASTSIG.EQ.BLOCKSIZE) THEN
+00643   		 BUFFER_IS_EMPTY = .TRUE.
+00644   		 GOTO 20				! get next block
+00645   	      ENDIF
+00646   C
+00647   C	      ..............................................................
+00648   C 	      No terminating characters found => badly constructed record,
+00649   C 	      error, Unless it is the volume header record which should 
+00650   C	      always be 66 or 80 characters long and which defines the 
+00651   C	      character to be used as EOR_MARKER (assumed to be <CR>)
+00652   C
+00653   	      IF ( BUFFER( BUFFER_PTR:BUFFER_PTR+1 ).EQ.'01' ) THEN
+00654   		 IF ( BUFFER( BUFFER_PTR+62:BUFFER_PTR+62 ).EQ.'F' ) THEN
+00655   	            I = BUFFER_PTR + 80
+00656   	         ELSE
+00657   	            I = BUFFER_PTR + 66
+
+READ_NTF_RECORD                                                  6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page   4
+                                                                 6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+00658   	         ENDIF
+00659   C
+00660   	      ELSE
+00661   	         CALL LSL_PUTMSG( NTF2DTI__READREC,RECNUM )
+00662   	         CALL LSL_ADDMSG( NTF2DTI__NOTERMCR )
+00663   		 I = LASTSIG	! guess length as last non-space
+00664   	      ENDIF
+00665   C
+00666   200	      LENGTH = I - BUFFER_PTR + 1
+00667   	      STRING = BUFFER(BUFFER_PTR:(BUFFER_PTR+LENGTH-1))
+00668   	   ENDIF
+00669   C
+00670   	   BUFFER_PTR = BUFFER_PTR + LENGTH
+00671   C
+00672   C	---------------------------FILE---------------------------------------
+00673   C
+00674   	ELSE						! read from a file
+00675   	   OK = FLRSTR( STRING, LENGTH, IERR )		! read string
+00676   	   IF ( .NOT.OK ) THEN				! problem
+00677   	      CALL LSL_PUTMSG(NTF2DTI__READREC,RECNUM)
+00678   	      IF (OK.EQ.LSL__SYSREAD) CALL LSL_ADDMSG(MTIERR)
+00679   	      GOTO 999
+00680   	   ENDIF
+00681   C
+00682   	   IF (RECNUM.EQ.1) THEN
+00683   	      IF (STRING(1:2).EQ.'01') THEN
+00684   C
+00685   C read the first record;
+00686   C we insist that this should be a volume header record (VOLHDREC) at a
+00687   C set length of 66 in a fixed or variable length record
+00688   C
+00689   	         OK = READ_VOLHDREC()
+00690   	         IF (.NOT.OK) GOTO 999
+00691   	      ELSE
+00692   	         NTF$_REC_DESCR = STRING(1:2)
+00693   	         CALL LSL_PUTMSG(NTF2DTI__NOVOLHDREC)
+00694   	         CALL LSL_ADDMSG(NTF2DTI__UNEXPREC,NTF$_REC_DESCR,RECNUM)
+00695   	         OK = .FALSE.
+00696   	         GOTO 999
+00697   	      ENDIF
+00698   	   ENDIF
+00699   C
+00700   	   IF (LENGTH.NE.80 .AND. FIXED) THEN			! fixed record
+00701   	      CALL LSL_PUTMSG(NTF2DTI__SHORTREC,RECNUM,LENGTH)	! not 80 chars
+00702   	      OK = .FALSE.
+00703   	   ENDIF
+00704   	ENDIF
+00705   C
+00706   C..........................................................................
+00707   C is the record type recognised? if not try to get another
+00708   C
+00709   	IF (.NOT. RECOGNISED(STRING)) THEN
+00710   	  CALL LSL_PUTMSG (NTF2DTI__UNEXPREC,STRING(1:2),RECNUM)
+00711   	  CALL LSL_ADDMSG (NTF2DTI__RETRY)
+00712   	  GOTO 10
+00713   	ENDIF
+00714   C
+
+READ_NTF_RECORD                                                  6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page   5
+                                                                 6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+00715   C..........................................................................
+00716   C adjust for the lack of a carriage return at the end of the string
+00717   C
+00718   C	IF (.NOT.FIXED) THEN
+00719   C	  IF (STRING(LENGTH:LENGTH).NE.EOR_MARKER) THEN
+00720   C	    IF (LENGTH.LT.80) LENGTH = LENGTH +1
+00721   C	    STRING(LENGTH:LENGTH) = EOR_MARKER
+00722   C	  ENDIF
+00723   C	ENDIF
+00724   C..........................................................................
+00725   C
+00726   999	READ_NTF_RECORD = OK
+00727   C
+00728   	RETURN
+00729   	END
+
+
+
+
+PROGRAM SECTIONS
+
+    Name				 Bytes   Attributes
+
+  0 $CODE                                  801   PIC CON REL LCL   SHR   EXE   RD NOWRT QUAD
+  1 $PDATA                                  38   PIC CON REL LCL   SHR NOEXE   RD NOWRT QUAD
+  2 $LOCAL                                2304   PIC CON REL LCL NOSHR NOEXE   RD   WRT QUAD
+  3 LSL_MTIVCM                               8   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  4 COMMANDS                                40   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  5 RECORD1                                 86   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  6 RECORD2                                  9   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  7 NTFDATA                                 16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  8 DTIDATA                                128   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+
+    Total Space Allocated                 3430
+
+
+ENTRY POINTS
+
+    Address  Type  Name                            
+
+  0-00000000  L*4  READ_NTF_RECORD                 
+
+
+VARIABLES
+
+    Address  Type  Name                                               Address  Type  Name                            
+
+  2-00000000  CHAR BUFFER                                           2-000007F0  L*4  BUFFER_IS_EMPTY                 
+  2-000007E2  I*2  BUFFER_PTR                                       2-000007E8  I*4  BYTCNT                          
+  8-0000005C  I*4  COL_END                                          8-00000068  I*4  COL_INV                         
+  8-00000058  I*4  COL_START                                        4-00000018  L*4  DEDUCE_FILE                     
+  4-00000024  L*4  DTIOPEN                                          6-00000008  CHAR EOR_MARKER                      
+  8-00000078  I*4  FIELD_WIDTH                                      7-0000000C  L*4  FIXED                           
+  2-000007F8  I*4  I                                                2-000007F4  I*4  IERR                            
+  8-00000074  I*4  INTERPRET                                        7-00000004  I*4  INTVER                          
+  4-0000001C  L*4  IS_MAGTAPE                                       4-00000010  L*4  IS_OS                           
+  4-00000020  L*4  IS_TERM                                          2-000007FC  I*4  LASTSIG                         
+
+READ_NTF_RECORD                                                  6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page   6
+01                                                               6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+  6-00000004  I*4  LENGTH                                           7-00000000  I*4  LEVEL                           
+  4-00000000  L*4  LOG                                              3-00000000  I*4  MTIERR                          
+  3-00000004  I*4  MTINBL                                           5-00000054  CHAR NTF$_REC_DESCR                  
+  8-0000007C  I*4  NUM_FIELD                                        8-0000002C  I*4  N_COLUMNS                       
+  8-00000028  I*4  N_ROWS                                           2-000007EC  L*4  OK                              
+  8-00000070  I*4  ORDER                                            4-00000004  L*4  OUTPUT                          
+  4-00000008  L*4  PROJECT                                          6-00000000  I*4  RECNUM                          
+  4-00000014  L*4  REWIND                                           8-00000064  I*4  ROW_END                         
+  8-0000006C  I*4  ROW_INV                                          8-00000060  I*4  ROW_START                       
+  4-0000000C  L*4  SECT                                             5-00000000  CHAR STRING                          
+  5-00000050  I*4  STR_LEN                                          7-00000008  R*4  VERSION                         
+  8-00000014  I*4  XMAX                                             8-00000010  I*4  XMIN                            
+  8-00000000  I*4  XYLEN                                            8-00000008  R*4  XY_MULT                         
+  8-00000004  I*4  XY_UNIT                                          8-00000030  R*4  X_ORIG                          
+  8-00000020  I*4  X_SAMP                                           8-0000001C  I*4  YMAX                            
+  8-00000018  I*4  YMIN                                             8-00000034  R*4  Y_ORIG                          
+  8-00000024  I*4  Y_SAMP                                           8-0000000C  R*4  Z_MULT                          
+
+
+ARRAYS
+
+    Address  Type  Name                                  Bytes  Dimensions
+
+  2-00000000  L*1  BLOCK                                  2000  (2000)
+  2-000007DC  CHAR STD_ATTR_CODES                            6  (3)
+  2-000007D0  I*4  STD_ATTR_LEN                             12  (3)
+  8-00000038  R*4  X_COORD                                  16  (4)
+  8-00000048  R*4  Y_COORD                                  16  (4)
+
+
+
+
+LABELS
+
+    Address   Label       Address   Label       Address   Label       Address   Label       Address   Label   
+
+  0-00000009  10        0-00000045  20        0-0000018B  100       0-00000200  200       0-00000317  999     
+
+
+FUNCTIONS AND SUBROUTINES REFERENCED
+
+  Type  Name            Type  Name            Type  Name            Type  Name            Type  Name            Type  Name          
+
+   L*4  FLRSTR                LSL_ADDMSG            LSL_PUTMSG       I*4  MIN              L*4  MTIRDB           L*4  READ_VOLHDREC 
+   L*4  RECOGNISED    
+
+                                                                 6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page   7
+                                                                 6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+00001   C
+00002    
+00003   	LOGICAL FUNCTION READ_CONTINUE( AFTER )
+00004   C
+00005   C
+00006   C Copyright Laser-Scan Ltd, Cambridge, England
+00007   C
+00008   C Author Tony J Ibbs, 7 October 1987
+00009   C
+00010   C Reads a continuation record in
+00011   C
+00012   	IMPLICIT NONE
+00013   C
+00014   C Arguments:
+00015   C
+00016   	CHARACTER*(*)	AFTER		! what we're continuing
+00017   C
+00018   C Messages:
+00019   C
+00020   	INCLUDE 'HERE:NTF2DTIMSG.PAR'
+00125   C
+00126   C Commons:
+00127   C
+00128   	INCLUDE	'HERE:RECORD.CMN'
+00151   C
+00152   C Functions:
+00153   C
+00154   	LOGICAL		READ_NTF_RECORD	! read the next record
+00155   C
+00156   C Workspace:
+00157   C
+00158   	LOGICAL		OK		! Success flag
+00159   C
+00160   C .....................................................................
+00161   C Read the continuation record in for the rest of the text
+00162   C
+00163   	OK = READ_NTF_RECORD()
+00164   	IF (OK) THEN
+00165   C
+00166   	   IF (STRING(1:2).NE.'00') THEN
+00167   	      CALL LSL_PUTMSG(NTF2DTI__NOTCONTINUE,AFTER,RECNUM)
+00168   	      CALL LSL_ADDSTR(STRING)
+00169   	      OK=.FALSE.
+00170   	   ENDIF
+00171   C
+00172   	ENDIF
+00173   C
+00174   C So we can return
+00175   C
+00176   	READ_CONTINUE = OK
+00177   C
+00178   	RETURN
+00179   	END
+
+READ_CONTINUE                                                    6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page   8
+01                                                               6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+PROGRAM SECTIONS
+
+    Name				 Bytes   Attributes
+
+  0 $CODE                                   76   PIC CON REL LCL   SHR   EXE   RD NOWRT QUAD
+  1 $PDATA                                   6   PIC CON REL LCL   SHR NOEXE   RD NOWRT QUAD
+  2 $LOCAL                                  56   PIC CON REL LCL NOSHR NOEXE   RD   WRT QUAD
+  3 RECORD1                                 86   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+  4 RECORD2                                  9   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+
+    Total Space Allocated                  233
+
+
+ENTRY POINTS
+
+    Address  Type  Name          
+
+  0-00000000  L*4  READ_CONTINUE 
+
+
+VARIABLES
+
+    Address  Type  Name                                               Address  Type  Name                            
+
+ AP-00000004@ CHAR AFTER                                            4-00000008  CHAR EOR_MARKER                      
+  4-00000004  I*4  LENGTH                                           3-00000054  CHAR NTF$_REC_DESCR                  
+  2-00000004  L*4  OK                                               4-00000000  I*4  RECNUM                          
+  3-00000000  CHAR STRING                                           3-00000050  I*4  STR_LEN                         
+
+
+
+
+FUNCTIONS AND SUBROUTINES REFERENCED
+
+  Type  Name                              Type  Name                              Type  Name                            
+
+        LSL_ADDSTR                              LSL_PUTMSG                         L*4  READ_NTF_RECORD                 
+
+                                                                 6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page   9
+                                                                 6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+00001   C
+00002    
+00003   	LOGICAL FUNCTION RECOGNISED (IN_STR)
+00004   C
+00005   C
+00006   C	
+00007   C	Author S.Gupta 16-August-1991
+00008   C
+00009   C	function determines whether the record read was a valid NTF record
+00010   C	when transferring digital terrain model data.
+00011   C
+00012   	IMPLICIT NONE
+00013   C
+00014   	CHARACTER*80	IN_STR
+00015   C
+00016   	INCLUDE 	'HERE:NTF2DTI.CMN'
+00046   C
+00047   	INTEGER		LOOP
+00048   	LOGICAL		MATCH
+00049   C
+00050   C###########################################################################
+00051   C
+00052   	LOOP =0
+00053   	MATCH = .FALSE.
+00054   	DO WHILE ( (.NOT.MATCH).AND.(LOOP.LT.NTF_RECORD_TYPES) )
+00055   	  LOOP = LOOP+1
+00056   	  MATCH = IN_STR(1:2).EQ.NTF_RECORDS(LOOP)
+00057   	END DO
+00058   C
+00059   C###########################################################################
+00060   C
+00061   	RECOGNISED = MATCH
+00062   C
+00063   	RETURN
+00064   	END
+
+RECOGNISED                                                       6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page  10
+01                                                               6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+PROGRAM SECTIONS
+
+    Name				 Bytes   Attributes
+
+  0 $CODE                                   66   PIC CON REL LCL   SHR   EXE   RD NOWRT QUAD
+  2 $LOCAL                                  44   PIC CON REL LCL NOSHR NOEXE   RD   WRT QUAD
+  3 NTF2DTI                                 16   PIC OVR REL GBL   SHR NOEXE   RD   WRT QUAD
+
+    Total Space Allocated                  126
+
+
+ENTRY POINTS
+
+    Address  Type  Name          
+
+  0-00000000  L*4  RECOGNISED    
+
+
+VARIABLES
+
+    Address  Type  Name              Address  Type  Name              Address  Type  Name              Address  Type  Name          
+
+  3-00000004  I*4  COUNT_SECTION  AP-00000004@ CHAR IN_STR          2-0000001C  I*4  LOOP            2-00000020  L*4  MATCH         
+  3-00000008  L*4  MULTIVOLUME     3-00000000  I*4  SECTION         3-0000000C  I*4  VOLCOUNT      
+
+
+ARRAYS
+
+    Address  Type  Name                Bytes  Dimensions
+
+  2-00000000  CHAR NTF_RECORDS            22  (11)
+
+
+
+                                                                 6-Aug-1997 09:37:28	VAX FORTRAN V5.9-173                Page  11
+                                                                 6-Aug-1997 09:37:27	[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.FOR;9   
+
+00001   C
+
+
+COMMAND QUALIFIERS
+
+  FORTRAN/EXTEND/DEBUG/NOOPT/LIST RECORDS
+
+  /CHECK=(NOBOUNDS,OVERFLOW,NOUNDERFLOW)
+  /DEBUG=(SYMBOLS,TRACEBACK)
+  /DESIGN=(NOCOMMENTS,NOPLACEHOLDERS)
+  /SHOW=(NODICTIONARY,NOINCLUDE,MAP,NOPREPROCESSOR,SINGLE)
+  /STANDARD=(NOSEMANTIC,NOSOURCE_FORM,NOSYNTAX)
+  /WARNINGS=(NODECLARATIONS,GENERAL,NOULTRIX,NOVAXELN)
+  /CONTINUATIONS=19  /NOCROSS_REFERENCE  /NOD_LINES  /EXTEND_SOURCE
+  /F77  /NOG_FLOATING  /I4  /NOMACHINE_CODE  /NOOPTIMIZE  /NOPARALLEL
+  /NOANALYSIS_DATA
+  /NODIAGNOSTICS
+  /LIST=LSL$SOURCE_ROOT:[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.LIS;9                                           
+  /OBJECT=LSL$SOURCE_ROOT:[DTMCONVERT.NTF2DTI.SPECIAL]RECORDS.OBJ;17                                          
+
+
+COMPILATION STATISTICS
+
+  Run Time:           1.11 seconds
+  Elapsed Time:       1.65 seconds
+  Page Faults:        908
+  Dynamic Memory:     632 pages

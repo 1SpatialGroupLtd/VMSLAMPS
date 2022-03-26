@@ -1,0 +1,382 @@
+C
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL*4 FUNCTION SEED_CHECK()
+C
+***	MODULE	SEED_CHECK
+***	IDENT	08MY92
+C
+	IMPLICIT NONE
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+	LOGICAL*4	ACTUAL_SEED_CHECK
+C
+C	........................................................................
+C
+	SEED_CHECK = ACTUAL_SEED_CHECK(
+     &			POLMAX,TABMAX,POLNEST_MAX, PARTS_MAX,
+     &			%VAL(PTR$_SEED_ADDRESS)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL*4 FUNCTION ACTUAL_SEED_CHECK(
+     &		POLMAX,TABMAX,POLNEST_MAX,PARTS_MAX,
+     &		SEED_ADDRESS
+     &	)
+C
+C
+***	MODULE	ACTUAL_SEED_CHECK
+***	IDENT	30OC91
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	No longer shares use of LRUSED bitmap		TJH  31-May-1989
+CMOD	Modified to include labelling from seed point 
+C	AC entries.					AC   05-Jul-1988
+C	Author						TJH  20-Feb-1987
+C
+C Function to check the validity of seed point features. Polygon seed
+C points are used to label a set of segments which together form a closed 
+C polygon. ACTUAL_SEED_CHECK checks the following:
+C
+C   o A label is taken from a specified AC entry (/SEED=USE:AC), from the 
+C     TX (/SEED=USE:TEXT) or from its FSN (/SEED=USE:FSN)
+C
+C   o Composite text in text features is not supported. Only a single
+C     TX (TeXt) entry will be read from the seed point feature.
+C
+C   o A seed point must have a single ST (STring) entry, containing a
+C     single locating point. 
+C
+C   o A seed point feature must have a feature code, or lie within a
+C     layer, such that it enables the user to differentiate it from
+C     polygon segment features. There can be no ambiguity of feature
+C     code or layer between segment features and seed point features. 
+C
+C   o If /SEED=USE:FSN is specified, seed point FSNs must be unique. 
+C
+C Seed point features are accessed via the addresses in SEED_ADDRESS.
+C All error message output is done within ACTUAL_SEED_CHECK(). 
+C
+C The segment data range and all address tables are stored
+C in /TABLES/.
+C
+C Function returns SS$_NORMAL if all is well or one of a variety
+C of IPOLYGON message codes if things go wrong.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNIPOLYGON:IPOLYGONMSG.PAR'
+	INCLUDE		'($STSDEF)'
+	INTEGER		SS$_ABORT
+	EXTERNAL	SS$_ABORT	! error
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'LSL$CMNIPOLYGON:COMMAND.CMN'
+	INCLUDE 	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+	INCLUDE		'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE		'LSL$CMNLSL:EXPC.CMN'
+C
+C Arguments
+	INTEGER*4	POLMAX
+	INTEGER*4	TABMAX
+	INTEGER*4	POLNEST_MAX
+	INTEGER*4	PARTS_MAX
+C
+	INTEGER*4	SEED_ADDRESS(TABMAX)
+C
+C Workspace:
+	INTEGER	  SEEDFSN(FSN_BITMAP_MAX)
+C				! bitmap for checking duplicate FSNs
+	REAL	  COORD(2)	! seed point position
+	INTEGER	  FSN		! feature serial number
+	LOGICAL   DUPLICATE	! duplicate FSN?
+	LOGICAL   HADST		! check for empty features
+	LOGICAL   HADTX		! checks for seed pt. text
+	LOGICAL   HADAC		! checks for seed pt. text
+	INTEGER*2 I,MESLEN	! temporary variables
+	INTEGER*2 IECODE,IELEN	! IFF entry code and length
+	INTEGER*2 IENDS		! line state (coded bitwise)
+	INTEGER	  ISQ		! internal sequence number
+	INTEGER*2 LAYER		! layer number
+	CHARACTER*256 MESTXT	! error message text
+	INTEGER*2 NPTS		! number of coord pairs to be read
+	LOGICAL   OK		! function return
+	INTEGER*2 ACTYPE	!
+C
+C Functions:
+	INTEGER*2 EXPAND	! expand text string
+	LOGICAL	BBCS		! checks/sets bitmap element
+	LOGICAL	GET_SEED_ADDRESS! for seed points in separate file
+	LOGICAL	CHK_SEED_RANGE	! checks seed point coord. is in range
+	LOGICAL	VIOCLR		! clears array
+C
+C ......................................................................
+C
+	ACTUAL_SEED_CHECK=%LOC(SS$_NORMAL)	! assume success
+C
+	IF (.NOT.HAD_SEED) GOTO 50	! no seed points?
+C
+C If the seed point features were jumbled up with the segment data
+C the addresses of the start of the seed point features will have
+C already been stored in TAB_BUILD. If, however, seed
+C points are supplied via a separate file, (using the /SEED_FILE
+C qualifier), a preliminary pass through the seed points file is made to
+C determine which seed point features are to be checked. This is
+C necessary as a subset may have been chosen using the /LAYER_SEED
+C and /FC_SEED qualifiers. We can store the addresses of the start of
+C the features and then use the same checks code as for the combined
+C seed point/segment feature file situation. 
+C
+C Separate seed point IFF file?
+	IF (HAD_SEED_FILE) THEN
+	   ACTUAL_SEED_CHECK=GET_SEED_ADDRESS()
+	ENDIF
+C
+C ......................................................................
+C             D O   S E E D   P O I N T   C H E C K S 
+C                               - via feature addresses in SEED_ADDRESS
+C
+C
+C If /USE:FSN specified we will use the SEEDFSN array for duplicate FSN
+C checks. Initialise the bitmap array
+	IF (USE_FSN) THEN
+	   ACTUAL_SEED_CHECK=VIOCLR(SEEDFSN(1),4*FSN_BITMAP_MAX,0)
+	   IF (.NOT.ACTUAL_SEED_CHECK) GOTO 50
+	ENDIF
+C
+	CALL FRAMED_MES('Checking Seed Points',20)
+C
+C Loop for each seed point feature in turn
+	DO 20 I=1,NUM_SEED_PTS
+	   HADST=.FALSE.
+	   HADTX=.FALSE.
+	   HADAC=.FALSE.
+	   CALL IFFPKE(IECODE,IELEN,SEED_ADDRESS(I))
+	   IF (IECODE.NE.'NF') THEN
+	      ACTUAL_SEED_CHECK=IPOL__LOST
+	      CALL LSL_PUTMSG(ACTUAL_SEED_CHECK,IECODE)
+	      GOTO 40
+	   ENDIF
+	   IF (IELEN.LE.-1) GOTO 30	! eof
+C
+C We landed on the feature OK!
+	   CALL EIHRI(FSN,1,1)
+	   CALL EIHRI(ISQ,1,2)	
+C
+C If the user specified the /USE:FSN  qualifier we must check for 
+C duplicate seed point FSNs. 
+	   IF (USE_FSN) THEN
+	      DUPLICATE=.FALSE.
+	      IF (.NOT.(BBCS(FSN,SEEDFSN(1)))) THEN
+	         ACTUAL_SEED_CHECK=%LOC(SS$_ABORT)
+	         DUPLICATE=.TRUE.
+	      ENDIF	   
+	   ENDIF	   
+C
+C Even if we have a duplicate FSN we will struggle on and try to do
+C all the checks. Get next entry...
+10	   CALL IFFNXT(IECODE,IELEN)
+	   IF (IELEN.LE.-1) GOTO 30		! unexpected eof
+	   IF (IECODE.EQ.'ST') THEN		! coordinate string
+C
+C Check for multiple STs in feat.
+	      IF (HADST) THEN
+	         IF (HAD_LITES) THEN
+	            CALL FLWSEL(LITESLUN)
+	            CALL FLWRTF('%%MESSAGE Seed point error:')
+	         ENDIF
+	         MESLEN=EXPAND(
+     &		  '%WSMultiple ST entries in feature with FSN %N (%N)'
+     &		    ,MESTXT			      ,FSN,ISQ)
+	         CALL MES_OUT(COORD,MESTXT,MESLEN)
+	      ENDIF
+	      HADST=.TRUE.			! had one ST for feature
+	      CALL EIHRS(NPTS,IENDS)
+	      IF (NPTS.GE.1) CALL EIHRR(COORD,2,1) ! read [1st] coord
+C
+C As we now have a coordinate to locate the error report the
+C duplicate FSN problem
+	      IF (DUPLICATE) THEN
+	         IF (HAD_LITES) THEN
+	            CALL FLWSEL(LITESLUN)
+	            CALL FLWRTF('%%MESSAGE Seed point error:')
+	         ENDIF
+	         MESLEN=EXPAND(
+     &		  '%WSDuplicate seed point FSN %N found - FSN %N (%N)'
+     &		   ,MESTXT		   ,FSN	          ,FSN,ISQ)
+	         CALL MES_OUT(COORD,MESTXT,MESLEN)
+	      ENDIF
+	      IF (NPTS.NE.1) THEN
+	         IF (NPTS.EQ.0) THEN
+	            MESLEN=EXPAND(
+     &		     '%WSEmpty ST entry in feature with FSN %N (%N)'
+     &		      ,MESTXT				   ,FSN,ISQ)
+	            ACTUAL_SEED_CHECK=%LOC(SS$_ABORT)
+	            IF (HAD_LIS)THEN
+	               CALL FLWRTF('%S',MESTXT(:MESLEN))
+	            ELSE
+	               CALL WRITEF('%S',MESTXT(:MESLEN))
+	            ENDIF
+	         ELSE IF (NPTS.GT.1) THEN
+	            IF (HAD_LITES) THEN
+	               CALL FLWSEL(LITESLUN)
+	               CALL FLWRTF('%%MESSAGE Seed point error:')
+	            ENDIF
+	            MESLEN=EXPAND(
+     &		     '%WSMulti-point ST entry in feature'//
+     &		     ' with FSN %N (%N)',MESTXT,FSN,ISQ)
+	            CALL MES_OUT(COORD,MESTXT,MESLEN)
+	         ENDIF
+	         ACTUAL_SEED_CHECK=%LOC(SS$_ABORT)
+	      ENDIF
+C
+C Check that the seed point lies within the segment data range
+	      OK=CHK_SEED_RANGE(COORD,FSN,ISQ)
+	      IF (.NOT.OK) ACTUAL_SEED_CHECK=%LOC(SS$_ABORT)
+	      GOTO 10				! get next entry in feat
+	   ELSEIF (IECODE.EQ.'TX') THEN	! text
+	      HADTX=.TRUE.
+	      GOTO 10				! get next entry in feat
+	   ELSEIF (IECODE.EQ.'AC') THEN 
+	      CALL EIHRI(ACTYPE,1,1)
+              IF (ACTYPE.EQ.SEED_AC) HADAC=.TRUE.
+	      GOTO 10
+	   ELSEIF (IECODE.EQ.'TS') THEN		! text component - bad
+	      IF (HAD_LITES) THEN
+	         CALL FLWSEL(LITESLUN)
+	         CALL FLWRTF('%%MESSAGE Seed point error:')
+	      ENDIF
+	      MESLEN=EXPAND(
+     &	       '%WSText component found in FSN %N (%N) - ignored'
+     &	       ,MESTXT	   	            ,FSN,ISQ)
+	      CALL MES_OUT(COORD,MESTXT,MESLEN)
+	      ACTUAL_SEED_CHECK=%LOC(SS$_ABORT)
+	      GOTO 10				! get next entry in feat
+	   ELSEIF (IECODE.NE.'EF') THEN	! end of feature?
+	      GOTO 10				! get next entry in feat
+	   ELSE				
+C
+C .......................................................................
+C		E N D   O F    F E A T U R E
+C
+C did we need a TX entry ?
+	      IF (USE_TEXT.AND..NOT.HADTX) THEN
+	         IF (HAD_LITES) THEN
+	            CALL FLWSEL(LITESLUN)
+	            CALL FLWRTF('%%MESSAGE Seed point error:')
+	         ENDIF
+	         MESLEN=EXPAND(
+     &		  '%WSTX entry missing from feature with FSN %N (%N)'
+     &		   ,MESTXT,FSN,ISQ)
+	         CALL MES_OUT(COORD,MESTXT,MESLEN)
+	         ACTUAL_SEED_CHECK=%LOC(SS$_ABORT)
+	      ENDIF	   
+C
+C did we need a particular AC entry ?
+	      IF (USE_AC.AND..NOT.HADAC) THEN
+	         IF (HAD_LITES) THEN
+	            CALL FLWSEL(LITESLUN)
+	            CALL FLWRTF('%%MESSAGE Seed point error:')
+	         ENDIF
+	         MESLEN=EXPAND(
+     &	'%WSAC (%^W%N) entry missing from feature with FSN %^L%N (%N)'
+     & 	,MESTXT,SEED_AC,FSN,ISQ)
+	         CALL MES_OUT(COORD,MESTXT,MESLEN)
+	         ACTUAL_SEED_CHECK=%LOC(SS$_ABORT)
+	      ENDIF	   
+C
+C did not require a TX or particular AC entry but got one anyway ?
+	      IF (USE_FSN.AND.(HADTX.OR.HADAC)) THEN
+	         IF (HAD_LITES) THEN
+	            CALL FLWSEL(LITESLUN)
+	            CALL FLWRTF('%%MESSAGE Seed point error:')
+	         ENDIF
+	         MESLEN=EXPAND(
+     &	'%WS% /SEED=USE:FSN selected - TX or AC (%^W%N) entry in '//
+     &	'feature with FSN %^L%N (%N) will be ignored',
+     &	MESTXT,SEED_AC,FSN,ISQ)
+	         CALL MES_OUT(COORD,MESTXT,MESLEN)
+	      ENDIF	   
+C
+C check that had a coordinate for the seed point
+	      IF (.NOT.HADST) THEN
+	         MESLEN=EXPAND(
+     &		  '%WSST entry missing from feature with FSN %N (%N)'
+     &		   ,MESTXT				,FSN,ISQ)
+	         IF (HAD_LIS) THEN
+	            CALL FLWSTR(MESTXT,MESLEN)
+	         ELSE
+	            CALL TTWLIN
+	         ENDIF
+	         ACTUAL_SEED_CHECK=%LOC(SS$_ABORT)
+	      ENDIF	   
+	   ENDIF	   
+20	CONTINUE
+	GOTO 40
+C
+C ......................................................................
+C
+C Unexpected end of file
+30	ACTUAL_SEED_CHECK=IPOL__UNEXPEOF
+	CALL LSL_PUTMSG(ACTUAL_SEED_CHECK,SEED_FILE(:SEED_LEN))
+C
+C ......................................................................
+C
+C If all is well so be it. If we have had to warn the user (but
+C continued processing) upgrade to severity ERROR now to stop further
+C processing.
+40	IF (ACTUAL_SEED_CHECK
+     &	   .OR.(IBITS(ACTUAL_SEED_CHECK,0,3).EQ.STS$K_WARNING)) THEN
+	   ACTUAL_SEED_CHECK=%LOC(SS$_NORMAL)
+C
+C Tell user what has been done?
+	   IF (HAD_LOG) THEN
+	      CALL EXPAND(
+     &	     'Number of seed point feature addresses tabulated ... %N',
+     &							NUM_SEED_PTS)
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+	   ENDIF
+	ELSE
+	   DELETE=.TRUE.			! delete output files
+	   ACTUAL_SEED_CHECK=IPOL__SEEDCHECK
+	   CALL LSL_PUTMSG(ACTUAL_SEED_CHECK)
+	ENDIF
+50	RETURN
+	END

@@ -1,0 +1,293 @@
+	LOGICAL FUNCTION INTERP(JPOS,LUN,ROVLUN)
+C
+***	MODULE	INTERP
+***	IDENT	10SE96
+C
+C	Copyright (C), Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	DTI_DTED replaced by parameter DTI_TED4         DRC 18-Aug-1988
+C	Modified to perform smooth feathering if IFF
+C	  control is not being used			SAB 20-Aug-1996
+C	Created						TJH 20-MAY-1988
+C
+C Performs re-interpolation of the posts along that part of the row 
+C or column lying within the blend zone at position JPOS along the join.
+C
+C The Z values to be interpolated between are held in the fixed Z
+C array FIXZAR. There are NUMINS fixed points to be
+C interpolated between.
+C
+C Function returns .TRUE. if all is well
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	INTEGER	JPOS		! position along blend edge
+	INTEGER	LUN		! blend file LUN
+	INTEGER	ROVLUN		! current ROVER file LUN
+C
+C Parameters:
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNDTIBLEND:DTIBLENDMSG.PAR'
+	INCLUDE 'LSL$CMNDTI:DTIPAR.PAR'
+	INCLUDE 'LSL$CMNDTI:DTIDEF.PAR'
+	INCLUDE 'LSL$CMNDTIBLEND:PARAMS.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:COMMAND.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:PROCESS.CMN'
+	INCLUDE	'LSL$CMNDTIBLEND:FILES.CMN'
+	INCLUDE '($SSDEF)/NOLIST'
+C
+C W/s
+	INTEGER		I,J
+	INTEGER		XPOS,YPOS	! position in DTI file
+	INTEGER		IERR		! error return
+	REAL	 	XYZ1(3),XYZ2(3) ! two ends of a profile segment
+	REAL	 	IXYZ(3)		! x,y,z of DTI post
+	REAL		ZDIFF		! difference between new & original ht.
+	LOGICAL 	OK		! function return
+	LOGICAL*4	VALUE		! 4 bytes equivalenced onto:
+	REAL*4		RVALUE
+	BYTE		BVALUE
+	INTEGER*4	LVALUE
+	INTEGER*2	WVALUE
+	EQUIVALENCE (VALUE,RVALUE,WVALUE,BVALUE,LVALUE)
+	LOGICAL*4	OLD_VALUE	! 4 bytes for old VALUE
+	BYTE		BVAL
+	INTEGER*2	UNSIGNED_BVAL
+	EQUIVALENCE (UNSIGNED_BVAL,BVAL)
+C
+C Functions
+	LOGICAL		DTI_WRITE_DATA	! write DTI data
+	LOGICAL		DTI_READ_DATA	! read DTI data
+
+C
+C ......................................................................
+C
+	INTERP=SS$_ABORT		! assume failure
+C
+C First set up the constant (X or Y) of the blend profile.
+	IF (HORIZONTAL_JOIN) THEN
+	   IF (HEADER_TYPE(LUN).EQ.DTI_TED4) THEN
+	      XYZ1(1)=
+     &		 LONREC(1,LUN)-MINXOF+(DTI_WINDOW_SWX(LUN)-1+JPOS-1)
+     &					*LONINT(LUN)
+	   ELSE
+	      XYZ1(1)=
+     &		 X_OFFSET(LUN)-MINXOF+(DTI_WINDOW_SWX(LUN)-1+JPOS-1)
+     &					*X_GRID(LUN)
+	   ENDIF
+	   XYZ2(1)=XYZ1(1)
+	   IXYZ(1)=XYZ1(1)
+	   XPOS=DTI_WINDOW_SWX(LUN)+JPOS-1
+	ELSE
+	   IF (HEADER_TYPE(LUN).EQ.DTI_TED4) THEN
+	      XYZ1(2)=
+     &		 LATREC(1,LUN)-MINYOF+(DTI_WINDOW_SWX(LUN)-1+JPOS-1)
+     &					*LATINT(LUN)
+	   ELSE
+	      XYZ1(2)=
+     &		 Y_OFFSET(LUN)-MINYOF+(DTI_WINDOW_SWY(LUN)-1+JPOS-1)
+     &					*Y_GRID(LUN)
+	   ENDIF
+	   XYZ2(2)=XYZ1(2)
+	   IXYZ(2)=XYZ1(2)
+	   YPOS=DTI_WINDOW_SWY(LUN)+JPOS-1
+	ENDIF
+C
+C For each pair of fixed Z's along the blend profile (got from the 
+C profile ends and/or IFF intersections) calculate, using linear
+C interpolation, new Z values for the old DTI posts that lie underneath
+	DO 20 I=1,NUMINS-1
+C
+C Get (X,Y,Z) of 1st of pair of fixed points along the blend profile
+	   IF (HORIZONTAL_JOIN) THEN
+	      XYZ1(2)=FIXZAR(1,I)
+	   ELSE			! vertical join
+	      XYZ1(1)=FIXZAR(1,I)
+	   ENDIF
+	   XYZ1(3)=FIXZAR(2,I)
+C
+C Now get (X,Y,Z) of second point in pair along blend profile
+	   IF (HORIZONTAL_JOIN) THEN
+	      XYZ2(2)=FIXZAR(1,I+1)
+	   ELSE			! vertical join
+	      XYZ2(1)=FIXZAR(1,I+1)
+	   ENDIF
+	   XYZ2(3)=FIXZAR(2,I+1)
+C
+C Now take each of the DTI posts along the blend profile in turn
+C and check if it lies within the range of the segment defined by 
+C XYZ1 XYZ2. If it does, lineally interpolate a new Z value for it
+C using INTERZ.
+	   ZDIFF = 0.0
+	   DO 10 J=1,BORDER_WIDTH
+	      IF (HORIZONTAL_JOIN) THEN
+C Blend zone at bottom of blend file?
+	         IF (SHARED_ROW(LUN).EQ.1) THEN
+	            IF (HEADER_TYPE(LUN).EQ.DTI_TED4) THEN
+	               IXYZ(2)=
+     &		        LATREC(1,LUN)-MINYOF+(DTI_WINDOW_SWY(LUN)-1+J-1)
+     &					*LATINT(LUN)
+	            ELSE
+	               IXYZ(2)=
+     &		        Y_OFFSET(LUN)-MINYOF+(DTI_WINDOW_SWY(LUN)-1+J-1)
+     &					*Y_GRID(LUN)
+	            ENDIF
+	            YPOS=DTI_WINDOW_SWY(LUN)+J-1
+	         ELSE		! at top
+	            IF (HEADER_TYPE(LUN).EQ.DTI_TED4) THEN
+	               IXYZ(2)=
+     &		        LATREC(1,LUN)-MINYOF+(DTI_WINDOW_NEY(LUN)-1
+     &					-(J-1))*LATINT(LUN)
+	            ELSE
+	               IXYZ(2)=
+     &		        Y_OFFSET(LUN)-MINYOF+(DTI_WINDOW_NEY(LUN)-1
+     &					-(J-1))*Y_GRID(LUN)
+	            ENDIF
+	            YPOS=DTI_WINDOW_NEY(LUN)-(J-1)
+	         ENDIF	   
+	      ELSE		! vertical join
+C Blend zone at left of blend file?
+	         IF (SHARED_COL(LUN).EQ.1) THEN
+	            IF (HEADER_TYPE(LUN).EQ.DTI_TED4) THEN
+	               IXYZ(1)=
+     &		        LONREC(1,LUN)-MINXOF+(DTI_WINDOW_SWX(LUN)-1+J-1)
+     &					*LONINT(LUN)
+	            ELSE
+	               IXYZ(1)=
+     &		        X_OFFSET(LUN)-MINXOF+(DTI_WINDOW_SWX(LUN)-1+J-1)
+     &					*X_GRID(LUN)
+	            ENDIF
+	            XPOS=DTI_WINDOW_SWX(LUN)+J-1
+	         ELSE					! at right
+	            IF (HEADER_TYPE(LUN).EQ.DTI_TED4) THEN
+	               IXYZ(1)=
+     &		        LONREC(1,LUN)-MINXOF+(DTI_WINDOW_NEX(LUN)-1
+     &					-(J-1))*LONINT(LUN)
+	            ELSE
+	               IXYZ(1)=
+     &		        X_OFFSET(LUN)-MINXOF+(DTI_WINDOW_NEX(LUN)-1
+     &					-(J-1))*X_GRID(LUN)
+		    ENDIF
+	            XPOS=DTI_WINDOW_NEX(LUN)-(J-1)
+	         ENDIF	   
+	      ENDIF
+C
+C We now have in IXYZ the (X,Y,unsetZ) for the current post. Does
+C it fall under the present blend profile segment? If not ignore.
+	      IF (HORIZONTAL_JOIN) THEN
+	         IF (IXYZ(2).LT.XYZ1(2).AND.IXYZ(2).LT.XYZ2(2)) GOTO 10
+	         IF (IXYZ(2).GT.XYZ1(2).AND.IXYZ(2).GT.XYZ2(2)) GOTO 10
+	      ELSE
+	         IF (IXYZ(1).LT.XYZ1(1).AND.IXYZ(1).LT.XYZ2(1)) GOTO 10
+	         IF (IXYZ(1).GT.XYZ1(1).AND.IXYZ(1).GT.XYZ2(1)) GOTO 10
+	      ENDIF
+C
+C Our DTI post is ripe for re-interpolation. Read the old Z value from
+C the DTI file 
+	      OK=DTI_READ_DATA(LUN,	! lun
+     &		 VALUE,		! old  post
+     &		 XPOS,		! column
+     &		 YPOS,		! row
+     &		 IERR)		! system error return
+	      IF (OK) THEN
+C
+C Is it a null post though?
+	         IF (DATA_TYPE(LUN).EQ.DATA_BYTE) THEN
+	            IF (BVALUE.EQ.NULL_BYTE_VALUE) GOTO 10
+	            BVAL = BVALUE
+		    IXYZ(3) = UNSIGNED_BVAL
+	         ELSEIF (DATA_TYPE(LUN).EQ.DATA_WORD) THEN
+	            IF (WVALUE.EQ.NULL_WORD_VALUE) GOTO 10
+		    IXYZ(3) = WVALUE
+	         ELSEIF (DATA_TYPE(LUN).EQ.DATA_LONG) THEN
+	            IF (LVALUE.EQ.NULL_LONG_VALUE) GOTO 10
+		    IXYZ(3) = LVALUE
+	         ELSEIF (DATA_TYPE(LUN).EQ.DATA_REAL) THEN
+	            IF (RVALUE.EQ.NULL_REAL_VALUE) GOTO 10
+		    IXYZ(3) = RVALUE
+		 ENDIF	            
+	         OLD_VALUE=VALUE
+	      ELSE
+	         CALL LSL_PUTMSG(DTIBLN__RETPOST)
+	         CALL LSL_ADDMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 999
+	      ENDIF
+
+C Perform smooth feathering if no IFF control was selected.
+	      IF (SMOOTH.AND.NUM_IFF.EQ.0) THEN
+	        IF (J.EQ.1) THEN
+C If we are on the edge calculate the difference between the new and the
+C original height.
+		  IF (XYZ1(3).EQ.DTI_NULL_REAL) GOTO 10
+	          ZDIFF = XYZ1(3) - IXYZ(3)
+	          IF (ZDIFF.EQ.0.0) GOTO 10
+	          IXYZ(3) = XYZ1(3)
+	        ELSE
+C Otherwise adjust height. The amount an elevation is increased or decreased
+C is inversely proportional to its distance from the edge.
+	          IF (ZDIFF.EQ.0.0) GOTO 10
+	          IXYZ(3) = IXYZ(3) + ZDIFF *
+     &                (FLOAT(BORDER_WIDTH - J) / (BORDER_WIDTH-1))
+	        ENDIF
+	      ELSE
+C If IFF control was selected use linear interpolation technique to calculate
+C a new z value for the post. New Z value returns in IXYZ(3)
+	        CALL INTERZ(XYZ1,XYZ2,IXYZ)
+	      ENDIF
+C
+C Convert real*4 Z value in IXYZ(3) to the DTI file data type.
+C RVALUE, LVALUE, WVALUE are all equivalenced onto VALUE.
+	      IF (DATA_TYPE(LUN).EQ.DATA_BYTE) THEN
+		 IF (IXYZ(3).LT.0.OR.IXYZ(3).GT.255) THEN
+		    CALL WRITEF(WARNING//
+     &			'Byte data value underflow or '//
+     &			'overflow at X = %F Y = %F',IXYZ(1),IXYZ(2))
+		    CALL WRITEF('               Original value used')
+	         ELSE
+	            UNSIGNED_BVAL=IXYZ(3)
+		    BVALUE=BVAL
+		 ENDIF
+	      ELSEIF (DATA_TYPE(LUN).EQ.DATA_WORD) THEN
+	         WVALUE=IXYZ(3)
+	      ELSEIF (DATA_TYPE(LUN).EQ.DATA_LONG) THEN
+	         LVALUE=IXYZ(3)
+	      ELSEIF (DATA_TYPE(LUN).EQ.DATA_REAL) THEN
+	         RVALUE=IXYZ(3)
+	      ENDIF
+C
+C Write the new Z value back into the DTI file
+	      OK=DTI_WRITE_DATA(LUN,	! lun
+     &			VALUE,		! new post
+     &			XPOS,		! column
+     &			YPOS,		! row
+     &			IERR)		! system error return
+C
+C If Rover or listing file subtract old from new DTI post value
+C and check that THRESHOLD value not exceeded. If so output messages
+C and editor directives to appropriate files. 
+	      IF (OK) THEN
+	         IF (HAD_THRESH) THEN
+	            CALL THRESHOLD_MES(LUN,	! dti lun
+     &				XPOS,		! column
+     &				YPOS,		! row
+     &				VALUE,		! new post value
+     &				OLD_VALUE,	! old post value
+     &				IXYZ,		! posn in user units
+     &				ROVLUN)		! Rover LUN
+	         ENDIF
+	      ELSE
+	         CALL LSL_PUTMSG(DTIBLN__RETPOST)
+	         CALL LSL_ADDMSG(OK)
+	         CALL LSL_ADDMSG(IERR)
+	         GOTO 999
+	      ENDIF
+10	   CONTINUE
+20	CONTINUE
+	INTERP=SS$_NORMAL
+999	RETURN
+	END

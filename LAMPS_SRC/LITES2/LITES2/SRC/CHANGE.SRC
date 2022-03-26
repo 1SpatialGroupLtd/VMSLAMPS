@@ -1,0 +1,191 @@
+	LOGICAL FUNCTION CHANGE(PACK)
+C
+***	MODULE	CHANGE
+***	IDENT	16NO93
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author  Clarke Brunt
+C
+C Coded 26.iii.84
+C
+C To perform changes to a feature which can be done without
+C creating a new feature in the IFF file.
+C Flags in /VARIAT/ control the changes to be made.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:GKSPAR/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+C
+***	COMMON/CMN:DEFINE/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:STRIKE/
+***	COMMON/CMN:VARIAT/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:WORKS/
+C
+C argument
+	INTEGER*4	PACK(PAKLEN)		! a pack for the object
+C
+C functions for SCNFTR
+	EXTERNAL DELPAK,CHAPAK
+C
+C w/s
+	INTEGER*2 IECODE, IELEN, ISTAT(4)	! for IFF reading
+	LOGICAL REDRAW				! re-draw feature
+	BYTE	  BUF(6)		! buffer for ACTYPE and ACVALUE
+	INTEGER	I
+C
+	CHANGE = .TRUE.				! assume failure
+C
+C is map read only?
+	IF (MAPRO(PACK(PAKMAP))) THEN
+	   CALL MOAN(MSG_MAPREADONLY,PACK(PAKMAP)+1)
+	   GOTO 999
+	ENDIF
+C
+C are we going to have to re-draw the thing?
+	REDRAW = CHFC
+C
+C if going to re-draw or re-flush, then remove the old one
+	IF (REDRAW.OR.REFLSH) CALL LDSG(PACK,.TRUE.)
+C
+C get correct map
+	CALL SELIF(PACK(PAKMAP))
+C
+C position to start of feature
+	CALL IFFPKE( IECODE, IELEN, PACK(PAKPNF) )
+	IF (IECODE.NE.'NF'.AND.IECODE.NE.'TC'.AND.IECODE.NE.'CH'
+     &				.AND.IECODE.NE.'VO') THEN
+	   CALL NASTY(MSG_BADPNF)
+	   CALL COLAPS(6)
+	   GOTO 999
+	ENDIF
+C
+C change the FSN
+	IF (CHFSN) THEN
+	   IF (IECODE.NE.'NF') THEN
+	      CALL IFFNXC( 'NF', IELEN )
+	      IF (IELEN.EQ.-1) THEN
+	         CALL NASTY(MSG_NONFENT)
+	         CALL COLAPS(5)
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+	   CALL EIHWI(NEWFSN,1,1)
+C
+C update maximum NF for map
+	   IF (NEWFSN.GT.MAXNF(PACK(PAKMAP))) MAXNF(PACK(PAKMAP)) = NEWFSN
+	ENDIF
+C
+C change the FS
+	IF(CHFC.OR.CHPC.OR.LIMBO.OR.RECOVR.OR.CHFSN.OR.CLREDT.OR.SETEDT)
+     &	   THEN
+	   CALL IFFNXC('FS',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      CALL NASTY(MSG_UNEXPEIFF)
+	      CALL COLAPS(6)
+	      GOTO 999
+	   ENDIF
+C
+C Read up to 4 words from it
+	   IF (IELEN.GT.4) IELEN=4
+	   CALL EIHR( ISTAT, IELEN, 1)
+C
+C Change as required
+	   IF (CHFC) ISTAT(1) = NEWFC
+	   IF (CHPC) ISTAT(3) = (ISTAT(3).AND..NOT.16383).OR.NEWPC
+	   IF (LIMBO)  ISTAT(2) = IOR(ISTAT(2),16)	! set limbo bit
+	   IF (RECOVR) ISTAT(2) = IAND(ISTAT(2),NOT(16))! clear limbo
+	   IF (CLREDT) ISTAT(4) = IAND(ISTAT(4),NOT(1)) ! clear edit bit
+	   IF ((EDTOPT.AND.(.NOT. LIMBO).AND.(.NOT.RECOVR).AND. 
+     &	     (.NOT.CLREDT))       .OR. SETEDT) THEN
+	      ISTAT(4) = IOR(ISTAT(4),1)		! set edited bit
+	   ENDIF
+C
+C and put them back
+	   CALL EIHW( ISTAT, IELEN, 1)
+	ENDIF
+C
+C update any ACs in the F_CODECHANGE list, if they exist in the file
+	IF (FLG_CODECHANGE.AND.DEFINITION(F_CODECHANGE).GT.0) THEN
+10	   CONTINUE
+	   CALL IFFNXT(IECODE,IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      CALL NASTY(MSG_UNEXPEIFF)
+	      CALL COLAPS(6)
+	      GOTO 999
+	   ENDIF
+	   IF (IECODE.EQ.'VO') GOTO 10		! try again
+	   IF (IECODE.NE.'AC') GOTO 20		! passed ACs
+	   IF (IELEN.LT.3) GOTO 10		! no value in this AC!!!
+	   CALL EIHR(BUF,3,1)			! read type and value
+	   CALL FUPDAC(DEFINITION(F_CODECHANGE),! update value
+     &	               BUF(1),
+     &	               BUF(3),
+     &	               .FALSE.)
+	   CALL EIHW(BUF,3,1)			! write it back
+	   GOTO 10				! to next one
+	ENDIF
+C
+C now change the packs for the feature if necessary
+C If DRAFTR or FLUFTR are to be called then, the pack passed to us needs
+C to be changed too. This only occurs for changes to feature code.
+20	CONTINUE
+	IF (CHFC) THEN
+	   PACK(PAKFC) = NEWFC
+	   PACK(PAKGT) = NEWGT
+	ENDIF
+C
+	IF (REFLSH) THEN		! re-flush feature
+	   CALL SCNFTR(PACK(PAKLNK), DELPAK)		! delete packs
+	   PACK(PAKFLG) = 0				! clear flags
+	   CALL FLUFTR(PACK)				! flush
+	ELSE				! just change packs
+	   IF (CHFC.OR.CHFSN.OR.LIMBO.OR.RECOVR)
+     &					CALL SCNFTR(PACK(PAKLNK),CHAPAK)
+C
+C Draw new picture
+	   IF (LIMBO) THEN
+C
+C perform any desired temporary de-activations
+	      DO 30 I=1,WSMAX
+	         IF (WKAC(I).AND.WKSUPP(I)) THEN
+	            CALL GDAWK(I)
+	            WKAC(I) = .FALSE.
+	         ENDIF
+30	      CONTINUE
+	      CALL LSVIS(PACK,GINVIS)
+	      DO 40 I=1,WSMAX
+	         IF (WKOP(I)) THEN
+	            IF (.NOT.WKAC(I)) THEN
+	               CALL GACWK(I)
+	               WKAC(I) = .TRUE.
+	               WKSUPP(I) = .FALSE.
+	            ENDIF
+	         ENDIF
+40	      CONTINUE
+	   ENDIF
+	   IF (RECOVR) CALL LSVIS(PACK,GVISI)
+	   IF (REDRAW) THEN
+	      CALL LCRSG(PACK)
+	      CALL DRAFTR(PACK)
+	      CALL LCLSG
+	   ENDIF
+	ENDIF
+C
+	IF (RECOVR) LASPAK = PACK(PAKLNK)	! for SEARCH LAST
+	IF (LIMBO) LASPAK = 0			! clear SEARCH LAST item
+C
+	CHANGE = .FALSE.
+C
+C automatic updating of OS map header
+	IF (OS_MH_EDIT) CALL OS_MH_UPDATE(PACK,ISTAT)
+C
+C that's all
+999	RETURN
+	END

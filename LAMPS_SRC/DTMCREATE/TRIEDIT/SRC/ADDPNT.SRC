@@ -1,0 +1,164 @@
+	LOGICAL FUNCTION ADDPNT(LIST,IX,IY,KOND,MVAL,LMULT,KEY,IFCODE)
+C
+***	MODULE	ADDPNT
+***	IDENT	07DE87
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+CMOD	Converted for TRIEDIT				TJH 07-Dec-1987
+CMOD	INSRTP now a function for clifflines		TJH 19-Mar-1986
+CMOD	New device types supported			 DM 04-Apr-1985
+C	Created 					 DM 02-Jul-1984
+C
+C Handles the INSERT command.
+C We enter with a point in hand. If it is NOT a master point (and the
+C string is multivalued) then we append it to a buffer and wait for the
+C next master point. When we get it, we linearly interpolate heights for
+C all the non master points and then pass them on to INSRTP.
+C Single height strings and adjacent master points are just handed on.
+C The function is .TRUE. if we fail for some reason.
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	BYTE	  IFCODE	! "feature code" for change
+C				! 0 = normal
+C				! 1 = river
+C				! 2 = ridgeline
+C
+	INTEGER	  LIST(3)	! coords and height of point (scaled)
+	INTEGER	  IX,IY		! coords of point (screen)
+	INTEGER	  KOND		! number of points in string so far
+	INTEGER	  MVAL		! 1 ==> this is a multivalued string
+	INTEGER	  LMULT		! 1 ==> is not a breakline, -1 ==> is
+	INTEGER	  KEY		! 'key' pressed
+C
+C Parameters:
+	INCLUDE 'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE 'LSL$CMNTRIEDIT:DIMS.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNTRIEDIT:DATQ.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNTRIEDIT:TTTYPE.CMN'
+C
+C W/s
+	INTEGER	  I		! temporary variable
+	INTEGER	  INSBUF(3,NTMSIZ)   ! the INSERT buffer itself
+	INTEGER	  LASTMP(3)	! last master point accepted
+	INTEGER	  NPTS		! number of points in buffer
+	INTEGER	  XPREV,YPREV	! previous coords
+	REAL	  H		! height read by RITVAL
+	REAL	  PARDIS	! partial line-length between master pts
+	REAL	  TOTDIS	! total line-length between master pts
+	LOGICAL	  NEW_FEATURE	! new feature?
+C
+C Functions:
+	LOGICAL	  NEARLY	! point too close to previous one ?
+	LOGICAL	  INSRTP	
+C
+	SAVE	  INSBUF,LASTMP,NPTS,TOTDIS,XPREV,YPREV
+C
+C ...................................................................
+C
+	ADDPNT=.FALSE.
+C
+	NEW_FEATURE=.FALSE.
+	IF (KOND.LE.0) THEN		! first point in string ?
+	   NPTS=0			! yes
+	   TOTDIS=0.0
+	   NEW_FEATURE=.TRUE.
+	ELSEIF (NEARLY(LIST(1),LIST(2),XPREV,YPREV,LIMDIS)) THEN
+	   IF (VT100) THEN		! no - moan if points too close
+	      CALL OUTOPT(WARNING//'Points too close - last ignored')
+	   ELSEIF (T4010) THEN
+	      CALL TEXPOS('Too close',1)
+	      CALL KBELL
+	   ELSE
+	      CALL TEXPOS('Points too close',1)
+	      CALL KBELL
+	   ENDIF
+	   IF (KEY.EQ.'E') KEY='P'	! pretend he didn't press END
+	   GO TO 40			! try again !!
+	ENDIF
+	NPTS=NPTS + 1			! add point to buffer
+C
+C  check if this is a multi-valued string.
+	IF (MVAL.EQ.1) THEN
+	   IF (KOND.GT.0) THEN
+	      TOTDIS=TOTDIS+DSQRT((DFLOAT(LIST(1))-DFLOAT(XPREV))**2 +
+     &		(DFLOAT(LIST(2))-DFLOAT(YPREV))**2)! accumulate length
+	   ENDIF
+C
+C  force this to be a master point if the buffer is full.
+	   IF (NPTS.EQ.NTMSIZ.AND.KEY.NE.'M'.AND.KEY.NE.'E') THEN
+	      CALL EXPAND(WARNING//'Backlog buffer full - ')
+	      CALL APPEND('enter the height of this point')
+	      CALL OUTOPT(EXPDSC)
+	      IF (T4010) THEN
+	         CALL RITVAL('Ht: ',H,I,1)
+	      ELSE
+	         CALL RITVAL('Height: ',H,I,1)
+	      ENDIF
+	      CALL CONVER(H,I,3)
+C
+C  convert height to negative if it is a discontinuous point.
+	      LIST(3)=I*LMULT
+	      KEY='M'			! pretend it was a master point
+	   ENDIF
+	ENDIF
+	INSBUF(1,NPTS)=LIST(1)		! add point to buffer
+	INSBUF(2,NPTS)=LIST(2)
+	INSBUF(3,NPTS)=LIST(3)
+C
+C  plot the appropriate symbol.
+	IF (KEY.EQ.'M'.OR.KEY.EQ.'E') THEN
+	   CALL PLSYMB(IX,IY,6)		! square for master point
+	   CALL OUTBUF
+	   IF (NPTS.EQ.1.OR.MVAL.NE.1) GO TO 20	! trivial cases
+	ELSE
+	   CALL PLSYMB(IX,IY,2)		! diamond for ordinary point
+	   CALL OUTBUF
+	   IF (MVAL.NE.1) GO TO 20	! do it now unless multivalued
+	   XPREV=LIST(1)		! remember it for next time
+	   YPREV=LIST(2)
+	   GO TO 40			! all done for now
+	ENDIF
+C
+C  interpolate heights between the master points.
+	PARDIS=0.0
+	XPREV=LASTMP(1)
+	YPREV=LASTMP(2)
+	DO 10 I=1,NPTS-1
+	   PARDIS=PARDIS + SQRT(FLOAT(
+     &		  (INSBUF(1,I)-XPREV)**2 + (INSBUF(2,I)-YPREV)**2))
+	   INSBUF(3,I)=(IABS(LASTMP(3)) + NINT(FLOAT(
+     &		  IABS(INSBUF(3,NPTS))-IABS(LASTMP(3))))*PARDIS/TOTDIS)*
+     &		  ISIGN(1,LASTMP(3))
+	   XPREV=INSBUF(1,I)
+	   YPREV=INSBUF(2,I)
+10	CONTINUE
+C
+C  insert the points into the data list, the triangulation and the
+C  window list.
+20	DO 30 I=1,NPTS
+	   ADDPNT=INSRTP(INSBUF(1,I),LASTMP,KOND,IFCODE,NEW_FEATURE)
+C
+C Error in INSRTP?
+	   IF (ADDPNT) GO TO 40
+	   IF (KOND.LE.0) THEN		! moan if illegal point
+	      CALL OUTOPT(
+     &		 WARNING//'Illegal point - operation abandoned')
+	      ADDPNT=.TRUE.		! signal back the error
+	      GO TO 40
+	   ENDIF
+30	CONTINUE
+	NPTS=0				! clear the insert buffer
+	TOTDIS=0.0			! zero the total line length
+	XPREV=LASTMP(1)			! remember the last master point
+	YPREV=LASTMP(2)
+C
+40	RETURN
+	END

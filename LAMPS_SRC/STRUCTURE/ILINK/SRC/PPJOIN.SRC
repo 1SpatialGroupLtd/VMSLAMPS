@@ -1,0 +1,324 @@
+	LOGICAL*4 FUNCTION PPJOIN(
+     &		HEADARM,ARM,NPT,MAXNODES,MAXARMS)
+
+***	MODULE	PPJOIN
+***	IDENT	02FE90
+
+C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
+
+CMOD	Use LIN_PAC to ensure valid PAC codes		WJJ	02-Feb-1990
+CMOD	Converted to use Point Accuracy Codes		ACM 02-Dec-1988
+CMOD	Converted to accept CB in place of ST entries	ACM 06-Apr-1988
+CMOD	Made a function					TJH 28-May-1987
+C	Created   : ACM					       Dec 1986
+
+	IMPLICIT NONE
+
+C Parameters
+	INCLUDE		'($SSDEF)'
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+	INCLUDE		'LSL$CMNILINK:ILINKCHAR.CMN'
+
+C Data in
+	INTEGER*4	MAXNODES,MAXARMS
+	INTEGER*4	HEADARM(MAXNODES)
+	INTEGER*4	ARM(2,MAXARMS)
+
+	REAL*4		NPT(2,MAXNODES)
+
+C Workspace
+	INTEGER*4	IFTR,IFTR1,IFTR2	! ftr indices
+	INTEGER*4	ARMS(MAXAPN)		! arms at one node
+	INTEGER*4	NARMS			! No. of arms at a node
+	INTEGER*4	INODE			! node index
+	INTEGER*4	IARM			! arm index
+	INTEGER*4	IPAC			! PAC index
+	INTEGER*4	NPTS			! # pts in ftr
+	INTEGER*4	I,J,K			! misc loop indices
+	INTEGER*4	PAC(MAXAPN)		! end pt accuracy codes
+
+	REAL*4		XNODE,YNODE		! node position coords
+	REAL*4		PCENT,LPCENT,PCF	! % process completion
+	REAL*4		ENDP(2,MAXAPN)		! ftr end pt coords
+	REAL*4		NXTP(2,MAXAPN)		! coords of pt before
+	REAL*4		X,Y			! point coords
+	REAL*4		JTOL(MAXAPN)		! end pt join tolerances
+	REAL*4		ETOL(MAXAPN)		! end pt extension tols
+	REAL*4		W(MAXAPN)		! end pt weights
+	REAL*4		WSUM			! weight sum
+
+	LOGICAL*4	HAD_ZERO_TOL		! had zero tol point?
+	LOGICAL*4	POINT_FTR(MAXAPN)	! arm is 1-pt ftr?
+
+C Functions
+	BYTE		LTEQGT			! priority ordering
+	LOGICAL*4	GET_FTR
+	LOGICAL*4	PRJVEX
+	INTEGER*4	LIN_PAC			! get PAC file line number
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Establishes final node positions.
+C
+C	The final node position for each node is found as follows:
+C
+C	If HAD_PROJECT is .FALSE. then the final node position is
+C	position of end pt of ftr at node which has the highest ftr
+C	priority, (more than one ftr with equal highest priority being
+C	treated as below for HAD_PROJECT .TRUE. case),
+C
+C	else HAD_PROJECT is .TRUE. and the final node position is
+C	determined as follows:
+C
+C	If there is just one end pt at a node then the node position is
+C	the position of this end point
+C
+C	If there are two end points at this node then
+C
+C		If both are point ftrs then the node position is the
+C		weighted average position (centre of graviry) of these
+C		two end points
+C
+C		else of one is a pt ftr and the other is not then the
+C		node position is still the CG of these two ends
+C
+C		else if both are not pt ftrs then the node position is
+C		found by first finding the intersection pt between the
+C		lines along the two end vectors and then attempting to
+C		project/truncate both vectors onto this pt. If not
+C		both vectors can be projected/truncated because the
+C		EXTOL tolerance for one or other end is exceeded, then
+C		the node position is the CG of the two end pts,
+C		else it is the intersection pt. 
+C
+C	If there are three or more end pts then the node pos is the CG.
+C
+C	Note that points with zero join tolerance will be given
+C	infinite weight relative to other points, so will stay in a
+C	fixed position - unless there are two or more zero tolerance
+C	ends at the same node, in which case they will carry equal
+C	infinite weight so that they will move to the centre of gravity
+C	between fixed points only.
+C
+C Here, there is already a link/node structure in which the start and
+C end of every ftr has been assigned the node index of a node which is
+C within node-separation NSTOL; no such node is closer than NSTOL to
+C any other; every node has a provisional position which is the
+C unweighted centre-of-mass of all of the ftr end pts associated with
+C it, and every node has a linked-list of all of the arms which meet
+C there. 
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	PPJOIN = SS$_NORMAL			! assume success
+
+	PCF = 100.0/N_NODES
+	PCENT = 0
+	LPCENT = 0
+
+	IF (HAD_MONITOR) WRITE(*,'(1X,F6.1,''%'')')PCENT
+
+C Use the arm list with each node to decide on final node positions
+
+	DO 90 INODE = 1,N_NODES			! for each node do
+
+C Put indices of all arms ending at this node into an array
+
+	  IARM = HEADARM(INODE)			! index of 1st arm
+	  IF (IARM.EQ.NIL) GOTO 90		! no arms?
+	  NARMS = 0
+	  GOTO 20
+10	  IARM = ARM(ARM_NXT,IARM)		! move along arm list
+	  IF (IARM.EQ.NIL) GOTO 30		! no more arms?
+20	  NARMS = NARMS+1
+
+	  IF (NARMS.GT.MAXAPN) THEN		! too many arms at node?
+	    PPJOIN = ILINK__TOOMNYAPN
+	    CALL LSL_PUTMSG(PPJOIN,MAXAPN)
+	    GOTO 100				! return
+	  END IF
+
+	  ARMS(NARMS) = ARM(ARM_FTR,IARM)
+	  GOTO 10
+30	  CONTINUE
+
+C Get vector connecting each feature to this node, and associated
+C point attribute codes from which join tolerances can be determined
+
+	  DO 35 IARM = 1,NARMS
+	    IFTR = ABS(ARMS(IARM))
+	    PPJOIN = GET_FTR(			! get ftr pt coords
+     &			IFTR,			! data in...
+     &			%VAL(FTR_INFTR_START),
+     &			%VAL(IN_FTR_ADDR_START),
+     &			MAXINFTRS_CMN,MAXOUTFTRS_CMN)
+	    IF (.NOT.PPJOIN) GOTO 100		! return with error
+	    NPTS = CBH.NROW
+	    POINT_FTR(IARM) = NPTS.LT.2
+	    IF (ARMS(IARM).GT.0) THEN		! ftr leaving node
+	      CALL IFS_CB_READ
+     &	        (CBH,BIG_CBD,ENDP(1,IARM),2,COLH_XY,1,1)
+	      IF (NPTS.GT.1) CALL IFS_CB_READ
+     &	        (CBH,BIG_CBD,NXTP(1,IARM),2,COLH_XY,2,2)
+	      CALL IFS_CB_READ
+     &	        (CBH,BIG_CBD,PAC(IARM),1,CAP_CODE,1,1)
+	    ELSE				! ftr entering node
+	      CALL IFS_CB_READ
+     &	        (CBH,BIG_CBD,ENDP(1,IARM),2,COLH_XY,NPTS,NPTS)
+	      IF (NPTS.GT.1) CALL IFS_CB_READ
+     &	        (CBH,BIG_CBD,NXTP(1,IARM),2,COLH_XY,NPTS-1,NPTS-1)
+	      CALL IFS_CB_READ
+     &	        (CBH,BIG_CBD,PAC(IARM),1,CAP_CODE,NPTS,NPTS)
+	    END IF
+C Find join and extension tolerances FOR EACH end point
+	    IPAC = LIN_PAC(PAC(IARM))
+	    JTOL(IARM) = PAC_JNTOL(IPAC)
+	    ETOL(IARM) = PAC_EXTOL(IPAC)
+35	  CONTINUE
+
+C Decide how to determine the final node position depending on the No.
+C of arms found at this node
+
+	  IF (NARMS.EQ.1) GOTO 80		! provisional pos is OK
+
+	  IF (NARMS.GT.2) GOTO 40
+
+C Two arms only
+
+	  IFTR1 = ABS(ARMS(1))			! ftr indices
+	  IFTR2 = ABS(ARMS(2))
+
+	  IF (POINT_FTR(1).OR.POINT_FTR(2)) THEN
+
+C Not both non-point features
+
+	    IF (HAD_PROJECT) THEN
+C If both pts have zero tolerances then give them equal weights
+38	      IF (JTOL(1).LT.COORD_TOL.AND.JTOL(2).LT.COORD_TOL) THEN
+	        W(1) = 1
+	        W(2) = 1
+C If just one pt has zero tolerances then give other pt zero weight
+	      ELSE IF (JTOL(1).LT.COORD_TOL) THEN
+	        W(1) = 1
+	        W(2) = 0
+	      ELSE IF (JTOL(2).LT.COORD_TOL) THEN
+	        W(1) = 0
+	        W(2) = 1
+C Otherwise give each pt weight = 1/tol
+	      ELSE
+	        W(1) = 1/JTOL(1)
+	        W(2) = 1/JTOL(2)
+	      END IF
+C Final node pos is weighted average position
+	      NPT(1,INODE) = (W(1)*ENDP(1,1)+W(2)*ENDP(1,2))/(W(1)+W(2))
+	      NPT(2,INODE) = (W(1)*ENDP(2,1)+W(2)*ENDP(2,2))/(W(1)+W(2))
+	    ELSE
+	      IF (LTEQGT(IFTR1,IFTR2).GT.0) THEN
+	        NPT(1,INODE) = ENDP(1,1)
+	        NPT(2,INODE) = ENDP(2,1)
+	      ELSE
+	        NPT(1,INODE) = ENDP(1,2)
+	        NPT(2,INODE) = ENDP(2,2)
+	      END IF
+	    END IF
+	  ELSE
+
+C Both non-point features
+
+	    IF (HAD_PROJECT) THEN
+	      IF (PRJVEX(ENDP,NXTP,ETOL,XNODE,YNODE)) THEN
+	        NPT(1,INODE) = XNODE
+	        NPT(2,INODE) = YNODE
+	      ELSE
+	        GOTO 38			! same as for point features
+	      END IF
+	    ELSE
+	      IF (LTEQGT(IFTR1,IFTR2).GT.0) THEN
+	        NPT(1,INODE) = ENDP(1,1)
+	        NPT(2,INODE) = ENDP(2,1)
+	      ELSE
+	        NPT(1,INODE) = ENDP(1,2)
+	        NPT(2,INODE) = ENDP(2,2)
+	      END IF
+	    END IF
+	  
+	  END IF
+
+	  GOTO 80				! go on to next node
+
+C Three or more arms
+
+40	  IF (HAD_PROJECT) THEN
+
+C Node pos is centre-of-gravity
+
+	    HAD_ZERO_TOL = .FALSE.
+	    DO 45 IARM = 1,NARMS
+	      IF (JTOL(IARM).LT.COORD_TOL) THEN
+	        W(IARM) = 1
+	        HAD_ZERO_TOL = .TRUE.
+	      ELSE
+	        W(IARM) = 1/JTOL(IARM)
+	      END IF
+45	    CONTINUE
+	    IF (HAD_ZERO_TOL) THEN
+	      DO 50 IARM = 1,NARMS
+	        IF (JTOL(IARM).GE.COORD_TOL) W(IARM) = 0
+50	      CONTINUE
+	    END IF
+	    XNODE = 0
+	    YNODE = 0
+	    WSUM = 0
+	    DO 55 IARM = 1,NARMS
+	      XNODE = XNODE+W(IARM)*ENDP(1,IARM)
+	      YNODE = YNODE+W(IARM)*ENDP(2,IARM)
+	      WSUM = WSUM+W(IARM)
+55	    CONTINUE
+	    NPT(1,INODE) = XNODE/WSUM
+	    NPT(2,INODE) = YNODE/WSUM
+
+	  ELSE
+
+C Node pos is pos of end pt from ftr with highest priority
+
+C Sort arm array into order of decreasing feature priority
+
+	    DO 70 I = 2,NARMS
+	      DO 60 J = I,2,-1
+	        IFTR1 = ABS(ARMS(J-1))
+	        IFTR2 = ABS(ARMS(J))
+	        IF (LTEQGT(IFTR1,IFTR2).GT.0) GOTO 70
+	        IFTR = ARMS(J)				! swap ARMS
+	        ARMS(J) = ARMS(J-1)
+	        ARMS(J-1) = IFTR
+	        X = ENDP(1,I)				! swap ENDP
+	        ENDP(1,I) = ENDP(1,J)
+	        ENDP(1,J) = X
+	        Y = ENDP(2,I)
+	        ENDP(2,I) = ENDP(2,J)
+	        ENDP(2,J) = Y
+60	      CONTINUE
+70	    CONTINUE
+
+	    NPT(1,INODE) = ENDP(1,1)
+	    NPT(2,INODE) = ENDP(2,1)
+
+	  END IF
+
+80	  IF (.NOT.HAD_MONITOR) GOTO 90
+	  PCENT = INODE*PCF
+	  IF (PCENT-LPCENT.GT.0.1) THEN
+	    WRITE(*,'(1H+,F6.1)')PCENT		! don't WRITE too often
+	    LPCENT = PCENT
+	  END IF
+
+90	CONTINUE				! go on to next node
+
+	PCENT = 100
+	IF (HAD_MONITOR) WRITE(*,'(1H+,F6.1)') PCENT
+
+100	RETURN
+	END

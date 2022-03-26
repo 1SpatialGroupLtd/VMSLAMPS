@@ -1,29 +1,13 @@
-C
-C * This file is part of the LAMPS distribution, released as a software
-C * preservation project to archive digital history for future historians.
-C * Copyright (c) 1980-2002 Laser-Scan Ltd, 1Spatial Group Ltd
-C *
-C * Timestamp of this file for the 2002 release was: 1985-11-01 16:58:06.000000000 +0000
-C *
-C * This program is free software: you can redistribute it and/or modify
-C * it under the terms of the GNU General Public License as published by
-C * the Free Software Foundation, version 3.
-C *
-C * This program is distributed in the hope that it will be useful, but
-C * WITHOUT ANY WARRANTY; without even the implied warranty of
-C * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-C * General Public License for more details.
-C *
-C * You should have received a copy of the GNU General Public License
-C * along with this program. If not, see http://www.gnu.org/licenses/.
-C
 	SUBROUTINE NODHGTS
 C
-***	IDENT	01NO85
+***	IDENT	17JL86
 ***	MODULE	NODHGTS
 C
 C	Copyright : Laser-Scan Laboratories Ltd., Cambridge, England
 C	Created   : ACM					Feb 1985
+CMOD	change to make use of more structured data	JMPW	13-06-86
+CMOD	alter so that if a node has 2 isetcts with
+CMOD	equal heights then it is undefined		JMPW    08-07-86
 C
 	IMPLICIT NONE
 C
@@ -35,13 +19,26 @@ C workspace
 	INTEGER		I_RIV		! river counter
 	INTEGER		IP,IP_STA,IP_FIN! river end pt RIV indices
 	INTEGER		NRPTS		! No. of pts in a river
+	INTEGER		IEND		! end index = 1,2
 	INTEGER		INODE		! node index
 	INTEGER		INODE_1,INODE_2	! node indices
 	INTEGER		PTR,PTR_1,PTR_2	! INTP pointers
-	REAL		L1,L2		! dist of int from node
-	REAL		DX,DY
-	REAL		X1,Y1,Z1	! int pt at river start
-	REAL		X2,Y2,Z2	! int pt at river end
+C
+     	INTEGER		STK,RPT,J_RIV	!Array pointers
+	INTEGER		RIVS_USED(1000) !Array of visited rivs
+	INTEGER		DEPTH_IN(1000)	!depht into netwk from start riv
+	INTEGER		PREVEN(1000)	!route thru nodes taken
+	INTEGER		DEPTH		!used to set above
+	INTEGER		STCNT		!counter
+	INTEGER		ENDON		!Ends one is using in netwk
+	INTEGER		ENDPOS,STAPOS	!Counters
+	INTEGER		I,J		!Counter
+	LOGICAL		EXPANDED(1000)	!t if has been used
+C
+	REAL		L,L1,L2		! dist of int from node
+	REAL		DX,DY,DELTZ
+	REAL		REMNDR		!tolerance used in real number tsts
+	REAL		X,Y,Z,Z1,Z2	! int pt coords & height
 	LOGICAL		FLOWS_DOWN! river/ridge falls from start to fin?
 C
 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
@@ -54,9 +51,18 @@ C put height and distance from river/ridge end of the intersections
 C nearest to either end of the river/ridge into the nodes corresponding
 C to each end
 C
+	IF (TCHDST .EQ. 0) THEN
+	   REMNDR = 0.001		!if 0 tch dist set rem 
+	ELSE				!otherwise
+	   REMNDR = TCHDST * 0.001	!calc rem tol using touch
+	ENDIF
+	IF(NOTBATCH) WRITE(*,'(1X,''        RIVERS EXAMINED'')')
 C for each river do
 	IP_FIN = 0			! index of previous end point
-	DO 50 I_RIV = 1,N_RIVERS
+	DO 150 I_RIV = 1,N_RIVERS
+C
+	  IF(NOTBATCH) WRITE(*,'(1H+,I7)') I_RIV
+C
 	  IP_STA = IP_FIN+2		! RIV index of first point
 	  NRPTS = RIVP(1,IP_STA-1)	! No. of pts in river
 	  IP_FIN = IP_STA+NRPTS-1	! RIV index of last point
@@ -76,61 +82,199 @@ C
 	    GOTO 14
 10	  CONTINUE
 C
-C direction of flow defined?
-	  IF (PTR_1.EQ.NILL.OR.PTR_1.EQ.PTR_2) GOTO 50
+C*******************************************************************************
 C
-C found both intersection points, so now set them up
-	  X1 = INTP(1,PTR_1)
-	  Y1 = INTP(2,PTR_1)
-	  Z1 = INTP(3,PTR_1)
+C	  Code from here on  to label 150 is added by jpw
 C
-	  X2 = INTP(1,PTR_2)
-	  Y2 = INTP(2,PTR_2)
-	  Z2 = INTP(3,PTR_2)
+C	  is pointer 1 defined ie have we discovered an ip
 C
-C find dists if int pts from respective nodes
-	  INODE_1 = ENDS(1,I_RIV)
-	  INODE_2 = ENDS(2,I_RIV)
+	  IF (PTR_1.EQ.NILL) THEN
+	     DO 140 I = 2, 1, -1
+	        STK = 1				!init the stack
+		RPT = ENDS(I,I_RIV)		!& the ass_rivs pointer
+		RIVS_USED(STK) = I_RIV		!& the rivs_used stack
+		DEPTH_IN(STK) = 0		!depth of search
+		EXPANDED(STK) = .TRUE.		!& the fact this is used
+		ENDON = RPT			!& the end we're starting at
+		DEPTH = 1			!now looking at depth of s=1
 C
-	  DX = NODE(1,INODE_1)-X1
-	  DY = NODE(2,INODE_1)-Y1
-	  L1 = SQRT(DX**2+DY**2)
+C		Find a river that has not been used/examined
 C
-	  DX = NODE(1,INODE_2)-X2
-	  DY = NODE(2,INODE_2)-Y2
-	  L2 = SQRT(DX**2+DY**2)
+45		IF (RPT .EQ. 0) GOTO 90
+		DO 60 STCNT = 1, STK
+50		   IF (ABS(ASS_RIVS(1,RPT)) .NE. RIVS_USED(STCNT)) GOTO 60
+		   RPT = ABS(ASS_RIVS(2,RPT))
+		   IF (RPT .EQ. 0) GOTO 90	!if we can't find a suitable riv
+		   GOTO 50
+60		CONTINUE
 C
-C put hgt and dist of int from nodes into appropriate nodes
-	  FLOWS_DOWN = Z1.GT.Z2
-	  IF (FLOWS_DOWN) THEN
-	    NODE(3,INODE_1) = Z1
-	    NODE(4,INODE_1) = L1
-	    NODE(5,INODE_2) = Z2
-	    NODE(6,INODE_2) = L2
-	  ELSE
-	    NODE(3,INODE_2) = Z2
-	    NODE(4,INODE_2) = L2
-	    NODE(5,INODE_1) = Z1
-	    NODE(6,INODE_1) = L1
-	  END IF
+C		update rivers used array
 C
-50	CONTINUE
+		STK = STK + 1
+		RIVS_USED(STK) = ABS(ASS_RIVS(1,RPT))
+		EXPANDED(STK) = .FALSE.
+		DEPTH_IN(STK) = DEPTH
 C
+C		Find the actual start and end positions of the river
+C
+		ENDPOS = 0
+		DO 70 J_RIV = 1, ABS(ASS_RIVS(1,RPT))
+		   STAPOS = ENDPOS + 2
+		   NRPTS  = RIVP(1,STAPOS-1)
+		   ENDPOS = STAPOS + NRPTS - 1
+70		CONTINUE
+C
+C		Now find an intersection point in this river if one exists
+C
+C--c--c--c-out->IF (ASS_RIVS(1,RPT) .GT. 0) THEN	!F-L
+		IF (ENDON .EQ. ENDS(1,ABS(ASS_RIVS(1,RPT)))) THEN
+		   DO 80  J_RIV = STAPOS, ENDPOS
+		      PTR = HEAD(J_RIV)
+		      IF (PTR .NE. 0) GOTO 130		!found an ip
+80		   CONTINUE
+		ELSE					!L-F
+		   DO 85 J_RIV = ENDPOS, STAPOS, -1
+		      PTR = HEAD(J_RIV)
+		      IF (PTR .EQ. 0) GOTO 85 		!not found an ip
+82		      IF (INTP(4,PTR) .EQ. 0) GOTO 130  !Last ip in section
+		      PTR = INTP(4,PTR)			!Down l'list of ip's
+		      GOTO 82
+85		   CONTINUE
+	        ENDIF
+		RPT = ABS(ASS_RIVS(2,RPT)) !set up river pointer
+	        GOTO 45			!loop to next river at this depth
+C
+C*******************************************************************************
+C		This is the case when no ip found and have to step into network
+C
+90		IF (STK .EQ. 1) GOTO 140 !river with no ass_rivs so next riv
+		PREVEN(DEPTH) = ENDON	 !store end node we were on & then
+		DO 95 STCNT = 1, STK	 !find a river which isn't used 
+		   IF (.NOT.EXPANDED(STCNT) .AND. 
+	1		DEPTH_IN(STCNT) .EQ. DEPTH) THEN !& is at same depth
+		      EXPANDED(STCNT) = .TRUE.
+		      IF (ENDS(1,RIVS_USED(STCNT)) .EQ. PREVEN(DEPTH)) THEN
+		         ENDON = ENDS(2,RIVS_USED(STCNT))
+	 	      ELSE
+		         ENDON = ENDS(1,RIVS_USED(STCNT))
+		      ENDIF
+		      DEPTH = DEPTH + 1  !expand one level deeper
+		      RPT = ABS(ASS_RIVS(2,ENDON)) !set up river pointer
+		      IF (RPT .EQ. 0) GOTO 100
+	             GOTO 45		        !loop to next riv at this depth
+		   ENDIF
+95		CONTINUE
+C
+C		as we got here it indicates we're on a river which we
+C		can't expand so we must go back into the network one step
+C		and go back and find a river in the depth below our present
+C		depth and look for unexpanded rivers
+C
+100		DEPTH = DEPTH - 1
+		IF (DEPTH .GT. 0) THEN
+		   ENDON = PREVEN(DEPTH)
+		   GOTO 90	!check one depth less
+		ENDIF
+C
+C	        If one gets to here then no more ass rivs so start next
+C		loop.
+C
+	 	GOTO 140
+C
+C*******************************************************************************
+C		ip has been found so ......
+C
+130		IF (I .EQ. 2) THEN		!store the pointer position
+		   PTR_1 = PTR			!that we found in the relevant
+		   J = 1
+		ELSE				!pointer for later use in
+		   PTR_2 = PTR			!setting up the node array
+		   J = 2
+		ENDIF
+C
+C		now test to see if this is a valid intersection ie 1st if any
+C		intersections have been found for this node and 2nd if they
+C		have if this intersection is the same height as the isection
+C		that is currently stored. If it is then the program goes back
+C		into the network and looks for another intersection I hope.
+C
+		IF (NODE(5,ENDS(J,I_RIV)) .EQ. -1) GOTO 140
+		DELTZ = ABS(
+     &		 INTP(3,PTR)-NODE(5,ENDS(J,I_RIV)))
+		IF (DELTZ .GT. REMNDR) GOTO 140
+C
+C		we must say that the river that we found the ip in is
+C 		expanded else it will be expanded resulting in a wrong
+C		ip, then we go back to the end we were on and look around
+C
+		PTR_2 = 0
+		DO 135 STCNT = 1, STK
+		   IF (ABS(ASS_RIVS(1,RPT)) .NE. RIVS_USED(STCNT)) GOTO 135
+		   EXPANDED(STCNT) = .TRUE.
+		   GOTO 45
+135		CONTINUE
+140	     CONTINUE
+	  ENDIF
+C
+C*******************************************************************************
+C
+C	  Set up the NODE array for later use in estimating heights
+C
+	  IF (PTR_1 .GT. 0) THEN
+C
+	     X = INTP(1,PTR_1)
+	     Y = INTP(2,PTR_1)
+	     Z = INTP(3,PTR_1)
+C
+	     INODE = ENDS(1,I_RIV)
+C
+	     DX = NODE(1,INODE)-X
+	     DY = NODE(2,INODE)-Y
+	     L  = SQRT(DX**2+DY**2)
+C
+	     CALL STOIPT(INODE,Z,L)
+C
+	  ENDIF
+ 	  IF (PTR_2 .GT. 0) THEN
+C
+	     X = INTP(1,PTR_2)
+	     Y = INTP(2,PTR_2)
+	     Z = INTP(3,PTR_2)
+C
+	     INODE = ENDS(2,I_RIV)
+C
+	     DX = NODE(1,INODE)-X
+	     DY = NODE(2,INODE)-Y
+	     L  = SQRT(DX**2+DY**2)
+C
+	     CALL STOIPT(INODE,Z,L)
+C
+	  ENDIF
+150	CONTINUE
+C	
+C*******************************************************************************
 C now, for each node with an intersection both up and downstream,
 C set its heights into NODE(3,INODE) using linear interpolation
 C along the length of the river between these two points - else set
 C this height := -1 to signal that the node height is not defined
 C
-	DO 60 INODE = 1,N_NODES
+	NRPTS = 0
+	IF (NOTBATCH)
+	1     WRITE(*,'(1X,''        NODES HAVE HEIGHTS ESTIMATED'')')
+	DO 160 INODE = 1,N_NODES
 	  Z1 = NODE(3,INODE)
 	  Z2 = NODE(5,INODE)
-	  IF (Z1.EQ.-1.OR.Z2.EQ.-1) THEN
+	  IF (Z1 .EQ .-1              .OR. 
+     &	      Z2 .EQ. -1              .OR.
+     &	      ABS(Z1 - Z2) .LT. REMNDR) THEN
 	    NODE(3,INODE) = -1
 	  ELSE
 	    L1 = NODE(4,INODE)
 	    L2 = NODE(6,INODE)
 	    NODE(3,INODE) = (Z1*L2+Z2*L1)/(L1+L2)
+	    NRPTS = NRPTS + 1
+	    IF (NOTBATCH) WRITE(*,'(1H+,I7)') NRPTS
 	  END IF
-60	CONTINUE
+160	CONTINUE
 C
 	END

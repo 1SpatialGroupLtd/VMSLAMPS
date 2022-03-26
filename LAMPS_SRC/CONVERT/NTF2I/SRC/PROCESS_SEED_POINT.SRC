@@ -1,0 +1,231 @@
+	LOGICAL FUNCTION PROCESS_SEED_POINT(NTF$_POLY_ID)
+C
+***	MODULE PROCESS_SEED_POINT
+***	IDENT	14NO96
+C
+C	Author							SG 23-Aug-1991
+CMOD	BS7567 (v2.0) support added (W93/13)			ST 07-Jul-1993
+CMOD	Prevent int overflow when assigning the result		ST 27-Apr-1994
+C       of ICHAR to a byte by first assigning it to an
+C	int equivalenced onto a byte. (Mod 1359).
+C
+C processes the seed point of the polygon record
+C many bits ripped from READ_TEXT, READ_CPOLY
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Commons:
+	INCLUDE 'LUNS.PAR'
+	INCLUDE 'FILE_REC.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE 'LOOKUP.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+C parameter
+	CHARACTER*6	NTF$_POLY_ID
+C
+C Function
+	LOGICAL		RDLONG
+	LOGICAL		READ_RECORD
+	LOGICAL		READ_GEOMETRY
+	LOGICAL		READ_NAMEREC
+C
+C Workspace:
+	LOGICAL		OK			! Success flag
+C
+	INTEGER		MAX_PTS			! Maximum no of coords in
+	PARAMETER	(MAX_PTS=10000)		! a feature
+	REAL		COORDS(2,MAX_PTS)	! Store feature's coords
+	INTEGER		GEOM_NUMPTS
+	REAL		POSN(2)			!digitising point for text
+C
+	CHARACTER*6	NTF$_NAME_ID, NTF$_GEOM_ID
+	INTEGER		NAME_ID,GEOM_ID
+	INTEGER		INITIAL_RECORD
+	INTEGER		IOS
+	INTEGER		LOOP
+C
+	INTEGER		FC
+	INTEGER		NTF_FC
+	CHARACTER*99	TEXT_STR
+	BYTE		BYTE_STR(99)
+	INTEGER		TEXT_LEN
+	BYTE		FC_LABEL(99)
+	LOGICAL		IS_LABEL
+	CHARACTER*10	FC_TXT
+	INTEGER*2	ISTAT(4)
+	INTEGER		CATEGORY
+	INTEGER		FONT
+	INTEGER		DIGPOS
+	INTEGER		LONGWORD
+	INTEGER*2	WORD
+	EQUIVALENCE	(LONGWORD,WORD)
+	INTEGER		CHARINT
+	BYTE		CHARBYTE
+	EQUIVALENCE	(CHARINT,CHARBYTE)
+C
+C##############################################################################
+C
+	OK=.TRUE.					! Assume success
+	INITIAL_RECORD = SEC_REC
+	NTF$_GEOM_ID = STRING(15:20)
+	NTF$_NAME_ID = STRING(27:32)
+C
+C..............................................................................
+C decode the GEOM_ID and read in the data
+C
+	CALL SETAUX (%REF(NTF$_GEOM_ID),6)
+	OK = .NOT.RDLONG(GEOM_ID)
+	IF (OK) THEN					!read geometry
+ 	   OK = READ_GEOMETRY(COORDS,GEOM_NUMPTS,MAX_PTS,GEOM_ID)
+	ELSE
+	  CALL WRITEF('%%NTF2I-E-MISC, bad GEOM_ID')
+          CALL WRITEF('-NTF2I-I-MISC, "%S" in record %I', NTF$_GEOM_ID, SEC_REC)
+ 	ENDIF
+C
+	IF (VERSION.EQ.2.0) GOTO 999
+C
+C..............................................................................
+C decode the NAME_ID and read in the data
+C
+	CALL SETAUX (%REF(NTF$_NAME_ID),6)
+	OK = .NOT.RDLONG(NAME_ID)
+	IF (OK) THEN
+	  IF (NAME_ID.EQ.0) THEN			! No valid ID
+	    NTF_FC = 28					!default to OS text
+	    IS_LABEL = .FALSE.				!no FC read from namerec
+            TEXT_LEN = 1				!default text
+	    TEXT_STR = ' '				!as a space
+	  ELSE
+C
+C	  .....................................................................
+C
+	     READ(NAME_LUN,KEY=NAME_ID,KEYID=0, IOSTAT=IOS) ID_REC
+	     OK = IOS.EQ.0				!was return status 0
+	     IF (OK) THEN					!yes, then ok
+C	      ...............................................................
+C
+	       SEC_REC = ID_REC.RECORD_NUM -1		! set record number
+	       OK = READ_RECORD()			! get the record
+	       IF (OK) THEN
+C
+C		 .............................................................
+C		 get text,
+C
+		 OK=READ_NAMEREC(NTF_FC,TEXT_STR,TEXT_LEN,NAME_ID,
+     &			FC_LABEL,IS_LABEL)
+C
+	      ELSE
+	        CALL WRITEF('%%NTF2I-E-MISC, unable to get NAMEREC')
+	        CALL WRITEF('-NTF2I-W-MISC, temporary data files corrupt')
+	      ENDIF
+C 
+ 	    ELSE
+	      CALL WRITEF('%%NTF2I-E-MISC, unable to find record for NAME_ID')
+	      CALL WRITEF('-NTF2I-I-MISC, NAME_ID was "%I"',NAME_ID)
+	    ENDIF
+C
+	  ENDIF
+	ELSE
+	  CALL WRITEF('%%NTF2I-E-MISC, bad NAME_ID')
+          CALL WRITEF('-NTF2I-I-MISC, "%S" in record %I', NTF$_NAME_ID, SEC_REC)
+ 	ENDIF
+C
+C Optionally translate NTF FC to IFF FC. Disallow translation from FC 28 if
+C using OS data, to avoid awful complications later on. Do not attempt
+C translation if FC is not numeric.
+C
+	FC = NTF_FC					! Transfer to IFF copy
+	IF (HAD_FC_LOOKUP .AND. (.NOT.IS_LABEL)) THEN
+	  IF (OS_DATA .AND. (NTF_FC.EQ.28)) THEN	! Disallow?
+	    IF (TRN_NTF_28)				! Yes, warn user if
+     &	      CALL LSL_PUTMSG( NTF2I__NTF28NOTTRN )	! necessary
+	  ELSE
+	    CALL FC_TRANS(%VAL(LUT_BASE_ADDR), NTF_FC, FC) ! Translate
+	  ENDIF
+	ENDIF
+C	........................................................................
+C	convert to a byte array so that IFFAC can deal with it
+
+	IF (OK.AND.(TEXT_LEN.GE.1)) THEN
+	  DO 200 LOOP = 1,TEXT_LEN
+	     CHARINT = ICHAR(TEXT_STR(LOOP:LOOP))
+	     BYTE_STR(LOOP) = CHARBYTE
+200	  CONTINUE		
+	ENDIF
+C
+C..............................................................................
+C calculate feature details
+C
+	POSN(1) = COORDS(1,1)	
+	POSN(2) = COORDS(2,1)
+C
+C 	........................................................................
+C	work out the Feature Status entry
+C
+	IF (OS_DATA.AND.(FC.NE.28).AND.(FC.LT.1000)) THEN   !invalid text FC
+	   ISTAT(1) = 28
+	   CATEGORY = ISHFT(FC,6)		! Use the OS FC as text category
+	ELSE
+	   ISTAT(1) = FC
+	   FONT = 1
+	   CATEGORY = ISHFT(FONT,6)
+	ENDIF
+C
+	ISTAT(2)=0	! This is only used by LASERAID - leave it unset
+	ISTAT(4)=0	! User dependent data           - leave it unset
+C
+	DIGPOS = 0
+C
+	LONGWORD =   '8000'X 		! bit 15 set - text feature
+     &		  .OR.CATEGORY 		! the text category	  (bits 6-11)
+     &		  .OR.DIGPOS		! digitised posn in text area (bits 0-8)
+C
+	ISTAT(3) = WORD			! extract the low word of that
+C
+C------------------------------------------------------------------------------
+C Got all the data, output the feature
+C
+	FSN=FSN+1
+	CALL IFFNF(FSN,FSN)				! NF entry (ISN==FSN)
+	CALL IFFFS(ISTAT)				! FS entry	
+	IF (IS_LABEL) CALL IFFAC(1,0,FC_LABEL,4)
+C
+C	.......................................................................
+C	may want to recode, so in text of AC 1, say it is a seed point
+
+	FC_TXT(1:10) = 'SEED_POINT'
+	DO 300 LOOP=1,10
+	  FC_LABEL(LOOP) = ICHAR( FC_TXT(LOOP:LOOP))
+300	CONTINUE
+	CALL IFFAC (1,0,FC_LABEL,10)
+C
+C	.......................................................................
+C
+	CALL IFFST(POSN,1,0)					! Coordinates
+	CALL IFFTX( %REF(TEXT_STR(1:TEXT_LEN)) ,TEXT_LEN )
+	CALL IFFEF
+C
+C
+C###############################################################################
+C rejoin errors
+C
+999	SEC_REC = INITIAL_RECORD -1
+	OK = READ_RECORD()
+	IF (.NOT.OK) THEN
+	  CALL WRITEF('%%NTF2I-E-MISC, unable to return to POLY record')
+	  CALL WRITEF('-NTF2I-W-MISC, temporary data files are corrupt')
+	ENDIF
+C
+C	.......................................................................
+C
+	PROCESS_SEED_POINT=OK
+	RETURN
+	END
+

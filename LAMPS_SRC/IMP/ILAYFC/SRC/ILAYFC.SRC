@@ -1,0 +1,594 @@
+	PROGRAM	ILAYFC
+C
+***	MODULE	ILAYFC
+***	IDENT	12DE86
+C
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	NO entries written explicitly not copied to cope with 
+C	old files without EO pointers			ATT 12-Dec-1986
+CMOD	IFF file opened using new LSLLIB IFF open
+C	 function					TJH 03-Nov-1986
+C	Converted to LSLLIB				TJH 01-Sep-1986
+C
+C	Author: M. Dhillon
+C	Created: 24-October-1985
+C
+C Program to set all of the feature codes in one or more layers in an
+C IFF file to user-specified values.
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INTEGER*2	INLUN		! IFF input file LUN
+	PARAMETER	(INLUN=1)
+	INTEGER*2	OUTLUN		! IFF output file LUN
+	PARAMETER	(OUTLUN=2)
+	INTEGER*4	MAXOVR		! maximum number of layers
+	PARAMETER	(MAXOVR=1024)
+	INCLUDE 	'($SSDEF)'
+	INCLUDE 	'($STSDEF)'
+	INCLUDE 	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 	'LSL$CMNILAYFC:ILAYFCMSG.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+C
+C Command Language Definitions:
+	EXTERNAL	ILAYFC_CLD
+C
+C Character:
+	CHARACTER*1024  CMLSTR		! show off the parsed cmd. line
+	CHARACTER*128	INPFIL		! input file-spec
+	CHARACTER*128	STR_ARG		! argument for /LOOK_FOR
+C
+C Word:
+	INTEGER*2	BYTIND		! index for copy into byte array
+	INTEGER*2	CFCODE		! current FC
+	INTEGER*2	CINDEX		! index into CARRAY
+	INTEGER*2	CODTBL(1000)	! FC table
+	INTEGER*2	ERRCOUNT	! error counter
+	INTEGER*2	FCSIND		! index into table
+	INTEGER*2	FSDATA(4)	! FS entry data
+	INTEGER*2	IECODE		! entry in hand code
+	INTEGER*2	IELEN		! entry in hand length
+	INTEGER*4	INPLEN		! length of input file-spec
+	INTEGER*2	LINDEX		! index into look up table
+	INTEGER*2	LUTABL(2,1024)	! look up table for NO,FC
+	INTEGER*2	NFDATA(2)	! NF entry data
+	INTEGER*2	NUMFCS		! points to next free space in ^
+	INTEGER*2	LAYER		! present layer number
+	INTEGER*2	SINDEX		! index for search into table
+	INTEGER*2	STRIND		! index into string array
+C
+C Longword:
+	INTEGER*4	I		! tmp var
+	INTEGER*4	NCHS		! number characters read
+	INTEGER*4	NOPOS		! position of start of layer
+C
+C Byte:
+	BYTE		STRBUF(1024)	! byte buffer for string args
+	BYTE		ICH		! one character
+C
+C Logical:
+	LOGICAL		ALTFCS		! .T. if FCs to be altered
+	LOGICAL		HAD_COD		! set .TRUE. if /CODES
+	LOGICAL		HADCOMMA	! .T. if had comma between ints
+	LOGICAL		HAD_INSU	! set .TRUE. if /IN_SITU
+	LOGICAL		HAD_LOG		! set .TRUE. if /LOG
+	LOGICAL		HADSEP		! .T. if had correct seperation
+	LOGICAL		LOCAL		! .T. if qual. is local
+	LOGICAL		LOCNEG		! set .TRUE. if qual. is 
+	LOGICAL		NOFILE		! .T. if nofile read
+C					! locally negated
+	LOGICAL		OK		! error return
+C
+C Functions:
+	INTEGER*4	DCL_FILE	! reads and parses file title 
+C					  from DCL command line
+	INTEGER*4	DCL_INT		! gets qualifier args. (integer)
+	INTEGER*4	DCL_QUAL	! looks for specified qualifier
+	INTEGER*4	DCL_REAL	! gets qualifier args. (real)
+	INTEGER*4	DCL_STARTUP	! gets and parses the DCL 
+C					  command line	
+	INTEGER*4	DCL_STR		! gets qualifier args. (strings)
+	INTEGER*4	IFFCREATE	! create and open IFF file
+	INTEGER*4	IFFMODIFY	! open IFF file for modification
+	INTEGER*4	IFFOPEN		! open IFF file for readonly
+	LOGICAL		RDCHS		! read 1 character
+	LOGICAL		RDLONG		! reads an integer from TXTBUF
+	INTEGER*4	TTRSTR		! reads a line from TT:
+C
+C ......................................................................
+C
+C Initialise things.
+C
+	CALL LSL_INIT
+C
+	HAD_LOG=.FALSE. 	! set .TRUE. if /LOG
+	HAD_INSU=.FALSE.	! set .TRUE. if /IN_SITU
+	HAD_COD=.FALSE.		! set .TRUE. if /CODES
+C
+C ......................................................................
+C
+C Get command line for our command verb EXAMPLE. DCL_STARTUP will return
+C set to SS$_NORMAL if all is well. 
+C
+	LSL_STATUS=DCL_STARTUP('ILAYFC',.FALSE.,ILAYFC_CLD,.TRUE.)
+	IF (LSL_STATUS.NE.SS$_NORMAL) GOTO 300
+C
+C ......................................................................
+C
+C Check for qualifiers, we could have /LOG /CODES=(int>int[,int>int...])
+C and /IN_SITU
+C
+C First /LOG
+C
+	LSL_STATUS=DCL_QUAL('LOG',HAD_LOG,LOCAL,LOCNEG,.TRUE.)
+	IF (LSL_STATUS.NE.SS$_NORMAL) GOTO 300
+C
+C Now /IN_SITU
+C
+	LSL_STATUS=DCL_QUAL('IN_SITU',HAD_INSU,LOCAL,LOCNEG,.TRUE.)
+	IF (LSL_STATUS.NE.SS$_NORMAL) GOTO 300
+C
+C Now /CODES 
+C
+	LSL_STATUS=DCL_QUAL('CODES',HAD_COD,LOCAL,LOCNEG,.TRUE.)
+	IF (LSL_STATUS.NE.SS$_NORMAL) GOTO 300
+C
+10	LINDEX=0
+	ERRCOUNT=0
+	IF (LSL_STATUS .NE. SS$_NORMAL) THEN
+	   GOTO 300 
+	ELSEIF (.NOT. HAD_COD) THEN
+20	   LSL_STATUS=TTRSTR(,NCHS,'Layer number, Feature code ? ',OK)
+	   IF (LSL_STATUS.EQ.LSL__NORMAL) THEN
+	     IF (NCHS) 30,30,40
+C
+30	     IF (LINDEX.GT.0) GOTO 110
+	     CALL LSL_PUTMSG(ILAYFC__ARGSREQ)
+	     GOTO 20
+C
+40	     CALL BSLN
+	     IF (RDLONG(I)) GOTO 80		! get the layer number
+C
+C Check layer number is in range 0 to 32767
+C
+	     IF (I.LT.0.OR.I.GT.32767) THEN
+	        CALL LSL_PUTMSG(ILAYFC__INVLAY,I)
+		GOTO 300
+	     ELSE
+	        LAYER=I
+	     ENDIF
+	     IF (RDCHS(ICH)) GOTO 80		! skip comma or colon
+	     IF (ICH.NE.','.AND.ICH.NE.'>') CALL BSCH
+	     IF (RDLONG(I)) GOTO 80		! get the feature code
+C
+C Check FC number is in range 0 to 32767
+C
+	     IF (I.LT.0.OR.I.GT.32767) THEN
+	        CALL LSL_PUTMSG(ILAYFC__INVFC,I)
+		GOTO 300
+	     ELSE
+	        CFCODE=I
+	     ENDIF
+	     IF (LINDEX.EQ.0) GOTO 60
+	     DO 50 I=1,LINDEX
+	       IF (LUTABL(1,I).NE.LAYER) GOTO 50  ! had layer already ?
+	       LUTABL(2,I)=CFCODE		! yes - change FC again
+	       GOTO 60
+50	     CONTINUE
+60	     LINDEX=LINDEX+ 1			! add a new entry
+	     ERRCOUNT=0
+	     IF (LINDEX.GT.MAXOVR) THEN
+	       CALL LSL_PUTMSG(ILAYFC__TOOMNYLAY,MAXOVR)
+	       GOTO 110
+	     ELSE
+	       LUTABL(1,LINDEX)=LAYER
+	       LUTABL(2,LINDEX)=CFCODE
+	     ENDIF
+	     GOTO 20
+C
+C End of file (or ^Z) on reading input
+C
+	   ELSEIF (LSL_STATUS.EQ.LSL__EOF) THEN
+	      LSL_STATUS=ILAYFC__EOF
+	      GOTO 300
+C
+C Some other error reading command line
+C
+	   ELSE					! error
+	      CALL LSL_PUTMSG(ILAYFC__BADCHR)
+	      CALL LSL_ADDMSG(LSL_STATUS)
+	      CALL LSL_ADDMSG(OK)
+	   ENDIF
+	   GOTO 20
+C
+C Error reading response
+C
+80	   ERRCOUNT=ERRCOUNT+1
+	   IF (ERRCOUNT .GT. 4) THEN
+	      CALL LSL_PUTMSG(ILAYFC__ERRSSNVIO)
+	      GOTO 300
+	   ELSE
+	      CALL LSL_PUTMSG(ILAYFC__TWOARGS)
+     	   ENDIF
+	   GOTO 20
+	ELSE
+C
+C Now read the argument into a string and decode into look up table
+C since the /CODE switch is present.
+C
+	   LSL_STATUS=DCL_STR('CODES',.TRUE.)
+	   IF (.NOT. LSL_STATUS) THEN
+	      GOTO 300
+	   ELSE
+C
+C Read them in using a sort of while loop
+C
+	      STRIND=1
+	      LINDEX=0
+	      CINDEX=1
+C 
+90	      DO 100 BYTIND=1,STR_LEN(STRIND)
+		 STRBUF(BYTIND)=ICHAR(CARRAY(STRIND)(BYTIND:BYTIND))
+100	      CONTINUE
+	      CALL SETAUX(STRBUF,STR_LEN(STRIND))
+	      CALL SETWIN(CINDEX,)
+	      IF (RDLONG(I)) THEN
+		 CALL LSL_PUTMSG
+     &		 (ILAYFC__BADPARFMT,CARRAY(STRIND)(:STR_LEN(STRIND)))
+	         HAD_COD=.FALSE.		! reset qualifier flag 
+	         GOTO 10			! and do interactively
+	      ENDIF
+C
+C Check layer number is in range 0 to 32767
+C
+	      IF (I.LT.0.OR.I.GT.32767) THEN
+	        CALL LSL_PUTMSG(ILAYFC__INVLAY,I)
+		GOTO 300
+	      ELSE
+	         LUTABL(1,LINDEX+1)=I
+	      ENDIF
+C
+C Check for the colon seperator.
+C
+	      CINDEX=DCPTR
+	      IF (STRBUF(CINDEX) .NE. '>') THEN
+		 CALL LSL_PUTMSG
+     &		 (ILAYFC__BADPARFMT,CARRAY(STRIND)(:STR_LEN(STRIND)))
+		 HAD_COD=.FALSE.		! reset qualifier flag 
+	         GOTO 10			! and do interactively
+	      ENDIF
+	      CINDEX=CINDEX + 1
+C
+C and the next number ie: the desired feature code for this layer.
+C
+	      CALL SETWIN(CINDEX,)
+	      IF (RDLONG(I)) THEN
+		 CALL LSL_PUTMSG
+     &		 (ILAYFC__BADPARFMT,CARRAY(STRIND)(:STR_LEN(STRIND)))
+	         HAD_COD=.FALSE.		! reset qualifier flag 
+	         GOTO 10			! and do interactively
+	      ENDIF
+C
+C Check FC number is in range 0 to 32767
+C
+	     IF (I.LT.0.OR.I.GT.32767) THEN
+	        CALL LSL_PUTMSG(ILAYFC__INVFC,I)
+		GOTO 300
+	     ELSE
+		LUTABL(2,LINDEX+1)=I
+	     ENDIF
+C
+C and now check for end of string
+C
+	      CINDEX=DCPTR
+	      IF ((CINDEX-1) .NE. STR_LEN(STRIND)) THEN
+		 CALL LSL_PUTMSG
+     &		 (ILAYFC__BADPARFMT,CARRAY(STRIND)(:STR_LEN(STRIND)))
+	         HAD_COD=.FALSE.		! reset qualifier flag 
+	         GOTO 10			! and do interactively
+	      ENDIF
+	      STRIND=STRIND + 1
+	      CINDEX=1
+	      LINDEX=LINDEX + 1
+	      IF (STRIND .GT. NUMSTR) GOTO 110
+	      GOTO 90
+	   ENDIF
+	ENDIF
+C
+C and here when all the parameters for /CODES have been obtained
+C ie: LINDEX-1 pairs of numbers.
+C
+C ......................................................................
+C
+C Now get the command parameters, in our case they are the input 
+C file and the output file. First the input file, and copy it to
+C the input file variables.
+C
+110	LSL_STATUS=DCL_FILE('IN_FILESPEC','LSL$IF:IFF.IFF;'
+     &				,NOFILE,.FALSE.,.TRUE.)
+C
+C Transfer the file-spec to our local variable
+C
+	IF (LSL_STATUS) THEN
+	    INPFIL=FILARY(1)(:FIL_LEN(1))	   	    	   
+	    INPLEN=FIL_LEN(1)
+	ELSE		
+	   GOTO 300
+	ENDIF
+C
+C Finally get the output file(s) but only if one is expected.
+C
+	IF (HAD_INSU) GOTO 120
+	LSL_STATUS=DCL_FILE('OUT_FILESPEC','LSL$IF:IFF.IFF',NOFILE,     
+     &						.FALSE.,.TRUE.)
+	IF (.NOT.LSL_STATUS) GOTO 300
+C
+C Just in case there was no output filename, copy the input filename
+C to it so that a higher version will be created of the same name.
+C
+	IF (NOFILE) THEN
+	   FIL_LEN(1)=INPLEN
+	   FILARY(1)(:FIL_LEN(1))=INPFIL(:INPLEN)
+	   HAD_VER=.FALSE.
+	   CALL EXPFLN(FILARY(1)(:FIL_LEN(1)),FIL_LEN(1))
+	ENDIF
+C
+C ......................................................................
+C
+C Here we have everything we want so go and get the IFF files and do the
+C business. Take the appropriate action depending on whether we are
+C working in-situ or creating a new file.
+C
+120	IF (HAD_INSU) THEN
+C
+C ......................................................................
+C
+C In-situ file modification option
+C
+	   LSL_STATUS=IFFMODIFY(INLUN,INPFIL(:INPLEN),
+     &					'In-situ mode',,HAD_LOG)
+C
+C Did the file open OK?
+C
+	   IF (LSL_STATUS) THEN
+C
+C Turn on IFF read look-ahead for modification file (done automatically 
+C if it had been readonly)
+C
+	      CALL IFFRLA
+	   ELSE
+C
+C No it didn't. Call exit
+C
+	      GOTO 300
+	   ENDIF
+C
+	ELSE
+C
+C ......................................................................
+C
+C Creating a new output file option. First open input file readonly.
+C
+	   LSL_STATUS=IFFOPEN(INLUN,INPFIL(:INPLEN),,HAD_LOG)
+C
+C Did the file open OK?
+C
+	   IF (.NOT.LSL_STATUS) THEN
+C
+C No it didn't. Call exit
+C
+	      GOTO 300
+	   ENDIF
+C
+C Open output file 
+C
+	   LSL_STATUS=IFFCREATE(OUTLUN,FILARY(1)(:FIL_LEN(1)),
+     &						'Create mode',,HAD_LOG)
+C
+C Did the file open OK?
+C
+	   IF (.NOT.LSL_STATUS) THEN
+C
+C No it didn't. Close input file then call exit.
+C
+	      GOTO 295
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C
+C Renable IFF error reporting.
+C
+	CALL IFFERM(.TRUE.)
+C
+C Now leap through the codes, most of them will only need to be copied
+C unless of course we are working in-situ.
+C
+	CALL IFFSEL(INLUN)
+130	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN
+	   CALL LSL_PUTMSG(ILAYFC__UNEXPEOF)
+	   GOTO 290
+	ENDIF
+C
+C Which entry is it ?
+	IF (IECODE.EQ.'NF') GOTO 160
+	IF (IECODE.EQ.'FS') GOTO 220
+	IF (IECODE.EQ.'EF') GOTO 170
+	IF (IECODE.EQ.'NO') GOTO 180
+	IF (IECODE.EQ.'EO') GOTO 270
+	IF (IECODE.EQ.'EJ') GOTO 280
+C
+C
+C If we fall through these codes can simply be copied if we are 
+C not working in-situ.
+C
+	IF (.NOT. HAD_INSU) CALL EIHCPY(OUTLUN)
+	GOTO 130
+C
+C ..................................................................
+C
+C NF - New Feature, cannot be copied so extract and create new entry
+C if not working in-situ.
+C
+160	IF (.NOT. HAD_INSU) THEN
+	   CALL EIHRI(NFDATA,2,1)
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFNF(NFDATA(1),NFDATA(2))
+	   CALL IFFSEL(INLUN)
+	ENDIF
+	GOTO 130
+C
+C.......................................................................
+C
+C EF - End of feature, cannot be copied so extract and create new entry
+C if not working in-situ.
+C
+170	IF (.NOT. HAD_INSU) THEN
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFEF
+	   CALL IFFSEL(INLUN)
+	ENDIF
+	GOTO 130
+C
+C.......................................................................
+C
+C NO - New layer. We can't simply copy it since the EO pointer may not
+C be present in old files. First extract layer number to 
+C check whether the FCs in this layer are to be altered.
+C
+180	NUMFCS=0
+	CALL EIHRI(LAYER,1,1)
+	IF (.NOT. HAD_INSU) THEN
+	  CALL IFFSEL(OUTLUN)		! select output file
+	  NOPOS=LPOSE			! remember NO position
+	  CALL IFFNO(LAYER,0,0)	! output dummy NO
+	  CALL IFFSEL(INLUN)
+	ENDIF
+	SINDEX=1
+190	IF (SINDEX.GT.LINDEX) GOTO 200		! checked all?
+	IF (LUTABL(1,SINDEX) .EQ. LAYER) GOTO 210
+	SINDEX=SINDEX + 1
+	GOTO 190
+C
+C Feature codes to remain unchanged
+C
+200	ALTFCS=.FALSE.
+	IF (HAD_LOG) THEN
+	   CALL LSL_PUTMSG(ILAYFC__LAYERSKP,LAYER)
+	ENDIF
+	GOTO 130
+C
+C Feature codes to be changed
+C
+210	ALTFCS=.TRUE.
+	IF (HAD_LOG) THEN
+	   CALL LSL_PUTMSG(ILAYFC__LAYERCHA,LAYER,LUTABL(2,SINDEX))
+	ENDIF
+	GOTO 130
+C
+C .....................................................................
+C
+C FS - Feature Status, change feature code to desired value if this
+C layer was  specified.
+C
+220	IF (ALTFCS) THEN
+C
+C Check to see if yet another feature is being blasted in this layer,
+C and if so update the count, but only need this if /LOG was used.
+C
+	   IF (.NOT. HAD_LOG) GOTO 250
+	   CALL EIHRI(CFCODE,1,1)
+	   FCSIND=1
+230	   IF (FCSIND .GT. NUMFCS) GOTO 240
+	     IF (CODTBL(FCSIND) .EQ. CFCODE) GOTO 250
+	     FCSIND=FCSIND + 1
+	   GOTO 230
+C
+C Here if code is not in table
+C
+240	   NUMFCS=NUMFCS + 1
+	   CODTBL(NUMFCS)=CFCODE
+C
+C Here if code in table, or operation unnecessary
+C
+250	   FSDATA(1)=LUTABL(2,SINDEX)
+	   IF (HAD_INSU) THEN
+	      CALL EIHWI(FSDATA(1),1,1)
+	   ELSE
+	      CALL EIHRI(FSDATA(2),3,2)
+	      CALL IFFSEL(OUTLUN)
+	      CALL IFFFS(FSDATA)
+	      CALL IFFSEL(INLUN)
+	   ENDIF
+	ELSE
+	   IF (.NOT. HAD_INSU) CALL EIHCPY(OUTLUN)
+	ENDIF
+	GOTO 130
+C
+C ......................................................................
+C
+C EO - End of layer entry, report on features changed if necessary.
+C and update NO entry.
+C
+270	IF (.NOT. HAD_INSU) THEN
+	  CALL IFFSEL(OUTLUN)		! select output file
+	  CALL IFFUNO(NOPOS) 		! update NO entry
+	  CALL IFFEO			! write EO
+	  CALL IFFSEL(INLUN)		! select input file
+	ENDIF
+	GOTO 130
+C
+C......................................................................
+C
+C EJ - End of job
+C
+280	IF (.NOT. HAD_INSU) CALL EIHCPY(OUTLUN)
+C
+C
+C ......................................................................
+C
+C Close the IFF files and exit setting $STATUS as we go
+C
+290	IF (HAD_INSU) THEN
+	   IF (.NOT.LSL_STATUS) THEN
+	      IF (IBITS(LSL_STATUS,0,3).NE.STS$K_WARNING) THEN
+	         LSL_STATUS=SS$_ABORT
+	      ENDIF
+	   ELSE
+	      LSL_STATUS=SS$_NORMAL	         
+	   ENDIF
+	   CALL IFFCLO(INLUN,LSL_STATUS)
+C
+C Output file was selected ... close it (deleting it if very severe
+C error occurred).
+C
+	ELSE
+	   IF (.NOT.LSL_STATUS) THEN
+	      IF (IBITS(LSL_STATUS,0,3).NE.STS$K_WARNING) THEN
+	         CALL IFFCDL(OUTLUN) 		! delete output file
+	      ELSE
+	         CALL IFFCLO(OUTLUN,SS$_ABORT)	! close output file
+	      ENDIF
+	   ELSE
+	      CALL IFFCLO(OUTLUN,SS$_NORMAL) 	! close output file
+	   ENDIF
+	ENDIF
+C
+C Not /IN_SITU, close input file
+295	IF (.NOT.HAD_INSU) THEN
+	   CALL IFFCLO(INLUN)
+	ENDIF
+C
+300	CALL LSL_EXIT
+	END

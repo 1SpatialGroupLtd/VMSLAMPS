@@ -1,0 +1,240 @@
+	SUBROUTINE DOCOLL
+C
+***	IDENT   09MY96
+***	MODULE  DOCOLL
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Written                                 RWR	 17-NOV-1986
+C
+C	LITES2 cartographic editor COLLAPSE command.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:ACS/
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CHARS/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+***	PARAMETER/CMN:STAPAR/
+C
+***	COMMON/CMN:ACS/
+***	COMMON/CMN:ATTBTS/
+***	COMMON/CMN:CTXS/
+***	COMMON/CMN:DEFINE/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/CMN:MASTER/		! odds and ends
+***	COMMON/CMN:MODIFY/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:STATE/
+***	COMMON/CMN:STRIKE/
+C
+C w/s
+	EXTERNAL	MOAN
+C
+	INTEGER		OLDFC
+	INTEGER*4	LENGTH
+	INTEGER*2	LNGTH(2)
+	EQUIVALENCE	(LENGTH,LNGTH)
+	INTEGER		ADDR
+	INTEGER		TMPADDR		! address of text descriptor
+					! of first CTX
+	INTEGER*2	TMPDSC(4)	! temporary text descriptor
+	LOGICAL		ONECHAR
+	REAL		X,Y
+	REAL		AUX(AUXLEN)	! an auxiliary array
+	INTEGER		DUMPAK(PAKLEN)	! a dummy pack for GENAUX (only
+					! DUMPAK(PAKFC) is significant)
+	INTEGER		Z		! height of resulting subtext
+	LOGICAL		DUMMY
+C
+C functions called
+	LOGICAL	THISCTX
+	LOGICAL	COIDLE
+	LOGICAL	GENAUX
+	INTEGER	COUNT_CHAR
+	LOGICAL	ADDDEF
+C
+C don't operate on symbols
+	IF (SINDEX.EQ.STATE_MODIFY.AND.COIPAK(PAKGT).NE.TEXTYP) THEN
+	   CALL MSGCMD(MOAN,MSG_CMDONLYTEXT)
+	   GOTO 999
+	ENDIF
+C
+C only valid if COMOPT has been enabled
+C
+	IF (.NOT.COMOPT) THEN
+	   CALL MSGCMD(MOAN,MSG_ONLYWITHCOMP)
+	   GOTO 999
+	ENDIF
+C
+C if not in MODIFY state, get into it
+	IF (SINDEX.EQ.STATE_TEXT) THEN
+	   IF (COIDLE(.TRUE.)) GOTO 999		! (deleting original)
+	ENDIF
+C
+C look at all CTXs - see if they are all one character long
+C
+	ONECHAR = .FALSE.
+	ADDR = COICTXD(CTXD_FSTCTX)
+   10	CONTINUE
+	IF (COUNT_CHAR(%VAL(ADDR+CTX_O_DESC)).GT.1) GOTO 20
+	IF (ADDR.NE.COICTXD(CTXD_LSTCTX)) THEN
+	   CALL PUTLNG(%VAL(ADDR+CTX_O_NXTPTR),ADDR)
+	   GOTO 10
+	ENDIF
+	ONECHAR = .TRUE.	! all subtexts only one character
+C
+C collapsing all subtexts?
+C
+   20	CONTINUE
+	IF (SUBTXT) GOTO 500	! no
+C
+C load first CTX
+C
+	COICTXD(CTXD_CUR) = COICTXD(CTXD_FSTCTX)
+	IF (.NOT.THISCTX(COICTXD)) THEN		! get this one in buffer
+	   CALL LOADCOI(.FALSE.)	! transfer to COI variables
+	ENDIF
+C
+C has this overridden FC?
+C
+	IF (COIFC.NE.CTXBUFW(CTX_W_TS1)) THEN
+	   OLDFC =COIFC
+	   COIFC = CTXBUFW(CTX_W_TS1)
+	   CALL INFORM(MSG_ALTEREDFC,OLDFC,COIFC)
+	ENDIF
+C
+C extract z if required
+	IF (ZOPT) CALL GETZ_LIST(Z,CTXBUFL(CTX_L_ATTR))
+C
+C get rid of any point attributes
+C
+	CALL DELDEF(CTXBUFL(CTX_L_ATTR))
+C
+C put height back again, if interested
+	IF (ZOPT) THEN
+	   IF (.NOT.ADDDEF(CTXBUFL(CTX_L_ATTR),IFF_C_Z,Z,DUMMY)) GOTO 999
+	ENDIF
+C
+C append subsequent texts to one in first CTXD. (Use this one as it is
+C dynamic)
+C
+	ADDR = COICTXD(CTXD_FSTCTX)
+   30	CONTINUE
+	IF (ADDR.EQ.COICTXD(CTXD_FSTCTX)) THEN		! first one
+	   TMPADDR = ADDR+CTX_O_DESC	! address of first descriptor
+	ELSE
+	   CALL COLLSTR(TMPADDR,ADDR+CTX_O_DESC,ONECHAR)
+	ENDIF
+C
+	IF (ADDR.NE.COICTXD(CTXD_LSTCTX)) THEN		! get next CTX
+	   CALL PUTLNG(%VAL(ADDR+CTX_O_NXTPTR),ADDR)
+	   GOTO 30
+	ELSE					! copy to CTXBUFL
+	   CALL PUTLNG(%VAL(TMPADDR),TMPDSC)	! moving long word
+	   CTXBUFW(CTX_W_TXTLEN) = TMPDSC(1)	! set length in fake
+						! descriptor
+C
+C check for overflow of buffer
+C
+	   IF (CTXBUFW(CTX_W_TXTLEN).GT.CTXMAX) THEN
+	      CTXBUFW(CTX_W_TXTLEN) = CTXMAX
+	      CALL MOAN(MSG_TEXTTOOLONG,CTXMAX)
+	   ENDIF
+	   CALL STR$COPY_DX(CTXBUFL(CTX_L_DESC),%VAL(TMPADDR))
+	ENDIF
+C
+C delete existing COICTXD, and start a new one!
+C
+	CALL FREECTX(COICTXD)
+C
+C create a new first CTX, and make it home
+	CALL ADDCTX(COICTXD,.TRUE.)
+	GOTO 600
+C
+C======================================================================
+C
+C collapse the next sub_text into this one
+500	CONTINUE
+C
+C check that not already on last subtext
+	IF (COICTXD(CTXD_CUR).EQ.COICTXD(CTXD_LSTCTX)) THEN
+	   CALL MOAN(MSG_ONLASTCTX)
+	   GOTO 999
+	ENDIF
+C
+C get current position
+	CALL PUTLNG(%VAL(COICTXD(CTXD_CUR)+CTX_O_X),X)
+	CALL PUTLNG(%VAL(COICTXD(CTXD_CUR)+CTX_O_Y),Y)
+C
+C and position of start of text
+	CALL CPYPAK(AUXLEN,%VAL(COICTXD(CTXD_CUR)+CTX_O_AUX),AUX)
+	X = X + AUX(MINXI)*AUX(COSI) - AUX(MINYI)*AUX(SINI)
+	Y = Y + AUX(MINXI)*AUX(SINI) + AUX(MINYI)*AUX(COSI)
+C
+C get address of current text descriptor, and the address of the next
+C CTX
+	TMPADDR = COICTXD(CTXD_CUR)+CTX_O_DESC
+	CALL PUTLNG(%VAL(COICTXD(CTXD_CUR)+CTX_O_NXTPTR),ADDR)
+C
+C concatenate the two strings
+	CALL COLLSTR(TMPADDR,ADDR+CTX_O_DESC,ONECHAR)
+C
+C check that resulting string is not too long (if it is, truncate)
+	CALL PUTLNG(%VAL(TMPADDR),LENGTH)
+	LNGTH(2) = 0			! only want bottom word
+	IF (LENGTH.GT.CTXMAX) THEN
+	   CALL STR$LEFT(%VAL(TMPADDR),%VAL(TMPADDR),CTXMAX)
+	   CALL MOAN(MSG_TEXTTOOLONG,CTXMAX)
+	ENDIF
+C
+C now genaux the new string, and update its coordinates
+	CALL PUTLNG(%VAL(COICTXD(CTXD_CUR)+CTX_O_TS),DUMPAK(PAKFC))
+	IF (GENAUX(1,%VAL(COICTXD(CTXD_CUR)+CTX_O_X),
+     &	                 %VAL(COICTXD(CTXD_CUR)+CTX_O_AUX),
+     &	                 %VAL(TMPADDR),
+     &	                 %VAL(COICTXD(CTXD_CUR)+CTX_O_RO),
+     &	                 %VAL(COICTXD(CTXD_CUR)+CTX_O_TH),
+     &	                 DUMPAK,
+     &	                 %VAL(COICTXD(CTXD_CUR)+CTX_O_TS))) THEN
+	   CALL MOAN(MSG_FTABANDONED)
+	   CALL ABANDN
+	   GOTO 1000
+	ENDIF
+C
+C and calculate locating point, from start of text
+	CALL CPYPAK(AUXLEN,%VAL(COICTXD(CTXD_CUR)+CTX_O_AUX),AUX)
+	X = X - AUX(MINXI)*AUX(COSI) + AUX(MINYI)*AUX(SINI)
+	Y = Y - AUX(MINXI)*AUX(SINI) - AUX(MINYI)*AUX(COSI)
+C
+C put coords back
+	CALL PUTLNG(X,%VAL(COICTXD(CTXD_CUR)+CTX_O_X))
+	CALL PUTLNG(Y,%VAL(COICTXD(CTXD_CUR)+CTX_O_Y))
+C
+C now delete following CTX
+	TMPADDR = COICTXD(CTXD_CUR) 		! remember current one
+	COICTXD(CTXD_HOME) = ADDR
+	CALL DELCTX(.FALSE.)
+C
+C DELCTX leaves us on next CTX, let us move back to this one
+	COICTXD(CTXD_CUR) = TMPADDR
+	CALL THISCTX(COICTXD)
+C
+C move cursor
+C alter text on display, in next call of RFDRAW, and display altered
+C text on screen
+600	CONTINUE
+	CALL LOADCOI(.TRUE.)
+C
+C geometrical change
+	FLG_GEOCHANGE = .TRUE.
+	GOTO 1000
+C
+999	CALL IGNCMD
+C
+1000	RETURN
+	END

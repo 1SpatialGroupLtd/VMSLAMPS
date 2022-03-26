@@ -1,0 +1,361 @@
+	PROGRAM ITRANS
+C
+***	MODULE	ITRANS
+***	IDENT	30AP93
+C
+C	Copyright: Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Author 					RWR	 9-Dec-1985
+C
+C program to transform from one projection system to another
+C
+CMOD	Output radius of sphere used, instead of specified	RWR 30-Apr-93
+C	spheroid, to log file. (mod 1227)
+C
+CMOD    Convert for F77 GCTPLIB compatibility (WI/CC 1514)      TJM 26-Oct-1995
+C
+	IMPLICIT NONE
+C
+C common blocks
+C
+	INCLUDE '($SSDEF)'
+***	PARAMETER/HERE:ITRANSMSG/
+C
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/HERE:DESCRIPT/
+***	COMMON/HERE:GENERAL/
+C
+C working storage
+C
+	PARAMETER	SUPERR = '10000000'X
+C
+	INTEGER*4	STATUS
+	INTEGER*4	STATUS1
+	INTEGER*4	I
+	CHARACTER*265	STR
+	INTEGER		STRLEN
+	INTEGER*2	TEMPMD(DESCLN) ! copy of original
+					 ! map descriptor
+	REAL*8		TEMP
+C
+	EXTERNAL	ITRANSEXCP
+C
+C functions:
+	INTEGER		ASKMD
+	INTEGER		ASK4PT
+	INTEGER		ASKORG
+	INTEGER		ASKFLP
+	INTEGER		ASKSEP
+	INTEGER		ASKSHIFT
+	INTEGER		CLSFIL
+	INTEGER		OBEY		! get command line
+	INTEGER		INIT		! open necessary files
+	INTEGER		PRCPTS		! process individual points
+	INTEGER		TRNSFRM		! transform a IFF file
+	INTEGER		WRTMD		! write a MD into a IFF file
+					! (in situ)
+	INTEGER		OUTMD
+	INTEGER		OUTSHIFT
+	LOGICAL		TSTTRANS	! test to see if transformation
+					! required
+C
+	CALL LSL_INIT
+C
+C condition handlers  (this includes condition handler for GCTPLIB)
+C
+	CALL LIB$ESTABLISH(ITRANSEXCP)
+C
+C extend EXPBUF, so that long messages will be output
+C
+	CALL SET_EXPMAX(200)
+C
+C get command line, and check that files are sensible
+C
+	STATUS = OBEY()
+	IF (.NOT.STATUS) GOTO 999
+C
+C get any existing MD from input IFF file and initialise IFFLIB
+C
+	STATUS = INIT()
+	IF (.NOT.STATUS) GOTO 999
+C
+C write it out (and make a copy of it)
+C
+    5	CONTINUE
+	IF (CURRGOOD) THEN
+	   CALL WRITEF
+	   CALL WRITEF('Existing map descriptor:')
+	   CALL WRITEF(' ')
+C
+C if doing accurate datum shift, need to know geoid - spheroid separation
+C
+	   IF (HAD_HEIGHT) THEN
+	      STATUS = ASKSEP(CURRSEP)
+	      IF (.NOT.STATUS) GOTO 999
+	   ENDIF
+C
+	   CALL OUTMD(CURRMD,TERMLUN)
+	   DO 10,I=1,DESCLN
+	      TEMPMD(I)=CURRMD(I)
+   10	   CONTINUE
+	ENDIF
+C
+C if there is no current map descriptor yet or we are inserting
+C one, then get it now
+C (but most of map descriptor is not needed if doing plane
+C transformation)
+C
+	IF (HAD_DESCR.OR..NOT.CURRGOOD) THEN
+	   CALL WRITEF(' ')
+	   IF (.NOT.HAD_POINT) THEN
+	      IF (.NOT.CURRGOOD.AND.HAD_FTT) THEN
+	         CALL WRITEF('Enter data for current IFF file')
+	         CALL WRITEF('*******************************')
+	         GOTO 16
+	      ELSE
+	         CALL WRITEF(
+     &	                  'Enter projection data for current IFF file')
+	         CALL WRITEF(
+     &	                  '******************************************')
+	      ENDIF
+	   ELSE
+	      CALL WRITEF('Enter projection data for source system')
+	      CALL WRITEF('***************************************')
+	   ENDIF
+C
+   15	   CONTINUE
+	   STATUS=ASKMD(CURRMD,1)		! setting up first part
+	   IF (.NOT.STATUS) GOTO 999		! of current MD
+	ENDIF
+C
+C check if geographicals are in order LAT LONG; this is illegal IFF
+C and they have to be flipped
+C
+	IF (CURRPRJ.EQ.100.AND.CURRFLP) THEN
+	   STATUS = ASKFLP()
+	   IF (.NOT.STATUS) THEN
+	      IF (STATUS.EQ.ITRANS__EOF) THEN
+	         IF (.NOT.CURRGOOD) THEN
+	            CALL LSL_PUTMSG(ITRANS__REENTER)
+	            GOTO 15
+	         ENDIF
+	      ELSE
+	         CALL LSL_PUTMSG(STATUS)
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C flip any offset, and clear flag
+C
+	IF (FLIP) THEN
+	   TEMP = CURRLOC(2)
+	   CURRLOC(2) = CURRLOC(1)
+	   CURRLOC(1) = TEMP
+	ENDIF
+C
+	CURRFLP = .FALSE.
+C
+C do plane transformation, if possible and required
+C
+16	CONTINUE
+	TABUNTS=CURRUNT.GE.101.AND.CURRUNT.LE.105
+	IF (.NOT.HAD_DESCR.AND.(TABUNTS.OR.HAD_FTT)) THEN
+	   STATUS=ASK4PT()
+	   IF (.NOT.STATUS) THEN
+	      IF (STATUS.EQ.ITRANS__EOF) THEN
+	         IF (.NOT.CURRGOOD.AND..NOT.HAD_FTT) THEN
+	            CALL LSL_PUTMSG(ITRANS__REENTER)
+	            GOTO 15
+	         ELSE
+	            CALL LSL_PUTMSG(STATUS)
+	            GOTO 999
+	         ENDIF
+	      ELSE
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C get local origin and scale of IFF file
+C
+	IF ((HAD_DESCR.OR..NOT.CURRGOOD.OR.DO4PT).AND.
+     &	                  .NOT.HAD_POINT) THEN
+	   STATUS=ASKORG(CURRMD,1)
+	   IF (.NOT.STATUS) THEN
+	      IF (STATUS.EQ.ITRANS__EOF.AND.
+     &               (HAD_DESCR.OR..NOT.CURRGOOD)) THEN
+	         CALL LSL_PUTMSG(ITRANS__REENTER)
+	         GOTO 15
+	      ELSE
+	         GOTO 999
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C if doing datum shift, ask for differences between datums
+C
+	IF (HAD_DATUM) THEN
+	   STATUS = ASKSHIFT(DIFFS)
+	   IF (.NOT.STATUS) GOTO 999
+	ENDIF
+C
+C get the target map descriptor
+C
+	IF (.NOT.HAD_DESCR) THEN
+	   CALL WRITEF(' ')
+	   IF (.NOT.HAD_POINT) THEN
+	      IF (.NOT.CURRGOOD.AND.HAD_FTT) THEN
+	         CALL WRITEF('Enter local origin for output file')
+	         CALL WRITEF('**********************************')
+	      ELSE
+	         CALL WRITEF('Enter projection data for target IFF file')
+	         CALL WRITEF('*****************************************')
+	      ENDIF
+	   ELSE
+	      CALL WRITEF('Enter projection data for target system')
+	      CALL WRITEF('***************************************')
+	   ENDIF
+C
+   20	   CONTINUE
+C
+C use current MD as the template for the target desrciptor
+C
+	   DO 25, I=1,DESCLN
+	      TARGMD(I)=CURRMD(I)
+   25	   CONTINUE
+C
+C if doing plane transformation, and existing map descriptor not set,
+C just get origin
+C
+	   IF (.NOT.CURRGOOD.AND.HAD_FTT) GOTO 30
+C
+C get first part of target map descriptor
+C
+	   STATUS=ASKMD(TARGMD,2)		! use current spheroid
+	   IF (.NOT.STATUS) GOTO 999
+C
+C now we are in a position to set up transformation
+C
+	   CALL PARINIT(INSYS,INZONE,PARIN,INUNIT,CURRMD,1)	! input
+	   CALL PARINIT(OUTSYS,OUTZONE,PAROUT,OUTUNIT,TARGMD,2)! out
+C
+C see if GCTP transformation is required
+C
+	   DOTRANS=TSTTRANS()
+C
+C if only changing units on spheroid (sphere), make input and output
+C zones the same. GTRN gets confused otherwise
+C
+	   IF (DOTRANS.AND.INSYS.EQ.0.AND.OUTSYS.EQ.0) OUTZONE=INZONE
+C
+C get origin and scale for target system
+C
+   30	   IF (.NOT.HAD_POINT) THEN
+	      STATUS=ASKORG(TARGMD,2)
+	      IF (.NOT.STATUS) THEN
+	         IF (STATUS.EQ.ITRANS__EOF.AND.
+     &	             (CURRGOOD.OR..NOT.HAD_FTT)) THEN
+	            CALL LSL_PUTMSG(ITRANS__REENTER)
+	            GOTO 20
+	         ELSE
+	            GOTO 999
+	         ENDIF
+	      ENDIF
+	   ENDIF
+	ELSE			! HAD_DESCR - use current MD as target
+	   DO 50, I=1,DESCLN
+	      TARGMD(I)=CURRMD(I)
+   50	   CONTINUE
+	ENDIF
+C
+C output current and target map descriptors
+C
+	CALL FLWSEL(OUTLUN)
+	CALL FLWRTF(' ')
+	IF (.NOT.HAD_DESCR) THEN
+	   CALL FLWRTF('Input projection system')
+	   CALL FLWRTF('***********************')
+	ELSE
+	   CALL FLWRTF('Output projection system')
+	   CALL FLWRTF('************************')
+	ENDIF
+C
+	IF (CURRGOOD.AND..NOT.HAD_DESCR) THEN
+	   STATUS=OUTMD(TEMPMD,OUTLUN)		! CURRMD may have been
+						! altered
+	ELSE
+	   STATUS=OUTMD(CURRMD,OUTLUN)
+	ENDIF
+	IF (.NOT.STATUS) GOTO 999
+C
+C shift in origin of spheroids for datum shift
+C
+	IF (HAD_DATUM) THEN
+	   STATUS = OUTSHIFT(DIFFS,OUTLUN)
+	   IF (.NOT.STATUS) GOTO 999
+	ENDIF
+C
+C control points used for transformation
+C
+	IF (DO4PT) CALL OUTCPTS
+C
+	IF (.NOT.HAD_DESCR) THEN
+	   CALL FLWRTF(' ')
+	   CALL FLWRTF('Output projection system')
+	   CALL FLWRTF('************************')
+	   STATUS=OUTMD(TARGMD,OUTLUN)
+	   IF(.NOT.STATUS) GOTO 999
+	ENDIF
+C
+C check that spheroids have not changed (should not happen)
+C
+	IF (.NOT.HAD_DESCR.AND..NOT.HAD_DATUM) THEN
+	   IF ((CURRSPH.NE.TARGSPH).OR.
+     &	       (CURRSPH.EQ.100.AND.
+     &	        (CURRUSP(1).NE.TARGUSP(1).OR.CURRUSP(2).NE.TARGUSP(2))))
+     &	                     THEN
+	      CALL LSL_PUTMSG(ITRANS__INCONSPH)
+	      STATUS=ITRANS__INCONSPH
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C
+C now do processing.
+C 1) if only writing map descriptor, the source file has one the
+C    correct length, and not flipping coordinates then can patch it in
+C 2) or process individual points
+C 3) or write a new IFF file
+C
+	IF (HAD_DESCR.AND.CURRGOOD.AND..NOT.FLIP) THEN
+	   STATUS=WRTMD()
+	   IF (STATUS) CALL LSL_PUTMSG(ITRANS__MDPTCHED,
+     &	                  SRCE_FILE(1:SRCE_LEN))
+	ELSE
+C
+C have we changed the spheroid to a sphere?
+C
+	   IF (.NOT.HAD_DESCR.AND.SPH_MESS) THEN
+	      CALL LSL_PUTMSG(ITRANS__NEWRAD,SPH_RAD)
+	      IF (HAD_OUT) THEN
+	         CALL LSL_GETMSG(ITRANS__NEWRAD,STR,STRLEN)
+	         CALL FLWRTF
+	         CALL FLWRTF('%'//STR(1:STRLEN),SPH_RAD)
+	      ENDIF
+	   ENDIF
+C
+	   IF (HAD_POINT) THEN
+	      STATUS=PRCPTS()
+	   ELSE
+	      STATUS=TRNSFRM()
+	      IF (HAD_DESCR.AND.STATUS)
+     &	         CALL LSL_PUTMSG(ITRANS__MDCOPIED,DEST_FILE(1:DEST_LEN))
+	   ENDIF
+	ENDIF
+C
+  999	CONTINUE
+	STATUS1 = CLSFIL()
+	IF (STATUS) STATUS=SS$_NORMAL
+	CALL LSL_EXIT(STATUS.OR.SUPERR)	! exit and set status
+	END

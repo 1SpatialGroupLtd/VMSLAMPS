@@ -61,15 +61,24 @@ tkhd02,tkiw02,tkrw02,tkvw02,tkws02,tkip02
 $	if ip .and. repm then mcr LBR pwosplib/RP=tkip
 $	if rf then mcr mac tkrf=-
 tkhd02,tkrw02,tkiw02,tkvw02,tkws02,tkrf02
+$	if rf then mcr mac lcrf=-
+lchd02,tkhd02,tkrw02,tkiw02,tkvw02,tkws02,tkrf02
+$	if rf then mcr mac lcrf14=-
+lc1402,lchd02,tkhd02,tkrw02,tkiw02,tkvw02,tkws02,tkrf02
 $	if rf .and. repm then mcr LBR pwosplib/RP=tkrf
+$	if rf .and. repm then mcr LBR pwosplib/-EP/RP=lcrf
+$	if rf .and. repm then mcr LBR pwosplib/-EP/RP=lcrf14
 $	if lc then mcr mac lsch=-
 lchd02,tkhd02,lscw02,tkws02,lsch02
 $	if lc .and. repm then mcr LBR pwosplib/-EP/RP=lsch
+$	if lc then mcr mac lsch14=-
+lc1402,lchd02,tkhd02,lscw02,tkws02,lsch02
+$	if lc .and. repm then mcr LBR pwosplib/-EP/RP=lsch14
 $!
 $	if repm then goto w_lnk
 $	mcr LBR pwosplib/CR:20=tkddcg,tddc,dsubst,tscb,tkbs,tkip,tknl,tkod,tkrf,tkvg
-$	mcr LBR pwosplib/IN/-EP=lscb,lcvg,lcod,lsch
-$	mcr LBR pwosplib/IN/-EP=lcvg14,lcod14
+$	mcr LBR pwosplib/IN/-EP=lscb,lcvg,lcod,lcrf,lsch
+$	mcr LBR pwosplib/IN/-EP=lcvg14,lcod14,lcrf14,lsch14
 $	pl pwosplib.olb
 $!
 $w_lnk:	set nover

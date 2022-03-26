@@ -1,0 +1,1016 @@
+	LOGICAL FUNCTION PROCESS
+C
+***	IDENT	01MR91
+***	MODULE	PROCESS
+C
+C Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author TJ Ibbs	29-Apr-1986
+C
+CMOD	Fixed bug caused by inability to detect missing OSTF text
+C	entries, which had the side effect of causing spikes to be
+C	drawn from the feature following the feature with the missing
+C	text entry, to the origin.			ACM 04-May-1989
+C
+C Main function for input data processing - reads the data from the tape
+C and outputs IFF file(s)
+C
+C Returns TRUE if it fails, FALSE otherwise
+C
+C History:
+C	D0902		original OS plot program
+C	DMC		Synercom translation program, to Informap
+C	DMC2IMAP	heavily modified by TJI, 1985
+C	OSTF2I		heavily modified by TJI, 1986
+C
+C Data format:
+C			[Tape index]
+C	per sheet:
+C			Sheet header
+C	per feature:
+C			FSN
+C			[tech sec]
+C			[history]
+C			FC
+C			[PC]
+C			grid square
+C			[height]
+C			coord
+C
+C for:	text		line		symbol		scaled-symbol
+C	   angle	   angle	   angle	   size
+C	   text descn	   coord			   angle
+C	   text		   ::
+C	   ::
+C	   [text xref]
+C
+C No check is made of this ordering, but we assume that the data is correct
+C
+	IMPLICIT NONE
+C
+C *********************************************************************
+C common blocks
+C
+	INCLUDE	'LSL$CMNFRT:FRTCOM.CMN'		! FRT common block
+	INCLUDE	'LSL$CMNIFF:IFFHAN.CMN'		! IFF file posns/errors
+	INCLUDE	'LSL$CMNIFF:MHDMB.CMN'		! OS style map header
+	INCLUDE	'LSL$CMNIFF:MAPDES.CMN'		! map descriptor (type 1)
+	INCLUDE	'LSL$CMNIFF:MD2DES.CMN'		! map descriptor (type 2)
+	INCLUDE	'LSL$CMNLSL:CLD.CMN'		! for sheet selections
+	INCLUDE	'LSL$CMNLSL:EXPC.CMN'		! for EXPBUF,EXPLEN
+	INCLUDE	'CMN:FILES.CMN'			! our files & switches
+	INCLUDE	'CMN:ATTRIBUTES.CMN'		! attribute codes
+	INCLUDE	'CMN:SHEET.CMN'			! sheet based common
+	INCLUDE	'CMN:FEATURE.CMN'		! feature ...
+	INCLUDE	'CMN:POSITION.CMN'		! position ...
+	INCLUDE	'CMN:RECCMN.CMN'		! for RECNUM
+	INCLUDE	'CMN:PTRCMN.CMN'		! for PTR_MH
+	INCLUDE	'CMN:OSTF2IMSG.PAR'		! message numbers
+C
+C include files to cope with new OS map header
+C
+	INCLUDE 'LSL$CMNIFF:MHOSGB.CMN'		! New OS map header
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW_MH.CMN'	! New map header variables
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW.PAR'	! Header field definitions
+C
+C functions
+C
+	LOGICAL		OSMH_NEW_INI	! Open and read translation table
+	LOGICAL		OSMH_NEW_GETFLD	! Extract field from new header
+C
+	LOGICAL		GETREC		! get next input record
+	LOGICAL		START_SHEET	! read in start of a sheet
+	LOGICAL		MAP_HEADER	! read & use secondary header
+	LOGICAL		SKIP_MAP	! skip over a sheet
+	LOGICAL		FRTFND		! find feature code
+	LOGICAL		CVT_DMY_DAY	! convert day,month,year to date
+	INTEGER		SIGCHS		! find no. of chars in string
+C
+C *********************************************************************
+C parameters
+C
+	REAL		PI
+	PARAMETER	(PI=3.1415926)
+C
+C local workspace
+C
+	INTEGER		FLAG		! absolute flag value
+	INTEGER		I,J		! DO loop variables
+C
+	LOGICAL	    	HAD_ENDMAP	! true if end of file legal
+	LOGICAL		IN_FEATURE	! true if inside a feature
+	LOGICAL		FIRST_FEATURE	! true if next is 1st feature
+	LOGICAL		OLD_DMC		! true if old format data found
+	LOGICAL		FOUND_PLUS	! true if unexpected OSTF+ 
+	LOGICAL		BAD_DATE	! true if invalid date
+	LOGICAL		HAD_COORD_FC	! true if coordinate text feature (900)
+	LOGICAL		HAD_TEXT_FC	! true if text feature (555)
+C
+	CHARACTER*8	RECORD		! Current record
+	CHARACTER*8	BLANK		! Empty string
+	INTEGER		ICUVAL(2)	! values read from input record
+	INTEGER		COMB_COORDS(2)	! Text coordinate
+	INTEGER		LPOSNO		! position of NO entry
+	INTEGER		LPOSRA		! position of RA entry
+	INTEGER		THIS_FC		! Current FC for feature
+C
+	INTEGER		DISTAN		! distance (size) of scaled symbol
+	INTEGER		SURV_M		! survey date - month
+	INTEGER		SURV_Y		! survey date - year
+	INTEGER		CHA_M		! change date - month
+	INTEGER		CHA_Y		! change date - year
+	INTEGER		ZCOORD		! z-coordinate (centimetres)
+	INTEGER		LR		! left/right counter for boundaries
+	INTEGER		HEADLEN		! Actual header length to be written
+C
+	INTEGER		NCHS		! number of characters in a text
+	BYTE		TEXT(80)	! the text itself
+	INTEGER		TEXT_DESCR(2)	! fake string descriptor
+	INTEGER*2	TEXT_LEN	! length field of descriptor
+	EQUIVALENCE	(TEXT_DESCR(1),TEXT_LEN)
+C
+	INTEGER*2	IECODE		! IFF entry type
+	INTEGER*2	IELEN		! IFF entry length
+C
+ 	REAL		CC(10,2)	! cubic coefficients
+	REAL		GX,GY		! temp grid variables
+	REAL		ANGLE		! rotation of feature
+C
+	CHARACTER*1	CAP_METHOD	! data capture method
+	CHARACTER*1	CHA_CH		! change type as read
+	CHARACTER*9	DAT		! date
+	CHARACTER*8	TIM		! time
+C
+	BYTE		NEW_SECTION(42)	! for NS entry
+C
+	DATA	BLANK	/'        '/
+C
+C *********************************************************************
+C assume that the processing succeeds
+C
+	PROCESS = .FALSE.
+C
+C set up a fake string for texts
+C
+	TEXT_DESCR(1) = 0		! zero the type/class fields
+	TEXT_DESCR(2) = %LOC(TEXT)	! set up the address field
+	TEXT_LEN = 80			! max. length for starters
+C
+C we start having not read any map sheets yet
+C
+	THIS_MAP = 0
+C
+C note that we don't accept an empty file!
+C
+	HAD_ENDMAP = .FALSE.		! haven't ended a map yet
+	HAD_COORD_FC = .FALSE.  	! no text coordinate feature (def. 900)
+C
+C and haven't started a feature yet
+C
+	IN_FEATURE = .FALSE.		! just in case
+C
+C and there have been no unexpected OSTF+ entries
+C
+	FOUND_PLUS = .FALSE.
+C
+C set up our cubic coefficients array - the same for all sheets
+C
+	DO 20 I = 1,10
+	   DO 10 J = 1,2
+	      CC(I,J) = 0.0
+10	   CONTINUE
+20	CONTINUE
+C
+C set up the unit matrix
+C
+	CC(2,1) = 1.0
+	CC(3,2) = 1.0
+C
+C and set up a the map descriptor
+C
+	IF (NEW_TYPE) THEN
+	   MATV2 = 2		! type 2 will be set
+	ELSE
+	   MDARR(1) = -1	! type 1 is blank
+	ENDIF
+C
+C and set the customer description part of the map header
+C
+	IF ( MHTYPE.EQ.2 ) THEN
+	   MHDESC(1) = 174			! length in longwords
+	   MHDESC(2) = 2
+	   MHDESC(3) = 0
+	   MHDESC(4) = 0
+	ELSE
+	   PTR_MH = 0
+	   MH2DESC(2) = 3
+	   MH2DESC(3) = 0
+	   MH2DESC(4) = 0
+	   IF ( .NOT.OSMH_NEW_INI() ) GOTO 9999	
+	ENDIF
+C
+C *********************************************************************
+C read the next 8 character record
+C
+C each type record is composed of two fields -
+C a negative flag number, which identifies the entry, and a second
+C integer whose meaning depends on the type of entry (this might be
+C significant in all 4 digits, so we read it I4)
+C
+C coordinates are stored as capture method or curve-flag (a single 
+C character) and two 3-digit integers, which are never negative
+C
+C Note that we always ignore the curve flag, as we do not use it in IFF
+C
+5000	IF ( GETREC( RECORD ) ) GOTO 90300
+C
+5555	READ (RECORD(1:4),5001,ERR=99901) CAP_METHOD, ICUVAL(1)
+5001	FORMAT(A1,I3)
+C
+	IF (ICUVAL(1) .EQ. -23) THEN
+	   READ (RECORD(5:8),5002,ERR=99901) CHA_CH
+5002	   FORMAT(3X,A1)
+	ELSE
+	   READ (RECORD(5:8),5003,ERR=99901) ICUVAL(2)
+5003	   FORMAT(I4)
+	ENDIF
+C
+C if the first value is positive, then it is not a flag
+C
+7000	FLAG = -ICUVAL(1)
+	IF ( FLAG.LE.0 ) THEN		! coordinate record
+	   GOTO 50
+	ELSEIF ( FLAG.GE.1 .AND. FLAG.LE.25 ) THEN
+	   GOTO ( 100, 200, 300, 400, 500, 600, 700, 800, 900,1000,
+     &	         1100,1200,1300,1400,1500,1600,1700,1800,1900,2000,
+     &	         2100,2200,2300,2400,2500),FLAG
+	ELSEIF ( FLAG.EQ.44 ) THEN
+	   GOTO 4400
+	ELSE
+	   CALL LSL_PUTMSG(OSTF2I__BADFLAG,ICUVAL(1),RECNUM)
+	   GOTO 5000
+	ENDIF
+C
+C *********************************************************************
+C ...	coordinate record
+C	check that we are inside a feature...
+C
+50	IF ( .NOT.IN_FEATURE ) THEN
+	   CALL LSL_PUTMSG(OSTF2I__NOTINFTR,ICUVAL(1),ICUVAL(2),RECNUM)
+	   GOTO 5000
+	ENDIF
+C
+C Save text coordinate for /OSTEXT_COMBINE
+C
+	IF ( HAD_COORD_FC .AND. .NOT.HAD_TEXT_FC ) THEN
+	   DO 51 I = 1,2
+	      COMB_COORDS(I) = ICUVAL(I)
+51	   CONTINUE
+	   GOTO 5000
+	ENDIF
+C
+C if we have a plan capture method, save it
+C
+	IF (PLUS .AND. (CAP_METHOD .NE. ' ')) THEN
+	   LAST_CAPXY = ICHAR(CAP_METHOD(1:1))
+	   IF (ORVLEV .NE. 0) THEN
+	      IF ((LAST_CAPXY .LT. MIN_CAPXY) .OR. 
+     &	          (LAST_CAPXY .GT. MAX_CAPXY)) THEN
+	         CALL LSL_PUTMSG( OSTF2I__INVALCAP, CAP_METHOD )
+	         CALL LSL_ADDMSG( OSTF2I__RECORD, RECNUM, RECORD )
+	         LAST_CAPXY = ICHAR('0')
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C and store the coordinate. COORD will automatically FLUSH the buffer
+C when enough coordinates have been accumulated. FLUSH will output the
+C start of feature data before the first ST is output.
+
+	CALL COORD(ICUVAL)		! store/output this item
+C
+	GOTO 5000			! and read another line
+C
+C *********************************************************************
+C -1	start of sheet
+C
+100	THIS_MAP = THIS_MAP+1
+C
+C if we are selecting particular sheets, then check if this is one
+C
+	IF ( HAD_SELECT ) THEN
+	   DO 101 I=1,NUM_SEL
+	      IF ( SEL_LIST(I).EQ.THIS_MAP ) GOTO 102
+101	   CONTINUE
+	   IF ( SKIP_MAP() ) GOTO 90300
+	   GOTO 5000
+	ENDIF
+C
+C so this sheet is one that has been chosen - or they are all selected
+C
+102	HAD_ENDMAP = .FALSE.		! at start of map
+	FIRST_FEATURE = .TRUE.		! next feature is first
+	IN_FEATURE = .FALSE.		! not yet in a feature
+C
+C assemble an NS entry
+C
+	CALL DATE( DAT )
+	CALL TIME( TIM )
+	CALL EXPAND('%WCreated by OSTF2I on %S at %S',
+     &	   NEW_SECTION,DAT,TIM)
+C
+C Copy -1 flag into MH2ARR. The rest of the header is copied over in START_SHEET
+C This will only be done if the map has type 3 header
+C
+	CALL COPY_TO_MH( RECORD )
+C
+C and read in the sheet header
+C
+	IF ( START_SHEET( OLD_DMC, ICUVAL ) ) GOTO 9999
+	IF (NEW_TYPE) THEN
+	   MD2LOC(1) = MHMRCE
+	   MD2LOC(2) = MHMRCN
+	   MD2SCL = MHSCSC
+	   MD2PRJ = 101		! projection - UK national grid
+	   MD2UNT = 2		! IFF units  - projection units (metres)
+	   MD2SPH = 9		! spheroid   - Airy
+	ENDIF
+	IF ( OLD_DMC ) THEN
+ 	   GOTO 7000			! header ended early, at a flag
+	ELSE
+	   GOTO 5000
+	ENDIF
+C
+C *********************************************************************
+C -2	end of sheet
+C
+200	HAD_ENDMAP = .TRUE.	! read end-of-sheet
+C
+C close down the IFF file
+C
+	IF (IN_FEATURE) CALL LSL_PUTMSG(OSTF2I__BADFEATURE,RECNUM-1)
+	CALL IFFUNO(LPOSNO)	! set NO/EO pointer for last layer
+	CALL IFFEO		! end the layer
+	CALL IFFEM		! end the map
+	CALL IFFEJ		! end the 'job'
+C
+C now go back and set the RA entry
+C
+	CALL IFFPKE( IECODE, IELEN, LPOSRA )
+	IF ( IECODE.NE.'RA' ) THEN
+	   CALL LSL_PUTMSG( OSTF2I__NORA )
+	   GOTO 9999
+	ENDIF
+	CALL EIHWR( RANGE, 4, 1 )
+C
+C and then close the file
+C
+	CALL IFFCLO( IFFLUN )
+C
+	GOTO 5000
+C
+C *********************************************************************
+C -3	end of file
+C
+300	IF (.NOT.HAD_ENDMAP) THEN
+	   CALL LSL_PUTMSG( OSTF2I__UNEXPEND )
+	   GOTO 200		! pretend we had a -2 flag
+	ENDIF
+C
+	GOTO 9000		! just return, having finished
+C				! processing
+C *********************************************************************
+C -4	start of feature
+C
+400	FSN       = ICUVAL(2)	! our feature serial number
+C
+C flag -44 joins us here, also
+C
+C warn if previous feature has not been terminated yet
+C
+405	IF (IN_FEATURE) CALL LSL_PUTMSG(OSTF2I__BADFEATURE,RECNUM-1)
+C
+	IN_FEATURE  = .TRUE.	! now inside a feature
+	PEN_UP      = .TRUE.	! pen up to start of feature
+	STPTR = 0		! no points yet
+	DONE_START_FEATURE = .FALSE.  ! not output start of feature yet
+	FOUND_FC   = .FALSE.	! FC not yet found in FRT
+	IS_SCALED  = .FALSE.	! assume not a scaled symbol
+	HAD_PC     = .FALSE.	! no process code yet
+	HAD_CONTOUR= .FALSE.	! no height AC yet
+	HAD_ANGLE  = .FALSE.	! no rotation yet
+	IN_BOUNDARY= .FALSE.	! no boundary texts yet
+	HAD_TEXT   = .FALSE.	! nor any ordinary texts
+	HAD_LOC    = .FALSE.	! and no text location
+	HAD_HIST   = .FALSE.	! no feature history yet
+	HAD_SEC    = .FALSE.	! no technical security flag yet
+	HAD_HEIGHT = .FALSE.	! no feature height yet
+	SURV_DATE  = 0		! survey date unset
+ 	CHA_DATE   = 0		! change date unset
+	CHA_TYPE   = ICHAR('0')	! change type unknown
+	LAST_Z_INT = IFF_ABSENT	! z-coordinate unset
+	LAST_DZ_INT= IFF_ABSENT	! difference height unset
+	LAST_CAPXY = ICHAR('0')	! XY capture method unknown
+	LAST_CAPZ  = ICHAR('0')	! Z  capture method unknown
+	HAD_TEXT_FC  = .FALSE.	! no text feature (def. 555)
+C
+C if this is the first feature of the sheet, then we must output stuff
+C that comes before it
+C
+	IF ( FIRST_FEATURE ) THEN
+	   FIRST_FEATURE = .FALSE.	! had the first feature, now
+	   LPOSRA = LPOSE		! remember where the RAnge is
+	   CALL IFFRA( RANGE )		! return & correct this later
+	   IF (NEW_TYPE) CALL IFFHI	! HI if new type IFF file
+C
+C Byte count at this point is PTR_MH. (For future use)
+C
+C The header length (in words) to be passed to IFFMH is the byte count divided
+C by 2 plus 2 words for the descriptor
+C
+
+	   IF (MHTYPE.EQ.2) THEN
+	      CALL IFFMH( MHARR,MHLEN )		! output OS style map header
+	   ELSE
+	      HEADLEN = PTR_MH / 2 + 2
+	      CALL IFFMH( MH2ARR,HEADLEN )	! output New style map header
+	   ENDIF
+C
+	   IF (NEW_TYPE) THEN
+	      CALL IFFMD( MD2ARR,MD2LEN )	! type 2 MD
+	   ELSE
+	      CALL IFFMD( MDARR,MDLEN )		! type 1 MD
+	   ENDIF
+	   CALL IFFNS( NEW_SECTION, 42 )! new section
+	   CALL IFFCC( CC )		! unit matrix cubic coefficients
+	   CALL IFFCP( CPS )		! sheet corners as corner pts
+	   IF (ADD_GRID) CALL OSGRID(GRID_INT)
+	   LPOSNO = LPOSE		! remember where our NO is going
+	   CALL IFFNO( 1, 0, 0 )	! output everything in layer 1
+	ENDIF
+C
+C NF entry will be written later by START_FEATURE together with FS entry
+C
+	GOTO 5000
+C
+C *********************************************************************
+C -5	end of feature
+C
+500	CONTINUE
+C
+C Check if a text coordinate feature (default 900) has been read 
+C
+	IF ( HAD_COORD_FC ) THEN
+	   IF ( HAD_TEXT_FC ) THEN
+	      HAD_COORD_FC = .FALSE.
+	      CATEGORY = COMB_CAT
+	      HEIGHT = COMB_SIZE
+	      STYLE = COMB_STYLE
+	      ANGLE = 0.0
+	      FC = COMB_FC(3)
+C
+C Restore the text coordinate for /OSTEXT_COMBINE
+C
+	      DO 52 I = 1, 2
+	         ICUVAL(I) = COMB_COORDS(I)
+52	      CONTINUE
+	      STPTR = 0			! Reset pointer into ST buffer
+	      CALL COORD(ICUVAL)	! store/output this item
+	   ELSE
+	      IN_FEATURE = .FALSE.
+	      GOTO 5000			! Don't write coordinate feature
+	   ENDIF
+	ENDIF
+C
+C if feature not yet started, don't output anything
+	IF (.NOT.IN_FEATURE) GOTO 5000
+	IN_FEATURE = .FALSE.
+C
+C if we have not yet output start of feature data, because we have not
+C flushed any point data, then output it now
+C
+	IF ( .NOT.DONE_START_FEATURE ) CALL START_FEATURE
+C
+C if this was a scaled symbol, then add the second (size/angle) point
+C to the output buffer
+C
+	IF ( IS_SCALED ) CALL SCASYM( ANGLE, DISTAN )
+C
+C output any points remaining unflushed
+C
+	CALL FLUSH
+C
+C now, if we had a rotation, and we are not a line, then output the
+C angle here
+C
+	IF ( HAD_ANGLE .AND. .NOT.IS_LINE ) THEN
+	   IF (FOUND_FC) THEN
+	      IF ((FRTGT .EQ. ORITYP) .OR. (FRTGT .EQ. TEXTYP)) THEN
+	         CALL IFFRO( ANGLE )
+	      ENDIF
+	   ELSE
+	      CALL IFFRO( ANGLE )
+	   ENDIF
+	ENDIF
+C
+C if this was a text feature, output the text
+C
+  	IF ( HAD_TEXT ) THEN
+	   IF ( TRUNCATE ) THEN
+	      TEXT_LEN = NCHS
+	      NCHS = SIGCHS( TEXT_DESCR )
+	   ENDIF
+	   CALL IFFTX( TEXT, NCHS )
+	ENDIF
+C
+C and end the feature
+C
+	CALL IFFEF
+	GOTO 5000
+C
+C *********************************************************************
+C -6	dummy
+C
+600	GOTO 5000
+C
+C *********************************************************************
+C -7	feature code (line)
+C
+700	IS_LINE = .TRUE.		! it is a line feature
+C
+C texts/symbols joins us here
+C
+705	FC = ICUVAL(2)			! new FC
+	IF (HAD_FRT) THEN
+	   IF (FRTFND(FC)) THEN
+	      CALL LSL_PUTMSG( OSTF2I__FINDFC, FC )
+	   ELSE
+	      FOUND_FC = .TRUE.
+C
+C Check if this feature code corresponds to the text coordinate feature
+C for /OSTEXT_COMBINE (default 900) or the text feature itself (default 555)
+C and set flags accordingly
+C
+C NOTE:
+C    /OSTEXT_COMBINE only performs the combination if both the symbol FC and
+C    the text FC appear in the FRT. Hence /FRT must be used with /OSTEXT_COMBINE
+C
+	      IF ( HAD_COMB ) THEN
+	         IF ( FC.EQ.COMB_FC(2) ) HAD_TEXT_FC  = .TRUE.
+C
+C Determine whether the text feature code (def 555) is missing and write a
+C dummy text feature if it is
+C
+	         IF ( HAD_COORD_FC .AND. .NOT.HAD_TEXT_FC ) THEN
+	            THIS_FC = FC			! Save this feature code
+	            READ (BLANK,5007,ERR=99907) (TEXT(J),J=1,8)
+	            TEXT_LEN = 8
+	            HAD_TEXT = .TRUE.
+	            NCHS = 1
+	            HAD_COORD_FC = .FALSE.
+	            CATEGORY = COMB_CAT
+	            HEIGHT = COMB_SIZE
+	            STYLE = COMB_STYLE
+	            FC = COMB_FC(3)
+C
+C Restore the text coordinate for /OSTEXT_COMBINE
+C
+	            DO 752 I = 1, 2
+	               ICUVAL(I) = COMB_COORDS(I)
+752	            CONTINUE
+	            STPTR = 0			! Reset pointer into ST buffer
+	            CALL COORD(ICUVAL)		! store/output this item
+C
+C if feature not yet started, don't output anything
+C
+	            IF (.NOT.IN_FEATURE) GOTO 5000
+	            IN_FEATURE = .FALSE.
+C
+C if we have not yet output start of feature data, because we have not
+C flushed any point data, then output it now
+C
+	            IF ( .NOT.DONE_START_FEATURE ) CALL START_FEATURE
+C
+C if this was a scaled symbol, then add the second (size/angle) point
+C to the output buffer
+C
+	            IF ( IS_SCALED ) CALL SCASYM( ANGLE, DISTAN )
+C
+C output any points remaining unflushed
+C
+	            CALL FLUSH
+C
+C output the zero rotation angle here
+C
+	            ANGLE = 0.0
+	            CALL IFFRO( ANGLE )
+C
+C Output the text
+C
+	            CALL IFFTX( TEXT, NCHS )
+C
+C and end the feature
+C
+	            CALL IFFEF
+C
+	            IN_FEATURE = .TRUE.
+	            DONE_START_FEATURE = .FALSE.
+	            FC = THIS_FC
+	         ENDIF
+	         IF ( FC.EQ.COMB_FC(1) ) HAD_COORD_FC = .TRUE.
+	      ENDIF
+C
+	   ENDIF
+	ENDIF
+	GOTO 5000
+C
+C *********************************************************************
+C -8	feature code (symbol/name)
+C
+800	IS_LINE = .FALSE.	! it is not a line feature
+	GOTO 705		! but now join the linear code!
+C
+C *********************************************************************
+C -9	grid square
+C	we are changing our grid square - read the next line to find
+C	out what square we are moving into
+C
+900	IF ( GETREC( RECORD ) ) GOTO 90300
+	READ (RECORD,5005,ERR=99905) GX, GY
+5005	FORMAT (2F4.0)
+C
+	GRIDX = GX*MHBGI 		! grid square local origin
+	GRIDY = GY*MHBGI
+C
+	GOTO 5000
+C
+C *********************************************************************
+C -10	text description
+C	NB text height here may be in tenths of a millimetre or
+C	   as a point size
+C
+1000	CATEGORY = ICUVAL(2)
+	IF ( GETREC( RECORD ) ) GOTO 90300
+	READ (RECORD,5006,ERR=99906) STYLE,HEIGHT
+5006	FORMAT (I4,I4)
+C
+	GOTO 5000
+C
+C *********************************************************************
+C -11	text
+C
+1100	NCHS = ICUVAL(2)		! text length
+C
+C read in the text - note that it may be boundary text for L/R ACs,
+C in which case we read it into the appropriate part of BTEXT, rather
+C than into TEXT
+C
+	IF ( IN_BOUNDARY ) THEN
+	   DO 1120 I = 1,NCHS,8
+	      IF ( GETREC( RECORD ) ) GOTO 90300
+	      READ (RECORD,5007,ERR=99907) (BTEXT(I+J,LR,LRCNT),J=0,7)
+5007	      FORMAT (8A1)
+	      BLEN(LR,LRCNT) = NCHS
+1120	   CONTINUE
+	ELSE
+	   DO 1140 I = 1,NCHS,8
+	      IF ( GETREC( RECORD ) ) GOTO 90300
+	      READ (RECORD,5007,ERR=99907) (TEXT(I+J),J=0,7)
+1140	   CONTINUE
+	   HAD_TEXT = .TRUE.		! had text in this feature
+	ENDIF
+	GOTO 5000
+C
+C *********************************************************************
+C -12	orientation
+C
+1200	ANGLE = FLOAT(ICUVAL(2)) / 10.0		! convert to whole degrees
+	ANGLE = ANGLE*PI/180.0			! convert to radians
+	HAD_ANGLE = .TRUE.			! remember we had it
+	GOTO 5000
+C
+C *********************************************************************
+C -13	invisible line flag
+C
+1300	CALL FLUSH			! output any point data so far
+	PEN_UP = .TRUE.			! pen up to the next lot
+	GOTO 5000
+C
+C *********************************************************************
+C -14	external grid square
+C
+1400	GOTO 900		! join up with normal grid square
+C
+C *********************************************************************
+C -15	distance - the size of a scaled symbol
+C
+1500	IS_SCALED = .TRUE.
+	DISTAN = ICUVAL(2)
+	GOTO 5000
+C
+C *********************************************************************
+C -16	process code
+C
+1600	HAD_PC = .TRUE.
+	PC = ICUVAL(2)
+	GOTO 5000
+C
+C *********************************************************************
+C -17	contour height
+C
+1700	HAD_CONTOUR = .TRUE.
+	CONTOUR = ICUVAL(2)
+	GOTO 5000
+C
+C *********************************************************************
+C -18	text location
+C
+C 	ICUVAL(2) contains the justification - 0 to 8
+C
+C the next couple of records contain the (original) position of the
+C text feature 
+C
+1800	HAD_LOC = .TRUE.
+	JUSTIF = ICUVAL(2)
+C
+	IF ( GETREC( RECORD ) ) GOTO 90300
+	READ (RECORD,5008,ERR=99908) GX, GY
+5008	FORMAT (2F4.0)
+C
+C Don't use the new grid if this is a text feature (default 555)
+C
+	IF ( .NOT.HAD_COORD_FC ) THEN
+	   GRIDX = GX*MHBGI 		! grid square local origin
+	   GRIDY = GY*MHBGI
+	ENDIF
+C
+	IF ( GETREC( RECORD ) ) GOTO 90300
+	READ (RECORD,5009,ERR=99909) CAP_METHOD, ICUVAL(1), ICUVAL(2)
+5009	FORMAT (A1,I3,I4)
+C
+C if we have a plan capture method, save it
+C
+	IF (PLUS .AND. (CAP_METHOD .NE. ' ')) THEN
+	   LAST_CAPXY = ICHAR(CAP_METHOD(1:1))
+	   IF (ORVLEV .NE. 0) THEN
+	      IF ((LAST_CAPXY .LT. MIN_CAPXY) .OR. 
+     &	          (LAST_CAPXY .GT. MAX_CAPXY)) THEN
+	         CALL LSL_PUTMSG( OSTF2I__INVALCAP, CAP_METHOD )
+	         CALL LSL_ADDMSG( OSTF2I__RECORD, RECNUM, RECORD )
+	         LAST_CAPXY = ICHAR('0')
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	CALL COORD(ICUVAL)		! store/output this item
+C
+	GOTO 5000
+C
+C *********************************************************************
+C -19	left/right boundary indicator
+C
+1900	IN_BOUNDARY = .TRUE.
+C
+C boundary texts come in pairs - decide which one it is
+C
+	IF (LR.EQ.1) THEN
+	   LR = 2
+	ELSE
+	   LR = 1
+	ENDIF
+C
+C and check that we have room to store another pair of them
+C
+	IF ( LRCNT.GE.LRMAX ) THEN
+	   CALL LSL_PUTMSG( OSTF2I__TOOMNYLR, LRMAX )
+	   LRCNT = 0
+	ELSE
+	   LRCNT = LRCNT+1
+	ENDIF
+C
+C remember the feature code for this boundary text
+C
+  	BOUND_FC(LR,LRCNT) = FC
+C
+	GOTO 5000
+C
+C *********************************************************************
+C -20	additional map header data
+C
+C If type 3 header, copy -20 flag into MH2ARR. The rest of the header is copied
+C over in MAP_HEADER
+C
+2000	CALL COPY_TO_MH( RECORD )
+C
+	IF ( MAP_HEADER( OLD_DMC, ICUVAL, RECORD ) ) GOTO 99900
+C
+	IF ( OLD_DMC ) THEN
+	   GOTO 7000			! old format - shorter than expected
+	ELSE
+	   IF (MHTYPE.EQ.2) THEN	
+    	      GOTO 5000		! get next record.
+	   ELSE IF (MHTYPE.EQ.3) THEN
+	      GOTO 5555		! read record in hand.
+	   ENDIF
+	ENDIF
+C
+C *********************************************************************
+C -21	start/end of index
+C	the index will already have been read by DO_INDEX - this is
+C	presumably just a trailing end of index flag
+C
+2100	CALL LSL_PUTMSG( OSTF2I__BADINDX, RECNUM )
+	GOTO 5000
+C
+C *********************************************************************
+C -22	text cross reference - ignored
+C	this consists of ICUVAL(2) FSN records, which we just ignore
+C
+2200	DO 2201 I = 1,ICUVAL(2)
+	   IF ( GETREC( RECORD ) ) GOTO 90300
+2201	CONTINUE
+	GOTO 5000
+C
+C *********************************************************************
+C -23	feature history - change type, survey date, change date
+C
+2300	IF (.NOT. (PLUS .OR. FOUND_PLUS)) THEN
+	   CALL LSL_PUTMSG(OSTF2I__GOTPLUS)
+	   FOUND_PLUS = .TRUE.
+	ENDIF
+C
+C set the change type
+C
+	CHA_TYPE = ICHAR(CHA_CH(1:1))
+	IF (PLUS .AND. (ORVLEV .NE. 0)) THEN
+	   IF ((CHA_TYPE .LT. MIN_CHA_TYPE) .OR. 
+     &	       (CHA_TYPE .GT. MAX_CHA_TYPE)) THEN
+	      CALL LSL_PUTMSG( OSTF2I__INVALCHA, CHA_CH )
+	      CALL LSL_ADDMSG( OSTF2I__RECORD, RECNUM, RECORD )
+	      CHA_TYPE = ICHAR('0')
+	   ENDIF
+	ENDIF
+C
+C get the next record containing the two dates
+C
+	IF ( GETREC( RECORD ) ) GOTO 90300
+	READ (RECORD,5010,ERR=99910) SURV_Y,SURV_M,CHA_Y,CHA_M
+5010	FORMAT (4I2)
+C
+C convert the survey date into VAX format
+C
+	IF ((SURV_M .NE. 0) .AND. (SURV_Y .NE. 0)) THEN
+	   BAD_DATE = .FALSE.
+	   SURV_Y = 1900 + SURV_Y
+	   IF (CVT_DMY_DAY(SURV_DATE,1,SURV_M,SURV_Y)) THEN
+	      IF (PLUS .AND. (ORVLEV .NE. 0)) THEN
+	         IF (SURV_DATE .GT. MAX_SURV_DATE) BAD_DATE = .TRUE.
+	      ENDIF
+	   ELSE
+	      BAD_DATE = .TRUE.
+	   ENDIF
+	   IF (BAD_DATE) THEN
+	      SURV_Y = SURV_Y - 1900
+	      CALL LSL_PUTMSG( OSTF2I__INVALDATE, SURV_Y, SURV_M )
+	      CALL LSL_ADDMSG( OSTF2I__RECORD, RECNUM, RECORD )
+	      SURV_DATE = 0
+	   ENDIF
+	ENDIF
+C
+C and do the same for the change date 
+C
+	IF ((CHA_M .NE. 0) .AND. (CHA_Y .NE. 0)) THEN
+	   BAD_DATE = .FALSE.
+	   CHA_Y = 1900 + CHA_Y
+	   IF (CVT_DMY_DAY(CHA_DATE,1,CHA_M,CHA_Y)) THEN
+	      IF (PLUS .AND. (ORVLEV .NE. 0)) THEN
+	         IF (CHA_DATE .GT. MAX_CHA_DATE) BAD_DATE = .TRUE.
+	      ENDIF
+	   ELSE
+	      BAD_DATE = .TRUE.
+	   ENDIF
+	   IF (BAD_DATE) THEN
+	      CHA_Y = CHA_Y - 1900
+	      CALL LSL_PUTMSG( OSTF2I__INVALDATE, CHA_Y, CHA_M )
+	      CALL LSL_ADDMSG( OSTF2I__RECORD, RECNUM, RECORD )
+	      CHA_DATE = 0
+	   ENDIF
+	ENDIF
+C
+	HAD_HIST = .TRUE.
+	GOTO 5000
+C
+C *********************************************************************
+C -24	height - difference in height between ground and top of feature,
+C		 measured height, height capture method
+C
+2400	IF (.NOT. (PLUS .OR. FOUND_PLUS)) THEN
+	   CALL LSL_PUTMSG(OSTF2I__GOTPLUS)
+	   FOUND_PLUS = .TRUE.
+	ENDIF
+C
+C the difference in height is given in decimetres, and an empty field 
+C means that it is unknown for the following points
+C
+	IF (RECORD(5:8) .EQ. ' ') THEN
+	   LAST_DZ_INT = IFF_ABSENT
+	ELSE
+	   LAST_DZ = FLOAT(ICUVAL(2))/10.0
+	ENDIF
+C
+C get the next record containing the capture method and measured height
+C
+	IF ( GETREC( RECORD ) ) GOTO 90300
+	READ (RECORD,5013,ERR=99913) CAP_METHOD,ZCOORD
+5013	FORMAT (A1,X,I6)
+C
+C update the last capture method
+C
+	IF (PLUS .AND. (CAP_METHOD .NE. ' ')) THEN
+	   LAST_CAPZ = ICHAR(CAP_METHOD(1:1))
+	   IF (ORVLEV .NE. 0) THEN
+	      IF ((LAST_CAPZ .LT. MIN_CAPZ) .OR. 
+     &	          (LAST_CAPZ .GT. MAX_CAPZ)) THEN
+	         CALL LSL_PUTMSG( OSTF2I__INVALCAP, CAP_METHOD )
+	         CALL LSL_ADDMSG( OSTF2I__RECORD, RECNUM, RECORD )
+	         LAST_CAPZ = ICHAR('0')
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C the z-coordinate is given in centimetres, and an empty field 
+C means that it is unknown for the following points
+C
+	IF (RECORD(3:8) .EQ. ' ') THEN
+	   LAST_Z_INT = IFF_ABSENT
+	ELSE
+	   LAST_Z = FLOAT(ZCOORD)/100.0
+	ENDIF
+C
+	HAD_HEIGHT = .TRUE.
+	GOTO 5000
+C
+C *********************************************************************
+C -25	technical security marker
+C
+2500	IF (.NOT. (PLUS .OR. FOUND_PLUS)) THEN
+	   CALL LSL_PUTMSG(OSTF2I__GOTPLUS)
+	   FOUND_PLUS = .TRUE.
+	ENDIF
+C
+C just set the flag
+C
+	HAD_SEC = .TRUE.
+	GOTO 5000
+C
+C *********************************************************************
+C -44	large FSN flag - greater than 9999 - treat as -4 flag, but
+C	work out the correct FSN
+C
+4400	FSN = ICUVAL(2)+10000		! our feature serial number
+	GOTO 405			! join standard start of feature
+C
+C *********************************************************************
+C come here when we read end of file
+C
+90300	IF ( HAD_ENDMAP ) THEN
+	   CALL LSL_PUTMSG( OSTF2I__NOENDFL )
+	   GOTO 9000
+	ELSE
+	   CALL LSL_PUTMSG( OSTF2I__UNEXPEOF )
+	   GOTO 9999
+	ENDIF
+C
+C *********************************************************************
+C
+99900	CALL LSL_ADDMSG( OSTF2I__RECORD, RECNUM, RECORD )
+	GOTO 9999
+C
+99901	CALL LSL_PUTMSG( OSTF2I__READREC )
+	GOTO 99900
+99905	CALL LSL_PUTMSG( OSTF2I__NEWGRID )
+	GOTO 99900
+99906	CALL LSL_PUTMSG( OSTF2I__TXTDESC )
+	GOTO 99900
+99907	CALL LSL_PUTMSG( OSTF2I__TXTERR )
+	GOTO 99900
+99908	CALL LSL_PUTMSG( OSTF2I__TXTGRID )
+	GOTO 99900
+99909	CALL LSL_PUTMSG( OSTF2I__TXTCOORD )
+	GOTO 99900
+99910	CALL LSL_PUTMSG( OSTF2I__HISTDATE )
+	GOTO 99900
+99913	CALL LSL_PUTMSG( OSTF2I__ZCOORD )
+	GOTO 99900
+C
+C *********************************************************************
+C failure return
+C
+9999	PROCESS = .TRUE.
+	CALL LSL_PUTMSG( OSTF2I__ENDPROC, RECNUM )
+C
+C success exit joins here
+C
+9000	RETURN
+	END
+               

@@ -1,0 +1,1760 @@
+	INTEGER*4 FUNCTION PROCESS_FILE
+C
+***	MODULE	PROCESS_FILE
+***	IDENT	08JL92
+C
+C	Copyright (C), Laser-Scan Ltd., Cambridge, England
+C
+C	Created					CCB  18-Nov-1989
+C
+C ......................................................................
+C
+C Process a UIM file, producing UIL code.
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE		'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE		'LSL$CMNUILGEN:UILGEN.PAR'
+	INCLUDE		'LSL$CMNUILGEN:UILGENMSG.PAR'
+C
+C Common:
+	INCLUDE		'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE		'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE		'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE		'LSL$CMNUILGEN:UILGEN.CMN'
+C
+C Functions:
+	INTEGER		RDCOMM		! read a command
+	LOGICAL		RDCHS		! reads a character
+	LOGICAL		RDLONG		! reads long integer
+	LOGICAL		RDREAL		! reads real number
+	INTEGER		READSTR		! reads a string
+	INTEGER		EXPAND		! expands strings
+	INTEGER		PARFILN		! parses a file name
+	INTEGER		GETFILNAM	! read a filename
+	INTEGER*4	FLROPN		! open a text file for reading
+	INTEGER*4	FLWOPN		! open a text file for writing
+	INTEGER*4	FLRLIN		! read a line
+	INTEGER*4	PROCESS_ICON	! process ICON file
+	EXTERNAL	CVT_CMD_TABLE	! command table
+	EXTERNAL	DEFCOL_CMD_TABLE
+	EXTERNAL	COND_CMD_TABLE
+C
+C W/s:
+	INTEGER		I
+	INTEGER		NEXT_MENU	! menu number
+	INTEGER		COLOUR_NUMBER,FONT_NUMBER
+	LOGICAL*4	STATUS		! return status code
+	INTEGER		IERR		! return error code
+	INTEGER		LINE		! current line being read
+	INTEGER		SAVLIN
+	INTEGER		SAVIND
+	BYTE		CH		! single character
+	LOGICAL		WINDOW_FRAME	! wan't a frame?
+	LOGICAL		HADPOS,HADSIZ,HADNAM,HADPAR,DONEHEAD
+	INTEGER		XPOS,YPOS,XSIZ,YSIZ,XOFF,YOFF
+	CHARACTER*80	PARENT,ICON,STR1,STR2
+	INTEGER		PARLEN,ICONLEN,L1,L2,ICON_HEIGHT
+	CHARACTER*2	CONTROL
+	CHARACTER*80	FONT
+	INTEGER		FINT,FL
+	INTEGER		XS,YS,XE,YE
+	INTEGER		COMMAND
+	INTEGER		CHOICE_GROUP
+	LOGICAL		CHOICE_ON
+	INTEGER		HEIGHT(0:11)/
+     &				14,14,14,28,12,18,12,14,18,14,28,14/
+	LOGICAL		MENU,RADIO,BAR,HORIZONTAL,PULLDOWN,OPTION
+	INTEGER		PULLDOWN_COUNT
+	LOGICAL		HAD_FILE
+	INTEGER		BOX_TYPE
+	LOGICAL		BOX_MODAL
+	LOGICAL		INPUT
+	LOGICAL		ROOT
+	LOGICAL		LIST
+	LOGICAL		LIST_SINGLE
+	INTEGER		LIST_X,LIST_Y,LIST_WIDTH,LIST_VIS
+	INTEGER		LIST_ITEMS,LIST_BASE
+	CHARACTER*128	CNDSTR	! conditional compilation symbol
+	INTEGER		CL	! its length
+	LOGICAL		DEF
+C
+	PROCESS_FILE = LSL__NORMAL
+C
+C set once only defaults
+	IFPTR = 0		! nothing on IF stack
+	IFSAVE = 0		! saved IF stack level
+	DOING = .TRUE.		! conditional compilation ON
+	HADELSE = .FALSE.	! not had an #ELSE
+	CALL FLWSEL(UILMENULUN)
+	NEXT_MENU = 0		! first menu
+	COLOUR_NUMBER = 1	! first colour
+	FONT_NUMBER = 1		! first font
+	CLEN(1) = 0
+	CLEN(2) = 0
+	CLEN(3) = 0
+	HAD_FILE = .FALSE.	! not in included file
+	LIST_BASE = 1
+	LINE = 0		! first line of file
+C
+C now the defaults for each dialog box
+1	WINDOW_FRAME = .TRUE.	! border round it
+	HADPOS = .FALSE.	! not had various things yet
+	HADSIZ = .FALSE.
+	HADNAM = .FALSE.
+	HADPAR = .FALSE.
+	DONEHEAD = .FALSE.
+	FONT = '0'		! font 0
+	FINT = 0		! and as an integer
+	FL = 0			! unless CDL use default font
+	IF (CDL) FL = 1
+	XOFF = 0		! no offsets
+	YOFF = 0
+	RETCOD = 1		! code 1 = send
+	DO_STR = ' '		
+	DO_LEN = 1
+	HAD_DO = .FALSE.
+	ICON = ' '		! blank icon name
+	ICONLEN = 1
+	ICON_HEIGHT = 0
+	CHOICE_GROUP = 0	! first choice group
+	CHOICE_ON = .TRUE.
+	MENU = .FALSE.		! not in a menu
+	PULLDOWN = .FALSE.	! or in a pulldown menu
+	PULLDOWN_COUNT = 0
+	LIST = .FALSE.		! not in a list
+	BOX_TYPE = TYPE_DIALOG	! dialog type box
+	BOX_MODAL = .FALSE.	! not modal box
+	INPUT = .FALSE.		! keyboard input not required
+	WLEN = 0		! no widget name
+C
+C Read in the next line 
+10	CONTINUE
+C
+C check of can do the header for this menu now
+	IF (.NOT.DONEHEAD) THEN
+	   IF (HADPOS.AND.HADSIZ.AND.HADNAM.AND.HADPAR) THEN
+	      ROOT = PARENT(:PARLEN).EQ.'none'
+	      IF (ROOT.AND.NEXT_MENU.EQ.0.AND.BOX_TYPE.NE.TYPE_DIALOG) THEN
+	         CALL LSL_PUTMSG(UILGEN__BADROOT)
+	         GOTO 9997
+	      ENDIF
+	      IF (ROOT) NEXT_MENU = NEXT_MENU+1
+	      IF (CDL) YPOS = 864-YPOS-YSIZ	! y is upside down
+	      IF (BOX_TYPE.NE.TYPE_DIALOG .AND.
+     &		  BOX_TYPE.NE.TYPE_COLOR_MIX) INPUT = .TRUE.! requires key input
+	      IF (CONVERT) THEN
+	         CALL FLWRTF('box name "%S"',NAME(:NAMLEN))
+	         CALL FLWRTF('box parent "%S"',PARENT(:PARLEN))
+	         IF (.NOT.WINDOW_FRAME) CALL FLWSTR('box noborder')
+	         CALL FLWRTF('box position %N %N',XPOS,YPOS)
+	         CALL FLWRTF('box size %N %N',XSIZ,YSIZ)
+	         IF (BOX_TYPE.NE.TYPE_DIALOG) CALL WRITE_DO
+	      ELSE
+	         CALL FLWSTR('object')
+	         INDENT = INDENT+1
+	         IF (BOX_TYPE.EQ.TYPE_FILE_SELECT) THEN
+	            CALL BEGIN(NAME(:NAMLEN)//' : XmFileSelectionDialog')
+	         ELSEIF (BOX_TYPE.EQ.TYPE_PROMPT) THEN
+	            CALL BEGIN(NAME(:NAMLEN)//' : XmPromptDialog')
+	         ELSEIF (BOX_TYPE.EQ.TYPE_COLOR_MIX) THEN
+	            CALL BEGIN(NAME(:NAMLEN)//' : DXmColorMixDialog')
+	         ELSEIF (ROOT.AND.NEXT_MENU.EQ.1) THEN
+	            CALL BEGIN(NAME(:NAMLEN)//' : XmBulletinBoard')
+	         ELSE
+	            CALL BEGIN(NAME(:NAMLEN)//' : XmBulletinBoardDialog')
+	         ENDIF
+	         CALL BEGIN('arguments')
+	         CALL ADD('XmNx = %N; XmNy = %N;',XPOS,YPOS)
+	         CALL ADD('XmNwidth = %N; XmNheight = %N;',XSIZ,YSIZ)
+	         CALL ADD('XmNdialogTitle = "%S";',NAME(:NAMLEN))
+	         IF (BOX_TYPE.EQ.TYPE_FILE_SELECT) THEN
+	            CALL ADD('arguments file_selection_args;')
+	            CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	            CALL ADD('XmNdirMask = "%S";',STR1(:L1))
+	            IF (FL.GT.0) CALL ADD(
+     &			'XmNtextFontList = font_%S;',FONT(:FL))
+	            IF (FL.GT.0) CALL ADD(
+     &			'XmNlabelFontList = font_%S;',FONT(:FL))
+	         ELSEIF (BOX_TYPE.EQ.TYPE_PROMPT) THEN
+	            CALL ADD('arguments prompt_dialog_args;')
+	            CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	            CALL ADD('XmNselectionLabelString = "%S";',STR1(:L1))
+	            IF (FL.GT.0) CALL ADD(
+     &			'XmNtextFontList = font_%S;',FONT(:FL))
+	         ELSEIF (BOX_TYPE.EQ.TYPE_COLOR_MIX) THEN
+	            CALL ADD('arguments color_mix_args;')
+	            CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	            IF (FL.GT.0) CALL ADD(
+     &			'XmNlabelFontList = font_%S;',FONT(:FL))
+	         ELSE
+	            CALL ADD('arguments dialog_box_args;')
+	            CALL WRITE_COLOR(.TRUE.,.FALSE.)
+	         ENDIF
+	         IF (BOX_MODAL) CALL ADD(
+     &			'XmNdialogStyle = XmDIALOG_FULL_APPLICATION_MODAL;')
+	         CALL END	! end arguments
+	         IF (BOX_TYPE.EQ.TYPE_FILE_SELECT) THEN
+	            CALL BEGIN('callbacks')
+	            CALL ADD(
+     &		'MrmNcreateCallback = procedure zap_help_proc();')
+	            CALL WRITE_CALLBACK('XmNokCallback','file_proc')
+	            CALL WRITE_CALLBACK('XmNcancelCallback','file_proc')
+	            CALL END	! end callbacks
+	         ELSEIF (BOX_TYPE.EQ.TYPE_PROMPT) THEN
+	            CALL BEGIN('callbacks')
+	            CALL ADD(
+     &		'MrmNcreateCallback = procedure zap_help_proc();')
+	            CALL WRITE_CALLBACK('XmNokCallback','select_proc')
+	            CALL WRITE_CALLBACK('XmNcancelCallback','select_proc')
+	            CALL END	! end callbacks
+	         ELSEIF (BOX_TYPE.EQ.TYPE_COLOR_MIX) THEN
+	            CALL BEGIN('callbacks')
+	            CALL WRITE_CALLBACK('XmNokCallback','color_proc')
+	            CALL WRITE_CALLBACK('XmNapplyCallback','color_proc')
+	            CALL WRITE_CALLBACK('XmNcancelCallback','color_proc')
+	            CALL END	! end callbacks
+	         ENDIF
+	         CALL BEGIN('controls')
+	      ENDIF
+	      DONEHEAD = .TRUE.
+	   ENDIF
+	ENDIF
+C
+	STATUS = FLRLIN()
+	LINE = LINE+1
+	IF (.NOT.STATUS) GOTO 9900
+C
+C Check if valid line to read - loop back if not
+	CALL BSLN
+	IF (RDCHS(CH)) GOTO 10		! ignore empty lines
+	IF (CH.EQ.'!') GOTO 10		! ignore comment lines
+	IF (CH.NE.'#') GOTO 90		! conditional compilation control
+C
+	COMMAND = RDCOMM(COND_CMD_TABLE)
+	IF (COMMAND.LE.0) GOTO 9998
+	GOTO (11,21,31,41), COMMAND
+	GOTO 9998
+C
+C #IFDEF/IFNDEF
+11	CONTINUE
+21	CONTINUE
+	IF (IFPTR.EQ.MAXIF) THEN
+	   CALL LSL_PUTMSG(UILGEN__IFNESTEX,MAXIF)
+	   GOTO 9998
+	ENDIF
+	IF (RDCHS(CH)) THEN
+	   CALL LSL_PUTMSG(LSL__UNEXPEOL)
+	   GOTO 9998
+	ENDIF
+	IF (CH.EQ.'!') THEN
+	   CALL LSL_PUTMSG(LSL__UNEXPEOL)
+	   GOTO 9998
+	ENDIF
+	CALL BSCH
+	CL = READSTR(CNDSTR,,ON_SPACE)
+C
+C upper case it - N.B. the strings from /DEFINE on the command line
+C are upper cased anyway (unless in quotes, in which case they contain
+C the quotes as well, so are unlikely to be much use!)
+	CALL STR$UPCASE(CNDSTR(:CL),CNDSTR(:CL))
+C
+C check if defined
+	DEF = .FALSE.
+	DO 22 I=1,NUMDEF
+	   IF (CNDSTR(:CL).EQ.DEFSTR(I)) THEN
+	      DEF = .TRUE.
+	      GOTO 23
+	   ENDIF
+22	CONTINUE
+C
+23	IFPTR = IFPTR+1
+	IFSTACK(1,IFPTR) = DOING
+	IFSTACK(2,IFPTR) = HADELSE
+	DOING = DOING .AND. (DEF .EQV. (COMMAND.EQ.1))
+	HADELSE = .FALSE.
+	GOTO 10
+C
+C #ELSE
+31	IF (IFPTR.LE.IFSAVE .OR. HADELSE) THEN
+	   CALL LSL_PUTMSG(UILGEN__BADCOND)
+	   GOTO 9998
+	ENDIF
+	HADELSE = .TRUE.
+	DOING = IFSTACK(1,IFPTR).AND..NOT.DOING
+	GOTO 10
+C
+C #ENDIF
+41	IF (IFPTR.LE.IFSAVE) THEN
+	   CALL LSL_PUTMSG(UILGEN__BADCOND)
+	   GOTO 9998
+	ENDIF
+	DOING = IFSTACK(1,IFPTR)
+	HADELSE = IFSTACK(2,IFPTR)
+	IFPTR = IFPTR-1
+	GOTO 10
+C
+90	CALL BSCH			! backspace
+C
+C if conditional compilation off, then skip line
+	IF (.NOT.DOING) GOTO 10
+C
+C Get primary command (loop back if necessary)
+	COMMAND = RDCOMM(CVT_CMD_TABLE)
+	IF (COMMAND.LE.0) GOTO 9998
+	GOTO (91,92,93,94,
+     &	      100,200,300,400,500,600,700,800,900,1000,1100,1200,1300,
+     &	      1400,1500,1600,1700,1800,1900,2000,2100,2200,2300,
+     &	      2400,2500,2600,2700,2800				),COMMAND
+	GOTO 9998
+C
+C ......................................................................
+C	FILE -	C R E A T E   N E W   M E N U
+C
+C get the filename
+91	IF (HAD_FILE) THEN
+	   CALL LSL_PUTMSG(UILGEN__ININCL)
+	   GOTO 9998
+	ENDIF
+	IF (CDL) THEN
+	   STATUS=GETFILNAM(UIM_FILE,UIM_FILE_LEN,'LSL$CDL:.CDL',.TRUE.)
+	ELSE
+	   STATUS=GETFILNAM(UIM_FILE,UIM_FILE_LEN,'LSL$UIL:.UIM',.TRUE.)
+	ENDIF
+	IF (.NOT.STATUS) THEN
+	   CALL LSL_PUTMSG(UILGEN__BADFILE)
+	   CALL LSL_ADDMSG(STATUS)
+	   GOTO 9998
+	ENDIF
+C
+C Attempt to open UIM file
+	STATUS=FLROPN(CDLLUN,UIM_FILE(:UIM_FILE_LEN),IERR)
+	IF (.NOT.STATUS) THEN
+	   CALL LSL_PUTMSG(UILGEN__OPNFIL,UIM_FILE(:UIM_FILE_LEN))
+	   CALL LSL_ADDMSG(STATUS)
+	   GOTO 9999
+	ENDIF
+C
+	IF (CDL) THEN
+	   CALL LSL_PUTMSG(UILGEN__READFILE,'CDL',UIM_FILE(:UIM_FILE_LEN))
+	ELSE
+	   CALL LSL_PUTMSG(UILGEN__READFILE,'UIM',UIM_FILE(:UIM_FILE_LEN))
+	ENDIF
+	HAD_FILE = .TRUE.
+	SAVLIN = LINE
+	LINE = 0
+	IFSAVE = IFPTR		! save IF stack pointer
+	GOTO 10
+C
+C ......................................................................
+C		S E T   B A C K G R O U N D   C O L O U R
+C
+92	IF (CONVERT) THEN
+	   CALL FLWRTF('colour background %N',COLOUR_NUMBER)
+	ELSE
+	   CLEN(1) = EXPAND('%W%N',%REF(COL(1)),COLOUR_NUMBER)
+	ENDIF
+	GOTO 95
+C
+C ......................................................................
+C		S E T   F O R E G R O U N D   C O L O U R
+C
+93	IF (CONVERT) THEN
+	   CALL FLWRTF('colour foreground %N',COLOUR_NUMBER)
+	ELSE
+	   CLEN(2) = EXPAND('%W%N',%REF(COL(2)),COLOUR_NUMBER)
+	ENDIF
+	GOTO 95
+C
+C ......................................................................
+C		S E T   H I L I T E   C O L O U R
+C
+94	IF (CONVERT) THEN
+	   CALL FLWRTF('colour highlight %N',COLOUR_NUMBER)
+	ELSE
+	   CLEN(3) = EXPAND('%W%N',%REF(COL(3)),COLOUR_NUMBER)
+	ENDIF
+	GOTO 95
+C
+C update colour
+95	IF (CONVERT) THEN
+	   CALL FLWRTF('define colour rgb %N %G0.3 %G0.3 %G0.3',
+     &		COLOUR_NUMBER,REALAR(1),REALAR(2),REALAR(3))
+	   
+	ELSE
+	   CALL FLWSEL(UILLUN)
+	   CALL FLWSTR('value')
+	   CALL FLWRTF(
+     &		'   LSL_COLOR%N : exported "%N %G0.3 %G0.3 %G0.3";',
+     &	   COLOUR_NUMBER,COLOUR_NUMBER,REALAR(1),REALAR(2),REALAR(3))
+	   CALL FLWSTR('identifier')
+	   CALL FLWRTF('   color_%N;',COLOUR_NUMBER)
+	   CALL FLWSEL(UILMENULUN)
+	ENDIF
+	COLOUR_NUMBER = COLOUR_NUMBER+1
+	GOTO 10
+C
+C ......................................................................
+C		WINDOW commands
+C
+100	GOTO (110,120,130) SECMDN
+	GOTO 9998
+C
+C WINDOW POSITION
+110	SECMDN = 4
+	GOTO 2300
+C
+C WINDOW SIZE
+120	SECMDN = 3
+	GOTO 2300
+C
+C WINDOW NOFRAME (nb first menu always has a frame)
+130	SECMDN = 7
+	GOTO 2300
+C
+C ......................................................................
+C		NAME commands
+C
+200	GOTO (210,220) SECMDN
+	GOTO 9998
+C
+C NAME CONSOLE
+210	SECMDN = 5
+	GOTO 2300
+C
+C NAME PARENT
+220	SECMDN = 6
+	GOTO 2300
+C
+C ......................................................................
+C		ADD commands
+C
+300	GOTO (310,320,330) SECMDN
+	GOTO 9998
+C
+C ADD LINE
+310	IF (.NOT.(MENU.OR.PULLDOWN)) THEN
+	   IF (ARGMSG) GOTO 9997
+	   IF (CDL) THEN
+	      INTARG(2) = YSIZ-INTARG(2)
+	      INTARG(4) = YSIZ-INTARG(4)
+	   ENDIF
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	   XE = INTARG(3)+XOFF
+	   YE = INTARG(4)+YOFF
+	   IF (XS.NE.XE.AND.YS.NE.YE) THEN
+	      CALL LSL_PUTMSG(UILGEN__IGNLIN)
+	      GOTO 10
+	   ENDIF
+	ENDIF
+	IF (CONVERT) THEN
+	   CALL FLWRTF('add line %N %N %N %N',
+     &			INTARG(1),INTARG(2),INTARG(3),INTARG(4))
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmSeparator')
+C
+C do the callbacks before the arguments for label, otherwise a UIL bug is
+C prone to saying "procedure list found when argument list expected" in
+C the next widget
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('separator')
+	CALL END	! procedure list
+	CALL END	! end callbacks
+	CALL BEGIN('arguments')
+	IF (MENU.OR.PULLDOWN) THEN
+	   IF (HORIZONTAL.AND..NOT.PULLDOWN) THEN
+	      CALL ADD('arguments separator_vertical_args;')
+	      CALL ADD('XmNorientation = XmVERTICAL;')
+	   ELSE
+	      CALL ADD('arguments separator_horizontal_args;')
+	      CALL ADD('XmNorientation = XmHORIZONTAL;')
+	   ENDIF
+	ELSEIF (XS.EQ.XE) THEN
+	   CALL ADD('arguments separator_vertical_args;')
+	   CALL ADD('XmNorientation = XmVERTICAL;')
+	   CALL ADD('XmNx = %N; XmNy = %N; XmNheight = %N;',
+     &				XS,MIN(YS,YE),ABS(YE-YS)+1)
+	ELSE
+	   CALL ADD('arguments separator_horizontal_args;')
+	   CALL ADD('XmNorientation = XmHORIZONTAL;')
+	   CALL ADD('XmNx = %N; XmNy = %N; XmNwidth = %N;',
+     &				MIN(XS,XE),YS,ABS(XE-XS)+1)
+	ENDIF
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	CALL END	! end arguments
+	CALL END	! end separator
+	GOTO 10
+C
+C ADD TEXT
+320	IF (CMDACT-CMDICT.EQ.0) GOTO 9997	! no text
+	IF (.NOT.(MENU.OR.PULLDOWN)) THEN
+	   IF (CMDICT.LT.2) GOTO 9997
+	   IF (CDL) INTARG(2) = YSIZ-INTARG(2)-HEIGHT(FINT)
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	ENDIF
+	IF (CONVERT) THEN
+	   CALL FLWRTF('add text %N %N "%S"',
+     &			INTARG(1),INTARG(2),STARST)
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmLabel')
+C
+C do the callbacks before the arguments for label, otherwise a UIL bug is
+C prone to saying "procedure list found when argument list expected" in
+C the next widget
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('label')
+	CALL END	! procedure list
+	CALL END	! end callbacks
+	CALL BEGIN('arguments')
+	CALL ADD('arguments label_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	IF (.NOT.(MENU.OR.PULLDOWN)) CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	IF (FL.GT.0) CALL ADD('XmNfontList = font_%S;',FONT(:FL))
+	CALL ADD('XmNlabelString = "%S";',STARST)
+	CALL END	! end arguments
+	CALL END	! end label
+	GOTO 10
+C
+C ADD ICON
+330	IF (.NOT.(MENU.OR.PULLDOWN)) THEN
+	   IF (CMDICT.LT.2) GOTO 9997
+	   IF (CDL) INTARG(2) = YSIZ-INTARG(2)-ICON_HEIGHT
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	ENDIF
+	L1 = 0
+	IF (.NOT.RDCHS(CH)) THEN
+	   IF (CH.NE.'!') THEN
+	      CALL BSCH
+	      L1 = READSTR(STR1,,ON_SPACE)
+	   ENDIF
+	ENDIF
+	IF (CONVERT) THEN
+	   CALL EXPAND('add icon %N %N ',INTARG(1),INTARG(2))
+	   IF (L1.GT.0) THEN
+	      CALL FLWAPP('%S',STR1(:L1))
+	   ELSE
+	      CALL FLWAPP('%S',ICON(:ICONLEN))
+	   ENDIF
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmLabel')
+C
+C do the callbacks before the arguments for label, otherwise a UIL bug is
+C prone to saying "procedure list found when argument list expected" in
+C the next widget
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('label')
+	CALL END	! procedure list
+	CALL END	! end callbacks
+	CALL BEGIN('arguments')
+	CALL ADD('arguments label_icon_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	IF (.NOT.(MENU.OR.PULLDOWN)) CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	CALL ADD('XmNlabelType = XmPIXMAP;')
+	IF (L1.GT.0) THEN
+	   CALL ADD('XmNlabelPixmap = icon_%S;',STR1(:L1))
+	ELSE
+	   CALL ADD('XmNlabelPixmap = icon_%S;',ICON(:ICONLEN))
+	ENDIF
+	CALL END	! end arguments
+	CALL END	! end label
+	GOTO 10
+C
+C ......................................................................
+C		BUTTON commands
+C
+400	GOTO (410,420) SECMDN
+	GOTO 9998
+C
+C BUTTON TEXT
+410	IF (CMDACT-CMDICT.EQ.0) GOTO 9997	! no text
+	IF (.NOT.(MENU.OR.PULLDOWN.OR.LIST)) THEN
+	   IF (CMDICT.LT.2) GOTO 9997
+	   IF (CDL) INTARG(2) = YSIZ-INTARG(2)-HEIGHT(FINT)
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	ENDIF
+	IF (CONVERT) THEN
+	   CALL WRITE_DO
+	   CALL FLWRTF('button text %N %N "%S"',
+     &			INTARG(1),INTARG(2),STARST)
+	   GOTO 10
+	ENDIF
+	IF (LIST) THEN
+	   SAVIND = INDENT
+	   INDENT = 1
+	   CALL FLWSEL(UILLUN)
+	   CALL FLWSTR('value')
+	   CALL ADD('list_item%N : "%S";',LIST_BASE+LIST_ITEMS,STARST)
+	   CALL EXPAND('list_do%N   : "',LIST_BASE+LIST_ITEMS)
+	   CALL WRITE_LIST
+	   CALL FLWSEL(UILMENULUN)
+	   LIST_ITEMS = LIST_ITEMS+1
+	   INDENT = SAVIND
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmPushButton')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments push_button_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	IF (CLEN(3).GT.0) CALL ADD(
+     &		'XmNarmColor = color_%S;',COL(3)(:CLEN(3)))
+	IF (.NOT.(MENU.OR.PULLDOWN)) CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	IF (FL.GT.0) CALL ADD('XmNfontList = font_%S;',FONT(:FL))
+	CALL ADD('XmNlabelString = "%S";',STARST)
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('button')
+	IF (PULLDOWN.AND.OPTION.AND.CHOICE_ON) THEN
+	   CALL WRITE_CREATE(CHOICE_GROUP,.TRUE.,NAME(:NAMLEN),'option')
+	   CHOICE_ON = .FALSE.
+	ENDIF
+	CALL END	! procedure list
+	CALL WRITE_CALLBACK('XmNactivateCallback','do_proc')
+	CALL END	! end callbacks
+	CALL END	! end push button
+	GOTO 10
+C
+C BUTTON ICON
+420	IF (.NOT.(MENU.OR.PULLDOWN)) THEN
+	   IF (CMDICT.LT.2) GOTO 9997
+	   IF (CDL) INTARG(2) = YSIZ-INTARG(2)-ICON_HEIGHT
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	ENDIF
+	L1 = 0
+	IF (.NOT.RDCHS(CH)) THEN
+	   IF (CH.NE.'!') THEN
+	      CALL BSCH
+	      L1 = READSTR(STR1,,ON_SPACE)
+	   ENDIF
+	ENDIF
+	IF (CONVERT) THEN
+	   CALL WRITE_DO
+	   CALL EXPAND('button icon %N %N ',INTARG(1),INTARG(2))
+	   IF (L1.GT.0) THEN
+	      CALL FLWAPP('%S',STR1(:L1))
+	   ELSE
+	      CALL FLWAPP('%S',ICON(:ICONLEN))
+	   ENDIF
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmPushButton')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments push_button_icon_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	IF (CLEN(3).GT.0) CALL ADD(
+     &		'XmNarmColor = color_%S;',COL(3)(:CLEN(3)))
+	IF (.NOT.(MENU.OR.PULLDOWN)) CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	CALL ADD('XmNlabelType = XmPIXMAP;')
+	IF (L1.GT.0) THEN
+	   CALL ADD('XmNlabelPixmap = icon_%S;',STR1(:L1))
+	ELSE
+	   CALL ADD('XmNlabelPixmap = icon_%S;',ICON(:ICONLEN))
+	ENDIF
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('button')
+	IF (PULLDOWN.AND.OPTION.AND.CHOICE_ON) THEN
+	   CALL WRITE_CREATE(CHOICE_GROUP,.TRUE.,NAME(:NAMLEN),'option')
+	   CHOICE_ON = .FALSE.
+	ENDIF
+	CALL END	! procedure list
+	CALL WRITE_CALLBACK('XmNactivateCallback','do_proc')
+	CALL END	! end callbacks
+	CALL END	! end push button
+	GOTO 10
+C
+C ......................................................................
+C		CHOICE command
+C
+500	GOTO (510,520) SECMDN
+	GOTO 9998
+C
+C CHOICE TEXT
+510	IF (CMDACT-CMDICT.EQ.0) GOTO 9997	! no text
+	IF (.NOT.(MENU.OR.PULLDOWN)) THEN
+	   IF (CMDICT.LT.2) GOTO 9997
+	   IF (CDL) INTARG(2) = YSIZ-INTARG(2)-HEIGHT(FINT)
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	ENDIF
+	IF (CONVERT) THEN
+	   CALL WRITE_DO
+	   CALL FLWRTF('choice text %N %N "%S"',
+     &			INTARG(1),INTARG(2),STARST)
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmToggleButton')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments toggle_button_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	IF (CLEN(3).GT.0) CALL ADD(
+     &		'XmNselectColor = color_%S;',COL(3)(:CLEN(3)))
+	IF (.NOT.(MENU.OR.PULLDOWN)) CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	CALL ADD('XmNindicatorType = XmONE_OF_MANY;')
+	IF (FL.GT.0) CALL ADD('XmNfontList = font_%S;',FONT(:FL))
+	CALL ADD('XmNlabelString = "%S";',STARST)
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('toggle')
+	CALL WRITE_CREATE(CHOICE_GROUP,CHOICE_ON,NAME(:NAMLEN),'group')
+	CALL END	! procedure list
+	CALL WRITE_CALLBACK('XmNvalueChangedCallback','do_proc')
+	CALL END	! end callbacks
+	CALL END	! end toggle button
+	CHOICE_ON = .FALSE.
+	GOTO 10
+C
+C CHOICE ICON
+520	IF (.NOT.(MENU.OR.PULLDOWN)) THEN
+	   IF (CMDICT.LT.2) GOTO 9997
+	   IF (CDL) INTARG(2) = YSIZ-INTARG(2)-ICON_HEIGHT
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	ENDIF
+	L1 = 0
+	IF (.NOT.RDCHS(CH)) THEN
+	   IF (CH.NE.'!') THEN
+	      CALL BSCH
+	      L1 = READSTR(STR1,,ON_SPACE)
+	   ENDIF
+	ENDIF
+	IF (CONVERT) THEN
+	   CALL WRITE_DO
+	   CALL EXPAND('choice icon %N %N ',INTARG(1),INTARG(2))
+	   IF (L1.GT.0) THEN
+	      CALL FLWAPP('%S',STR1(:L1))
+	   ELSE
+	      CALL FLWAPP('%S',ICON(:ICONLEN))
+	   ENDIF
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmToggleButton')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments toggle_button_icon_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	IF (CLEN(3).GT.0) CALL ADD(
+     &		'XmNselectColor = color_%S;',COL(3)(:CLEN(3)))
+	IF (.NOT.(MENU.OR.PULLDOWN)) CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	CALL ADD('XmNindicatorType = XmONE_OF_MANY;')
+	CALL ADD('XmNlabelType = XmPIXMAP;')
+	IF (L1.GT.0) THEN
+	   CALL ADD('XmNlabelPixmap = icon_%S;',STR1(:L1))
+	ELSE
+	   CALL ADD('XmNlabelPixmap = icon_%S;',ICON(:ICONLEN))
+	ENDIF
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('toggle')
+	CALL WRITE_CREATE(CHOICE_GROUP,CHOICE_ON,NAME(:NAMLEN),'group')
+	CALL END	! procedure list
+	CALL WRITE_CALLBACK('XmNvalueChangedCallback','do_proc')
+	CHOICE_ON = .FALSE.
+	CALL END	! end callbacks
+	CALL END	! end toggle button
+	GOTO 10
+C
+C ......................................................................
+C		FONT number
+C
+600	FL = 0
+	IF (.NOT.RDCHS(CH)) THEN
+	   IF (CH.NE.'!') THEN
+	      CALL BSCH
+	      FL = READSTR(FONT,,ON_SPACE)
+	   ENDIF
+	ENDIF
+	IF (CDL) THEN
+	   CALL SETAUX(%REF(FONT),FL)
+	   IF (RDLONG(FINT)) GOTO 9997
+	   IF (FINT.LT.0.OR.FINT.GT.11) GOTO 9997
+	ENDIF
+	IF (CONVERT) CALL FLWSTR(TXTDSC)
+	GOTO 10
+C
+C ......................................................................
+C		GROUP
+C
+700	CHOICE_GROUP = CHOICE_GROUP+1
+	CHOICE_ON = .TRUE.
+	IF (CONVERT) CALL FLWSTR(TXTDSC)
+	GOTO 10
+C
+C ......................................................................
+C		ICON command
+C
+800	GOTO (810) SECMDN
+	GOTO 9998
+C
+C ICON FILE
+810	STATUS = PARFILN(
+     &		ICON_FILE,ICON_FILE_LEN,STARST,'LSL$CDL:.ICON',.TRUE.)
+	IF (.NOT.STATUS) THEN
+	   CALL LSL_PUTMSG(UILGEN__BADFILE)
+	   CALL LSL_ADDMSG(STATUS)
+	   GOTO 9998
+	ENDIF
+C
+C Attempt to open ICON file
+	STATUS=FLROPN(ICONLUN,ICON_FILE(:ICON_FILE_LEN),IERR)
+	IF (.NOT.STATUS) THEN
+	   CALL LSL_PUTMSG(UILGEN__OPNFIL,ICON_FILE(:ICON_FILE_LEN))
+	   CALL LSL_ADDMSG(STATUS)
+	   GOTO 9999
+	ENDIF
+C
+C Get file for UIL translation of it
+C First get the name part of the ICON file
+	ICONLEN = LEN_NAM
+	ICON = STR_NAM
+C
+C now put the destination UIL filename into the common block
+	CALL PUTFLN(UIL_FILE(:UIL_FILE_LEN))
+C
+C now replace the name part by the name of the ICON file, and the
+C extension by .ICON_UIL
+	LEN_NAM = ICONLEN
+	STR_NAM = ICON
+	LEN_EXT = 8
+	STR_EXT = 'ICON_UIL'
+	HAD_EXT = .TRUE.
+	CALL EXPFLN(UIL_ICON_FILE,UIL_ICON_FILE_LEN)
+C
+C open the ICON UIL output file
+	STATUS=FLWOPN(UILICONLUN,UIL_ICON_FILE(:UIL_ICON_FILE_LEN),IERR)
+	IF (.NOT.STATUS) THEN
+	   CALL LSL_PUTMSG(UILGEN__OPNFIL,
+     &				UIL_ICON_FILE(:UIL_ICON_FILE_LEN))
+	   CALL LSL_ADDMSG(STATUS)
+	   GOTO 9999
+	ENDIF
+C
+	CALL LSL_PUTMSG(UILGEN__CVTICON,
+     &	   ICON_FILE(:ICON_FILE_LEN),UIL_ICON_FILE(:UIL_ICON_FILE_LEN))
+	STATUS = PROCESS_ICON('icon_'//ICON(:ICONLEN),ICON_HEIGHT)
+	IF (.NOT.STATUS) GOTO 9999
+C
+	CALL FLWCLO(UILICONLUN)
+	CALL FLRCLO(ICONLUN)
+C
+C write a line to our main UIL file to include the ICON_UIL file
+	CALL FLWSEL(UILLUN)
+	IF (CONVERT) THEN
+	   CALL FLWRTF('uil "include file ""%S"";"',
+     &				UIL_ICON_FILE(:UIL_ICON_FILE_LEN))
+	ELSE
+	   CALL FLWRTF('include file "%S";',
+     &				UIL_ICON_FILE(:UIL_ICON_FILE_LEN))
+	   CALL FLWSEL(UILMENULUN)
+	ENDIF
+	IF (HAD_FILE) THEN
+	   CALL FLRSEL(CDLLUN)
+	ELSE
+	   CALL FLRSEL(DATLUN)
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C		ON command
+C
+900	GOTO (910) SECMDN
+	GOTO 9998
+C
+C ON BORDER
+910	IF (CONVERT) GOTO 10	! not supported in UIM
+	GOTO 10
+C
+C ......................................................................
+C		OFF command
+C
+1000	GOTO 900
+C
+C ......................................................................
+C		OFFSET
+C
+1100	XOFF = INTARG(1)
+	YOFF = INTARG(2)
+	IF (CDL) YOFF = -YOFF
+	IF (CONVERT) CALL FLWRTF('offset %N %N',XOFF,YOFF)
+	GOTO 10
+C
+C ......................................................................
+C		RETURN command
+C
+1200	GOTO (1210,1220) SECMDN
+	GOTO 9998
+C
+C CODE
+1210	IF (	INTARG(1).NE.0.AND.INTARG(1).NE.1.AND.
+     &		(INTARG(1).LT.991.OR.INTARG(1).GT.999) ) THEN
+	   INTARG(1) = 0
+	ENDIF
+	RETCOD = INTARG(1)
+	HAD_DO = .FALSE.
+	GOTO 10
+C
+C TEXT
+1220	DO_LEN = EXPAND('%W%S',%REF(DO_STR),STARST)
+	IF (DO_LEN.EQ.0) GOTO 9997
+	HAD_DO = .FALSE.
+	GOTO 10
+C
+C ......................................................................
+C		TOGGLE command
+C
+1300	GOTO (1310,1320) SECMDN
+	GOTO 9998
+C
+C TOGGLE TEXT
+1310	IF (CMDACT-CMDICT.EQ.0) GOTO 9997	! no text
+	IF (.NOT.(MENU.OR.PULLDOWN)) THEN
+	   IF (CMDICT.LT.2) GOTO 9997
+	   IF (CDL) INTARG(2) = YSIZ-INTARG(2)-HEIGHT(FINT)
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	ENDIF
+	IF (CONVERT) THEN
+	   CALL WRITE_DO
+	   CALL FLWRTF('toggle text %N %N "%S"',
+     &			INTARG(1),INTARG(2),STARST)
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmToggleButton')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments toggle_button_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	IF (CLEN(3).GT.0) CALL ADD(
+     &		'XmNselectColor = color_%S;',COL(3)(:CLEN(3)))
+	IF (.NOT.(MENU.OR.PULLDOWN)) CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	IF (FL.GT.0) CALL ADD('XmNfontList = font_%S;',FONT(:FL))
+	CALL ADD('XmNlabelString = "%S";',STARST)
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('toggle')
+	IF (MENU.AND.RADIO) THEN
+	   CALL WRITE_CREATE(
+     &		CHOICE_GROUP,CHOICE_ON,NAME(:NAMLEN),'radio')
+	   CHOICE_ON = .FALSE.
+	ELSE
+	   CALL WRITE_CREATE(0,.FALSE.,NAME(:NAMLEN),'group')
+	ENDIF
+	CALL END	! procedure list
+	CALL WRITE_CALLBACK('XmNvalueChangedCallback','do_proc')
+	CALL END	! end callbacks
+	CALL END	! end toggle button
+	GOTO 10
+C
+C TOGGLE ICON
+1320	IF (.NOT.(MENU.OR.PULLDOWN)) THEN
+	   IF (CMDICT.LT.2) GOTO 9997
+	   IF (CDL) INTARG(2) = YSIZ-INTARG(2)-ICON_HEIGHT
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	ENDIF
+	L1 = 0
+	IF (.NOT.RDCHS(CH)) THEN
+	   IF (CH.NE.'!') THEN
+	      CALL BSCH
+	      L1 = READSTR(STR1,,ON_SPACE)
+	   ENDIF
+	ENDIF
+	IF (CONVERT) THEN
+	   CALL WRITE_DO
+	   CALL EXPAND('toggle icon %N %N ',INTARG(1),INTARG(2))
+	   IF (L1.GT.0) THEN
+	      CALL FLWAPP('%S',STR1(:L1))
+	   ELSE
+	      CALL FLWAPP('%S',ICON(:ICONLEN))
+	   ENDIF
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmToggleButton')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments toggle_button_icon_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	IF (CLEN(3).GT.0) CALL ADD(
+     &		'XmNselectColor = color_%S;',COL(3)(:CLEN(3)))
+	IF (.NOT.(MENU.OR.PULLDOWN)) CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	CALL ADD('XmNlabelType = XmPIXMAP;')
+	IF (L1.GT.0) THEN
+	   CALL ADD('XmNlabelPixmap = icon_%S;',STR1(:L1))
+	ELSE
+	   CALL ADD('XmNlabelPixmap = icon_%S;',ICON(:ICONLEN))
+	ENDIF
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('toggle')
+	IF (MENU.AND.RADIO) THEN
+	   CALL WRITE_CREATE(
+     &		CHOICE_GROUP,CHOICE_ON,NAME(:NAMLEN),'radio')
+	   CHOICE_ON = .FALSE.
+	ELSE
+	   CALL WRITE_CREATE(0,.FALSE.,NAME(:NAMLEN),'group')
+	ENDIF
+	CALL END	! procedure list
+	CALL WRITE_CALLBACK('XmNvalueChangedCallback','do_proc')
+	CALL END	! end callbacks
+	CALL END	! end toggle button
+	GOTO 10
+C
+C ......................................................................
+C		MENU command
+C
+1400	IF (MENU.OR.PULLDOWN) THEN
+	   CALL LSL_PUTMSG(UILGEN__MENNOTMEN)
+	   GOTO 9998
+	ENDIF
+	RADIO = .FALSE.
+	BAR = .FALSE.
+1401	GOTO (1410,1420,1430) SECMDN
+	GOTO 9998
+C
+C MENU HORIZONTAL
+1410	HORIZONTAL = .TRUE.
+	GOTO 1435
+C
+C MENU VERTICAL
+1420	HORIZONTAL = .FALSE.
+	GOTO 1435
+C
+C MENU BAR
+1430	BAR = .TRUE.
+	GOTO 1435
+C
+1435	MENU = .TRUE.
+	IF (CDL) INTARG(2) = YSIZ-INTARG(2)
+	XS = INTARG(1)+XOFF
+	YS = INTARG(2)+YOFF
+	IF (CONVERT) THEN
+	   IF (RADIO) THEN
+	      CALL EXPAND('radio_box ')
+	   ELSE
+	      CALL EXPAND('menu ')
+	   ENDIF
+	   IF (BAR) THEN
+	      CALL APPEND('bar ')
+	   ELSEIF (HORIZONTAL) THEN
+	      CALL APPEND('horizontal ')
+	   ELSE
+	      CALL APPEND('vertical ')
+	   ENDIF
+	   CALL FLWAPP('%N %N',INTARG(1),INTARG(2))
+	   GOTO 10
+	ENDIF
+	IF (RADIO) THEN
+	   CALL BEGIN('XmRadioBox')
+	   CALL BEGIN('arguments')
+	   CALL ADD('arguments radio_box_args;')
+	ELSEIF (BAR) THEN
+	   CALL BEGIN('XmMenuBar')
+	   CALL BEGIN('arguments')
+	   CALL ADD('arguments menu_bar_args;')
+	ELSE
+	   CALL BEGIN('XmRowColumn')
+	   CALL BEGIN('arguments')
+	   CALL ADD('arguments menu_args;')
+	ENDIF
+	CALL WRITE_COLOR(.TRUE.,.FALSE.)
+	CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	IF (HORIZONTAL.AND..NOT.BAR) THEN
+	   CALL ADD('XmNorientation = XmHORIZONTAL;')
+	ENDIF
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	IF (RADIO) THEN
+	   CALL WRITE_NAME('radio')
+	ELSEIF (BAR) THEN
+	   CALL WRITE_NAME('bar')
+	ELSE
+	   CALL WRITE_NAME('menu')
+	ENDIF
+	CALL END	! procedure list
+	CALL END	! end callbacks
+	CALL BEGIN('controls')
+	GOTO 10
+C
+C ......................................................................
+C		RADIO_BOX command
+C
+1500	IF (MENU.OR.PULLDOWN) THEN
+	   CALL LSL_PUTMSG(UILGEN__MENNOTMEN)
+	   GOTO 9998
+	ENDIF
+	RADIO = .TRUE.
+	BAR = .FALSE.
+	CHOICE_GROUP = CHOICE_GROUP+1
+	CHOICE_ON = .TRUE.
+	GOTO 1401
+C
+C ......................................................................
+C		END command
+C
+1600	IF (LIST) THEN
+	   LIST = .FALSE.
+	   IF (CONVERT) THEN
+	      CALL FLWRTF(TXTDSC)
+	      GOTO 10
+	   ENDIF
+	   CALL BEGIN('XmScrolledList')
+	   CALL BEGIN('arguments')
+	   CALL ADD('arguments list_args;')
+	   CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	   CALL ADD('XmNx = %N; XmNy = %N;',LIST_X,LIST_Y)
+	   IF (LIST_WIDTH.NE.0) THEN
+	      CALL ADD('XmNwidth = %N; XmNlistSizePolicy = XmCONSTANT;',
+     &				LIST_WIDTH)
+	   ELSE
+	      CALL ADD('XmNlistSizePolicy = XmRESIZE_IF_POSSIBLE;')
+	   ENDIF
+	   IF (FL.GT.0) CALL ADD('XmNfontList = font_%S;',FONT(:FL))
+	   CALL ADD('XmNvisibleItemCount = %N;',LIST_VIS)
+	   IF (LIST_SINGLE) THEN
+	      CALL ADD('XmNselectionPolicy = XmBROWSE_SELECT;')
+	   ELSE
+	      CALL ADD('XmNselectionPolicy = XmMULTIPLE_SELECT;')
+	   EnDIF
+	   IF (LIST_ITEMS.GT.0) THEN
+	      CALL ADD('XmNitems = string_table(')
+	      INDENT = INDENT+1
+	      DO 1601 I=LIST_BASE,LIST_BASE+LIST_ITEMS-2
+	         CALL ADD('list_item%N,',I)
+1601	      CONTINUE
+	      CALL ADD('list_item%N',LIST_BASE+LIST_ITEMS-1)
+	      INDENT = INDENT-1
+	      CALL ADD(');')
+	   ENDIF
+	   CALL END	! end arguments
+	   CALL BEGIN('callbacks')
+	   CALL BEGIN('MrmNcreateCallback = procedures')
+	   CALL WRITE_NAME('list')
+	   CALL END	! procedure list
+	   IF (LIST_SINGLE) THEN
+	      CALL ADD(
+     & 'XmNbrowseSelectionCallback = procedure list_proc(string_table(')
+	   ELSE
+	      CALL ADD(
+     & 'XmNmultipleSelectionCallback = '//
+     &		'procedure list_proc(string_table(')
+	   ENDIF
+	   INDENT = INDENT+1
+	   DO 1602 I=LIST_BASE,LIST_BASE+LIST_ITEMS-2
+	      CALL ADD('list_do%N,',I)
+1602	   CONTINUE
+	   IF (LIST_ITEMS.GT.0) CALL ADD('list_do%N',LIST_BASE+LIST_ITEMS-1)
+	   INDENT = INDENT-1
+	   CALL ADD('));')
+	   LIST_BASE = LIST_BASE+LIST_ITEMS
+	   CALL END	! end callbacks
+	   CALL END	! end list
+	ELSEIF (PULLDOWN) THEN
+	   PULLDOWN_COUNT = PULLDOWN_COUNT-1
+	   IF (PULLDOWN_COUNT.EQ.0) PULLDOWN = .FALSE.
+	   IF (CONVERT) THEN
+	      CALL FLWRTF(TXTDSC)
+	      GOTO 10
+	   ENDIF
+	   CALL END	! end pulldown_menu controls
+	   CALL END	! end pulldown_menu
+	   CALL END	! end pulldown_entry controls
+	   CALL END	! end pulldown_entry
+	ELSEIF (MENU) THEN
+	   MENU = .FALSE.
+	   IF (CONVERT) THEN
+	      CALL FLWRTF(TXTDSC)
+	      GOTO 10
+	   ENDIF
+	   CALL END	! end controls
+	   CALL END	! end menu
+	ELSE
+	   IF (CONVERT) THEN
+	      CALL FLWRTF(TXTDSC)
+	   ELSE
+	      IF (INDENT.NE.3) THEN
+	         CALL LSL_PUTMSG(UILGEN__MISSEND)
+	         GOTO 9998
+	      ENDIF
+	      CALL END		! end of controls
+	      CALL END		! end of dialog box
+C
+C write a line to our main UIL file define this menu
+	      CONTROL = 'b'
+	      IF ((NEXT_MENU.GT.1.OR..NOT.ROOT)
+     &			.AND..NOT.WINDOW_FRAME) CONTROL = 'n'
+	      IF (INPUT) CONTROL(2:2) = 'i'
+	      CALL FLWSEL(UILLUN)
+	      CALL FLWSTR('value')
+	      IF (ROOT) CALL FLWRTF('   LSL_MENU%N : exported "%S";',
+     &				NEXT_MENU,NAME(:NAMLEN))
+	      CALL FLWRTF('   LSL_%S : exported "%S %S";',
+     &				NAME(:NAMLEN),CONTROL,PARENT(:PARLEN))
+	      CALL FLWSEL(UILMENULUN)
+C
+	   ENDIF
+	   INDENT = 0
+	   GOTO 1
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C		COMMAND_WINDOW command
+C
+1700	IF (MENU.OR.PULLDOWN) THEN
+	   CALL LSL_PUTMSG(UILGEN__COMNOTMEN)
+	   GOTO 9998
+	ENDIF
+	INPUT = .TRUE.			! requires keyboard input
+	IF (CDL) INTARG(2) = YSIZ-INTARG(2)
+	XS = INTARG(1)+XOFF
+	YS = INTARG(2)+YOFF
+	IF (CONVERT) THEN
+	   CALL WRITE_DO
+	   CALL FLWRTF('command_window %N %N %N %N "%S"',
+     &		INTARG(1),INTARG(2),INTARG(3),INTARG(4),STARST)
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmCommand')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments command_window_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	CALL ADD('XmNwidth = %N;',INTARG(3))
+	CALL ADD('XmNhistoryVisibleItemCount = %N; XmNpromptString = "%S";',
+     &				INTARG(4),STARST)
+	IF (FL.GT.0) CALL ADD('XmNtextFontList = font_%S;',FONT(:FL))
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('command')
+	CALL END	! procedure list
+	CALL WRITE_CALLBACK('XmNcommandEnteredCallback','command_proc')
+	CALL END	! end callbacks
+	CALL END	! end command_window
+	GOTO 10
+C
+C ......................................................................
+C		DO command
+C
+1800	IF (RDCHS(CH)) THEN
+	   CALL LSL_PUTMSG(LSL__UNEXPEOL)
+	   GOTO 9998
+	ENDIF
+	IF (CH.NE.'''' .AND. CH.NE.'"') THEN
+	   CALL LSL_PUTMSG(LSL__UNEXPCH,CH)
+	   GOTO 9998
+	ENDIF
+	DO_LEN = READSTR(DO_STR, CH, ON_CHAR2, .FALSE.)
+	IF (DO_LEN.LE.0) THEN
+	   CALL LSL_PUTMSG(LSL__UNEXPCH,CH)
+	   GOTO 9998
+	ENDIF
+	HAD_DO = .TRUE.
+	IF (CONVERT) CALL FLWRTF(TXTDSC)
+	GOTO 10
+C
+C ......................................................................
+C		SCALE command
+C
+1900	IF (MENU.OR.PULLDOWN) THEN
+	   CALL LSL_PUTMSG(UILGEN__SCANOTMEN)
+	   GOTO 9998
+	ENDIF
+	GOTO (1910,1920) SECMDN
+	GOTO 9998
+C
+C SCALE HORIZONTAL
+1910	HORIZONTAL = .TRUE.
+	GOTO 1925
+C
+C SCALE VERTICAL
+1920	HORIZONTAL = .FALSE.
+1925	IF (CDL) INTARG(2) = YSIZ-INTARG(2)
+	XS = INTARG(1)+XOFF
+	YS = INTARG(2)+YOFF
+	IF (CONVERT) THEN
+	   CALL WRITE_DO
+	   CALL EXPAND('scale ')
+	   IF (HORIZONTAL) THEN
+	      CALL APPEND('horizontal ')
+	   ELSE
+	      CALL APPEND('vertical ')
+	   ENDIF
+	   CALL FLWAPP('%N %N %N %N %G0.7 %G0.7 "%S"',
+     &			INTARG(1),INTARG(2),INTARG(3),INTARG(4),
+     &			REALAR(1),REALAR(2),STARST)
+	   GOTO 10
+	ENDIF
+	INTARG(5) = 10**INTARG(4)	! scale factor
+	INTARG(6) = NINT(REALAR(2)*INTARG(5))
+	INTARG(5) = NINT(REALAR(1)*INTARG(5))
+	CALL BEGIN('XmScale')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments scale_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	IF (FL.GT.0) CALL ADD('XmNfontList = font_%S;',FONT(:FL))
+	IF (HORIZONTAL) THEN
+	   CALL ADD('XmNorientation = XmHORIZONTAL;')
+	   CALL ADD('XmNscaleWidth = %N;',INTARG(3))
+	   CALL ADD('XmNprocessingDirection = XmMAX_ON_RIGHT;')
+	ELSE
+	   CALL ADD('XmNorientation = XmVERTICAL;')
+	   CALL ADD('XmNscaleHeight = %N;',INTARG(3))
+	   CALL ADD('XmNprocessingDirection = XmMAX_ON_TOP;')
+	ENDIF
+	CALL ADD('XmNtitleString = "%S";',STARST)
+	CALL ADD('XmNminimum = %N; XmNmaximum = %N; XmNdecimalPoints = %N;',
+     &			INTARG(5),INTARG(6),INTARG(4))
+	IF (INTARG(5)*INTARG(6).GT.0) CALL ADD('XmNvalue = %N;',
+     &			MIN(INTARG(5),INTARG(6)))
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('scale')
+	CALL END	! procedure list
+	CALL WRITE_CALLBACK('XmNvalueChangedCallback','scale_proc')
+	CALL END	! end callbacks
+	CALL END	! end scale
+	GOTO 10
+C
+C ......................................................................
+C		DEFINE command
+C
+2000	GOTO (2010,2020) SECMDN
+	GOTO 9998
+C
+C DEFINE FONT
+2010	IF (CONVERT) THEN
+	   CALL FLWSTR(TXTDSC)
+	   GOTO 10
+	ENDIF
+	L1 = READSTR(STR1,,ON_SPACE)
+	IF (L1.LE.0) GOTO 9997
+	IF (RDCHS(CH)) GOTO 9997
+	IF (CH.NE.'"') GOTO 9997
+	L2 = READSTR(STR2,'"',ON_CHAR2)
+	IF (L2.LE.0) GOTO 9997
+	IF (CONVERT) THEN
+	   CALL FLWSTR(TXTDSC)
+	   GOTO 10
+	ENDIF
+	CALL FLWSEL(UILLUN)
+	CALL FLWSTR('value')
+	CALL FLWRTF('   LSL_FONT%N : exported "%S %S";',
+     &		FONT_NUMBER,STR1(:L1),STR2(:L2))
+	CALL FLWSTR('identifier')
+	CALL FLWRTF('   font_%S;',STR1(:L1))
+	FONT_NUMBER = FONT_NUMBER+1
+	CALL FLWSEL(UILMENULUN)
+	GOTO 10
+C
+C DEFINE COLOUR
+2020	SECMDN = RDCOMM(DEFCOL_CMD_TABLE)
+	IF (SECMDN.LE.0) GOTO 9997
+	IF (CONVERT) THEN
+	   CALL FLWSTR(TXTDSC)
+	   GOTO 10
+	ENDIF
+	GOTO (2022,2024), SECMDN
+	GOTO 9998
+C
+C ... name
+2022	L1 = READSTR(STR1,,ON_SPACE)
+	IF (L1.LE.0) GOTO 9997
+	IF (RDCHS(CH)) GOTO 9997
+	IF (CH.NE.'"') GOTO 9997
+	L2 = READSTR(STR2,'"',ON_CHAR2)
+	IF (L2.LE.0) GOTO 9997
+	CALL FLWSEL(UILLUN)
+	CALL FLWSTR('value')
+	CALL FLWRTF('   LSL_COLOR%N : exported "%S %S";',
+     &		COLOUR_NUMBER,STR1(:L1),STR2(:L2))
+	CALL FLWSTR('identifier')
+	CALL FLWRTF('   color_%S;',STR1(:L1))
+	COLOUR_NUMBER = COLOUR_NUMBER+1
+	CALL FLWSEL(UILMENULUN)
+	GOTO 10
+C
+C ... rgb
+2024	L1 = READSTR(STR1,,ON_SPACE)
+	IF (L1.LE.0) GOTO 9997
+	IF (RDREAL(REALAR(1))) GOTO 9997
+	IF (RDREAL(REALAR(2))) GOTO 9997
+	IF (RDREAL(REALAR(3))) GOTO 9997
+	CALL FLWSEL(UILLUN)
+	CALL FLWSTR('value')
+	CALL FLWRTF('   LSL_COLOR%N : exported "%S %G0.3 %G0.3 %G0.3";',
+     &		COLOUR_NUMBER,STR1(:L1),REALAR(1),REALAR(2),REALAR(3))
+	CALL FLWSTR('identifier')
+	CALL FLWRTF('   color_%S;',STR1(:L1))
+	COLOUR_NUMBER = COLOUR_NUMBER+1
+	CALL FLWSEL(UILMENULUN)
+	GOTO 10
+C
+C ......................................................................
+C		COLOUR/COLOR command
+C
+2100	L1 = 0
+	IF (.NOT.RDCHS(CH)) THEN
+	   IF (CH.NE.'!') THEN
+	      CALL BSCH
+	      L1 = READSTR(STR1,,ON_SPACE)
+	   ENDIF
+	ENDIF
+	IF (L1.LE.0) THEN
+	   CLEN(SECMDN) = 0
+	ELSE
+	   CLEN(SECMDN) = L1
+	   COL(SECMDN) = STR1
+	ENDIF
+	IF (CONVERT) CALL FLWSTR(TXTDSC)
+	GOTO 10
+C
+C ......................................................................
+C		UIL command
+C
+2200	IF (CONVERT) THEN
+	   CALL FLWSTR(TXTDSC)
+	ELSE
+	   CALL FLWSEL(UILLUN)
+	   CALL FLWSTR(STARST)
+	   CALL FLWSEL(UILMENULUN)
+	ENDIF
+	GOTO 10
+C
+C ......................................................................
+C		BOX command
+C
+2300	IF (DONEHEAD) THEN
+	   CALL LSL_PUTMSG(UILGEN__BOXINBOX)
+	   GOTO 9998
+	ENDIF
+	GOTO (2301,2302,2303,2304,2305,2306,2307,2308,2309,2310,
+     &	      2311), SECMDN
+	GOTO 9998
+C
+C BOX DIALOG
+2301	BOX_TYPE = TYPE_DIALOG
+	GOTO 10
+C
+C BOX FILE_SELECT
+2302	L1 = EXPAND('%W%S',%REF(STR1),STARST)
+	IF (L1.LE.0) GOTO 9997
+	BOX_TYPE = TYPE_FILE_SELECT
+	IF (CONVERT) CALL FLWSTR(TXTDSC)
+	GOTO 10
+C
+C BOX SIZE
+2303	XSIZ = INTARG(1)
+	YSIZ = INTARG(2)
+	HADSIZ = .TRUE.
+	GOTO 10
+C
+C BOX POSITION
+2304	XPOS = INTARG(1)
+	YPOS = INTARG(2)
+	HADPOS = .TRUE.
+	GOTO 10
+C
+C BOX NAME
+2305	NAMLEN = EXPAND('%WS%S',NAME,STARST)
+	IF (NAMLEN.EQ.0) GOTO 9997
+	HADNAM = .TRUE.
+	GOTO 10
+C
+C BOX PARENT
+2306	PARLEN = EXPAND('%WS%S',PARENT,STARST)
+	IF (PARLEN.EQ.0) GOTO 9997
+	IF (PARENT(:PARLEN).EQ.'cdl$none') THEN
+	   PARLEN = 4
+	   PARENT(:PARLEN) = 'none'
+	ENDIF
+	HADPAR = .TRUE.
+	GOTO 10
+C
+C BOX NOBORDER
+2307	WINDOW_FRAME = .FALSE.
+	GOTO 10
+C
+C BOX MODAL
+2308	BOX_MODAL = .TRUE.
+	IF (CONVERT) CALL FLWSTR(TXTDSC)
+	GOTO 10
+C
+C BOX MODELESS
+2309	BOX_MODAL = .FALSE.
+	IF (CONVERT) CALL FLWSTR(TXTDSC)
+	GOTO 10
+C
+C BOX PROMPT
+2310	L1 = EXPAND('%W%S',%REF(STR1),STARST)
+	IF (L1.LE.0) GOTO 9997
+	BOX_TYPE = TYPE_PROMPT
+	IF (CONVERT) CALL FLWSTR(TXTDSC)
+	GOTO 10
+C
+C BOX COLOR_MIX
+2311	BOX_TYPE = TYPE_COLOR_MIX
+	IF (CONVERT) CALL FLWSTR(TXTDSC)
+	GOTO 10
+C
+C ......................................................................
+C		PULLDOWN_MENU command
+C
+2400	IF (.NOT.(MENU.AND.BAR).AND..NOT.PULLDOWN) THEN
+	   CALL LSL_PUTMSG(UILGEN__PULLMEN)
+	   GOTO 9998
+	ENDIF
+	PULLDOWN = .TRUE.
+	OPTION = .FALSE.
+2405	PULLDOWN_COUNT = PULLDOWN_COUNT+1
+	IF (CONVERT) THEN
+	   IF (OPTION) THEN
+	      CALL EXPAND('option_menu ')
+	      IF (.NOT.MENU) CALL APPEND('%N %N ',INTARG(1),INTARG(2))
+	      CALL FLWAPP('%S',STARST)
+	   ELSE
+	      CALL FLWRTF('pulldown_menu "%S"',STARST)
+	   ENDIF
+	   GOTO 10
+	ENDIF
+	IF (OPTION) THEN
+	   CALL BEGIN('XmOptionMenu')
+	   CALL BEGIN('arguments')
+	   CALL ADD('arguments option_menu_args;')
+	ELSE
+	   CALL BEGIN('XmCascadeButton')
+	   CALL BEGIN('arguments')
+	   CALL ADD('arguments pulldown_entry_args;')
+	   IF (FL.GT.0) CALL ADD('XmNfontList = font_%S;',FONT(:FL))
+	ENDIF
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	IF (OPTION.AND..NOT.MENU) CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	CALL ADD('XmNlabelString = "%S";',STARST)
+	CALL END	! end arguments
+	IF (OPTION) THEN
+	   CHOICE_GROUP = CHOICE_GROUP+1
+	   CALL BEGIN('callbacks')
+	   CALL BEGIN('MrmNcreateCallback = procedures')
+	   CALL WRITE_NAME('option_menu')
+	   CALL WRITE_CREATE(
+     &		CHOICE_GROUP,.FALSE.,NAME(:NAMLEN),'option')
+	   CALL END	! procedure list
+	   CALL END	! end callbacks
+	ELSE
+	   CALL BEGIN('callbacks')
+	   CALL BEGIN('MrmNcreateCallback = procedures')
+	   CALL WRITE_NAME('cascade')
+	   CALL END	! procedure list
+	   CALL END	! end callbacks
+	ENDIF
+	CALL BEGIN('controls')
+	CALL BEGIN('XmPulldownMenu')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments pulldown_menu_args;')
+
+	CALL WRITE_COLOR(.TRUE.,.FALSE.)
+	CALL END	! end arguments
+	CALL BEGIN('controls')
+	GOTO 10
+C
+C ......................................................................
+C		OPTION_MENU command
+C
+2500	IF (CMDACT-CMDICT.EQ.0) GOTO 9997	! no text
+	IF ((MENU.AND.BAR).OR.PULLDOWN) THEN
+	   CALL LSL_PUTMSG(UILGEN__OPTNOTMEN)
+	   GOTO 9998
+	ENDIF
+	IF (.NOT.MENU) THEN
+	   IF (CMDICT.LT.2) GOTO 9997
+	   IF (CDL) INTARG(2) = YSIZ-INTARG(2)-HEIGHT(FINT)
+	   XS = INTARG(1)+XOFF
+	   YS = INTARG(2)+YOFF
+	ENDIF
+	PULLDOWN = .TRUE.
+	OPTION = .TRUE.
+	CHOICE_ON = .TRUE.
+	GOTO 2405
+C
+C ......................................................................
+C		LIST command
+C
+2600	IF (MENU.OR.PULLDOWN) THEN
+	   CALL LSL_PUTMSG(UILGEN__LISTNOTMEN)
+	   GOTO 9998
+	ENDIF
+C
+C look for optional 4th argument
+	IF (RDLONG(INTARG(4))) INTARG(4) = 0
+C
+	IF (CDL) INTARG(2) = YSIZ-INTARG(2)
+	IF (CONVERT) THEN
+	   IF (SECMDN.EQ.1) THEN
+	      CALL EXPAND('list single')
+	   ELSE
+	      CALL EXPAND('list multiple')
+	   ENDIF
+	   CALL APPEND(' %N %N %N',INTARG(1),INTARG(2),INTARG(3))
+	   IF (INTARG(4).NE.0) CALL APPEND(' %N',INTARG(4))
+	   CALL FLWSTR
+	   GOTO 10
+	ENDIF
+	LIST_X = INTARG(1)+XOFF
+	LIST_Y = INTARG(2)+YOFF
+	IF (INTARG(4).NE.0) THEN
+	   LIST_WIDTH = INTARG(3)
+	   LIST_VIS = INTARG(4)
+	ELSE
+	   LIST_WIDTH = 0
+	   LIST_VIS = INTARG(3)
+	ENDIF
+	LIST_ITEMS = 0
+	LIST_SINGLE = (SECMDN.EQ.1)
+	LIST = .TRUE.
+	GOTO 10
+C
+C ......................................................................
+C		WIDGET NAME command
+C
+2700	WLEN = EXPAND('%WS%S',WNAME,STARST)
+	IF (CONVERT) CALL FLWSTR(TXTDSC)
+	GOTO 10
+C
+C ......................................................................
+C		TEXT command
+C
+2800	IF (CMDICT.LT.3) GOTO 9997
+	IF (MENU.OR.PULLDOWN) THEN
+	   CALL LSL_PUTMSG(UILGEN__TEXTNOTMEN)
+	   GOTO 9998
+	ENDIF
+	INPUT = .TRUE.			! requires keyboard input
+	IF (CDL) INTARG(2) = YSIZ-INTARG(2)
+	XS = INTARG(1)+XOFF
+	YS = INTARG(2)+YOFF
+	IF (CONVERT) THEN
+	   CALL WRITE_DO
+	   CALL EXPAND('text %N %N %N',INTARG(1),INTARG(2),INTARG(3))
+	   IF (CMDACT.NE.CMDICT) CALL APPEND(' "%S"',STARST)
+	   GOTO 10
+	ENDIF
+	CALL BEGIN('XmText')
+	CALL BEGIN('arguments')
+	CALL ADD('arguments text_args;')
+	CALL WRITE_COLOR(.TRUE.,.TRUE.)
+	CALL ADD('XmNx = %N; XmNy = %N;',XS,YS)
+	CALL ADD('XmNwidth = %N;',INTARG(3))
+	IF (CMDACT.NE.CMDICT) CALL ADD('XmNvalue = "%S";',STARST)
+	IF (FL.GT.0) CALL ADD('XmNfontList = font_%S;',FONT(:FL))
+	CALL END	! end arguments
+	CALL BEGIN('callbacks')
+	CALL BEGIN('MrmNcreateCallback = procedures')
+	CALL WRITE_NAME('text')
+	CALL END	! procedure list
+	CALL WRITE_CALLBACK('XmNactivateCallback','text_proc')
+	CALL END	! end callbacks
+	CALL END	! end text
+	GOTO 10
+C
+C ......................................................................
+C	end of file - terminate object
+C
+9900	IF (CDL.OR..NOT.HAD_FILE) THEN
+	   IF (.NOT.CONVERT) THEN
+9910	      IF (INDENT.GT.1) THEN
+	         CALL END
+	         GOTO 9910
+	      ENDIF
+	      INDENT = 0
+	   ENDIF
+	   IF (DONEHEAD) THEN
+	      IF (CONVERT) THEN
+	         CALL FLWSTR('end box')
+	      ELSE
+C
+C write a line to our main UIL file define this menu
+	         CONTROL = 'b'
+	         IF ((NEXT_MENU.GT.1.OR..NOT.ROOT)
+     &			.AND..NOT.WINDOW_FRAME) CONTROL = 'n'
+	         IF (INPUT) CONTROL(2:2) = 'i'
+	         CALL FLWSEL(UILLUN)
+	         CALL FLWSTR('value')
+	         IF (ROOT) CALL FLWRTF('   LSL_MENU%N : exported "%S";',
+     &				NEXT_MENU,NAME(:NAMLEN))
+	         CALL FLWRTF('   LSL_%S : exported "%S %S";',
+     &				NAME(:NAMLEN),CONTROL,PARENT(:PARLEN))
+	         CALL FLWSEL(UILMENULUN)
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C check for matched conditional statements
+	IF (IFPTR.NE.IFSAVE) THEN
+	   CALL LSL_PUTMSG(UILGEN__BADCOND)
+	   GOTO 9998
+	ENDIF
+C
+	IF (HAD_FILE) THEN
+	   HAD_FILE = .FALSE.
+	   CALL FLRCLO(CDLLUN)
+	   CALL FLRSEL(DATLUN)
+	   LINE = SAVLIN
+	   IFSAVE = 0
+	   IF (CDL) GOTO 1	! CDL box ends at end of file
+	   GOTO 10
+	ENDIF
+C
+C write lines to our main UIL file to define the
+C number of menus/colours/fonts
+	IF (.NOT.CONVERT) THEN
+	   CALL FLWSEL(UILLUN)
+	   CALL FLWSTR('value')
+	   CALL FLWRTF('   LSL_MENUS : exported %N;',NEXT_MENU)
+	   CALL FLWRTF('   LSL_COLORS : exported %N;',COLOUR_NUMBER-1)
+	   CALL FLWRTF('   LSL_FONTS : exported %N;',FONT_NUMBER-1)
+	   CALL FLWSEL(UILMENULUN)
+	ENDIF
+	GOTO 10000
+C
+C ......................................................................
+C		U N E X P E C T E D   A R G U M E N T S
+C            
+9997	CALL LSL_PUTMSG(UILGEN__BADARGS)
+C
+C ......................................................................
+C		U N E X P E C T E D   I N P U T
+C
+9998	IF (HAD_FILE) THEN
+	   CALL LSL_ADDMSG(UILGEN__BADINPUT,LINE,UIM_FILE(:UIM_FILE_LEN))
+	ELSE
+	   CALL LSL_ADDMSG(UILGEN__BADINPUT,LINE,IN_FILE(:IN_FILE_LEN))
+	ENDIF
+	GOTO 9999
+C
+C ......................................................................
+C		U N E X P E C T E D   F A I L U R E
+C
+9999	PROCESS_FILE = UILGEN__ABORT
+	GOTO 10000
+C
+C Finished.....
+10000	RETURN
+	END

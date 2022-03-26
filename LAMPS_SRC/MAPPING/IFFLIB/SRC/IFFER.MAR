@@ -1,0 +1,110 @@
+
+	.TITLE	$IFFER
+	.IDENT	'30NO87'
+;
+; Copyright  Laser-Scan Laboratories Limited, Cambridge, England.
+;
+; Author: Paul Hardy after P. Cross.
+;
+
+; Default error processor for IFFLIB
+
+; IF$ERR called from MACRO with no args
+; uses two implicit primary args from COMMON /IFFHAN/
+;	IERCD = 4 letter code (OPEN, SLOT, READ, WRIT, etc)
+;	IERNM = VMS longword error number (1 if internal error)
+
+; called from FORTRAN with two optional args IFFERR([ERRCD],[ERRNM])
+; if both absent then as for MACRO entry
+; default for ERRCD is current contents of IERCD
+; default for ERRNM is no VMS error number (SS_NORMAL)
+
+; also entry IFFERM(state,[actrtn]) to turn on/off error messages
+; default state is ON (.TRUE.)
+
+; local storage
+
+	$PUTMSGDEF			; define $PUTMSG arguments
+
+	DATA_PSECT	IFF
+
+IERDSC:	.LONG	4			; string descriptor for IERCD
+       .ADDRESS	IERCD
+
+PUTVEC:	.BLKL	1			; message vector for PUTMSG
+PUTMSG:	.BLKL	1			; the IFF message number
+	.LONG	2			; FAO argument count
+	.ADDRESS IERDSC			; IERCD argument
+PUTLUN:	.BLKL	1			; LUN argument
+PUTNUM:	.BLKL	1			; system error code
+
+PUTARG:	$PUTMSG	MSGVEC=PUTVEC		; argument list for $PUTMSG
+
+	CODE_PSECT	IFF
+
+; table of 'special' IERCD values and equivalent messages
+MSGS:	.LONG	^A/OPEN/,IFF__OPEN
+	.LONG	^A/MEND/,IFF__MEND
+	.LONG	^A/NIFF/,IFF__NIFF
+	.LONG	^A/CREA/,IFF__CREA
+	.LONG	^A/LOST/,IFF__LOST
+	.LONG	       0,IFF__IFFERR	; default message
+
+; FORTRAN entry
+
+	.ENTRY	IFFERR,^M<R11>
+	JSB	IF$ERI			; error init for arg handling
+	JSB	IF$GNA			; first arg is code letters
+	BCS	10$			; missing
+	PUSHAQ	IERDSC			; pointer to IERCD
+	PUSHAQ	(R0)			; pointer to source string
+	CALLS	#2,G^LIB$SCOPY_DXDX	; copy source to destination
+	MOVL	#1,IERNM		; default SS_NORMAL
+	JSB	IF$GNA			; next arg is VMS code number
+	BCS	10$			; missing
+	MOVL	(R0),IERNM		; use argument
+10$:	BSB	IF$ERM			; common up with macro entry
+	RET
+
+; MACRO entries
+
+IF$ERR::
+IF$ERM:	BBC	#FLG_V_ERM,IFFLG,ERRXT	; skip this if messages OFF
+	CLRL	PUTLUN			; selection
+	MOVL	IFFPT,R0		; pointer to IFCB
+	BEQL	10$			; none selected
+	MOVZBL	I.LUN(R0),PUTLUN	; unit no
+10$:	MOVAL	MSGS,R0			; message table
+12$:	MOVL	(R0)+,R1		; letter code
+	BEQL	14$			; end of list
+	CMPL	R1,IERCD		; is this the code?
+	BEQL	14$			; yes
+	BLBC	(R0)+,12$		; N.B. always branches!
+14$:	MOVL	(R0),PUTMSG		; insert message code in vector
+	MOVL	#4,PUTVEC		; assume no system error
+	BLBS	IERNM,20$
+	MOVL	IERNM,PUTNUM		; system message number
+	INCL	PUTVEC			; vector length now 5
+20$:	$PUTMSG_G	PUTARG		; output error message
+
+; call our optional tidy up routine
+ERRXT:	JSB	IF$TDY
+	SEC
+	RSB
+
+; entry IFFERM(State,[ACTRTN]) to turn off/on error messages, and supply
+; action routine for $PUTMSG. If ACTRTN absent completely, then leave
+; its setting alone, thus passing %VAL(0) will clear ACTRTN.
+	.ENTRY	IFFERM,^M<R11>
+	JSB	IF$ERI			; error init for arg handling
+	JSB	IF$GNA			; get first arg
+	BCS	10$			; missing
+	INSV	(R0),#FLG_V_ERM,#1,IFFLG; transfer low bit
+10$:	ACBB	(AP),#1,R11,20$		; j if some left
+	RET				; no args left
+
+20$:	MOVL	(AP)[R11],PUTARG+PUTMSG$_ACTRTN	; into $PUTMSG arg list
+	RET				; all done
+
+	.PSECT
+	.END

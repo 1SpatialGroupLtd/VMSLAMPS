@@ -1,0 +1,560 @@
+	.TITLE EXPAND
+	.IDENT /10SE86/
+	.ENABL LC
+;
+; Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+;
+; $EXP moved to make routines be within branch range	WJJ	10-Sep-1986
+; %X for HEX output added				AJW	03-Dec-1982
+; Authors M.C.Fulford, P.Cross & P. G. Hardy
+;
+; Formatted expansion routine, commonly called from WRITEF or
+; MSGF but may be called directly thus:-
+;
+;	length = EXPAND(' string ',A1,A2,A3,...)
+;	expand arguments according to FORMAT, with escape character  %
+;		%% - output %
+;		%  - %space is ignored and can terminate numbers
+;		%W - next arg replaces EXPBUF as buffer
+;		%T - tab
+;		%Px - set padding character for integers to x
+;		%Bn - set base for next integer to n (default 10.)
+;		%U - set unsigned mode for next integer
+;		%M - 'S' or <null> depending on multiplicity of
+;			last integer output with %I,%N,%L or %O
+;		%m - as %M but produces 's' (lower case)
+;		%$ - set prompt format controls
+;	OR output next argument as :-
+;
+;		%C -  1 or 2 ASCII chars
+;		%N -  a minimum width integer (decimal)
+;		%In - a signed integer of width n (default 6)
+;		%Ln - as for %In but a long integer (default width minimum)
+;		%On - unsigned octal integer, width n (default minimum)
+;		%Xn - heXadecimal number, (default field 0)
+;		%Ed -  a real number with D digits (default 4)
+;		%&d - as %E but uses '&' for subscipt 10
+;		%Sn -  a .ASCIZ string - maximum of n chars (default 80.)
+;		%An - ditto		for compatibility with VAX - AJW
+;		%Ff.d - a fixed field real
+;		  F & D both optional, defaults 9 & 3
+;		%R - 3 RAD50 characters (also %5)
+;		%(n ...%) - repeat section n (default 1) times
+;
+;	LENGTH = APPEND is as EXPAND but appends characters to
+;			existing string in /EXPC/
+;
+
+NULL = 0
+TAB = 11
+SPACE = 40
+AC0 = %0
+AC1 = %1
+AC2 = %2
+AC3 = %3
+AC4 = %4
+AC5 = %5
+
+
+; PSECT to contain line of characters
+
+; COMMON/EXPC/EXPLEN,EXPVFC,EXPBUF(80)
+
+	.PSECT EXPC,D,OVR,GBL
+EXPLEN:	.WORD	0	; length
+EXPVFC:	.BLKW	1
+EXPBUF:	.BLKB	80.	; buffer
+
+	.PSECT
+
+; primitive number expanders
+
+; expand R0 as an octal integer (unsigned, min length)
+$XPLO::	DEC	SIGNED
+	MOV	#8., IBASE
+
+; expand R0 as an integer (defaulting to decimal, signed, min length)
+$XPLI::	CLR	R1
+	TST	SIGNED		; is it unsigned
+	BNE	$XPLLI		; yes
+	TST	R0		; 16 bit signed integer
+	SXT	R1		; to common with 32 bit long integer
+;
+	.ENABL	LSB
+;
+; long (32-bit) integer in R0 (ls 16), R1 (ms 16)
+$XPLLI:	CLR	R2		; digit count
+	MOV	R4,-(SP)
+	MOV	R5,-(SP)
+	TST	SIGNED		; unsigned integer ?
+	BNE	10$		; yes
+	TST	R1
+	SXT	SIGN		; remember sign
+	BGE	10$		; positive
+	NEG	R1		; negate ms
+	NEG	R0		; negate ls
+	SBC	R1		; carry through
+10$:	ASL	R0		; shift up (prevent overflow later)
+	ROL	R1
+	MOV	R0,R5		; save ls15
+; loop to get digits
+1$:	CLR  R0			; high order
+	DIV  #10.,R0
+IBASE = .-2			; patched in octal case
+	MOV	R0, R4		; preserve new ms16
+	MOV	R1, R0		; remainder := new high order
+	MOV	R5,R1		; recover ls15
+	ASHC	#-1,R0		; re-justify for division
+	DIV	IBASE, R0	; divide again
+	ADD	#'0,R1		; remainder
+	CMPB	#'9,R1		; HEX numbers are ABCDEF, not :;<=>?
+	BGE	5$
+	ADD	#7,R1		; #'A-#'9-1
+5$:	MOVB	R1,-(SP)	; store digits on stack
+	INC	R2		; one more digit
+	ASL	R0
+	ADC	R4
+	MOV	R0,R5
+	BEQ	11$
+	MOV	R4,R1		; ms16
+	BR	1$
+
+11$:	MOV	R4, R1
+	BNE	1$
+;
+	MOV	R2,R0		; leave number of digits in a register
+	MOV	FIELD,R1
+	TST	SIGN
+	BEQ	16$		; positive
+	CMPB	PADCH,#'0	; zeroes ?
+	BNE	12$		; no - put sign last
+	MOVB	#'-,(R3)+	; sign first
+	DEC	R1		; reduce field
+	BR	16$
+
+12$:	MOVB	#'-,-(SP) 	; add sign
+	INC	R2		; one more item on stack
+16$:	SUB	R2,R1		; no of pad chars needed
+	BLE	4$		; minimum width
+3$:	MOVB	PADCH,(R3)+	; pad out with blanks or whatever
+	SOB	R1,3$
+4$:	MOVB	(SP)+,(R3)+ 	; take digits off stack
+	SOB	R2,4$		; note now in correct order
+	MOV	#10.,IBASE	; reset to decimal
+	CLR	SIGN
+	CLR	SIGNED
+	CLR	FIELD
+	MOV	(SP)+,R5
+	MOV	(SP)+,R4
+	RTS	PC
+
+	.DSABL	LSB
+
+SIGN:	.WORD	0
+SIGNED:	.WORD	0
+FIELD:	.WORD	0
+LSTINT:	.WORD	0		; last integer output
+PADCH:	.BYTE	SPACE		; padding char for integers
+	.EVEN
+
+; expand R0 as .RAD50
+$XPL50::MOV	#3,R2
+272$:	MOV	R0,R1		; LO order
+	CLR	R0		; HI order
+	DIV	#50,R0
+	MOV	R1,-(SP)	; chars emerge backwards
+	BNE	274$		; convert to ASCII
+	MOV	#' ,@SP		; deal with space
+	BR	279$
+274$:	SUB	#33,@SP
+	BEQ	275$		; $
+	BPL	276$		; . or digit
+	ADD	#67,@SP		; letter
+275$:	SUB	#11,@SP
+276$:	ADD	#55,@SP
+279$:	SOB	R2,272$		; for next character
+	MOVB	(SP)+,(R3)+ 	; unpeel the characters
+	MOVB	(SP)+,(R3)+
+	MOVB	(SP)+,(R3)+
+	RETURN
+
+; expand AC0 (as a mantissa) into characters
+; preceded by SPACE or MINUS, depending on the FPP N bit.
+; no. of digits in R1, a '.' is output after the R2th digit
+; (counting down from R1, R2=R1+1 => a '.' before the 1st digit)
+; AC2 assumed to contain 10.0	!!
+
+$XAC0:	MOVB	#SPACE,@R3	; estimated sign
+	CFCC
+	BGE	1$
+	MOVB	#'-,@R3		; refine estimate
+1$:	INC 	R3
+; entry for unsigned printing
+$XACU:	ABSF	AC0
+	INC	R1		; in case dot before number
+	BR	3$
+;
+2$:	MODF	AC2,AC0		; get next digit
+	STCFI	AC1,-(SP)
+	ADD	#'0,(SP)	; convert to a character
+	MOVB	(SP)+,(R3)+	; store in line
+3$:	CMP	R1,R2		; time for a dot ?
+	BNE	4$
+	MOVB	#'.,(R3)+	; yes - in she goes
+4$:	SOB	R1,2$
+	RTS	PC
+
+; expand AC0 as a fixed field real
+; field in R0, decimal count in R2
+
+$XPLFD:	STF	AC0,AC4		; take a copy
+	ABSF	AC0		; 'cos this loses the sign
+	LDF	#^F10.0,AC2	; constant
+	LDF	#^F0.5, AC1	; rounding factor
+	MOV	R2,R1		; digit count
+	BLE	2$		; none (?)
+1$:	DIVF	AC2, AC1	; take rounding factor down below ..
+	SOB	R1, 1$	;  .. least significant digit of output
+2$:	ADDF	AC1, AC0	; round up
+	MOV	R2,R1		; provisional digit count
+	INC	R2		; dot position
+	SUB	R2,R0		; free space
+3$:	DIVF	AC2,AC0		; divide by 10.
+	DEC	R0		; one less space
+	INC	R1		; one more digit (always one before dot)
+	CMPF	#^F1.,AC0
+	CFCC
+	BLE	3$		; REPEATUNTIL AC0<1.0
+	TSTF	AC4		; '-' wanted ?
+	CFCC
+	BGE	5$		; j if not
+	DEC	R0		; one less space
+5$:	TST	R0		; how many spaces ?
+	BLE	7$		; none needed
+6$:	MOVB	#SPACE,(R3)+	; pad
+	SOB	R0,6$
+7$:	CFCC			; deal with -ve
+	BGE	8$
+	MOVB	#'-,(R3)+
+8$:	BR	$XACU		; expand the number
+
+; expand AC0 into bytes, pointed at by R3
+; FPP is assumed to be in I & F	modes
+; Digit count in R1
+
+$XPLR:	LDF	#^F10.,AC2	; constant
+	LDF	#^F1.0,AC3	; init exponent
+	STF	AC3,AC4		; also a constant
+	STF	AC0,AC5		; save signed copy
+	ABSF	AC0		; & get unsigned copy
+; reduce to range .1<= x <1.
+1$:	SUBF	AC4,AC3		; decr exponent
+	CMPF	AC4,AC0
+	CFCC
+	BLE	2$		; J if x>=1.0
+	MULF	AC2,AC0		; else mult by 10.
+	CFCC
+	BEQ	7$		; zero special case
+	BR 1$
+;
+2$:	DIVF	AC2,AC0
+	ADDF	AC4,AC3		; incr exponent
+	CMPF	AC4,AC0
+	CFCC
+	BLE	2$		; J if still >=1.
+; print mantissa
+7$:	MOV	R1,R2		; number of digits
+	INC	R2		; dot's position
+	ADDF	#^F0.5E-13,AC0	; round up
+	TSTF	AC5		; set FPP N bit appropriately
+	JSR	PC,$XAC0
+	MOVB	#'E,(R3)+	; introduce exponent
+EXPCH = .-2
+	LDF	AC3,AC0		; exponent
+	DIVF	#^F99.5,AC0	; convert to a mantissa & round
+	MOV	#2,R1
+	CLR	R2
+	BR	$XAC0
+
+
+; get number from format into R1
+; default follows call
+; ***Called via R5 ***
+
+$GETC:	CLRB	2$		; switch -> no digits yet
+	CLR	R1
+1$:	CMPB	(R4),#'0
+	BLT	2$
+	CMPB	(R4),#'9
+	BGT	2$
+	MUL	#10.,R1
+	CLR	-(SP)		; to avoid rubbish in top byte
+	MOVB	(R4)+,(SP)	; Oh for an ADDB	!
+	SUB	#'0,(SP)
+	ADD	(SP)+,R1
+	MOVB	#3$-2$-2/2,2$	; got a digit now
+	BR	1$
+; End of number
+2$:	BR	3$		; OR 4$
+4$:	MOV	(R5),R1		; use default
+3$:	TST	(R5)+		; move past default word
+	RTS	R5
+
+
+; EXPAND & APPEND take a format string, decode it &
+; return number of characters (excluding terminating null) in R0.
+
+BUFFAD:	.WORD 0			; address of last buffer used
+
+EXPAND::MOV	(PC)+, -(SP)
+APPEND::CLR	-(SP)
+	MOV	#-1, R1
+	CALL	LI$ARG
+	CMP	(R5)+,(R5)+	; move to second argument
+	MOV	R1,R4	; format pointer
+	MOV	#EXPBUF,R3	; line buffer pointer
+	MOV	R3, BUFFAD
+	TST	(SP)+		; which entry ?
+	BNE	5$		; j if EXPAND
+1$:	TSTB	(R3)+		; seek end of line
+	BNE	1$
+	DEC	R3
+5$:	CMP	R4, #-1		; format given ?
+	BEQ	10$		; j if not
+	MOVB	#SPACE,PADCH	; default padding char is space
+	CALL	$EXP		; to do the work
+10$:	CLRB	@R3		; terminate the string
+	MOV	R3, R0
+	SUB	BUFFAD, R0	; character count
+	MOV	R0,EXPLEN	; for compatability's sake (RF)
+	RETURN
+
+; Macros to define control characters
+	.MACRO	$PRC	CH, JUMP
+	$$PRC	<''CH>, JUMP, JUMP
+	.ENDM
+
+	.MACRO	$PRN	EXPBUF, JUMP
+	$$PRC	EXPBUF, JUMP, JUMP
+	.ENDM
+
+	.MACRO	$$PRC	CH, ?JUMP1, JUMP2
+	.PSECT	$PDATA
+; add checks for branch range - WJJ
+	.IIF	GT	JUMP1-200$-2/2 -177 .ERROR ;$$PRC jump too far forwards
+	.IIF	LT	JUMP1-200$-2/2 +200 .ERROR ;$$PRC jump too far backwards
+	.BYTE	JUMP1-200$-2/2, CH
+	.PSECT
+	.IF	B	JUMP2
+JUMP1:
+	.ENDC
+	.ENDM
+
+; start character table
+	.ENABL	LSB
+
+	.PSECT	$PDATA	LCL,CON,D
+PRCTAB:
+	$PRN	SPACE, 3$		; %<space> is ignored
+
+; Start of $EXP routines.
+
+; %T - tab
+	$PRC	T
+	MOVB	#TAB,(R3)+
+	BR	3$
+
+; %In - decimal integer
+	$PRC	I
+220$:	JSR	R5,$GETC	; read length if present (%I)
+	.WORD	6		; default length is 6
+225$:	MOV	R1,FIELD	; save it
+; join %N here
+	$PRC	N
+	MOV	@(R5)+,R0	; next argument
+	JSR	PC,$XPLI	; expand it
+	BR	3$
+
+; %Px - use x as pad character
+	$PRC	P
+	MOVB	(R4)+,PADCH	; use next char to pad integers
+	BEQ	290$		; unexpected end of string
+	BR	3$		; back for next char
+
+; %On - octal integer
+	$PRC	O
+	DEC	SIGNED		; unsigned
+	MOV	#8.,IBASE	; octal
+	BR	220$
+
+; %Xn - HEX integer, default width 0
+	$PRC	X
+	DEC	SIGNED		; unsigned
+	MOV	#16.,IBASE	; HEX
+	JSR	R5,$GETC	; read length if present
+	.WORD	0		; default length is 0
+	BR	225$
+
+; %Ln - long integer
+	$PRC	L
+	JSR	R5,$GETC
+	.WORD	0		; default is minimum width
+	MOV	R1,FIELD
+	MOV	(R5)+,R1	; pointer to long integer
+	MOV	(R1)+,R0	; ls 16 bits
+	MOV	(R1),R1		; ms 16 bits
+	JSR	PC,$XPLLI	; expand it
+	BR	3$
+
+; %Bn - set base for next integer to n
+	$PRC	B
+	JSR	R5,$GETC
+	.WORD	10.		; default decimal
+	MOV	R1,IBASE
+	BR	3$
+
+; %U - force unsigned mode for next integer
+	$PRC	U
+	DEC	SIGNED
+	BR	3$
+
+; %Sn - string
+	$PRC	S
+	$PRC	A
+	MOV	(R5)+,R0
+	JSR	R5,$GETC	; character count
+	.WORD 80.
+212$:	TSTB	@R0
+	BEQ	3$		; j if end
+	MOVB	(R0)+,(R3)+
+	SOB	R1,212$
+	BR	3$
+
+; %C - 1/2 characters
+	$PRC	C
+	MOV	@(R5)+,R0
+	BEQ	3$		; nothing to do
+	MOVB	R0,(R3)+	; 1st character
+	SWAB	R0
+	BEQ	3$		; j if 2nd char null
+	BR	4$		; else take that also
+
+; Put $EXP in the middle of its routines, so that BRanch will work !
+
+; $EXP is the basic expansion routine
+;	R3 - output buffer pointer
+;	R4 - format string pointer
+;	R5 - argument list pointer
+$EXP:
+; get next character from format
+	MOVB	(R4)+,R0
+; check for control characters
+	BEQ	202$		; <null> - end of format
+	CMPB	R0,#'%
+	BNE	4$		; j if not escape
+; escape character (%) introduces a control character
+	CLR	R0
+	BISB	(R4)+,R0	; extract next character
+; look up R0 in table of control characters
+202$:	MOV	#PRCTAB, R1
+201$:	MOVB	(R1)+, 200$	; set up branch
+	BEQ	200$		; end of table
+	CMPB	(R1)+, R0
+	BNE	201$
+200$:	BR	.+2		; patched
+; replace %<junk> by ?<junk>
+	MOVB	#'?,(R3)+
+; ordinary character (in R0)
+	$PRC	%,4$		; %% -> %
+4$:	MOVB	R0,(R3)+	; copy R0 to output buffer
+3$:	BR	$EXP		; to continue
+
+; Continue $EXP routines
+
+; %En and %&n -  real number as fraction plus exponent
+	$PRC	E
+	$PRC	&
+	MOVB	R0, EXPCH
+	SETI
+	SETF
+	JSR	R5,$GETC	; Number of digits
+	.WORD	4		; Default
+	LDF	@(R5)+,AC0 	; next argument
+	JSR	PC,$XPLR	; get it expanded
+	BR	3$
+
+; %Fn.d - fixed point real
+	$PRC	F
+	JSR	R5,$GETC	; get field size
+	.WORD 9.		; default
+	MOV	R1,R0		; and save it away
+	CMPB	@R4,#'.
+	BNE	233$
+	INC	R4
+233$:	JSR	R5,$GETC	; get no. of decimals
+	.WORD 3.		; default
+	MOV	R1,R2
+	SETI
+	SETF
+	LDF	@(R5)+,AC0
+	JSR	PC,$XPLFD
+	BR	3$
+
+; %(n - repeated section
+	$PRC	(
+	JSR	R5,$GETC	; repetition count
+	.WORD	1		; default is once
+	MOV	R4,-(SP)	; save format pointer
+42$:	MOV	R1,-(SP)	; save count
+	MOV	2(SP), R4	; reset format pointer
+	CALL	$EXP		; recurse to expand section
+	MOV	(SP)+, R1	; recover count
+	SOB	R1, 42$		; repeat
+	TST	(SP)+		; tidy up stack
+	BR	3$
+
+; %W - change to user-supplied buffer
+	$PRC	W
+	MOV	(R5)+, R3
+	MOV	R3, BUFFAD
+	BR	3$
+
+; %M/%m - multiplicity, S/s or <null> depending on last integer
+	$PRC	M
+	$PRC	m
+	CMP	LSTINT,#1
+	BEQ	3$
+	ADD	#'S-'M, R0
+	BR	4$
+
+; %) - end of repetition section
+	$PRC	),290$
+; <null> - end of format string
+	$PRN	NULL,290$
+290$:	RETURN
+
+; %$ - set prompt VFCs ('$' & null)
+	$PRC	$
+	MOV	R0, EXPVFC	; use control character
+	BR	3$
+
+; %Q - return line length to next argument
+	$PRC	Q
+	MOV	R3, R0
+	SUB	BUFFAD, R0
+	MOV	R0, @(R5)+
+	BR	3$
+
+; %R and %5 - 3 RAD50 characters
+	$PRC	R
+	$PRC	5
+	MOV	@(R5)+,R0
+	CALL	$XPL50
+	BR	3$
+
+	.PSECT	$PDATA
+	.WORD	0		; mark end of table
+	.PSECT
+
+	.DSABL	LSB
+	.END

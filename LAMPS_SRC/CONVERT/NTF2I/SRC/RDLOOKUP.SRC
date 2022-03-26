@@ -1,0 +1,212 @@
+	LOGICAL FUNCTION RDLOOKUP
+C
+***	MODULE	RDLOOKUP
+***	IDENT	29NO96
+C
+C Copyright Laser-Scan Ltd., Cambridge, England.
+C
+C Author Matt Wenham, 24 October 1996
+C Modified from NTFINI
+C
+C Returns TRUE if it succeeds in opening, reading, and sorting and FC lookup
+C table from the file specified in LUTFIL (FILENAME.CMN).
+C
+C The sorted contents of the file are left in a virtual memory block pointed
+C to by LUT_BASE_ADDR (LOOKUP.CMN).
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE 'HERE:NTF2IMSG.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+C
+C Commons:
+	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'
+        INCLUDE 'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'
+	INCLUDE 'HERE:COMMANDS.CMN'
+	INCLUDE 'HERE:FILENAME.CMN'
+	INCLUDE 'HERE:LOOKUP.CMN'
+C
+	INCLUDE 'HERE:LUNS.PAR'
+	INCLUDE '($SSDEF)'
+C
+C functions:
+	INTEGER		FLROPN		! open file for read
+	INTEGER		FLRCLO		! close it again
+	INTEGER		FLRLIN		! read a line
+	INTEGER		TRNALL		! read a logical definition
+	LOGICAL		RDINT		! decode integer
+	INTEGER		LIB$GET_VM	! allocate virtual memory
+	LOGICAL		RDCHS		! read character
+	INTEGER		RDCOMM		! read command
+	LOGICAL		ADD_LUT_ENTRY	! add entry to FC lookup table
+	LOGICAL		SORT_LUT	! sort FC lookup table
+C
+C workspace:
+	INTEGER		OK		! Function return
+	INTEGER		IERR		! Error flag
+	INTEGER		I		! DO loop counter
+	INTEGER		LINE		! line in cmd file
+	CHARACTER*5	LOGICAL		! result of TRNALL
+	BYTE		CHAR		! last-read character
+	INTEGER		RESULT		! command read result
+C
+	CHARACTER*1	 PLING
+	PARAMETER	(PLING ='!')	! comment delimitor
+C
+C External declarations
+C
+	INTEGER		LOOKUPCMD_CMD_TABLE
+	EXTERNAL	LOOKUPCMD_CMD_TABLE
+C  ...................................................................
+C
+	RDLOOKUP = .FALSE.			! assume failure
+C
+C Find maximum size of FC lookup table. Look at logical LSL$FRT_FRTMAX.
+C Default used if logical doesn't exist or is not an integer.
+C
+	LUT_SIZE = DEF_LUT_SIZE				! Get default
+C
+	IERR = TRNALL('LSL$FRT_FRTMAX', LOGICAL)	! Look at logical
+	IF (IERR .EQ. SS$_NORMAL) THEN			! Did it work?
+	    CALL SETAUX(%REF(LOGICAL),5)		! Set to read LOGICAL
+	    IF (RDINT(LUT_SIZE)) THEN			! Read integer
+		LUT_SIZE = DEF_LUT_SIZE			! Failed
+		CALL LSL_PUTMSG(NTF2I__BADFRTMAX, DEF_LUT_SIZE)		! Warn
+	    ENDIF
+	ELSE
+	    IF (IERR .NE. SS$_NOLOGNAM)			! Bigger problem?
+     &		CALL LSL_PUTMSG(NTF2I__BADFRTMAX, DEF_LUT_SIZE)		! Warn
+		CALL LSL_ADDMSG(IERR)
+	ENDIF
+C  ...................................................................
+C
+C Set up FC lookup table in virtual memory. Need space for 2 x LUT_SIZE
+C INTEGERS = 8 x LUT_SIZE bytes.
+C
+	OK = LIB$GET_VM(8*LUT_SIZE, LUT_BASE_ADDR)	! Allocate
+	IF (.NOT. OK) THEN
+	    CALL LSL_PUTMSG( NTF2I__VMALLFAIL )		! Failed - report
+	    CALL LSL_ADDMSG(OK)
+	    GOTO 9999					! Outa here 
+	ENDIF
+C  ...................................................................
+C
+C open up the file
+C
+	OK = FLROPN( LUTLUN, LUTFIL, IERR )	! open FC lookup file
+	IF ( .NOT.OK ) THEN
+	   CALL LSL_PUTMSG( NTF2I__OPENERR, LUTFIL(1:LUTLEN))
+	   CALL LSL_ADDMSG(OK)
+	   IF ( OK.EQ.LSL__SYSOPEN ) CALL LSL_ADDMSG(IERR)
+	   HAD_FC_LOOKUP = .FALSE.		! No valid table
+	   GOTO 9999
+	ELSE IF (LOG) THEN
+	   CALL LSL_PUTMSG(NTF2I__LUTFILOPN,LUTFIL(1:LUTLEN))
+	ENDIF
+C
+C open for business now
+C
+	TRN_NTF_28 = .FALSE.			! reset flag
+	LINE = 0				! no lines read yet
+	LUT_ENTRIES = 0				! start at first entry in table
+	CALL BSLN				! reset to read from buffer
+C
+C  ...................................................................
+C Read commands in turn.
+C
+50	LINE = LINE+1				! next line 
+	OK = FLRLIN(,,,IERR)			! read line
+	IF ( .NOT. OK ) THEN
+	   IF (OK .EQ. LSL__EOF) THEN
+	      RDLOOKUP = .TRUE.			! presumably success
+	      GOTO 8000				! sort the table
+	   ELSE
+	      CALL LSL_PUTMSG( NTF2I__LUTLINE, LINE )
+	      CALL LSL_ADDMSG(OK)
+	      IF (OK.EQ.LSL__SYSREAD) CALL LSL_ADDMSG(IERR)
+	   ENDIF
+	   GOTO 9000
+	ENDIF
+C
+C Reset decoding pointer to the start of the line
+C
+	CALL BSLN
+C
+C Check for a comment, ignore an empty line
+C
+	IF ( RDCHS( CHAR ) ) GOTO 50
+	IF ( CHAR .EQ. PLING ) THEN
+	    GOTO 50
+	ELSE
+	   CALL BSCH				! Unread pling
+	ENDIF
+C
+C Read the command from the line
+C
+	RESULT = RDCOMM(LOOKUPCMD_CMD_TABLE)
+C
+C Check there was a command
+C
+	IF (RESULT.LE.0) GOTO 5000		! Bad command
+C
+C Decode command. Only one at present, replace with GOTO (xxx,yyy,...) if
+C more added in future.
+C
+	IF (RESULT.EQ.1) GOTO 100
+C
+C Unknown command
+C
+	GOTO 5000
+C  ...................................................................
+C
+C Add lookup table entry and jump back for next line
+C
+100	IF (INTARG(1) .NE. INTARG(2)) THEN	! Skip if entries are equal
+	   LUT_ENTRIES = LUT_ENTRIES + 1	! Next entry in table
+	   IF (LUT_ENTRIES .GT. LUT_SIZE) THEN	! Off the end of the table?
+	      CALL LSL_PUTMSG( NTF2I__LUTTOOSMA) ! Report if so
+	      GOTO 9000				! Outa here
+	   ENDIF
+	   OK = ADD_LUT_ENTRY(%VAL(LUT_BASE_ADDR), LUT_ENTRIES,
+     &						INTARG(1), INTARG(2))
+	   IF ( .NOT.OK ) GOTO 9000		! Get outa here if failed
+	   IF (INTARG(1) .EQ. 28) TRN_NTF_28 = .TRUE.	! Flag if found
+	ENDIF
+	GOTO 50
+C  ...................................................................
+C
+C Bad line in command file
+C
+5000	CALL LSL_PUTMSG( NTF2I__BADLUTLIN, LINE, LUTFIL(1:LUTLEN))
+	GOTO 50
+C  ...................................................................
+C
+C Sort the lookup table, eliminate duplicate NTF entries, and check for invalid
+C IFF entries.
+C
+8000	IF (LUT_ENTRIES .GT. 0) THEN			! If any valid entries
+	   OK = SORT_LUT(%VAL(LUT_BASE_ADDR), LUT_ENTRIES)	! Sort table
+	   RDLOOKUP = OK
+	ELSE
+	   HAD_FC_LOOKUP = .FALSE.			! No valid table
+	ENDIF
+C  ...................................................................
+C
+C and finally, close the file
+C
+9000	OK = FLRCLO( LUTLUN, IERR )
+	IF ( .NOT.OK ) THEN
+	   CALL LSL_PUTMSG( NTF2I__CLOSERR, LUTFIL(1:LUTLEN) )
+	   CALL LSL_ADDMSG(OK)
+	   IF ( OK.EQ.LSL__SYSCLOSE ) CALL LSL_ADDMSG(IERR)
+	ELSE IF (LOG) THEN
+	   CALL LSL_PUTMSG(NTF2I__LUTFILCLO,LUTFIL(1:LUTLEN))
+	ENDIF
+C
+C that's all
+C
+9999	RETURN
+	END
+C

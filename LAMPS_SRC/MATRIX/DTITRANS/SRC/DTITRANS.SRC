@@ -1,0 +1,235 @@
+	PROGRAM	DTITRANS
+C
+***	MODULE  DTITRANS
+***	IDENT	25SE91
+C
+C	Copyright : Laser-Scan, Cambridge, England
+C	Author    : D R Catlow
+C	Created   : 24 September 1987
+C	Modified  :
+C
+CMOD1533 Add ROUND_ORIGIN if requested
+C
+C----------------------------------------------------------------------
+C
+C	DTITRANS performs the following sets of operations on grid data 
+C	held in a DTI format:
+C
+C	Transforms data held in Geographicals (latitude and longitude) 
+C	to a specified map projection 
+C       Transforms data held in a map projection system to Geographical
+C	(latitude and longitude) 
+C	Resamples data to a new grid interval without projection change
+C
+C----------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+***	PARAMETER /LSL$CMNLSL:LSLLIBMSG/
+C
+***	PARAMETER /HERE:DTITRANSMSG/
+***	COMMON	  /HERE:DTITRANS/
+***	COMMON    /HERE:PRINT/
+C
+C Local
+	INTEGER*4	LSL_STATUS		! normal sucessful 
+	INTEGER*4	OK			! function return
+	LOGICAL		DO_RESAMPLE		! resample operation required
+	INTEGER		ERROR
+C
+	EXTERNAL	DTITRANSEXCP		! exception handler
+C
+C Functions
+	INTEGER*4	DTITRANS_DECODE	   	! to decode DTITRANS command
+C						! line
+	INTEGER*4	OPEN_CONTROL_FILE	! to open input CONTROL file
+	INTEGER*4	OPEN_INPUT_FILE	   	! to open input DTI file
+	INTEGER*4	OPEN_SATMAP_FILE 	! to open input SATMAP file
+	INTEGER*4	OPEN_OUTPUT_FILE 	! to open output DTI file
+	INTEGER*4	ASK_INPUT_PARAMETERS	! to request details of
+C					 	! input file from user
+	INTEGER*4	ASK_OUTPUT_PARAMETERS	! to request details of
+C					 	! output file proj. from user
+	INTEGER*4	ASK_INPUT_WINDOW 	! window of the input DTI file
+	INTEGER*4	ASK_OUTPUT_WINDOW 	! window of the output DTI file
+	INTEGER*4	ROUND_ORIGIN	 	! round origin values
+	INTEGER*4	ASK_SHIFT	 	! prompt for shift values
+	INTEGER*4	GET_OUTPUT_SIZE	 	! determines dimensions of
+C						! output file
+	INTEGER*4	PROCESS_DTI	 	! transforms and resamples
+	INTEGER*4	IFF		 	! creates an IFF file of
+C						! grid vectors
+	INTEGER*4	CLOSE_DTI_FILES	 	! closes input and output
+C						! DTI files
+	LOGICAL		TEST_TRANSFORM	 	! test whether a GCTPLIB 
+C						! transform
+C					 	! is required.
+	LOGICAL		TEST_RESAMPLE	 	! test whether resampling is
+C					 	! really required.
+	INTEGER*4	SET_PROJ_REC 	 	! set up the projection record
+C
+C-----------------------------------------------------------------------
+C-----------------------------------------------------------------------
+C Initialise LSLLIB and DTILIB
+	CALL LSL_INIT
+	CALL DTI_INIT
+C
+C Extend EXPBUF, so that long messages will be output
+	CALL SET_EXPMAX(200)
+C
+C-----------------------------------------------------------------------
+C Condition handlers - this includes condition handler for
+C	GCTPLIB.
+	CALL LIB$ESTABLISH(DTITRANSEXCP)
+	IPEMSG=1
+	IPPARM=1
+C
+C-----------------------------------------------------------------------
+C Initialise DTITRANS
+	CALL DTITRANS_INIT
+C
+C-----------------------------------------------------------------------
+C Announce the program
+	CALL DTMJPI
+C
+C-----------------------------------------------------------------------
+C Decode the command line
+	LSL_STATUS=DTITRANS_DECODE()
+	IF(.NOT.LSL_STATUS)GOTO 100
+C
+C-----------------------------------------------------------------------
+C Open the input file, and extract any relevant proj. parameters
+	LSL_STATUS=OPEN_INPUT_FILE()
+	IF (.NOT.LSL_STATUS) GOTO 100
+C
+C-----------------------------------------------------------------------
+C Input file open from now on
+C Open the SATMAP file, and extract transformation parameters
+	IF (IMAGEMAP) THEN
+	   LSL_STATUS = OPEN_SATMAP_FILE()
+	   IF (.NOT.LSL_STATUS) GOTO 101
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C Open the CONTROL file, and extract transformation parameters
+	CONTROL_SF = 1				! default
+C
+	IF (CONTROL) THEN
+	   LSL_STATUS=OPEN_CONTROL_FILE()
+	   IF (.NOT.LSL_STATUS) GOTO 101
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C Ask for details of input projection parameters
+	LSL_STATUS = ASK_INPUT_PARAMETERS()
+	IF (.NOT.LSL_STATUS) GOTO 101
+C
+C-----------------------------------------------------------------------
+C Round the origin values if requested
+	IF (HAD_ROUND) THEN
+	   LSL_STATUS = ROUND_ORIGIN(IN_LUN)
+	   IF (.NOT.LSL_STATUS) GOTO 101
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C Patch in the new projection details if /DESCRIPTOR
+	IF (HAD_DESCRIPTOR) THEN
+	   LSL_STATUS = SET_PROJ_REC()
+	   IF (.NOT.LSL_STATUS) GOTO 101
+C
+	   GOTO 70
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C Ask for details of input DTI file window
+	LSL_STATUS = ASK_INPUT_WINDOW()
+	IF (.NOT.LSL_STATUS) GOTO 101
+C
+C-----------------------------------------------------------------------
+C Ask for details of output projection parameters
+	LSL_STATUS = ASK_OUTPUT_PARAMETERS()
+	IF (.NOT.LSL_STATUS) GOTO 101
+C
+C-----------------------------------------------------------------------
+C Ask for details of x y shift
+	LSL_STATUS = ASK_SHIFT()
+	IF (.NOT.LSL_STATUS) GOTO 101
+C
+C-----------------------------------------------------------------------
+C Setup the transformation parameters
+C First set up the tranformation for input and output
+C
+	IF (DO_TRANSFORM) THEN
+	  CALL PARINIT(INSYS,INZONE,PARIN,INUNIT,IN_LUN)
+	  CALL PARINIT(OUTSYS,OUTZONE,PAROUT,OUTUNIT,OUT_LUN)
+	ENDIF
+C
+C Test whether a GCTPLIB transformation is really required.
+	IF (.NOT. (IMAGEMAP .OR. CONTROL) .AND. DO_TRANSFORM) THEN
+	  DO_TRANSFORM = TEST_TRANSFORM()
+	ENDIF
+C
+C If a transform isn't required, test whether a resampling
+C operation is required.
+	IF (.NOT.DO_TRANSFORM) THEN
+	  DO_RESAMPLE = TEST_RESAMPLE()
+	ENDIF
+C
+	IF (.NOT. (DO_TRANSFORM .OR. DO_RESAMPLE)) THEN
+C
+C Output file would be the same as the input file so not much
+C point in creating an output file.
+	  CALL LSL_PUTMSG(DTRANS__NOPROCREQ)
+	  CALL LSL_PUTMSG(DTRANS__NOOUTDTI)
+	  LSL_STATUS=DTRANS__NORMAL
+	  GOTO 101
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C Determine the size of the output file 
+	LSL_STATUS=GET_OUTPUT_SIZE()
+	IF (.NOT.LSL_STATUS) GOTO 101
+C
+C-----------------------------------------------------------------------
+C Ask for details of output DTI file window
+	LSL_STATUS=ASK_OUTPUT_WINDOW()
+	IF(.NOT.LSL_STATUS) GOTO 101
+C
+C-----------------------------------------------------------------------
+C Open the output file, and write any relevant proj. parameters to
+C the header
+	LSL_STATUS=OPEN_OUTPUT_FILE()
+	IF(.NOT.LSL_STATUS) GOTO 101
+C
+C-----------------------------------------------------------------------
+C Input and output DTI files open from here on
+C Create IFF file
+	IF (IFF_FILE) THEN
+	   LSL_STATUS=IFF()
+	   IF (.NOT.LSL_STATUS) GOTO 102
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C Transform and Resample
+	LSL_STATUS=PROCESS_DTI()
+	IF (.NOT.LSL_STATUS) GOTO 102
+C
+C-----------------------------------------------------------------------
+C Close input and ouput DTI files
+70	LSL_STATUS=CLOSE_DTI_FILES()
+	GOTO 100
+C
+C-----------------------------------------------------------------------
+C Error exits - close input file without writing to it
+102	CALL DTI_CLOSE(OUT_LUN,.FALSE.,.FALSE.,ERROR)
+C
+101	CALL DTI_CLOSE(IN_LUN,.FALSE.,.FALSE.,ERROR)
+C
+C-----------------------------------------------------------------------
+C Exit
+100	CALL LSL_EXIT(LSL_STATUS)
+C
+C-----------------------------------------------------------------------
+C
+999	END
+C

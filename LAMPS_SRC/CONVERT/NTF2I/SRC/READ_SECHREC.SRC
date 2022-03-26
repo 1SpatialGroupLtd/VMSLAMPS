@@ -1,0 +1,567 @@
+	LOGICAL FUNCTION READ_SECHREC
+C
+***     MODULE READ_SECHREC
+***     IDENT	14JN96
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+C Author	IM	27-04-87
+C
+C Reads the data from the section header record
+C - creates an IFF file
+C - writes the header data into the map descriptor of the IFF file
+C - if we are reading OS data, also writes the map header
+C
+CMOD							TJI	 5-Oct-1987
+CMOD	Handle NTF 1.1					VLG	31-Oct-1989
+CMOD							VLG	30-Jan-1990
+CMOD	Do not assign MD2SCL if fail to find SCALE	VLG	30-Jan-1990
+CMOD	Tidied source code, removed redundant variables, added string variables
+C	to hold NTF fields. makes code clearer		 SG	27-Jun-1991
+CMOD	reads the SECHREC record before processing 	 SG	16-July-1991
+C
+CMOD	reading the range from the NTF file is unnecc as we will work it out as 
+C	we go along.					 SG	07-Aug-1991
+C
+CMOD	changed interpretation of XY_MULT and Z_MULT fields. NTF data not 
+C	consistent, field sometimes stored as real, othertimes as an integer.
+C	changed code tries to guess what was intended	 SG	09-Aug-1991
+C
+CMOD	if the new qualifier /LSL has been specified, then before we process
+C	the SECHREC, go back and read specified data from coomment records
+C	preceeding the SECHREC				 SG	13-Aug-1991
+C
+CMOD	moved above to READ_SECTION			 SG	14-Aug-1991
+C
+CMOD	the comment fields have been read before we got here. changed code so 
+C	that if /LSL qualifier was present then use data from the common block
+C	in which the data from the comments was stored	SG	16-Aug-1991
+C
+CMOD	xmax,xmin,ymax,ymin is needed since it is written to the control point
+C	entry in the IFF file which unlike the RA entry can not ne updated.
+C	these have been re-instated			SG	23-sep-91
+C
+CMOD	fixed bug in XY_MULT and Z_MULT			SG	26-sep-91
+CMOD	BS7567 (v2.0) support added (W93/13)		ST	02-Jun-1993
+CMOD	Make the program accept an XY_UNIT of 4		ST 	27-Apr-1994
+C	(seconds of arc) and set the MD to the
+C	appropriate value (3). Mod 1359.
+C
+CMOD    Implement CITF96 changes (WI/CC 1545)           TJM     12-Jun-1996
+C
+	IMPLICIT NONE
+C
+C Commons:
+C
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'NTF2IMSG.PAR'
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW.PAR'	!  OSMHLIB parameters
+C
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'		!  Common for version 2 MD
+	INCLUDE 'LSL$CMNIFF:MHOSGB.CMN'		!  Type 4 Map Header
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW_MH.CMN'	!  OSMHLIB common
+C
+	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE	'FILENAME.CMN'
+C
+	INCLUDE 'CITF.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE	'LSLDATA.CMN'
+	INCLUDE	'LUNS.PAR'
+C
+C Functions:
+C
+	LOGICAL		PARFILN			! work out a file-spec
+	LOGICAL		RDINT			! read an integer
+	LOGICAL		RDREAL
+	LOGICAL		RDLONG			! read a longword
+	LOGICAL		READ_RECORD
+	LOGICAL		READ_OSMH		! read an OS style map header
+	LOGICAL		READ_OSMH_V2		! read OS map header for v2.0
+	LOGICAL		READ_CONTINUE		! read a continuation record
+	LOGICAL		IS_CONTINUATION	
+	INTEGER*4	OSMH_NEW_GETFLD		! find DIFF_HT_LEN in header
+C
+C Workspace:
+C
+	INTEGER		OK			! Success flag
+	INTEGER		NUM			! To RDINT into
+	INTEGER		I			! DO loop counter
+	INTEGER		SCALE			! Temp storage of scale
+	INTEGER		X_ORIG,Y_ORIG		! Temp storage of origin
+	CHARACTER*80	IFF_NAME		! Final IFF name
+	INTEGER		IFF_NAME_LEN		! Its length
+C
+	CHARACTER*2	NTF$_REC_DESCR
+	CHARACTER*10	NTF$_SECT_REF
+	CHARACTER	NTF$_COORD_TYPE
+	CHARACTER	NTF$_STRUC_TYPE
+	CHARACTER*5	NTF$_XYLEN
+	CHARACTER	NTF$_XY_UNIT
+	CHARACTER*10	NTF$_XY_MULT
+	CHARACTER*5	NTF$_ZLEN
+	CHARACTER	NTF$_Z_UNIT
+	CHARACTER*10	NTF$_Z_MULT
+	CHARACTER*10	NTF$_X_ORIG
+	CHARACTER*10	NTF$_Y_ORIG
+	CHARACTER*8	NTF$_Z_DATUM
+C
+	CHARACTER*10	NTF$_XMIN
+	CHARACTER*10	NTF$_YMIN
+	CHARACTER*10	NTF$_XMAX
+	CHARACTER*10	NTF$_YMAX
+C
+	CHARACTER*7	UNITS(5)
+C
+	DATA UNITS /    'degrees',' metres','   feet','seconds','illegal'/
+	PARAMETER	XY_ORIENT =4
+	PARAMETER	SECONDS =3
+	PARAMETER	METRES =2
+	PARAMETER	FEET =1
+	PARAMETER	GEOGRAPHIC = 100
+	PARAMETER	UK_NATIONAL_GRID = 101
+C
+C ........................................................................
+C read in and confirm that we have a SECHREC
+C
+	OK = READ_RECORD()
+	IF (OK) THEN
+	  NTF$_REC_DESCR= STRING(1:2)
+	  IF (NTF$_REC_DESCR.NE.REC$_SECHREC) THEN
+	    CALL WRITEF('%%NTF2I-E-MISC, expected SECHREC record not found')
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C ........................................................................
+C get data from record
+C
+	
+	NTF$_SECT_REF	= STRING(3:12)
+	NTF$_COORD_TYPE	= STRING(13:13)
+	NTF$_STRUC_TYPE	= STRING(14:14)
+	NTF$_XYLEN	= STRING(15:19)
+	NTF$_XY_UNIT	= STRING(20:20)
+	NTF$_XY_MULT	= STRING(21:30)
+	NTF$_ZLEN	= STRING(31:35)
+	NTF$_Z_UNIT	= STRING(36:36)
+	NTF$_Z_MULT	= STRING(37:46)
+	NTF$_X_ORIG	= STRING(47:56)
+	NTF$_Y_ORIG	= STRING(57:66)
+	NTF$_Z_DATUM	= STRING(67:74)
+C
+C	------------------------------------------------------------------
+C	get the file name, note we may have allready read it in from comments
+C	if we have read it, ignore the one in the SECHREC
+C
+	IF (LSL.AND.LSL$_HAD_FNAME) THEN			!allready read
+	  IFF_NAME_LEN = LSL$_FILE_LEN
+	  IFF_NAME(1:IFF_NAME_LEN) = LSL$_FILE_NAME(1:IFF_NAME_LEN)
+	ELSE
+	  CALL DEDUCE_IFF_NAME( NTF$_SECT_REF, IFF_NAME, IFF_NAME_LEN )
+	ENDIF
+C
+C	..................................................................
+C	use deduced_name to deduce the full IFF filespec
+C
+	OK = PARFILN(
+     &	    IFFFILE,IFFLEN, IFF_NAME(:IFF_NAME_LEN),'LSL$IF:IFF.IFF',.FALSE. )
+C
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__BADIFFNAME,IFF_NAME)
+	   CALL LSL_ADDMSG(OK)
+	   GOTO 999
+	ENDIF
+C
+C	.................................................................
+C	for OS data use IFF_NAME to try to deduce the map scale
+C
+	IF (OS_DATA) THEN				! is it OS data
+  	   IF (IFF_NAME_LEN.EQ.8) THEN
+	      SCALE = 1250
+	   ELSE IF (IFF_NAME_LEN.EQ.6) THEN
+	      SCALE = 2500				! default scale
+	      IF (IFF_NAME(6:6).GE.'A')  SCALE = 10000
+	   ENDIF
+	   MD2SCL = SCALE				! put into common block
+	ENDIF
+C
+C	..................................................................
+C	Check that this is vector data - give up if it isn't
+C
+	IF ( NTF$_STRUC_TYPE.NE.'1' ) THEN
+	   CALL LSL_PUTMSG(NTF2I__NOTVECTOR,NTF$_SECT_REF)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C	..................................................................
+C	Find out the size of planimetric coordinates - XYLEN
+C
+	XYLEN = 10				! default as XYLEN is optional
+	IF (NTF$_XYLEN.NE.' '.AND.NTF$_XYLEN.NE.'00000') THEN
+	   CALL SETAUX( %REF(NTF$_XYLEN), 5 )
+	   OK = .NOT.RDLONG(XYLEN)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(NTF2I__SECHREC,'XYLEN',SEC_REC)
+	      CALL LSL_ADDSTR(NTF$_XYLEN)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+	IF (XYLEN.LE.0) THEN
+	   IF (LEVEL.EQ.1) THEN
+	      XYLEN = 10
+	   ELSE
+	      CALL LSL_PUTMSG(NTF2I__XYLEN)
+	      OK = .FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C	..................................................................
+C	Use XY_UNIT to set common block headers
+C	ignore if we have allready read the units and projection
+C
+	IF (NTF$_XY_UNIT.NE.' ') THEN			! empty field
+	  XY_UNIT = ICHAR(NTF$_XY_UNIT)-ICHAR('0')
+	  IF (XY_UNIT.EQ.1) THEN			! data is in degrees
+	    MD2UNT = XY_ORIENT
+	    MD2PRJ = GEOGRAPHIC
+	  ELSE IF (XY_UNIT.EQ.2) THEN			! data is in metres 
+	    MD2UNT = METRES
+	    MD2PRJ = UK_NATIONAL_GRID
+	  ELSE IF (XY_UNIT.EQ.3) THEN			! data is in feet
+	    MD2UNT = FEET
+	    MD2PRJ = UK_NATIONAL_GRID
+	  ELSE IF (XY_UNIT.EQ.4) THEN			! data is in seconds
+	    MD2UNT = SECONDS
+	    MD2PRJ = GEOGRAPHIC
+	  ELSE						! data not recognised
+	    CALL LSL_PUTMSG(NTF2I__SECHREC,'XY_UNIT',SEC_REC)
+	    CALL LSL_ADDMSG(NTF2I__BADUNIT,XY_UNIT)
+	    XY_UNIT = 5
+	  ENDIF
+	ELSE
+	  CALL LSL_PUTMSG(NTF2I__SECHREC,'XY_UNIT',SEC_REC)
+	  CALL LSL_ADDSTR(NTF$_XY_UNIT)
+	  GOTO 999
+	ENDIF
+C
+C	..................................................................
+C	Read the multiplication factor for our data - XY_MULT
+C
+	XY_MULT = 1.0					! default as optional
+	IF (NTF$_XY_MULT.NE.' ') THEN			! anything there
+	  CALL SETAUX(%REF(NTF$_XY_MULT),10)		! set read buffer
+	  OK = .NOT.RDREAL(XY_MULT)			! read real number
+	  IF (OK) THEN					! sucess
+C
+C	    ..................................................................
+C	    since the XY_MULT field is real number interpreted with 3 decimal 
+C	    places then must set the correct position of the decimal place
+C
+C	    NOTE: I2NTF stores the XY_MULT field as an integer, not as the 
+C	    expected real number. consequently it was necc to divide by 1000. If
+C	    the value is allready less than 1, then dividing further will yield
+C	    a ridiculously low value. Note that this may cause problems if the 
+C	    scale was 1:1 in the first place
+
+	    IF (XY_MULT.EQ.0.0) THEN		! result too small
+	      XY_MULT = 1.0				! default
+	      CALL LSL_PUTMSG(NTF2I__NILXYMULT)		! warning
+	    ELSEIF(XY_MULT.GE.1.0) THEN
+	      XY_MULT = XY_MULT/1000.0
+	    ENDIF
+	  ELSE						! not a real number
+	    CALL LSL_PUTMSG( NTF2I__SECHREC,'XY_MULT',SEC_REC)
+	    CALL LSL_ADDSTR( NTF$_XY_MULT)
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C	..................................................................
+C	Find out the size of Z coordinates - ZLEN
+C
+	ZLEN = 10					! default as optional
+	IF (NTF$_ZLEN.NE.' '.AND.NTF$_ZLEN.NE.'00000') THEN
+	  CALL SETAUX( %REF(NTF$_ZLEN),5)
+	  OK = .NOT.RDLONG(ZLEN)
+	  IF (.NOT.OK) THEN
+	    CALL LSL_PUTMSG(NTF2I__SECHREC,'ZLEN',SEC_REC)
+	    CALL LSL_ADDSTR(NTF$_ZLEN)
+	    GOTO 999
+	  ENDIF
+	ENDIF
+	IF (ZLEN.LE.0) THEN
+	   IF (LEVEL.EQ.1) THEN
+	      ZLEN = 10
+	   ELSE
+	      CALL LSL_PUTMSG(NTF2I__ZLEN)
+	      OK = .FALSE.
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C	..................................................................
+C	Read the units for our Z data (if any) - Z_UNIT
+C
+	Z_UNIT =2					! default as optional
+	IF (NTF$_Z_UNIT.NE.' ') THEN
+	  CALL SETAUX(%REF(NTF$_Z_UNIT),1)
+	  OK = .NOT.RDINT(Z_UNIT)
+	  IF (OK) THEN					! ahh but is it valid
+	    IF (.NOT.((Z_UNIT.GE.1).AND.(Z_UNIT.LE.3))) Z_UNIT =4
+	  ELSE
+	    CALL LSL_PUTMSG(NTF2I__SECHREC,'Z_UNIT',SEC_REC)
+	    CALL LSL_ADDSTR(NTF$_Z_UNIT)
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C	..................................................................
+C
+	Z_MULT=1.0					! default as optional
+	IF (NTF$_Z_MULT.NE.' ') THEN			! non-empty field
+	  CALL SETAUX(%REF(NTF$_Z_MULT),10)		! set input buffer
+	  OK =.NOT.RDREAL(Z_MULT)			! read real number
+	  IF (OK) THEN					! sucess
+	     IF (Z_MULT.EQ.0)THEN
+	       Z_MULT  = 1.0
+	     ELSEIF (Z_MULT.GE.1.0) THEN
+	       Z_MULT = Z_MULT/1000.0
+	     ENDIF
+	  ELSE						! error reading num
+	    CALL LSL_PUTMSG(NTF2I__SECHREC,'Z_MULT',SEC_REC)
+	    CALL LSL_ADDSTR(NTF$_Z_MULT)
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C 	.......................................................................
+C
+	CALL SETAUX(%REF(NTF$_X_ORIG),10)
+	OK = .NOT.RDLONG(X_ORIG)
+C
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__SECHREC,'X_ORIG',SEC_REC)
+	   CALL LSL_ADDSTR(NTF$_X_ORIG)
+	   GOTO 999
+	ENDIF
+C
+C	.......................................................................
+C
+	CALL SETAUX(%REF(NTF$_Y_ORIG),10)
+	OK = .NOT.RDLONG(Y_ORIG)
+C
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(NTF2I__SECHREC,'Y_ORIG',SEC_REC)
+	   CALL LSL_ADDSTR(NTF$_Y_ORIG)
+	   GOTO 999
+	ENDIF
+C
+C	.......................................................................
+C
+	Z_DATUM=0					! default as optional
+	IF (NTF$_Z_DATUM.NE.' ') THEN
+	  CALL SETAUX(%REF(NTF$_Z_DATUM),8)
+	  OK = .NOT.RDLONG(Z_DATUM)
+	  IF (.NOT.OK) THEN
+	    CALL LSL_PUTMSG(NTF2I__SECHREC,'Z_DATUM',SEC_REC)
+	    CALL LSL_ADDSTR(NTF$_Z_DATUM)
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C ........................................................................
+C Set up more of the map descriptor (note projection was set with XY units)
+C
+	MATV2 =2		! Version 2 MD
+	MD2SPH=9		! Assume the spheroid is Airy
+	MD2FLP=.FALSE.		! Coordinates are Long,Lat (ie X,Y)
+	MD2LOC(1)=X_ORIG	! Local origin for the coordinates
+	MD2LOC(2)=Y_ORIG
+C
+C ........................................................................
+C  If the LSL qualifier has been set then use the data from the LSLDATA common
+C  block to overwrite specific MD information
+C
+	IF (LSL) THEN
+	  IF (LSL$_HAD_SPHER)	MD2SPH = LSL$_SPHER
+	  IF (LSL$_HAD_PROJ)	MD2PRJ = LSL$_PROJ
+	  IF (LSL$_HAD_SCALE)	MD2SCL = LSL$_SCALE
+	  IF (LSL$_HAD_UNITS)	MD2UNT = LSL$_UNITS
+C
+C	  ................................................................
+C	  note that the height units information was never contained in the
+C	  original IFF file. it was supplied as a qualifier to I2NTF or default
+C	  was metres. It may have been read from the comments, it was junk
+C
+C	  IF (LSL$_HAD_HEIGHT)..
+C
+	ENDIF
+C
+	IF (HAD_CITF93.OR.HAD_CITF96) CALL WRITE_LINE_TO_MH4()
+C
+C ........................................................................
+C mandatory continuation record
+C
+	OK =IS_CONTINUATION(STRING,LENGTH)
+	IF (OK) THEN
+	   OK = READ_CONTINUE('SECHREC')
+	ELSE
+	   CALL LSL_PUTMSG(NTF2I__MINSECH)
+	ENDIF
+	IF (.NOT.OK) GOTO 999
+C
+	IF (HAD_CITF93.OR.HAD_CITF96) CALL WRITE_LINE_TO_MH4()
+C
+C...........................................................................
+C since XMAX,YMAX,XMIN,YMIN are all optional, set them to ridiculous default 
+C values as they will be calculated later
+C
+	NTF$_XMIN = STRING(3:12)
+	NTF$_YMIN = STRING(13:22)
+	NTF$_XMAX = STRING(23:32)
+	NTF$_YMAX = STRING(33:42)
+C
+	XMIN=2147483647
+	XMAX=-2147483648
+	YMIN=2147483647
+	YMAX=-2147483648
+C
+	XMIN_NTF=-1
+	XMAX_NTF=-1
+	YMIN_NTF=-1
+	YMAX_NTF=-1
+C
+C	.......................................................................
+C	read max_min fields from file 
+C
+	IF (NTF$_XMAX.NE.' ') THEN
+	  CALL SETAUX(%REF(NTF$_XMAX),10)
+	  OK = .NOT.RDLONG(XMAX_NTF)
+	ENDIF
+C
+	IF (OK.AND.(NTF$_YMAX.NE.' ')) THEN
+	  CALL SETAUX(%REF(NTF$_YMAX),10)
+	  OK = .NOT.RDLONG(YMAX_NTF)
+	ENDIF
+C
+	IF (OK.AND.(NTF$_XMIN.NE.' ')) THEN
+	  CALL SETAUX(%REF(NTF$_XMIN),10)
+	  OK = .NOT.RDLONG(XMIN_NTF)
+	ENDIF
+C
+	IF (OK.AND.(NTF$_YMIN.NE.' ')) THEN
+	  CALL SETAUX(%REF(NTF$_YMIN),10)
+	  OK = .NOT.RDLONG(YMIN_NTF)
+	ENDIF
+C
+	NTF_RANGE_PRESENT = ((XMIN_NTF.NE.-1).AND.
+     &			     (XMAX_NTF.NE.-1).AND.
+     &			     (YMIN_NTF.NE.-1).AND.
+     &			     (YMAX_NTF.NE.-1))
+C
+C ........................................................................
+C If an OS style map header was requested by the /OS qualifier then we
+C expect the rest of the section header to be in OS format, containing
+C the relevant data
+C
+	IF (OS_DATA) THEN		! interpret the OS style data
+	   IF (VERSION.EQ.2.0) THEN
+	      OK = READ_OSMH_V2()
+	   ELSE
+	      OK = READ_OSMH()
+	   ENDIF
+	ELSE				! or ignore the records
+	   DO WHILE ( IS_CONTINUATION(STRING,LENGTH) )
+	      OK = READ_CONTINUE('SECHREC')
+	      IF (.NOT.OK) GOTO 999
+	      IF (HAD_CITF93.OR.HAD_CITF96) CALL WRITE_LINE_TO_MH4()
+	   END DO
+	ENDIF
+C
+C ........................................................................
+C We need the DIFF_HT_LEN for CITF from the Map Header
+C
+	IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	   MH_CITF_DIVIDER = DIVIDER
+	   MH_CITF_EOR = EOR_MARKER
+	   OK = OSMH_NEW_GETFLD(MH_DIFF_HT_LEN)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(NTF2I__SECHREC,'DIFF_HT_LEN',SEC_REC)
+	      GOTO 999
+	   ENDIF
+	   DIFF_HT_LEN = MH_I_VALUE
+C
+C We also need the scale
+C
+	   OK = OSMH_NEW_GETFLD(MD_SCALE)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(NTF2I__SECHREC,'SCALE',SEC_REC)
+	      GOTO 999
+	   ENDIF
+	   MD2SCL = MH_I_VALUE				! put into common block
+	ENDIF
+C       
+C ........................................................................
+C
+	IF (HAD_CITF93.OR.HAD_CITF96) THEN
+500	   OK = READ_RECORD()
+	   IF (OK) THEN
+	      NTF$_REC_DESCR= STRING(1:2)
+	      IF (NTF$_REC_DESCR.EQ.REC$_EXTREC .OR.
+     &		  NTF$_REC_DESCR.EQ.REC$_MANINFREC .OR.
+     &		  NTF$_REC_DESCR.EQ.REC$_TRANSFORM) THEN
+		 CALL WRITE_LINE_TO_MH4()
+		 DO WHILE ( IS_CONTINUATION(STRING,LENGTH) )
+		    IF (NTF$_REC_DESCR.EQ.REC$_EXTREC) THEN
+		       OK = READ_CONTINUE('EXTREC')
+		       IF (.NOT.OK) GOTO 999
+		    ELSEIF (NTF$_REC_DESCR.EQ.REC$_MANINFREC) THEN
+		       OK = READ_CONTINUE('MANINFREC')
+		       IF (.NOT.OK) GOTO 999
+		    ELSEIF (NTF$_REC_DESCR.EQ.REC$_TRANSFORM) THEN
+		       OK = READ_CONTINUE('TRANSFORM')
+		       IF (.NOT.OK) GOTO 999
+		    ENDIF
+		    CALL WRITE_LINE_TO_MH4()
+		 END DO
+	      ELSE
+		 SEC_REC = SEC_REC - 1		! back up one record
+		 GOTO 999
+	      ENDIF
+	   ELSE
+	      GOTO 999
+	   ENDIF
+	   GOTO 500
+	ENDIF
+C ........................................................................
+C If we're producing a log file, write pertinent information to it
+C
+	IF (OUTPUT) THEN
+	   CALL FLWSTR( 'Section header record:'			)
+	   CALL FLWRTF( '%TSection reference  "%S"',NTF$_SECT_REF	)
+	   CALL FLWRTF( '%TOutput to IFF file "%S"',IFFFILE(:IFFLEN)	)
+	   CALL FLWRTF( '%TXYlen = %I2, XY_unit = %I1 (%S), Z_unit = %I1 (%S)'
+     &		,XYLEN, XY_UNIT, UNITS(XY_UNIT), Z_UNIT, UNITS(Z_UNIT)	)
+	   CALL FLWRTF( '%TXY multiplication = %F',XY_MULT		)
+	   CALL FLWRTF( '%TZ  multiplication = %F', Z_MULT		)
+	   CALL FLWRTF( '%TXY origin = %N, %N, Z datum = %N',
+     &		X_ORIG, Y_ORIG, Z_DATUM					)
+	   IF (NTF_RANGE_PRESENT) THEN
+	      CALL FLWRTF(' %TXmin = %^L%I0, Ymin = %^L%I0',XMIN_NTF,YMIN_NTF )
+	      CALL FLWRTF(' %TXmax = %^L%I0, Ymax = %^L%I0',XMAX_NTF,YMAX_NTF )
+	   ENDIF
+	   IF (SCALE.NE.0) CALL FLWRTF(
+     &		'%TScale = 1:%N%T(this is an extension of NTF)',SCALE	)
+	ENDIF
+C
+C ........................................................................
+C rejoin errors
+C
+999	READ_SECHREC=OK
+	RETURN
+	END

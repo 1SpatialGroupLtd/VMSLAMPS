@@ -1,5 +1,5 @@
 	SUBROUTINE	START_FEATURE
-CDEC$	IDENT	'18AP91'
+CDEC$	IDENT	'07AP93'
 C
 C	Copyright (C)			Laser-Scan Ltd., Cambridge
 C	Created				9-Nov-1989	A.P.Brown
@@ -53,24 +53,43 @@ C AA2IFF feature codes are linear by default, unles the parameter file
 C specifies a symbol FC for single coordinate entries
 C AAGAZ2IFF feature codes are always texts and IS_TEXT .TRUE.
 C
-	IS_SYMBOL = .FALSE.
-C
-C Check FRT file for FC to get symbol GT 
+C Check FRT file for supplied FC's to get GT 
 C
 	IF (HAD_PAR) THEN
+	   IF (DEFAULT_FC) THEN
+	      IF (IS_SYMBOL .OR. IS_TEXT) THEN
+	         FC = 999
+	      ELSE
+	         FC = 0
+	      ENDIF
+	   ENDIF
+C
 	   OK = FRTFND(FC,.FALSE.)
-	   IF (OK) CALL LSL_PUTMSG(AA2I__ERRFNDFC, FC)
+	   IF (OK) THEN				! FC not found
+	      CALL LSL_PUTMSG(AA2I__ERRFNDFC, FC)
+	      GOTO 99
+	   ENDIF
 C
-	   IF (FRTGT.EQ.UNOTYP .OR. FRTGT.EQ.ORITYP .OR.
-     &	       FRTGT.EQ.SCATYP) IS_SYMBOL = .TRUE.
+	   IF (IS_SYMBOL) THEN
+	      IF (FRTGT.NE.UNOTYP .AND. FRTGT.NE.ORITYP .AND.
+     &	          FRTGT.NE.SCATYP .AND. HAD_LOG) CALL LSL_PUTMSG
+     &				(AA2I__NOTSYMBFTR,FC,CODENUM)
 C
-	   IF (IS_TEXT .AND. FRTGT.NE.TEXTYP) 
-     &			CALL LSL_PUTMSG(AA2I__NOTEXTFTR,FC)
+	   ELSEIF (IS_TEXT) THEN
+	      IF (FRTGT.NE.TEXTYP .AND. HAD_LOG) CALL LSL_PUTMSG
+     &				(AA2I__NOTTEXTFTR,FC,CODENUM)
+C
+	   ELSE
+	      IF (FRTGT.NE.LINTYP .AND. FRTGT.NE.CURTYP .AND.
+     &	          FRTGT.NE.STRTYP .AND. FRTGT.NE.ARETYP .AND. 
+     &			HAD_LOG) CALL LSL_PUTMSG
+     &				(AA2I__NOTLINEFTR,FC,CODENUM)
+	   ENDIF
 	ENDIF
 C
 C for texts (set in AAGAZ2IFF), assume we have the digitised position
 C
-	IF ( IS_TEXT ) THEN
+99	IF (IS_TEXT) THEN
 	   CALL LIB$INSV( JUSTIF,   0, 4, ISTAT(3) )
 	   CALL LIB$INSV( STYLE,    4, 2, ISTAT(3) )
 	   CALL LIB$INSV( CATEGORY, 6, 6, ISTAT(3) )

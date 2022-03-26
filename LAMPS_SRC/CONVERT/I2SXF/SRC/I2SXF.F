@@ -1,6 +1,6 @@
 	PROGRAM I2SXF
 C
-CDEC$	IDENT	'10MY90'
+CDEC$	IDENT	'12JL90'
 C
 C	Copyright Laser-Scan Ltd., Cambridge, England.
 C
@@ -20,7 +20,9 @@ C
 C
 C Common Blocks
 C
-	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'	! LSLLIB filename parse
+ 	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'	! LSLLIB message def.
+ 	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'	! LSLLIB filename parse
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'		! LSLLIB output common
 	INCLUDE 'LSL$CMNI2SXF:COMMANDS.CMN'	! command line things
 C
 C Functions called
@@ -29,11 +31,22 @@ C
 	LOGICAL		RDPAR		! read parameter file
 	LOGICAL		FRTINI		! read FRT file
 	INTEGER*4	IFFOPEN		! open IFF file
+	INTEGER*4	FLWOPN		! open SXF file
+	INTEGER*4	FLWCLO		! close SXF file
+	INTEGER*4	PROCESS		! main loop of program
 	LOGICAL		CLOSE_IFF	! close IFF file
+C
+C Local varables
+C
+	INTEGER*4	ILEVEL		! input revision level
+	INTEGER*4	OK		! SXF file status
+	INTEGER*4	IERR		! SXF file status
+	INTEGER*4	ALQ		! SXF file size
 C
 C Initialise LSL libraries
 C
 	CALL LSL_INIT(.TRUE.)
+	ILEVEL = 1			! input revision level
 C
 C Get and decode the command line
 C
@@ -61,16 +74,35 @@ C
 C Open IFF file and SXF file
 C
 	      IF (IFFOPEN(IFFLUN,IFFFIL(:IFFLEN),,HAD_LOG)) THEN
-C ***** open SXF file
+C
+C Set input revision level 1
+C
+ 	      CALL IFFIRV(ILEVEL)
+
+C Open SXF file
+C
+	      OK = FLWOPN(SXFLUN,SXFFIL(:SXFLEN),IERR,ALQ)
+	      IF(OK .NE. LSL__NORMAL) THEN
+		 CALL LSL_PUTMSG(I2SXF__ERRSXFOPN,SXFFIL(:SXFLEN),IERR)
+                 GO TO 9000
+              ENDIF
 C
 C Process the IFF file
 C
-C *****	         CALL PROCESS
+	         OK = PROCESS()
+		 IF (OK .NE. LSL__NORMAL) THEN
+C.. ??		     GO TO 9000
+		 ENDIF
 C
 C Close IFF file and SXF file
 C
 	         CALL CLOSE_IFF
-C ***** close SXF file
+C
+C Close SXF file
+		 IF(FLWCLO(SXFLUN)) THEN
+		   IF (HAD_LOG) CALL LSL_PUTMSG(I2SXF__SXFCLOSED)
+                   GO TO 9000
+		 ENDIF
 	      ENDIF
 	   ENDIF
 	ENDIF

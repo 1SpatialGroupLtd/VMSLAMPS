@@ -1,0 +1,25 @@
+	SUBROUTINE GKDUMM
+C
+CDEC$	IDENT	'26FE91'
+C
+C Copyright Laser-Scan Laboratories Ltd,Cambridge,England
+C
+C Author R.W. Russell				29-May-1986
+C
+C	Dummy routines for GKSLDLIB
+C
+	IMPLICIT NONE
+C
+	ENTRY GPM
+C
+	ENTRY GQMK
+	ENTRY GQPMCI
+C
+	ENTRY GSMK
+	ENTRY GSPMCI
+C
+	ENTRY GSMKSF
+	ENTRY GQMKSF
+C
+	RETURN
+	END

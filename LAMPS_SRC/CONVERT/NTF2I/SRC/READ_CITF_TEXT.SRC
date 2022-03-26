@@ -1,0 +1,359 @@
+	LOGICAL FUNCTION READ_CITF_TEXT
+C
+***     MODULE READ_CITF_TEXT
+***     IDENT	14NO96
+C
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C       Author					S Townrow 20-Nov-1992
+C
+C Description
+C
+C A parallel routine to READ_TEXT which handle CITF text records.
+C
+CMOD1245 always output UPDATE_DATE and UPDATE_TYPE ACs, so that ...
+C  ... LITES2 OPERATIONS can update them.
+C  ... Also suppress marginal text marker AC if `N'		PGH 24-Jun-1993
+CMOD1310 call READ_CITF_ATTRIBS with .FALSE. instead of
+C  NUMPOINTS as the routine takes a logical denoting whether
+C  this is a point feature or not.				 ST 21-Oct-1993
+C
+	IMPLICIT NONE
+C
+C Messages:
+C
+	INCLUDE 'HERE:NTF2IMSG.PAR'
+C
+C Commons:
+C
+	INCLUDE 'CITF.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'FILE_REC.CMN'
+	INCLUDE 'LUNS.PAR'
+	INCLUDE	'STORE_RECORDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE 'LOOKUP.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'
+C
+C Functions:
+C
+	LOGICAL		RDINT		! read an integer
+	LOGICAL		RDLONG
+	LOGICAL		READ_RECORD	! read the next record
+	LOGICAL		READ_NAMPOSTN
+	LOGICAL		READ_CITF_NAMEREC
+	LOGICAL		READ_CITF_COORDATTS
+	LOGICAL		READ_CITF_ATTRIBS
+	INTEGER*4	CVT_DMY_DAY
+C
+C Workspace:
+C
+	BYTE		AC_STR(255)
+	INTEGER*4	T,RET		! various temporaries
+	INTEGER*4	DATE
+	INTEGER*4	YEAR
+	INTEGER*4	MONTH
+	INTEGER*4	DAY
+	INTEGER		NAME_ID
+	INTEGER		I
+	INTEGER		TXTCOORDS	! Max no. coords read by GEOMETRY
+	PARAMETER	(TXTCOORDS=2)
+	REAL	  	TEMP_COORDS(2,TXTCOORDS)
+	INTEGER	  	TMP_I_COORDS(2,TXTCOORDS)
+	REAL		POSN(2)			! IFF coordinates for the text
+	INTEGER		I_POSN(2)		! IFF coordinates for the text
+	LOGICAL		OK			! Success flag
+	INTEGER		TEMP,CATEGORY		! Text category
+	INTEGER		FONT			! The text font
+	INTEGER		DIGPOS			! Digitised location (0-8)
+	INTEGER		NTF_FC			! The NTF feat. code from file
+	INTEGER		FC			! The IFF feature code
+	INTEGER*2	ISTAT(4)		! The FS entry
+	INTEGER*2	HEIGHT			! The text height
+	INTEGER		NUMPOINTS		! Num of points read by GEOMETRY
+	REAL		ACTUAL_HT		! Text height in mm
+	REAL		ROTATE			! The angle of the text
+	INTEGER		TEXTLEN			! The length of text field
+	CHARACTER*99	TEXTSTR			! text string 
+	REAL		COORDS(2,TXTCOORDS)	! Coords read by GEOMETRY
+	INTEGER		GEOM_ID			! ID of geometry record
+C
+C
+C (NTF is limited to 99 characters in a text feature, because the text
+C  length field is only two characters long)
+C
+	INTEGER		LONGWORD
+	INTEGER*2	WORD
+	EQUIVALENCE	(LONGWORD,WORD)
+C
+	INTEGER		IOS
+	INTEGER		INITIAL_RECORD 
+	LOGICAL		JUMPED
+	CHARACTER*6	NTF$_NAME_ID
+	INTEGER		LOOP
+	INTEGER		SERIAL_NO			! serial number
+	CHARACTER*8	UPDATE_DATE			! UPDATE_DATE attribute
+	CHARACTER*1	UPDATE_STAT			! UPDATE_STATUS attrib
+	CHARACTER*255	SPEC				! the SPEC attribute
+	INTEGER		SPECLEN				! length of above
+	CHARACTER*1	MARG
+	CHARACTER*1	PHYS
+	LOGICAL		HAD_UP_DATE
+	LOGICAL		HAD_UP_STAT
+	LOGICAL		HAD_SPEC
+	LOGICAL		HAD_MARG
+	LOGICAL		HAD_PHYS
+C
+	EQUIVALENCE	(TMP_I_COORDS,TEMP_COORDS)
+	EQUIVALENCE	(I_POSN,POSN)
+C
+C ........................................................................
+C Assume success
+C 
+	OK=.TRUE.
+	INITIAL_RECORD = SEC_REC
+	JUMPED = .FALSE.
+C
+C---------------------------------------------------------------------------
+C We are now at the NAMEREC, read it in
+C
+	OK = READ_CITF_NAMEREC(SERIAL_NO,NTF_FC,TEXTSTR,TEXTLEN, UPDATE_DATE,
+     &	     		       UPDATE_STAT,SPEC,SPECLEN,MARG,PHYS,HAD_UP_DATE,
+     &	     		       HAD_UP_STAT,HAD_SPEC,HAD_MARG,HAD_PHYS)
+	IF (.NOT.OK) THEN
+	  CALL WRITEF('%%NTF2I-E-MISC, error reading the NAMREC')
+	  GOTO 999
+	ENDIF
+	REC_IN_HAND = .FALSE.
+C
+C Optionally translate NTF (CITF) FC to IFF FC. Disallow translation from FC
+C 28 to avoid awful complications later on.
+C
+        FC = NTF_FC					! Transfer to IFF copy
+        IF (HAD_FC_LOOKUP) THEN
+          IF (TRN_NTF_28 .AND. (NTF_FC.EQ.28)) THEN	! Disallow?
+	    CALL LSL_PUTMSG( NTF2I__NTF28NOTTRN )	! Yes, warn user
+          ELSE
+            CALL FC_TRANS(%VAL(LUT_BASE_ADDR), NTF_FC, FC) ! Translate
+          ENDIF
+        ENDIF
+C
+C---------------------------------------------------------------------------
+C we are at the NAMPOSTN, read it in
+C
+	OK = READ_NAMPOSTN( 	FONT, HEIGHT, DIGPOS, TEMP_COORDS, ROTATE,
+     &				NUMPOINTS, ACTUAL_HT)
+	IF (.NOT.OK) THEN
+C
+C NAMPOSTN calls READ_CITF_GEOMTERY which has to insert all the per-point
+C attribtues into the CITF common array OUTBUF. TEMP_COORDS is therefore not
+C used and is a dummy argument for compatibility with NTF (ie READ_NAMPOSTN is
+C used for CITF and NTF)
+C
+	  CALL WRITEF('%%NTF2I-E-MISC, error reading the NAMPOSTN record')
+	  GOTO 999
+	ENDIF
+C
+	TMP_I_COORDS(1,1) = OUTBUF(1,1)		! This fills TEMP_COORDS with
+	TMP_I_COORDS(2,1) = OUTBUF(2,1)		! the correct reals as
+	TMP_I_COORDS(1,2) = OUTBUF(1,2)		! TMP_I_COORDS is equivalenced
+	TMP_I_COORDS(2,2) = OUTBUF(2,2)		! onto it.
+C
+C---------------------------------------------------------------------------
+C Deduce the required coordinates - depends on /LOWER_LEFT and DIGPOS
+C
+	IF (LOWER_LEFT.AND.(DIGPOS.NE.0)) THEN
+	   IF (NUMPOINTS.EQ.2) THEN			! Use second coord pair
+	      POSN(1) = TEMP_COORDS(1,2)
+	      POSN(2) = TEMP_COORDS(2,2)
+	      DIGPOS = 0
+	   ELSE						! One coord pair
+	      IF (MD2SCL.EQ.0) THEN			! calculate lower left
+	         CALL LSL_PUTMSG(NTF2I__NOSCALE,SEC_REC)
+	      ELSE
+	         CALL LSL_PUTMSG(NTF2I__NOLEFTPOS,SERIAL_NO)
+	         CALL NEWSTART(	TEMP_COORDS(1,1), TEMP_COORDS(2,1),
+     &				POSN(1), POSN(2), DIGPOS,ROTATE,
+     &				ACTUAL_HT, TEXTLEN, %REF(TEXTSTR))
+	         DIGPOS = 0
+	      ENDIF
+	   ENDIF
+	ELSE
+	   POSN(1) = TEMP_COORDS(1,1)	! Use first coord pair
+	   POSN(2) = TEMP_COORDS(2,1)
+	ENDIF
+C
+C	.......................................................................
+C	work out the Feature Status FC,font and category entries
+C
+	IF ((FC.NE.28).AND.(FC.LT.1000)) THEN   ! invalid text FC
+	   ISTAT(1) = 28			! Set output to 28
+	   TEMP = ISHFT(FC,6)			! Use FC as category
+C
+	ELSEIF ((FC.GE.1000).AND.(FC.LE.1020)) THEN
+	   ISTAT(1) = 28			! set output to 28
+	   CATEGORY = FC - 1000			! work out category
+	   IF ( FONT.GT.3 .OR. FONT.LT.0 ) THEN	! validate font
+	      CALL LSL_PUTMSG(NTF2I__FONT,0,63,FONT,SEC_REC)
+	      FONT = 1
+	   ENDIF
+C
+C	   ....................................................................
+C	   put FONT into bits 4-5 and category into bits 6-11 in ISTAT(3)
+C
+	   TEMP = ISHFT(FONT,4).OR.ISHFT(CATEGORY,6)
+C
+	ELSE
+	   ISTAT(1) = FC
+	   IF ( FONT.GT.63 .OR. FONT.LT.0 ) THEN
+	      CALL LSL_PUTMSG(NTF2I__FONT,0,63,FONT,SEC_REC)
+	      FONT = 1
+	   ENDIF
+	   TEMP = ISHFT(FONT,6)				!use FONT as category
+	ENDIF
+C
+C	......................................................................
+C	work out rest of ISTAT entry
+C
+	ISTAT(2)=0				! only used by LASERAID
+C
+	LONGWORD = DIGPOS			! digitised position bits 0-3
+     &		  .OR.TEMP			! font,category: bits 4-5, 6-11
+     &		  .OR.'8000'X 			! bit 15 set - text feature
+C
+	ISTAT(3) = WORD				! extract the low word of that
+C
+	ISTAT(4)=0				! User dependent data
+C
+C------------------------------------------------------------------------------
+C Got all the data, output the feature.
+C
+	CALL IFFNF(SERIAL_NO,SERIAL_NO)			! NF entry
+	CALL IFFFS(ISTAT)				! FS entry	
+C
+C	.......................................................................
+C
+	CALL IFFTH(HEIGHT)			! Text height
+	OUTBUF(1,1) = I_POSN(1)		  	! WRITE_CITF_COORDS writes the
+	OUTBUF(2,1) = I_POSN(2)  		! coords from OUTBUF
+C
+C Write the feature level attributes - if defined in the ACD
+C
+C UPDATE_DATE
+C
+	T = FEAT_UPDATE_DATE
+!!!!	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_UP_DATE) THEN
+	IF (CITF_FEAT_ACD_DEF(T)) THEN
+	   IF (HAD_UP_DATE) THEN
+	      RET = .FALSE.
+	      IF (CITF_FEAT_ACD_TYPE(T).EQ.ACD_DATATYPE_D) THEN   ! is it a DATE
+	         CALL SETAUX(%REF(UPDATE_DATE(1:4)),4)
+	         OK = RDINT(YEAR)		! check later if it fails
+	         CALL SETAUX(%REF(UPDATE_DATE(5:6)),2)
+	         OK = RDINT(MONTH)		! check later if it fails
+	         CALL SETAUX(%REF(UPDATE_DATE(7:8)),2)
+	         OK = RDINT(DAY)		! check later if it fails
+	         RET = CVT_DMY_DAY(DATE,DAY,MONTH,YEAR)
+	      ENDIF
+	   ELSE
+	      DATE=0		! 17th November 1858 is unset value
+	      RET=.TRUE.	! put into VALUE field
+	   ENDIF
+	   IF (RET) THEN
+	      CALL IFFAC(CITF_FEAT_ACD_CODE(T),DATE)
+	   ELSE
+	      DO 120 I=1,8			! copy it to AC string
+120		 AC_STR(I) = ICHAR(UPDATE_DATE(I:I))
+	      CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,8)
+	   ENDIF
+	ENDIF
+C
+C UPDATE_STAT
+C
+	T = FEAT_UPDATE_STAT
+!!!	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_UP_STAT) THEN
+	IF (CITF_FEAT_ACD_DEF(T)) THEN
+	   IF (HAD_UP_STAT) THEN
+	      AC_STR(1) = ICHAR(UPDATE_STAT(1:1))
+	   ELSE
+	      AC_STR(1) = ICHAR(' ')	! missing value is space
+	   ENDIF
+	   DO 880 I = 2,4
+880	      AC_STR(I) = ICHAR(' ')
+C	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,1)
+	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),AC_STR)
+	ENDIF
+C
+C SPEC
+C
+	T = FEAT_SPEC
+	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_SPEC) THEN
+	   DO 110 I=1,SPECLEN			! copy it to AC
+110	      AC_STR(I) = ICHAR(SPEC(I:I))
+	   IF (SPECLEN.GT.0) THEN
+	      CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,SPECLEN)
+	   ENDIF
+	ENDIF
+C
+C MARGINAL_TEXT
+Cmod  ... suppress marginal text marker AC if `N'		PGH 24-Jun-1993
+C
+	T = FEAT_MARGINAL_TXT
+	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_MARG.AND.(MARG(1:1).NE.'N')) THEN
+	   AC_STR(1) = ICHAR(MARG(1:1))
+	   DO 881 I = 2,4
+881	      AC_STR(I) = ICHAR(' ')
+C	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,1)
+	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),AC_STR)
+	ENDIF
+C
+C PHYS_STAT
+C
+	T = FEAT_PHYS_STAT
+	IF (CITF_FEAT_ACD_DEF(T).AND.HAD_PHYS) THEN
+	   AC_STR(1) = ICHAR(PHYS(1:1))
+	   DO 882 I = 2,4
+882	      AC_STR(I) = ICHAR(' ')
+C	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),0,AC_STR,1)
+	   CALL IFFAC(CITF_FEAT_ACD_CODE(T),AC_STR)
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C read any attribute coordinate records and add the value to the CB array
+C
+	OK=READ_CITF_COORDATTS(NUMPOINTS)
+	IF (.NOT.OK) GOTO 999
+C
+C------------------------------------------------------------------------------
+C read any attribute records
+C
+	OK=READ_CITF_ATTRIBS(.FALSE.)
+	IF (.NOT.OK) GOTO 999
+C
+	NUMPOINTS = 1
+	CALL WRITE_CITF_COORDS(NUMPOINTS,10) ! write coordinates
+	CALL IFFRO(ROTATE)
+	CALL IFFTX(%REF(TEXTSTR(1:TEXTLEN)),TEXTLEN)
+	CALL IFFEF
+C
+C
+C###############################################################################
+C rejoin errors
+C
+999	IF (JUMPED) THEN			!return from whence we came
+	  SEC_REC = INITIAL_RECORD -1
+	  OK = READ_RECORD()
+	  IF (.NOT.OK) THEN
+	    CALL WRITEF('%%NTF2I-E-MISC, unable to return to NAMPOSTN record')
+	    CALL WRITEF('-NTF2I-W-MISC, temporary data files are corrupt')
+	  ENDIF
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C
+	READ_CITF_TEXT=OK
+	RETURN
+	END

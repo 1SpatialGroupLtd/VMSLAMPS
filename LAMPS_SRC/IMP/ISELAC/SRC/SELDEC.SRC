@@ -1,0 +1,932 @@
+        LOGICAL FUNCTION SELDEC
+C
+***     IDENT  11JN87
+***     MODULE SELDEC
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+CMOD	Code that fills out default value range when dealing with
+C	secondary feature code removed.			DEC 11-Jun-1987
+CMOD	To fill out value range when selecting on second AC value
+C							DRC 10-Apr-1987
+CMOD    Attributes reset when new AC is defined		DRC 11-Mar-1987
+C	Bug in single prompt mode corrected		DRC 11-Mar-1987
+CMOD	OPNFIL made a subroutine			ATT 18-Dec-1986
+CMOD	HELP made a function				TJH 05-Dec-1986
+C
+C	Author: A T Timms (but don't blame me !!)
+C
+C	Cobbled together from the unbelievably awful DAMP SELAC & SELDEC
+C	The whole lot ought to be re-written !!!
+C
+C	Routine to decode ISELAC command line.
+C
+C Returns TRUE for SUCCESS and FALSE otherwise
+C NB. only ERRORS return false (and therefore exit ISELAC)
+C
+        IMPLICIT NONE
+C
+C LSL Common blocks
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'		! LSL_STATUS ..
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'		! CMDLIB stuff
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'	! for LSL__EOF 
+	INCLUDE 'LSL$CMNLSL:EXCEPTION.CMN'	! for EXPBUF
+C
+	INCLUDE '($SSDEF)'			! for SS$_NORMAL
+C
+C ISELAC common blocks
+	INCLUDE 'LSL$CMNISELAC:ATTRIB.CMN'
+	INCLUDE 'LSL$CMNISELAC:FILES.CMN'
+	INCLUDE 'LSL$CMNISELAC:ACSKEL.CMN'
+	INCLUDE 'LSL$CMNISELAC:DICTS.CMN'
+	INCLUDE 'LSL$CMNISELAC:ISELACMSG.PAR'	! ISELAC error messages
+C
+C Workspace
+	INTEGER*4    HIGHEST_VALUE	! highest longword value
+	PARAMETER    (HIGHEST_VALUE=2147483520)
+	INTEGER*4    LOWEST_VALUE	! lowest longword value
+	PARAMETER    (LOWEST_VALUE=-2147483648)
+C
+	REAL         RVAL1		! saved REALAR(1)
+	REAL         RVAL2		! REALAR(1) 2nd time around
+        INTEGER*4    COMAND		! position in command dict
+        INTEGER*4    CMDSAV		! saved command number
+        INTEGER*4    OLD_ACNUM		! previous command number
+        INTEGER*4    OTHCMD            	! position in dict OTHER
+        INTEGER*4    DESCR(2)		! string descriptor
+        INTEGER*4    PARNUM             ! param position ACNUM
+	INTEGER*4    IND 
+        INTEGER*4    NUM 		! counter for prompt loop
+        INTEGER*4    NO
+        INTEGER*4    VAL1		! integer equivalent of RVAL1
+        INTEGER*4    I 			! loop variable
+        INTEGER*4    CMDACTSAV		! no. of arguments found
+        INTEGER*4    CMDICTSAV		! no. of int. arguments found
+        INTEGER*4    CMDRCTSAV		! no. of real arguments found
+	INTEGER*2    INTEMP
+        INTEGER*2    PTR		! pos. of buffer decoding ptr.
+        INTEGER*2    PTRSAV		! pos. of 2nd decoding ptr. !!
+	LOGICAL      SECFC
+	LOGICAL      RANGE
+        LOGICAL      ERROR
+        LOGICAL      HADCOM
+        LOGICAL      HADAND
+	LOGICAL      NFFND		
+        LOGICAL      HADNOT
+        LOGICAL      HADPAR		! had ac attribute ?
+	LOGICAL      PRMPT
+	LOGICAL      NEW_ACNAM		! a new AC name ??
+C
+        BYTE         ICH
+C
+C Functions called
+        INTEGER*4	RDCOMM
+        INTEGER*4	RDFILT
+        INTEGER*4	TTRSTR
+        LOGICAL		RDCHS
+        LOGICAL		RDREAL
+C
+C Local functions:
+        INTEGER*4	HELP
+	LOGICAL		PROMPT
+        LOGICAL		SETUP           ! to set up command dicts.
+	LOGICAL		SKELRD
+C
+C Command dictionaries
+        EXTERNAL     OTHER_CMD_TABLE	! ISELAC commands
+        INTEGER*4    OTHER_CMD_TABLE
+        EXTERNAL     AND_CMD_TABLE	! AND etc commands
+        INTEGER*4    AND_CMD_TABLE
+        EXTERNAL     NOT_CMD_TABLE	! NOT etc commands
+        INTEGER*4    NOT_CMD_TABLE
+        EXTERNAL     HELP_CMD_TABLE	! HELP commands
+        INTEGER*4    HELP_CMD_TABLE
+C
+C....................................................................
+C Initialise a few assorted odds and sods
+        SELDEC = .FALSE.	! initial assumption FALIURE !!
+        HADCOM = .FALSE.  	! not yet had a command
+        HADAND = .FALSE.	! not yet had AND
+	PRMPT = .FALSE.		! not yet in prompt mode
+        DESCR(1) = 24		! string length
+        NOMESS = .TRUE.		! no error messages from CMDLIB
+        NEW_ACNAM = .FALSE.	! no new AC name 
+C
+C....................................................................
+        CALL BSLN		! set to beginning of line
+	CALL DCPSAV(PTR)	! save current position before calls
+C 
+C*******************************************************************
+C
+C Check each possible command table in turn
+C
+C*******************************************************************
+C Check for valid AC type name
+        COMAND = RDCOMM(ACNAME)	
+C
+C Valid command within this command table ?
+        IF (COMAND.LT.1) THEN			! we don't have valid AC
+	  IF (ERRNUM.NE.LSL__UNEXPCMD) THEN	! CMDLIB error
+	    CALL LSL_CMDERR			! yes
+	    GOTO 400				! exit ok though 
+	  ENDIF
+	  GOTO 15				! look for command
+	ELSE					! we have a valid AC
+          HADPAR = .FALSE.
+          HADCOM = .TRUE.			! Remember 
+	  INTEMP = INEQUAL			! save any inequality
+          CMDSAV = COMAND			! save command index
+	  CMDACTSAV = CMDACT			! save no. of args
+	  CMDICTSAV = CMDICT			! save no. of int args
+	  CMDRCTSAV = CMDRCT			! save no. of real args
+	  DESCR(1) = 24
+          DESCR(2) = %LOC(SK_NAME(1,CMDSAV))
+C
+C Check we havn't got an ambiguous command. First with ISELAC commands
+	  CALL DCPSAV(PTRSAV)			! save decode ptr pos
+	  CALL DCPSET(PTR)			! reset pointer again
+          COMAND = RDCOMM(OTHER_CMD_TABLE)	! An ISELAC command ?
+C
+C Ambiguous command within this command table ?
+	  IF (ERRNUM.EQ.LSL__AMBIG) THEN
+	    SELDEC = ISELAC__AMBIGCMD		! yes
+	    CALL LSL_PUTMSG(SELDEC,DESCR,CMDFST) ! say so
+	    GOTO 400				! exit ok though 
+	  ENDIF
+C
+          IF (COMAND.GT.0) THEN			! Yes, so ambiguous
+	    SELDEC = ISELAC__AMBIGCMD
+	    CALL LSL_PUTMSG(SELDEC,DESCR,CMDFST)! say so 
+	    GOTO 400				! exit ok
+	  ENDIF
+C
+C Check now with AC ATTRIBUTE names
+	  IF (HADNAM) THEN			! have we had one ?
+	    CALL DCPSET(PTR)			! reset pointer 
+            COMAND = RDCOMM(PARAMS)		! An AC attribute name ?
+C Ambiguous command within this command table ?
+	    IF (ERRNUM.EQ.LSL__AMBIG) THEN
+	      SELDEC = ISELAC__AMBIGCMD		! yes
+	      CALL LSL_PUTMSG(SELDEC,DESCR,CMDFST) ! say so
+	      GOTO 400				! exit ok though 
+	    ENDIF
+C
+            IF (COMAND.GT.0) THEN		! Yes, ambiguous
+	      SELDEC = ISELAC__AMBIGCMD		! say so
+	      CALL LSL_PUTMSG(SELDEC,DESCR,CMDFST)
+	      GOTO 400				! exit ok.
+	    ENDIF
+	  ENDIF
+C
+C Phew !! We have a non ambiguous command 
+	  IF (ACNUM.NE.CMDSAV) NEW_ACNAM = .TRUE.	! 
+	  OLD_ACNUM = ACNUM
+	  ACNUM = CMDSAV
+	  PTR = PTRSAV				! put pointer back
+	  CALL DCPSET(PTR)			! and reset it
+	  NFFND = .FALSE.			! selection by NF &
+          IF (.NOT.SETUP(ACNUM)) GOTO 999 	! set up attribute 
+C				! command table associated with this AC
+          HADNAM = .TRUE.		! now had an AC name
+	  PARNUM = 21
+	  SECFC = .TRUE.
+	  HADSEC = .TRUE.
+C
+C Initialise limit array if new ac name 
+  	  IF (NEW_ACNAM) THEN
+             CALL RESET(OLD_ACNUM,PARNUM,SECFC,.FALSE.)	! reset old AC
+             DO 10 I = 1,21
+                NLIM(I) = 0
+10           CONTINUE
+          ENDIF
+C
+C Let's go away depending upon what else is on the command line.
+C If inequality or integer or real arguments then...
+	  IF (INTEMP.NE.0.OR.CMDICTSAV.NE.0.OR.CMDRCTSAV.NE.0) GOTO 40	
+	  GOTO 20			! go check for ?, reset etc.
+	ENDIF
+C
+C....................................................................
+C No ACNAME found so look for a command 
+15	CALL DCPSET(PTR)			! reset decode pointer
+        COMAND = RDCOMM(OTHER_CMD_TABLE)	! An ISELAC command ?
+C
+        IF (COMAND.LT.1) THEN	
+	  IF (ERRNUM.NE.LSL__UNEXPCMD) THEN	! CMDLIB error
+	    CALL LSL_CMDERR			! yes
+	    GOTO 400				! exit ok though 
+	  ENDIF
+	  GOTO 18				! look for AC attribute
+	ELSE					! Valid command
+          HADPAR = .FALSE.
+          HADCOM = .TRUE.	 		! remember the fact and
+          OTHCMD = COMAND	 		! save command pointer
+	  INTEMP = INEQUAL			! save any inequality
+	  CMDACTSAV = CMDACT			! save no. of args
+	  CMDICTSAV = CMDICT			! save no. of int args
+	  CMDRCTSAV = CMDRCT			! save no. of real args
+C
+C Check we havn't got an ambiguous command with PARAMS command table. 
+	  CALL DCPSAV(PTRSAV)			! save decode ptr pos
+	  DESCR(1) = CMDFST(1)
+C
+	  IF (HADNAM) THEN
+	    CALL DCPSET(PTR)			! reset pointer 
+            COMAND = RDCOMM(PARAMS)		! An AC attribute name ?
+C Ambiguous command within this command table ?
+	    IF (ERRNUM.EQ.LSL__AMBIG) THEN
+	      SELDEC = ISELAC__AMBIGCMD		! yes
+	      CALL LSL_PUTMSG(SELDEC,DESCR,CMDFST) ! say so
+	      GOTO 400				! exit ok though 
+	    ENDIF
+C
+            IF (COMAND.GT.0) THEN		! Yes, ambiguous
+	      SELDEC = ISELAC__AMBIGCMD
+	      CALL LSL_PUTMSG(SELDEC,DESCR,CMDFST)
+	      GOTO 400
+	    ENDIF
+	    CALL DCPSET(PTRSAV)		! put pointer back
+	  ENDIF
+C
+C We are non-ambiguous !!
+	  IF(OTHCMD.EQ.9)THEN 		! secondary feature code
+	    SELDEC = ISELAC__UNRECCMDAC	! 
+	    CALL LSL_PUTMSG(SELDEC,CMDNST)
+	    GOTO 400
+	  END IF
+C
+	  IF (OTHCMD.EQ.8) THEN		! selection by FSN
+C
+	    PARNUM = 22
+	    NFFND = .TRUE.
+	    SECFC = .FALSE.
+	    INTNUM = .TRUE. 	
+	    HADNF = .TRUE.
+	    GOTO 30
+	  END IF
+C
+	  IF (OTHCMD.EQ.6) THEN		! selection by layer
+C
+	    PARNUM = 23
+	    SECFC = .FALSE.
+	    INTNUM = .TRUE. 	
+	    HAD_LAY = .TRUE.
+	    GOTO 30
+	  END IF
+C
+C Branch for other commands in OTHCMD table
+	  GOTO (90,100,110,120,130,30,160,30,30,300),OTHCMD
+        END IF        
+C				
+C....................................................................
+C Is it an attribute of the AC ? If we have had an AC it is possible
+C to have an attribute of that AC.
+18      IF (HADNAM) THEN	
+	  CALL DCPSET(PTR)			! reset decode pointer
+	  COMAND = RDCOMM(PARAMS)		! look in attributes
+C
+C Ambiguous command within this command table ?
+	  IF (ERRNUM.EQ.LSL__AMBIG) THEN	
+	    SELDEC = ISELAC__AMBIGCMD		! yes, say so.
+	    CALL LSL_PUTMSG(SELDEC,CMDFST,CMDAST)
+	    GOTO 400
+	  ENDIF
+C
+	  IF (COMAND.LE.0) THEN  	! No match in and cmd table 
+	    SELDEC = ISELAC__UNRECCMDAC		! Unrecognised CMD
+	    CALL LSL_PUTMSG(SELDEC,CMDNST)	! say so
+            GOTO 400				! and return
+	  ELSE		
+            PARNUM = COMAND		! Ok we have an AC ATTRIBUTE
+	    SECFC = .FALSE.	
+	    NFFND = .FALSE.
+            HADPAR = .TRUE.
+	    INTEMP = INEQUAL
+	    CMDACTSAV = CMDACT			! save no. of args
+	    CMDICTSAV = CMDICT			! save no. of int args
+	    CMDRCTSAV = CMDRCT			! save no. of real args
+	    CALL DCPSAV(PTR)		! save current position 
+C
+C Let's tell the user what we have selected if there's nothing else
+C on command line.
+            DESCR(2) = %LOC(SK_FDID(1,PARNUM,ACNUM))
+C
+	    IF (INTEMP.NE.0.OR.CMDICTSAV.NE.0.OR.CMDRCTSAV.NE.0) GOTO 40
+C
+	    GOTO 30				! look for reset etc
+	  END IF
+C
+C otherwise it is an unrecognised command or command error
+	ELSE
+C
+	  SELDEC = ISELAC__UNRECCMDAC	      
+	  CALL LSL_PUTMSG(SELDEC,CMDNST)
+	  GOTO 400				! and return ok
+	END IF
+C
+C*******************************************************************
+C
+C Now we have a valid command or AC name or AC attribute. See what's
+C next
+C
+C*******************************************************************
+C
+C....................................................................
+C Test for ? which puts us into prompt mode.! look for reset or not
+20	CALL DCPSAV(PTR)
+	IF (RDCHS(ICH)) THEN		! We have just selected an 
+	  SELDEC = ISELAC__ACNAMSEL	! AC name... say so
+	  CALL LSL_PUTMSG(SELDEC,DESCR)
+	  GOTO 400
+	ENDIF
+C
+	IF (ICH.EQ.'?') THEN
+	  PRMPT = .TRUE.			! we are in prompt mode
+          NUM = 0				! initialise counter
+C
+C....................................................................
+C prompt loop here
+25        NUM = NUM+1
+          IF (NUM.GT.SK_NFDS(ACNUM)) THEN
+	    IF (SK_NFDS(ACNUM).GT.0) THEN
+	      PRMPT  = .FALSE.			!  finished prompting
+	      GOTO 400
+	    ENDIF
+	    SK_LPRMPT(24,ACNUM) = '?'
+	    DESCR(1) = 24
+	    DESCR(2) = %LOC(SK_LPRMPT(1,ACNUM))
+	    CALL TTRSTR(,,DESCR)
+	    CALL BSLN
+	    IF (RDCHS(ICH)) THEN
+              PRMPT = .FALSE.
+	      GOTO 400
+	    ELSE
+C
+	      IF (.NOT.PROMPT(21,ACNUM)) THEN
+	        GOTO 25
+	      ELSE
+	        SECFC = .TRUE.
+	        HADSEC = .TRUE.
+	        PRMPT  = .FALSE.
+	        PARNUM = 21
+	        GOTO 40
+	      ENDIF
+	    ENDIF
+          END IF
+26        SK_FPRMPT(26,NUM,ACNUM) = '?'
+	  SK_FPRMPT(27,NUM,ACNUM) = ' '
+	  DESCR(1) = 27
+	  DESCR(2) = %LOC(SK_FPRMPT(1,NUM,ACNUM))
+	  CALL TTRSTR(,,DESCR)
+	  CALL BSLN
+          IF (RDCHS(ICH)) GOTO 25
+C
+          IF (.NOT.PROMPT(NUM,ACNUM)) THEN
+	    GOTO 26
+          ELSE
+            PARNUM = NUM
+	    SECFC = .FALSE.
+	    NFFND = .FALSE.
+            GOTO 40
+          END IF
+	ELSE
+	  CALL DCPSET(PTR)
+	END IF
+C
+C....................................................................
+C Look for RESET or NOT
+30	CALL DCPSAV(PTR)
+        COMAND = RDCOMM(NOT_CMD_TABLE)
+	IF (COMAND.LE.0) THEN		! We havn't got RESET or NOT
+	  CALL DCPSET(PTR)
+C
+C If we have had the LAYER of FSN command we should either
+C have an integer argument or and inequality or reset so....
+	  IF (HADCOM.AND.CMDACTSAV.LT.1.AND.INTEMP.EQ.0.AND..NOT.PRMPT)
+     &	  THEN	
+	    SELDEC = 	ISELAC__MISSVALCMD		! we havn't
+	    CALL LSL_PUTMSG(SELDEC)			! say so
+	    GOTO 400					! and exit
+	  ENDIF
+C
+C Otherwise...if we have had an AC attribute and nothing else (which we
+C have if we have got here ) then say so.
+	  IF (HADPAR) THEN
+            DESCR(2) = %LOC(SK_FDID(1,PARNUM,ACNUM))
+	    SELDEC = ISELAC__ATTRNAMSEL	
+	    CALL LSL_PUTMSG(SELDEC,DESCR)	! say so
+	    NLIM(PARNUM) = NLIM(PARNUM) + 1	! add one to limits
+	    NO=NLIM(PARNUM)
+C
+C Check if we are dealing with integer or real
+	    IND = SK_FDIND(PARNUM,ACNUM)	! AC Attributes
+	    INTNUM = .NOT.BTEST(IND,0)	! Integer or Real
+C
+C And then set values to min and max range values
+            IF (INTNUM)THEN
+               ULIM(NO,PARNUM) = FLOAT(SK_HIIVAL(PARNUM,ACNUM)) 
+	       LLIM(NO,PARNUM) = FLOAT(SK_LOIVAL(PARNUM,ACNUM)) 
+	    ELSE
+	       ULIM(NO,PARNUM) = SK_HIRVAL(PARNUM,ACNUM) 
+	       LLIM(NO,PARNUM) = SK_LORVAL(PARNUM,ACNUM) 
+	    ENDIF
+C
+            HADUP(NO,PARNUM) = .TRUE.
+            HADLOW(NO,PARNUM) = .TRUE.
+C
+	    GOTO 400				! and exit
+	  ENDIF
+C
+C	  IF(SECFC)THEN
+C	    IF(HAD_INT(ACNUM))THEN
+C               ULIM(NO,PARNUM) = FLOAT(SK_ACHIIVAL(ACNUM)) 
+C	       LLIM(NO,PARNUM) = FLOAT(SK_ACLOIVAL(ACNUM)) 
+C	    ELSE
+C	       ULIM(NO,PARNUM) = SK_ACHIRVAL(ACNUM) 
+C	       LLIM(NO,PARNUM) = SK_ACLORVAL(ACNUM) 
+C	    ENDIF
+C            HADUP(NO,PARNUM) = .TRUE.
+C            HADLOW(NO,PARNUM) = .TRUE.
+C	    GOTO 400
+C	  ENDIF
+C	  
+C see what else we have got !
+	  GOTO 40			! process command argument
+C
+	ELSE				! We have got RESET or NOT
+C
+	  CALL DCPSAV(PTR)
+C
+	  IF (COMAND.NE.2) THEN
+	    IF (HADAND) THEN
+	      SELDEC = ISELAC__INVALRESET	      
+	      CALL LSL_PUTMSG(SELDEC)
+	      GOTO 400
+	    END IF
+	    GOTO 170			! RESET
+	  ELSE
+	    HADNOT = .TRUE.
+	    IF (CMDACT.EQ.0) THEN	! No arguments ! not allowed
+	      SELDEC = 	ISELAC__MISSVALCMD		! we havn't
+	      CALL LSL_PUTMSG(SELDEC)			! say so
+	      GOTO 400
+	    END IF 
+	  END IF 
+	END IF
+C
+C....................................................................
+C Add one to the number of limits
+40	NO = NLIM(PARNUM)+1
+	IF (NO.GT.PAR_NLIM) THEN	! If greater than the max 
+	  SELDEC = ISELAC__TOOMANLIM	! allowed then moan
+	  CALL LSL_PUTMSG(SELDEC)
+	  GOTO 400
+	END IF
+C
+	NLIM(PARNUM) = NO		! new no.of limits.
+C
+C
+	IF ((NFFND.AND.PARNUM.EQ.22).OR.(HAD_LAY.AND.PARNUM.EQ.23)) THEN
+	  VAL1 = INTARG(1)		! FSN or LAYER selection
+C
+C Check that we will not get integer overflow !!
+	  IF (REALAR(1).GT.HIGHEST_VALUE.OR.
+     &        REALAR(1).LT.LOWEST_VALUE) THEN
+	      IF(SECFC)THEN
+	        DESCR(1) = 24
+                DESCR(2) = %LOC(SK_NAME(1,ACNUM))
+	        SELDEC = ISELAC__INVACVALUE
+	        CALL LSL_PUTMSG(SELDEC,DESCR)
+	        NLIM(PARNUM)=NLIM(PARNUM)-1
+	        GOTO 400
+	      ELSE
+	        DESCR(1) = 24
+                DESCR(2) = %LOC(SK_FDID(1,PARNUM,ACNUM))
+	        SELDEC = ISELAC__INVVALSPEC
+	        CALL LSL_PUTMSG(SELDEC,DESCR)
+	        NLIM(PARNUM)=NLIM(PARNUM)-1
+	        GOTO 400
+	      ENDIF
+	  ENDIF
+C
+	  IF (HADAND.OR.HADNOT) VAL1 = INT(REALAR(1))
+	  GOTO 41
+	END IF
+C
+        IF (SECFC) THEN			! Secondary FC (height etc..)
+          IND = SK_ACIND(ACNUM)		! Check if we're dealing with
+          INTNUM = .NOT.BTEST(IND,0)	! integer or reals
+          IF(INTNUM) THEN		! Integer
+C
+C Check that we will not get integer overflow !!
+	    IF(REALAR(1).GT.HIGHEST_VALUE.OR.
+     &         REALAR(1).LT.LOWEST_VALUE) THEN
+	       IF(SECFC)THEN
+	         DESCR(1) = 24
+                 DESCR(2) = %LOC(SK_NAME(1,ACNUM))
+	         SELDEC = ISELAC__INVACVALUE
+	         CALL LSL_PUTMSG(SELDEC,DESCR)
+	         NLIM(PARNUM)=NLIM(PARNUM)-1
+	         GOTO 400
+	       ELSE
+	         DESCR(1) = 24
+                 DESCR(2) = %LOC(SK_FDID(1,PARNUM,ACNUM))
+	         SELDEC = ISELAC__INVVALSPEC
+	         CALL LSL_PUTMSG(SELDEC,DESCR)
+	         NLIM(PARNUM)=NLIM(PARNUM)-1
+	         GOTO 400
+	       ENDIF
+	     ELSE
+               VAL1 = INT(REALAR(1))
+	     ENDIF
+          ELSE
+             RVAL1 = REALAR(1)		! Real
+          ENDIF
+          GOTO 41
+	ELSE
+	  IND = SK_FDIND(PARNUM,ACNUM)	! AC Attributes
+	  INTNUM = .NOT.BTEST(IND,0)	! Integer or Real
+	  IF (INTNUM) THEN
+C
+C Check that we will not get integer overflow !!
+	  IF (REALAR(1).GT.HIGHEST_VALUE.OR.
+     &        REALAR(1).LT.LOWEST_VALUE) THEN
+	       IF(SECFC)THEN
+	         DESCR(1) = 24
+                 DESCR(2) = %LOC(SK_NAME(1,ACNUM))
+	         SELDEC = ISELAC__INVACVALUE
+	         CALL LSL_PUTMSG(SELDEC,DESCR)
+	         NLIM(PARNUM)=NLIM(PARNUM)-1
+	         GOTO 400
+	       ELSE
+	         DESCR(1) = 24
+                 DESCR(2) = %LOC(SK_FDID(1,PARNUM,ACNUM))
+	         SELDEC = ISELAC__INVVALSPEC
+	         CALL LSL_PUTMSG(SELDEC,DESCR)
+	         NLIM(PARNUM)=NLIM(PARNUM)-1
+	         GOTO 400
+	       ENDIF
+	    ENDIF
+            VAL1 = INT(REALAR(1))	! integer
+          ELSE
+	    RVAL1 = REALAR(1)		! real
+	  END IF
+        END IF
+C
+C....................................................................
+C Test for ':' ie. specific range
+41	IF (INEQUAL.EQ.0.AND.INTEMP.EQ.0) THEN	! no inequalities
+	  IF (RDCHS(ICH)) GOTO 37		! check for something
+	  IF (ICH.EQ.':') THEN			! we have a ':'
+	    IF (RDCHS(ICH)) THEN		! no so moan
+	      SELDEC = ISELAC__UNEXPEOCL
+	      CALL LSL_PUTMSG(SELDEC)
+	      GOTO 400
+	    ENDIF
+C
+	    CALL BSCH				! backspace 1 character
+	    IF (RDREAL(RVAL2)) GOTO 400		! Nothing read
+C
+   	    IF (INTNUM) THEN
+C
+C Check that we will not get integer overflow !!
+	  IF(RVAL2.GT.HIGHEST_VALUE.OR.
+     &       RVAL2.LT.LOWEST_VALUE) THEN
+	       IF(SECFC)THEN
+	         DESCR(1) = 24
+                 DESCR(2) = %LOC(SK_NAME(1,ACNUM))
+	         SELDEC = ISELAC__INVACVALUE
+	         CALL LSL_PUTMSG(SELDEC,DESCR)
+	         NLIM(PARNUM)=NLIM(PARNUM)-1
+	         GOTO 400
+	       ELSE
+	         DESCR(1) = 24
+                 DESCR(2) = %LOC(SK_FDID(1,PARNUM,ACNUM))
+	         SELDEC = ISELAC__INVVALSPEC
+	         CALL LSL_PUTMSG(SELDEC,DESCR)
+	         NLIM(PARNUM)=NLIM(PARNUM)-1
+	         GOTO 400
+	       ENDIF
+	     ENDIF
+C
+             IF(INT(RVAL2).GE.VAL1)THEN
+               LLIM(NO,PARNUM) = FLOAT(VAL1)
+               ULIM(NO,PARNUM) = INT(RVAL2)
+             ELSE
+               LLIM(NO,PARNUM) = INT(RVAL2)
+               ULIM(NO,PARNUM) = FLOAT(VAL1)
+             ENDIF
+	     GOTO 39
+C
+  	    ELSE
+	      IF (RVAL2.GE.RVAL1) THEN
+	        LLIM(NO,PARNUM) = RVAL1
+	        ULIM(NO,PARNUM) = RVAL2
+	      ELSE
+	        LLIM(NO,PARNUM) = RVAL2
+	        ULIM(NO,PARNUM) = RVAL1
+	      END IF
+C
+39	      HADLOW(NO,PARNUM) = .TRUE.
+              HADUP (NO,PARNUM) = .TRUE.
+	      GOTO 65
+            END IF
+          ELSE					! only one value so
+37	    CALL DCPSET(PTR)
+   	    IF (INTNUM) THEN
+              LLIM(NO,PARNUM) = VAL1
+              ULIM(NO,PARNUM) = VAL1
+	    ELSE
+              LLIM(NO,PARNUM) = RVAL1
+              ULIM(NO,PARNUM) = RVAL1
+	    END IF
+C
+	    HADLOW(NO,PARNUM) = .TRUE.
+            HADUP (NO,PARNUM) = .TRUE.
+	    GOTO 65				! Check validity
+          END IF
+	ELSE
+	  IF (INEQUAL.EQ.0) INEQUAL = INTEMP
+        END IF
+C
+C....................................................................
+C Set up limits according to type of inequality
+47      GOTO (43,44,46,48,50,42)INEQUAL+1
+C
+C....................................................................
+C
+42      HADNOT = .TRUE.
+C
+C....................................................................
+C  '='
+43	IF (INTNUM) THEN
+	  ULIM(NO,PARNUM) = FLOAT(VAL1)
+	  LLIM(NO,PARNUM) = FLOAT(VAL1)
+	ELSE
+	  ULIM(NO,PARNUM) = RVAL1
+	  LLIM(NO,PARNUM) = RVAL1
+	END IF
+        HADLOW(NO,PARNUM) = .TRUE.
+        HADUP (NO,PARNUM) = .TRUE.
+        GOTO 70
+C
+C....................................................................
+C  '>'
+44      IF (INTNUM)LLIM(NO,PARNUM) = FLOAT(VAL1+1)
+	IF (.NOT.INTNUM)LLIM(NO,PARNUM) = RVAL1+.001
+        HADLOW(NO,PARNUM) = .TRUE.
+        HADUP (NO,PARNUM) = .FALSE.
+        GOTO 70
+C
+C....................................................................
+C '>='
+46      IF (INTNUM)LLIM(NO,PARNUM) = FLOAT(VAL1)
+	IF (.NOT.INTNUM)LLIM(NO,PARNUM) = RVAL1
+        HADLOW(NO,PARNUM) = .TRUE.
+        HADUP (NO,PARNUM) = .FALSE.
+        GOTO 70
+C
+C....................................................................
+C '<'
+48      IF (INTNUM)ULIM(NO,PARNUM) = FLOAT(VAL1-1)
+	IF (.NOT.INTNUM)ULIM(NO,PARNUM) = RVAL1-.001
+        HADUP (NO,PARNUM) = .TRUE.
+        HADLOW(NO,PARNUM) = .FALSE.
+        GOTO 70
+C
+C....................................................................
+C '<='
+50      IF (INTNUM)ULIM(NO,PARNUM) = FLOAT(VAL1)
+	IF (.NOT.INTNUM)ULIM(NO,PARNUM) = RVAL1
+        HADUP (NO,PARNUM) = .TRUE.
+        HADLOW(NO,PARNUM) = .FALSE.
+        GOTO 70
+C
+C....................................................................
+C Now check validity of values, and if necessary fill in missing upper 
+C or lower limits
+65      IF (INEQUAL.EQ.5) HADNOT = .TRUE.
+C70	IF (SECFC) GOTO 76
+C
+C Check FSNs
+70	IF (NFFND.AND.PARNUM.EQ.22) THEN
+	  IF ((ULIM(NO,PARNUM).GT.65535).OR.(LLIM(NO,PARNUM).LT.0)) THEN
+	    ULIM(NO,PARNUM) = 0
+	    LLIM(NO,PARNUM) = 0
+	    NLIM(PARNUM) = 0
+	    NFFND = .FALSE.
+	    SELDEC = ISELAC__INVALFSN
+	    CALL LSL_PUTMSG(SELDEC)
+	    GOTO 400
+	  ENDIF
+	  GOTO 76
+	ENDIF
+C
+C and LAYERs
+	IF (HAD_LAY.AND.PARNUM.EQ.23) THEN
+	  IF ((ULIM(NO,PARNUM).GT.32767).OR.(LLIM(NO,PARNUM).LT.0)) THEN
+	    ULIM(NO,PARNUM) = 0
+		    LLIM(NO,PARNUM) = 0
+	    NLIM(PARNUM) = 0
+	    HAD_LAY = .FALSE.
+	    SELDEC = ISELAC__INVALLAY
+	    CALL LSL_PUTMSG(SELDEC)
+	    GOTO 400
+	  ENDIF
+	  GOTO 76
+	ENDIF
+C
+	IF(SECFC.AND.PARNUM.EQ.21)THEN
+	  IF(INTNUM)THEN
+            SK_HIIVAL(PARNUM,ACNUM)=SK_ACHIIVAL(ACNUM) 
+	    SK_LOIVAL(PARNUM,ACNUM)=SK_ACLOIVAL(ACNUM)
+	  ELSE
+	    SK_HIRVAL(PARNUM,ACNUM)=SK_ACHIRVAL(ACNUM) 
+	    SK_LORVAL(PARNUM,ACNUM)=SK_ACLORVAL(ACNUM) 
+	  ENDIF
+	  DESCR(1) = 24
+          DESCR(2) = %LOC(SK_NAME(1,ACNUM))
+	  GOTO 71
+	ENDIF
+C
+        RANGE = BTEST(IND,2)
+	IF (.NOT.RANGE) GOTO 76
+	DESCR(1) = 24
+        DESCR(2) = %LOC(SK_FDID(1,PARNUM,ACNUM))
+71      IF (HADUP(NO,PARNUM)) THEN
+  	  IF (INTNUM) THEN   
+            IF ((ULIM(NO,PARNUM).GT.SK_HIIVAL(PARNUM,ACNUM)).OR.
+     &          (ULIM(NO,PARNUM).LT.SK_LOIVAL(PARNUM,ACNUM))) GOTO 72 
+	  ELSE
+	    IF ((ULIM(NO,PARNUM).GT.SK_HIRVAL(PARNUM,ACNUM)).OR.
+     &          (ULIM(NO,PARNUM).LT.SK_LORVAL(PARNUM,ACNUM))) GOTO 72
+	  END IF
+	  GOTO 73
+72	  SELDEC = ISELAC__INVVALSPEC
+	  CALL LSL_PUTMSG(SELDEC,DESCR)
+          GOTO 75
+        ELSE
+C
+C fill in upper range
+          IF (INTNUM)ULIM(NO,PARNUM) = FLOAT(SK_HIIVAL(PARNUM,ACNUM))
+	  IF (.NOT.INTNUM)ULIM(NO,PARNUM) = SK_HIRVAL(PARNUM,ACNUM)
+          HADUP(NO,PARNUM) = .TRUE.
+        END IF
+73      IF (HADLOW(NO,PARNUM)) THEN
+          IF (INTNUM) THEN
+            IF (LLIM(NO,PARNUM).LT.SK_LOIVAL(PARNUM,ACNUM).OR.
+     &          LLIM(NO,PARNUM).GT.SK_HIIVAL(PARNUM,ACNUM))GOTO 74
+            IF (ULIM(NO,PARNUM).GT.SK_HIIVAL(PARNUM,ACNUM).OR.
+     &          ULIM(NO,PARNUM).LT.SK_LOIVAL(PARNUM,ACNUM))GOTO 74
+	  ELSE
+	    IF (LLIM(NO,PARNUM).LT.SK_LORVAL(PARNUM,ACNUM).OR.
+     &          LLIM(NO,PARNUM).GT.SK_HIRVAL(PARNUM,ACNUM))GOTO 74
+            IF (ULIM(NO,PARNUM).GT.SK_HIRVAL(PARNUM,ACNUM).OR.
+     &          ULIM(NO,PARNUM).LT.SK_LORVAL(PARNUM,ACNUM))GOTO 74
+	  END IF
+	  GOTO 76
+	ELSE
+C
+C....................................................................
+C Fill in lower range
+	  IF (INTNUM)LLIM(NO,PARNUM) = FLOAT(SK_LOIVAL(PARNUM,ACNUM))
+	  IF (.NOT.INTNUM)LLIM(NO,PARNUM) = SK_LORVAL(PARNUM,ACNUM)
+	  HADLOW(NO,PARNUM) = .TRUE.
+	END IF
+	GOTO 76
+C
+74	IF(SECFC)THEN
+	  SELDEC = ISELAC__INVACVALUE
+	  CALL LSL_PUTMSG(SELDEC,DESCR)
+	ELSE
+	  SELDEC = ISELAC__INVVALSPEC
+	  CALL LSL_PUTMSG(SELDEC,DESCR)
+	ENDIF
+C
+75	IF (INTNUM) CALL WRITEF('Valid range for %S is %I6 to %I6',
+     &                  DESCR,SK_LOIVAL(PARNUM,ACNUM),SK_HIIVAL(PARNUM,
+     &                  ACNUM))
+	IF (.NOT.INTNUM) CALL WRITEF('Valid range for %S is %F to %F',
+     &      		DESCR,SK_LORVAL(PARNUM,ACNUM),SK_HIRVAL(PARNUM,	
+     &   	        ACNUM))			
+	HADLOW(NO,PARNUM) = .FALSE.
+        HADUP(NO,PARNUM) = .FALSE.
+	LLIM(NO,PARNUM) = 0
+	ULIM(NO,PARNUM) = 0
+	NLIM(PARNUM) = 0
+	IF (PRMPT) GOTO 26
+	GOTO 400
+C
+C....................................................................
+C Save the NOT if we have had one
+76      EXCLUDE(NO,PARNUM) = HADNOT	
+        HADNOT = .FALSE.
+C
+C....................................................................
+C Check for AND between values
+	IF (RDCHS(ICH)) THEN			! anything else ?
+	  IF (PRMPT) GOTO 25			! no
+          GOTO 400
+        ENDIF
+C
+C We have something
+        CALL BSCH
+        HADAND = .FALSE.
+        CALL DCPSAV(PTR)
+        COMAND = RDCOMM(AND_CMD_TABLE)
+C
+        IF (COMAND.LE.0) THEN			! If not AND moan
+          CALL DCPSET(PTR)
+	  IF (PRMPT) GOTO 25
+	  SELDEC = ISELAC__UNEXPEOCL
+	  CALL LSL_PUTMSG(SELDEC,CMDNST)
+	  GOTO 400
+        ELSE
+C
+	  CALL DCPSAV(PTR)
+	  IF (CMDACT.NE.1) THEN
+	    IF (RDCHS(ICH)) THEN
+	      SELDEC = ISELAC__UNEXPEOCL
+	      CALL LSL_PUTMSG(SELDEC)
+	      GOTO 400
+	    ELSE
+	      CALL BSCH
+	    ENDIF
+	  ENDIF
+          HADAND = .TRUE.
+	  INTEMP = INEQUAL
+	  HADPAR = .FALSE.
+	  GOTO 30
+        END IF
+C
+C*******************************************************************
+C
+C Process COMMANDS
+C 
+C*******************************************************************
+C From (input file)
+90	CALL OPNFIL(INLUN,1) 
+        IF (INFILOK) HADFROM = .TRUE.
+        GOTO 400			! success
+C
+C....................................................................
+C To (output file)
+100	CALL OPNFIL(OUTLUN,2)
+	IF (OUTFILOK) HADTO = .TRUE.
+        GOTO 400			! success
+C
+C....................................................................
+C Go (start processing)
+110	HADGO = .TRUE.
+        GOTO 400			! success
+C
+C....................................................................
+C Show (AC selections)
+120    	CALL SHOW(ACNUM)
+        GOTO 400			! success
+C
+C....................................................................
+C Help  Check for HELP qualifier
+130    CALL DCPSAV(PTR)
+       COMAND = RDCOMM(HELP_CMD_TABLE)
+       IF (COMAND.LE.0) THEN
+	 NO=0
+	 CALL DCPSET(PTR)
+       ELSE
+	 NO=COMAND 
+       END IF
+C
+       IF ((COMAND.EQ.2).AND.(.NOT.HADNAM)) THEN
+	 CALL TTWSTR(' ')
+	 CALL TTWSTR('HELP ATTRIBUTES unavailable - AC not yet defined')
+	 CALL TTWSTR(' ')
+	 GOTO 400
+       END IF
+C
+       SELDEC=HELP(NO)
+C
+       GOTO 400			! success
+C
+C....................................................................
+C Exit
+160    DOEXIT=.TRUE.
+       GOTO 400			! success
+C
+C....................................................................
+C Reset remove AC selections
+170    CALL RESET(ACNUM,PARNUM,SECFC,.TRUE.)
+       GOTO 400
+C
+C....................................................................
+C Skeleton file
+300    IF(.NOT.SKELRD())GOTO 999
+C
+C....................................................................
+C Success returns here
+400    SELDEC = SS$_NORMAL		! set function return ok
+C
+C....................................................................
+C Faliure here.
+999    RETURN
+       END      
+

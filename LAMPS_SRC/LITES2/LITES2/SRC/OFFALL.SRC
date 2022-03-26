@@ -1,0 +1,297 @@
+	SUBROUTINE OFFALL(ARC)
+C
+***	IDENT	10SE92
+***	MODULE	OFFALL
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					RJH	03-MAY-1985
+C
+C Description
+C
+C    This subroutine is part of LITES2, and its purpose is to offset a
+C whole or part feature, by offsetting the vertices and end points of 
+C the original whole or part feature. For part features, the end points
+C specified on the original feature need not be vertices.
+C    Note that OFFALL (pronounced awful) is an appropriate name for this
+C subroutine.
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+C
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/		! auxiliary array definitions
+***	PARAMETER/CMN:PACK/		! external pack definitions
+***     PARAMETER/CMN:START/		! digitising procedures
+C
+C Common Blocks
+C
+***	COMMON/CMN:CSTRCT/
+***	COMMON/CMN:DEFINE/
+***	COMMON/CMN:MASTER/
+***	COMMON/CMN:OIIH/		! output item data
+***	COMMON/CMN:OPTION/
+***	COMMON/CMN:STRIKE/		! found objects, etc.
+***	COMMON/CMN:VARIAT/
+C
+C argument
+	LOGICAL		ARC		! true if offsetting a circle arc
+C
+C Local Variables
+C
+	INTEGER*4	VRT1		! first vertex
+	INTEGER*4	VRT2		! last vertex
+	INTEGER*4	REMVRT		! remaining vertices
+	INTEGER*4	BUFVRT		! vertices to process
+	INTEGER*4	FLAG		! visibility flag
+	INTEGER*4	I		! counter
+	REAL		SAVOFF(2,2)	! stored offset line
+	REAL		EXTSEG(2,2)	! first or last segment
+	LOGICAL*1	FSTPT		! first point ?
+	LOGICAL*1	LASTPT		! last point ?
+	LOGICAL*1	HADOFF		! had on offset segment ?
+	REAL		AUX(AUXLEN)	! auxiliary array for arcs
+	INTEGER		OPER
+	REAL		Z		! original height of point
+	LOGICAL		FAR_MOVE
+C
+C deal with circle arcs first
+	IF (ARC) THEN
+	   CALL CPYPAK(AUXLEN,IHAUX,AUX)
+C
+C alter radius
+	   AUX(RADI) = AUX(RADI) + OFFDIS
+C
+C and create COI...
+	   CALL CREARC(2,COIPAK(PAKGT),AUX,ZOPT.AND.IHC_DEFINED,IHCOEFFS)
+C
+C and that's it
+	   GOTO 100
+	ENDIF
+C
+C Initialise flags
+C
+	FSTPT = .TRUE.
+	LASTPT = .FALSE.
+	HADOFF = .FALSE.
+	OPER = DEFINITION(P_OFFSET)
+	IF (OPER.EQ.0) OPER = DEFINITION(P_OTHER)
+	FAR_MOVE = .FALSE.
+	FAR_MOVE = DEFINITION(P_FAR_MOVE) .NE. 0 .AND.
+     &	              OFFDIS .GT. FAR_MOVE_IFF
+
+C Find first and last vertices, and if first point is not a vertex,
+C set it up in an extra segment which will be offset first.
+C
+	VRT1 = IMVRT			! first attempt for first vertex
+	IF (.NOT. IMNVRT) THEN		! first point not a vertex
+	   EXTSEG(1,1) = IMCXY(1)	! first point of extra segment
+	   EXTSEG(2,1) = IMCXY(2)
+	   CALL PUTLNG(IMCXY(3),Z)	! its height
+	   VRT1 = VRT1 + 1		! increment first vertex no.
+	ENDIF
+	VRT2 = IHVRT			! last vertex
+C
+C Find initial value for remaining vertices
+C
+	REMVRT = VRT2 - VRT1 + 1
+C
+C While some vertices remain, offset them
+C
+10	IF (REMVRT .LE. 0) GO TO 30
+C
+C Get next lot of vertices
+C
+	CALL GETVRT(IHPAK,VRT1,VRT2)
+C
+C Set the number of vertices to be processed in the current buffer
+C
+	IF (RITOP .LT. REMVRT) THEN
+	   BUFVRT = RITOP - 1
+	ELSE
+	   BUFVRT = RITOP
+	ENDIF
+C
+C Offset first point if it wasn't on a vertex and not already done
+C
+	IF (FSTPT .AND. .NOT. IMNVRT) THEN
+	   EXTSEG(1,2) = RIXY(1,1)	! second point of extra segment
+	   EXTSEG(2,2) = RIXY(2,1)
+C
+C no attributes for this point
+	   CONATT = 0
+C
+C perhaps add Z value
+	   IF (ZOPT) CALL ADDZ(Z,MXATTR,CONATT,COATTC,COATTV)
+C
+C update attribute arrays for OFFSET to use
+	   CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+	   IF (FAR_MOVE)
+     &	      	   CALL LSTARR(DEFINITION(P_FAR_MOVE),CONATT,
+     &	                       COATTC,COATTV,.TRUE.)
+C
+	   CALL OFFSET(SAVOFF,EXTSEG,FSTPT,LASTPT,HADOFF) ! add offset pt
+	   FSTPT = .FALSE.		! done first point
+	ENDIF
+C
+C Offset each vertex of the current lot in turn
+C
+	DO 20 I=1, BUFVRT
+C
+C Check if point is invisible
+C
+	   FLAG = RIFLG(I)
+	   IF ((IAND(FLAG,START_VISIBLE) .EQ. 0) .AND. 
+     &	      (.NOT. FSTPT)) THEN
+	      CALL FLUSH(1)
+	      OIENDS = 0
+	      FSTPT = .TRUE.
+	   ENDIF
+C
+C ignore duplicated points
+	   IF (I.LT.BUFVRT.AND.RIXY(1,I).EQ.RIXY(1,I+1).AND.
+     &	                       RIXY(2,I).EQ.RIXY(2,I+1)) GOTO 20
+C
+C Deal with the last vertex of the feature as a special case, as it can 
+C either be on or between vertices. Note that we have to deal with bad 
+C original features, i.e. those with only one point or whose points all 
+C have the same coordinates. This can only occur when offsetting whole 
+C features, and in such cases, the offset feature will consist of only 
+C one point. Also, if the last point is not on a vertex, this implies 
+C that the first point must already be done.
+C
+	   IF ((VRT1+I-1) .EQ. VRT2) THEN	! last vertex
+C
+C get attributes for this point
+	      CALL ARRARR(RINATT,RIATTC,RIATTV(1,I),
+     &	                         CONATT,COATTC,COATTV)
+C
+C update attribute arrays for OFFSET to use
+	      CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+	      IF (FAR_MOVE)
+     &	            CALL LSTARR(DEFINITION(P_FAR_MOVE),CONATT,
+     &	                               COATTC,COATTV,.TRUE.)
+C
+	      IF (IHNVRT) THEN			! last pt. is vertex
+		 LASTPT = .TRUE.
+		 IF (FSTPT .OR. (.NOT. HADOFF)) THEN	! bad feature
+C
+		    CALL OFFSET(SAVOFF,RIXY(1,I),FSTPT,LASTPT,HADOFF)
+		    IF (FSTPT) FSTPT = .FALSE.
+		 ELSE				! normal case
+		    CALL OFFSET(SAVOFF,EXTSEG,FSTPT,LASTPT,HADOFF)
+						! dummy EXTSEG
+		 ENDIF
+	      ELSE				! last pt. not vertex
+		 EXTSEG(1,1) = RIXY(1,I)	! last vertex
+		 EXTSEG(2,1) = RIXY(2,I)
+		 EXTSEG(1,2) = IHCXY(1)		! last point
+		 EXTSEG(2,2) = IHCXY(2)
+C
+		 CALL OFFSET(SAVOFF,EXTSEG,FSTPT,LASTPT,HADOFF)
+	      ENDIF
+C
+C For other vertices, the action taken depends whether or not the next
+C point has an invisible line up to it. Invisible sections are treated 
+C like the start and end points of the feature, i.e. the offset point is
+C perpendicular to the segment up to the original.
+C
+	   ELSE
+	      FLAG = RIFLG(I+1)
+	      IF (IAND(FLAG,START_VISIBLE) .EQ. 0) THEN	! invisible
+		 IF (HADOFF .AND. (.NOT. FSTPT)) THEN	! have started
+		    LASTPT = .TRUE.
+C
+C get the attributes for second point
+	            CALL ARRARR(RINATT,RIATTC,RIATTV(1,I+1),
+     &	                        CONATT,COATTC,COATTV)
+C
+C update attribute arrays for OFFSET to use
+	            CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+	            IF (FAR_MOVE)
+     &	                  CALL LSTARR(DEFINITION(P_FAR_MOVE),CONATT,
+     &	                              COATTC,COATTV,.TRUE.)
+C
+		    CALL OFFSET(SAVOFF,EXTSEG,FSTPT,LASTPT,HADOFF)
+							! dummy EXTSEG
+		    LASTPT = .FALSE.
+		 ENDIF
+	      ELSE					! visible
+C
+C get the attributes for point
+	         CALL ARRARR(RINATT,RIATTC,RIATTV(1,I),
+     &	                        CONATT,COATTC,COATTV)
+C
+C update attribute arrays for OFFSET to use
+	         CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+	         IF (FAR_MOVE)
+     &	               CALL LSTARR(DEFINITION(P_FAR_MOVE),CONATT,
+     &	                               COATTC,COATTV,.TRUE.)
+C
+	         CALL OFFSET(SAVOFF,RIXY(1,I),FSTPT,LASTPT,HADOFF)
+		 IF (FSTPT) FSTPT = .FALSE.
+	      ENDIF
+	   ENDIF
+20	CONTINUE
+C
+C Calculate remaining no. of vertices and first vertex no. for next lot
+C of vertices
+C
+	REMVRT = REMVRT - BUFVRT
+	VRT1 = VRT1 + BUFVRT
+C
+C Branch back for test
+C
+	GOTO 10
+C
+C Deal with offset on a single span of the original feature, neither end
+C point being on a vertex. (i.e. we didn't enter the main loop)
+C
+30	IF (FSTPT) THEN
+	   EXTSEG(1,2) = IHCXY(1)
+	   EXTSEG(2,2) = IHCXY(2)
+	   CONATT = 0
+	   IF (ZOPT) CALL ADDZ(Z,MXATTR,CONATT,COATTC,COATTV)
+C
+C update attribute arrays for OFFSET to use
+	   CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+	   IF (FAR_MOVE)
+     &	         CALL LSTARR(DEFINITION(P_FAR_MOVE),CONATT,
+     &	                               COATTC,COATTV,.TRUE.)
+C
+	   CALL OFFSET(SAVOFF,EXTSEG,FSTPT,LASTPT,HADOFF)
+	   FSTPT = .FALSE.
+	   LASTPT = .TRUE.
+	   CONATT = 0
+	   IF (ZOPT) CALL ADDZ(IHCXY(3),MXATTR,CONATT,COATTC,COATTV)
+C
+C update attribute arrays for OFFSET to use
+	   CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+	   IF (FAR_MOVE)
+     &	         CALL LSTARR(DEFINITION(P_FAR_MOVE),CONATT,
+     &	                     COATTC,COATTV,.TRUE.)
+C
+	   CALL OFFSET(SAVOFF,EXTSEG,FSTPT,LASTPT,HADOFF)
+C
+C Deal with last point not on a vertex (last point on a vertex has been 
+C done)
+C
+	ELSE IF (.NOT. IHNVRT) THEN
+	   LASTPT = .TRUE.
+	   CONATT = 0
+	   IF (ZOPT) CALL ADDZ(IHCXY(3),MXATTR,CONATT,COATTC,COATTV)
+C
+C update attribute arrays for OFFSET to use
+	   CALL LSTARR(OPER,CONATT,COATTC,COATTV,.TRUE.)
+	   IF (FAR_MOVE)
+     &	         CALL LSTARR(DEFINITION(P_FAR_MOVE),CONATT,
+     &	                               COATTC,COATTV,.TRUE.)
+C
+	   CALL OFFSET(SAVOFF,EXTSEG,FSTPT,LASTPT,HADOFF)  ! dummy EXTSEG
+	ENDIF
+C
+C Return
+C
+100	RETURN
+	END

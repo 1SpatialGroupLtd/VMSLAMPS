@@ -1,0 +1,314 @@
+	SUBROUTINE VIEWFTR(PCK)
+C
+***	MODULE	VIEWFTR
+***	IDENT	10MY96
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author Ron Russell					27-Apr-1989
+C
+C To render the feature pointed at by PACK
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:AUXDEF/
+***	PARAMETER/CMN:CTXS/
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/
+***	PARAMETER/CMN:PACK/
+C
+***	COMMON/CMN:CB/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:FCS/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/CMN:LAYERS/
+***	COMMON/CMN:MAPS/
+***	COMMON/CMN:OIIH/
+***	COMMON/CMN:OPTION/
+***	COMMON/LSL$CMNLSL:TXTC/
+***	COMMON/CMN:VIEW/
+***	COMMON/CMN:WORKS/
+***	COMMON/CMN:WORK_DRAW/
+C
+C arguments
+C
+	INTEGER*4 PCK(PAKLEN)	! a pack for the feature
+C
+C functions called
+C
+	LOGICAL	FRTFND		! find a feature code
+	LOGICAL GENAUX		! generate auxiliary array for symbols,
+C				! texts, and arcs
+	LOGICAL LOOPY		! check if curve is a closed loop
+	LOGICAL	LIB$EXTZV
+	LOGICAL	GEOG_TRANS_ARRAY
+C
+C w/s
+	LOGICAL		LAST	! had last coordinates
+	INTEGER		I
+	INTEGER*2	IECODE,IELEN	! for reading from IFF
+	INTEGER*2	ISTAT(4)	! feature status words
+	INTEGER		TXSIZE		! text size from TH entry
+	LOGICAL*1	HADST
+	INTEGER*4 	PACK(PAKLEN)	! a pack for the feature
+	INTEGER 	TMPPAK(PAKLEN)	! local copy of pack
+	INTEGER		TFC		! text feature code (from TS)
+	INTEGER*2	TSTAT(4)	! text status words
+	LOGICAL*1	HADTS	
+	INTEGER		OLDGT
+	INTEGER		FC
+	REAL		AUX(AUXLEN)	! auxiliary array
+	REAL		ANG		! angle
+	LOGICAL*1	FST		! first bit?
+	LOGICAL*1	LOOP		! closed loop?
+C
+C set of variables for STREND, local so independent of all others
+C - Common block WORK_DRAW
+	REAL		ZZ(2,OIFULL)
+	EQUIVALENCE	(ZZ,ATTV)		! save space
+C
+C make copy of pack
+	CALL CPYPAK(PAKLEN,PCK,PACK)
+C
+C debugging
+	if (diaopt) then
+	   call writef('Rendering feature FSN = %N',pack(pakfsn))
+	endif
+C
+C get correct map (only if not already for optimisation)
+	IF (PACK(PAKMAP).NE.MAPCUR) CALL SELIF(PACK(PAKMAP))
+C
+C set up the feature code
+C (use FC in pack rather than reading IFF file)
+	IF ( FRTFND(PACK(PAKFC)) ) THEN
+	   CALL NASTY(MSG_BADCODE,PACK(PAKFC))
+	   CALL COLAPS(MSG_BADCODE)
+	   GOTO 999
+	ENDIF
+C
+C use VIEW FC_OFFSET if necessary
+	IF (VIEW_FC_OFFSET.GT.0.AND.FRTFC.LT.VIEW_FC_OFFSET.AND.
+     &	         (FRTFC+VIEW_FC_OFFSET).LE.32767) THEN
+	   OLDGT = FRTGT
+	   FC = FRTFC + VIEW_FC_OFFSET
+	   IF (FRTFND(FC,.FALSE.)) THEN 	! no FC
+	      CALL FRTFND(PACK(PAKFC))	! so use old
+	   ELSE
+	      IF (OLDGT.NE.FRTGT) THEN	! not a valid change of FC
+	         CALL MOAN(MSG_INCONSFCOFFSET,FC,PACK(PAKFC))
+	         CALL LEARN(MSG_ORIGFCUSED)
+	         CALL FRTFND(PACK(PAKFC))
+	      ELSE
+C
+C use new FC (put in pack for GENAUX)
+	         PACK(PAKFC) = FRTFC
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C set flag if this feature is to "stand up"  - use REND_SYMB_TEXT
+	REND_SYMB_TEXT = .FALSE.
+	IF (LIB$EXTZV(11,1,FRTFLG)) THEN	! look at bit 11
+	   IF (FRTARC.OR.FRTCUR) THEN
+	      CALL MOAN(MSG_NOUPCURVCIRC,PACK(PAKFSN))
+	   ELSEIF (FRTLIN.AND.(FRTSC.NE.0)) THEN
+	      CALL MOAN(MSG_NOUPPATTLINE,PACK(PAKFSN))
+	   ELSEIF (FRTARE.AND.(FRTSC.LT.-1)) THEN
+	      CALL MOAN(MSG_NOUPPATTLINE,PACK(PAKFSN))
+	   ELSEIF (FRTLIN.AND.FRTSIZ.NE.0.0) THEN
+	      CALL MOAN(MSG_NOUPOFFLINE,PACK(PAKFSN))
+	   ELSE
+	      REND_SYMB_TEXT = .TRUE.
+	      VIEW_BOT_STRAIGHT = LIB$EXTZV(12,1,FRTFLG)
+	      VIEW_TOP_STRAIGHT = LIB$EXTZV(13,1,FRTFLG)
+	   ENDIF
+	ENDIF
+C
+C is this a solid object?
+	VIEW_SOLID = REND_SYMB_TEXT.AND.(FRTLIN.OR.FRTARE)
+C
+	CALL IFFPKE( IECODE, IELEN, PACK(PAKPNF) )
+	IF (IECODE.NE.'NF'.AND.IECODE.NE.'TC'.AND.IECODE.NE.'CH'
+     &					.AND.IECODE.NE.'VO') THEN
+	   CALL NASTY(MSG_BADPNF)
+	   CALL COLAPS(MSG_BADPNF)
+	   GOTO 999
+	ENDIF
+C
+C Initialise
+10	HADST = .FALSE.
+	HADTS = .FALSE.
+	TXSIZE = 0
+	TXTPTR = 0			! in case text has no TX entry
+	FST = .TRUE.			! will be drawing first bit
+	ANG = 0.0
+	ISTAT(3)=0			! text position to 0, by default
+C
+	LAST = .FALSE.
+20	CONTINUE
+	CALL IFFNXT(IECODE, IELEN)
+C
+	IF (IELEN.EQ.-1) THEN
+	   CALL NASTY(MSG_UNEXPEIFF)
+	   CALL COLAPS(MSG_UNEXPEIFF)
+	   GOTO 999
+	ENDIF
+C
+	IF (IECODE.EQ.'CB') GOTO 70
+	IF (IECODE.EQ.'EF') GOTO 120
+	IF (IECODE.EQ.'RO') GOTO 390
+	IF (.NOT.FRTTEX) GOTO 20	! FS,TH,TX,TS only for text
+	IF (IECODE.EQ.'FS') GOTO 330
+	IF (IECODE.EQ.'TH') GOTO 350
+	IF (IECODE.EQ.'TX') GOTO 320
+	IF (IECODE.EQ.'TS') GOTO 400
+	GOTO 20				! ignore anything else
+C
+C ST (CB) - string of coordinates
+70	CONTINUE
+C
+C Render the previous ST if there was such
+	IF (HADST) THEN
+	   CALL STREND(
+     &		CBH.NROW,XY,ZZ,
+     &		AUX,TXTDSC,FST,.FALSE.,CBH.FLAGS,LOOP)
+	   FST = .FALSE.		! not first bit any more
+	ELSE
+C
+C generate auxiliary array for symbol strings
+	   IF (FRTGT.EQ.STRTYP) THEN
+C
+C GENAUX will produce its own error message if it fails,
+C which is sufficiently disastrous for us to reject the feature
+	      IF (GENAUX(CBH.NROW,XY,AUX,TXTDSC,ANG,TXSIZE,PACK,ISTAT)
+     &				) GOTO 999
+	   ENDIF
+	ENDIF
+C
+	NATT = 0
+	CALL EIHRCB_HEAD(CBH)
+C
+C If on first ST or this ST starts 'pen up' then
+C see whether a curve feature is a closed loop
+	IF (FRTCUR.AND.((.NOT.HADST).OR.((CBH.FLAGS.AND.1).EQ.0))) THEN
+	   LOOP = LOOPY()
+	ENDIF
+C
+C read in the points
+	CALL EIHRCB_DATA(CBD)! read into scratch, and extract XY
+	CALL IFS_CB_READ(CBH,CBD,XY,2,COLHXY,1,CBH.NROW)
+C
+C add origin of map, or transform into LITES2 space, if required
+	IF (DO_FLY_TRANS) THEN
+	   IF (.NOT.GEOG_TRANS_ARRAY(CURR_SYS,CURR_ZONE,CURR_PARAMS,
+     &	                         CURR_UNIT,CURR_ORG,
+     &	                         LITES2SYS,LITES2ZONE,LITES2PAR,
+     &	                         LITES2UNIT,LITES2ORG,
+     &	                         CBH.NROW,XY)) GOTO 999
+	ELSEIF (USE_ORG) THEN
+	   CALL ADDORG(ORGXY,XY,CBH.NROW)	! add origin of map
+	ENDIF
+C
+C if solid object need the two Z values
+	IF (VIEW_SOLID) CALL IFS_CB_READ(CBH,CBD,ZZ,2,VIEW_Z_INTERP_ACD,
+     &	                  1,CBH.NROW)
+C
+C mark we've had an ST
+	HADST = .TRUE.
+	GOTO 20
+C
+C EF - end feature
+120	CONTINUE
+C
+C generate auxiliary array for texts,symbols,circles
+	IF (FRTARC.OR.(FRTSYM.AND.FRTGT.NE.STRTYP).OR.FRTTEX) THEN
+C
+C GENAUX will produce its own error message if it fails,
+C which is sufficiently disastrous for us to reject the feature
+	   IF (HADTS) THEN
+	      IF (GENAUX(CBH.NROW,XY,AUX,TXTDSC,ANG,TXSIZE,TMPPAK,TSTAT)
+     &				) GOTO 999
+	   ELSE
+	      IF (GENAUX(CBH.NROW,XY,AUX,TXTDSC,ANG,TXSIZE,PACK,ISTAT)
+     &				) GOTO 999
+	   ENDIF
+	ENDIF
+C
+C render last bit of feature (maybe all of it!)
+	CALL STREND(
+     &		CBH.NROW,XY,ZZ,
+     &		AUX,TXTDSC,FST,.TRUE.,CBH.FLAGS,LOOP)
+	GOTO 999			! tara
+C
+C TX - text string
+320	IF (IELEN.EQ.0) GOTO 999	! null???
+	IELEN = MIN(IELEN,(CTXMAX+1)/2)
+	CALL EIHR(TXTBUF,IELEN,1)
+	TXTPTR = IELEN*2
+C Remove any trailing null
+	IF (TXTBUF(TXTPTR).EQ.0) TXTPTR = TXTPTR-1
+	TXTPTR = MIN(TXTPTR,CTXMAX)
+	GOTO 20
+C
+C FS entry
+330	CALL EIHRI(ISTAT,MIN(IELEN,4),1)
+	GOTO 20
+C
+C TH entry
+350	TXSIZE = 0				! blank out longword
+	CALL EIHRI(TXSIZE,1,1)			! read word into bottom
+	GOTO 20
+C
+C RO - symbol or text rotation
+390	CALL EIHRR(ANG,1,1)
+	GOTO 20
+C
+C TS - text status
+400	IF (HADST) THEN			! draw previous text component
+	   IF (GENAUX(CBH.NROW,XY,AUX,TXTDSC,ANG,TXSIZE,TMPPAK,TSTAT)
+     &				) GOTO 999
+	   CALL STREND(
+     &		CBH.NROW,XY,ZZ,
+     &		AUX,TXTDSC,FST,.TRUE.,CBH.FLAGS,LOOP)
+	   TXTPTR = 0			! wait for next TX entry
+	ELSE
+C
+C this must be first TS, so make a copy of the pack for use of
+C compound texts
+	   CALL CPYPAK(PAKLEN,PACK,TMPPAK)
+	ENDIF
+C
+	TSTAT(3) = 0
+	CALL EIHRI(TSTAT,MIN0(IELEN,4),1)
+410	TFC = TSTAT(1)			! convert to long
+	TMPPAK(PAKFC) = TSTAT(1)	! store in PACK for GENAUX/STDRAW
+C
+	IF (FRTFND(TMPPAK(PAKFC))) THEN
+	   CALL MOAN(MSG_BADTC,TFC,TMPPAK(PAKFSN))
+	   GOTO 420
+	ENDIF
+C
+	IF (.NOT.FRTTEX) THEN
+	   CALL MOAN(MSG_TCNOTTEXT,TFC,TMPPAK(PAKFSN))
+	   GOTO 420
+	ENDIF
+	GOTO 440
+C
+C default to fs entry
+420	CALL INFORM(MSG_DEFAULTFS)
+	DO 430, I= 1,4
+	   TSTAT(I) = ISTAT(I)
+430	CONTINUE
+	GOTO 410
+
+440	IF (HADTS) THEN
+	   TXSIZE = 0
+	   HADST = .FALSE.
+	ENDIF
+	HADTS = .TRUE.
+	GOTO 20
+C
+999	CONTINUE
+	RETURN
+	END

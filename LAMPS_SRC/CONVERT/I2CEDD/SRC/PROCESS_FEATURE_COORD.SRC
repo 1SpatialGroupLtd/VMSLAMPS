@@ -1,0 +1,231 @@
+	INTEGER FUNCTION PROCESS_FEATURE_COORD()
+C
+***	MODULE PROCESS_FEATURE_COORD
+***	IDENT 17AU88
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C Author: J.M. Billing			17 August 1988
+C
+C Routine to read through layers 1 onwards of the input IFF file,
+C writing all coordinate strings (ZS and ST entries) to the CEDD
+C output file SEG record.
+C
+	IMPLICIT NONE
+C
+C common blocks
+	INCLUDE 'HERE:I2CEDDMSG.PAR'
+	INCLUDE 'HERE:DESCR.CMN'
+	INCLUDE 'HERE:PARAMS.CMN'
+C
+C w/s
+	INTEGER*2 IECODE		! Code of IFF entry
+	INTEGER*2 IELEN			! Length of IFF entry
+C
+	INTEGER	FEATURE_ID		! current feature/segment id
+C
+	INTEGER	MAX_POINTS		! maximum number of coords in
+	PARAMETER (MAX_POINTS=200)	! one entry
+C
+	LOGICAL	HAD_COORD		! .T. when encounter ZS or ST
+	REAL	COORD_BUFFER(MAX_POINTS*3)! array to hold coordinates
+	INTEGER	NUM_POINTS		! number of points in ZS/ST
+	INTEGER	NUM_DIMEN		! num of dimensions (ZS=3,ST=2)
+	LOGICAL	FOUND_EF		! .T. if find EF when looking
+					! for coord entry
+	INTEGER	LAST_NUM_DIMEN		! number of dimensions of last
+					! coordinate entry in this ftr.
+C
+C functions
+	INTEGER	READ_COORD_ENTRY	! read the next ZS/ST entry in
+					! current feature
+	INTEGER	START_SEG_SUBRECORD	! begin a new SEG subrecord to
+					! take the coordinates of the
+					! current feature
+	INTEGER	WRITE_COORD_TO_SEG	! write the current coordinate
+					! entry contents to SEG record
+					! in the output CEDD buffer
+	INTEGER	FINISH_BLOCK		! pad and output current block
+					! from buffer
+C
+C Assume success
+C
+	PROCESS_FEATURE_COORD = I2CEDD__NORMAL
+C
+C Reposition the input IFF file at the start of the layer after
+C layer 0 - i.e. the start of the feature entries
+C
+	CALL IFFPKE(IECODE,IELEN,LPOSNO(1))
+C
+C Check that this is actually an NO entry
+C
+	IF ((IECODE.NE.'NO').OR.(IELEN.EQ.-1)) THEN
+C
+C Set up return code to deal with error
+C
+	   PROCESS_FEATURE_COORD = I2CEDD__UNFINDFEALAY
+C
+C Report the problem
+C
+	   CALL LSL_PUTMSG(PROCESS_FEATURE_COORD)
+C
+C And exit
+C
+	   GOTO 900
+	ENDIF
+C
+C Set feature/segment id to 0
+C The feature and segment ids will be the same for corresponding
+C subrecords, and will be allocated sequentially from 1 as each
+C feature is found
+C
+	FEATURE_ID = 0
+C
+C Search for the next feature (indicated by NF entry)
+C
+10	CALL IFFNXC('NF',IELEN)
+C
+C Determine if have found NF, if have, go on and do things to it.
+C otherwise, finish up and exit
+C
+	IF (IELEN.EQ.-1) GOTO 800
+C
+C Store feature serial number, in case need to report errors later
+C
+	CALL EIHR(FSN,1,1)
+C
+C If diagnostics are required, output message saying we are dealing
+C with coordinates from current feature
+C
+	IF (DIAG) CALL WRITEF(
+     &		'.Writing SEG entry for feature FSN %^W%N',FSN)
+C
+C Increment the feature id
+C
+	FEATURE_ID = FEATURE_ID + 1
+C
+C Clear flag to indicate have not yet found ZS/ST in this feature
+C
+	HAD_COORD = .FALSE.
+C
+C Start a new SEG subrecord relating to this feature
+C This routine searches through this feature, totaling the number
+C of points which it contains, and then writes the start of the
+C SEG subrecord (segment id, feature count, feature id, orientation,
+C point count) to the output block buffer.
+C
+	   PROCESS_FEATURE_COORD = START_SEG_SUBRECORD(FSN,FEATURE_ID)
+C
+C Check for errors in starting subrecord for this feature
+C
+	   IF (.NOT.PROCESS_FEATURE_COORD) THEN
+C
+C Check whether have found feature with no coordinates, go to
+C next feature if we have
+C
+	      IF (PROCESS_FEATURE_COORD.EQ.I2CEDD__NOCOORD) GOTO 10
+C
+C Exit for other errors
+C
+	      GOTO 900
+	   ENDIF
+C
+C Read the next ZS or ST entry
+C
+20	PROCESS_FEATURE_COORD = READ_COORD_ENTRY(
+     &		.TRUE.,			! do want to read points
+     &		COORD_BUFFER,		! coordinates read
+     &		MAX_POINTS,		! maximum number of points
+     &		NUM_POINTS,		! number of points found
+     &		NUM_DIMEN,		! num of dimensions (ZS=3,ST=2)
+     &		FOUND_EF)		! .T. if find EF entry
+C
+C Check for errors
+C
+	IF (.NOT.PROCESS_FEATURE_COORD) GOTO 900
+C
+C Check whether the end of feature has been reached (EF)
+C
+	IF (FOUND_EF) THEN
+C
+C Check whether have had any coordinates in this feature - warn user
+C if not
+C
+	   IF (.NOT.HAD_COORD) CALL LSL_PUTMSG(I2CEDD__NOCOORD,FSN)
+C
+C Jump to read next feature (look for next NF)
+C
+	   GOTO 10
+	ENDIF
+C
+C Check if this is the first coordinate entry found in this feature
+C
+	IF (.NOT.HAD_COORD) THEN
+C
+C Then set flag to indicate that some coordinates have been found in 
+C this entry
+C
+	   HAD_COORD = .TRUE.
+C
+C And set the number of dimensions of the last coordinate entry in
+C this feature to be the number of dimensions of this entry (since
+C it is the first)
+C This is used to check that ZSes and STs are not mixed in same feature
+C
+	   LAST_NUM_DIMEN = NUM_DIMEN
+	ENDIF
+C
+C Check that this entry has the same number of dimensions as the last
+C coordinate type entry in this feature.
+C ie Check that ZSes and STs not mixed in same feature
+C
+	IF (LAST_NUM_DIMEN.NE.NUM_DIMEN) THEN
+C
+C Warn the user of problem
+C
+	   CALL LSL_PUTMSG(I2CEDD__MIXSTZS,FSN)
+C
+C Skip this feature and go on to next
+C
+	   GOTO 10
+	ENDIF
+C
+C Now, at last, we can write out the coordinates to the SEG record
+C
+	PROCESS_FEATURE_COORD = WRITE_COORD_TO_SEG(
+     &		COORD_BUFFER,		! coordinates to write
+     &		MAX_POINTS,		! maximum number of points
+     &		NUM_POINTS,		! number of points 
+     &		NUM_DIMEN)		! num of dimensions (ZS=3,ST=2)
+C
+C Check for errors
+C
+	IF (.NOT.PROCESS_FEATURE_COORD) GOTO 900
+C
+C Loop to look for the next ZS/ST entry in this feature
+C
+	GOTO 20
+C
+C Check that at least one feature has been processed
+C Jump to here when end of file is found (no further NFs)
+C
+800	IF (FEATURE_ID.LT.1) THEN
+C
+C Set up return code
+C
+	   PROCESS_FEATURE_COORD = I2CEDD__NOFEA
+C
+C Report the problem
+C
+	   CALL LSL_PUTMSG(PROCESS_FEATURE_COORD)
+C
+C Otherwise, at least one feature has been found, so pad and
+C output the final block of CEDD SEG data
+C
+	ELSE
+	   PROCESS_FEATURE_COORD = FINISH_BLOCK()
+	ENDIF
+C
+C Exit
+C
+900	RETURN
+	END

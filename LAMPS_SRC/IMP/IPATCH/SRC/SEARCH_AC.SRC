@@ -1,0 +1,234 @@
+	LOGICAL FUNCTION SEARCH_AC
+C
+***	IDENT	24DE87
+***	MODULE	SEARCH_AC
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C
+C Author TJ Ibbs, 25 July 1986
+C
+C to look for the next AC entry
+C - returns FALSE if we find one, TRUE if we don't
+C
+C note that the numbers can be wildcarded if required
+C
+	IMPLICIT NONE
+C
+C **********************************************************************
+C parameter files
+C
+	INCLUDE	'HERE:IPATCHMSG.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'LSL$CMNLSL:READSTR.PAR'	! for ON_CHAR2
+	INCLUDE	'HERE:USEFUL.PAR'
+C
+C common files
+C
+	INCLUDE	'HERE:ENTRY.CMN'		! for entry values
+	INCLUDE	'LSL$CMNFRT:FRTACD.CMN'
+C
+C functions
+C
+	LOGICAL		READ_WILD_ACTYPE
+	LOGICAL		READ_WILD_ACVAL
+	LOGICAL		READ_WILD_REAL
+	LOGICAL		RDCHS			! read a character
+	INTEGER		READSTR			! read a string
+	LOGICAL		SEARCH_SIMPLE
+	LOGICAL		SUB_STRING
+	LOGICAL		CHECK_EOL		! check eol for rubbish
+C
+C workspace
+C
+	INTEGER			TYPE_WANTED	! AC type wanted
+	INTEGER			IVALUE_WANTED	!    value wanted
+	REAL			RVALUE_WANTED	!    value wanted
+	CHARACTER*4		CVALUE_WANTED	!    value wanted
+	EQUIVALENCE (IVALUE_WANTED,RVALUE_WANTED,CVALUE_WANTED)
+	INTEGER			DATATYPE_WANTED	!    datatype wanted
+C
+	LOGICAL			WILD_TYPE	! type is wildcarded
+	LOGICAL			WILD_VALUE	! value ditto
+	LOGICAL			IS_REAL		! true if value real
+C
+	CHARACTER*(TEXT_MAX)	TEXT_WANTED	! text wanted
+	INTEGER			LENGTH		! length of text
+	INTEGER			COUNT		! no of args
+	BYTE			ICH		! a character
+	INTEGER			OK		! error from READSTR
+C
+C **********************************************************************
+C assume that we succeed
+C
+	SEARCH_AC = .FALSE.
+C
+C no arguments yet
+C
+	COUNT = 0
+C
+C read the TYPE that is wanted
+C - if none is given, then we just look for an AC
+C
+	IF ( RDCHS(ICH) ) GOTO 2000
+	CALL BSCH
+	WILD_TYPE = .TRUE.		! wildcard acceptable
+	IF ( READ_WILD_ACTYPE( TYPE_WANTED, WILD_TYPE ) ) GOTO 9000
+C
+	COUNT = 1
+C
+C - otherwise, we try for the AC value
+C   This may be various data types, depending on the value
+C   of TYPE_WANTED. If TYPE_WANTED is WILD, then we try to deduce
+C   whether it is real or integer from context - ie make it an explicit
+C   real if you want a real
+C
+C - regardless, we will end up with either WILD_VALUE set TRUE, or
+C   IS_REAL defined as TRUE or FALSE
+C
+	IF ( WILD_TYPE ) THEN
+C
+	   WILD_VALUE = .TRUE.		! wildcard acceptable
+	   IF ( READ_WILD_REAL( RVALUE_WANTED,WILD_VALUE,IS_REAL ) ) GOTO 1900
+C
+	   DATATYPE_WANTED = ACD_DATATYPE_R	! assume want a real
+	   IF ( .NOT. WILD_VALUE .AND. .NOT.IS_REAL ) THEN
+C
+	      IF ( RVALUE_WANTED.LT.FLOAT(MINI4) .OR.
+     &		   RVALUE_WANTED.GT.FLOAT(MAXI4) ) THEN
+		 CALL LSL_PUTMSG( IPATCH__OUTRANGE,RVALUE_WANTED,MINI4,MAXI4)
+		 GOTO 9000
+	      ELSE
+	         IVALUE_WANTED = RVALUE_WANTED	! want integer instead
+	         DATATYPE_WANTED = ACD_DATATYPE_I
+	      ENDIF
+C
+	   ENDIF
+C
+	ELSE
+C
+C look up the type, so as to set up the expected datatype for the value
+	   CALL ACDFND(TYPE_WANTED,.FALSE.)
+	   DATATYPE_WANTED = ACD_DATA_TYPE
+	   IF ( RDCHS(ICH) ) GOTO 2000
+	   CALL BSCH
+	   IF ( READ_WILD_ACVAL( IVALUE_WANTED,TYPE_WANTED,WILD_VALUE ) ) GOTO 9000
+	ENDIF
+C
+	COUNT = 2
+C
+C - and lastly, we may have a text
+C   work out what its enclosing quotation mark is
+C
+	IF ( RDCHS(ICH) ) GOTO 2000
+	IF ( ICH.NE.Q1 .AND. ICH.NE.Q2 ) THEN
+	   CALL LSL_PUTMSG( LSL__UNEXPCH, ICH )
+	   GOTO 9000
+	ENDIF
+C
+C - and read the text itself
+C
+	LENGTH = READSTR( TEXT_WANTED, ICH, ON_CHAR2, .FALSE., OK )
+	IF ( .NOT.OK ) THEN
+	   CALL LSL_PUTMSG( OK )	! describe the error
+	   GOTO 9000			! return
+    	ENDIF
+C
+	COUNT = 3
+C
+C and check for rubbish after what we've read
+C
+1900	IF ( CHECK_EOL() ) GOTO 9000
+C
+C **********************************************************************
+C find the next AC code
+C
+2000	IF ( SEARCH_SIMPLE( %REF('AC') ) ) GOTO 8000
+C
+C and if we don't have any arguments, then we have finished
+C
+	IF ( COUNT.EQ.0 ) GOTO 9000
+C
+C otherwise, read the entry in
+C
+	CALL READ_ENTRY
+C
+C and check the arguments...
+C - if an argument is wildcarded, then we don't care about its value
+C
+	IF ( COUNT.GE.1 .AND. .NOT.WILD_TYPE .AND.
+     &			      AC_TYPE.NE.TYPE_WANTED ) GOTO 2000
+C
+C - if the value is being searched on, then we must match datatype
+C   and then match the actual value
+C
+ 	IF ( COUNT.GE.2 .AND. .NOT.WILD_VALUE ) THEN
+C
+C	 if the type is different, then they're not the same!
+C
+	   IF ( DATATYPE_WANTED.NE.AC_DATATYPE ) GOTO 2000
+C
+C	 compare according to datatype
+C
+	   IF ( AC_DATATYPE.EQ.ACD_DATATYPE_R .AND.
+     &		IVALUE_WANTED.NE.IFF_ABSENT ) THEN
+	      IF ( ABS(AC_RVALUE-RVALUE_WANTED).GT.REAL_TOL ) GOTO 2000
+	   ELSE
+	      IF ( AC_IVALUE.NE.IVALUE_WANTED ) GOTO 2000
+	   ENDIF
+C
+	ENDIF
+C
+C - and lastly, check the text
+C
+	IF ( COUNT.EQ.3 ) THEN
+	   IF ( .NOT.SUB_STRING( TEXT_WANTED(:LENGTH),
+     &				 TEXT_DSC ) ) GOTO 2000
+	ENDIF
+C
+C otherwise, the entry we got matches what we asked for, so return
+C
+	GOTO 9000
+C
+C **********************************************************************
+C error - we can't find it
+C
+8000	CALL EXPAND('%%IPATCH-W-SEARCH, cannot find AC ')
+C
+	IF ( COUNT.GE.1 ) THEN
+	   IF ( WILD_TYPE ) THEN
+	      CALL APPEND('* ')
+	   ELSE
+	      CALL ACDFND( TYPE_WANTED, .FALSE. )
+	      CALL APPEND('%S (%N) ',ACD_NAME(:ACD_NAME_LEN),TYPE_WANTED)
+	   ENDIF
+	ENDIF
+C
+	IF ( COUNT.GE.2 ) THEN
+	   IF ( WILD_VALUE ) THEN
+	      CALL APPEND('*')
+	   ELSEIF ( IVALUE_WANTED.EQ.IFF_ABSENT ) THEN
+	      IF ( DATATYPE_WANTED.EQ.ACD_DATATYPE_C) THEN
+	         CALL APPEND('""')
+	      ELSE
+	         CALL APPEND('?')
+	      ENDIF
+	   ELSEIF ( DATATYPE_WANTED.EQ.ACD_DATATYPE_I) THEN
+	      CALL APPEND('%N',IVALUE_WANTED)
+	   ELSEIF ( DATATYPE_WANTED.EQ.ACD_DATATYPE_R) THEN
+	      CALL APPEND('%G0.8',RVALUE_WANTED)
+	   ELSEIF ( DATATYPE_WANTED.EQ.ACD_DATATYPE_C) THEN
+	      CALL APPEND('"%A4"',IVALUE_WANTED)
+	   ELSEIF ( DATATYPE_WANTED.EQ.ACD_DATATYPE_D) THEN
+	      CALL APPEND('%DD',IVALUE_WANTED)
+	   ELSEIF ( DATATYPE_WANTED.EQ.ACD_DATATYPE_T) THEN
+	      CALL APPEND('%DT',IVALUE_WANTED)
+	   ENDIF
+	ENDIF
+C
+	IF ( COUNT.EQ.3 ) CALL APPEND(' "%S255"',TEXT_WANTED(:LENGTH))
+	CALL TTWLIN
+	SEARCH_AC = .TRUE.		! we failed
+C
+C and return
+9000	RETURN
+	END

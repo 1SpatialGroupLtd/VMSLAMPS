@@ -1,10 +1,11 @@
 	SUBROUTINE 	PROCESS
-CDEC$	IDENT	'28SE94'
+CDEC$	IDENT	'31OC94'
 C
 C	Copyright (C)				Laser-Scan Ltd., Cambridge
 C	Created					11-Jun-1990	John Cadogan
 C	Mod					09-Apr-1991	Jon Barber
 C       Mod 1400. Now part of MAPDATA2I		01-Sep-1994	Steve Townrow
+C       Mod 1415. Updates CP entry with range	31-Oct-1994	Steve Townrow
 C
 C Description:
 C
@@ -64,6 +65,7 @@ C
 	CHARACTER*8	MD_FC
 	INTEGER		XYVAL
 	REAL*4		X,Y,Z
+	REAL*4		CP(4,4)
 	LOGICAL		FIRST_FEATURE
 	LOGICAL		HAD_H_OR_L
 	LOGICAL		EOF
@@ -323,6 +325,38 @@ C Now go back and set the RA entry
 C
 	CALL IFFPKE( IECODE, IELEN, LPOSRA )
 	CALL EIHWR( RANGE, 4, 1 )
+C
+C Now put the Range infor in the CP - it's better than nothing!
+C
+	CALL IFFPKE( IECODE, IELEN, LPOSCP )
+C
+C Set Source CPs
+C
+	CP(1,1) = RANGE(1)
+	CP(2,1) = RANGE(4)
+	CP(1,2) = RANGE(1)
+	CP(2,2) = RANGE(3)
+	CP(1,3) = RANGE(2)
+	CP(2,3) = RANGE(3)
+	CP(1,4) = RANGE(2)
+	CP(2,4) = RANGE(4)
+C
+C Set Target CPs
+C
+	CP(3,1) = RANGE(1)
+	CP(4,1) = RANGE(4)
+	CP(3,2) = RANGE(1)
+	CP(4,2) = RANGE(3)
+	CP(3,3) = RANGE(2)
+	CP(4,3) = RANGE(3)
+	CP(3,4) = RANGE(2)
+	CP(4,4) = RANGE(4)
+C
+C Overwrite it.
+C
+	CALL EIHWR( CP, 16, 1 )
+C
+C Close dat file.
 C
 	CALL IFFCLO(IFFLUN)
 C

@@ -1,0 +1,240 @@
+	SUBROUTINE IFFBDY(FINISH)
+C
+***	MODULE	IFFBDY
+***	IDENT	08DE94
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author:  R. Daly
+C
+C	Created					 RD	21-Jun-1983
+C
+C To read in the body of an IFF file and plot it.
+C
+CMOD	All entries between NF and EF have been pulled out into a separate
+C	routine, DRAFTR, so it can be called by DRAW_PRIO_LIST.
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:GKSPAR/
+C
+***	COMMON/CMN:ACSEL/
+***	COMMON/CMN:CB/
+***	COMMON/CMN:CURFT/
+***	COMMON/LSL$CMNFRT:FRTACD/
+***	COMMON/CMN:GRABUF/
+***     COMMON/CMN:LABEL/
+***	COMMON/CMN:CONT/
+***	COMMON/CMN:DRAWIN/
+***	COMMON/CMN:FPPDAT/
+***	COMMON/LSL$CMNFRT:FRTCOM/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:IFFSTR/
+***	COMMON/LSL$CMNIFF:MD2DES/
+***	COMMON/LSL$CMNIFF:MHDEF/
+***	COMMON/CMN:SCALES/
+***	COMMON/CMN:SELECT/
+***	COMMON/CMN:TITLE/
+C
+C W/s
+	INTEGER*4 I
+	INTEGER*4 EOPOSN	! EO entry position held in NO entry
+	INTEGER*4 NOPOSN	! NO entry position
+	INTEGER*2 IECODE	! IFF entry read in
+	INTEGER*2 IELEN		! length of entry read in
+	INTEGER*2 TMPCNT	! number of chars in TMPBUF
+	BYTE TMPBUF(MAXTXTLEN+1) ! temporary string buffer (for NS/TC)
+	INTEGER*2 NUMRED	! number of coord pairs to be read
+	LOGICAL	  WANTED	! set if the current feature code -
+C				! or layer is selected
+	LOGICAL	  FINISH	! set TRUE when file is finished with
+	LOGICAL	  HADCTRLC	! had a CTRL/C
+C
+C Functions
+	LOGICAL	  LIB$EXTZV
+C
+C***********************************************************************
+C
+C Initialise
+	FINISH=.FALSE.		! not finished with file yet
+	CTRLC=.FALSE.		! not had CTRL/C
+	CALL LIB$INIT_TIMER	! start timing the plot (irrelevant -
+C				! for an interactive session)
+	IF (TITLE_TIMERBLOCK .EQ. 0 .OR. TITLE_TIMERRESET)
+     1		CALL LIB$INIT_TIMER(TITLE_TIMERBLOCK)	! for TITLE routines
+	TITLE_TIMERRESET = .FALSE.
+C
+	TITLE_LAYERSTART = 0	! no layer selected for progress reporting
+C
+C If thick lines have been (un)suppressed for this layer/file then
+C we must tell FRTLIB to permit/suppress thick lines in text/symbols
+	FRTHKS=(.NOT.THKLIN)
+C
+C start counting number of features each call of IFFBDY
+	IF (PAUSE) PAUSE_COUNT = 0
+C
+C and start count for logging
+	IF (LOGOPT) LOG_COUNT = LOG_NO
+C
+C check for silly index contour interval (to avoid zero divides)
+	IF (LABINX.AND.CINDEX.EQ.0) THEN
+	   CALL TTWSTR('Index contour interval not specified')
+	   CALL TTWSTR('Index contour labelling switched off')
+	   LABINX = .FALSE.
+	ENDIF
+C
+C***********************************************************************
+C
+C Main loop - read the next entry
+10	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GOTO 998
+	TITLE_LAYERPOS = LPOSH		! record for progress reporting
+C
+C Which entry is it ?
+	IF (IECODE.EQ.'CH') GOTO 10
+	IF (IECODE.EQ.'JP') GOTO 10
+	IF (IECODE.EQ.'JB') GOTO 10
+	IF (IECODE.EQ.'VO') GOTO 10
+	IF (IECODE.EQ.'SL') GOTO 10
+	IF (IECODE.EQ.'SS') GOTO 10
+	IF (IECODE.EQ.'CS') GOTO 10
+	IF (IECODE.EQ.'NF') GOTO 30
+	IF (IECODE.EQ.'TC') GOTO 170
+	IF (IECODE.EQ.'NO') GOTO 180
+	IF (IECODE.EQ.'EO') GOTO 200
+	IF (IECODE.EQ.'EJ') GOTO 250
+	IF (IECODE.EQ.'EM') GOTO 270
+C
+C Unknown entry
+	CALL WRITEF('Unexpected %C in IFF at %^L%N',IECODE,LPOSH)
+	GOTO 10
+C
+C Error exits
+12	CALL WRITEF('Layer %^W%I6 - FSN %^L%I6 - ISN %I6',
+     &						LAYNUM,FTNUM,ISQ)
+14	CALL IFFNXC('EF',IELEN)
+	IF (IELEN.LT.0) GOTO 998
+	GOTO 10
+C
+C***********************************************************************
+C
+C NF - new feature
+30	CALL DRAFTR(LPOSH,0,.FALSE.)	! go off and deal with feature
+	IF (PAUSE_NOW) GOTO 1010
+C if there's been a CTRL/C then pretend reached EJ
+	IF (HADCTRLC()) GOTO 250
+	GOTO 10
+C
+C***********************************************************************
+C
+C TC - transmitted comment
+170	IF (.NOT.REPORT) GOTO 10
+	TMPCNT=MIN(IELEN,40)	! how many characters are there?
+	CALL EIHR(TMPBUF,TMPCNT,1)
+	TMPCNT = TMPCNT*2		! bytes
+	TMPBUF(TMPCNT+1)=0
+	CALL WRITEF('TC %A80',TMPBUF)
+	GOTO 10
+C
+C***********************************************************************
+C
+C NO - new overlay
+180	NEWORG = .FALSE.
+	CALL EIHRI(LAYNUM,1,1)
+C
+C get EO position if there
+	IF (IELEN.GE.4) THEN			! has EO pointer
+	   CALL EIHRL(EOPOSN,1,3)
+	   NOPOSN = LPOSH
+	   CALL IFFPKE(IECODE,IELEN,EOPOSN)	! get EO entry
+	   IF (IECODE.NE.'EO') THEN		! bad EO
+	      CALL WRITEF('Bad EO pointer in NO %^W%N',LAYNUM)
+	      EOPOSN = 0			! remember no EO position
+	   ENDIF
+	   CALL IFFPKE(IECODE,IELEN,NOPOSN)	! back to NO
+	ELSE
+	   EOPOSN = 0				! remember no EO position
+	ENDIF
+C
+	IF (LAYNUM.LT.0) THEN
+	   CALL WRITEF(
+     &	'Illegal layer number %^W%N found - layer ignored.',LAYNUM)
+	   GOTO 182				! skip it
+	ENDIF
+C
+C test if we want this layer
+	I = LAYNUM				! convert to long
+	WANTED=LIB$EXTZV(I,1,LAYMAP)
+	IF (.NOT.WANTED) GOTO 182		! skip it
+C
+C record layer start and end for plot progress reporting
+	TITLE_LAYERSTART = NOPOSN
+	TITLE_LAYEREND = EOPOSN
+C
+C Check if this layer is selected with OVERRIDE
+	IF (HADOVR) THEN
+	   DO 195 I=1,NOVRRD
+	      IF (LAYNUM.EQ.OVERRD(1,I)) THEN
+	         FTCODE=OVERRD(2,I)
+	         FSSET=.TRUE.
+	         GOTO 196
+	      ENDIF
+195	   CONTINUE
+	ENDIF
+196	IF (REPORT.OR.HADINT) CALL WRITEF('Layer %^W%N.',LAYNUM)
+	IF (HADINT) GOTO 1000			! interactive
+	GOTO 10
+C
+C skip layer
+182	IF (EOPOSN.NE.0) THEN
+	   CALL IFFPKE(IECODE,IELEN,EOPOSN)	! get EO entry
+	ELSE
+	   CALL IFFNXC('EO',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      CALL WRITEF('Missing EO entry in layer %^W%N',LAYNUM)
+	      GOTO 998
+	   ENDIF
+	ENDIF
+	GOTO 10
+C
+C***********************************************************************
+C
+C EO - empty the output buffers if necessary
+200	IF (REPORT)
+     &   CALL WRITEF('Layer %^W%N contained %N features.',LAYNUM,LFTCNT)
+	FSSET=.FALSE.
+	LFTCNT=0
+	IF (HADINT) CALL GUWK(WKID,GSUPP)
+C add layer length to accumulated total for plot progress monitoring
+	IF (TITLE_LAYERSTART.NE.0 .AND. TITLE_PLOTLEN.NE.0) THEN
+	  TITLE_PLOTPROG = TITLE_PLOTPROG + TITLE_LAYEREND - TITLE_LAYERSTART
+	  TITLE_LAYERSTART = 0
+	ENDIF
+	GOTO 10
+C
+C***********************************************************************
+C
+C EJ - reached end of IFF file
+250	IF (.NOT.HADINT) CALL GUWK(WKID,GSUPP)
+	IF (REPORT) THEN
+	   CALL WRITEF
+	   CALL WRITEF('Total of %N features found in file.',FTCNT)
+	ENDIF
+	FTCNT=0
+	FINISH=.TRUE.
+	GOTO 1000
+C
+C***********************************************************************
+C
+C EM - end of map, re-calculate scale from next MH,MD etc.
+270	SCALED = .FALSE.
+	GOTO 10
+C
+C*********************************************************************
+C Errors
+998	CALL WRITEF('Unexpected end of IFF file.')
+999	FINISH=.TRUE.
+1000	CALL LIB$SHOW_TIMER	! output time in IFFBDY
+1010	RETURN
+C
+	END

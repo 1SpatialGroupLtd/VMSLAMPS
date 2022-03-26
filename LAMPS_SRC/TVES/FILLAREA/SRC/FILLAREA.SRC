@@ -1,0 +1,475 @@
+	LOGICAL FUNCTION FILL_AREA( NPTS, PTS,
+     &				    MAXSCT, INTSCT, DVPOS,
+     &			            NHATCH, SPACE,  DEVICE, FREQ )
+C
+***	MODULE	FILL_AREA
+***	IDENT	11JA85
+C
+	  IMPLICIT NONE
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+C Created by TJ Ibbs, 6 December 1984
+C
+C *********************************************************************
+C
+C This function is intended to hatch a polygon feature, which it does
+C by drawing lines across it.
+C
+C It returns FALSE if it fills the polygon (see NOTE below), and TRUE
+C if something drastic is wrong - ie silly arguments
+C
+C It uses GKS polyline routines to draw with
+C
+C NOTE - if a line intersects the feature more than MAXSCT times,
+C	 then the fill will be incorrect on that line. However,
+C	 this is not treated as a true error condition - the function
+C	 will still return FALSE
+C
+C *********************************************************************
+C
+C parameters
+C
+	PARAMETER	X = 1		! X coordinate index
+	PARAMETER	Y = 2		! Y coordinate index
+C
+C arguments
+C
+	INTEGER*2	NPTS
+	REAL		PTS(2,NPTS)
+	INTEGER*2	MAXSCT
+	REAL		INTSCT(MAXSCT)
+	BYTE		DVPOS(MAXSCT)
+	INTEGER		NHATCH
+	REAL		SPACE
+	INTEGER		DEVICE
+	INTEGER		FREQ
+C
+C NPTS	  is the number of points in the polygon
+C PTS	  is the array of points defining this feature
+C	  - the last and first points are assumed to be equal
+C
+C MAXSCT  is the number of intersections which may be stored in INTSCT
+C INTSCT  is used to store intersections between the line being drawn
+C	  and the polygon - note that we only store one of the
+C	  coordinates for the intersection, as the other is known
+C
+C DVPOS   is a byte array, with elements set to +1 if DV is positive,
+C	  and -1 if DV is negative, for each intersection stored in
+C	  INTSCT
+C
+C NHATCH  is the type of fill to do
+C
+C		1 => horizontal lines		----
+C		2 => vertical lines		||||
+C		3 =>  45 degrees		////
+C		4 => -45 degrees		\\\\
+C		5 => crosshatch vertical	++++
+C		6 => crosshatch 45 degrees	xxxx
+C
+C SPACE  is the gap between adjacent lines
+C
+C DEVICE  which workstation to update
+C
+C FREQ	  how often (in lines drawn) to update the workstation
+C
+C routines referenced
+C
+	EXTERNAL	CF_REAL		! compare two reals
+	EXTERNAL	COPY_REAL	! copy one to another
+C
+C *********************************************************************
+C
+C workspace:
+C
+	REAL	VMIN,VMAX	! range of points in the feature
+	REAL	DV,ALPHA,VSCT	! intersection calculation
+	REAL	VLIM		! limit for VSLICE
+	REAL	VSLICE		! current raster line
+	REAL	VTEMP(2)	! copies of VSLICE for GPL
+	REAL	USCT		! loc'n of intersection with a line
+C
+	INTEGER		NSCT	! number of intersections
+	LOGICAL		DUPLIC	! true if two intersections the same
+C
+	INTEGER		LHATCH	! Working value of NHATCH
+	LOGICAL		HORIZ	! Present direction of fill
+	LOGICAL		ROTATE	! need we rotate this polygon
+	INTEGER		U,V	! shield X and Y from us
+	INTEGER		I,J,K	! DO loop variables
+	INTEGER		LINOUT	! count of lines output
+C
+	REAL		STORE	! for HEAP_SORT
+C
+C *********************************************************************
+C
+C check our arguments
+C
+	IF (	NPTS.LT.4	.OR.		! less than a triangle
+     &		MAXSCT.LT.2	.OR.		! <2 intersections!!
+     &		NHATCH.LT.1	.OR.
+     &		NHATCH.GT.6	.OR.
+     &		SPACE.LE.0.0	.OR.		! no line separation
+     &		DEVICE.LT.0	.OR.		! invalid workstation
+     &		FREQ.LE.0			! no frequency
+     &	   ) THEN
+	   CALL WRITEF('FILL_AREA - Bad argument list')
+	   FILL_AREA = .TRUE.
+	   GOTO 9999			! just give up
+	ENDIF
+C
+C haven't output any lines to the device yet
+C
+	LINOUT = 0
+C
+C now, check what sort of hatching is required
+C
+	IF (NHATCH.LT.5) THEN
+	   LHATCH = NHATCH		! in one direction only
+	ELSEIF (NHATCH.EQ.5) THEN
+	   LHATCH = 1			! fill horizontal first
+	ELSE
+	   LHATCH = 3			! fill +45 degrees first
+	ENDIF
+C
+C and thus deduce what we need to do...
+C for horizontal/vertical fill, we don't need to rotate the
+C polygon. If we are doing 45 degree fill, then we rotate the
+C polygon, and choose which direction to fill it in.
+C
+	IF ( LHATCH.EQ.1 ) THEN
+	   HORIZ  = .TRUE.
+	   ROTATE = .FALSE.
+	ELSEIF ( LHATCH.EQ.2 ) THEN
+	   HORIZ  = .FALSE.
+	   ROTATE = .FALSE.
+	ELSEIF ( LHATCH.EQ.3 ) THEN
+	   HORIZ  = .FALSE.
+	   ROTATE = .TRUE.
+	ELSEIF ( LHATCH.EQ.4 ) THEN
+	   HORIZ  = .TRUE.
+	   ROTATE = .TRUE.
+	ENDIF
+C
+C *********************************************************************
+C
+C now, if we need to rotate our polygon, then we proceed to do so
+C - ROT45 rotates the polygon by 45 degrees (first arg .TRUE. to
+C rotate it, and .FALSE. to get it back again)
+C
+	IF ( ROTATE ) THEN
+C
+	   DO 5 I = 1,NPTS
+	      CALL ROT45( .TRUE., PTS(X,I), PTS(Y,I) )
+5	   CONTINUE
+C
+	ENDIF
+C
+C *********************************************************************
+C
+C and decide on which way round we see our data
+C
+40	IF ( HORIZ ) THEN
+	   U  = X			! horizontal fill
+	   V  = Y
+	ELSE
+	   U  = Y			! vertical fill
+	   V  = X
+	ENDIF
+C
+C *********************************************************************
+C
+C horizontal or vertical fill - we must determine the range
+C
+	VMIN = PTS(V,1)
+	VMAX = PTS(V,1)
+C
+C get limits between which our points range
+C
+	DO 25 I = 2, NPTS
+	   IF (PTS(V,I) .LT. VMIN) VMIN = PTS(V,I)
+	   IF (PTS(V,I) .GT. VMAX) VMAX = PTS(V,I)
+25	CONTINUE
+C
+C start raster scan at 'bottom' of feature
+C
+	VSLICE = VMIN+SPACE/2	! half line thickness above bottom
+	VLIM   = VMAX-SPACE/2	! where to stop
+C
+C *********************************************************************
+C
+C find all intersections with this scan line
+C
+60	NSCT = 0		! none yet
+	DO 120 I = 1,NPTS-1
+C
+C
+C	 DV is the change in the 'V' axis (the one we care about)
+C	 between this point and the next
+C
+	   DV = PTS(V,I+1)-PTS(V,I)
+	   IF ( DV.EQ.0 ) GOTO 120	! ignore 'horizontals'
+C
+C	 determine at what 'height' the VSLICE line intersects the line
+C	 between our two points
+C
+	   ALPHA = (VSLICE-PTS(V,I))/DV	! vertical ratio
+	   IF (ALPHA.LT.0 .OR.
+     &	       ALPHA.GT.1) GOTO 120	! no intersection
+C
+C	 calculate the real intersection position
+C
+	   USCT = PTS(U,I)*(1-ALPHA)+PTS(U,I+1)*ALPHA
+C
+C	 and add the intersection to our list
+C
+	   NSCT = NSCT+1			! ready for next entry
+C
+	   IF (NSCT.GT.MAXSCT) THEN
+	      CALL WRITEF(
+     &		'FILL_AREA - Buffer full - can''t add next entry')
+	      GOTO 160				! ignore this line
+	   ELSE
+	      INTSCT(NSCT) = USCT		! add this intersection
+	      DVPOS(NSCT)  = INT(SIGN(1.0,DV))	! set to +1 or -1
+	   ENDIF
+C
+C	 the above termination clause will fill the buffer, and then
+C	 scan more of the feature, giving the error message if an
+C	 attempt is made to add another entry. Some time could be saved
+C	 by jumping immediately to the draw stage (below) immediately
+C	 on filling the buffer, regardless of whether there are more
+C	 intersections for this line - the version above will only draw
+C	 'correct' lines, whereas the quick version would draw partial
+C	 lines in some cases. Eg:
+C
+C		NSCT = NSCT+1
+C		INTSCT(NSCT) = USCT
+C		DVPOS(NSCT)  = INT(SIGN(1.0,DV))
+C		IF (NSCT.GE.MAXSCT) GOTO 130
+C
+120	CONTINUE	! to get all intersections
+C
+C *********************************************************************
+C
+C here with intersection list complete - draw the line across
+C
+C we can ignore an empty list of intersections, and a single
+C intersection is an error
+C
+C two intersections occur often enough to be treated specially -
+C note that of the problems with intersections, only case (1)
+C (see below for a description) is relevant - case (2)
+C requires more points)
+C for two intersections, we don't bother to sort
+C
+	IF ( NSCT.EQ.1 ) THEN
+C
+	   CALL WRITEF(
+     &		'FILL_AREA - Single intersection point in buffer')
+C
+	ELSEIF ( NSCT.EQ.2 ) THEN
+C
+	   IF ( INTSCT(1).NE.INTSCT(2) ) THEN
+C
+C	     and now draw the slice - first set up the 'other'
+C	     coordinate we shall use...
+C
+	      VTEMP(1) = VSLICE
+	      VTEMP(2) = VSLICE
+C
+C	     transform back if required
+C
+	      IF ( ROTATE ) THEN
+		 DO 135 I = 1,2
+		    IF (HORIZ) THEN
+		       CALL ROT45(.FALSE.,INTSCT(I),VTEMP(I))
+		    ELSE
+		       CALL ROT45(.FALSE.,VTEMP(I),INTSCT(I))
+		    ENDIF
+135		 CONTINUE
+	      ENDIF
+C
+	      IF (HORIZ) THEN
+	         CALL GPL( 2, INTSCT(1), VTEMP )
+	      ELSE
+	         CALL GPL( 2, VTEMP, INTSCT(1) )
+	      ENDIF
+C
+C	    count this line as having been output
+C
+	      LINOUT = LINOUT+1
+	   ENDIF
+C
+	ELSEIF ( NSCT.GT.2 ) THEN
+C
+C	 we have a proper list of points - scan it for any
+C	 intersections to be thrown away...
+C
+C	 Assumptions are
+C	  i)	that if two values are identical, then they represent
+C		one of the cases below
+C	 ii)	that we won't get three or more identical values, or
+C		that if we do, the following will deal correctly with
+C		them
+C
+C	 Actions are
+C	 - if we find two adjacent INTSCT values to be the same, then
+C	 we have one of the following cases
+C
+C	 -----	in the diagrams, the dashed horizontal line is VSLICE,
+C		and passes exactly through the common point of the line
+C		segments shown
+C
+C	  		    /				    /
+C	 ---/\--   or   ---x---   or   --x==x--   or  --x==x--
+C	   /  \		  /		/    \	       /
+C
+C	   (1)		  (2)		 (3)		(4)
+C
+C	 in case (1) both intersections may be discarded, as
+C	 	     they define a null line
+C	 	     - we have INTSCT(I)  = INTSCT(I+1)
+C			        DVPOS(I) ~=  DVPOS(I+1)
+C
+C	 in case (2) one of the intersections may be discarded, as
+C	 	     retaining both would yield the wrong result
+C		     - we have INTSCT(I)  = INTSCT(I+1)
+C			        DVPOS(I)  =  DVPOS(I+1)
+C
+C	 in case (3) the line segment parallel to VSLICE has DV zero,
+C	 	     so is ignored, meaning that this case reduces to
+C		     case (1)
+C
+C	 in case (4) the line segment parallel to VSLICE has DV zero,
+C		     and this case reduces to case (2)
+C
+	   DUPLIC = .FALSE.
+C
+C	 check for case (1) or case (2)
+C
+	   DO 140 I = 1,NSCT-1
+C
+	      IF ( INTSCT(I).EQ.INTSCT(I+1) .AND.
+     &		    DVPOS(I).NE. DVPOS(I+1)) THEN
+C
+		 DVPOS(I)   = 0		! case (1), so lose
+		 DVPOS(I+1) = 0		! both points
+		 DUPLIC = .TRUE.
+C
+	      ELSEIF (  DVPOS(I).EQ. DVPOS(I+1) ) THEN
+C
+		 DVPOS(I+1) = 0		! case (2/3), lose one point
+	         DUPLIC = .TRUE.
+C
+	      ENDIF
+140	   CONTINUE
+C
+C	 now check the first against the last...
+C
+	   IF ( INTSCT(1).EQ.INTSCT(NSCT) .AND.
+     &		 DVPOS(1).NE. DVPOS(NSCT)) THEN
+	      DVPOS(1)    = 0		! case (1), so lose
+	      DVPOS(NSCT) = 0		! both points
+	      DUPLIC = .TRUE.
+	   ELSEIF (  DVPOS(1).EQ. DVPOS(NSCT) ) THEN
+	      DVPOS(1) = 0		! case (2/3), lose one point
+	      DUPLIC = .TRUE.
+	   ENDIF
+C
+C	 and remove any duplicates from our list...
+C
+	   IF (DUPLIC) THEN
+	      J = 0
+	      DO 145 I = 1,NSCT
+		 IF (DVPOS(I).EQ.0) GOTO 145
+		 J = J+1
+		 INTSCT(J) = INTSCT(I)
+145	      CONTINUE
+	      NSCT = J
+	   ENDIF
+C
+C	 sort the list into order - if only two points, then
+C	 don't bother - we don't care what order they come in
+C
+	   IF ( NSCT.NE.2 ) THEN
+	      CALL HEAP_SORT( INTSCT, NSCT, CF_REAL, COPY_REAL, STORE )
+	   ENDIF
+C
+C	 if we still have an odd number of intersections, then we
+C	 don't draw the last one - no check at this stage
+C
+C	 and draw the lines between the intersections
+C	 - first set up the 'other' coordinate we shall use...
+C
+	   VTEMP(1) = VSLICE
+	   VTEMP(2) = VSLICE
+C
+C	 and do the actual drawing
+C
+	   DO 155 I = 1, NSCT-1, 2
+C
+	      IF (HORIZ) THEN
+C
+		 IF (ROTATE) THEN		! transform back
+		    DO 153 J = 1,2
+		       VTEMP(J) = VSLICE
+		       CALL ROT45(.FALSE.,INTSCT(I+J-1),VTEMP(J))
+153		    CONTINUE
+		 ENDIF
+	         CALL GPL( 2, INTSCT(I), VTEMP )
+C
+	      ELSE
+C
+		 IF (ROTATE) THEN		! transform back
+		    DO 154 J = 1,2
+		       VTEMP(J) = VSLICE
+		       CALL ROT45(.FALSE.,VTEMP(J),INTSCT(I+J-1))
+154		    CONTINUE
+		 ENDIF
+	         CALL GPL( 2, VTEMP, INTSCT(I) )
+C
+	      ENDIF
+C
+155	   CONTINUE
+C
+C	 count this line as having been output
+C
+	   LINOUT = LINOUT+1
+C
+	ENDIF
+C
+C *********************************************************************
+C
+160	VSLICE = VSLICE+SPACE	! ready for next raster line
+C
+	IF (LINOUT.GE.FREQ) THEN
+	   CALL GUWK(DEVICE,0)		! force the lines out
+	   LINOUT = 0			! restart the count
+	ENDIF
+C
+C if we haven't yet reached the top, then go back for another scan
+C
+	IF (VSLICE .LE. VLIM) GOTO 60
+C
+C and we finally reach here when we have scanned the whole feature
+C - do we need to scan it again?
+C
+	IF (LHATCH.NE.NHATCH) THEN
+	   IF (LHATCH.EQ.1.OR.LHATCH.EQ.3) THEN
+	      LHATCH = LHATCH+1		! 'next' sort of hatch
+	      HORIZ  = .NOT.HORIZ	! fill it crosswise
+	      GOTO 40
+	   ENDIF
+	ENDIF
+C
+C no, so check that we have output all lines required
+C
+	IF (LINOUT.NE.0) CALL GUWK(DEVICE,0)
+C
+C so we may assume that we have succesfully filled our polygon
+C
+	FILL_AREA = .FALSE.
+C
+9999	RETURN
+	END

@@ -1,0 +1,210 @@
+	LOGICAL FUNCTION WAIT_INPUT(PROMPT)
+C
+***	IDENT	06OC92
+***	MODULE	WAIT_INPUT
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C
+C	Author	  : Andrew Morris
+C	Created   : Jan 1985
+CMOD	To select LUN on which command file is open before reading
+C	the next line.				DRC 16-MAR-89
+C
+	IMPLICIT NONE
+C
+C parameters in
+	CHARACTER*(*)		PROMPT	! prompt
+C
+C parameters
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+C
+C system parameters
+	INCLUDE '($SSDEF)'
+	INCLUDE '($IODEF)'
+C
+C commons
+	INCLUDE	'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE	'LSL$CMNROVER:DTIQIO.CMN'
+	INCLUDE	'LSL$CMNROVER:TAB.CMN'
+	INCLUDE	'LSL$CMNROVER:DTICMN.CMN'
+	INCLUDE	'LSL$CMNROVER:ROVCMN.CMN'
+	INCLUDE	'LSL$CMNROVER:MOUSE.CMN'
+C
+C functions
+	INTEGER		SYS$QIO		! "queue" an input requeuest
+	INTEGER		EXPAND		! length of string argument
+	INTEGER		SYS$READEF	! read event flag
+	INTEGER		SYS$ASSIGN	! assign I/O channels
+	INTEGER		SYS$DASSGN	! deassign I/O channels
+	INTEGER*4	TTRLIN		! read line from SYS$INPUT
+	LOGICAL		HAD_ERROR	! had table input error?
+	LOGICAL		READ_ERROR	! read error message
+	INTEGER*4	FLRLIN		! reads line from file
+	EXTERNAL	CTRLCAST	! CTRL/C handler
+C
+C workspace
+	INTEGER		I		! longword for SYS$READEF
+	INTEGER*4	IERR2		! ret code from TTRLIN
+	INTEGER*4	RET
+	INTEGER*4	MASK		! WFLOR mask
+C
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C Prompts and waits for input from table or keyboard.
+C
+C Waits for table streamed input only if COMMAND is true
+C
+C Function result is	.FALSE. for ^Z or possibly fatal read error,
+C			.TRUE. otherwise.
+C:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+C
+	WAIT_INPUT = .FALSE.	! assume error
+	TXTLIM=80
+C
+C
+10	IF (CMDFIL) THEN		! commands from command file?
+	  IERR2 = TTRLIN()		! read next line from SYS$INPUT
+	  IF (.NOT.IERR2) THEN
+	    CALL WRITEF
+     &	    ('*** End of command file ***')
+	    CMDFIL = .FALSE.
+	    CALL TEST_TERM('SYS$COMMAND',CMDFIL,IERR2)
+	    CMDFIL = .NOT.CMDFIL
+	    IF (CMDFIL) GOTO 20		! not a terminal, so exit
+	    WAS_CMDFIL = .TRUE.		! signal for TT_READ_NUMBER
+	    IERR = SYS$ASSIGN('SYS$COMMAND',IN_CHAN,,)
+	    IF (.NOT.IERR) THEN
+	      CALL LSL_PUTMSG(IERR)
+	      GOTO 20			! as for ^Z
+	    END IF
+	    CALL SET_OUTBAND_AST(CTRLCAST,8,,'SYS$COMMAND')
+	    GOTO 10			! take commands from terminal
+	  END IF
+C
+	  IF (TXTPTR.LT.80) TXTBUF(TXTPTR+1) = 0
+C	  CALL LIB$SET_CURSOR(23,LEN(PROMPT))
+	  CALL WRITEF('%S> %A',PROMPT,TXTBUF(1))	! echo command
+	  HAD_VDU = .TRUE.
+	  GOTO 17			! input is a text command line
+	ELSEIF (IN_COM) THEN
+C
+C we're in a Rover command file (the user has typed @filename at some 
+C time.
+	   CALL FLRSEL(COMLUN)
+	   RET = FLRLIN(,,,IERR)
+	   IF (.NOT. RET) THEN
+	      IF (RET .EQ. LSL__EOF) THEN
+	 	 CALL WRITEF('*** End of command file ***')
+	         IN_COM = .FALSE.
+		 CALL FLRCLO(COMLUN)
+		 GOTO 10
+	      ELSE
+	         CALL WRITEF
+     &	        ('%S reading from Rover Command File',EBELL)
+		CALL WRITEF('Command File execution abandoned')
+		IN_COM = .FALSE.
+		CALL LSL_PUTMSG(RET)
+		CALL LSL_PUTMSG(IERR)
+		GOTO 10
+	      ENDIF 
+	   ELSE
+	      HAD_VDU = .TRUE.
+	      GOTO 17
+	   ENDIF
+	END IF
+C
+C Write the prompt - TTWSTR eventually calls our VIO$PUT_OUTPUT in
+C OUTPUT.SRC, which takes account of PROING
+	IF (TTODON .OR. TTIDON .OR. TTOPRO) THEN
+C
+C cancel existing QIO
+	   CALL SYS$CANCEL(%VAL(IN_CHAN))
+	   HADQIO = .FALSE.
+	   TTOPRO = .TRUE.
+	   CALL TTWSTR(PROMPT//'> ')
+	ENDIF
+C
+C queue input requeuest
+	IF (.NOT. HADQIO) THEN
+C
+	   IERR = SYS$QIO
+     +	  	(
+     +		%VAL(EF_VDU),		! event flag to be set
+     +  	%VAL(IN_CHAN),		! input channel number
+     +  	%VAL(IO$_READVBLK),	! I/O function
+     +  	ISB,			! I/O status block
+     +  	,			! AST address
+     +  	,			! AST parameters
+     +  	TXTBUF,			! p1 is buffer
+     +  	%VAL(TXTLIM-1),		! p2 is max buffer length
+     +    	,			! p3 is default timeout period
+     +  	,			! p4 is default terminator
+     +  	,			! p5 is prompt string
+     +  	,			! p6 is prompt length
+     +  	)
+C
+C QIO successful?
+	   IF (IERR.NE.SS$_NORMAL) THEN
+	      CALL LSL_PUTMSG(IERR)
+	      GOTO 10			! try again
+	   END IF
+	   HADQIO = .TRUE.		! now had a QIO
+	ENDIF
+C
+C wait for keyboard, table or trackerball input
+c build up mask
+16	MASK = 0		! clear mask
+	HAD_FB = .FALSE.
+	HAD_TRKB = .FALSE.
+	HAD_TIMER = .FALSE.
+	CALL EFWM(MASK,EF_VDU)	! always want VDU event flag
+	IF (TABLE) CALL EFWM(MASK,EF_POINT,EF_ERROR)
+	IF (EDITING.OR.REGISTERING) 
+     &  CALL EFWM(MASK,EF_TRKB,EF_FB,EF_TIMER)
+C
+C wait
+	CALL SYS$WFLOR(%VAL(EF_POINT),%VAL(MASK))
+C
+C input from keyboard?
+	HAD_VDU = ISB_STATUS.NE.0				! VDU
+	IF (.NOT. HAD_VDU) THEN
+	   HAD_TRKB = SYS$READEF(%VAL(EF_TRKB),I).EQ.SS$_WASSET	! TRKB
+	   IF(.NOT. HAD_TRKB) THEN
+	      HAD_TIMER= SYS$READEF(%VAL(EF_TIMER),I).EQ.SS$_WASSET 
+	   ENDIF
+	   IF (.NOT. (HAD_TRKB.OR.HAD_TIMER)) THEN
+	      HAD_FB = SYS$READEF(%VAL(EF_FB),I).EQ.SS$_WASSET	! FB's
+	   ENDIF
+	ENDIF
+C
+	IF (HAD_VDU) THEN		! had keyboard input?
+	  HADQIO = .FALSE.		! no QIO now
+	  IF (ISB_STATUS.NE.SS$_NORMAL) THEN
+	    CALL LSL_PUTMSG(ISB_STATUS)	! debug
+	    GOTO 10			! try again
+	  END IF
+	  TXTPTR = ISB_TOFF
+	  TTIDON = .TRUE.		! done some output
+	END IF
+C
+C 
+	IF (HAD_FB.OR.HAD_TRKB) GOTO 18
+C
+17	IF (HAD_VDU) THEN		! had keyboard input?
+	  IF (TXTBUF(1).EQ.26) GOTO 20	! ^Z ?
+C
+	  IF (TXTPTR.EQ.0) GOTO 10	! try again if blank line
+	  CALL BSLN
+	ELSE
+C
+C if had table error, try again
+	  IF (HAD_ERROR(IERR)) THEN
+	    CALL READ_ERROR(ERRBUF,ERRLEN,ERRNOM,IERR)
+	    GOTO 16	! try again
+	  END IF
+	END IF
+C
+18	WAIT_INPUT = .TRUE.		! success
+C
+20	RETURN
+	END
+C

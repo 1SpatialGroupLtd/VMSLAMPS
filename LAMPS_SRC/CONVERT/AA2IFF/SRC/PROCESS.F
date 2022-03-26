@@ -1,5 +1,5 @@
 	SUBROUTINE 	PROCESS
-CDEC$	IDENT	'19AP91'
+CDEC$	IDENT	'19JL94'
 C
 C	Copyright (C)				Laser-Scan Ltd., Cambridge
 C	Created					11-Jun-1990	John Cadogan
@@ -56,6 +56,10 @@ C
 	LOGICAL		FIRST_FEATURE
 	LOGICAL		HAD_H_OR_L
 	LOGICAL		HAD_AC
+C
+	BYTE		CHARBYTE
+	INTEGER*4	CHARINT
+	EQUIVALENCE	(CHARINT,CHARBYTE)
 C
 C Record types
 C
@@ -158,8 +162,14 @@ C
 	   CALL BSCH
 	   LEN = READSTR(ACTEXT,STAR,ON_CHAR)
 	   ACLEN = LEN
+C
+C Prevent an integer overflow by first assigning the result of ICHAR to a
+C 4 byte int since this can be negative for composite characters and use an
+C equivalenced byte when copying the character to the ACBYTE array.
+C
 	   DO 11 I = 1,LEN
-	      ACBYTE(I) = ICHAR(ACTEXT(I:I))
+	      CHARINT = ICHAR(ACTEXT(I:I))
+	      ACBYTE(I) = CHARBYTE
 11	   CONTINUE
 	   HAD_AC = .TRUE.
 C

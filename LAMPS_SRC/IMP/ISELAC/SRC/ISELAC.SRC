@@ -1,0 +1,508 @@
+	PROGRAM ISELAC
+C
+***	IDENT   10AP90
+***	MODULE  ISELAC
+C
+C	Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C
+CMOD	No longer outputs empty layers			TJH 10-Apr-1990
+CMOD	EIHRL rather than IEHR used to get secondary AC value
+C							DRC 11-Jun-1986
+CMOD	ACTEST passed FSN for error mesages		ATT 22-Dec-1986
+CMOD	Subroutine COPENT added to update range
+C	of output file					TJH 16-Dec-1986
+CMOD	IRANGE declared so ISELAC compiles ! 		ATT 16-Dec-1986
+CMOD	Now closes output file and clears had-output-file
+C	logical after eacg "GO". Adjusts RAnge of output file
+C	to reflect the true range of the selected data, not
+C	just the range of the input file. Various mods to
+C	online help (no longer access violates if LSL$HELP:
+C	incorrectly assigned!) Messages rationalised. $STATUS
+C	written into the output file on closure; reduced to
+C	SS$_NORMAL or SS$_ABORT. Output file deleted if an
+C	error of severity worse than warning occurs.	TJH 05-Dec-1986
+C
+C	Author: A T Timms
+C
+C 	ISELAC reads an IFF file and outputs selected items to a new 
+C	file according to AC type or AC attributes.
+C
+C	The program is based on the DAMP SELAC which has merely been 
+C	updated to IMP standards (LSLLIB. etc.).
+C	
+C....................................................................
+C	
+C	SUMMARY OF PROGRAM LOGIC (or is LOGIC a contradiction ?)
+C	
+C	Features before first Layer are merely copied to the output
+C	file. When an NO is found checks for selection by layer are
+C	made (layer zero is always copied !). If a layer is selected
+C	then remember the position of the first non-void feature
+C	(to allow for TCs). Go through feature testing where relevant
+C	for FSN selection and ACs. If a feature is rejected remember
+C	the position of the begining of the next feature and start 
+C	testing again. If reach an EF then feature has passed all tests 
+C	so go back to the saved position and copy entries to the
+C	output file until we reach another feature.
+C							Simple eh !
+C....................................................................
+C	
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE '($SSDEF)'
+	INCLUDE '($STSDEF)'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'	! LSLLIB error numbers 
+C
+C LSL common blocks
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'		! LSL_STATUS ....
+	INCLUDE 'LSL$CMNLSL:TXTC.CMN'		! TXTBUF ....
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'		! IFF read & write
+C
+C Program common blocks
+	INCLUDE 'LSL$CMNISELAC:ATTRIB.CMN'
+	INCLUDE 'LSL$CMNISELAC:FILES.CMN'
+	INCLUDE 'LSL$CMNISELAC:ACSKEL.CMN'
+	INCLUDE 'LSL$CMNISELAC:DICTS.CMN'
+	INCLUDE 'LSL$CMNISELAC:IFFOK.CMN' 	! IFF error stuff
+	INCLUDE 'LSL$CMNISELAC:ISELACMSG.PAR'	! ISELAC errors
+C
+C Functions called
+	LOGICAL		RDCHS
+C
+C Local functions
+	LOGICAL		GETCMD		! to prompt for command line
+	LOGICAL		ACTEST		! to decode an AC text
+	LOGICAL		REJECT		! reject a feature?
+        LOGICAL         ACSKRD          ! read from AC text file
+        LOGICAL         SETUP           ! set up dynamic cmd. dicts.  
+	INTEGER*4 	IFFREP		! handles IFF error reporting
+	EXTERNAL	IFFREP
+C
+C Workspace
+	REAL    	IRANGE(4)	! IFF range elements for outfile
+	REAL		VALUE		! temporary real value
+	REAL		RSEC 		! secondary feature coding
+	INTEGER*4	TOTSEL		! number selected in file
+	INTEGER*4	NSEL		! number selected in overlay
+	INTEGER*4	NREJ		! number rejected in overlay
+        INTEGER*4	IND
+	INTEGER*4	FSN		! feature serial number
+	INTEGER*4	LPOSNO		! remember NO position
+	INTEGER*4	NOPOS		! NO position
+	INTEGER*4	EOPOS		! EO position
+	INTEGER*4	I		! loop counter
+	INTEGER*4	NVOPOS		! non-void position
+	INTEGER*4	SEC             ! secondary f coding
+	INTEGER*4	ISQ		! Internal sequence number
+	INTEGER*2	NVOCODE		! non-void code
+	INTEGER*2	NPTS		! number of points in string
+	INTEGER*2	IENDS		! string pen control
+	INTEGER*2	IECODE		! entry in hand
+	INTEGER*2	IELEN		! its length (words)
+	INTEGER*2	IFFLAY		! current overlay number
+	INTEGER*2	ACTYPE		! type (word) of AC
+	LOGICAL		OVCOPY		! copying OV 0 ? 
+	LOGICAL		NODONE		! done an NO ? 
+	LOGICAL		HADNVO		! had non-void entry?
+	LOGICAL		HADAC		! Had an AC?
+	LOGICAL		STEPIT		! Stepping to EO?
+	LOGICAL		ACCMD		! selecting on AC attribute ?
+	CHARACTER*80	FILNAM		! Default Skeleton File name 
+C
+C....................................................................
+C initialise LSLLIB
+	CALL LSL_INIT(.TRUE.)
+C
+C initialise logicals
+	INFILOK = .FALSE.
+	OUTFILOK = .FALSE.
+	HADFROM = .FALSE.
+	HADTO   = .FALSE.
+	DOEXIT  = .FALSE.
+	SKIPOV  = .FALSE.		! skip overlays
+	NO_ACSK = .TRUE.
+C
+C....................................................................
+C See if there is a default skeleton file
+	FILNAM = 'LSL$LOOKUP:ACSKEL.DAT'
+C
+C default skeleton file found ? ACSKRD deals with it
+        IF (ACSKRD(FILNAM)) GOTO 5
+C
+C Set up dynamic dictionary
+5	IF (.NOT.SETUP(0)) THEN		! error setting up 
+	  OK = ISELAC__ERROPCMD		! command tables
+	  CALL LSL_PUTMSG(OK)		! tell user
+	  GOTO 999			! and exit
+	ENDIF
+C
+C....................................................................
+C Get command line and work out what is required. .TRUE. return = error
+10	OK = GETCMD()
+	IF (.NOT.OK) GOTO 999		! error
+	IF (DOEXIT) GOTO 999		! exit
+C
+C....................................................................
+C have we had GO command yet. If not go back for more.
+	IF (.NOT.HADGO) GOTO 10
+C
+C....................................................................
+C We have had GO. Check we have input and output filenames.
+	IF (.NOT.HADFROM.OR..NOT.INFILOK) THEN
+	  OK = ISELAC__INFILNOSPEC
+	  CALL LSL_PUTMSG(OK)
+	  HADFROM = .FALSE.
+	  HADGO = .FALSE.
+	  GOTO 10
+	ENDIF
+C
+	IF (.NOT.HADTO.OR..NOT.OUTFILOK) THEN
+	  OK = ISELAC__OUTFILNOSPEC
+	  CALL LSL_PUTMSG(OK)
+	  HADTO = .FALSE.
+	  HADGO = .FALSE.
+	  GOTO 10
+	ENDIF
+C
+C ......................................................................
+C Initialise range for output file
+	IRANGE(1)=1.0E24		! initialise RAnge, XMIN
+	IRANGE(2)=-IRANGE(1)		!		    XMAX
+	IRANGE(3)=IRANGE(1)		!		    YMIN
+	IRANGE(4)=-IRANGE(1)		!		    YMAX
+C
+C....................................................................
+C Now go through file.
+	CALL IFFSEL(INLUN)		! select input
+	CALL IFFRWD			! and rewind it
+C
+C....................................................................
+C Initialise various bits and pieces
+	TOTSEL = 0
+	NSEL = 0
+	NREJ = 0
+C
+C....................................................................
+C See if we have any param selections (as opposed to just FAC)
+	ACCMD = .FALSE.				! assume none
+	DO 18 I=1,21
+	  IF (NLIM(I).NE.0) THEN
+	    ACCMD = .TRUE.			! we have AC selection
+	    GOTO 20				! so don't look further
+	  ENDIF
+18	CONTINUE
+C
+C....................................................................
+C Copy until NO
+20	CALL IFFNXT( IECODE, IELEN )
+	IF (IELEN.EQ.-1) GOTO 840		! normal end of file
+	IF (IECODE.EQ.'VO') GOTO 20		! skip voids
+	IF (IECODE.NE.'NO') THEN
+	  CALL EIHCPY(OUTLUN)
+	  GOTO 20
+	ENDIF
+C
+C...................................................................
+C NO entry
+30	SKIPOV = .FALSE.		! not skipping yet 
+	NODONE = .FALSE.		! not done NO yet
+	HADNVO = .FALSE.		! no non-void yet
+	NREJ = 0			! none selected
+	NSEL = 0			! or rejected
+	CALL EIHR(IFFLAY,1,1)		! read layer number
+C
+C We skip LAYER 0 (zero)
+	IF (IFFLAY.EQ.0) THEN
+	  OK = ISELAC__LAYCOP
+	  CALL LSL_PUTMSG(OK,IFFLAY)
+	  OVCOPY = .TRUE.
+	  GOTO 50	  
+	ENDIF
+C
+C...................................................................
+C See if we can skip this overlay
+	IF (HAD_LAY) THEN			! yes LAYER specified
+	  VALUE = FLOAT(IFFLAY)			
+	  IF (REJECT(23,VALUE)) SKIPOV = .TRUE.	! we are not interested 
+	ENDIF			      		! we can skip this layer
+C...................................................................
+C Tell the world what is going on
+45	IF (SKIPOV) THEN		! we are skipping 
+	  OK = ISELAC__LAYSKIP
+	  CALL LSL_PUTMSG(OK,IFFLAY)
+	ELSE				! we are processing
+	  OK = ISELAC__LAYPROC
+	  CALL LSL_PUTMSG(OK,IFFLAY)
+	END IF
+C
+C....................................................................
+C Lets take the necessary action depending upon whether we are 
+C processing or skipping.
+50	IF (SKIPOV) THEN		! we are skipping so ....
+	  CALL IFFNXC('EO',IELEN)	! jump to next EO 
+	  IF (IELEN.EQ.-1) GOTO 800	! unexpected EOF 
+	  GOTO 20			! and find next entry 
+	ELSE				! we are processing
+	  CALL IFFSEL(OUTLUN)		! select output file
+	  LPOSNO = LPOSE		! remember where we are
+	  CALL IFFNO(IFFLAY,0,0)	! write dummy NO entry
+	  CALL IFFSEL(INLUN)		! select output file
+	END IF
+C
+C....................................................................
+C Go through the layer 
+60	CALL IFFNXT( IECODE, IELEN )	! get next entry
+	IF (IECODE.EQ.'VO') GOTO 60	! ignore voids
+C
+C Remember where we are if needs be
+	IF (.NOT.HADNVO) THEN
+	   NVOPOS = LPOSH		! got non-void so
+	   NVOCODE = IECODE		! remember position and code
+	   HADNVO = .TRUE.
+	ENDIF
+C
+	IF (IECODE.EQ.'EO') GOTO 65	! End of overlay
+C
+C If it is layer zero (0) then just copy through.
+	IF (OVCOPY) THEN		! Layer 0
+	  IF (IECODE.EQ.'NF') THEN	! New feature
+	    CALL EIHR(FSN,1,1)		! read FSN
+	    FSN = IAND(FSN,65535)	! cnvrt to unsgnd lngwrd
+	    ISQ = 0			! set sequence no. to zero
+	    CALL IFFSEL(OUTLUN)
+	    CALL IFFNF(FSN,ISQ)
+	    CALL IFFSEL(INLUN)
+	  ELSE IF (IECODE.EQ.'EF') THEN	! End feature
+	    CALL IFFSEL(OUTLUN)
+	    CALL IFFEF
+	    CALL IFFSEL(INLUN)
+	  ELSE				! otherwise just
+	    CALL COPENT(IECODE,IRANGE)	! copy to OUTLUN
+	  ENDIF
+	  GOTO 60			! and go back for more
+	ENDIF
+C	  
+	IF (IECODE.EQ.'NF') GOTO 70	! New feature
+C
+C If not EO or NF just copy to output file
+	CALL COPENT(IECODE,IRANGE)
+	GOTO 60				! and return
+C
+C....................................................................
+C EO. Check that we have selected something. If so then write
+C an EO, go back and fix EO pointer. If not go back to NO in output file.
+C and lose this layer in the output file
+65	CALL IFFSEL(OUTLUN)			! select out-file
+	IF (NSEL.EQ.0.AND.IFFLAY.NE.0) THEN	! not layer 0 & nothing
+	  CALL IFFUPP(0,LPOSM,LPOSH,LPOSNO)	! selected, so put LPOSE back
+	ELSE					! on top of useless NO
+	  CALL IFFUNO(LPOSNO)			! update NO
+	  CALL IFFEO				! and write EO
+	ENDIF
+	CALL IFFSEL(INLUN)			! reselect in-file
+C
+	IF (IFFLAY.EQ.0) OVCOPY = .FALSE.	! reset OVCOPY
+	SKIPOV = .FALSE.			! reset SKIPOV
+C
+C Keep track of total number of features selected so far
+	TOTSEL=TOTSEL+NSEL
+C
+C Inform the world what has gone on
+	IF (NSEL.EQ.0.AND.NREJ.EQ.0) GOTO 20
+	CALL WRITEF
+	CALL WRITEF('%^W%N feature%m selected in layer %^W%N'
+     &		   ,NSEL				,IFFLAY)
+	CALL WRITEF('%^W%N feature%m rejected in layer %^W%N'
+     &		   ,NREJ				,IFFLAY)
+	CALL WRITEF
+	GOTO 20					! see what's next 
+C
+C....................................................................
+C NF entry
+70	CALL EIHR(FSN,1,1)			! read FSN
+	FSN = IAND(FSN,65535)			! cnvrt to unsgnd lngwrd
+C
+C....................................................................
+C Selection by FSN ?
+	IF (HADNF) THEN				! yes
+	  VALUE = FLOAT(FSN)			
+	  IF (REJECT(22,VALUE)) GOTO 100	! we are not interested 
+	ENDIF
+C
+C....................................................................
+C Find the AC for this feature if we are selecting on basis of AC's.
+C If are not selecting on basis of AC's (ACNUM = 0) but we have got this
+C far then we are selecting this feature by NF.
+	IF (.NOT.ACCMD.AND.ACNUM.EQ.0) GOTO 95	! selected
+	HADAC = .FALSE.				! haven't had an AC yet
+C
+C....................................................................
+80	CALL IFFNXT(IECODE,IELEN)		! get next entry
+	IF (IELEN.EQ.-1) GOTO 800		! unexpected EOF
+	IF (IECODE.EQ.'EF') THEN	! EF if we have got this
+	  NREJ = NREJ + 1		! far we ignore this feature
+	  HADNVO = .FALSE.		! reset
+	  GOTO 60
+	ENDIF
+C
+	IF (IECODE.EQ.'VO') GOTO 80		! ignore voids
+	IF (IECODE.EQ.'AC') GOTO 90		! AC
+	GOTO 80
+C
+C....................................................................
+C We have an AC
+C Check ACTYPE = SK_ACTYP(ACNUM), move AC text to TXTBUF, and decode it
+90	CALL EIHR(ACTYPE,1,1)
+	IF (ACTYPE.NE.SK_ACTYP(ACNUM)) GOTO 80
+C
+C Check for secondary code selection
+	IF (.NOT.HADSEC) GOTO 91
+	IND = SK_ACIND(ACNUM)
+	INTNUM = .NOT. BTEST(IND,0)
+	IF (INTNUM) THEN
+          CALL EIHRL(SEC,1,2)
+          VALUE=FLOAT(SEC)
+	ELSE
+	  CALL EIHRR(RSEC,1,2)
+	  VALUE=RSEC
+	END IF
+	IF (REJECT(21,VALUE)) GOTO 80	! This AC ignored another AC ?
+C
+C Text check ?
+91	IF (.NOT.ACCMD) GOTO 95
+	IF (ACNUM.EQ.2.OR.ACNUM.EQ.3.OR.(ACNUM.GE.80.AND.ACNUM.LE.99))
+     &    GOTO 95		! heights so we can skip the text check.
+	IF (.NOT.HAD_TEXT(ACNUM)) GOTO 95 ! No text so don't check it
+	HADAC=.TRUE.
+C
+C Work out the size of TXTBUF
+	TXTPTR = (IELEN-3)*2
+	IF (TXTPTR.GT.80) THEN			! It is a very big AC
+	  IF (TXTPTR.GT.1024) TXTPTR = 1024
+	  CALL SET_TXTLIM(TXTPTR)		! Increase TXTBUF size 
+	ENDIF
+C
+	CALL EIHR (TXTBUF,IELEN-3,4)
+	DO 92 I=1,TXTPTR
+	  IF (TXTBUF(I).EQ.0) THEN
+	    TXTPTR = I-1
+	    GOTO 94
+	  ENDIF
+92	CONTINUE
+94	IF (ACTEST(FSN)) GOTO 95		! if select 
+	GOTO 80				! look for another AC
+C
+C....................................................................
+C Copy the whole feature. It has passed one of the tests for selection
+C Rewind to the beginning of the feature and copy everything until an
+C EF is found.
+95	CALL IFFPKE(IECODE,IELEN,NVOPOS)
+	IF (IECODE.NE.NVOCODE.OR.IELEN.EQ.-1) THEN
+	  OK = ISELAC__FTOREPTONV		! Oh dear !!
+	  CALL LSL_PUTMSG(OK)			! we are lost !!
+	  CALL IFFSEL( OUTLUN )			! exit tidyly
+	  CALL IFFEJ
+	  GOTO 999
+	ENDIF
+C
+C....................................................................
+C Copy until NF, unless already at NF
+98	IF (IECODE.NE.'NF') THEN
+	  IF (IECODE.NE.'VO') CALL COPENT(IECODE,IRANGE)
+	  CALL IFFNXT( IECODE, IELEN )
+	  IF (IELEN.EQ.-1) GOTO 800
+	  GOTO 98
+	ENDIF
+C
+C....................................................................
+C Write an NF
+	CALL IFFSEL( OUTLUN )
+	ISQ = 0
+	CALL IFFNF( FSN, ISQ )
+	CALL IFFSEL( INLUN )
+C
+C....................................................................
+C Copy until EF
+99	CALL IFFNXT( IECODE, IELEN )
+	IF (IELEN.EQ.-1) GOTO 800
+	IF (IECODE.EQ.'VO') GOTO 99
+	IF (IECODE.NE.'EF') THEN
+	   CALL COPENT(IECODE,IRANGE)
+	   GOTO 99
+	ENDIF
+C
+C....................................................................
+C Reached an EF so write an EF
+	CALL IFFSEL( OUTLUN )
+	CALL IFFEF
+	CALL IFFSEL( INLUN )
+	HADNVO = .FALSE.
+	NSEL = NSEL + 1
+	GOTO 60					! go for next feature
+C
+C....................................................................
+C Skip feature so
+100	CALL IFFNXC( 'EF', IELEN )
+	IF (IELEN.EQ.-1) GOTO 800
+	NREJ = NREJ + 1
+	HADNVO = .FALSE.
+	GOTO 60					! go for next entry
+C
+C....................................................................
+C Unexpected EOF while searching for NF AC EF EO etc.
+C
+800	OK = ISELAC__UNEXPEOF
+	CALL LSL_PUTMSG(OK)
+	GOTO 999
+C
+C....................................................................
+C Normal termination on EOF.
+840	HADGO = .FALSE.			! finished with that "GO"
+	CALL IFFSEL(OUTLUN)		! select output
+	CALL IFFRWD			! and rewind it
+	CALL IFFNXC('RA',IELEN)		! find its range ...
+	IF (IELEN.EQ.-1) GOTO 800	! did we find it?
+	CALL EIHWR(IRANGE,4,1)		! yes, patch in the new values
+C
+C No features select at all? If so tell user, and set LSL_STATUS (via
+C LSL$PUTMSG) to ensure that the output IFF file is closed and deleted.
+	IF (TOTSEL.EQ.0) THEN
+	   CALL LSL_PUTMSG(ISELAC__NOSELFND)
+	ENDIF
+	IF (.NOT.LSL_STATUS) THEN
+	   IF (IBITS(LSL_STATUS,0,3).NE.STS$K_WARNING) THEN
+	      CALL IFFCDL(OUTLUN) 	! delete output file
+	      CALL LSL_ADDMSG(ISELAC__DELOUTIFF)
+	   ELSE
+	      CALL IFFCLO(OUTLUN,SS$_ABORT) ! close output file
+	   ENDIF
+	ELSE
+	   CALL IFFCLO(OUTLUN,SS$_NORMAL) ! close output file
+	ENDIF
+	HADTO   = .FALSE.		! which we have finished with
+	GOTO 10				! go back to ISELAC> prompt
+C
+C....................................................................
+C Normal termination on exit
+999	IF (HADFROM) CALL IFFCLO( INLUN )
+	IF (HADTO) THEN
+	   IF (.NOT.LSL_STATUS) THEN
+	      IF (IBITS(LSL_STATUS,0,3).NE.STS$K_WARNING) THEN
+	         CALL IFFCDL(OUTLUN) 	! delete output file
+	      ELSE
+	         CALL IFFCLO(OUTLUN,SS$_ABORT) ! close output file
+	      ENDIF
+	   ELSE
+	      CALL IFFCLO(OUTLUN,SS$_NORMAL) ! close output file
+	   ENDIF
+	ENDIF
+C
+C....................................................................
+C Exit setting $STATUS as we go via LSL_EXIT
+C
+	IF (OK) LSL_STATUS = SS$_NORMAL
+C
+	CALL LSL_EXIT
+C
+	END

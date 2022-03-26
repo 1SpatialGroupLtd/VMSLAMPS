@@ -1,5 +1,5 @@
 
-#module GETFRT "13JL89"
+#module GETFRT "04FE91"
 
 /******************************************************************************/
 /*									      */
@@ -12,33 +12,37 @@
 #include <lsldef.h>				/* standard LSL header */
 #include <stdio.h>				/* standard I/O header */
 #include <string.h>				/* for char string handling */
-#include "iff.h"
 
-extern FILE *ffrt;
+/*#include "lsl$cmnfrt:frtcom.h"*/
+#include "here:frtcom.h"
+#include "here:iff.h"
+
 extern short gtype[], colour[], sc[], symbol[]; /* FRT info held elsewhere */
 extern float width[], size[];
 
 int getfrt()					/* FRT info reading program */
 {
+   BOOLEAN FRTFND();
+
    int fc, gt, col, scode;
    double wid, sz;
    char type[10], group[20];
 
    int ntext = 0, nlin = 0, nsym = 0;		/* symbol nos for text, lines */
 						/*  and points */
-   int fcl;
+   int i,fcl;
 
-   char buffer[121];				/* working buffer */
-
-	/* Read FRT file line by line to get fc info etc. into the */
-			/* arrays referenced by FC */
-
-   while ( getline (ffrt, buffer, 120) > 0 )
+   for (i=0;i<FRTCOM.FRTCNT;i++)
    {
-	if ( sscanf (buffer,"%3s %d %d %d %lf %lf %d",
-	   	type,&fc,&gt,&col,&wid,&sz,&scode)==7 &&
-		strncmp (type,"FRT",3)==0 )
-	{
+	if (! FRTFND(&(FRTCOM.FRTINT[i][0])) )
+	   {
+	   fc = FRTCOM.FRTFC;
+	   gt = FRTCOM.FRTGT;
+	   col = FRTCOM.FRTCOL;
+	   wid = FRTCOM.FRTWID;
+	   sz = FRTCOM.FRTSIZ;
+	   scode = FRTCOM.FRTSC;
+
 	   gtype[fc]  = gt;
 	   colour[fc] = col;
 	   width[fc]  = wid;
@@ -80,15 +84,8 @@ int getfrt()					/* FRT info reading program */
 	found:
 
 	   continue;
-	}
-
-	else if ( sscanf (buffer,"%5s",type,group) == 2 &&
-		strncmp (type,"GROUP",5) == 0 )
-	{
-	   fprintf (stderr,"GROUP = %s\n",group);	   
 	};
    };
-
    return(1);
 }
 

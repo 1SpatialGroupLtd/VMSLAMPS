@@ -1,0 +1,122 @@
+$!
+$ set nover
+$!
+$! command file to convert OSNI NTF jiffy format to DTI via dtifromtext
+$! and dticombine to convert to metres
+$! data should be fixed length 80 char records, with no header records
+$!
+$! test test alpha:matrix
+$ @lsl$com:matrixini q
+$!
+$   close df
+$   close wf
+$   close if
+$!
+$ open/read  df 'p1'
+$ ws == "write sys$output"
+$!
+$   i = 0
+$!
+$ read_line:
+$!
+$   read/end_of_file=end  df data_line
+$!
+$!   ws "''data_line'"
+$!
+$!   i = i + 1
+$!   if i .ne. 68 then goto read_line
+$!
+$   j = 0
+$!
+$! i = 68, get file size
+$!
+$ get_file_size:
+$!
+$   j = j + 1
+$!
+$ if j.lt.450  then goto skip1
+$!
+$ if j.gt.950  then goto end
+$!
+$ open/write if new2_'j'.index
+$ open/write wf new2_'j'.dat
+$!
+$   xorig = f$extract(4, 4, data_line)
+$   yorig = f$extract(8, 4, data_line)
+$!
+$ ws "''xorig', ''yorig'"
+$!
+$   xsize = f$extract(12, 4, data_line)
+$   ysize = f$extract(16, 4, data_line)
+$!
+$ ws "''xsize', ''ysize'"
+$!
+$   write if "''xorig'000 ''yorig'000 ''xsize' ''ysize' 50 50"
+$   close if
+$!
+$ skip1:
+$!
+$   read/end_of_file=end  df data_line
+$!   ws "''data_line'"
+$   read/end_of_file=end  df data_line
+$!   ws "''data_line'"
+$!
+$   i = 0
+$!
+$ read:
+$!
+$   i = i + 1
+$!   ws "''i'"
+$!
+$   read/end_of_file=end  df data_line
+$   line = f$extract(2, 77, data_line)
+$!
+$! ws "''line'"
+$!
+$   if i.eq.108 then goto dtif
+$!
+$! if j.lt.450 then goto skip2
+$!
+$   write wf line
+$!
+$ skip2:
+$!
+$   if i.ne.108 then goto read
+$!
+$ dtif:
+$!
+$   close wf
+$!
+$   ws "''j'"
+$!
+$!   if j.lt.450 then goto skip
+$!
+$   dtifromtext/real/ind=new2_'j'.index  new2_'j'.dat  here:osni2'xorig''yorig'
+$!
+$! use dticombine to convert to metres
+$!
+$ open/write dtc dtc.com
+$!
+$ write dtc "$dticombine"
+$ write dtc "	filea   here:osni2''xorig'''yorig'"
+$ write dtc "	fileout here:osni2_''xorig'''yorig'"
+$ write dtc "	real = a/10.0"
+$ write dtc "	go"
+$!
+$ close dtc
+$!
+$ @dtc.com
+$ del dtc.com;
+$!
+$ skip:
+$!
+$! get next file
+$!
+$   goto get_file_size
+$!
+$ end:
+$!
+$   close wf
+$   close df
+$   exit
+$!

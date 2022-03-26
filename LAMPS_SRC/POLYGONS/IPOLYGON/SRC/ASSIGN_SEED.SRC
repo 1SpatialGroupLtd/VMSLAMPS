@@ -1,0 +1,412 @@
+C
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL*4 FUNCTION ASSIGN_SEED()
+C
+***	MODULE	ASSIGN_SEED
+***	IDENT	08MY92
+C
+	IMPLICIT NONE
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+	LOGICAL*4	ACTUAL_ASSIGN_SEED
+C
+C	........................................................................
+C
+	ASSIGN_SEED = ACTUAL_ASSIGN_SEED(
+     &		POLMAX,TABMAX,POLNEST_MAX, PARTS_MAX,POSPOL_MAX,PCOVER_MAX,
+     &			%VAL(PTR$_DUFF_POLYGON),
+     &			%VAL(PTR$_NEST_START),
+     &			%VAL(PTR$_PCOVER_BOX),
+     &			%VAL(PTR$_PCOVER_START),
+     &			%VAL(PTR$_POLY_DONE),
+     &			%VAL(PTR$_POLY_LIST),
+     &			%VAL(PTR$_POLY_START),
+     &			%VAL(PTR$_SEEDBOX),
+     &			%VAL(PTR$_SEED_COORD),
+     &			%VAL(LOC_PTR$_POS_SEED)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL*4 FUNCTION ACTUAL_ASSIGN_SEED(
+     &		POLMAX,TABMAX,POLNEST_MAX,PARTS_MAX,POSPOL_MAX,PCOVER_MAX,
+     &		DUFF_POLYGON,
+     &		NEST_START,
+     &		PCOVER_BOX,
+     &		PCOVER_START,
+     &		POLY_DONE,
+     &		POLY_LIST,
+     &		POLY_START,
+     &		SEEDBOX,
+     &		SEED_COORD,
+     &		POS_SEED
+     &	)
+C
+
+***	MODULE	ACTUAL_ASSIGN_SEED
+***	IDENT	01NO91
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD1056 Send abs coords to LITES2 if requested		JB   01-Nov-1991
+C
+CMOD	Keeps count of number of seed points ignored since multiple
+C	seed points per polygon				AC   11-Aug-1988
+CMOD	Altered to use new COMMAND common block		AC   22-Jun-1988
+C
+C	Author						TJH  05-Mar-1987
+C
+C Function to assign seed point to each polygon.
+C
+C ACTUAL_ASSIGN_SEED the the sectored spatial index created by FORM_BOXES
+C et al. and the polygon nesting information compiled by NESTS.
+C
+C Function returns SS$_NORMAL if all is well or one of a variety of
+C IPOLYGON error codes on failure.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INTEGER*2	X,Y
+	PARAMETER 	(X=1, Y=2)
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNIPOLYGON:IPOLYGONMSG.PAR'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'LSL$CMNIPOLYGON:COMMAND.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:SECTOR.CMN'
+	INCLUDE		'LSL$CMNIFF:MD2DES.CMN'
+C
+C Arguments
+	INTEGER*4	POLMAX
+	INTEGER*4	TABMAX
+	INTEGER*4	POLNEST_MAX
+	INTEGER*4	PARTS_MAX
+	INTEGER*4	POSPOL_MAX
+	INTEGER*4	PCOVER_MAX
+C
+	INTEGER		DUFF_POLYGON((POLMAX+31)/32)
+	INTEGER		NEST_START(POLMAX+1)
+	INTEGER		PCOVER_BOX(TABMAX)
+	INTEGER		PCOVER_START(POLMAX+1)
+	INTEGER		POLY_DONE(POLMAX)
+	INTEGER*4	POLY_LIST(2,TABMAX*2)
+	INTEGER		POLY_START(3,POLMAX)
+	INTEGER*2	SEEDBOX(POLMAX+1)
+	REAL		SEED_COORD(2,POLMAX+1)
+	INTEGER		POS_SEED(2,POSPOL_MAX)
+C
+C W/s
+	INTEGER	  BOXES(BOXMAX)	! list of boxes within polygon.
+	INTEGER	  I,J		! loop vars.
+	INTEGER	  IN		! for point in pol return
+	INTEGER	  NBOX		! number of boxes within polygon
+	INTEGER	  NPASS		! number of passes required for nesting
+	INTEGER	  NSEED		! number of poss. seed points
+	INTEGER   NUMDUFF	! number of duff polygons
+	INTEGER   NUMDUP	! number of duplicate seed pts.
+	INTEGER	  NXTSIGN	! sign of next index into POLNEST
+	INTEGER	  POLY_INDX	! current polygons ident
+C			        ! list of possible nested polygons
+	INTEGER	  RESOLVED	! number of seed points resolved in pass
+	INTEGER   SEED_FAIL	! number of polys without seeds
+	INTEGER	  STARTSIGN	! sign of index into POLNEST
+C
+	LOGICAL	  DONE		! .T. when we've done a poly
+C
+	CHARACTER*256	MESTXT	! message text
+	INTEGER*2	MESLEN	! and its length
+C
+	REAL	  APOINT(2)	! a coordinate
+C
+C Functions:
+	LOGICAL	  ASSIGN_FAIL	! warns user of failure
+	LOGICAL	  BBCS		! checks/sets bitmap element
+	INTEGER*2 EXPAND	! old friend
+	LOGICAL	  EXT1V		! extract 1-bit field
+	LOGICAL	  GET_POLY	! gets polygon coordinates
+	LOGICAL	  FINISHED	! .T. when all seed points used
+	LOGICAL	  NEST_FINISHED	! .T. when all nested seed pts used
+	INTEGER   GET_POLPNT	! gets a single polygon coordinate
+	INTEGER	  PNTPOL	! point in polygon test
+C
+C ......................................................................
+C
+	ACTUAL_ASSIGN_SEED=%LOC(SS$_NORMAL)
+C
+C Tell user of progress?
+	CALL FRAMED_MES('Assigning Seed Points',21)
+C
+	NPASS=0
+	NUMDUFF=0
+	NUMDUP=0
+	SEED_FAIL=0
+C
+C Increment number of passes required to resolve nesting
+10	NPASS=NPASS+1
+C
+C And counter of number of seed points resolved in a pass
+	RESOLVED=0
+C
+C ......................................................................
+C    L O O P    F O R    E  A C H    P O L Y G O N   I N    T U R N
+C
+	DO 70 POLY_INDX=1,NUM_POLY
+C
+C Carefully avoid processing the bounding polygon
+	   IF (POLY_INDX.EQ.BOUND_POL) GOTO 70
+C
+C And ensure that this is not a duff polygon
+	   IF (EXT1V(POLY_INDX,DUFF_POLYGON(1))) GOTO 70
+C
+C Has this polygon already been assigned a seed point?
+	   IF (POLY_DONE(POLY_INDX).NE.0) GOTO 70
+C
+C Is this a polygon isolation and must therefore be ignored?
+	   IF (POLY_START(1,POLY_INDX).LT.0) THEN
+	      RESOLVED=RESOLVED+1
+	      POLY_DONE(POLY_INDX)=-32767 ! lie, say it has been done
+	      GOTO 70
+	   ENDIF
+C
+C No. Determine whether this polygon contains any nested polygons; we
+C cannot do anything about it until all the nested polygon seed points
+C have been assigned 
+	   IF (NEST_START(POLY_INDX).NE.0) THEN ! does contain nests
+C
+C Our polygon does contain nests, but have all the nested polygons
+C had seed points assigned? If so we can safely get the seed point for
+C our polygon POLY_INDX.
+	      IF (.NOT.NEST_FINISHED(POLY_INDX)) GOTO 70
+	   ENDIF
+C
+C If we get here we can try to assign a seed point for polygon POLY_INDX
+C First get the defining polygon coordinates for polygon POLY_INDX.
+C These will be returned in /POLYGONS/POLY_BUF and POLY_PTS
+	   POLY_PTS=0
+	   ACTUAL_ASSIGN_SEED=GET_POLY(POLY_INDX)
+	   IF (.NOT.ACTUAL_ASSIGN_SEED) GOTO 90
+C
+C Second get the box (or boxes) containing (or covered by) this polygon.
+	   NBOX=0
+	   STARTSIGN=ISIGN(1,PCOVER_BOX(PCOVER_START(POLY_INDX)))
+	   DO 20 I=PCOVER_START(POLY_INDX),PCOVER_MAX
+	      NXTSIGN=ISIGN(1,PCOVER_BOX(I))
+	      IF ((NXTSIGN.NE.STARTSIGN).OR.(PCOVER_BOX(I).EQ.0))GOTO 30
+	      BOXES(NBOX+1)=IABS(PCOVER_BOX(I))
+	      NBOX=NBOX+1
+20	   CONTINUE
+C
+C We have now got all the NBOX boxes covered by polygon POL_INDEX
+C stored away in BOXES. Get the seed points which lie inside the boxes
+30	   NSEED=0
+	   DO 50 I=1,NBOX
+C
+C Is box devoid of seed points?
+	      IF (SBOX_START(BOXES(I)).LT.0) GOTO 50
+C
+C No, get start of list of seed points in this box
+	      STARTSIGN=ISIGN(1,SEEDBOX(SBOX_START(BOXES(I))))
+	      DO 40 J=SBOX_START(BOXES(I)),POLMAX+1
+	         NXTSIGN=ISIGN(1,SEEDBOX(J))
+	         IF ((NXTSIGN.NE.STARTSIGN).OR.(SEEDBOX(J).EQ.0))GOTO 50
+C
+C If a seed point has already been used its SEEDBOX entry will be set
+C to +/-32767, this will cut the number of seed points which have to be
+C considered.
+	         IF (IABS(SEEDBOX(J)).NE.32767) THEN
+	            POS_SEED(1,NSEED+1)=IABS(SEEDBOX(J))
+	            POS_SEED(2,NSEED+1)=J
+	            NSEED=NSEED+1
+	         ENDIF
+40	      CONTINUE
+50	   CONTINUE
+C
+C We now have a seed point (or seed points) which lie within the boxes
+C covered by polygon POLY_INDX. Do point in polygon test to determine
+C which seed point is the one for polygon POLY_INDX
+	   DONE=.FALSE.			! not done this poly yet
+	   DO 60 I=1,NSEED
+C
+C Get the coordinate value for the seed point
+	      APOINT(X)=SEED_COORD(X,POS_SEED(1,I))
+	      APOINT(Y)=SEED_COORD(Y,POS_SEED(1,I))
+C
+C And let PNTPOL do the point in polygon test.
+	      IN=PNTPOL(APOINT,POLY_BUF,POLY_PTS)
+	      IF (IN.EQ.1) THEN   	! point in polygon?
+	         IF (.NOT.DONE) THEN
+	            RESOLVED=RESOLVED+1
+	            POLY_DONE(POLY_INDX)=POS_SEED(1,I)
+C
+C Tell the idiot user if he has got multiple seed points in a polygon
+	         ELSE
+	            IF (HAD_LITES) THEN
+	               CALL FLWSEL(LITESLUN)
+	               CALL FLWRTF(
+     &			'%%MESSAGE Seed point assignment error:')
+	            ENDIF
+C
+		    IF (HAD_ABS) THEN
+			MESLEN=EXPAND(
+     &		    '%WSDisregarding multiple seed point in polygon at'
+     &			//' (%F, %F)',MESTXT,APOINT(1)+MD2LOC(1),
+     &					     APOINT(2)+MD2LOC(2))
+		    ELSE
+			MESLEN=EXPAND(
+     &		    '%WSDisregarding multiple seed point in polygon at'
+     &			//' (%F, %F)',MESTXT,APOINT(1),APOINT(2))
+		    ENDIF
+C
+	            CALL MES_OUT(APOINT,MESTXT,MESLEN)
+		    NUMDUP=NUMDUP+1
+	         ENDIF
+	         DONE=.TRUE.		! we've assigned a seed point
+C
+C Remove the seed point from the seed box list SEEDBOX by setting it
+C to +/-32767
+	         STARTSIGN=ISIGN(1,SEEDBOX(POS_SEED(2,I)))
+	         SEEDBOX(POS_SEED(2,I))=32767*STARTSIGN
+	      ENDIF
+60	   CONTINUE
+C?
+	   IF(.NOT.DONE)THEN
+	      RESOLVED=RESOLVED+1
+	      POLY_DONE(POLY_INDX)=-32766
+	   ENDIF
+70	CONTINUE
+C
+C Check if there are still any polygons which have not been assigned
+C seed points
+	IF (RESOLVED.GT.0) GOTO 10
+C
+C reset unassigned polygons
+	DO 75 POLY_INDX=1,NUM_POLY
+	IF(POLY_DONE(POLY_INDX).EQ.-32766)POLY_DONE(POLY_INDX)=0
+75	CONTINUE
+C
+C Now see if there are any polygons to which seed points could not
+C be assigned - flag them in /POLYGONS/DUFF_POLYGON if necessary
+	IF (.NOT.FINISHED) THEN
+	   DO 80 POLY_INDX=1,NUM_POLY
+C
+C The bounding polygon is a special case
+	      IF (POLY_INDX.EQ.BOUND_POL) GOTO 80
+	      IF (POLY_DONE(POLY_INDX).EQ.0) THEN
+C
+C Are we to flag polygons which seed point assignment failed as duff
+C (/OPTIONS=UNDEFINED:DELETE) or are we to keep and output them? They
+C will be simply flagged as duff if they are to be thrown away.
+	         IF (OPT_KEEP) THEN
+C
+C Bit already set  - simply a duff polygon to start with?
+	            IF (EXT1V(POLY_INDX,DUFF_POLYGON(1)))
+     &						NUMDUFF=NUMDUFF+1
+		    ACTUAL_ASSIGN_SEED=ASSIGN_FAIL(POLY_INDX,SEED_FAIL)
+	         ELSE
+		    IF (.NOT.(BBCS(POLY_INDX,DUFF_POLYGON(1)))) THEN
+C
+C Bit already set  - simply a duff polygon to start with
+	               NUMDUFF=NUMDUFF+1
+	            ELSE
+C
+C Bit not set  - failed to assign a seed point
+		        ACTUAL_ASSIGN_SEED=ASSIGN_FAIL(POLY_INDX,SEED_FAIL)
+	            ENDIF
+	         ENDIF
+	      ENDIF
+80	   CONTINUE
+	ENDIF
+C
+C ......................................................................
+C
+C Give summary?
+	IF (HAD_LOG) THEN
+	   CALL EXPAND(
+     &	    'Number of seed points assigned ...................... %N',
+     &							NUM_SEED_PTS)
+	   IF (HAD_LIS) THEN
+	      CALL FLWLIN
+	   ELSE
+	      CALL TTWLIN
+	   ENDIF
+	   CALL EXPAND(
+     &	    'Number of passes required to resolve nesting ........ %N',
+     &								NPASS)
+	   IF (HAD_LIS) THEN
+	      CALL FLWLIN
+	   ELSE
+	      CALL TTWLIN
+	   ENDIF
+	   IF (NUMDUFF.GT.0) THEN
+	      CALL EXPAND('Number of invalid polygons to ')
+	      IF (OPT_KEEP) THEN
+	          CALL APPEND('be omitted ............ %N',
+     &					NUMDUFF)
+	      ELSE
+	          CALL APPEND('be omitted ............ %N',
+     &					NUMDUFF+SEED_FAIL)
+	      ENDIF
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+	   ENDIF
+	   IF (SEED_FAIL.GT.0) THEN
+	      CALL EXPAND(
+     &	    'Polygons lacking seed points ........................ %N',
+     &							     SEED_FAIL)
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+	   ENDIF
+	   IF (NUMDUP.GT.0) THEN
+	      CALL EXPAND(
+     &	    'Seed points ignored due to multiple assignment ...... %N',
+     &								NUMDUP)
+	      IF (HAD_LIS) THEN
+	         CALL FLWLIN
+	      ELSE
+	         CALL TTWLIN
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C ......................................................................
+C
+90	RETURN
+	END
+C

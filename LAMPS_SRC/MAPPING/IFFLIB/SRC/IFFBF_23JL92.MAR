@@ -1,0 +1,179 @@
+	.TITLE	$IFFBF
+	.IDENT	'23JL92'
+;
+; Copyright  Laser-Scan Laboratories Limited, Cambridge, England.
+;
+; Author: Paul Hardy after PDP11 version by P. Cross.
+;
+;Mod	Make B.VBNx long not word to allow big IFF files	PGH  23-Jul-1992
+
+	DATA_PSECT	IFF
+
+BLKLST:	.LONG	-1			; last block number loaded
+
+	CODE_PSECT	IFF
+
+; IF$GTB - find a suitable buffer for file IFCB=R9 block R3
+;   (hopefully, already in core)
+; Outputs:	R5  buffer address (at preamble)
+;		R2  =R5+B.BUF  i.e. start of data
+
+	.ENTRY	IFEGTB,^M<>		; dummy entry for PME purposes
+
+IF$GTB:	PUSHR	#^M<R3,R4,R6>
+	CLRL	R6			; no buffer found yet
+5$:	MOVAL	IFBHD,R5		; chain headpointer
+10$:	MOVL	R5,R2			; previous buffer
+	MOVL	(R2),R5			; next buffer
+	BEQL	30$			; j if no more
+	TSTL	R3
+	BNEQ	40$			; j if 1st pass
+; here if first pass failed - try all buffers
+20$:	TSTB	B.STS(R5)
+	BNEQ	10$			; j if unsuitable (in use)
+	MOVL	R5,R6			; make a note of this one
+	MOVL	R2,R4			; and its predecessor
+	BRB	10$
+
+; end of chain
+30$:	MOVL	R6,R5
+	BNEQ	50$			; j if we found one
+	TSTL	R3
+	BEQL	35$			; j if not 1st pass
+; ensure buffer flushed (in case it was our own primary)
+	JSB	IF$TRF
+	CLRL	R3			; set 2nd pass
+	$CLREF_S	EFN=IFFEF	; in case need to wait
+	BRW	5$			; try again
+
+; here at end of second pass
+35$:	$WAITFR_S  EFN=IFFEF		; wait for disc to complete
+	BRW	5$			; try again
+
+; first pass (trying to re-use one of our own buffers)
+40$:	CMPL	R9,B.IFCB(R5)
+	BNEQ	10$			; j if not our file
+	BICB	#IBC_M_1ST,B.STS(R5)	; clear all primary markers in our file
+	CMPL	R3,B.VBNR(R5)
+	BNEQ	10$			; j if not wanted block
+; wanted block already in (or coming in) - look no further
+	MOVL	R2,R4			; predecessor
+; found a suitable buffer
+50$:	MOVL	(R5),(R4)		; remove from chain
+	BNEQ	55$			; already on end
+	MOVL	R4,IFBHD+4		; new end of chain
+55$:	CMPL	R9,B.IFCB(R5)
+	BEQL	60$			; j if same owner
+	CLRL	B.VBNR(R5)
+	CLRL	B.VBNW(R5)		; erase memory
+	MOVL	R9,B.IFCB(R5)		; new owner
+60$:	MOVL	IFBHD,(R5)
+	MOVL	R5,IFBHD		; rechain at head
+	MOVAL	B.BUF(R5),R2		; data area of buffer
+	MOVL	R2,BUFPT		; make current
+	POPR	#^M<R3,R4,R6>		; restore regs
+	RSB
+
+; IF$WBF - initiate writing of current buffer
+;   if it is primary, it won't actually be written yet
+
+	.ENTRY	IFEWBF,^M<>		; dummy entry for PME purposes
+
+IF$WBF::BBS	#IFC_V_MAP,I.STS(R9),10$; mapped file
+	MOVL	BUFPT,R0		; current buffer
+	BISB	#IBC_M_WTR,B.STS-B.BUF(R0) ; set write request
+	JSB	IF$TRF			; set the wheels in motion
+10$:	RSB
+
+; IF$LBF - load some buffer and make it current
+; R9 IFCB  R3 VBN of desired block  R4 byte offset in block
+; leaves R4 pointing to byte address
+
+	.ENTRY	IFELBF,^M<>		; dummy entry for PME purposes
+
+IF$LBF::BBC	#IFC_V_MAP,I.STS(R9),1$	; not mapped file
+
+; for mapped file
+	PUSHL	R2			; save
+	MOVL	R3,R2
+	DECL	R2			; so starts at zero
+	ASHL	#9,R2,R2		; blocks to bytes
+	ADDL2	I.ADR(R9),R2		; add start address
+	MOVL	R2,BUFPT		; save address of current buffer
+	ADDL2	R2,R4			; add byte offset
+	POPL	R2			; restore
+	RSB
+
+; for non-mapped file
+1$:	PUSHR	#^M<R2,R5>		; save regs
+	BSBW	IF$GTB			; get a suitable buffer (to R5,R2)
+	ADDL2	R2,R4			; cvt byte offset to byte address
+2$:	CMPL	R3,B.VBNW(R5)
+	BEQL	8$			; j if bk in core already
+	$CLREF_S	EFN=IFFEF	; for wait below
+	CMPL	R3,B.VBNW(R5)		; check again
+	BEQL	8$			; j if bk in core already
+	CMPL	R3,B.VBNR(R5)
+	BEQL	14$			; j if coming in (lookahead)
+	CMPL	BUFPT,LSTBLK		; block in use by fast reading?
+	BNEQ	3$			; no
+	CLRL	LSTPT			; yes, so zap it
+3$:	MOVL	R3,B.VBNR(R5)		; store virtual block no
+	CMPL	I.POSE(R9),#1		; first block of all ??
+	BLEQU	6$			; yes - so must be blank
+	PUSHR	#^M<R3,R4>		; save block/byte posns
+	MOVL	R2,R4			; (R2=BUFPT) start of block address
+	JSB	IF$CCW			; get word posn R3
+	CMPL	R3,I.POSE(R9)		; past end of file ?
+	POPR	#^M<R3,R4>		; restore block/byte
+	BGEQU	6$			; j if block after EOF
+
+	BISB	#IBC_M_RDR,B.STS(R5) 	; set read request
+	JSB	IF$TRF			; start the read off
+14$:	$WAITFR_S	EFN=IFFEF	; wait for read to complete
+	BRB	2$			; to check it was ours
+
+; if not, just zero the buffer and return
+6$:	PUSHR	#^M<R2,R3,R4,R5>
+	MOVC5	#0,(R2),#00,#IFBKSZ,(R2); clear 512 bytes in one go!
+	POPR	#^M<R2,R3,R4,R5>	; however - not for nowt
+; buffer contents now valid
+	MOVL	R3,B.VBNW(R5) 		; for writing back
+8$:	BSBB	IF$LLB			; try look-ahead
+	BISB	#IBC_M_1ST,B.STS(R5) 	; mark as primary
+	POPR	#^M<R2,R5>		; restore regs
+	RSB
+
+	.ENTRY	IFELLB,^M<>		; dummy entry for PME purposes
+
+IF$LLB:	BBC	#IFC_V_RLA,I.STS(R9),11$ ; no look-ahead
+	CMPL	R3,BLKLST		; same block as last time?
+	BEQL	11$			; yes so no look-ahead
+	PUSHL	R5			; preserve buffer address
+	INCL	R3			; next block
+	BSBW	IF$GTB			; get buffer to R2,R5
+	CMPL	R5,(SP)			; same buffer?
+	BEQL	10$			; if so don't look ahead
+	CMPL	R3,B.VBNR(R5)
+	BEQL	10$			; j if coming in or in already
+	PUSHR	#^M<R3,R4>		; save block/byte posns
+	MOVL	R2,R4			; (R2=BUFPT) start of block address
+	JSB	IF$CCW			; get word posn R3
+	CMPL	R3,I.POSE(R9)		; past end of file ?
+	POPR	#^M<R3,R4>		; restore block/byte
+	BGEQU	10$			; j if block after end of file
+; here with valid read-ahead
+	CMPL	BUFPT,LSTBLK		; block in use by fast reading?
+	BNEQ	3$			; no
+	CLRL	LSTPT			; yes, so zap it
+3$:	MOVL	R3,B.VBNR(R5)		; store virtual block no
+	BISB	#IBC_M_RDR,B.STS(R5)	; set read request
+	JSB	IF$TRF			; start read off
+10$:	MOVL	(SP)+,R5		; recover buffer address
+	MOVAL	B.BUF(R5),BUFPT		; reset BUFPT
+	DECL	R3			; original block number
+	MOVL	R3,BLKLST
+11$:	RSB
+
+	.PSECT
+	.END

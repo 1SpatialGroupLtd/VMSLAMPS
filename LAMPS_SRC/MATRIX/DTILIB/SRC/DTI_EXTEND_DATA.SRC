@@ -1,0 +1,294 @@
+	INTEGER*4 FUNCTION DTI_EXTEND_DATA( DTI_LUN,
+     &            NUMBER_COLS, NUMBER_ROWS, RETVAL )
+C
+***	IDENT	20JA89
+***	MODULE	DTI_EXTEND_DATA
+C
+C	Copyright : Laser-Scan Laboratories, Cambridge, England
+C	Author    : D R Catlow
+C	Created   : 01AU88 from the old DTILIB routine DTI_EXTEND
+C		    since the introduction of the function
+C		    DTI_EXTEND_HEADER
+C
+CMOD		    To check that the number of columns or rows
+C		    in the extended file does not exceed DTILIB
+C		    maximum column or row values.  DATA_SIZE
+C		    changed to a real.        DRC  20JA89
+C		   
+C	Modified  : 04AU88 DRC
+C		    To correctly shift columns of data if the
+C		    the y extent of the matrix is increased.
+C	            Now checks whether we need to extend 
+C		    the existing file (since extension is by
+C		    blocks rather than actual number of bytes).
+C
+C	Note - these MODS refer to the function DTI_EXTEND:
+C	Modified  : DRC  02AP87 To accommodate bit data files
+C	Modified  : To pass lun argument in range 0-8 to VIO$EXTEND_SEC
+C		    DRC  08-FEB-88
+C
+C
+C-----------------------------------------------------------------------
+C	DTILIB Function.   
+C
+C	Extends a file opened on DTI_LUN by the specified number 
+C	of columns and rows.
+C
+C	The function returns true if successful; in the event of
+C	failure any system routine errors are returned in RETVAL.
+C
+C	The function interfaces directly with the LSLLIB function
+C	VIO$EXTEND_SEC.
+C
+C-----------------------------------------------------------------------
+C
+	IMPLICIT NONE
+C
+C parameters
+	INCLUDE '($SSDEF)'
+C
+***	PARAMETER/LSL$CMNDTI:DTIDEF/
+***	PARAMETER/LSL$CMNDTI:DTIPAR/
+***	PARAMETER/LSL$CMNDTI:DTILIBMSG/
+C
+***	COMMON/LSL$CMNDTI:DTIHDR/
+C
+C arguments
+	INTEGER*4		DTI_LUN		!LUN on which to extend file
+	INTEGER*4		NUMBER_COLS	!number of cols to extend by
+	INTEGER*4		NUMBER_ROWS	!number of rows to extend by
+	INTEGER*4		RETVAL		!system error condition
+C
+C functions
+	INTEGER*4		VIO$EXTEND_SEC	!to map file into virtual mem
+C
+C local variables
+	INTEGER*4		VIO_LUN		!passed to VIO$EXTEND_SEC
+	INTEGER*4		SECTION_ADDR	!address of mapped file
+	INTEGER*4		SECTION_SIZE	!size of mapped file
+	REAL*4			DATA_SIZE	!size of extended data area
+	INTEGER*4		NEW_DTISIZ	!calculated size of extended
+C						!DTI file
+	INTEGER*4		XSIZE		!extended x size
+	INTEGER*4		YSIZE		!extended y size
+	INTEGER*4		EXTEND_SIZE	!size in blocks by which
+C						!to extend the file
+	INTEGER*4		BYTE_OFFSET	!number_cols in bytes
+	INTEGER*4		NUMBER_BYTES	!no. of bytes to move
+	INTEGER*4	        TOTAL_BYTE_OFFSET !byte_offset * column
+	INTEGER*4		COLUMN_OFFSET	!addr of start of column
+	INTEGER*4		I		!counter
+	INTEGER*4		IERR		!function return value
+	INTEGER*4		ERROR		!system error
+	INTEGER*4	X_EXTENT_BYTE_OFFSET	!x extent byte offset
+	INTEGER*4	Y_EXTENT_BYTE_OFFSET	!y extent byte offset
+C
+C	Functions:
+	INTEGER*4		VIOMV3		!to transfer bytes
+	INTEGER*4		DTI_INIT_DATA	!to initialise part of
+C						!matrix
+	INTEGER*4		DTI_WRITE_WORD_HEADER	!for writing new
+C						!x and y extents
+C
+C****************************************************************************
+C
+C	Test if the supplied LUN number is valid
+	IF(DTI_LUN.LT.1.OR.DTI_LUN.GT.MAX_DTI)THEN
+	  DTI_EXTEND_DATA=DTI__BADLUN		! LUN out of range
+	  GOTO 999				! Return
+	ENDIF
+C
+C	Test of the supplied LUN is in use (ie. is there a file to extend!)
+	IF(.NOT.DTILUN_INUSE(DTI_LUN))THEN
+	  DTI_EXTEND_DATA=DTI__LUNUNUSED 	! LUN not in use
+	  GOTO 999				! Return
+	ENDIF
+C
+C	Test the file on DTI_LUN has been opened for write access.
+C	A mapped file may only be extended if this is the case
+	IF(READ_ONLY(DTI_LUN))THEN 
+	  DTI_EXTEND_DATA=DTI__READONLY
+	  GOTO 999
+	ENDIF
+C
+C	Test if the supplied column and row values are usable
+C	0 is valid because we may only want to extend in 1 direction
+	IF(NUMBER_COLS.LT.0.OR.NUMBER_ROWS.LT.0.OR.
+     &     X_EXTENT(DTI_LUN)+NUMBER_COLS.GT.DTI_MAX_COLUMNS.OR.
+     &     Y_EXTENT(DTI_LUN)+NUMBER_ROWS.GT.DTI_MAX_ROWS)THEN
+	  DTI_EXTEND_DATA=DTI__BADEXTENT	! Bad argument values
+	  GOTO 999
+	ENDIF
+C
+C	Test for 2 matrix extension values of 0
+	IF(NUMBER_COLS.EQ.0.AND.NUMBER_ROWS.EQ.0)GOTO 900
+C
+C	If DATA_TYPE is DATA_BIT then test that NUMBER_ROWS
+C	is valid (ie. a multiple of 8)
+	IF(DATA_TYPE(DTI_LUN).EQ.DATA_BIT.AND.NUMBER_ROWS.NE.0)THEN
+	  IF(MOD(NUMBER_ROWS,8).NE.0)THEN
+	    DTI_EXTEND_DATA=DTI__BADDATAEXT
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C
+C	How many blocks do we wish to extend by ie.
+C	work out total size, and compare with current size of mapped file.
+C
+C	Work out the size of the new DTI section in bytes
+C	ie. data area + header
+	XSIZE=X_EXTENT(DTI_LUN)+NUMBER_COLS
+	YSIZE=Y_EXTENT(DTI_LUN)+NUMBER_ROWS
+C
+C	Beware that either the column or row may be 0 when
+C	working out by how many bytes to extend
+	IF     (DATA_TYPE(DTI_LUN).EQ.DATA_BYTE)THEN
+	   DATA_SIZE=XSIZE*YSIZE	
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_WORD)THEN
+	   DATA_SIZE=(XSIZE*YSIZE)*2
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_LONG.OR.
+     &          DATA_TYPE(DTI_LUN).EQ.DATA_REAL)THEN
+	   DATA_SIZE=(XSIZE*YSIZE)*4
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_BIT)THEN
+	   DATA_SIZE=(XSIZE*YSIZE)/8
+	ENDIF
+C
+C	Sum header and data sizes and round up to next block
+	NEW_DTISIZ=(DATA_OFFSET(DTI_LUN)+DATA_SIZE+511)/512	!in blocks
+C
+C	Work out difference between new and old block values
+	EXTEND_SIZE=NEW_DTISIZ-(SEC_SIZE(DTI_LUN)/512)
+C
+C	Is the existing mapped file already large enough to
+C	accommodate the extension of the matrix?
+	IF(EXTEND_SIZE.EQ.0)GOTO 50 	
+C
+C	Now let's try extending the file 
+	SECTION_ADDR=SEC_ADDR(DTI_LUN)
+	SECTION_SIZE=SEC_SIZE(DTI_LUN)
+C
+	VIO_LUN=DTI_LUN-1
+	IERR  = VIO$EXTEND_SEC
+     &  (EXTEND_SIZE,			! Number of blocks to extend by
+     &	SECTION_ADDR,			! Address of mapped file
+     &	SECTION_SIZE,			! Size of mapped file (bytes)
+     &	VIO_LUN)			! LUN to open the file on
+C
+	IF (IERR.NE.SS$_CREATED) THEN	! Unsuccessful
+	  DTI_EXTEND_DATA=DTI__SYSERR
+	  RETVAL=IERR			! Pass back system error
+	  GOTO 999
+	END IF
+C
+C	Update mapped file details in DTIHDR 
+	SEC_ADDR(DTI_LUN)	=SECTION_ADDR		
+	SEC_SIZE(DTI_LUN)	=SECTION_SIZE
+C
+C---------------------------------------------------------------------------
+C	Do we need to shift data around the extended mapped file?
+C	This is only required if the y extent of the matrix has changed.
+50	IF(YSIZE.EQ.Y_EXTENT(DTI_LUN))GOTO 500
+C
+C	The first column of data is correctly postioned.  The remaining
+C	columns need to be offset by from the start of the previous
+C	column by NUMBER_ROW
+C	Determine byte offset between start and end of successive columns.
+C	and number of bytes to move
+	IF     (DATA_TYPE(DTI_LUN).EQ.DATA_BYTE)THEN
+	  BYTE_OFFSET=NUMBER_ROWS
+	  NUMBER_BYTES=Y_EXTENT(DTI_LUN)
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_WORD)THEN
+	  BYTE_OFFSET=NUMBER_ROWS*2
+	  NUMBER_BYTES=Y_EXTENT(DTI_LUN)*2
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_LONG.OR.
+     &          DATA_TYPE(DTI_LUN).EQ.DATA_REAL)THEN
+	  BYTE_OFFSET=NUMBER_ROWS*4
+	  NUMBER_BYTES=Y_EXTENT(DTI_LUN)*4
+	ELSE IF(DATA_TYPE(DTI_LUN).EQ.DATA_BIT)THEN
+	  BYTE_OFFSET=NUMBER_ROWS/8
+	  NUMBER_BYTES=Y_EXTENT(DTI_LUN)/8
+	ENDIF
+C
+	DO 100 I=X_EXTENT(DTI_LUN),2,-1
+	   TOTAL_BYTE_OFFSET=(I-1)*BYTE_OFFSET
+	   COLUMN_OFFSET=(I-1)*Y_EXTENT(DTI_LUN)
+C
+	   IERR =VIOMV3(%VAL(SEC_ADDR(DTI_LUN)+DATA_OFFSET(DTI_LUN)+
+     &                  COLUMN_OFFSET),
+     &                  NUMBER_BYTES,
+     &                  %VAL(SEC_ADDR(DTI_LUN)+DATA_OFFSET(DTI_LUN)+
+     &                  COLUMN_OFFSET+TOTAL_BYTE_OFFSET))
+	   IF(IERR.NE.SS$_NORMAL)THEN
+	     DTI_EXTEND_DATA=DTI__SYSERR
+	     RETVAL=IERR
+	     GOTO 999
+	   ENDIF
+C
+100	CONTINUE
+C
+C----------------------------------------------------------------------
+C	Update data extent values in DTIHDR and also in the mapped
+C	file (in case the user forgets).
+C	This has to be done before the call to DTI_INIT_DATA.
+500	X_EXTENT(DTI_LUN)=XSIZE
+	Y_EXTENT(DTI_LUN)=YSIZE
+C
+C	Write these values to the header of the mapped file
+C	Set up byte offsets for records
+	IF	(HEADER_TYPE(DTI_LUN).EQ.DTI_MIKE)THEN
+	  X_EXTENT_BYTE_OFFSET  =DTI_PAN_EEXT
+	  Y_EXTENT_BYTE_OFFSET  =DTI_PAN_NEXT
+	ELSE IF (HEADER_TYPE(DTI_LUN).EQ.DTI_UHL1)THEN	  
+	  X_EXTENT_BYTE_OFFSET  =DTI_DMA_EEXT
+	  Y_EXTENT_BYTE_OFFSET  =DTI_DMA_NEXT
+	ELSE IF (HEADER_TYPE(DTI_LUN).EQ.DTI_TED4)THEN	  
+	  X_EXTENT_BYTE_OFFSET  =DTI_TED_EEXT
+	  Y_EXTENT_BYTE_OFFSET  =DTI_TED_NEXT
+	ELSE IF (HEADER_TYPE(DTI_LUN).EQ.DTI_ALVY.OR.
+     &           HEADER_TYPE(DTI_LUN).EQ.DTI_LSLA)THEN	  
+	  X_EXTENT_BYTE_OFFSET  =DTI_LSLA_EEXT
+	  Y_EXTENT_BYTE_OFFSET  =DTI_LSLA_NEXT
+	ENDIF
+C
+C	X Extent
+	IERR=DTI_WRITE_WORD_HEADER
+     &	     (DTI_LUN,X_EXTENT(DTI_LUN),X_EXTENT_BYTE_OFFSET,ERROR)
+	IF(IERR.NE.DTI__NORMAL)THEN
+	  DTI_EXTEND_DATA=IERR
+	  IF(IERR.EQ.DTI__SYSERR)RETVAL=ERROR
+	  GOTO 999
+	ENDIF
+C
+C	Y Extent	  
+	IERR=DTI_WRITE_WORD_HEADER
+     &	     (DTI_LUN,Y_EXTENT(DTI_LUN),Y_EXTENT_BYTE_OFFSET,ERROR)
+	IF(IERR.NE.DTI__NORMAL)THEN
+	  DTI_EXTEND_DATA=IERR
+	  IF(IERR.EQ.DTI__SYSERR)RETVAL=ERROR
+	  GOTO 999
+	ENDIF
+C
+C-----------------------------------------------------------------------
+	IF(NUMBER_ROWS.GT.0)THEN
+C	Initialise the extended part of the matrix
+	  IERR=DTI_INIT_DATA(DTI_LUN,
+     &                       0,
+     &                       1,
+     &                       (Y_EXTENT(DTI_LUN)-NUMBER_ROWS)+1,
+     &                       X_EXTENT(DTI_LUN),
+     &                       NUMBER_ROWS)
+	  IF(IERR.NE.DTI__NORMAL)THEN
+	    DTI_EXTEND_DATA=IERR
+	    GOTO 999
+	  ENDIF
+	ENDIF
+C
+C-----------------------------------------------------------------------
+C
+900	DTI_EXTEND_DATA=DTI__NORMAL	! signal success
+C
+999	RETURN
+C
+	END

@@ -1,0 +1,354 @@
+	LOGICAL FUNCTION READ_TEXT(REC_NUM)
+C
+***     MODULE READ_TEXT
+***     IDENT	14NO96
+C
+C Copyright Laser-Scan Ltd, Cambridge, England
+C
+C Author					IM	 2-Sep-1987
+C Reads the records defining a text feature, and writes it to the IFF file
+C
+CMOD	Modified						TJI 7-Oct-1987
+CMOD	Modified for version 1.1				IM  22-Aug-89
+CMOD	Handle NTF 1.1						VLG 31-Oct-1989
+CMOD	Implement /LOWER_LEFT qualifier				VLG 02-Feb-1990
+CMOD	Handle NTF level 3 input				VLG 07-Mar-1990
+CMOD	Give error if CURVTEXT record is found			VLG 08-Jun-1990
+CMOD	Warn user if /LOWER_LEFT and do not know SCALE		VLG 28-Nov-1990
+C
+CMOD	removed duplicate code, generally tidied source	 	SG  22-jul-1991
+C
+CMOD	added error messages. to see where errors occured 	SG  23-Jul-1991
+C
+CMOD	reordered code, now starts processing on a NAMPOSTN record since its 
+C	easier to find the NAMERECS from the NAMPOSTNS, as opposed to the other
+C	way around.						SG 25-July-1991
+C
+CMOD	allways puts out FC with 'TEXT' in optional text	SG 02-Aug-1991
+CMOD	modified to put "TEXT" only if level 3			SG 23-Sep-1991
+CMOD	Assume that NAME_ID holds FSN if below level 3		SG 26-Sep-1991
+CMOD	moved RO entry to be output before TX entry		ST 30-Sep-1991
+CMOD	BS7567 (v2.0) support added (W93/13)			ST 02-Jun-1993
+C
+C	.-----------------------------------------------.
+C	| process NAMPOSTN (READ_NAMPOSTN)		|
+C	|   this automatically processes the GEOM_ID	|
+C	| if level 3					|
+C	|   read NAME_ID				|
+C	|   jump to NAMEREC				|
+C	| else						|
+C	|   jump to previous record (must be NAMEREC)	|
+C	| endif						|
+C	| process the NAMEREC				|
+C	| write out the feature				|
+C	| jump back to original NAMEPOSTN		|
+C	| cancel RECORD_IN_HAND				|
+C	| exit						|
+C	|						|
+C	`-----------------------------------------------'
+C
+C
+	IMPLICIT NONE
+C
+C Messages:
+C
+	INCLUDE 'NTF2IMSG.PAR'
+C
+C Commons:
+C
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'FILE_REC.CMN'
+	INCLUDE 'LUNS.PAR'
+	INCLUDE	'STORE_RECORDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+	INCLUDE 'LOOKUP.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'
+C
+C Arguments:
+C
+	INTEGER*4	REC_NUM
+C
+C Functions:
+C
+	LOGICAL		RDINT		! read an integer
+	LOGICAL		RDLONG
+	LOGICAL		READ_RECORD	! read the next record
+	LOGICAL		READ_NAMPOSTN
+	LOGICAL		READ_NAMEREC
+	LOGICAL		READ_GEOMETRY
+C
+C Workspace:
+C
+	INTEGER		NAME_ID
+	INTEGER		I
+	INTEGER		MCOORDS		! Max no. coords read by GEOMETRY
+	PARAMETER	(MCOORDS=2)
+	REAL	  	TEMP_COORDS(2,MCOORDS)
+	REAL		POSN(2)			! IFF coordinates for the text
+	LOGICAL		OK			! Success flag
+	INTEGER		TEMP,CATEGORY		! Text category
+	INTEGER		FONT			! The text font
+	INTEGER		DIGPOS			! Digitised location (0-8)
+	INTEGER		NTF_FC			! The NTF feat. code from file
+	INTEGER		FC			! The IFF feature code
+	INTEGER*2	ISTAT(4)		! The FS entry
+	INTEGER*2	HEIGHT			! The text height
+	INTEGER		NUMPOINTS		! Num of points read by GEOMETRY
+	REAL		ACTUAL_HT		! Text height in mm
+	REAL		ROTATE			! The angle of the text
+	INTEGER		TEXTLEN			! The length of text field
+	CHARACTER*99	TEXTSTR			! text string 
+	REAL		COORDS(2,MCOORDS)	! Coords read by GEOMETRY
+	INTEGER		GEOM_ID			! ID of geometry record
+C
+C
+C (NTF is limited to 99 characters in a text feature, because the text
+C  length field is only two characters long)
+C
+	INTEGER		LONGWORD
+	INTEGER*2	WORD
+	EQUIVALENCE	(LONGWORD,WORD)
+C
+	INTEGER		IOS
+	INTEGER		INITIAL_RECORD 
+	LOGICAL		JUMPED
+	CHARACTER*6	NTF$_NAME_ID
+	LOGICAL		IS_LABEL
+	BYTE		FC_LABEL(4)
+	CHARACTER*4	FC_TXT
+	INTEGER		LOOP
+C
+C ........................................................................
+C Assume success
+C 
+	OK=.TRUE.
+	INITIAL_RECORD = SEC_REC
+	JUMPED = .FALSE.
+C
+C---------------------------------------------------------------------------
+C we are at the NAMPOSTN, read it in
+C
+	OK = READ_NAMPOSTN( 	FONT, HEIGHT, DIGPOS, TEMP_COORDS, ROTATE,
+     &				NUMPOINTS, ACTUAL_HT	 )
+	IF (.NOT.OK) THEN
+	  CALL WRITEF('%%NTF2I-E-MISC, error reading the NAMPOSTN record')
+	  GOTO 999
+	ENDIF
+C
+C
+C---------------------------------------------------------------------------
+C find location of NAMEREC
+C	.....................................................................
+C	with level 3, use indices to position to appropriate record
+C
+	IF (LEVEL.EQ.3) THEN
+C
+C	  ...................................................................
+C	  read the NAME_ID (note that it only occurs here at level 3)
+C
+	  NTF$_NAME_ID = STRING(21:26)			!read name_id field
+	  CALL SETAUX(%REF(NTF$_NAME_ID),6)
+	  OK = .NOT.RDLONG(NAME_ID)			!convert to integer
+	  IF (OK) THEN
+C
+C	     ................................................................
+C	     get record number associated with NAME_ID
+C
+	     READ(NAME_LUN,KEY=NAME_ID,KEYID=0, IOSTAT=IOS) ID_REC
+	     OK = IOS.EQ.0				!was return status 0
+	     IF (OK) THEN				!yes, then ok
+C
+C	       ...............................................................
+C	       jump to the actual record
+C
+	       SEC_REC = ID_REC.RECORD_NUM -1		! set record number
+	       OK = READ_RECORD()			! get the record
+	       IF (OK) THEN
+		 JUMPED = .TRUE.
+		 REC_IN_HAND = .TRUE.			! this is the NAMEREC
+	       ELSE
+		 CALL WRITEF('%%NTF2I-E-MISC, unable to get NAMEREC')
+		 CALL WRITEF('-NTF2I-W-MISC, temporary data files corrupt')
+	       ENDIF
+  	     ELSE
+	       CALL WRITEF('%%NTF2I-E-MISC, unable to find record for NAME_ID')
+	       CALL WRITEF('-NTF2I-I-MISC, NAME_ID was "%I"',NAME_ID)
+	     ENDIF
+	  ELSE
+	     CALL WRITEF('%%NTF2I-E-NAMPOS, bad field in record %I',SEC_REC)
+	     CALL WRITEF('-NTF2I-E-MISC, NAME_ID "%S"', NTF$_NAME_ID)
+	  ENDIF
+C
+C	.....................................................................
+C	not level 3, then previous record was NAMEREC
+C
+	ELSE
+	  SEC_REC = REC_NUM				!position to record
+	  OK = READ_RECORD()				!get next record
+	  IF (OK) THEN
+	    JUMPED = .TRUE.				!success
+	    REC_IN_HAND = .TRUE.			!we have the record
+	    OK = STRING(1:2).EQ.REC$_NAMEREC		!is it NAMEREC
+	    IF (.NOT.OK) THEN				!**NO**
+	      CALL WRITEF('%%NTF2I-E-MISC, record before NAMPOSTN not NAMEREC')
+	      CALL WRITEF('-NTF2I-W-MISC, structure of NTF file corrupt')
+	    ENDIF
+	  ELSE
+	    CALL WRITEF('%%NTF2I-E-MISC, unable to get NAMEREC')
+	  ENDIF
+	ENDIF
+C
+C	.....................................................................
+C
+	IF (.NOT.OK) GOTO 999
+C
+C---------------------------------------------------------------------------
+C We are now at the NAMEREC, read it in
+C
+	OK = READ_NAMEREC(NTF_FC,TEXTSTR,TEXTLEN,NAME_ID,FC_LABEL,IS_LABEL)
+	IF (.NOT.OK) THEN
+	  CALL WRITEF('%%NTF2I-E-MISC, error reading the NAMREC')
+	  GOTO 999
+	ENDIF
+	REC_IN_HAND = .FALSE.
+C
+C Optionally translate NTF FC to IFF FC. Disallow translation from FC 28 if
+C using OS data, to avoid awful complications later on. Do not attempt
+C translation if FC is not numeric.
+C
+	FC = NTF_FC					! Transfer to IFF copy
+	IF (HAD_FC_LOOKUP .AND. (.NOT.IS_LABEL)) THEN
+	  IF (OS_DATA .AND. (NTF_FC.EQ.28)) THEN	! Disallow?
+	    IF (TRN_NTF_28)				! Yes, warn user if
+     &	      CALL LSL_PUTMSG( NTF2I__NTF28NOTTRN )	! necessary
+	  ELSE
+	    CALL FC_TRANS(%VAL(LUT_BASE_ADDR), NTF_FC, FC) ! Translate
+	  ENDIF
+	ENDIF
+C
+C---------------------------------------------------------------------------
+C Deduce the required coordinates - depends on /LOWER_LEFT and DIGPOS
+C
+	IF (LOWER_LEFT.AND.(DIGPOS.NE.0)) THEN
+	   IF (NUMPOINTS.EQ.2) THEN			! Use second coord pair
+	      POSN(1) = TEMP_COORDS(1,2)
+	      POSN(2) = TEMP_COORDS(2,2)
+	      DIGPOS = 0
+	   ELSE						! One coord pair
+	      IF (MD2SCL.EQ.0) THEN			! calculate lower left
+	         CALL LSL_PUTMSG(NTF2I__NOSCALE,SEC_REC)
+	      ELSE
+	         CALL LSL_PUTMSG(NTF2I__NOLEFTPOS,FSN)
+	         CALL NEWSTART(	TEMP_COORDS(1,1), TEMP_COORDS(2,1),
+     &				POSN(1), POSN(2), DIGPOS,ROTATE,
+     &				ACTUAL_HT, TEXTLEN, %REF(TEXTSTR))
+	         DIGPOS = 0
+	      ENDIF
+	   ENDIF
+	ELSE
+	   POSN(1) = TEMP_COORDS(1,1)	! Use first coord pair
+	   POSN(2) = TEMP_COORDS(2,1)
+	ENDIF
+C
+C	........................................................................
+C	work out the Feature Status FC,font and category entries
+C
+	IF (OS_DATA.AND.(FC.NE.28).AND.(FC.LT.1000)) THEN   ! invalid text FC
+	   ISTAT(1) = 28				! Set output to 28
+	   TEMP = ISHFT(FC,6)				! Use FC as category
+C
+	ELSEIF (OS_DATA.AND.(LEVEL.LT.3).AND.(FC.GE.1000).AND.(FC.LE.1020)) THEN
+	   ISTAT(1) = 28			! set output to 28
+	   CATEGORY = FC - 1000			! work out category
+	   IF ( FONT.GT.3 .OR. FONT.LT.0 ) THEN	! validate font
+	      CALL LSL_PUTMSG(NTF2I__FONT,0,63,FONT,SEC_REC)
+	      FONT = 1
+	   ENDIF
+C
+C	   .....................................................................
+C	   put FONT into bits 4-5 and category into bits 6-11 in ISTAT(3)
+C
+	   TEMP = ISHFT(FONT,4).OR.ISHFT(CATEGORY,6)
+C
+	ELSE
+	   ISTAT(1) = FC
+	   IF ( FONT.GT.63 .OR. FONT.LT.0 ) THEN
+	      CALL LSL_PUTMSG(NTF2I__FONT,0,63,FONT,SEC_REC)
+	      FONT = 1
+	   ENDIF
+	   TEMP = ISHFT(FONT,6)				!use FONT as category
+	ENDIF
+C
+C	......................................................................
+C	work out rest of ISTAT entry
+C
+	ISTAT(2)=0				! only used by LASERAID
+C
+	LONGWORD = DIGPOS			! digitised position bits 0-3
+     &		  .OR.TEMP			! font,category: bits 4-5, 6-11
+     &		  .OR.'8000'X 			! bit 15 set - text feature
+C
+	ISTAT(3) = WORD				! extract the low word of that
+C
+	ISTAT(4)=0				! User dependent data
+
+C
+C------------------------------------------------------------------------------
+C below level 3, the NAME_ID field could be used to store the feature serial num
+C so if the field is not blank and we could read a number then use it as the FSN
+C
+	IF ((LEVEL.LT.3).AND.(NAME_ID.GT.0)) THEN	!was there a name_ID
+	  FSN = NAME_ID					! use it
+	ELSE						!not valid NAME_ID
+	  FSN = FSN+1					! increment FSN
+	ENDIF
+C
+C------------------------------------------------------------------------------
+C Got all the data, output the feature, if we were unable to read the FC as a 
+C number than output it in the optional text of AC 1
+C
+	CALL IFFNF(FSN,FSN)				! NF entry (ISN==FSN)
+	CALL IFFFS(ISTAT)				! FS entry	
+	IF (IS_LABEL) CALL IFFAC(1,0,FC_LABEL,4)	! alphanumeric FC
+C
+C	.......................................................................
+C	we may want to recode this later, so say it is a TEXT just in case in 
+C	the optional text of an AC 1, BUT only do this at level 3, we dont want
+C	to confuse poeple by putting in too much information.
+
+	IF (LEVEL.EQ.3) THEN
+	  FC_TXT(1:4) = 'TEXT'
+	  DO 100 LOOP=1,4
+	    FC_LABEL(LOOP) = ICHAR( FC_TXT(LOOP:LOOP))
+100	  CONTINUE
+	  CALL IFFAC (1,0,FC_LABEL,4)			!say that it is a TEXT
+	ENDIF
+C
+C	.......................................................................
+C
+	CALL IFFTH(HEIGHT)				! Text height
+	CALL IFFST(POSN,1,0)				! Coordinates
+	CALL IFFRO(ROTATE)
+	CALL IFFTX(%REF(TEXTSTR(1:TEXTLEN)),TEXTLEN)
+	CALL IFFEF
+C
+C
+C###############################################################################
+C rejoin errors
+C
+999	IF (JUMPED) THEN			!return from whence we came
+	  SEC_REC = INITIAL_RECORD -1
+	  OK = READ_RECORD()
+	  IF (.NOT.OK) THEN
+	    CALL WRITEF('%%NTF2I-E-MISC, unable to return to NAMPOSTN record')
+	    CALL WRITEF('-NTF2I-W-MISC, temporary data files are corrupt')
+	  ENDIF
+	ENDIF
+C
+C----------------------------------------------------------------------------
+C
+	REC_IN_HAND = .FALSE.
+	READ_TEXT=OK
+	RETURN
+	END

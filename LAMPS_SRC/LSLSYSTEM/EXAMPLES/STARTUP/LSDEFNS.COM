@@ -2,6 +2,9 @@ $! LSDEFNS.COM - define LSL logicals. Called from LSSTARTUP.COM
 $!
 $! Copyright Laser-Scan Ltd, Cambridge, England
 $! version for LSLINSTALL				PGH	11-Jul-1990
+$! Alpha AXP definitions added				PGH	20-Jul-1993
+$! Alpha AXP definitions added				PGH	22-Nov-1993
+$! LSL$FRTSHR added					CCB	 3-Aug-1994
 $!
 $! sets up various LSL logical names to point to directories etc.
 $!
@@ -47,12 +50,19 @@ $!
 $! Package LSLSYSTEM
 $!
 $	Define/System	LSL$LSLSHR	LSL$LIBRARY:LSLSHR
+$	Define/System	LSL$LSLSHR_TV	LSL$LIBRARY:LSLSHR_TV
 $	Define/System	LSL$CMNLSL -
 				LSL$PUBLIC_ROOT:[LSLSYSTEM.COMMON.LSLLIB]
+$	Define/System	LSL$LSLGOTHICSHR	LSL$LIBRARY:LSLGOTHICSHR
+$	Define/System	LSL$LSLGOTHICSHR_TV	LSL$LIBRARY:LSLGOTHICSHR_AXP
+$	Define/System	LSL$LSLGOTHICSHR_AXP	LSL$LIBRARY:LSLGOTHICSHR_AXP
 $!
 $! Package MAPPING
 $!
 $	Define/System	LSL$IFFSHR	LSL$LIBRARY:IFFSHR
+$	Define/System	LSL$IFFSHR_TV	LSL$LIBRARY:IFFSHR_TV
+$	Define/System	LSL$FRTSHR	LSL$LIBRARY:FRTSHR
+$	Define/System	LSL$FRTSHR_TV	LSL$LIBRARY:FRTSHR_TV
 $	Define/System	LSL$CMNFRT	LSL$PUBLIC_ROOT:[MAPPING.COMMON.FRTLIB]
 $	Define/System	LSL$CMNIFF	LSL$PUBLIC_ROOT:[MAPPING.COMMON.IFFLIB]
 $	Define/System	LSL$IF		LSL$DATA_ROOT:[LSL.IFF]

@@ -1,0 +1,523 @@
+	INTEGER*4 FUNCTION ARESCA(CENX,CENY,SQAREX,SQAREY,NOMAP,RASTER)
+C
+***	MODULE	ARESCA
+***	IDENT	03JN86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Converged				 DM	28-Jan-1986
+CMOD	PAUSEs removed				 DM	05-Sep-1983
+CMOD	RASTER option added (rectangular scan)	 DM	23-Jun-1983
+CMOD	VIOCLR introduced			 DM	07-May-1983
+CMOD	Chaining stuff added			 DM	20-May-1983
+CMOD	LARKSVO sunk again, BITMAP.DAT created	 DM	17-May-1983
+CMOD	LARKSVO.MIT risen from the ashes	JHR	16-May-1983
+CMOD	/COEFFS/ removed			AJW	07-Apr-1983
+CMOD	Last edited 				JHR	16-May-1983
+CMOD	Author 					JHR	04-Feb-1982
+C 	(from module FRS, as used in LAR)
+C
+C
+C	Routine to perform selective AREa-SCAnning.
+C
+C	 The scan pattern is as follows :-
+C
+C  swathe n
+C     .    
+C     .
+C     .  	  scan 1     scan 2       . . . . . scan n
+C     .        -  I- - -> - -I- - -> - -I . . . . . I- - -> - -I
+C     .        |  I- - <- - -I- - <- - -I . . . . . I- - <- - -I
+C  swathe 1 -> |  I- - -> - -I- - -> - -I . . . . . I- - -> - -I
+C	       |  I- - <- - -I- - <- - -I . . . . . I- - <- - -I
+C	       -  I- - -> - -I- - -> - -I . . . . . I- - -> - -I
+C	          A          B                      N
+C		  ^				               ^
+C	      start of swathe    			end of swathe
+C
+C
+C
+C	Points A,B and N are the start-points for scan-blocks 1,2
+C	and n.
+C
+C	If anything was encountered in the first, x-scan, then, and
+C	only then, will an additional scan in y be executed and the
+C	two sets of data OR'ed together.
+C
+C	When one complete swathe, n scan-blocks, have been done,
+C	the encounters are output to NEBINT, and scanning then starts 
+C	on the next swathe.
+C	When we completed scanning, NEBINT is copied to NEBUF for 
+C	interpreting in the usual manner by the main-line program. 
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+***	PARAMETER/PARAMS/
+C
+***	COMMON/AREA/
+***	COMMON/RSE/
+***	COMMON/SCPARM/
+***	COMMON/SCCORR/
+***	COMMON/XYPIXC/
+C
+C i/p arguments
+	INTEGER	  SQAREX,SQAREY		! number of squares to scan in
+					!  each axis.
+	LOGICAL*1 NOMAP			! byte-map wanted ?
+	LOGICAL*1 RASTER		! RASter scan wanted ?
+	REAL	  CENX,CENY		! centre of scan window,
+					!  (that is in x, but lying on
+					!   the base of the required 
+					!   scan-window in y)
+C
+C w/s
+	REAL SCAX, SCAY			! st-pt for each individual scan
+	REAL TWID			! WID truncated to PIT.
+	INTEGER*4 NEBINT(3,NESIZE)	! interim buffer of encs after
+					!  analysing each swathe 
+					!  - copied to NEBUF at exit.
+	INTEGER*4 LINBUF(1000)		! complete swathe-length 
+					! scan-line of pixels
+	INTEGER*4 LINEWD		! line-width after analysis of
+					!  encounters - used when in 
+					!  'line-mode' i.e. IMOD.AND.1=1
+	INTEGER*4 YBASE			! y-coord of each scan-swathe
+					! (i.e. the centre of the pixel)
+	INTEGER INEINT			! pointer for NEBINT
+	INTEGER LINPT			! pointer into LINBUF
+	INTEGER SCATOT			! running total of complete 
+				        ! swathes of scan-lines o/p
+	INTEGER PIXPSL			! pixels per scan-line
+	INTEGER SCPSWA			! number of scans per swathe
+	INTEGER SCALIN			! number of scans/swathe 
+					!  - saved from SCPSWA
+	INTEGER IERR			! error return flag, non-zero 
+					! if error
+	INTEGER SAVMOD, SAVDIR		! saved line-following 
+					! parameters which we muck about
+					! with - restored on exit
+	INTEGER SENSE(2)		! holds +ve and -ve multiple enc
+					!  bit code.
+	INTEGER SENSAT			! offset into SENSE
+	INTEGER WARWID			! the product of WAR and IWID.
+	INTEGER HLFPIT			! half the pitch
+	INTEGER I,J,K,L			! DO loop variables, etc
+C	INTEGER N			! function button read.
+	INTEGER START			! used in transferring encs to
+					!  NEBINT when in line-mode.
+	INTEGER SCACNT			! scan-square we're at.
+	INTEGER SWACNT			! swathe we're at.
+	INTEGER MASK			! mask for multiple enc. bit
+	LOGICAL*1 EMPTY			! returned from AREPRC - TRUE if
+					! no encounters found in the
+					! scan-block just scanned
+C byte-map stuff
+	INTEGER*4 MIDWNX,HLFWNX		! middle & half-width of window
+	INTEGER*4 MIDWNY,HLFWNY
+	INTEGER*4 UPPER,LOWER		! window limits in X (pitches)
+	INTEGER*4 WINDWP		! size of window in X (pitches)
+	INTEGER*4 BYTSZX,BYTSZY		! size ...
+	INTEGER*4 NPXHIX,NPXLOX		! and used region of map
+	INTEGER*4 NPXHIY,NPXLOY
+	INTEGER*4 BYTMAP,BYTWRK,NBYTES	! byte-map and work array
+	INTEGER*4 HEIGHT		! contour height
+	INTEGER*4 LIB$GET_VM,OK
+C
+C functions:
+	LOGICAL*4 AREPRC
+	LOGICAL*4 ENCDMP
+C
+	DATA HEIGHT/49/
+C
+C ......................................................................
+C
+C check we've been passed a good scan window
+	IF (SQAREX*SQAREY.LT.1) GOTO 9000	! moan if bad
+C
+C initialisation needed by scanning library,
+C  saving parameters which we mangle for restoring at exit.
+	SAVMOD = IMOD
+	SAVDIR = IDIR
+	IMOD = 2
+	IDIR = 0
+C	CALL FBWT16("100000)
+	CALL SCSET(0)			! disable scanner????
+C
+C grab some virtual memory for the byte-map arrays.
+	BYTSZX=SQAREX*PIXNUM + 1
+	BYTSZY=SQAREY*PIXNUM + 1
+	NBYTES=BYTSZX*BYTSZY
+	IF (NOMAP) NBYTES=1		! messy, messy ...
+	OK=LIB$GET_VM(NBYTES,BYTMAP)
+	IF (.NOT.OK) GO TO 1
+  	OK=LIB$GET_VM(NBYTES,BYTWRK)
+	IF (OK) GO TO 2
+	CALL LIB$FREE_VM(NBYTES,BYTMAP)	! failed - free grabbed memory
+1	CALL LIB$SIGNAL(%VAL(OK))
+	GO TO 9999
+2	IF (.NOT.NOMAP) CALL VIOCLR(%VAL(BYTMAP),NBYTES,32)
+C
+C open file for debug print-out.
+CCC	OPEN (UNIT=DEBLUN,NAME='LSL$DB:LARKSVO.MIT'
+CCC     &      ,TYPE='NEW',CARRIAGECONTROL='LIST')
+C
+C initialisation for program w/s
+	CALL VIOCLR(ENCSF,2*PIXNUM)
+	CALL VIOCLR(INPOSN,2*PIXNUM)
+	SCPSWA = 0
+	SCATOT = 0	
+	SCALIN = 0
+	SWATOT = 0
+	SCACNT = 0
+	SWACNT = 0
+	EMPTY = .FALSE.
+C	DEBUG  = .FALSE.
+	SENSE(1) = MULNEG
+	SENSE(2) = MULPOS
+	ARESCA = 0
+	INEINT = 0
+	START = 2
+C
+C calculate size of scan, etc.
+	WARWID=IWID*WAR
+	XWID=WARWID*CRX 
+	TWID=IFIX(XWID/IPIT)*IPIT
+	HSLENP=(XWID/2.0)/IPIT		! 1/2 len of scan-blk (pitches)
+	SCPSCB=HSLENP*2 + 1		! scans/scan-block
+	HSLENC=HSLENP*IPIT		! 1/2 len of scan-block (counts)
+	SCLEN=(HSLENP*2.0 + 0.5)*IPIT	! length of scan-block
+	HLFPIT=IPIT/2			! half the pitch
+C
+	MIDWNX=(SQAREX*PIXNUM)/2 + 1	! mid-pnt of scan in X (pitches)
+	HLFWNX=(SQAREX*(SCPSCB-4))/2	! half-width in X (pitches)
+	MIDWNY=(SQAREY*PIXNUM)/2 + 1	! ditto for Y
+	HLFWNY=(SQAREY*(SCPSCB-4))/2
+	UPPER=2*HLFWNX + 1		! limits of scan in X (pitches)
+	LOWER=2
+	WINDWP=UPPER - LOWER		! size of scan in X (pitches)
+C
+C  min x and y (start-pt)
+	RSTRX = CENX - (((SCPSCB-4)*IPIT/2.0)*SQAREX)	! SW
+	RSTRY = CENY 
+C
+C get the coords of the start-pt of the first scan of the 
+C  first swathe.
+	SCAX = RSTRX + 0.5 * XWID
+	SCAY = RSTRY + 0.5 * IPIT
+C
+C stop refreshing.
+	CALL DISMOD(0)			
+C
+C move to the start-pt for the next scan-block.
+10	SCACNT = SCACNT + 1		! bump scan-block counter
+	CALL MOVTO(SCAX,SCAY)
+	SCPSWA = SCPSWA + 1
+	IDIR = 0			! set direction...
+	CALL SCSET(0)			! ...and implement
+	CALL SCANBY(0, SCLEN, 1)	! scan in x
+	CALL SCSET(0)			! disable scanner????
+C
+C process encounters received while scanning.
+	IF (AREPRC(EMPTY,%VAL(BYTMAP),SCACNT + SWACNT*SQAREX,NOMAP))
+     &	   GO TO 9997			! process x-scan data
+	IF (EMPTY) GOTO 20		! skip y-scan if x-scan empty
+	IDIR = 1			! switch direction ...
+	CALL SCSET(0)			! ... and implement
+	CALL MOVTO(SCAX-HSLENC, SCAY+HSLENC)
+	CALL SCANBY(SCLEN, 0, 1)	! scan in y
+	CALL SCSET(0)
+	IF (AREPRC(EMPTY,%VAL(BYTMAP),SCACNT + SWACNT*SQAREX,NOMAP))
+     &	   GO TO 9997			! process y-scan data
+20	CONTINUE
+CC
+CC is he/she panicking??
+C	CALL FBRD(N)
+C	IF (N.EQ.1) DEBUG=.NOT.DEBUG
+C	CALL FBWT(1,DEBUG)
+C	IF (N.EQ.16) GOTO 9999
+C
+C update start-pt for next scan in swathe,
+C  i.e. just in the x-axis.
+	SCAX = SCAX + (SCPSCB-4)*IPIT
+C
+C check for end-of-swathe.
+	IF (SCACNT.LT.SQAREX) GOTO 10
+C
+C at end-of-swathe...
+	SCACNT=0			   ! reset scan-block counter
+	SWACNT=SWACNT + 1		   ! bump swathe counter
+	YBASE=SCATOT
+	YBASE=YBASE*IPIT + NINT(FLOAT(IPIT)/2.0)   ! thanks, compiler !!
+C
+C ...copy one complete swathe-length of scan-lines. 
+	DO 200 I = 3, SCPSCB - 2	   ! scan-line
+	   YBASE=YBASE + IPIT
+	   IF ( ENCSF(I).GT.0 ) GOTO 25	   ! any encs to process ?
+	   IF ((SAVMOD.AND.6).NE.6) GO TO 200	! want all-black scans ?
+	   INEINT=INEINT + 1		   ! yes - record it
+	   NEBINT(1,INEINT)=BLACK	   ! all-black scan
+	   NEBINT(2,INEINT)=0		   ! ... its x 'coord'
+	   NEBINT(3,INEINT)=YBASE	   ! ... its y coord
+	   GO TO 200
+C
+25	   CONTINUE
+CC
+CC trace printout if FB1 pressed
+C	   IF (.NOT.DEBUG) GOTO 30
+C	   CALL FBRD(N)
+C	   IF(N.EQ.1) DEBUG = .FALSE.
+C	   CALL WRITEF('*Swathe %N, Scan %N, Encounters %N',
+C     &			SCATOT/(SCPSCB-4),I,ENCSF(I))
+C	   DO 300 J=1,ENCSF(I)
+C	      CALL WRITEF('*%^L%N',SWABUF(J,I))
+C300	   CONTINUE
+C
+C here to loop on encounters on this scan-line.
+30	   LINPT = 0
+	   DO 400 J = 1, ENCSF(I)
+	      IF (J.GT.1.AND.SWABUF(J-1,I).GT.SWABUF(J,I)) CALL WRITEF(
+     &	      'ARESCA: Encounters in wrong order at line %N,(%^L%N,%N)',
+     &				SCATOT + I,SWABUF(J-1,I),SWABUF(J,I))
+C
+C copy encounters (already in pixels), to our o/p buffer.
+	      LINPT = LINPT + 1
+	      LINBUF(LINPT) = SWABUF(J,I)
+400	   CONTINUE
+C
+C see if we need to add an extra encounter at the end of this scan-line.
+	   IF (MOD(LINPT,2) .EQ. 0) GOTO 35	 ! o.k. if even
+C
+C check we're not doing a silly.
+	   IF (LINBUF(LINPT) .GT. SWATOT+1)
+     &	      CALL WRITEF('ARESCA: End of swathe point incorrect')
+	   LINPT = LINPT + 1
+	   LINBUF(LINPT) = SWATOT + 1
+CC
+CC last debug trace printout
+35	   CONTINUE
+C	   IF (.NOT.DEBUG) GOTO 40
+C	      CALL WRITEF('*Swathe %N, Scan %N, Encounters %N',
+C     &                       SCATOT/(HSLENP-1)*2,I,LINPT)
+C	   IF (LINPT.EQ.0) GOTO 40
+C	   DO 500 J=1,LINPT
+C	      CALL WRITEF('*%^L%N',LINBUF(J))
+C500	   CONTINUE
+C
+C o/p to NEBUF; type of o/p is dependent on whether line or edge 
+C  	       information was requested.
+40	   IF (LINPT.LE.0) CALL WRITEF(
+     &	      'ARESCA: Inconsistent pointer value for o/p buffer')
+C
+C ... all-white scan ?
+	   IF ((SAVMOD.AND.2).EQ.0) GO TO 45	! do we care anyway ?
+	   IF (LINPT.GT.2) GO TO 45		! need exactly 2 encs
+	   LINEWD=LINBUF(START) - LINBUF(START-1)	! N.B. pitches
+	   IF (LINEWD) 45,45,42			! check width is good
+42	   IF (LINEWD.LT.WINDWP) GO TO 45	! whole scan width ?
+	   INEINT=INEINT + 1			! yes - record it
+	   NEBINT(1,INEINT)=WHITE		! all-white scan
+	   NEBINT(2,INEINT)=0			! ... its x 'coord'
+	   NEBINT(3,INEINT)=YBASE	        ! ... its y coord
+	   GO TO 90				! get next scan-line
+C
+C ... line or edge?
+45	   IF ((SAVMOD.AND.1).EQ.1) GO TO 60
+C
+C ......................................................................
+C
+C ... edge; deal with the first enc on this swathe-length scan-line.
+	   INEINT=INEINT + 1			! encounter counter (!)
+	   NEBINT(1,INEINT)=POSEDG      	! 1st, so +ve single enc
+	   NEBINT(2,INEINT)=LINBUF(1)*IPIT	! ... its x coord
+	   NEBINT(3,INEINT)=YBASE	   	! ... its y coord
+C
+C ... now deal with the rest of this scan-line.
+	   SENSAT = 2			! set offset into SENSE so as:-
+					! even encs are -ve multiple,
+					! odd encs are +ve multiple.
+	   DO 600 K = 2, LINPT
+	      INEINT=INEINT + 1
+	      SENSAT=3 - SENSAT			! flip sense
+	      NEBINT(1,INEINT)=SENSE(SENSAT)	! set sense of enc...
+	      NEBINT(2,INEINT)=LINBUF(K)*IPIT	!...its x coord
+	      NEBINT(3,INEINT)=YBASE		!...its y coord
+600	   CONTINUE
+	   GOTO 90				! get next scan-line
+C
+C ......................................................................
+C
+C ... line; here we return the line-width and the centre of the line.
+C ... deal with the first pair of encounters on this scan-line.
+60	   LINEWD=LINBUF(START) - LINBUF(START-1)
+	   IF (LINEWD) 65, 70, 75		! check width is good
+C
+C ... negative width - complain and drop through.
+65	   CALL WRITEF('ARESCA: Negative line-width')
+C
+C ... zero width - discard offending pair.
+70	   CALL WRITEF('ARESCA: Zero width line found')
+	   IF (LINPT.EQ.START) GOTO 90
+	   START = START + 2		! skip grotty pair
+	   GOTO 60			! ...and try again
+C
+C ... here with a good line-width.
+C ... watch out for edges at the extreme ends of the swathe.
+75	   MASK=0			! next enc will be first
+C
+C ... is START-1 a positive edge ?
+	   IF (LINBUF(START).LT.UPPER) GO TO 76
+	   INEINT=INEINT + 1
+	   NEBINT(1,INEINT)=POSEDG			! yes
+	   NEBINT(2,INEINT)=LINBUF(START-1)*IPIT	! x-coord
+	   NEBINT(3,INEINT)=YBASE			! y-coord
+	   MASK="40000			! next enc will be multiple
+C
+C ... is START a negative edge ?
+76	   IF (LINBUF(START-1).GT.LOWER) GO TO 77
+	   INEINT=INEINT + 1
+	   NEBINT(1,INEINT)=NEGEDG.OR.MASK		! yes
+	   NEBINT(2,INEINT)=LINBUF(START)*IPIT		! x-coord
+	   NEBINT(3,INEINT)=YBASE			! y-coord
+	   IF (MASK.NE.0) GO TO 78			! all-white ?
+	   GO TO 80
+C
+77	   IF (MASK.EQ.0) GO TO 79			! had POSEDG ?
+78	   IF (START.GE.LINPT) GO TO 90			! finished ?
+	   CALL WRITEF('ARESCA: Had POSEDG but some encounters left')
+	   GO TO 90
+C
+C ... first two encounters really do constitute a line.
+79	   INEINT=INEINT + 1
+	   LINEWD=LINEWD*IPIT				! N.B. counts
+	   NEBINT(1,INEINT)=LINEWD			! line-width
+	   NEBINT(2,INEINT)=JNINT(LINEWD/2.0 +
+     &			    FLOAT(LINBUF(START-1)*IPIT))   ! x-coord
+	   NEBINT(3,INEINT)=YBASE			   ! y-coord
+C
+80	   IF (START.GE.LINPT) GO TO 90			! finished ?
+C
+C ... here to deal with the rest of this scan-line.
+	   DO 700 L=START+2 , LINPT, 2
+	      INEINT=INEINT + 1
+	      LINEWD=(LINBUF(L) - LINBUF(L-1))*IPIT	! N.B. counts
+C
+C ... line-width with multiple encounter bit set.
+	      NEBINT(1,INEINT)=LINEWD.OR.'40000'O
+	      NEBINT(2,INEINT)=JNINT(LINEWD/2.0 +
+     &			       FLOAT(LINBUF(L-1)*IPIT))	! x-coord
+	      NEBINT(3,INEINT)=YBASE			! y-coord
+700	   CONTINUE
+C
+C ... check final encounter for possible edge.
+	   IF (LINBUF(START).LT.UPPER) GO TO 90
+	   NEBINT(1,INEINT)=POSEDG			! overwrite enc
+	   NEBINT(2,INEINT)=LINBUF(START-1)*IPIT   	! x-coord
+C
+C ......................................................................
+C
+C ... clear swathe-buffer by clearing its pointer and drop through to
+C ... get next scan-line.
+90	   ENCSF(I) = 0
+200	CONTINUE
+C
+	SCATOT = SCATOT + (SCPSCB - 4)
+	SCALIN = SCPSWA		! save number of scans-lines/swathe
+	SCPSWA = 0
+	SWATOT = 0
+	CALL VIOCLR(INPOSN,2*POSCNT)
+	POSCNT = 0
+	INLINE = .FALSE.
+C
+C update start-pt for first scan in new swathe.
+	SCAX = RSTRX + 0.5*XWID
+	SCAY = SCAY + (SCPSCB - 4)*IPIT
+C
+C ... do we want RASter output ?
+	IF (INEINT.LE.0.OR..NOT.RASTER) GO TO 899
+	DO 898 I=1,INEINT		! yes - dump this lot to disk
+	   NEBUF(1,I)=NEBINT(1,I)
+	   NEBUF(2,I)=(NEBINT(2,I) + RSTRX)/HLFPIT	! half pitches
+	   NEBUF(3,I)=(NEBINT(3,I) + RSTRY)/HLFPIT
+898	CONTINUE
+	IF (ENCDMP(NEBUF,INEINT)) GO TO 999
+	INEINT=0			! then forget all about it
+C
+C finished scanning altogether?
+899	IF (SWACNT .LT. SQAREY) GOTO 10
+C
+C yes - make gleemed data available to line-following logic
+	IF (RASTER) GO TO 901		! already done ?
+	L=RSTRX - CENX			! coords relative to (CENX,CENY)
+	DO 900 I=1,INEINT
+	   NEBUF(1,I)=NEBINT(1,I)
+	   NEBUF(2,I)=NEBINT(2,I) + L
+	   NEBUF(3,I)=NEBINT(3,I)
+900	CONTINUE
+C
+C ......................................................................
+C
+C let's grow those chains !!
+901	IF (NOMAP) GO TO 999
+	NPXLOX=MIDWNX - HLFWNX
+	NPXHIX=MIDWNX + HLFWNX
+	NPXLOY=MIDWNY - HLFWNY
+	NPXHIY=MIDWNY + HLFWNY
+	CALL ARECHN(%VAL(BYTMAP),%VAL(BYTWRK),BYTSZX,BYTSZY,
+     &		    NPXLOX,NPXHIX,NPXLOY,NPXHIY,HEIGHT)
+C
+C ......................................................................
+C
+999	CALL LIB$FREE_VM(NBYTES,BYTMAP)	! free the virtual memory
+	CALL LIB$FREE_VM(NBYTES,BYTWRK)
+C
+	ARESCA=ARESCA + INEINT		! copy encounters o/p count...
+	GOTO 9999			! ...and exit
+C
+C error returns
+9000	CALL WRITEF('ARESCA: Bad scan window')
+	GOTO 9998
+C
+C ... aborted.
+9997	ARESCA=-1
+C
+C general exit route, restores mangled line-following parameters
+C  and re-positions the digitising beam to where it was at entry
+9999	IMOD = SAVMOD
+	IDIR = SAVDIR
+	CALL MOVTO(CENX, CENY)
+	CALL SCSET(0)
+C
+9998	RETURN
+	END
+	LOGICAL*4 FUNCTION ENCDMP(ENCBUF,ENCSIZ)
+C
+***	MODULE	ENCDMP
+***	IDENT	25JL83
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+C	Created 				 DM	23-Jun-1983
+C
+C Dumps a complete swathe of encounters to the output file.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+	INTEGER*2 ENCSIZ
+	INTEGER*2 ENCBUF(0:2,ENCSIZ)
+	INTEGER*2 I
+C
+	ENCDMP=.FALSE.
+	WRITE (1,ERR=10,IOSTAT=I) ENCSIZ
+	WRITE (1,ERR=10,IOSTAT=I) ENCBUF
+	GO TO 20
+C
+10	CALL WRITEF('ENCDMP: Error %N writing to LSL$DB:DATABASE.LAA',I)
+	ENCDMP=.TRUE.			! we blew it
+20	RETURN
+	END

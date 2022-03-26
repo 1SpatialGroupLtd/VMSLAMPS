@@ -1,0 +1,282 @@
+	.TITLE	FIND_CMD	Command look-up
+	.IDENT	/10JA86/
+ 
+; Copyright Laser-Scan Laboratories, Ltd., Cambridge, England
+; Author  R. Fairbairns		Date December 1979
+ 
+; Note that FINCMD.MAR should be assembled with CMDCOM.MAR
+
+	.LIBRARY	/MACRO_LIBRARY:LSLMACLIB/
+ 
+	$CMDCOM				; define common block
+ 
+	$$CMTAB_INIT			; define command table flags
+ 
+ 
+	CODE_PSECT	VIO
+ 
+ 
+; FORTRAN-callable INTEGER*4 FUNCTION FIND_CMD
+ 
+; inputs:
+;	arg 1	Q	descriptor of string to be looked-up
+;	arg 2	A[Q]	table control, followed by
+;			array of descriptors of strings to look up arg 1 in
+; output:
+;	R0	(function result):
+;		>0 - index of command entry found in array <arg 2>,
+;		=0 - ambiguous
+;		-1 - not found
+;
+;	and, in common block CMDCOM
+;	CMD_NUM		'number' of command, extracted from descriptor in table
+;	CMD_FLAG	flags for this command
+ 
+; internal register use
+; R4, R5	current table string descriptor
+;     R6	index of base of current slice of table
+;     R7	index of limit of current slice of table,
+;		then ambiguity count
+; R8, R9	command string descriptor
+;    R10	table pointer
+;    R11	index of current item in table being inspected
+ 
+ .ENTRY FIND_CMD, ^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+ 
+	MOVAW	@8(AP), R10		; table address
+	MOVQ	@4(AP), R8		; command string descriptor
+	BBS	#15, (R10), 3$		; if BS, we've got pointer to the
+					;  array itself
+	MOVAW	@4(R10), R10		; dereference to get from
+					;	descriptor to array
+3$:	BICL3	#^XFFFF8000, (R10), R7	; get table size
+	BEQLW	70$			; if nowt in (dynamic) table, we'll
+					;	never find owt
+	CVTWL	2(R10), CMD_TBFLAG	; return 'whole table' flags
+	DECL	R7			; adjust from FORTRAN index
+	CLRL	R6			; base index on table
+	BBC	#16+CMT$V_UPCASE,-
+		(R10), 4$		; if BC, lower case commands permitted
+ 
+; upper-case command
+	MOVZWL	R8, R8			; string length as longword
+	SUBL2	R8, SP			; make space for copy of string
+					;			on stack
+	MOVTC	R8, (R9),-		; translate command, using
+		#0,-			; silly fill character, and
+		W^UPTAB,-		; upper-casing table
+		R8, (SP)		; onto stack
+	MOVAB	(SP), R9		; new position of string
+; NB never encounters escape, so R8 as valid as length afterwards as before
+ 
+; preserve information for success exit
+4$:	PUSHAW	@4(R10)			; global command flags
+	PUSHAW	@8(R10)			; pointer to user flags
+					;	(in case there are any)
+	PUSHL	R7			; save length of table
+	BBS	#16+CMT$V_NOUFLG,-	; if BS, no user flags
+		(R10), 5$		;	  with this table
+	ADDL2	#12, R10		; table with user flags attached
+	BBS	#16+CMT$V_MNEMS,-	; if BS, there are mnemonics (secondary
+		-12(R10), 6$		;	 commands) in this table
+	BRB	10$
+5$:	ADDL2	#8, R10			; table with no user flags
+	BBC	#16+CMT$V_MNEMS,-	; if BC, no mnemonics...
+		-8(R10), 10$
+6$:	ADDL2	#4, R10			; allow for mnemonic array pointer
+ 
+ 
+; main look-up loop
+10$:	ADDL3	R6, R7, R11		; difference top of range with bottom
+	INCL	R11			; round up, and
+	ASHL	#-1, R11, R11		;  halve difference
+	MOVQ	(R10)[R11], R4		; extract current table entry
+	CMPC5	R8, (R9), #0, R4, (R5) 	; compare command string with it
+	BGTRW	60$			; command string follows in table
+	BNEQ	30$			; command string precedes in table
+; fall through on exact match (both characters and lengths)
+ 
+; preserve 'current' descriptor
+15$:	MOVQ	R4, CMD_FOUND		; as 'found' command
+ 
+; found command
+20$:	ADDL3	#1, R11, R0		; return result as FORTRAN index on
+					;   array of strings
+	CVTWL	CMD_FOUND+2, R1		; extract command index number
+					;		from descriptor
+	CVTLW	R1, CMD_NUM		; and save it
+	DECL	R1			; allow for command number offset
+	MOVAW	@8(SP), R2		; get address of global command flags
+	BEQL	21$			; if EQL, there ain't none
+	CVTWL	(R2)[R1], CMD_FLAG 	; extract and return global cmd flags
+	BRB	22$
+ 
+21$:	CLRW	CMD_FLAG		; no command flags of the appropriate
+					;  type - return 'no bits set'
+22$:	BBS	#CMT$V_NOUFLG,-		; if BS, no user flags
+		CMD_TBFLAG, 23$		;	 to this table
+	MOVAL	@4(SP), R2		; address user flags table
+	BEQL	23$			; if EQL, even though there should have
+					;	  been a table, there wasn't
+	MOVL	(R2)[R1], CMD_UFLAG	; transfer user flags for this command
+	CLRB	CMD_NOUFLAG		; mark there is a flag there
+	BBS	#CMD$V_MNEM,-		; if BS, there's a secondary
+		CMD_FLAG, 25$		;	  command table associated
+24$:	CLRL	CMD_SECTAB		; no secondary table
+	RET
+ 
+; no user flag expected (or none found)
+23$:	MNEGB	#1, CMD_NOUFLAG		; signal none found
+	CLRL	CMD_UFLAG		; and clear all backlog bits
+	BBC	#CMD$V_MNEM,-		; if BC, no secondary table
+		CMD_FLAG, 24$
+ 
+; extract secondary command table pointer
+25$:	MOVL	@-4(R10)[R1], CMD_SECTAB
+	RET
+ 
+ 
+ 
+; command precedes table entry
+30$:	TSTL	R0			; did command string exhaust?
+	BNEQ	50$			; if NEQ, no
+ 
+; command is (at worst) candidate abbreviation of table entry
+	TSTL	R2			; did table string exhaust?
+	BEQL	20$			; if EQL, yes - exact match
+ 
+; at best abbreviated match - are abbreviated matches allowed?
+	BBS	#CMT$V_EXACT,-		; if BS, they're not - treat as if
+		CMD_TBFLAG, 50$		;  command string didn't exhaust
+	MOVQ	R4, CMD_FOUND		; save description
+	MNEGL	#1, R7			; ambiguities count
+	PUSHL	R11			; preserve table ptr of proposed match
+	INCL	R11			; look at next
+	CMPL	R11, 4(SP)		; cf end of table
+	BGTR	40$			; if GTR, match was with last of table
+	BSBB	FIND_AMBIG		; seek ambig'ty with next table entry
+	.BYTE	43$-.			; 'ambiguous' exit
+40$:	DECL	R11			; back to original found entry
+41$:	INCL	R7			; count ambiguities
+	DECL	R11			; look at previous entry in table
+	BLSS	42$			; if LSS, got to start of table
+	BSBB	FIND_AMBIG		; seek ambig'ty with this table entry
+	.BYTE	44$-.			; 'ambiguous' exit
+42$:	MOVL	(SP)+, R11		; restore table pointer
+	TSTL	R7			; any ambiguities found?
+	BEQLW	20$			; if EQL, none
+ 
+; ambiguous match exits
+	MOVQ	(R10)[R11], CMD_FOUND	; other part of ambiguity
+	CLRL	R0			; 'ambiguous'
+	RET
+ 
+; ambiguity found when going forwards
+43$:	INCL	R7			; count it, and go back
+	BRB	40$			;  to look for exact match backwards
+ 
+; apparent ambiguity found when going backwards
+44$:	CMPW	R4, R8			; command str same length as table str?
+	BNEQ	41$			; if NEQ, not - true ambiguity
+	ADDL2	#4, SP			; clear R11 save from stack
+	BRW	15$			; if same length, this is match sought
+					;  - go to save ITS descriptor
+ 
+; command string did not exhaust, preceded table entry
+50$:	CMPL	R7, R6			; range now empty?
+	BEQL	70$			; if EQL, yes - return failure
+	CMPL	R11, R7			; slice at top of range?
+	BNEQ	55$			; if NEQ, no - move top down
+	MOVL	R6, R7			; move top right down to bottom
+	BRW	10$			; and loop to search
+ 
+55$:	MOVL	R11, R7			; trim range downwards
+	BRW	10$
+ 
+; command follows table entry
+60$:	CMPL	R7, R6			; range now empty?
+	BEQL	70$			; if EQL, yes - return failure
+	CMPL	R11, R6			; slice at bottom of range?
+	BNEQ	65$			; if NEQ, no - move bottom up
+	MOVL	R7, R6			; otherwise move bottom right up to top
+	BRW	10$			; and loop to search
+ 
+65$:	MOVL	R11, R6			; trim range upwards
+	BRW	10$
+ 
+; run out of things to look at - failure exit
+70$:	MNEGL	#1, R0			; no match
+	RET				; how sad
+ 
+; find ambiguity between command string and table entry
+ 
+; inputs:
+;	R7	L	ambiguity count-so-far
+;	R8, R9	Q	descriptor of string
+;	R10	A	address of table
+;	R11	L	index of entry in question
+;	@0(SP)	B	offset of 'ambiguous' exit
+ 
+; output:
+;	R4, R5		descriptor of table entry
+;	R7		decremented if ambiguity found with command of same no.
+;	exit to (SP)+1	if not ambiguous
+;	exit to (SP)+(byte(SP)) if ambiguous
+ 
+FIND_AMBIG:				; call via JSB/BSBx
+ 
+	MOVQ	(R10)[R11], R4		; get descriptor of
+					;    possibly ambiguous table string
+	CMPW	R4, R8			; compare string lengths
+	BLSS	10$			; if LSS, table string shorter,
+					;	  so no ambiguity
+	CMPC3	R8, (R5), (R9)		; compare characters of strings
+	BEQL	20$			; if EQL, ambiguity found
+10$:	INCL	(SP)			; move link past 'ambiguous' exit
+	RSB
+ 
+20$:	EXTZV	#16, #16, R4, R0	; extract command no of table entry
+	CMPW	CMD_FOUND+2, R0		; cf that of subject
+	BNEQ	30$			; if NEQ, they're not same command
+	DECL	R7			; allow for insignificant ambiguity
+	BRB	40$			; don't save descriptor of insig. one
+30$:	MOVQ	R4, CMD_AMBIG		; save descriptor of ambiguous command
+40$:	CVTBL	@(SP), R0		; get ambiguous exit offset
+	ADDL2	R0, (SP)		; add into link to get ambiguous exit
+	RSB
+ 
+ 
+ 
+; upper-casing table
+UPTAB:	.REPT	2			; whole thing done twice for benefit of d7
+ 
+	.REPT	32
+	.BYTE	0			; control chars all 0
+	.ENDR
+ 
+$$$CH = ^A/ /
+	.REPT	33
+	.BYTE	$$$CH			; punctuation, digits, etc., up to '@'
+$$$CH = $$$CH+1
+	.ENDR
+ 
+$$$CH = ^A/A/
+	.REPT	26
+	.BYTE	$$$CH			; upper-case letters
+$$$CH = $$$CH+1
+	.ENDR
+ 
+	.ASCII	/[\]^_`/		; the gap between the letter sets
+ 
+$$$CH = ^A/A/
+	.REPT	26
+	.BYTE	$$$CH			; lower-case letters converting to upper
+$$$CH = $$$CH+1
+	.ENDR
+ 
+	.ASCII	/{|}~/
+	.BYTE	0			; delete
+ 
+	.ENDR
+ 
+	.END

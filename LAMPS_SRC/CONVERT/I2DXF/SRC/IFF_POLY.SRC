@@ -1,15 +1,17 @@
 	LOGICAL FUNCTION IFF_POLY(WITH_COORDS)
 C
-***	IDENT	11JA94
+***	IDENT	19DE94
 ***	MODULE 	IFF_POLY
 C
 C Copyright (C) Laser-Scan Ltd, Cambridge, England
 C
 C Author  :  Paul Pan, 5 September 1989
-C Modified:  Paul Pan, 13 March 1990 to introduce PARAMETER file handling
+C Modified:  Paul Pan, 13 March 1990
+C	     to introduce PARAMETER file handling
 C
-CMOD960	     Jon Barber 				04 Feb 1991
-C	     Output AC heights to group 38, ZS contents only to 3x groups
+CMOD960	     Jon Barber 				04-Feb-1991
+C	     Output AC heights to group 38, ZS contents only
+C	     to 3x groups
 C
 CMOD1125     Jon Barber				 	13-Jul-1992
 C	     Use abs coords for /ABSOLUTE qualifier
@@ -23,12 +25,17 @@ C	     from IFF_LINE with the ST/ZS entry already read in cmn
 C
 CMOD1324     Jon Barber				 	13-Dec-1993
 C	     Fix the output of NF, FS, ST 6 0, ST 6 0, EF;
-C	     ie. strings of invisible breaks to be output as separate
-C	     features.
-C	     Add /DECIMAL_PLACES to specify output format for the x,y
-C	     coordinates.
-C	     Add /IGNORE=INVISIBLE to ignore invisible moves within a
-C	     feature.
+C	     ie. strings of invisible breaks to be output as
+C	     separate features.
+C	     Add /DECIMAL_PLACES to specify output format for the
+C	     x,y coordinates.
+C	     Output warning message SINGPNTDEL when ignoring a
+C	     single point in a line or area feature, usually a
+C	     closing point of a nested polygon with holes.
+C
+CMOD1439     Jon Barber				 	02-Dec-1994
+C	     Do not use IFF_ABSENT as a 'real' number,
+C	     preventing an AXP crash.
 C
 C Purpose :  Convert IFF Interpolated Curve, Symbol String and Area 
 C		features into DXF Polyline format
@@ -39,6 +46,7 @@ C Messages:
 	INCLUDE	 'LSL$CMNI2DXF:I2DXFMSG.PAR'
 C
 C Common Blocks:
+        INCLUDE  'LSL$CMNIFF:CB.STR'		! for IFF_ABSENT
         INCLUDE  'LSL$CMNFRT:FRTCOM.CMN'
 	INCLUDE  'LSL$CMNDXFPAR:LOOKUP.CMN'
         INCLUDE  'LSL$CMNI2DXF:FEATURE.CMN'
@@ -49,9 +57,12 @@ C Argument
 	LOGICAL	    WITH_COORDS		! got coords etc. in cmn
 C
 C Workspace:
+	INTEGER     NEXT_NO_OF_PTS	! next no of coords in feature cont'n
+	LOGICAL	    CONTINUE		! feature to be continued
+C
 	INTEGER     I,COUNT	        ! DO loop counter, pt count
 	INTEGER*2   IELEN		! end of file/entry length
-        INTEGER*2   IECODE   
+        INTEGER*2   IECODE
 C
 	LOGICAL	    IN_POLYLINE		! started polyline?
 	LOGICAL	    HAD_FIRST_COORD	! had first coord
@@ -59,12 +70,17 @@ C
 	REAL	    LAST_COORD(3)	! last coordinate for closure
 	REAL	    X,Y			! coords of single point
 C
+	INTEGER	    INT_EQUIV		! for IFF_ABSENT comparison
+	REAL 	    REAL_EQUIV
+	EQUIVALENCE(REAL_EQUIV, INT_EQUIV)
+C
 C----------------------------------------------------------------
 C output DXF file has already been selected
 C
         IFF_POLY 	= I2DXF__NORMAL
 	HAD_FIRST_COORD = .FALSE.
 	IN_POLYLINE	= .FALSE.
+	CONTINUE	= .FALSE.
 C
 	COUNT = 0
 	IF (WITH_COORDS) COUNT = NO_OF_PTS
@@ -93,10 +109,10 @@ C we just consider the entry containing the area boundary data points
 C
 94	CALL IFFNXT(IECODE,IELEN)
 C
-        IF (IECODE.EQ.'EF') THEN
+95	IF (IECODE.EQ.'EF') THEN
 	   GOTO 1001
 C
-        ELSEIF (IECODE.EQ.'ST' .OR. IECODE.EQ.'ZS' ) THEN
+	ELSEIF (IECODE.EQ.'ST' .OR. IECODE.EQ.'ZS' ) THEN
 	   CALL EIHRS(NO_OF_PTS,PEN)
 C
 	   IF (PEN.EQ.PEN_UP .AND. IN_POLYLINE) THEN	! new feature, with
@@ -124,7 +140,8 @@ C
 C
 		  CALL OUTPUT_COORD(FIRST_COORD(1), FIRST_COORD(2), 1)
 C
-		  IF (HAD_ZS) THEN
+		  REAL_EQUIV = FIRST_COORD(3)
+		  IF (HAD_ZS .AND. INT_EQUIV.NE.IFF_ABSENT) THEN
 		    CALL FLWSTR( ' 30' )
 		    CALL FLWRTF( '%F',FIRST_COORD(3) )
 		  ENDIF
@@ -197,17 +214,36 @@ C Start a new polyline
 C
 103	CONTINUE
 C
-C If less than or equal one point, give up, with a warning
+C If less than/equal to one point, get next entry to see if more points.
+C If so start a new entity.
+C If not, give up, with a warning.
 C
-	IF (COUNT.LE.1) THEN
-	   IF (.NOT.HAD_QUIET .AND. COUNT.EQ.1) THEN
-		CALL LSL_PUTMSG(I2DXF__SINGPNTDEL)
-	   	CALL LSL_ADDMSG(I2DXF__ATPOSITION,X,Y)
-	   	CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
-	   ENDIF
+ 	IF (COUNT.LE.1) THEN
+	   CALL IFFNXT(IECODE,IELEN)
 C
-	   GOTO 94
-	ENDIF
+	   IF (IECODE.EQ.'ST' .OR. IECODE.EQ.'ZS') THEN
+	      CALL EIHRS(NEXT_NO_OF_PTS, PEN)
+C
+	      IF (PEN.EQ.PEN_DOWN) THEN
+		CONTINUE = .TRUE.
+		COUNT = NO_OF_PTS + NEXT_NO_OF_PTS
+	        GOTO 104			! continuing feature, start poly
+C
+	      ELSEIF (PEN.EQ.PEN_UP) THEN	! new feature, give message
+		IF (.NOT.HAD_QUIET .AND. COUNT.EQ.1) THEN
+		  CALL LSL_PUTMSG(I2DXF__SINGPNTDEL)
+		  CALL LSL_ADDMSG(I2DXF__ATPOSITION,X,Y)
+		  CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
+		ENDIF
+C
+	        GOTO 95
+	      ENDIF			! pen down, up			
+	   ENDIF			! ST, ZS next
+C
+	   GOTO 94			! other entry
+	ENDIF				! count .le. 1
+C
+104	CONTINUE
 C
         CALL FLWSTR( '  0' )
         CALL FLWSTR( 'POLYLINE' )
@@ -254,9 +290,10 @@ C
 C
 	   CALL OUTPUT_COORD(PT_BUFFER(1,I), PT_BUFFER(2,I), 1)
 C
-	   IF (HAD_ZS) THEN
+	   REAL_EQUIV = PT_BUFFER(3,I)
+	   IF (HAD_ZS .AND. INT_EQUIV.NE.IFF_ABSENT) THEN
 	      CALL FLWSTR( ' 30' )
-	      CALL FLWRTF( '%F',PT_BUFFER(3,I) )
+	      CALL FLWRTF( '%F', PT_BUFFER(3,I) )
 	   ENDIF
 106     CONTINUE
 C
@@ -265,6 +302,11 @@ C
 	LAST_COORD(1) = PT_BUFFER(1,NO_OF_PTS)
 	LAST_COORD(2) = PT_BUFFER(2,NO_OF_PTS)
 	IF (HAD_ZS) LAST_COORD(3) = PT_BUFFER(3,NO_OF_PTS)
+C
+	IF (CONTINUE) THEN
+	   CONTINUE = .FALSE.
+	   GOTO 95
+	ENDIF
 C
 	GOTO 94				! get next entry
 C
@@ -294,7 +336,8 @@ C
 C
 	      CALL OUTPUT_COORD(FIRST_COORD(1), FIRST_COORD(2), 1)
 C
-	      IF (HAD_ZS) THEN
+	      REAL_EQUIV = FIRST_COORD(3)
+	      IF (HAD_ZS .AND. INT_EQUIV.NE.IFF_ABSENT) THEN
 	        CALL FLWSTR( ' 30' )
 	        CALL FLWRTF( '%F',FIRST_COORD(3) )
 	      ENDIF

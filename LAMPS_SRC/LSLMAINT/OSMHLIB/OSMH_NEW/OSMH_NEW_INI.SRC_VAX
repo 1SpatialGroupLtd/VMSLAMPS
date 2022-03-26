@@ -1,0 +1,404 @@
+	LOGICAL FUNCTION OSMH_NEW_INI ( NO_MESSAGES )
+C
+***	IDENT	06FE91
+***	MODULE	OSMH_NEW_INI
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C	Created					ST	28-Aug-1990
+C
+C Description
+C
+C Read and store header positions and sizes for fields and stores them in
+C common array OSMH_TABLE which is to be found in OSMH_NEW_TAB.CMN
+C
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+C
+CCCC	INCLUDE 'CMN:OSMHLIBMSG.PAR'		! OSMHLIB messages
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'	! LSLLIB message definitions
+	INCLUDE 'LSL$CMNLSL:READSTR.PAR'	! Readstr parameters
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW.PAR'	! Header field definitions
+C
+C Common Blocks
+C
+	INCLUDE 'CMN:OSMH_NEW_FILES.CMN'	! File definitions
+	INCLUDE 'CMN:OSMH_NEW_TAB.CMN'		! Map header table vars
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'		! command decoding
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'		! contains LSL_STATUS
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW_MH.CMN'	! Map header variables
+	INCLUDE 'LSL$CMNIFF:MHOSGB.CMN'		! MH variables
+C
+	INCLUDE '($SSDEF)'
+C
+C Arguments
+C
+	LOGICAL		NO_MESSAGES		! True to suppress messages
+C
+C Local Parameters
+C
+	BYTE		PLING			! comment delimiter
+	PARAMETER	(PLING = '!')
+C
+C External declaration
+C
+	INTEGER*4	OSMH_CMD_TABLE
+	EXTERNAL	OSMH_CMD_TABLE
+	EXTERNAL 	OSMHLIB__ERROPNPAR
+	EXTERNAL 	OSMHLIB__ERRRDPAR
+	EXTERNAL 	OSMHLIB__UNKCMD
+	EXTERNAL 	OSMHLIB__LINEINPAR
+	EXTERNAL 	OSMHLIB__ERRFMT
+	EXTERNAL 	OSMHLIB__ERRCLOPAR
+	EXTERNAL 	OSMHLIB__ERRINI
+	EXTERNAL 	OSMHLIB__ERROSMHSIZ
+	EXTERNAL 	OSMHLIB__ERRCIMHSIZ
+	EXTERNAL 	OSMHLIB__ERROSSIZ
+	EXTERNAL 	OSMHLIB__ERRCISIZ
+	EXTERNAL 	OSMHLIB__ERROFFSIZ
+	EXTERNAL 	OSMHLIB__ERRCHFLG
+	EXTERNAL 	OSMHLIB__ERRNOTCONT
+C
+C Functions called
+C
+	INTEGER*4	FLROPN			! open file for reading
+	INTEGER*4	FLRCLO			! close file for reading
+	INTEGER*4	FLRLIN			! read in line from file
+	INTEGER*4	RDCOMM			! read a command
+	LOGICAL		RDCHS			! read next character
+	INTEGER*4	READSTR			! read a string
+	LOGICAL		HAVE_I_AN_ARG		! check for arguments
+	LOGICAL		OSMH_NEW_INQTABLE	! check for table
+	INTEGER*4	LIB$GET_LUN		! Get logical unit number
+	INTEGER*4	LIB$FREE_LUN		! Free logical unit number
+C
+C Local Variables
+C
+	LOGICAL		STATUS			! Success/failure of routine
+	LOGICAL		HADARG			! Had an argument
+	LOGICAL		NOTCONT			! Contiguous CH_IND flags
+	LOGICAL		OK			! success of freeing LUN
+	INTEGER*4	LINE			! count line numbers
+	INTEGER*4	I,J			! counters
+	INTEGER*4	RESULT			! command read result
+	INTEGER*4	ERRCOD			! LSLLIB error code
+	INTEGER*4	RETCOD			! system error code
+	BYTE		CH			! character read
+	INTEGER*4	MHTYPE			! header type, 3 or 4
+	INTEGER*4	STRLEN			! string length of READSTR
+	INTEGER*4	RETVAL			! return value of READSTR
+	INTEGER*4	OSMH_PARLUN		! LUN for table
+	INTEGER*4	OS_BYSIZ,CI_BYSIZ	! OSTF and CITF header sizes
+C
+C------------------------------------------------------------------------------
+C
+C Assume everything will work
+C
+	STATUS = SS$_NORMAL
+C
+C Define default characters of CITF divider and {EOR}
+C
+	MH_CITF_EOR = '%'
+	MH_CITF_DIVIDER = '\'
+C
+C Set whole array as undefined
+C
+	DO 50 I = 1,ARRINDEX
+	   DO 40 J = 1,3
+	      OSMH_TABLE(I,J,3) = MH_UNDEFINED
+	      OSMH_TABLE(I,J,4) = MH_UNDEFINED
+40	   CONTINUE
+50	CONTINUE
+C
+	HADARG = HAVE_I_AN_ARG(1)
+	IF (HADARG.AND.NO_MESSAGES) MH_NOMESS = .TRUE.
+C
+C Check if logical name has been set up.
+C
+	IF ( .NOT.MH_FOUNDFILE )THEN
+	   STATUS = OSMH_NEW_INQTABLE()
+	   IF ( .NOT.STATUS ) THEN
+	      IF ( .NOT.MH_NOMESS ) CALL LSL_PUTMSG( STATUS )
+	      GOTO 999
+	   ENDIF
+	ENDIF
+C
+C Get LUN for parameter file.
+C
+	STATUS = LIB$GET_LUN( OSMH_PARLUN )
+	IF ( .NOT.STATUS ) THEN
+	   CALL LSL_PUTMSG( STATUS )
+	   GOTO 999
+	ENDIF
+C
+C Open our parameter file, read only. The filename was left in OSMH_PARFIL by
+C the call to OSMH_NEW_INQTABLE
+C
+	ERRCOD = FLROPN(OSMH_PARLUN,OSMH_PARFIL,RETCOD)
+C
+C If unsuccessful, output message
+C
+	IF (.NOT. ERRCOD) THEN
+	   STATUS = %LOC(OSMHLIB__ERROPNPAR)
+	   IF ( .NOT.MH_NOMESS ) THEN
+	      CALL LSL_PUTMSG(STATUS,OSMH_PARFIL(1:OSMH_PARLEN))
+	      CALL LSL_ADDMSG(ERRCOD)
+	      IF (ERRCOD .EQ. LSL__SYSOPEN) CALL LSL_ADDMSG(RETCOD)
+	   ENDIF
+	   GOTO 999
+	ENDIF
+C
+C Disable LSLLIB messages for RDCOMM
+C
+	NOMESS = .TRUE.
+C
+C Haven't got a line yet
+C
+	LINE = 0
+C
+C So let us read in the lines, one by one
+C
+500	LINE = LINE+1
+C
+	ERRCOD = FLRLIN(,,,RETCOD)
+	IF (ERRCOD .EQ. LSL__EOF) GOTO 600
+C
+C If unsuccessful, output message
+C
+	IF (.NOT. ERRCOD) THEN
+	   STATUS = %LOC(OSMHLIB__ERRRDPAR)
+	   IF ( .NOT.MH_NOMESS ) THEN 
+	      CALL LSL_PUTMSG(STATUS,OSMH_PARFIL(1:OSMH_PARLEN),LINE)
+	      CALL LSL_ADDMSG(ERRCOD)
+	      IF (ERRCOD .EQ. LSL__SYSREAD) CALL LSL_ADDMSG(RETCOD)
+	   ENDIF
+	   GOTO 800		! close parameter file and exit
+	ENDIF
+C
+C Now reset the decoding pointer to the start of the line
+C
+	CALL BSLN
+C
+C Check for a comment delimiter - ignore an empty line
+C
+	IF ( RDCHS( CH ) ) GOTO 500
+	IF ( CH.EQ.PLING ) THEN
+	   GOTO 500			! ignore line
+	ELSE
+	   CALL BSCH			! unread non-pling
+	ENDIF
+C
+C Now, read the command from the line
+C
+	RESULT = RDCOMM(OSMH_CMD_TABLE)
+C
+C and check that there was one
+C
+	IF (RESULT .LE. 0) THEN
+C
+C Unknown command, output message
+C
+	   STATUS = %LOC(OSMHLIB__UNKCMD)
+	   IF ( .NOT.MH_NOMESS ) THEN
+	      CALL LSL_PUTMSG(STATUS,CMDNST)
+	      CALL LSL_ADDMSG(%LOC(OSMHLIB__LINEINPAR),LINE)
+	   ENDIF
+	   GOTO 800		! close parameter file and exit
+	ENDIF
+C
+	DO 510 J = CMDICT,7
+	   INTARG(J+1) = MH_UNDEFINED
+510	CONTINUE
+C
+	IF (RESULT.LE.OSTF_NUMFIELDS) THEN
+	   MHTYPE = 3
+	ELSE
+	   RESULT = RESULT - OSTF_NUMFIELDS
+	   MHTYPE = 4
+	ENDIF
+C
+C Check size of header for OS and CITF
+C
+	IF (RESULT.EQ.1) THEN 
+	   IF (MHTYPE.EQ.3) THEN
+	      OS_BYSIZ = INTARG(2)
+	   ELSE
+	      CI_BYSIZ = INTARG(1)
+	      IF (CI_BYSIZ.LT.320 .OR. CI_BYSIZ.GT.MH2BYSZ) THEN
+	         STATUS = %LOC(OSMHLIB__ERRCIMHSIZ)
+	         IF ( .NOT.MH_NOMESS ) THEN
+	            CALL LSL_PUTMSG(STATUS,320,MH2BYSZ)
+	            CALL LSL_ADDMSG(%LOC(OSMHLIB__LINEINPAR),LINE)
+	         ENDIF
+	         GOTO 800
+	      ENDIF
+	   ENDIF
+	ELSE IF (RESULT.EQ.2) THEN 
+	   OS_BYSIZ = OS_BYSIZ + INTARG(2)
+	   IF (OS_BYSIZ.GT.MH2BYSZ) THEN
+	      STATUS = %LOC(OSMHLIB__ERROSMHSIZ)
+              IF ( .NOT.MH_NOMESS ) THEN
+	         CALL LSL_PUTMSG(STATUS,MH2BYSZ)
+	      CALL LSL_ADDMSG(%LOC(OSMHLIB__LINEINPAR),LINE)
+	      ENDIF
+	      GOTO 800
+	   ENDIF
+C
+C Check that current field is inside appropriate header
+C ie start position (INTARG(1)) + size (INTARG(2))
+C
+	ELSE IF (MHTYPE.EQ.3) THEN
+	   IF ((INTARG(1)+INTARG(2)-1).GT.OS_BYSIZ) THEN
+	      STATUS = %LOC(OSMHLIB__ERROSSIZ)
+	      IF ( .NOT.MH_NOMESS ) THEN
+	         CALL LSL_PUTMSG(STATUS,OS_BYSIZ)
+	      CALL LSL_ADDMSG(%LOC(OSMHLIB__LINEINPAR),LINE)
+	      ENDIF
+	      GOTO 800
+	   ENDIF
+	ELSE IF (MHTYPE.EQ.4) THEN
+	   IF (RESULT.LT.MH_DIFF_HT_LEN .OR. RESULT.GT.MH_CH_IND_H) THEN
+C
+C Check non-variable fields have offsets between 2 and 78
+C
+	      IF (INTARG(2).LT.2 .OR. INTARG(2)+INTARG(3).GT.78) THEN
+		 STATUS = %LOC(OSMHLIB__ERROFFSIZ)
+		 IF ( .NOT.MH_NOMESS ) THEN
+		    CALL LSL_PUTMSG(STATUS)
+		    CALL LSL_ADDMSG(%LOC(OSMHLIB__LINEINPAR),LINE)
+		 ENDIF
+		 GOTO 800
+	      ENDIF
+C
+C Check non-vraible fields will fit into the header, given the line, offset and
+C field width
+C
+	      IF ((INTARG(1)*80+INTARG(2)+INTARG(3)-1).GT.CI_BYSIZ) THEN
+		 STATUS = %LOC(OSMHLIB__ERRCISIZ)
+		 IF ( .NOT.MH_NOMESS ) THEN
+		    CALL LSL_PUTMSG(STATUS,CI_BYSIZ)
+		    CALL LSL_ADDMSG(%LOC(OSMHLIB__LINEINPAR),LINE)
+		 ENDIF
+		 GOTO 800
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C Store arguments in appropriate part of common block array	
+C
+	IF (MHTYPE.EQ.3) THEN
+	   OSMH_TABLE(RESULT,1,MHTYPE) = MH_UNDEFINED   	!unset
+	   OSMH_TABLE(RESULT,2,MHTYPE) = INTARG(1)
+	   OSMH_TABLE(RESULT,3,MHTYPE) = INTARG(2)
+	ELSE
+	   OSMH_TABLE(RESULT,1,MHTYPE) = INTARG(1)
+	   OSMH_TABLE(RESULT,2,MHTYPE) = INTARG(2)
+	   OSMH_TABLE(RESULT,3,MHTYPE) = INTARG(3)
+	ENDIF
+C
+C Don't try to read a format for MH_ONE, MH_TWENTY and MH_LENGTH commands
+C
+	IF (RESULT.LE.2) THEN
+	   OSMH_TABLE_FORMAT(RESULT,MHTYPE) = ' '
+	ELSE
+	   STRLEN = READSTR(OSMH_TABLE_FORMAT( RESULT,MHTYPE ),
+     &                                     ,ON_SPACE,.TRUE.,RETVAL)
+	   IF (  STRLEN .EQ. 0 ) THEN
+	      STATUS = %LOC(OSMHLIB__ERRFMT)
+	      IF ( .NOT.MH_NOMESS ) THEN
+		 CALL LSL_PUTMSG(STATUS,OSMH_PARFIL(1:OSMH_PARLEN))
+		 CALL LSL_ADDMSG(RETVAL)
+	      ENDIF
+	      GOTO 800		! close parameter file and exit
+	   ENDIF
+	ENDIF
+C
+C Check that all change indicator flags are A1
+C
+	IF (RESULT.GE.MH_CH_IND_A .AND. RESULT.LE.MH_CH_IND_H) THEN
+	   IF (OSMH_TABLE_FORMAT(RESULT,MHTYPE).NE.'A' .OR.
+     &	       OSMH_TABLE(RESULT,3,MHTYPE).NE.1) THEN
+	      STATUS = %LOC(OSMHLIB__ERRCHFLG)
+	      IF ( .NOT.MH_NOMESS ) THEN
+		 CALL LSL_PUTMSG(STATUS)
+		 CALL LSL_ADDMSG(%LOC(OSMHLIB__LINEINPAR),LINE)
+	      ENDIF
+	      GOTO 800		! close parameter file and exit
+	   ENDIF
+	ENDIF
+C
+C Get next line
+C
+	GOTO 500
+C
+C Check that the OSTF change indicators are contiguous
+C
+600	NOTCONT = .FALSE.
+	DO 700 I = MH_CH_IND_B, MH_CH_IND_H
+	   IF (OSMH_TABLE(I,2,3).NE.OSMH_TABLE(I-1,2,3)+1) THEN
+	      NOTCONT = .TRUE.
+	   ENDIF
+700	CONTINUE
+	IF (NOTCONT) THEN
+	   STATUS = %LOC(OSMHLIB__ERRNOTCONT)
+	   IF ( .NOT.MH_NOMESS ) THEN
+	      CALL LSL_PUTMSG(STATUS)
+	   ENDIF
+	ENDIF
+C
+C Print out table for testing
+C
+C	DO 765 I = 3,4
+C	   DO 766 J = 1,19
+C	      CALL WRITEF('%P.%^L%I10%I10%I10%I10 %S1',J,
+C     &		   OSMH_TABLE(J,1,I),
+C     &		   OSMH_TABLE(J,2,I),
+C     &		   OSMH_TABLE(J,3,I),
+C     &		   OSMH_TABLE_FORMAT(J,I))
+C766	   CONTINUE
+C765	CONTINUE
+C
+C
+C Close the file
+C
+800	ERRCOD = FLRCLO(OSMH_PARLUN,RETCOD)
+C
+C If unsuccessful output message
+C
+	IF (.NOT. ERRCOD) THEN
+	   STATUS = %LOC(OSMHLIB__ERRCLOPAR)
+	   IF ( .NOT.MH_NOMESS ) THEN
+	      CALL LSL_PUTMSG(STATUS,OSMH_PARFIL(1:OSMH_PARLEN))
+	      CALL LSL_ADDMSG(ERRCOD)
+	      IF (ERRCOD .EQ. LSL__SYSCLOSE) CALL LSL_ADDMSG(RETCOD)
+	   ENDIF
+	   GOTO 999
+	ENDIF
+C
+C Free the LUN
+C
+	OK = LIB$FREE_LUN( OSMH_PARLUN )
+	IF ( .NOT.OK ) THEN
+	   CALL LSL_PUTMSG( OK )
+	   GOTO 999
+	ENDIF
+C
+	IF ( STATUS ) THEN
+	   GOTO 1000
+	ENDIF
+C
+C Failure
+C
+999	IF ( .NOT.MH_NOMESS ) CALL LSL_ADDMSG( %LOC(OSMHLIB__ERRINI) )
+C
+C Return
+C
+	NOMESS = .FALSE.
+C
+1000	OSMH_NEW_INI = STATUS
+C
+	RETURN
+	END
+C

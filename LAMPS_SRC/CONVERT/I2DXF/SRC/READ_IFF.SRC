@@ -1,0 +1,1172 @@
+	LOGICAL FUNCTION READ_IFF
+C
+***	IDENT	19DE94
+***	MODULE 	READ_IFF
+C
+C Copyright (C) Laser-Scan Ltd, Cambridge, England
+C
+C Author :  Paul Pan, 5 September 1989
+C Modified: Paul Pan, 16 February 1990 to add FSN reporting
+C 		      26 February 1990 to add lookup facilities
+C                     31 July 1990 to add default linetypes
+C
+CMOD960		Remove OSMH_UPGRADE		Jon Barber 22-Jan-1991
+C		Use IFF_LINE for areas instead of IFF_POLY so that 
+C		TRACE and SOLID entities may be output
+C
+CMOD1010					Jon Barber 22-Jul-1991
+C		Put RA into $EXTMIN/MAX only
+C		Skip layer if absent from parameter file
+C		Read layer 0 AC entries if /HEADER given 
+C		for DXF HEADER variables
+C
+CMOD1103					Jon Barber 23-Apr-1992
+C		Use $CECOLOR instead of $CECOLOUR
+C
+CMOD1125					Jon Barber 10-Jul-1992
+C		Get MD2 for /ABSOLUTE qualifier
+C
+C Purpose:  transformation module for data from IFF format
+C              to DXF format
+C
+        IMPLICIT NONE
+C
+C Messages:
+	INCLUDE	 'HERE:I2DXFMSG.PAR'
+C
+C Common Blocks:
+	INCLUDE  'LSL$CMNDXFPAR:LOOKUP.CMN'
+	INCLUDE  'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE  'LSL$CMNIFF:MD2DES.CMN'
+	INCLUDE  'LSL$CMNFRT:FRTCOM.CMN'
+	INCLUDE  'HERE:I2DXF.CMN'		! added on 28/02/90
+        INCLUDE  'HERE:FEATURE.CMN'
+        INCLUDE  'HERE:LAYER.CMN'
+        INCLUDE  'HERE:POINT.CMN'
+        INCLUDE  'HERE:SYMBOL.CMN'
+C
+C Functions:
+        LOGICAL     IFF_LINE
+        LOGICAL	    IFF_POLY
+        LOGICAL     IFF_ARC
+        LOGICAL     IFF_CIRCLE
+        LOGICAL     IFF_CIRCUM
+        LOGICAL     IFF_POINT
+        LOGICAL     IFF_INSERT
+        LOGICAL     IFF_TEXT
+	INTEGER	    READSTR
+C
+C Workspace:
+        LOGICAL     PROCESS_OK          ! process successful ident
+        INTEGER     PROCESS_SUCC	! process success
+        INTEGER     PROCESS_FAIL	! process fail
+        INTEGER     PROCESS_TOTAL	! total no of feature p'd
+	INTEGER     I,J			! DO loop counter
+	INTEGER	    LEN
+	INTEGER*2   IELEN		! end of file/entry length
+        INTEGER*2   IECODE
+	INTEGER*2   FSN(2)		! storing FSN
+        INTEGER*2   LAYER(1)		! overlay number
+        REAL        RANGE(4)		! the IFF map extents
+	BYTE	    NULL_SPACE		! ''
+C
+	INTEGER*4	INT_HT		! a type 2 AC integer height value
+	INTEGER*2	AC_TYPE		! the AC type
+	INTEGER*2	AC_LEN		! the AC text length
+	INTEGER		AC_VAL		! the AC value = len of text string
+	BYTE		AC_TEXT(255)
+	CHARACTER*255	AC_CHAR
+C
+C Header variables
+	CHARACTER*255	CLAYER,CELTYPE,TEXTSTYLE,UCSNAME
+	CHARACTER*255	CECOLOR,PDMODE,LUNITS,LUPREC
+	CHARACTER*255	TEXTSIZE,PDSIZE,UCSORG(3)
+	CHARACTER*255	UCSXDIR(3),UCSYDIR(3)
+	CHARACTER*255	TDCREATE,TDINDWG
+	CHARACTER*255	TDUPDATE,TDUSRTIMER
+	LOGICAL		HAD_CECOLOR,HAD_CELTYPE,HAD_TEXTSTYLE
+	LOGICAL		HAD_AC
+C
+C----------------------------------------------------------------
+C
+	READ_IFF      = .TRUE.
+	HAD_CECOLOR   = .FALSE.
+	HAD_CELTYPE   = .FALSE.
+	HAD_TEXTSTYLE = .FALSE.
+	SELLAYIND     = 0		! flag for layer name not allocated
+C
+C----------------------------------------------------------------
+C now the HEADER section
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'SECTION' )
+        CALL FLWSTR( '  2' )
+        CALL FLWSTR( 'HEADER' )
+C
+C read the extents of the map in IFF file
+C
+	CALL IFFNXC( 'RA',IELEN )
+	IF ( IELEN.EQ.-1 ) THEN
+           CALL LSL_PUTMSG(I2DXF__BADRA)
+           GOTO 300
+        ELSE
+           CALL EIHRR( RANGE,4,1 )
+           IF (HAD_LOG) CALL LSL_PUTMSG(I2DXF__MAPEXTENT,
+     &			RANGE(1),RANGE(2),RANGE(3),RANGE(4))
+        ENDIF
+C
+C Get MD entry if had /ABSOLUTE qualifier
+C
+	IF (HAD_ABS) THEN
+	   CALL IFFNXC('MD',IELEN)
+	   IF (IELEN.EQ.-1) THEN
+	      READ_IFF = I2DXF__MDABSENT
+	      CALL LSL_PUTMSG(READ_IFF)
+	      GOTO 300
+C
+	   ELSEIF (IELEN.NE.MD2LEN) THEN	  ! type 1 MD ?
+	      CALL LSL_PUTMSG(I2DXF__MDDEFAULT)	  ! no MD2 available
+	      MD2LOC(1) = 0
+	      MD2LOC(2) = 0
+C
+	   ELSE
+	      CALL EIHR(MD2ARR,MD2LEN,1)
+	      IF (MATV2.NE.2) THEN
+		 CALL LSL_PUTMSG(I2DXF__MDDEFAULT) ! no MD2 available
+		 MD2LOC(1) = 0
+		 MD2LOC(2) = 0
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C now output the Map Extent read to the DXF file
+C    please note that only four entries of the DXF file header 
+C    are considered relevant for the time being
+C    they are: $LIMMIN, $LIMMAX, $EXTMIN, $EXTMAX
+C
+C now output the $LIMMIN & $LIMMAX
+C
+C	CALL FLWSTR( '  9' )
+C	CALL FLWSTR( '$LIMMIN' )
+C	CALL FLWSTR( ' 10' )
+C	CALL FLWRTF( '%F0.3',Range( 1 ) )
+C	CALL FLWSTR( ' 20' )
+C	CALL FLWRTF( '%F0.3',Range( 3 ) )
+C	CALL FLWSTR( '  9' )
+C	CALL FLWSTR( '$LIMMAX' )
+C	CALL FLWSTR( ' 10' )
+C	CALL FLWRTF( '%F0.3',Range( 2 ) )
+C	CALL FLWSTR( ' 20' )
+C	CALL FLWRTF( '%F0.3',Range( 4 ) )
+C
+C now output the $EXTMIN & $EXTMAX
+C
+        CALL FLWSTR( '  9' )
+        CALL FLWSTR( '$EXTMIN' )
+        CALL FLWSTR( ' 10' )
+        CALL FLWRTF( '%F0.3',Range( 1 ) )
+        CALL FLWSTR( ' 20' )
+        CALL FLWRTF( '%F0.3',Range( 3 ) )
+        CALL FLWSTR( '  9' )
+        CALL FLWSTR( '$EXTMAX' )
+        CALL FLWSTR( ' 10' )
+        CALL FLWRTF( '%F0.3',Range( 2 ) )
+        CALL FLWSTR( ' 20' )
+        CALL FLWRTF( '%F0.3',Range( 4 ) )
+C
+C Check for layer 0 and /HEADER specified
+C
+	IF (HAD_HDR) THEN
+C
+	   HAD_AC = .FALSE.
+	   IF (HAD_LOG) CALL LSL_PUTMSG(I2DXF__RDHDRACS)
+C
+C Get LAYER 0
+1000	   CALL IFFNXC( 'NO',IELEN )
+	   IF ( IELEN.EQ.-1 ) THEN
+	      READ_IFF = .FALSE.
+	      CALL LSL_PUTMSG(I2DXF__BADHDRFTR)
+	      GOTO 300
+	   ENDIF
+C
+	   IECODE = 'NO'
+	   CALL EIHR( LAYER,1,1 )       	! FSN
+	   IF (LAYER(1) .NE. 0) GOTO 1000	! next NO
+C
+C Get FSN 1
+1001	   CALL IFFNXC( 'NF',IELEN )
+	   IF ( IELEN.EQ.-1 ) THEN
+	      READ_IFF = .FALSE.
+	      CALL LSL_PUTMSG(I2DXF__BADHDRFTR)
+	      GOTO 300
+	   ENDIF
+C
+	   IECODE = 'NF'
+	   CALL EIHR( FSN,2,1 )       		! FSN
+	   CURRFSN = FSN(1)
+	   IF (FSN(1) .NE. 1) GOTO 1001		! next NF
+C
+C Get FC 0
+1005	   CALL IFFNXC( 'FS',IELEN )
+	   IF ( IELEN.EQ.-1 ) THEN
+	      READ_IFF = .FALSE.
+	      CALL LSL_PUTMSG(I2DXF__BADHDRFTR)
+	      GOTO 300
+	   ENDIF
+C
+	   IECODE = 'FS'
+	   CALL EIHR( FSTAT,4,1)		! extract feature status
+	   IF (FSTAT(1) .NE. 0) GOTO 1005	! carry on as normal
+C
+C Got right feature, get AC entries
+2104	   CALL IFFNXT(IECODE,IELEN)		! extract an entry
+	   IF ( IELEN.EQ.-1 ) THEN
+	      READ_IFF = .FALSE.
+	      CALL LSL_PUTMSG(I2DXF__BADHDRFTR)
+	      GOTO 300
+	   ENDIF
+C
+C Read the AC's for the header
+C
+	   IF (IECODE.EQ.'AC') THEN
+		 CALL EIHRI(AC_TYPE,1,1)		! extract AC type
+		 IF (AC_TYPE .NE. DEF_HEADER_AC) GOTO 2104  ! get next entry
+C
+C Got right AC
+		 HAD_AC = .TRUE.
+		 CALL EIHRL(AC_VAL,1,2)
+C
+C len of text string in I*2
+		 AC_LEN = IELEN-3
+		 CALL EIHR(AC_TEXT(1),AC_LEN,4)
+		 CALL SETAUX(AC_TEXT,2*AC_LEN)
+		 AC_LEN = READSTR(AC_CHAR,,ON_SPACE)
+		 IF (AC_LEN.LE.0) GOTO 2104
+C
+C Default layer name
+		 IF (AC_CHAR(1:AC_LEN).EQ.'$CLAYER') THEN
+		    LEN = READSTR(CLAYER,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$CLAYER' )
+		    CALL FLWSTR( '  8' )
+		    CALL FLWRTF( '%S',CLAYER(1:LEN))
+C
+C Layer colour
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$CECOLOUR' .OR.
+     &		 	 AC_CHAR(1:AC_LEN).EQ.'$CECOLOR') THEN
+		    LEN = READSTR(CECOLOR,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$CECOLOR' )
+		    CALL FLWSTR( ' 62' )
+		    CALL FLWRTF( '%S',CECOLOR(1:LEN))
+		    HAD_CECOLOR = .TRUE.
+C
+C Layer line type
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$CELTYPE') THEN
+		    LEN = READSTR(CELTYPE,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$CELTYPE' )
+		    CALL FLWSTR( '  6' )
+		    CALL FLWRTF( '%S',CELTYPE(1:LEN))
+		    HAD_CELTYPE = .TRUE.
+C
+C Default text height
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$TEXTSIZE') THEN
+		    LEN = READSTR(TEXTSIZE,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$TEXTSIZE' )
+		    CALL FLWSTR( ' 40' )
+		    CALL FLWRTF( '%S',TEXTSIZE(1:LEN))
+C
+C Default text style
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$TEXTSTYLE') THEN
+		    LEN = READSTR(TEXTSTYLE,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$TEXTSTYLE' )
+		    CALL FLWSTR( '  7' )
+		    CALL FLWRTF( '%S',TEXTSTYLE(1:LEN))
+		    HAD_TEXTSTYLE = .TRUE.
+C
+C Default point size
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$PDSIZE') THEN
+		    LEN = READSTR(PDSIZE,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$PDSIZE' )
+		    CALL FLWSTR( ' 40' )
+		    CALL FLWRTF( '%S',PDSIZE(1:LEN))
+C
+C Point display mode
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$PDMODE') THEN
+		    LEN = READSTR(PDMODE,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$PDMODE' )
+		    CALL FLWSTR( ' 70' )
+		    CALL FLWRTF( '%S',PDMODE(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$UCSNAME') THEN
+		    LEN = READSTR(UCSNAME,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$UCSNAME' )
+		    CALL FLWSTR( '  1' )
+		    CALL FLWRTF( '%S',UCSNAME(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$UCSORG') THEN
+		    LEN = READSTR(UCSORG(1),,ON_SPACE)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$UCSORG' )
+		    CALL FLWSTR( ' 10' )
+		    CALL FLWRTF( '%S',UCSORG(1)(1:LEN))
+C
+		    LEN = READSTR(UCSORG(2),,ON_SPACE)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( ' 20' )
+		    CALL FLWRTF( '%S',UCSORG(2)(1:LEN))
+C
+		    LEN = READSTR(UCSORG(3),NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( ' 30' )
+		    CALL FLWRTF( '%S',UCSORG(3)(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$UCSXDIR') THEN
+		    LEN = READSTR(UCSXDIR(1),,ON_SPACE)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$UCSXDIR' )
+		    CALL FLWSTR( ' 10' )
+		    CALL FLWRTF( '%S',UCSXDIR(1)(1:LEN))
+C
+		    LEN = READSTR(UCSXDIR(2),,ON_SPACE)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( ' 20' )
+		    CALL FLWRTF( '%S',UCSXDIR(2)(1:LEN))
+C
+		    LEN = READSTR(UCSXDIR(3),NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( ' 30' )
+		    CALL FLWRTF( '%S',UCSXDIR(3)(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$UCSYDIR') THEN
+		    LEN = READSTR(UCSYDIR(1),,ON_SPACE)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$UCSYDIR' )
+		    CALL FLWSTR( ' 10' )
+		    CALL FLWRTF( '%S',UCSYDIR(1)(1:LEN))
+C
+		    LEN = READSTR(UCSYDIR(2),,ON_SPACE)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( ' 20' )
+		    CALL FLWRTF( '%S',UCSYDIR(2)(1:LEN))
+C
+		    LEN = READSTR(UCSYDIR(3),NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( ' 30' )
+		    CALL FLWRTF( '%S',UCSYDIR(3)(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$LUNITS') THEN
+		    LEN = READSTR(LUNITS,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$LUNITS' )
+		    CALL FLWSTR( ' 70' )
+		    CALL FLWRTF( '%S',LUNITS(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$LUPREC') THEN
+		    LEN = READSTR(LUPREC,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$LUPREC' )
+		    CALL FLWSTR( ' 70' )
+		    CALL FLWRTF( '%S',LUPREC(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$TDCREATE') THEN
+		    LEN = READSTR(TDCREATE,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$TDCREATE' )
+		    CALL FLWSTR( ' 40' )
+		    CALL FLWRTF( '%S', TDCREATE(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$TDINDWG') THEN
+		    LEN = READSTR(TDINDWG,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$TDINDWG' )
+		    CALL FLWSTR( ' 40' )
+		    CALL FLWRTF( '%S', TDINDWG(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$TDUPDATE') THEN
+		    LEN = READSTR(TDUPDATE,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$TDUPDATE' )
+		    CALL FLWSTR( ' 40' )
+		    CALL FLWRTF( '%S', TDUPDATE(1:LEN))
+C
+		 ELSEIF (AC_CHAR(1:AC_LEN).EQ.'$TDUSRTIMER') THEN
+		    LEN = READSTR(TDUSRTIMER,NULL_SPACE,ON_CHAR)
+		    IF (LEN.LE.0) GOTO 2104
+		    CALL FLWSTR( '  9' )
+		    CALL FLWSTR( '$TDUSRTIMER' )
+		    CALL FLWSTR( ' 40' )
+		    CALL FLWRTF( '%S', TDUSRTIMER(1:LEN))
+		 ENDIF
+C
+		 GOTO 2104
+	   ELSE
+C
+C Get EF, and turn HAD_HDR off
+		 HAD_HDR = .FALSE.
+C
+		 IF (.NOT.HAD_AC) THEN
+		    READ_IFF = .FALSE.
+		    CALL LSL_PUTMSG(I2DXF__BADHDRFTR)
+		    GOTO 300
+		 ENDIF
+C
+		 CALL IFFNXC( 'EF',IELEN )
+		 IF ( IELEN.EQ.-1 ) GOTO 300
+		 IECODE = 'EF'
+	   ENDIF
+	ENDIF
+C
+C colour by BLOCK, unsupported and interpreted as by entity
+C
+	IF (.NOT.HAD_CECOLOR) THEN
+	   CALL FLWSTR( '  9' )
+           CALL FLWSTR( '$CECOLOR' )
+           CALL FLWSTR( ' 62' )
+           CALL FLWSTR( '     0' )
+	ENDIF
+C
+C default linetype name
+C
+	IF (.NOT.HAD_CELTYPE) THEN
+           CALL FLWSTR( '  9' )
+           CALL FLWSTR( '$CELTYPE' )
+           CALL FLWSTR( '  6' )
+           CALL FLWSTR( 'CONTINUOUS' )
+	ENDIF
+C
+C default text style
+C
+	IF (.NOT.HAD_TEXTSTYLE) THEN
+           CALL FLWSTR( '  9' )
+           CALL FLWSTR( '$TEXTSTYLE' )
+           CALL FLWSTR( '  7' )
+           CALL FLWSTR( 'STANDARD' )
+	ENDIF
+C
+C end the section
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'ENDSEC' )
+C
+C DXF file header section finished
+C----------------------------------------------------------------
+C
+C now the TABLES section
+C
+C----------------------------------------------------------------
+C only the LTYPE, LAYER and STYLE portions of the TABLES section is 
+C considered here.
+C (please note that the LAYERs are no longer organised in their colour)
+C
+C output section header
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'SECTION' )
+        CALL FLWSTR( '  2' )
+        CALL FLWSTR( 'TABLES' )
+C
+C----------------------------------------------------------------
+C now the LTYPE subsection
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'TABLE' )
+        CALL FLWSTR( '  2' )
+        CALL FLWSTR( 'LTYPE' )
+C
+C number of LTYPEs
+C
+        CALL FLWSTR( ' 70' )
+        CALL FLWRTF( '%I6',CURRLININD )
+C
+C now the LTYPE's definition
+C
+        DO 1002 I = 1,CURRLININD
+           CALL FLWSTR( '  0' )
+           CALL FLWSTR( 'LTYPE' )
+           CALL FLWSTR( '  2' )
+           CALL FLWRTF( '%S',DXFENTNAM(DXFLINTYP(I))
+     &				(1:DXFENTLEN(DXFLINTYP(I))) )
+           CALL FLWSTR( ' 70' )
+           CALL FLWSTR( '    64' )
+C 
+C if line type is CONTINUOUS
+C
+           IF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'CONTINUOUS' ) THEN
+              CALL FLWSTR( '  3' )
+              CALL FLWSTR( 'Solid line' )
+              CALL FLWSTR( ' 72' )
+              CALL FLWSTR( '    65' )
+              CALL FLWSTR( ' 73' )
+              CALL FLWSTR( '     0' )
+              CALL FLWSTR( ' 40' )
+              CALL FLWSTR( '0.0' )
+C 
+C if line type is DASHED
+C
+           ELSEIF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'DASHED' ) THEN
+	      CALL FLWSTR( '  3' )
+	CALL FLWSTR( '__ __ __ __ __ __ __ __ __ __ __ __ __ __ __' )
+	      CALL FLWSTR( ' 72' )
+	      CALL FLWSTR( '    65' )
+	      CALL FLWSTR( ' 73' )
+	      CALL FLWSTR( '     2' )
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '0.75' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.5' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+C 
+C if line type is HIDDEN
+C
+           ELSEIF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'HIDDEN' ) THEN
+	      CALL FLWSTR( '  3' )
+	CALL FLWSTR( '_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _' )
+	      CALL FLWSTR( ' 72' )
+	      CALL FLWSTR( '    65' )
+	      CALL FLWSTR( ' 73' )
+	      CALL FLWSTR( '     2' )
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '0.375' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.125' )
+C 
+C if line type is CENTER
+C
+           ELSEIF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'CENTER' ) THEN
+	      CALL FLWSTR( '  3' )
+	CALL FLWSTR( '____ _ ____ _ ____ _ ____ _ ____ _ ____ _ ____' )
+	      CALL FLWSTR( ' 72' )
+	      CALL FLWSTR( '    65' )
+	      CALL FLWSTR( ' 73' )
+	      CALL FLWSTR( '     4' )
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '2.0' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '1.25' )
+	      CALL FLWSTR( ' 49' )
+              CALL FLWSTR( '-0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+C 
+C if line type is CENTRE
+C
+           ELSEIF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'CENTRE' ) THEN
+	      CALL FLWSTR( '  3' )
+	CALL FLWSTR( '____ _ ____ _ ____ _ ____ _ ____ _ ____ _ ____' )
+	      CALL FLWSTR( ' 72' )
+	      CALL FLWSTR( '    65' )
+	      CALL FLWSTR( ' 73' )
+	      CALL FLWSTR( '     4' )
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '2.0' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '1.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+C 
+C if line type is PHANTOM
+C
+           ELSEIF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'PHANTOM' ) THEN
+	      CALL FLWSTR( '  3' )
+	CALL FLWSTR( '_____ _ _ _____ _ _ _____ _ _ _____ _ _ ____' )
+	      CALL FLWSTR( ' 72' )
+	      CALL FLWSTR( '    65' )
+	      CALL FLWSTR( ' 73' )
+	      CALL FLWSTR( '     6' )
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '2.5' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '1.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+C 
+C if line type is DOT
+C
+           ELSEIF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'DOT' ) THEN
+	      CALL FLWSTR( '  3' )
+	CALL FLWSTR( '...............................................' )
+	      CALL FLWSTR( ' 72' )
+	      CALL FLWSTR( '    65' )
+	      CALL FLWSTR( ' 73' )
+	      CALL FLWSTR( '     2' )
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+C 
+C if line type is DASHDOT
+C
+           ELSEIF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'DASHDOT' ) THEN
+	      CALL FLWSTR( '  3' )
+	CALL FLWSTR( '__ . __ . __ . __ . __ . __ . __ . __ . __ . __' )
+	      CALL FLWSTR( ' 72' )
+	      CALL FLWSTR( '    65' )
+	      CALL FLWSTR( ' 73' )
+	      CALL FLWSTR( '     4' )
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '1.0' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.5' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+C 
+C if line type is BORDER
+C
+           ELSEIF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'BORDER' ) THEN
+	      CALL FLWSTR( '  3' )
+	CALL FLWSTR( '__ __ . __ __ . __ __ . __ __ . __ __ . __ __' )
+	      CALL FLWSTR( ' 72' )
+	      CALL FLWSTR( '    65' )
+	      CALL FLWSTR( ' 73' )
+	      CALL FLWSTR( '     6' )
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '1.75' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.5' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.5' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+C 
+C if line type is DIVIDE
+C
+           ELSEIF ( DXFENTNAM(DXFLINTYP(I))(1:DXFENTLEN(DXFLINTYP(I)))
+     &		.EQ.'DIVIDE' ) THEN
+	      CALL FLWSTR( '  3' )
+	CALL FLWSTR( '__ . . __ . . __ . . __ . . __ . . __ . . __' )
+	      CALL FLWSTR( ' 72' )
+	      CALL FLWSTR( '    65' )
+	      CALL FLWSTR( ' 73' )
+	      CALL FLWSTR( '     6' )
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '1.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.5' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 49' )
+	      CALL FLWSTR( '-0.25' )
+C 
+C otherwise, it's just a copy of CONTINUOUS
+C
+           ELSE 
+              CALL FLWSTR( '  3' )
+              CALL FLWSTR( 'Solid line' )
+              CALL FLWSTR( ' 72' )
+              CALL FLWSTR( '    65' )
+              CALL FLWSTR( ' 73' )
+              CALL FLWSTR( '     0' )
+              CALL FLWSTR( ' 40' )
+              CALL FLWSTR( '0.0' )
+           ENDIF
+1002    CONTINUE
+C
+C end the subsection
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'ENDTAB' )
+C
+C----------------------------------------------------------------
+C now the LAYER subsection
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'TABLE' )
+        CALL FLWSTR( '  2' )
+        CALL FLWSTR( 'LAYER' )
+C
+C number of LAYERs
+C
+        CALL FLWSTR( ' 70' )
+        CALL FLWRTF( '%I6',TOTDXFLAY )
+C
+C now each LAYER's definition
+C    please note that the line work are set to CONTINUOUS
+C
+        DO 1003 I = 1,CURRLAYIND
+           IF ( I.EQ.1 ) THEN
+              CALL FLWSTR( '  0' )
+              CALL FLWSTR( 'LAYER' )
+              CALL FLWSTR( '  2' )
+              CALL FLWRTF( '%S',DXFLAYNAM(I)(1:DXFLAYLEN(I)) )
+              CALL FLWSTR( ' 70' )
+              CALL FLWSTR( '    64' )
+              CALL FLWSTR( ' 62' )
+              CALL FLWRTF( '%^W%I6',IFFOLAYNO(I) )
+              CALL FLWSTR( '  6' )
+              CALL FLWSTR( 'CONTINUOUS' )
+C
+C test if there are duplicated LAYER names 
+C
+           ELSE
+              DO 2000 J = 1,I - 1
+                 IF ( DXFLAYNAM(I)(1:DXFLAYLEN(I)).EQ.
+     &			DXFLAYNAM(J)(1:DXFLAYLEN(J)) ) GOTO 1003
+2000	      CONTINUE
+              CALL FLWSTR( '  0' )
+              CALL FLWSTR( 'LAYER' )
+              CALL FLWSTR( '  2' )
+              CALL FLWRTF( '%S',DXFLAYNAM(I)(1:DXFLAYLEN(I)) )
+              CALL FLWSTR( ' 70' )
+              CALL FLWSTR( '    64' )
+              CALL FLWSTR( ' 62' )
+              CALL FLWRTF( '%^W%I6',IFFOLAYNO(I) )
+              CALL FLWSTR( '  6' )
+              CALL FLWSTR( 'CONTINUOUS' )
+	   ENDIF
+1003    CONTINUE
+C
+C end the subsection
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'ENDTAB' )
+C
+C----------------------------------------------------------------
+C now the STYLE subsection
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'TABLE' )
+        CALL FLWSTR( '  2' )
+        CALL FLWSTR( 'STYLE' )
+C
+C number of STYLEs
+C
+        CALL FLWSTR( ' 70' )
+        CALL FLWRTF( '%I6',CURRTEXIND )
+C
+C now each STYLE's definition
+C
+        DO 1004 I = 1,CURRTEXIND
+           CALL FLWSTR( '  0' )
+           CALL FLWSTR( 'STYLE' )
+           CALL FLWSTR( '  2' )
+           CALL FLWRTF( '%S',DXFENTNAM(DXFTEXSTY(I))
+     &				(1:DXFENTLEN(DXFTEXSTY(I))) )
+           CALL FLWSTR( ' 70' )
+           CALL FLWSTR( '    64' )
+C 
+C if text style is STANDARD
+C
+           IF ( DXFENTNAM(DXFTEXSTY(I))(1:DXFENTLEN(DXFTEXSTY(I)))
+     &		.EQ.'STANDARD' ) THEN
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 41' )
+	      CALL FLWSTR( '1.0' )
+	      CALL FLWSTR( ' 50' )
+              CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 71' )
+	      CALL FLWSTR( '     0' )
+	      CALL FLWSTR( ' 42' )
+	      CALL FLWSTR( '5.0' )
+	      CALL FLWSTR( '  3' )
+	      CALL FLWSTR( 'simplex' )
+	      CALL FLWSTR( '  4' )
+!	      CALL FLWSTR( '' )
+	      CALL FLWLIN( NULL_SPACE,0 )
+C 
+C if text style is ROMANC
+C
+           ELSEIF ( DXFENTNAM(DXFTEXSTY(I))(1:DXFENTLEN(DXFTEXSTY(I)))
+     &		.EQ.'ROMANC' ) THEN
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '2.0' )
+	      CALL FLWSTR( ' 41' )
+	      CALL FLWSTR( '1.0' )
+	      CALL FLWSTR( ' 50' )
+	      CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 71' )
+	      CALL FLWSTR( '     0' )
+	      CALL FLWSTR( ' 42' )
+	      CALL FLWSTR( '2.0' )
+	      CALL FLWSTR( '  3' )
+	      CALL FLWSTR( 'romanc' )
+	      CALL FLWSTR( '  4' )
+!	      CALL FLWSTR( '' )
+	      CALL FLWLIN( NULL_SPACE,0 )
+C 
+C if text style is ROMANT
+C
+           ELSEIF ( DXFENTNAM(DXFTEXSTY(I))(1:DXFENTLEN(DXFTEXSTY(I)))
+     &		.EQ.'ROMANT' ) THEN
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '3.0' )
+	      CALL FLWSTR( ' 41' )
+	      CALL FLWSTR( '1.0' )
+	      CALL FLWSTR( ' 50' )
+	      CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 71' )
+	      CALL FLWSTR( '     0' )
+	      CALL FLWSTR( ' 42' )
+	      CALL FLWSTR( '3.0' )
+	      CALL FLWSTR( '  3' )
+	      CALL FLWSTR( 'romant' )
+	      CALL FLWSTR( '  4' )
+!              CALL FLWSTR( '' )
+	      CALL FLWLIN( NULL_SPACE,0 )
+C 
+C otherwise, it's just a copy of STANDARD
+C
+	   ELSE	
+	      CALL FLWSTR( ' 40' )
+	      CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 41' )
+	      CALL FLWSTR( '1.0' )
+	      CALL FLWSTR( ' 50' )
+              CALL FLWSTR( '0.0' )
+	      CALL FLWSTR( ' 71' )
+	      CALL FLWSTR( '     0' )
+	      CALL FLWSTR( ' 42' )
+	      CALL FLWSTR( '5.0' )
+	      CALL FLWSTR( '  3' )
+	      CALL FLWSTR( 'simplex' )
+	      CALL FLWSTR( '  4' )
+!	      CALL FLWSTR( '' )
+	      CALL FLWLIN( NULL_SPACE,0 )
+	   ENDIF
+1004    CONTINUE
+C
+C end the subsection
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'ENDTAB' )
+C
+C end the section
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'ENDSEC' )
+C
+C----------------------------------------------------------------
+C
+C now the BLOCKS section
+C
+C----------------------------------------------------------------
+C in DXF format, BLOCKS effectively represents Symbol definitions
+C    Graphics definition is stored in each DXF BLOCK.
+C    As far as the format transformation is concerned, only the
+C    colour and the coordinate point defining the location of the 
+C    symbol is considered. Again, the CONTINUOUS type is used.
+C    Other construction details of the symbols are ignored.
+C
+C now the section header
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'SECTION' )
+        CALL FLWSTR( '  2' )
+        CALL FLWSTR( 'BLOCKS' )
+C
+C now each BLOCK's definition
+C    line = continuous, name, referenced ? = 64, 10 = 0.0, 20 = 0.0
+C    colour entry is now removed
+C
+        DO 3001 I = 1,CURRSYMIND
+           CALL FLWSTR( '  0' )
+           CALL FLWSTR( 'BLOCK' )
+           CALL FLWSTR( '  6' )
+           CALL FLWSTR( 'CONTINUOUS' )
+           CALL FLWSTR( ' 62' )
+           CALL FLWRTF( '%^W%I6',ENTCOLOUR(I) )
+           CALL FLWSTR( '  2' )
+           CALL FLWRTF( '%S',DXFENTNAM(DXFSYMBOL(I))
+     &				(1:DXFENTLEN(DXFSYMBOL(I))) )
+           CALL FLWSTR( ' 70' )
+           CALL FLWSTR( '    64' )
+           CALL FLWSTR( ' 10' )
+           CALL FLWSTR( '0.0' )
+           CALL FLWSTR( ' 20' )
+           CALL FLWSTR( '0.0' )
+           CALL FLWSTR( '  0' )
+           CALL FLWSTR( 'ENDBLK' )
+3001    CONTINUE
+C
+C end the section
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'ENDSEC' )
+C
+C----------------------------------------------------------------
+C
+C now the ENTITIES section
+C
+C----------------------------------------------------------------
+C section header
+C
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'SECTION' )
+        CALL FLWSTR( '  2' )
+        CALL FLWSTR( 'ENTITIES' )
+C
+C initialise the counters
+C
+        PROCESS_SUCC = 0
+        PROCESS_FAIL = 0
+C
+C now read each feature record from the IFF file and call
+C    the routines to manipulate the transformation according
+C    to their Graphical type
+C
+2102    CONTINUE
+C
+	CALL IFFNXT(IECODE,IELEN)       ! extract a feature
+	IF (IELEN.EQ.-1) GOTO 301	! If there are none left
+C
+C a new overlay is found
+C
+2103	IF ( IECODE.EQ.'NO' ) THEN
+           CALL EIHR( LAYER,1,1 )
+           IF ( HAD_LOG ) CALL LSL_PUTMSG
+     &				(I2DXF__NEWLAYFND,LAYER(1))
+C
+C now lookup for its corresponding DXF LAYER name
+C
+	   DO 2005 I = 1,CURRLAYIND
+              IF (LAYER(1).EQ.IFFOLAYNO(I)) THEN
+		 SELLAYIND = I
+		 GOTO 2102
+	      ENDIF
+2005	   CONTINUE
+C
+C if missing, output an error message now and look for EO, thereby 
+C skipping the layer
+C
+           CALL LSL_PUTMSG(I2DXF__UNDEFLAY,LAYER(1))
+	   CALL IFFNXC( 'EO',IELEN )
+C
+	   IF ( IELEN.EQ.-1 ) THEN
+	      CALL LSL_PUTMSG(I2DXF__BADENDOFLAY,LAYER(1))
+	      READ_IFF = .FALSE.
+	      GOTO 300
+	   ENDIF
+C
+C scan for the NF entry
+C    store it in FSNBLK common block for error reporting.
+C
+ 	ELSEIF ( IECODE.EQ.'NF' ) THEN
+           CALL EIHR( FSN,2,1 )       	! FSN
+           CURRFSN = FSN( 1 )
+C
+C check if layer name not allocated yet (in particular for the
+C continuation of layer 0 after reading the header feature)
+C
+	   IF (SELLAYIND.EQ.0) THEN
+C
+	      IF ( HAD_LOG ) CALL LSL_PUTMSG
+     &				(I2DXF__NEWLAYFND,LAYER(1))
+C
+C now lookup for its corresponding DXF LAYER name
+C
+	      DO 2004 I = 1,CURRLAYIND
+		 IF (LAYER(1).EQ.IFFOLAYNO(I)) THEN
+		    SELLAYIND = I
+		    GOTO 2102
+		 ENDIF
+2004	      CONTINUE
+C
+C if missing, output an error message now and look for EO, thereby 
+C skipping the layer
+C
+	      CALL LSL_PUTMSG(I2DXF__UNDEFLAY,LAYER(1))
+	      CALL IFFNXC( 'EO',IELEN )
+C
+	      IF ( IELEN.EQ.-1 ) THEN
+	         CALL LSL_PUTMSG(I2DXF__BADENDOFLAY,LAYER(1))
+	         READ_IFF = .FALSE.
+	         GOTO 300
+	      ENDIF
+	   ENDIF
+C
+C scan for the FS entry, and extract the IFF FC code
+C
+        ELSEIF ( IECODE.EQ.'FS' ) THEN
+C
+	   PROCESS_OK = .FALSE.         ! initialisation
+	   CALL EIHR( FSTAT,4,1 )       ! extract feature status
+C
+C test for the matching IFF FC in the lookup tables
+C
+           DO 2006 I = 1,CURRENTIND
+              IF (FSTAT(1).EQ.IFFFCCODE(I)) THEN
+		 SELENTIND = I
+		 GOTO 2008
+              ENDIF
+2006       CONTINUE
+C
+C otherwise output error message indicating that the feature code 
+C does not match any in parameter file
+C
+           CALL LSL_PUTMSG(I2DXF__UNABMATFC,FSTAT(1),CURRFSN)
+           GOTO 2009
+C
+C diverge according to FRT graphical type
+C
+2008       CONTINUE
+	   HAD_HT = .FALSE.
+	   HAD_ZS = .FALSE.
+C
+	   CALL EIHMK(1)		! mark entry
+	   CALL IFFNXT(IECODE,IELEN)    ! extract an entry
+	   IF (IELEN.EQ.-1) GOTO 301	! If there are none left
+C
+C Is there an AC height?
+C
+           IF ( IECODE.EQ.'AC' ) THEN
+              CALL EIHRI( AC_TYPE,1,1 )       ! extract AC type
+	      IF (AC_TYPE.EQ.2) THEN
+	         CALL EIHRL( INT_HT,1,2 )
+	         AC_HT = INT_HT
+	         HAD_HT = .TRUE.
+C
+	      ELSEIF (AC_TYPE.EQ.3) THEN
+	         CALL EIHRR( AC_HT,1,2 )
+	         HAD_HT = .TRUE.
+	      ENDIF
+C
+	   ELSE
+	      CALL IFFRWM
+	   ENDIF
+C
+	   CALL EIHMK(0)		! unmark entry
+C
+C No AC height, so rewind to last feature and read ST or ZS again
+C
+           IF (FRTGTTYPE(SELENTIND).EQ.LINTYP) THEN
+              PROCESS_OK = IFF_LINE( )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.CLOTYP) THEN
+              PROCESS_OK = IFF_ARC( )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.ANTTYP) THEN
+              PROCESS_OK = IFF_ARC( )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.CIRTYP) THEN
+              PROCESS_OK = IFF_CIRCUM( )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.FULTYP) THEN
+              PROCESS_OK = IFF_CIRCLE( )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.CURTYP) THEN
+              PROCESS_OK = IFF_POLY( .FALSE. )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.UNOTYP) THEN
+              PROCESS_OK = IFF_POINT( )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.ORITYP) THEN
+              PROCESS_OK = IFF_INSERT( )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.SCATYP) THEN
+              PROCESS_OK = IFF_INSERT( )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.TEXTYP) THEN
+              PROCESS_OK = IFF_TEXT( )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.STRTYP) THEN
+              PROCESS_OK = IFF_POLY( .FALSE. )
+           ELSEIF (FRTGTTYPE(SELENTIND).EQ.ARETYP) THEN
+              PROCESS_OK = IFF_LINE( )
+           ENDIF
+C
+C rejoin the success/fail statistic module
+C
+2009       IF ( PROCESS_OK ) THEN
+              PROCESS_SUCC = PROCESS_SUCC + 1
+           ELSE
+              PROCESS_FAIL = PROCESS_FAIL + 1
+           ENDIF
+C
+C end of job is found
+C
+        ELSEIF ( IECODE.EQ.'EJ' ) THEN
+C
+C inform user of the general statistics of the process
+C
+	   PROCESS_TOTAL = PROCESS_SUCC + PROCESS_FAIL
+           IF (HAD_LOG) THEN
+              CALL LSL_PUTMSG(I2DXF__FEAFND,PROCESS_TOTAL)
+              CALL LSL_PUTMSG(I2DXF__PROCESUCC, PROCESS_SUCC )
+              IF (PROCESS_FAIL.GT.0) CALL LSL_PUTMSG
+     &				(I2DXF__PROCEFAIL, PROCESS_FAIL)
+           ENDIF
+C
+           GOTO 301
+        ENDIF
+C
+C Get next feature
+C
+        GOTO 2102
+C
+C output the end of section marker
+C
+301     CONTINUE
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'ENDSEC' )
+        CALL FLWSTR( '  0' )
+        CALL FLWSTR( 'EOF' )
+C
+C transformation process now finished
+C----------------------------------------------------------------
+C rewind the IFF file for later use
+C
+        CALL IFFRWD
+C
+C Exit
+300     CONTINUE
+C
+        RETURN
+	END
+C

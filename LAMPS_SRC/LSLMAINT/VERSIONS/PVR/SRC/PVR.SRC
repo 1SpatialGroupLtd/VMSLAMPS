@@ -1,0 +1,195 @@
+	PROGRAM PVR
+C
+***	MODULE PVR
+***	IDENT 08OC81
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England
+C Author R. Fairbairns
+C
+C Coded 9.v.81
+C Typed 11.v.81
+C
+C To patch the version number in an RSX object file,
+C  taking new version from the file ADC.IDE
+C
+C define things in the object language that we're interested in
+C  - record type word values
+	PARAMETER RECTHD = 1	! header
+	PARAMETER RECTEM = 6	! end module
+C  - entry type bytes within header record
+	PARAMETER ENTTMN = 0	! module name
+	PARAMETER ENTTID = 6	! module identification
+C
+C define maximum number of modules expected in one object file
+	PARAMETER IDEFUL = 50
+C
+***	COMMON/[COMMON.PDP.LIOLIB]TXTC/
+C
+C w/s
+	INTEGER*4 RECPTR, PTR, APTR, EOF
+	INTEGER*4 R50N, R50ID
+	INTEGER*2 RECLEN, RECTYP, ENTTYP
+	INTEGER*2 IDEPTR, MAXIDE
+	INTEGER*2 IRC
+	INTEGER*2 R50NAM(2), R50IDW(2)
+	INTEGER*4 MODIDE(IDEFUL,2) ! (,1): module name
+C				   ! (,2): ident to patch in
+	BYTE MODNAM(6),IDENT(6)
+	BYTE OBJTIT(61)		! object file title
+	LOGICAL*1 SEENMN(IDEFUL), USEDID(IDEFUL)
+C
+C overlay INT*2 arrays with INT*4s where neccessary
+	EQUIVALENCE (R50N,R50NAM)
+	EQUIVALENCE (R50ID,R50IDW)
+C
+C functions called
+	INTEGER*2 RFBYTE, RFWORD
+C
+C pesets
+	DATA SEENMN,USEDID/IDEFUL*.FALSE.,IDEFUL*.FALSE./
+	DATA IDEPTR/-1/
+C
+C first find the name of the object file to be patched
+10	CALL GETCML(TXTBUF, IRC)
+	IF (IRC) 20,10,30
+C
+C error - end of CML, one supposes
+20	CALL EXIT
+C
+C successful 'command read' - prepare for decode
+30	TXTPTR = IRC
+	IF (IRC.LT.80) TXTBUF(IRC+1) = 0
+	CALL BSLN
+C
+C get the object file title
+40	CALL RDFILT(OBJTIT, 60, 'SY:XXX.OBJ',
+     &              .FALSE.,.TRUE.,.FALSE.,IRC)
+	IF (IRC.GT.0) GOTO 50
+C
+C moan and exit
+	CALL WRITEF('File title decode error %N', IRC)
+	CALL EXIT
+C
+C get ADC.IDE file output from ADC
+50	OPEN (UNIT=2,NAME='SY:ADC.IDE',TYPE='OLD',
+     &        READONLY, ERR=190)
+	MAXIDE = 0
+C
+C read ADC.IDE file
+60	READ (2,1001, END=70) MODNAM, IDENT
+	MAXIDE = MAXIDE+1
+	CALL IRAD50(6, MODNAM, MODIDE(MAXIDE,1))
+	CALL IRAD50(6, IDENT,  MODIDE(MAXIDE,2))
+	IF (MAXIDE.LT.IDEFUL) GOTO 60
+	READ (2,1001, END=70) MODNAM, IDENT
+C
+C too many records - tell 'im first that can't be read in
+	CALL WRITEF('Too many IDENT records')
+	CALL WRITEF('First ignored %A6 (ident %A6)',
+     &                             MODNAM,    IDENT)
+C
+C done with that file
+70	CLOSE (UNIT=2)
+C
+C open the object file and select for block read/write
+	OBJTIT(IRC+1) = 0
+	OPEN (UNIT=1,NAME=OBJTIT,TYPE='OLD', ERR=200)
+	CALL FLBSEL(1)
+C
+C initialise
+	CALL FLBFE(,EOF)		! find extent of data
+	RECPTR = 0
+C
+C loop for records within the file
+90	PTR = RECPTR			! copy for reading record
+	RECLEN = RFWORD(PTR)		! get record length
+	RECPTR = (PTR+RECLEN+1).AND.(-2)! point to next record
+	RECTYP = RFWORD(PTR)		! get record type word
+C
+C despatch on record type
+	IF (RECTYP.EQ.RECTHD) GOTO 100	! if EQ, header record
+	IF (RECTYP.NE.RECTMN) GOTO 160	! if NE, not end of module
+C
+C end of module
+	IDEPTR = -1			! 'not in known module'
+	GOTO 160
+C
+C deal with header record
+100	DO 150 I = 0,RECLEN-10,8	! scan each entry in record
+	APTR = PTR+I+5			! point to entry type
+	ENTTYP = RFBYTE(APTR)		! read it
+	IF (ENTTYP.EQ.ENTTMN) GOTO 110	! if EQ, module name entry
+	IF (ENTTYP.NE.ENTTID) GOTO 150	! if NE, not ident entry
+C
+C deal with IDENT entry
+	IF (IDEPTR.LT.0) GOTO 150	! if LT, current module is
+C					!  (as yet) unknown
+	R50ID = MODIDE(IDEPTR,2)	! extract name it should have
+	APTR = PTR+I			! point to 'name' field of entry
+C
+C patch IDENT
+	CALL WFWORD(APTR, R50IDW(1))
+	CALL WFWORD(APTR, R50IDW(2))
+	USEDID(IDEPTR) = .TRUE.
+	GOTO 150
+C
+C module name entry
+110	IF (MAXIDE.EQ.0) GOTO 130	! if EQ, no known modules
+C					!  (why are we here at all?)
+	APTR = PTR+I			! point to 'name' field
+	R50NAM(1) = RFWORD(APTR)	! get the
+	R50NAM(2) = RFWORD(APTR)	!  module name
+	DO 120 IDEPTR = 1,MAXIDE
+	IF (R50N.EQ.MODIDE(IDEPTR,1)) GOTO 140
+120	CONTINUE
+C
+C no match, one way or the other
+130	IDEPTR = -1
+C
+C jump from DO loop brings us here without corrupting DO variable
+140	IF (IDEPTR.GT.0) SEENMN(IDEPTR) = .TRUE. ! seen this module
+C
+C end of 'entries' loop
+150	CONTINUE
+C
+C proceed (if appropriate) to next record
+160	IF (RECPTR.LT.EOF) GOTO 90
+C
+C tidy the file
+	CALL RWFUPD			! ensure last block written
+	CALL FLBCLO			! and close it
+C
+C analyse what we did
+	IF (MAXIDE.EQ.0) CALL EXIT	! nothing
+	DO 180 I = 1,MAXIDE
+	IF (SEENMN(I).AND.USEDID(I)) GOTO 180
+C
+C something wrong
+	R50N = MODIDE(I,1)
+	R50ID = MODIDE(I,2)
+	IF (SEENMN(I)) GOTO 170
+C
+C module not in file
+	CALL WRITEF('Module %5%5 (ident %5%5) not seen',
+     &               R50NAM(1),R50NAM(2),R50IDW(1),R50IDW(2))
+	GOTO 180
+C
+C module seen, but not ident
+170	CALL WRITEF('Ident %5%5 for module %5%5 not used',
+     &               R50IDW(1),R50IDW(2),R50NAM(1),R50NAM(2))
+180	CONTINUE
+C
+C tara!
+	CALL EXIT
+C
+C errors
+190	CALL WRITEF('Can''t open patch file')
+	STOP 1
+C
+200	CALL WRITEF('Can''t open object file')
+	STOP 2
+C
+C format statement (in all its glorious isolation)
+1001	FORMAT (6A1,26X,6A1)
+C
+	END

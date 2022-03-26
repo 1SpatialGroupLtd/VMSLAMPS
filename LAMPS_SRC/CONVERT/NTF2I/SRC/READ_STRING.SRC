@@ -1,0 +1,211 @@
+	SUBROUTINE READ_STRING(OK,FINISH)
+C
+***	IDENT	14JN96
+***	MODULE	READ_STRING
+C
+C Copyright LaserScan Ltd, Cambridge, England
+C
+C Author VL Gilham	3 April 1990
+C
+C Reads the string in hand and processes it according to the record descriptor
+C
+CMOD 		VLG		08-Jun-1990
+CMOD	added parameters to make code more readable,tidied	SG 27-June-1991
+CMOD	moved duplicate code into new function CHECK_IF_WARNED	SG 28-June-1991
+CMOD	removed buffering functions since records associated with IDs are
+C	immediately available, also removed redundant code which checks if
+C	record is recognised					SG 18-July-1991
+CMOD	ensures that READ_STRING does not return a record in hand
+CMOD	supports collect AND CPOLY records. Warning removed, collects processed
+C	at the end of generating features 			SG 01-Aug-1991
+CMOD	corrected bad assumptions about polygon reading. previously NAME_ID and
+C	GEOM_ID had been thrown out. This is needed since the NAMEID may
+C	contain information about the polygon			SG 23-Aug-1991
+CMOD	BS7567 (v2.0) support added (W93/13)			ST 02-June-1993
+CMOD	Suppress warning that [NODEREC] is being ignored when	ST 14-Dec-1994
+C	processing OSCAR data. Mod 1447.
+CMOD    Implement CITF96 changes (WI/CC 1545)           TJM     12-Jun-1996
+C
+	IMPLICIT NONE
+C
+C Common files:
+C
+	INCLUDE	'NTF2IMSG.PAR'
+	INCLUDE	'CITF.CMN'
+	INCLUDE	'COMMANDS.CMN'
+	INCLUDE	'RECORD.CMN'
+	INCLUDE	'STORE_RECORDS.CMN'
+	INCLUDE	'NTFDATA.CMN'
+C
+C Arguments
+C
+	LOGICAL		OK			! True if succesful
+	LOGICAL		FINISH			! True if end of section
+C
+C Functions
+C
+	LOGICAL		READ_CONTINUE		! read a continuation
+	LOGICAL		IS_CONTINUATION
+	LOGICAL		READ_SECQUAL
+	LOGICAL		READ_LINEAR
+	LOGICAL		READ_CITF_LINEAR
+	LOGICAL		READ_TEXT
+	LOGICAL		READ_TEXT_V2		! for Level 3 NTF v2.0
+	LOGICAL		READ_CITF_TEXT
+	LOGICAL		RDINT
+	LOGICAL		CHECK_IF_WARNED
+C
+C Workspace
+C
+C
+	CHARACTER*2	NTF$_REC_DESCR
+	CHARACTER*2	NTF$_REC_DESCR_ID
+	EQUIVALENCE	(NTF$_REC_DESCR , NTF$_REC_DESCR_ID)
+	CHARACTER*6	NTF$_REC_ID
+	CHARACTER*6	NTF$_POLY_ID
+C
+	INTEGER		GEOM_ID				
+	INTEGER		RECID
+	INTEGER		TEXT_REC_NUM
+	LOGICAL		DIAG
+	PARAMETER	(DIAG = .FALSE.)
+C
+C *****************************************************************************
+C
+	OK      = .TRUE.					! assume success
+	FINISH = .FALSE.
+	NTF$_REC_DESCR = STRING(1:2)
+	NTF$_REC_ID    = STRING(3:8)
+C
+C..............................................................................
+C yes, DIAG is FALSE and this line wont ever be executed. But if a problem is 
+C found, then by setting diag to true, you can see if the records are being 
+C processed in the correct order (ie sequential)
+C
+	IF (DIAG) CALL WRITEF('%I',SEC_REC)
+C
+C..............................................................................
+C
+	IF (NTF$_REC_DESCR.EQ.REC$_VOLTERM    ) THEN
+	   FINISH = .TRUE.					! end of FILE
+	ELSE IF ( NTF$_REC_DESCR .EQ. REC$_SECQUAL  ) THEN
+	  CALL READ_SECQUAL
+C	.......................................................................
+C
+	ELSE IF ( NTF$_REC_DESCR .EQ. REC$_POINTREC ) THEN
+	   IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	      OK = READ_CITF_LINEAR(.FALSE.,.FALSE.)	! point feature
+	   ELSE
+	      OK = READ_LINEAR(.FALSE.,.FALSE.)		! point feature
+	   ENDIF
+C	.......................................................................
+C
+	ELSE IF ( NTF$_REC_DESCR .EQ. REC$_LINEREC  ) THEN
+	   IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	      OK = READ_CITF_LINEAR(.FALSE.,.FALSE.)	! line feature
+	   ELSE
+	      OK = READ_LINEAR(.FALSE.,.FALSE.)		! line feature
+	   ENDIF
+C	.......................................................................
+C
+	ELSE IF ( NTF$_REC_DESCR .EQ. REC$_NAMEREC ) THEN
+C
+C Existing NTF code reads NAMPOSTN, then backtracks for NAMEREC
+C Keep it simpler for CITF
+C
+	   TEXT_REC_NUM = SEC_REC - 1
+	   IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	      OK = READ_CITF_TEXT()	! get text feat
+	   ENDIF
+C	.......................................................................
+C
+	ELSE IF ( NTF$_REC_DESCR .EQ. REC$_NAMPOSTN  ) THEN
+	   OK = READ_TEXT(TEXT_REC_NUM)			! get text feat
+C
+C	.......................................................................
+C
+	ELSE IF ( NTF$_REC_DESCR .EQ. REC$_TEXTREC  ) THEN
+	   IF (VERSION.EQ.2.0 .AND. LEVEL.EQ.3) THEN
+	      OK = READ_TEXT_V2() 			! get v2.0 text feat
+	   ELSE
+	      CALL LSL_PUTMSG(NTF2I__ILLEGAL,'TEXTREC')
+	   ENDIF
+C
+C	.......................................................................
+C
+	ELSE IF ( NTF$_REC_DESCR .EQ. REC$_CURVTEXT ) THEN
+	  CALL LSL_PUTMSG(NTF2I__CURVTEXT,SEC_REC)		! ignore record
+	  DO WHILE (IS_CONTINUATION(STRING,LENGTH)) 		! ignore contins
+	    OK = READ_CONTINUE('CURVTEXT')
+	  END DO
+	  REC_IN_HAND = .FALSE.
+C	.......................................................................
+C
+	ELSE IF ( NTF$_REC_DESCR .EQ. REC$_QUALREC  ) THEN
+	  REC_IN_HAND = .FALSE.					! ignore it
+C	.......................................................................
+C
+	ELSE IF ( NTF$_REC_DESCR .EQ. REC$_COMMENT  ) THEN
+	  CALL READ_COMMENT					! report on it
+	  REC_IN_HAND = .FALSE.
+C	----------------------------------------------------------------------
+C
+	ELSE IF (LEVEL.EQ.3) THEN
+C	  .....................................................................
+C
+	  IF ( NTF$_REC_DESCR.EQ.REC$_NODEREC) THEN
+C
+C Warn that they are being ignored, but only if not OSCAR data
+C
+	     IF (.NOT.HAD_OSCAR) THEN
+		OK = CHECK_IF_WARNED(NTF$_REC_DESCR_ID, NTF2I__NODE, SEC_REC)
+		REC_IN_HAND = .FALSE.
+	     ENDIF
+C
+C	  .....................................................................
+C	  note that the seed point for the polygon is to be treated as a text 
+C	  feature, with its name being taken from the name record pointed at
+C	  by the NAMEID. Process this first before throwing away this data 
+C	  and processing it as a CLINE
+C
+	  ELSE IF ( NTF$_REC_DESCR.EQ.REC$_POLYGON) THEN
+	     IF (LENGTH.GT.16) THEN
+	        NTF$_POLY_ID = STRING(3:8)
+	        CALL PROCESS_SEED_POINT(NTF$_POLY_ID)
+		IF (VERSION.EQ.2.0) THEN
+		   OK = CHECK_IF_WARNED(NTF$_REC_DESCR_ID,NTF2I__NOSUPPORT,SEC_REC)
+		ELSE
+		   STRING(15:20) = STRING(21:26) ! discard geom_id, move ATT_ID
+		   STRING(21:26) = STRING(27:32) ! move the name_id
+		   STRING(27:(LENGTH-6)) = STRING(33:LENGTH) 	! end record
+		   LENGTH = LENGTH - 6				! amend length
+		   OK = READ_LINEAR(.FALSE.,.TRUE.) ! ie a cline feature
+		ENDIF
+	     ENDIF
+C
+C	  .....................................................................
+C
+	  ELSE IF ( NTF$_REC_DESCR.EQ.REC$_CLINE ) THEN
+	     OK = READ_LINEAR(.FALSE.,.TRUE.)  		! ie a cline feature
+C
+C	  .....................................................................
+C	  any other records dont start features, unimportant
+C
+	  ELSE
+	     REC_IN_HAND = .FALSE.
+	  ENDIF
+C	----------------------------------------------------------------------
+C	whatever was left over could not have been important
+C
+	ELSE
+	  REC_IN_HAND = .FALSE.
+	ENDIF
+C
+C..............................................................................
+C
+999	IF (.NOT.OK) THEN
+	   CALL WRITEF('%%NTF2I-W-MISC, error decoding record')
+	   CALL WRITEF('-NTF2I-I-MISC, REC_DESCR was %S',NTF$_REC_DESCR)
+	ENDIF
+	RETURN
+	END

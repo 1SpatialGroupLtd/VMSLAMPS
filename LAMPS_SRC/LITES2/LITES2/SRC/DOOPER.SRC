@@ -1,0 +1,230 @@
+        SUBROUTINE DOOPER
+C
+***     IDENT   27FE91
+***     MODULE  DOOPER
+C
+C       Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+C
+C       Written                                 RWR	10-Nov-1987
+C
+C	LITES2 cartographic editor OPERATION command.
+C
+        IMPLICIT NONE
+C
+	INCLUDE	'LSL$CMNIFF:CB.STR'
+***	PARAMETER/CMN:EFNLUN/
+***	PARAMETER/CMN:MOANMESS/
+C
+***	COMMON/LSL$CMNLSL:CMDCOM/	! CMDLIB output
+***     COMMON/LSL$CMNFRT:FRTCOM/	! common for FRTLIB
+***     COMMON/LSL$CMNFRT:FRTGRP/	! common for FRTLIB
+***	COMMON/CMN:DEFINE/
+***	COMMON/CMN:DOUT/
+***	COMMON/CMN:FILES/
+***	COMMON/CMN:GLOBAL/
+***	COMMON/CMN:MAPS/
+***	COMMON/LSL$CMNLSL:TXTC/
+C
+C functions
+	LOGICAL		ATTDECOD
+	LOGICAL		ADDDEF
+	LOGICAL		CHK_PRIV_ATT
+	LOGICAL		ALPHA
+	LOGICAL		NUMERIC
+	INTEGER*4	RDCOMM
+	INTEGER		FINSTR
+	LOGICAL		FRTFND
+	LOGICAL		CHK_FC_CAT
+	LOGICAL		GETDEF
+	LOGICAL		GRPFC		! FRTLIB, is FC in group?
+C
+C w/s
+	EXTERNAL	NASTY
+C
+	INTEGER*2	SAVPTR		! to make TXTBUF secure
+	LOGICAL		SAVED_PTR
+	INTEGER		ACTYPE		! the attribute number
+	INTEGER		OUTSTR_L	! the length of the string
+	CHARACTER*1	OUTSTR		! the output string
+	INTEGER		ACVALUE		! the value (as an integer)
+	LOGICAL		GOT_VALUE
+	BYTE		CHR		! next character in input line
+	INTEGER		ICHR
+	EQUIVALENCE	(ICHR,CHR)
+	INTEGER*4	GRPNUM		! group number corresponding
+					! to group name
+	INTEGER		STR_LEN
+	CHARACTER*6	STR
+	INTEGER		CAT
+	INTEGER		FLAGNO
+	INTEGER		FC
+	INTEGER		TEMP		! address of new definition (PPT)
+	INTEGER		CONTEXT
+C
+	SAVED_PTR = .FALSE.
+C
+C check for valid secondary command number out of range
+	IF (DSECN.EQ.DEF_NUMBER+1) GOTO 100	! operation OS_MH_FLAGS
+	IF (DSECN.EQ.DEF_NUMBER+2) GOTO 200	! operation OS_MH_TEXTCAT
+	IF (DSECN.GT.DEF_NUMBER) THEN
+	   CALL MSGCMD(NASTY,MSG_ERRSECIND)
+	   GOTO 998
+	ENDIF
+C
+C decode the ACD type, and its value
+	IF (.NOT.ATTDECOD(DSTR(1:DSTRL),ACTYPE,OUTSTR_L,OUTSTR,ACVALUE,
+     &	                  .FALSE.,GOT_VALUE)) GOTO 998
+C
+C check for "end of line"
+	IF (OUTSTR_L.GT.0) THEN
+	   CALL MOAN(MSG_ILLEGALTERM,%REF(OUTSTR))
+	   GOTO 998
+	ENDIF
+C
+C check that allowed to operate on this attribute
+	IF (CHK_PRIV_ATT(ACTYPE)) GOTO 998
+C
+C want to remove an attribute on completion of operation?
+	IF (.NOT.GOT_VALUE) ACVALUE = IFF_ABSENT
+C
+C add to list of definitions
+	IF (.NOT.ADDDEF(DEFINITION(DSECN),ACTYPE,ACVALUE,GOT_VALUE)) GOTO 998
+	GOTO 999
+C
+C operation OS_MH_FLAG n GROUP char
+100	CONTINUE
+	IF (DINTS(1).LT.1.OR.DINTS(1).GT.OS_MH_FLAGS) THEN
+	   CALL MOAN(MSG_ILLEGLMHOPER,1,OS_MH_FLAGS)
+	   GOTO 998
+	ELSEIF (OS_MH_GRP(DINTS(1)-1).GT.0) THEN	! OS_MH arrays go
+	   CALL MOAN(MSG_MHFLGALREADYSET,DINTS(1))	! from 0
+	   CALL LEARN(MSG_USEVIEWCMD,'CANCEL OS_MH_FLAG')
+     	   GOTO 998
+	ENDIF
+C
+C read group from rest of line
+C
+C Set up auxiliary buffer
+	CALL DCPSAV(SAVPTR)
+	SAVED_PTR = .TRUE.
+	CALL SETAUX(%REF(DSTR),DSTRL)
+C
+C Check whether FRT file has been read
+	IF (.NOT.HADFRT) THEN
+	   CALL MOAN(MSG_NOFILENAME,'FRT')
+	   CALL MSGCMD(LEARN,MSG_REQFRTNAME)
+	ELSEIF (GRPCNT.LE.0) THEN
+	   CALL MOAN(MSG_NOGROUP)		! there are no groups
+	ELSE
+C
+C check whether command line contains group name
+	   GRPNUM=RDCOMM(%VAL(GRPCMT_LOC))
+	   IF (GRPNUM.LE.0) THEN		! no such group 
+	      CALL MOAN(MSG_BADGRPNAME,CMDNST)
+	      GOTO 998
+	   ENDIF
+C
+C read character
+	   STR_LEN = FINSTR(STR,'OS map header flag')
+	   IF (MOANED) GOTO 998
+	   IF (STR_LEN.LE.0) THEN		! nothing left on line
+	      CALL MOAN(MSG_CMDLIBEOL,'command',
+     &		DPRI(:DPRIL)//' '//DSEC(:DSECL) )
+	      GOTO 998
+	   ELSEIF (STR_LEN.GT.1) THEN
+	      CALL MOAN(MSG_ILLEGALTERM,ICHAR(STR(2:2)))
+	      GOTO 998
+	   ENDIF
+C
+C check for valid character - must be letter or number
+	   ICHR = ICHAR(STR(1:1))		! see equivalence
+	   IF (.NOT.(ALPHA(CHR).OR.NUMERIC(CHR))) THEN
+	      CALL MOAN(MSG_ILLEGLMHCHAR,CHR)
+	      GOTO 998
+C
+C check for lower case character
+	   ELSEIF (CHR .GE. 'a' .AND. CHR .LE. 'z') THEN
+	      CALL MOAN(MSG_NEEDUPCASE,CHR)
+	      GOTO 998
+C
+C check if there are new type os maps but table has not been initialised
+	   ELSEIF (HAD_NEW_OS_MH.AND..NOT.OS_MH_INITIALISED) THEN
+	      CALL MOAN(MSG_NEWMHNOTABLE)
+	      CALL MOAN(MSG_NEWMHNOTABLE1)
+	      GOTO 998
+C
+C set these values in arrays
+	   ELSE
+	      OS_MH_GRP(DINTS(1)-1)  = GRPNUM
+	      OS_MH_CHAR(DINTS(1)-1) = CHAR(CHR)
+	      OS_MH_EDIT = .TRUE.
+	   ENDIF
+	ENDIF
+	GOTO 999
+C
+C operation OS_MH_TEXTCAT flagno FC cat
+200	CONTINUE
+C
+C check if group has been set for flag with OPERATION OS_MH_FLAG
+	FLAGNO = DINTS(1)
+	IF (FLAGNO.LT.1.OR.FLAGNO.GT.OS_MH_FLAGS) THEN
+	   CALL MOAN(MSG_ILLEGLMHOPER,1,OS_MH_FLAGS)
+	   GOTO 998
+	ELSEIF (OS_MH_GRP(FLAGNO-1).LE.0) THEN	! OS_MH arrays go
+	   CALL MOAN(MSG_MHFLGNOTSET,FLAGNO)
+	   CALL LEARN(MSG_USEVIEWCMD,'OPERATION OS_MH_FLAGS')
+	   GOTO 998
+	ENDIF
+C
+C check that fc is text type
+	FC = DINTS(2)
+	IF (FRTFND(FC)) THEN           
+	   CALL MOAN(MSG_BADCODE,FC)
+	   GOTO 998
+	ELSEIF (.NOT.FRTTEX) THEN		! I not text type
+	   CALL MOAN(MSG_FCNOTTEXT,FC)
+	   GOTO 998
+	ENDIF
+C
+C check that fc is in specified group
+	IF ( .NOT.GRPFC(FC,OS_MH_GRP(FLAGNO-1))) THEN
+C
+C group name
+	   CONTEXT = 0
+	   CALL FIND_CMDNAME(%VAL(GRPCMT_LOC),OS_MH_GRP(FLAGNO-1),
+     &	                        TXTDSC,STR_LEN,CONTEXT)
+	   TXTPTR = STR_LEN			! I*4 -> I*2
+	   CALL MOAN(MSG_FCNOTINGRP,FC,TXTDSC)
+	   GOTO 998
+	ENDIF
+C
+C and check for valid category
+	CAT = DINTS(3)
+	IF (CAT.LT.0.OR.CAT.GT.63) THEN
+	   CALL MOAN(MSG_ILLEGCLASS,0,63)
+	   GOTO 998
+	ENDIF
+C
+C if FC and category is already in list, then do no more
+	IF (CHK_FC_CAT(OS_MH_CAT_LIST(FLAGNO - 1),FC,CAT)) GOTO 999
+C
+C constuct a list element, and add it to start of list
+	IF (GETDEF(TEMP)) GOTO 998
+	CALL PUTLNG(FC,%VAL(TEMP+DEF_TYP))
+	CALL PUTLNG(CAT,%VAL(TEMP+DEF_VALUE))
+C
+C and put at start of list
+	CALL PUTLNG(OS_MH_CAT_LIST(FLAGNO-1),%VAL(TEMP))
+	OS_MH_CAT_LIST(FLAGNO-1) = TEMP	
+	GOTO 999
+C
+998	CONTINUE
+	CALL IGNCMD
+C
+999	CONTINUE
+	IF (SAVED_PTR) THEN
+	   CALL BSLN
+	   CALL DCPSET(SAVPTR)
+	ENDIF
+        RETURN
+        END

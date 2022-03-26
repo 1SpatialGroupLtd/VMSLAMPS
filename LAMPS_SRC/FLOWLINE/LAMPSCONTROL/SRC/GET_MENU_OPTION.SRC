@@ -1,0 +1,392 @@
+	INTEGER FUNCTION GET_MENU_OPTION(
+     &		OPT_VECT,	! option list
+     &		OPT_LEN,	! option list length
+     &		INV_VECT,	! invariant option list
+     &		INV_LEN,	! invariant option list length
+     &		OPT,		! current option in list
+     &		INV,		! current invarient option
+     &		AREA_LEN,	! number of lines in scrolled area
+     &		FIELD_NAME,	! name of field
+     &		TERM,		! field terminator
+     &		ARG_REDISPLAY)	! .T. if to redisplay menu
+C
+***	MODULE GET_MENU_OPTION
+***	IDENT 13AP88
+C
+C Copyright Laser-Scan Laboratories Ltd, Cambridge, England
+C Author: J.M. Billing			13 April 1988
+C
+C Routine to get scrolled area option from LAMPSCONTROL standard format
+C menu. The options are supplied and the responses returned in 
+C arguments:
+C
+C	OPT_VECT(OPT_LEN)	! list of possible options
+C	OPT_LEN			! number of possible options
+C
+C	INV_VECT(INV_LEN)	! invariant option (on every page)
+C	INV_LEN			! number of invariant options
+C
+C	OPT			! current option number selected
+C				! OPT < 0 => invariant option
+C	INV			! invariant option number chosen
+C
+C	AREA_LEN		! number of lines in scrolled area
+C				! i.e. number of options which can
+C				! be displayed at one time
+C
+C	FIELD_NAME		! name of scrolled field
+C
+C	TERM			! field terminator used to complete
+C				! field entry (when not used for
+C				! moving between options)
+C
+C	ARG_REDISPLAY		! .T. if to redisplay all options
+C				! from scratch
+C				! will be copied to local variable
+C
+C
+C The options will be displayed in the order
+C
+C		List options
+C		Invariant options
+C		Move to previous page (if applicable)
+C		Move to next page (if applicable)
+C
+C The maximum number of actual list options which can be displayed in
+C one screen is thus
+C
+C		AREA_LEN - 2 - INV_LEN
+C
+C The number may be less if the number of options to be displayed on
+C this page is less i.e. at the end of the option list.
+C
+C
+	IMPLICIT NONE
+C
+	INCLUDE 'LSL$LAMPSCONTROL:INTERACTIVE_IO.CMN'
+	INCLUDE 'LSL$LAMPSCONTROL:LAMPSCONTROLMSG.PAR'
+C
+C arguments
+	INTEGER		OPT_LEN		! length of option vector
+	INTEGER		INV_LEN		! length of invariant vector
+	CHARACTER*(*)	OPT_VECT(OPT_LEN+1)! options
+	CHARACTER*(*)	INV_VECT(INV_LEN+1)! invariant options
+	INTEGER		OPT		! current option on entry/exit
+	INTEGER		INV		! invariant option on entry/exit
+	INTEGER		AREA_LEN	! number of lines in scroll area
+	CHARACTER*(*)	FIELD_NAME	! name of menu option field
+	INTEGER		TERM		! field terminator
+	LOGICAL		ARG_REDISPLAY	! .T. if to redisplay menu
+C
+C w/s
+	LOGICAL		REDISPLAY	! local copy of ARG_REDISPLAY
+	CHARACTER*60	DISPLAY(MAX_AREA_LEN) ! actual options 
+					! displayed on screen
+	INTEGER		CURRENT_DISP	! index to actual options 
+					! displayed on screen
+					! i.e. current line
+	INTEGER		REQUIRED_DISP	! required index on next page
+	INTEGER		LAST_OPT	! last displayed option index
+					! taken from option list
+	INTEGER		CURRENT_OFFSET	! base of current page in
+					! option list
+	INTEGER		NEXT_PAGE	! 0 => no next page
+					! 1 => next page exists
+	INTEGER		PREV_PAGE	! 0 => no previous page
+					! 1 => previous page exists
+	INTEGER		I		! temporary index
+	INTEGER		J		! temporary index
+	LOGICAL		MOVING_FORWARDS ! To flag direction of movement 
+	LOGICAL		MOVING_BACKWARDS! through menu pages
+C
+C functions
+	INTEGER		DISPLAY_AREA_OPTION
+	INTEGER		GET_AREA_OPTION
+C
+C
+C Assume success
+C
+	GET_MENU_OPTION = LSC__NORMAL
+C
+C Turn of the terminal echo, to prevent overtyping of menu options
+C
+	CALL WANT_ECHO(.FALSE.)
+C
+C Turn off the cursor
+C
+	CALL WANT_CURSOR(.FALSE.)
+C
+C Take local copy of redisplay flag argument
+C
+	REDISPLAY = ARG_REDISPLAY
+C
+C Check that there are some options to display, give error message
+C if there are none
+C
+	IF ((INV_LEN + OPT_LEN).EQ.0) THEN
+	   GET_MENU_OPTION = LSC__NOMENUOPT
+	   CALL LCONT_PUTMSG(GET_MENU_OPTION,0)
+	   GOTO 900
+	ENDIF
+C
+C Ensure current option and invariant option are sensible
+C
+	IF (OPT.EQ.0) OPT = 1
+	IF (OPT.LT.0) OPT = - OPT
+C
+	IF (INV.EQ.0) INV = 1
+	IF (INV.LT.0) INV = -INV
+C
+	IF (OPT.GT.OPT_LEN) OPT = OPT_LEN
+	IF (INV.GT.INV_LEN) INV = INV_LEN
+C
+C Set up number of current line on menu area
+C This is 
+C 	1 +
+C	(current option-1) MOD 
+C	(number of lines for displaying options)
+C
+	CURRENT_DISP = 1 + MOD ((OPT - 1), (AREA_LEN - 2 - INV_LEN) )
+C
+C Set up initial value for offset in main option list of the
+C first option on the current screen
+C
+	CURRENT_OFFSET = OPT - CURRENT_DISP + 1
+C
+C Show neither moving forwards or backwards in menu pages yet
+C
+	MOVING_FORWARDS = .FALSE.
+	MOVING_BACKWARDS = .FALSE.
+C
+C Check for a zero option list length, and jump to invariant options
+C if one is found
+C
+10	IF (OPT_LEN.EQ.0) THEN
+	   LAST_OPT  = 0
+	   NEXT_PAGE = 0
+	   PREV_PAGE = 0
+	   GOTO 35
+	ENDIF
+C
+C Check if this is first page, set flag to indicate there is no 
+C previous page
+C
+	IF (CURRENT_OFFSET.EQ.1) THEN
+	   PREV_PAGE = 0
+C
+C Otherwise this is not the first page, so set flag to indicate there
+C is a previous page
+C
+	ELSE
+	   PREV_PAGE = 1
+	ENDIF
+C
+C Check if this is the last page, allowing (last) two lines of scrolled
+C area for (possible) previous/next page options, and for number 
+C of lines required for invariant options
+C
+	IF ((CURRENT_OFFSET + AREA_LEN - 2 - INV_LEN)
+     &		.LT.OPT_LEN) THEN
+C
+C Set numeric flag to indicate there is a next page, and the
+C position of its line relative to the end of the invariant option
+C list i.e. allowing for any previous page option
+C
+	   NEXT_PAGE = 1
+C
+C Set up pointer to last line of display used for main option list,
+C allowing space for invariant options and leaving last two
+C lines for possible previous/next page options
+C
+	   LAST_OPT = AREA_LEN - INV_LEN - 2
+C
+C Otherwise, no next page
+C
+	ELSE
+C
+C Set numeric flag to indicate no next page
+C
+	   NEXT_PAGE = 0
+C
+C Set up pointer to last line of display
+C If this is last page, not all the lines may be occupied
+C
+	   LAST_OPT = OPT_LEN - CURRENT_OFFSET + 1
+	ENDIF
+C
+C Place option list entries in display list, transfering between
+C strings on a character by character basis, up to the length of
+C the shortest string
+C
+	DO 30 I = 1, LAST_OPT
+	   DISPLAY(I) = OPT_VECT(CURRENT_OFFSET+I-1)
+30	CONTINUE
+C
+C Place invariant option list entries in display list
+C
+35	DO 50 I = 1,INV_LEN
+	   DISPLAY(LAST_OPT+I) = INV_VECT(I)
+50	CONTINUE
+C
+C Now place the previous page option in the display if wanted
+C
+	IF (PREV_PAGE.NE.0) THEN
+	   DISPLAY(LAST_OPT+INV_LEN+PREV_PAGE) =
+     &		'Move to previous page of options'
+	ENDIF
+C
+C Now place the next page option in the display if wanted
+C NEXT_PAGE will be 
+C	0 (no next page)
+C	1 (next page but no previous page)
+C	2 (next page and previous page)
+C
+	IF (NEXT_PAGE.NE.0) THEN
+	   DISPLAY(LAST_OPT+INV_LEN+NEXT_PAGE+PREV_PAGE) =
+     &		'Move to next page of options'
+	ENDIF
+C
+C Determine what the required display line is by determining if we
+C are moving forwards or backwards through or have just started 
+C the option pages
+C
+C If moving forwards, then position over next page option, if
+C there is one, previous page option otherwise.
+C
+	IF (MOVING_FORWARDS) THEN
+	   REQUIRED_DISP = LAST_OPT+INV_LEN+PREV_PAGE+NEXT_PAGE
+	   MOVING_FORWARDS = .FALSE.
+C
+C If moving backwards, then position over previous page option, if
+C there is one, next page option otherwise.
+C
+	ELSEIF (MOVING_BACKWARDS) THEN
+	   REQUIRED_DISP = LAST_OPT+INV_LEN+MAX(NEXT_PAGE,PREV_PAGE)
+	   MOVING_BACKWARDS = .FALSE.
+C
+C Otherwise, not moving forwards or backwards, so stay in same
+C position in menu
+C
+	ELSE
+	   REQUIRED_DISP = CURRENT_DISP
+	ENDIF
+C
+C Now, if screen has been disturbed since last access to this menu,
+C display the option list constructed
+C
+	IF (REDISPLAY) GET_MENU_OPTION = DISPLAY_AREA_OPTION(
+     &		FIELD_NAME,			! name of option field
+     &		DISPLAY,			! display options
+     &		LAST_OPT+INV_LEN
+     &		   +NEXT_PAGE+PREV_PAGE,	! number of display opts
+     &		AREA_LEN,			! max no. lines
+     &		CURRENT_DISP,			! current display index
+     &		REQUIRED_DISP)			! requ'rd display index
+C
+C Deal with errors
+C
+	IF (.NOT.GET_MENU_OPTION) GOTO 900
+C
+C Set redisplay flag to indicate no need to display as a default
+C
+	REDISPLAY = .FALSE.
+C
+C Now get the actual option
+C
+60	GET_MENU_OPTION = GET_AREA_OPTION(
+     &		FIELD_NAME,			! name of option field
+     &		CURRENT_DISP,			! option current/chosen
+     &		LAST_OPT+INV_LEN
+     &		   +NEXT_PAGE+PREV_PAGE,	! no. options
+     &		TERM)				! field terminator used
+C
+C Deal with errors
+C
+	IF (.NOT.GET_MENU_OPTION) GOTO 900
+C
+C Determine action, dependent on display option chosen
+C
+C Test if there is a previous page, and whether the chosen
+C option is to move to it
+C
+	IF ((PREV_PAGE.NE.0).AND.(TERM.EQ.RETURN_KEY).AND.
+     &	    (CURRENT_DISP.EQ.(LAST_OPT+INV_LEN+PREV_PAGE))) THEN
+C
+C Adjust page offset in option list, allowing for invariant options,
+C next/previous page option
+C
+	   CURRENT_OFFSET = CURRENT_OFFSET - 
+     &		(AREA_LEN - INV_LEN - 2)
+C
+C Set flag showing moving forwards
+C
+	   MOVING_BACKWARDS = .TRUE.
+C
+C And set the redisplay flag to indicate that we should display new
+C page
+C
+	   REDISPLAY = .TRUE.
+C
+C And loop to do previous page
+C
+	   GOTO 10
+C
+C Test if there is a next page, and whether the current option
+C points at it
+C
+	ELSEIF ((NEXT_PAGE.NE.0).AND.(TERM.EQ.RETURN_KEY).AND.
+     &		(CURRENT_DISP.EQ.
+     &		    (LAST_OPT+INV_LEN+NEXT_PAGE+PREV_PAGE))) THEN
+C
+C And now increment the page offset by number of displayed items
+C
+	   CURRENT_OFFSET = CURRENT_OFFSET + LAST_OPT
+C
+C Set flag showing moving backwards
+C
+	   MOVING_FORWARDS = .TRUE.
+C
+C And set the redisplay flag to indicate that we should display new
+C page
+C
+	   REDISPLAY = .TRUE.
+C
+C And loop to do next page
+C
+	   GOTO 10
+C
+C Check for the option being an invariant, which can only be selected 
+C with RETURN
+C
+	ELSEIF ((CURRENT_DISP.GT.LAST_OPT).AND.
+     &		(CURRENT_DISP.LE.(LAST_OPT+INV_LEN))
+     &		.AND.(TERM.EQ.RETURN_KEY)) THEN
+C
+C If it is, signal it and return with chosen option
+C
+	   OPT = - OPT
+	   INV = CURRENT_DISP - LAST_OPT
+	   GOTO 900
+C
+C Otherwise, the option is one of the list options, so work out
+C which and send it back
+C
+	ELSEIF (CURRENT_DISP.LE.LAST_OPT) THEN
+	   OPT = CURRENT_OFFSET + CURRENT_DISP - 1
+	   GOTO 900
+C
+C Otherwise, the option is an illegal terminator over one of the
+C next or last page options, so just loop for next terminator,
+C ignoring the current selection
+C
+	ELSE
+	   GOTO 60
+	ENDIF
+C
+C Exit, returning option number and terminator for action by caller,
+C turn on echo and turn on the cursor
+C
+900	CALL WANT_ECHO(.TRUE.)
+	CALL WANT_CURSOR(.TRUE.)
+	RETURN
+	END

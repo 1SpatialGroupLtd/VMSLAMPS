@@ -1,0 +1,130 @@
+	LOGICAL FUNCTION POKE_TABLE
+C
+***	IDENT	16DE89
+***	MODULE	POKE_TABLE
+C
+C	Copyright LaserScan Laboratories Ltd., Cambridge, England
+C
+C Author CC Brunt, 15 December 1989
+C
+C This routine attempts to place an exclusive lock on the
+C resource LOCKT_NAME
+C
+C It returns TRUE if it fails, but FALSE on success
+C This lock if supposed to be owned in exclusive mode by TABLIB,
+C so we don't expect to get the exclusive lock - the idea is to
+C cause a blocking AST to be delivered to TABLIB.
+C If we do get the lock (implies TABLIB has gone away), then
+C convert it back to null again, and cause TABMON to hibernate.
+C
+	IMPLICIT NONE
+C
+C lock definitions and system definitions
+C
+	INCLUDE		'($SSDEF)'
+	INCLUDE		'($LCKDEF)'
+C
+C other parameters
+C
+***	PARAMETER/HERE:ERROR/		! error numbers
+***	PARAMETER/CMN:TABMON/		! for HIBERNATE
+C
+C common
+C
+***	COMMON/CMN:TABLE/		! for TABLE_STATUS/LOCKID
+C
+C functions used
+C
+	INTEGER*4	SYS$ENQ		! enqueue a lock request
+	INTEGER*4	SYS$ENQW	! enqueue a lock request
+	INTEGER*4	SYS$DEQ		! dequeue a lock request
+C
+C workspace
+C
+	INTEGER*4	IERR		! return from function
+C
+C
+C start off with pessimism
+C
+	POKE_TABLE = .TRUE.
+C
+C now let us attempt the lock...
+C
+	IERR = SYS$ENQ(
+     &			,			! efn
+     &			%VAL(LCK$K_EXMODE),	! exclusive
+     &			TABLE_STATUS,		! status block
+     &			%VAL(LCK$M_CONVERT),	! flags - convert lock
+     &			,			! resource name
+     &			,			! parent lock ID
+     &			,			! astadr
+     &			,			! astprm
+     &			,			! blocking ast
+     &			,			! access mode
+     &			 )			! final arg reserved
+C
+C what status do we have for the enqueue?
+C
+	IF ( IERR.NE.SS$_NORMAL ) THEN
+	   CALL ERROR( ERR_TAB_ENQ, IERR )
+	   GOTO 9999
+	ENDIF
+C
+C that should have caused blocking AST to fire, so now immediately
+C cancel the request
+C
+	IERR = SYS$DEQ(
+     &			%VAL(TABLE_LOCKID),	! lock id
+     &			,			! value block
+     &			,			! access mode
+     &			%VAL(LCK$M_CANCEL)	! flags - cancel request
+     &			 )
+C
+C what status do we have for the dequeue?
+C
+	IF ( IERR.EQ.SS$_NORMAL ) GOTO 9000	! OK - cancelled
+	IF ( IERR.NE.SS$_CANCELGRANT) THEN	! unexpected error
+	   CALL ERROR( ERR_TAB_DEQ, IERR )
+	   GOTO 9999
+	ENDIF
+C
+C lock was somehow granted (TABLIB has gone away)
+C
+	IERR = SYS$ENQW(
+     &			,			! efn
+     &			%VAL(LCK$K_NLMODE),	! back to null mode
+     &			TABLE_STATUS,		! status block
+     &			%VAL(LCK$M_CONVERT),	! flags - convert lock
+     &			,			! resource name
+     &			,			! parent lock ID
+     &			,			! astadr
+     &			,			! astprm
+     &			,			! blocking ast
+     &			,			! access mode
+     &			 )			! final arg reserved
+C
+C what status do we have for the enqueue?
+C
+	IF ( IERR.NE.SS$_NORMAL ) THEN
+	   CALL ERROR( ERR_TAB_ENQ, IERR )
+	   GOTO 9999
+	ENDIF
+C
+C and what was the final status?
+C
+	IF ( TABLE_STATUS(1).NE.SS$_NORMAL ) THEN
+	   CALL ERROR( ERR_TAB_STATUS, TABLE_STATUS(1) )
+	   GOTO 9999
+	ENDIF
+C
+C set the HIBERNATE flag which will cause us to hibernate again
+C until another TABLIB comes along
+C
+	CALL SYS$SETEF( %VAL(HIBERNATE) )
+C
+C otherwise, we have success
+C
+9000	POKE_TABLE = .FALSE.
+C
+9999	RETURN
+	END

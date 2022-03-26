@@ -1,0 +1,945 @@
+	INTEGER*4 FUNCTION I2TENT(IECODE,IELEN)
+C
+***     IDENT   30NO95
+***     MODULE  I2TENT
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England.
+C
+CMOD1512 Output the MD Origin Offset as (0,0) if /ABS used
+C	 to not get used twice (eg. by TRANSLATE)	 JB 30-Nov-1995
+C
+CMOD1491 Add /QUOTED_TEXT to specify the use of quotes around text
+C	 Set .TRUE. by default				 JB 15-May-1995
+C
+CMOD1387 Added /ABSOLUTE etc.				 JB 22-Jul-1994
+C
+CMOD	JP addresses now correctly output on long IFF
+C	files						TJH 19-Dec-1990
+CMOD	/CUSTOMER now does what it says it should      IMcL 05-Jul-1988
+CMOD	Deals with the CB entry			       MWSR    Nov-1987	
+CMOD	Actual SH entry contents now formatted like
+C	IPATCH, in addition to the JB address contents
+C	of the IFF forepart.				TJH 06-Jan-1987
+CMOD	Superfluous (& potential access violation)
+C	null byte removed from character strings	TJH 16-Dec-1986
+CMOD	HI entry no longer sent to SYS$OUTPUT: if /LOG
+C	Floating point AC longwords for AC type 80
+C	to 99 added					TJH 26-Nov-1986
+CMOD	Text buffer size now up to 255			TJH 11-Nov-1986
+CMOD	Common block inclusions tidied, /LSL_EXPC/
+C	added. TS entry accommodated.			TJH 05-Nov-1986
+CMOD	Addresses output as 8 digits, left padded with 0s
+C	Outputs JP,JB,SH in manner consistent with
+C	IPATCH						TJI 31-Oct-1986
+CMOD	References to I2TEXT changed to ITOTEXT!	TJH 01-Oct-1986
+CMOD	Deal with HI entry, version 2 MD               MWSR 14-Feb-1986
+CMOD	Add  /ADDRESS and /BRIEF switches,
+C	real no. field width decided by I2TLIN		ACM 14-Mar-1985
+CMOD	Max NF number increased to 65535		ACM 14-Mar-1985
+CMOD	Use NREALS to read RO entries			CCB 17-Aug-1984
+CMOD	Use IELEN to read TH SS SL NF CS NO		RJH 31-Jul-1984
+C	FS RO RA CC entries, initialise
+C	buffers prior to reading
+CMOD	Amended	max. length MH long integers,		RJH 11-May-1984
+C	extra space between CC reals
+C
+C	Created						RJH 13-Mar-1984
+C
+C Description
+C
+C This function reads the current entry from an IFF file, and writes
+C the relevant information to the current output file. Arguments are the
+C current entry code, entry length, and type of map header required on
+C output. The function returns the C is written to the output file.
+C
+	IMPLICIT NONE
+C
+C Local parameters
+	INTEGER*4	IBSIZ		! integer buffer size
+	PARAMETER	(IBSIZ=4)
+	INTEGER*4	RBSIZ		! real buffer size
+	PARAMETER	(RBSIZ=4)
+	INTEGER*4	CHBSIZ		! character buffer size
+	PARAMETER	(CHBSIZ=255)
+	INTEGER*4	CCI		! cubic coefficients rows
+	PARAMETER	(CCI = 10)
+	INTEGER*4	CCJ		! cubic coefficients columns
+	PARAMETER	(CCJ = 2)
+C
+C Arguments
+	INTEGER*2	IECODE		! IFF entry code
+	INTEGER*2	IELEN		! IFF entry length
+C
+C Parameters:
+	INTEGER	 SS$_NORMAL
+	EXTERNAL SS$_NORMAL
+C
+4	INCLUDE 'LSL$CMNIFF:IFFPAR.PAR'
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE 'LSL$CMNITOTEXT:ITOTEXTMSG.PAR'
+C
+C Common blocks
+	INCLUDE 'LSL$CMNIFF:MHOSGB.CMN'	! IFF New OS map header information
+	INCLUDE 'LSL$CMNIFF:MHMCE.CMN'	! IFF MCE map header information
+	INCLUDE 'LSL$CMNIFF:MAPDES.CMN'	! IFF map descriptor information
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'	! IFF type 2 map descriptor info
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'	! IFF maintenance interface
+	INCLUDE	'LSL$CMNIFF:IFFJUN.CMN'	! IFF junction data
+	INCLUDE	'LSL$CMNFRT:FRTACD.CMN'	! ACD stuff
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+	INCLUDE 'LSL$CMNITOTEXT:I2TCOM.CMN'
+C
+C Functions called
+	INTEGER*4	I2TLIN		! writes a line of real numbers
+	INTEGER*4	I2TLI8		! writes a line of REAL*8 number
+	INTEGER*4	I2TCB		! writes a CB block
+	INTEGER*4	FLWRTF		! VIOLIB - writes to file
+	INTEGER*4	FLWAPP		! VIOLIB - appends, writes file
+	INTEGER*4	FLWLIN		! VIOLIB - writes buffer to file
+	INTEGER*4	EXPAND		! VIOLIB
+	INTEGER*4	APPEND
+	INTEGER*4	APPFLT
+	LOGICAL		ACDFND
+C
+	EXTERNAL	FLWSTR
+C
+C Local variables
+	INTEGER*2	NREALS		! number of reals to read
+	INTEGER*2	NPTS		! number of points in string
+	INTEGER*2	NCHS		! number of characters in string
+	INTEGER*2	NWORDS		! number of words to read
+	INTEGER*2	IENDS		! point string details
+	INTEGER*2	WORD		! current word number
+	INTEGER*2	I		! counter
+	INTEGER*2	J		! counter
+	INTEGER*2	ILENMH		! integer map header data length
+	INTEGER*2	ICUSMH		! integer map header customer
+	INTEGER*2	IBUF(IBSIZ)	! buffer for reading integers
+	INTEGER*4	ADDR		! JB address
+	INTEGER*4	NBLNK		! number of blank characters
+	INTEGER*4	ILEN,POS,RRR,QQQ! temporary variables
+	INTEGER*4	FSN,ISQ		! NF data
+	REAL*4		RBUF(RBSIZ)	! buffer for reading reals
+	REAL*8		R2BUF(5)	! buffer for reading real*8s
+	REAL*4		CCBUF(CCI,CCJ)	! buffer for reading cub. coeff.
+	REAL*8		RXY(2)		! real*8 for MD2LOC
+	BYTE		CHBUF(CHBSIZ)	! buffer for reading characters
+	BYTE		BLENMH		! byte map header data length
+	BYTE		BCUSMH		! byte map header customer
+	LOGICAL		SUPH		! history entry logical
+	INTEGER*4	LIBUF
+	BYTE		MH_TYPE		! the map header type (2, 3 or 4)
+C
+C Junction stuff
+	INTEGER*4	JN_ADDR		! junction address
+	INTEGER*2	JN_NUMB		! number of junctions
+	INTEGER*2	JN_ARMS		! number of arms
+	INTEGER*2	JN_VERT		! vertex at which junction is
+	INTEGER*2	JN_SECT		! sector containing junction
+	INTEGER*4	JN_NEXT		! address of next sector header
+	INTEGER		JN_POS		! for DO loop
+	INTEGER		JN_ARM		! for DO loop
+	REAL		X,Y		! position of junction
+
+C
+C Equivalences
+C
+	EQUIVALENCE	(ILENMH,BLENMH)
+	EQUIVALENCE	(ICUSMH,BCUSMH)
+C
+C ......................................................................
+C Main Structure
+C
+C    The main structure is as follows :-
+C
+C	case entry code of
+C	   NF : read and output a 2 integer entry
+C	   EF : output a no data entry
+C	   FS : read and output a 4 integer entry
+C	   |
+C	   |
+C	   RA : read and output a 4 real entry
+C	   EJ : output a no data entry
+C	   ?? : output error message to terminal
+C	assign function value
+C
+C Despatch table
+C
+	IF (IECODE .EQ. 'NF') GO TO 70
+	IF (IECODE .EQ. 'EF') GO TO 20
+	IF (IECODE .EQ. 'FS') GO TO 90
+	IF (IECODE .EQ. 'AC') GO TO 250
+	IF (IECODE .EQ. 'TH') GO TO 50
+	IF (IECODE .EQ. 'ST' .OR.
+     &	    IECODE .EQ. 'ZS') GO TO 280
+	IF (IECODE .EQ. 'CB') GO TO 515
+	IF (IECODE .EQ. 'RO') GO TO 130
+	IF (IECODE .EQ. 'TS') GO TO 110
+	IF (IECODE .EQ. 'TX') GO TO 30
+	IF (IECODE .EQ. 'VO') GO TO 20
+	IF (IECODE .EQ. 'TC') GO TO 30
+	IF (IECODE .EQ. 'CH') GO TO 30
+	IF (IECODE .EQ. 'CS') GO TO 70
+	IF (IECODE .EQ. 'SS') GO TO 50
+	IF (IECODE .EQ. 'SL') GO TO 50
+	IF (IECODE .EQ. 'NO') GO TO 70
+	IF (IECODE .EQ. 'EO') GO TO 20
+	IF (IECODE .EQ. 'NS') GO TO 30
+	IF (IECODE .EQ. 'CC') GO TO 200
+	IF (IECODE .EQ. 'CP') GO TO 170
+	IF (IECODE .EQ. 'MH') GO TO 310
+	IF (IECODE .EQ. 'MD') GO TO 360
+	IF (IECODE .EQ. 'EM') GO TO 20
+	IF (IECODE .EQ. 'JP') GO TO 460
+	IF (IECODE .EQ. 'JB') GO TO 490
+	IF (IECODE .EQ. 'SH') GO TO 470
+	IF (IECODE .EQ. 'RA') GO TO 150
+	IF (IECODE .EQ. 'HI') GO TO 10
+	IF (IECODE .EQ. 'EJ') GO TO 20
+C
+C unknown code
+C
+	CALL LSL_PUTMSG(ITOTEXT__UNKNIFFENT,IECODE,LPOSH)
+	GO TO 520			! branch forward
+C
+C *********************************************************************
+C HI entry
+C
+10	IF (.NOT.CUSTOMER) THEN  	! if required
+	   ILEN=EXPAND('%^W%C',IECODE) 	! output entry code
+C
+	   IF (ADDRESS) THEN
+	      NBLNK=69-ILEN
+	      CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	   ENDIF
+C
+	   I2TENT=FLWLIN()	  
+	   IF (.NOT.BRIEF) THEN
+	      SUPH=.TRUE.
+	      CALL EIHPHI(FLWSTR,SUPH)
+	   ENDIF
+	ENDIF			! (.not.customer)
+C
+	GO TO 520
+C
+C *********************************************************************
+C EF VO EO EM EJ entries (no data)
+C
+20	ILEN=EXPAND('%^W%C',IECODE)	! output entry code
+C
+	IF (ADDRESS) THEN
+	    NBLNK=69-ILEN
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	GO TO 520			! branch forward
+C
+C *********************************************************************
+C TX TC CH NS entries (character string)
+C
+30	DO 40 I=1,CHBSIZ
+	   CHBUF(I) = 0					! initialise buffer
+40	CONTINUE
+C
+	CALL EIHR(CHBUF,IELEN,1)			! read entry
+C
+	IF (HAD_QUOTED) THEN
+	   NCHS = EXPAND('%^W%C ', IECODE)		! output TX code
+	   NCHS = APPEND('"')
+	   NCHS = APPEND('%AZ255', CHBUF)		! output string
+	   NCHS = APPEND('"')
+C
+	ELSE
+	   NCHS = EXPAND('%^W%C %AZ255',IECODE,CHBUF)	! output string
+	ENDIF
+C
+	IF (ADDRESS) THEN
+	  IF (NCHS.GT.68) THEN
+	    NBLNK=69-MOD((NCHS+4),80)
+	  ELSE
+	    NBLNK=69-NCHS
+	  ENDIF
+C
+	  CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	GO TO 520					! branch forward
+C
+C *********************************************************************
+C TH SS SL entries (1 integer)
+C
+50	DO 60 I=1,IBSIZ
+	   IBUF(I) = 0					! initialise buffer
+60	CONTINUE
+C
+	CALL EIHRI(IBUF,IELEN,1)			! read entry
+	ILEN=EXPAND('%^W%C %^W%N',IECODE,IBUF(1))	! output entry
+	IF (ADDRESS) THEN
+	    NBLNK=69-ILEN
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	GO TO 520					! branch forward
+C
+C *********************************************************************
+C NF CS NO entries (2 integers)
+C
+70	DO 80 I=1,IBSIZ
+80	   IBUF(I) = 0					! initialise buffer
+C
+	CALL EIHRI(IBUF,IELEN,1)			! read entry
+	IF (IECODE.EQ.'NF') THEN			! convert to longwds
+	   FSN = IAND(IBUF(1),65535)
+	   ISQ = IAND(IBUF(2),65535)
+	   ILEN=EXPAND('%^W%C %^L%N %N',IECODE,FSN,ISQ)
+C
+	ELSEIF (IECODE.EQ.'NO') THEN			! data are words
+	   IF (LOG) THEN
+	      CALL LSL_PUTMSG(ITOTEXT__LAYER,IBUF(1))
+	   ENDIF
+	   ILEN=EXPAND('%^W%C %N %N',IECODE,IBUF(1),IBUF(2))
+C
+	ELSE
+	   ILEN=EXPAND('%^W%C %N %N',IECODE,IBUF(1),IBUF(2))
+	ENDIF
+C
+	IF (ADDRESS) THEN
+	    NBLNK=69-ILEN
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	GO TO 520					! branch forward
+C
+C *********************************************************************
+C FS entry (4 integers)
+C
+90	DO 100 I=1,IBSIZ
+	   IBUF(I) = 0					! initialise buffer
+100	CONTINUE
+C
+	CALL EIHRI(IBUF,IELEN,1)			! read entry
+	ILEN=EXPAND('%^W%C %N %N %N %N',IECODE,
+     &	IBUF(1),IBUF(2),IBUF(3),IBUF(4))		! output entry
+C
+	IF (ADDRESS) THEN
+	    NBLNK=69-ILEN
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	GO TO 520					! branch forward
+C
+C *********************************************************************
+C TS entry (4 integers)
+C
+110	DO 120 I=1,IBSIZ
+	   IBUF(I) = 0					! initialise buffer
+120	CONTINUE
+C
+	CALL EIHRI(IBUF,IELEN,1)			! read entry
+	ILEN=EXPAND('%^W%C %N %N %N %N',IECODE,
+     &	IBUF(1),IBUF(2),IBUF(3),IBUF(4))		! output entry
+C
+	IF (ADDRESS) THEN
+	    NBLNK=69-ILEN
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	GO TO 520				! branch forward
+C
+C *********************************************************************
+C RO entry (1 real)
+C
+130	DO 140 I=1,RBSIZ
+	   RBUF(I) = 0.0			! initialise buffer
+140	CONTINUE
+C
+	NREALS = IELEN/2			! calculate no. of reals
+	CALL EIHRR(RBUF,NREALS,1)		! read entry
+	ILEN=EXPAND('%^W%C ',IECODE)		! put entry code into buffer
+	RRR=APPFLT(RBUF(1))			! append real no., 7 sig figs
+C
+	IF (ADDRESS) THEN
+	    NBLNK=69-RRR
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	GO TO 520				! branch forward
+C
+C *********************************************************************
+C RA entry (4 reals)
+C
+150	DO 160 I=1,RBSIZ
+	   RBUF(I) = 0.0			! initialise buffer
+160	CONTINUE
+C
+	NREALS = IELEN/2			! calculate number of reals
+	CALL EIHRR(RBUF,NREALS,1)		! read entry
+	ILEN  = EXPAND('%^W%C',IECODE)		! put entry code into buffer
+C
+	FIRST = .TRUE.
+	COORD = .TRUE.
+	I2TENT = I2TLIN(IECODE,RBUF,NREALS)	! append reals & output buffer
+	GO TO 520				! branch forward
+C
+C *********************************************************************
+C CP entry (16 reals)
+C
+C    Structure is :-
+C
+C	initialise buffer
+C	read first 4 reals
+C	output entry code with first 4 reals
+C	while < 4 lines and no write error do
+C	   read next 4 reals
+C	   output 4 reals, preceded by spaces
+C
+170	DO 180 I=1,RBSIZ
+	   RBUF(I) = 0.0			! initialise buffer
+180	CONTINUE
+C
+	NREALS = 4				! initialise no. of reals
+	J      = 1				! initialise counter
+	WORD   = 1				! initialise word number
+C
+	CALL EIHRR(RBUF,NREALS,WORD)		! read first 4 reals
+	ILEN=EXPAND('%^W%C',IECODE)		! put entry code into buffer
+C
+	IF (BRIEF) THEN
+	   IF (ADDRESS) THEN
+	      NBLNK=69-ILEN
+	      CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	   ENDIF
+C
+	   I2TENT=FLWLIN()
+	   GOTO 520
+	ENDIF
+C
+	FIRST  = .TRUE.
+	COORD  = .TRUE.
+	I2TENT = I2TLIN(IECODE,RBUF,NREALS)	! append reals & output buffer
+C
+190	IF (J.EQ.4 .OR. .NOT.I2TENT) GO TO 520
+C
+	J = J+1					! increment counter
+	WORD = WORD+8				! increment word number
+	CALL EIHRR(RBUF,NREALS,WORD)		! read next 4 reals
+	ILEN   = EXPAND('  ')			! put spaces into buffer
+	COORD  = .TRUE.
+	I2TENT = I2TLIN(IECODE,RBUF,NREALS)	! append reals & output buffer
+	GO TO 190				! branch back for test
+C
+C *********************************************************************
+C CC entry (20 reals)
+C
+C    Structure is :-
+C
+C	if CC required then
+C	   initialise buffer
+C	   read reals
+C	   output first 2 reals, preceded by entry code
+C	   while < 10 lines and no write error do
+C	      output 2 reals, preceded by spaces
+C
+200	IF (.NOT.CUSTOMER) THEN			! test if CC required
+	   IF (BRIEF) THEN
+	      ILEN=EXPAND('%^W%C',IECODE)
+	      IF (ADDRESS) THEN
+		NBLNK=69-ILEN
+		CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	      ENDIF
+C
+	      I2TENT=FLWLIN()
+	      GOTO 520
+	   ENDIF
+C
+	   DO 220 J=1,CCJ
+	      DO 210 I=1,CCI
+		 CCBUF(I,J) = 0.0		! initialise buffer
+210	      CONTINUE
+220	   CONTINUE
+C
+	   NREALS = IELEN/2			! initialise no. of reals
+	   I = 1				! initialise counter
+	   CALL EIHRR(CCBUF,NREALS,1)		! read 20 reals
+	   ILEN=EXPAND('%^W%C %(2 %E8%)',IECODE,
+     &			CCBUF(I,1),CCBUF(I,2))
+C						! output entry code & reals
+	   IF (ADDRESS) THEN
+	      NBLNK=69-ILEN
+	      CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	   ENDIF
+C
+	   I2TENT=FLWLIN()
+230	   IF (I.EQ.CCI .OR. .NOT.I2TENT) GO TO 240
+	      I = I+1				! increment counter
+	      I2TENT= FLWRTF('   %(2 %E8%)',CCBUF(I,1),CCBUF(I,2))
+C						! output spaces and reals
+	      GO TO 230				! branch back for test
+240	   CONTINUE
+	ENDIF					! (.not. customer)
+C
+	GO TO 520				! branch forward
+C
+C *********************************************************************
+C AC entry (1 short integer, 1 long integer, character string)
+C
+250	DO 260 I=1,IBSIZ
+	   IBUF(I) = 0				! initialise integer buffer
+260	CONTINUE
+C
+	DO 270 I=1,CHBSIZ
+	   CHBUF(I) = 0				! initialise character buffer
+270	CONTINUE
+C
+	WORD   = 1				! initialise word number
+	NWORDS = 3				! initialise no. of words
+	CALL EIHR(IBUF,NWORDS,WORD)		! read first 3 words of entry
+C
+C Check that AC type is not 3 or in range 80 to 99 as these have
+C floating point numbers in their longword field.
+C find the data type according to the ACD table
+C
+	LIBUF = IBUF(1)
+	IF (ACDFND(LIBUF)) CONTINUE		! allow default
+C
+C Put entry code & first word into buffer
+C
+	ILEN=EXPAND('%^W%C %N ',IECODE,IBUF(1)) 
+	IF (ACD_DATA_TYPE.EQ.ACD_DATATYPE_C) CALL APPEND('"')
+	CALL APPEND('%^L'//ACD_FORMAT(:ACD_FORMAT_LEN),IBUF(2))
+	IF (ACD_DATA_TYPE.EQ.ACD_DATATYPE_C) CALL APPEND('"')
+C
+C	IF (IBUF(1).EQ.3 .OR. (IBUF(1).GE.80.AND.IBUF(1).LE.99)) THEN
+C	   RRR=APPFLT(IBUF(2))			! append it to buffer
+C	ELSE
+C	   RRR=APPEND('%^L%N',IBUF(2))		! append long integer to buffer
+C	ENDIF	! (IBUF(1) .EQ. 3)
+C
+	WORD   = WORD+NWORDS			! increment word number
+	NWORDS = IELEN-NWORDS			! calculate remaining words
+	NCHS   = NWORDS*2			! calculate no. of characters
+	CALL EIHR(CHBUF,NWORDS,WORD)		! read character string
+	CHBUF(NCHS+1) = 0			! add null byte to end of string
+C
+	IF (NCHS.NE.0) THEN
+	   QQQ=APPEND(' "%AZ255"',CHBUF) 	! append string & output buffer
+	ENDIF
+C
+	IF (ADDRESS) THEN
+	    NBLNK=69-QQQ
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	GO TO 520				! branch forward
+C
+C *********************************************************************
+C ST entry (2 integers, point string; 2 reals to each point)
+C ZS entry (2 integers, point string; 3 reals to each point)
+C
+C    Structure is :-
+C
+C	initialise buffer
+C	read point string details
+C	output point string details
+C	while not finished do
+C	   read point
+C	   output point
+C
+280	DO 290 I=1,RBSIZ
+	   RBUF(I) = 0.0			! initialise buffer
+290	CONTINUE
+C
+	CALL EIHRS(NPTS,IENDS)			! read point string details
+	ILEN=EXPAND('%^W%C %N %N',IECODE,NPTS,IENDS)	! output them
+	IF (ADDRESS) THEN
+	    NBLNK=69-ILEN
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	IF (BRIEF) GOTO 520
+C
+	IF (IECODE .EQ.'ST') THEN
+	   NREALS = 2				! initialise no. of reals
+	ELSE
+	   NREALS = 3
+	ENDIF
+	WORD = 1				! initialise word number
+C
+300	IF (NPTS.LE.0 .OR. .NOT.I2TENT) GO TO 520
+C
+	CALL EIHRR(RBUF,NREALS,WORD)		! read point
+	CALL EXPAND()				! empty buffer
+C
+	COORD  = .TRUE.
+	I2TENT = I2TLIN(IECODE,RBUF,NREALS)	! append point & output buffer
+C
+	IF (IECODE.EQ.'ST') THEN
+	   WORD = WORD+4			! increment word number
+	ELSE
+	   WORD = WORD+6
+	ENDIF
+C
+	NPTS = NPTS-1				! decrement no. of points
+	GO TO 300				! branch back for test
+C
+C *********************************************************************
+C MH entry
+C
+C    Structure is :-
+C
+C	if required then initialise and read map header
+C	if default output then
+C	   output entry code and descriptor
+C	   while not finished and no write error do
+C	      output line of integers
+C	else if text output then
+C	   output map header in readable form
+C
+310	IF (.NOT.CUSTOMER) THEN			! if required,
+	   IF (BRIEF) THEN
+	      ILEN=EXPAND('%^W%C',IECODE)
+	      IF (ADDRESS) THEN
+		NBLNK=69-ILEN
+		CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	      ENDIF
+C
+	      I2TENT=FLWLIN()
+	      GOTO 520
+	   ENDIF
+C
+	   CALL EIHR(MHDESC,2,1)			! find out MH type
+	   MH_TYPE = MHDESC(2)
+C
+	   IF (MH_TYPE.LE.2) THEN
+	      DO 320 I=1,MHLEN
+	         MHARR(I) = 0				! initialise MHARR
+320	      CONTINUE
+	      CALL EIHR(MHARR,MIN(IELEN,MHLEN),1)	! read map header
+C
+	   ELSE
+	      DO 321 I=1,MH2LEN
+	         MH2ARR(I) = 0				! initialise MH2ARR
+321	      CONTINUE
+	      CALL EIHR(MH2ARR,MIN(IELEN,MH2LEN),1)	! read map header
+	   ENDIF
+	ENDIF						! (.not. customer)
+C
+	IF (.NOT.MH .AND. .NOT.CUSTOMER) THEN
+	   ILENMH = 0					! clear top byte
+	   ICUSMH = 0					! clear top byte
+	   BLENMH = MHDESC(1)				! set low byte
+	   BCUSMH = MH_TYPE				! set low byte
+	   ILEN=EXPAND('%^W%C %N %N',IECODE,ILENMH,ICUSMH)
+	   IF (ADDRESS) THEN
+	      NBLNK=69-ILEN
+	      CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	   ENDIF
+C
+	   I2TENT=FLWLIN()	  
+	   I = 0					! initialise counter
+C
+	   IF (MH_TYPE.LE.2) THEN
+330	      IF (I.EQ.MHI4SZ .OR. .NOT.I2TENT) GO TO 332
+	      CALL EXPAND()				! empty buffer
+	         DO 331 J=1,6
+	            CALL APPEND('%^L%N13',MHINT4(I+J))	! append integer
+331	         CONTINUE
+C
+	         I2TENT= FLWLIN()			! output buffer (6 ints)
+	         I = I+6				! increment counter
+	         GO TO 330				! branch back for test
+332	      CONTINUE
+	   ELSE
+	      CALL I2TASC( MH2BYTE, MIN(IELEN,MH2LEN)*2-4 )
+	   ENDIF
+	ELSEIF (MH) THEN
+	   IF (MH_TYPE.LT.3) CALL I2TMHT		! map header text output
+	ENDIF						! ()
+C
+	GO TO 520					! branch back for test
+C
+C *********************************************************************
+C MD entry
+C
+C    Structure is :-
+C	
+C	initialise buffers
+C	read MD entry
+C	output MD entry
+C
+360	IF (BRIEF) THEN
+	   ILEN=EXPAND('%^W%C',IECODE)
+	   IF (ADDRESS) THEN
+	      NBLNK=69-ILEN
+	      CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	   ENDIF
+C
+	   I2TENT=FLWLIN()
+	   GOTO 520
+	ENDIF
+C
+	IF (IELEN.EQ.MD2LEN) GOTO 390			! type 2 MD
+C
+	DO 370 I=1,RBSIZ
+	   RBUF(I) = 0.0				! initialise real buffer
+370	CONTINUE
+C
+	DO 380 I=1,MDLEN
+	   MDARR(I) = 0					! initialise MD
+380	CONTINUE
+C
+	CALL EIHR(MDARR,MDLEN,1)		 	! read entry
+	ILEN  = EXPAND('%^W%C MA %N2',IECODE,MAT) 	! enter codes & integer
+C
+	FIRST  = .TRUE.
+	COORD  = .FALSE.
+C
+	I2TENT = I2TLIN(IECODE,EMLE,4)			! append reals & output
+	IF (I2TENT) THEN
+	   CALL EXPAND('   GR %^W%N2',MGT)		! enter codes & integer
+	   I2TENT = I2TLIN(IECODE,EMGO,4)		! append reals & output
+C
+	   IF (I2TENT) THEN
+	      CALL EXPAND('   SC   ')
+	      RBUF(1) = EMSC
+	      I2TENT  = I2TLIN(IECODE,RBUF,1)
+	      IF (I2TENT) THEN
+		 I2TENT = FLWRTF('   PS %^W%N2 %N2',MMP,MSCLD)
+		 IF (I2TENT) THEN
+		    CALL EXPAND('   AG %^W%N2',MAGT)
+		    I2TENT = I2TLIN(IECODE,EMAGO,4)
+		 ENDIF
+	      ENDIF	
+	   ENDIF	
+	ENDIF	
+C
+	GO TO 520				! branch back for test
+C
+C Type 2 map descriptor
+C Formatted version commented out
+C
+390	CALL EIHR(MD2ARR,MD2LEN,1)		! read entry
+	IF (MATV2.NE.2) THEN
+	  CALL LSL_PUTMSG(ITOTEXT__ERRMD2)
+	  GOTO 520
+	ENDIF
+C
+	ILEN  = EXPAND('!%^W%C LO',IECODE)	! local origin
+	FIRST = .TRUE.
+C
+	IF (HAD_ABS) THEN
+	   RXY(1)    = 0.0D0			! use 0,0 for md2loc
+	   RXY(2)    = 0.0D0
+C
+	   I2TENT=I2TLI8(RXY,2)			! origin offset as (0,0)
+	   IF (.NOT.I2TENT) GOTO 520
+C
+	ELSE
+	   I2TENT=I2TLI8(MD2LOC,2)
+	   IF (.NOT.I2TENT) GOTO 520
+	ENDIF
+C
+	CALL EXPAND('!   SC')			! scale factor
+	I2TENT=I2TLI8(MD2SCL,1)
+	IF (.NOT.I2TENT) GOTO 520
+C
+	I2TENT=FLWRTF('!   PR %^L%N3',MD2PRJ)	! projection
+	IF (.NOT.I2TENT) GOTO 520
+C
+	I2TENT=FLWRTF('!   UN %^L%N3',MD2UNT)	! units
+	IF (.NOT.I2TENT) GOTO 520
+C
+	I2TENT=FLWRTF('!   SP %^L%N3',MD2SPH)	! spheroid
+	IF (.NOT.I2TENT) GOTO 520
+C
+	IF (MD2SPH.EQ.101) THEN
+	   I2TENT=I2TLI8(MD2USP,2)
+	   IF (.NOT.I2TENT) GOTO 520
+	ENDIF
+C
+	IF (MD2SPH.GT.0) THEN
+	   CALL EXPAND('!   PA ')		! projection parameters
+C
+	   DO 400 I= 1,3
+	      R2BUF(I) = MD2PAR(I)
+400	   CONTINUE
+C
+	   I2TENT=I2TLI8(R2BUF,3)
+C
+	   DO 420 I= 1,4
+	      DO 410 J= 1,3  
+	         R2BUF(J) = MD2PAR(J+(3*I))
+	         CALL EXPAND('!      ')
+410	      CONTINUE
+	      I2TENT=I2TLI8(R2BUF,3)
+C
+420	   CONTINUE
+	ENDIF
+C
+C  Now unformatted version 2 MD - not commented out
+C
+	IF (HAD_ABS) THEN
+	   RXY(1)    = MD2LOC(1)			! store md2loc
+	   RXY(2)    = MD2LOC(2)
+C
+	   MD2LOC(1) = 0.0D0				! set to 0,0
+	   MD2LOC(2) = 0.0D0
+	ENDIF
+C
+	ILEN=EXPAND('%^W%C%^L%(4 %N12%)',IECODE,
+     &			MD2ARR(1),MD2ARR(3),MD2ARR(5),MD2ARR(7))
+	IF (ADDRESS) THEN
+	   NBLNK=69-ILEN
+	   CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT = FLWLIN()
+C
+	DO 450 I= 1,16
+	   CALL EXPAND('  ')
+	   DO 440 J = 1,6
+	      CALL  APPEND(' %N12',MD2ARR((I*6-2+J)*2-1))
+440	   CONTINUE
+	   I2TENT = FLWLIN()
+450	CONTINUE	     
+C	   
+	IF (HAD_ABS) THEN
+	   MD2LOC(1) = RXY(1)			! set md2loc back
+	   MD2LOC(2) = RXY(2)
+	ENDIF
+C
+	GOTO 520
+C
+C *********************************************************************
+C JP entry
+C
+460	CALL EIHRL( JN_ADDR, 1, 1 )
+	CALL EIHRI( JN_NUMB, 1, 3 )
+	ILEN=EXPAND('%^W%C %^L%P0%X8 %^W%X4',IECODE,JN_ADDR,JN_NUMB)
+	IF (ADDRESS) THEN
+	    NBLNK=69-ILEN
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+	GOTO 520
+C
+C *********************************************************************
+C SH - sector header
+C
+470	ILEN=EXPAND('%^W%C',IECODE)
+	IF (ADDRESS) THEN
+	    NBLNK=69-ILEN
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	CALL FLWLIN
+	CALL FLWRTF('! Sector Header entry')
+	CALL FLWRTF('! size of entry = %^W%I3 words',IELEN)
+C
+	IF ( IFSHSZ.EQ.1 ) THEN
+	   CALL FLWRTF('! there is 1 sector')
+	ELSE
+	   CALL FLWRTF(
+     &		'! there are %^W%N sectors, %I2 in X and %I2 in Y',
+     &			       IFSHSZ,     IFSNUM(1),   IFSNUM(2))
+	ENDIF
+C
+	CALL FLWRTF(
+     &		'! sector origin: %G12.4,%G12.4',IFSORI(1),IFSORI(2))
+	CALL FLWRTF(
+     &		'! sector size:   %G12.4,%G12.4',IFSSTP(1),IFSSTP(2))
+C
+	CALL FLWRTF(
+     &		'! JB entry chains start at the following addresses:')
+	CALL FLWRTF(
+     &		'! (using data from the forepart of the IFF file)')
+	CALL EXPAND
+C
+C and then carry on
+C
+	DO 480 POS = 1,IELEN,2
+C
+	   CALL EIHRL( ADDR, 1, POS )
+C
+	   IF ( EXPLEN.GT.DEF_EXPMAX-10 ) THEN
+	      CALL FLWLIN
+	      CALL EXPAND('!%P0%X8 ',ADDR)
+	   ELSE
+	      IF (POS.EQ.1) THEN
+	        CALL APPEND('!%P0%X8 ',ADDR)
+	      ELSE
+	        CALL APPEND(' %P0%X8 ',ADDR)
+	      ENDIF
+	   ENDIF
+C
+480	CONTINUE
+C
+	IF ( EXPLEN.GT.0 ) I2TENT=FLWLIN()
+C
+	GOTO 520
+C
+C *********************************************************************
+C JB - junction block
+C
+490	CALL EIHRI( JN_SECT, 1, JBSECT )
+	CALL EIHRL( JN_NEXT, 1, JBNEXT )
+	ILEN=EXPAND('%^W%C %I2 %P0%X8',IECODE,JN_SECT,JN_NEXT)
+	IF (ADDRESS) THEN
+	    NBLNK=69-ILEN
+	    CALL APPEND('%[ %] ! %^L%P0%X8',NBLNK,LPOSH)
+	ENDIF
+C
+	I2TENT=FLWLIN()	  
+C
+C get the next junction from the JB
+C
+500	CALL IFJNXT( X, Y, JN_ARMS )
+C
+C if JN_ARMS is -1, then there are no more
+C
+	IF ( JN_ARMS.EQ.-1 ) GOTO 520
+C
+C otherwise, print out the junction
+C
+	I2TENT=FLWRTF('%^W%P0%X4: %P %^W%I2 %F12.4, %F12.4',
+     &			IFPOSJ, JN_ARMS, X, Y )
+C
+C and list the locations of the arms...
+C
+	DO 510 JN_ARM = 1,JN_ARMS
+	   CALL JIHR( JN_ARM, JN_ADDR, JN_VERT )
+	   CALL EXPAND('   %^W%I2:', JN_ARM )
+	   CALL APPEND(' %^W%I3 %^L%P0%X8',JN_VERT,JN_ADDR )
+	   I2TENT=FLWLIN()
+510	CONTINUE
+C
+C and get the next junction from the block
+C
+	GOTO 500
+C
+C *********************************************************************
+C CB entry
+515	I2TENT = I2TCB()
+C
+	GOTO 520
+C
+C**********************************************************************
+C Assign function value
+C
+520	IF (I2TENT .EQ. LSL__NORMAL) I2TENT = %LOC(SS$_NORMAL)
+C
+C Return
+	RETURN
+	END
+C

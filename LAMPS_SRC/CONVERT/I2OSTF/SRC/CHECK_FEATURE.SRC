@@ -1,0 +1,402 @@
+	LOGICAL FUNCTION CHECK_FEATURE(ORIENT,IGNORE,NOTNF,BADFEATURE)
+C
+***	MODULE	CHECK_FEATURE
+***	IDENT	20SE91
+C
+C Copyright: Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C Logical function to check IFF features for the presence of orientation data.
+C
+C Returns .TRUE. if the feature is okay, i.e. has an orientation or may be
+C ignored (i.e. empty or a degenerate line), returns .FALSE. otherwise.
+C
+C Function also returns the following via the argument list :
+C
+C	ORIENT		true if the feature is orientated, false otherwise
+C	IGNORE		true if the feature is to be ignored, false otherwise
+C	NOTNF		true if the current IFF record on entry was not an NF
+C			record, false otherwise
+C	BADFEATURE	true if the function couldn't find/reposition to
+C			specified  records, false otherwise
+C
+C If the function returns a 0 (okay) then the current IFF record on exit is
+C the starting NF record of the feature if the feature is orientated and is
+C not to be ignored. If the feature is to be ignored (degenerate line), the
+C current IFF record on exit is the terminating EF record of the feature.
+C
+C If the function returns a 1 then the current IFF record on exit is the same 
+C as on entry if NOTNF is true, otherwise the current record on exit may be
+C any IFF record of the feature 
+C
+	IMPLICIT NONE
+C
+C - argument list
+C
+	LOGICAL		ORIENT		! returns true if the feature is
+C					! orientated, false otherwise
+	LOGICAL		IGNORE		! returns true if the feature is to be
+C					! ignored, false otherwise
+	LOGICAL		NOTNF		! returns true if the current record on
+C					! entry was not an NF, false otherwise
+	LOGICAL		BADFEATURE	! returns true if the function failed
+C					! to find/reposition to specified
+C					! records, false otherwise 
+C
+C following code block is copied from PROCFILE.SRC
+C with some irrelevant lines removed. This is not
+C to say that all of this code block is relevant
+C                        
+	INCLUDE	'LSL$CMNIFF:CB.STR'	! record structure definition
+C
+	INCLUDE	'HERE:I2OSTFMSG.PAR'	! error numbers
+	INCLUDE	'HERE:LUN.PAR'		! luns for i/o files
+C
+***	COMMON/HERE:COMMANDS/		! for command line data
+***	COMMON/HERE:ATTRIBUTES/		! for attribute codes
+C
+***	COMMON/LSL$CMNIFF:IFFHAN/	! for IFFLIB errors
+***	COMMON/LSL$CMNIFF:MHDMB/	! map header buffer
+C
+C - IFFLIB routine general arguments
+C
+ 	INTEGER*2	IECODE	! entry name as 2 ASCII characters
+	INTEGER*2	IELEN	! entry length (-1 => end-of-file)
+C
+	INTEGER		NFPOSH	! address of NF entry
+	INTEGER*2	NFNUM	! feature number from IFFLIB
+ 	INTEGER*2	TXTDAT	! text data/process code part of same
+	LOGICAL		TEXTF	! true if text feature
+	LOGICAL		SYMBF	! true if symbol feature
+	LOGICAL		LINEF	! true if line feature
+C
+C - point data
+C
+	INTEGER		STPTR		! number of points in current ST
+	INTEGER		STCOL(2)	! column headers for points
+ 	REAL		STBUF(2,200)	! buffer for points
+ 	REAL		ZBUF(200)	! buffer for heights
+	REAL		X,Y			! individual point
+	REAL		Z,DZ			! its heights
+	REAL		SAV_X,SAV_Y		! saved first point
+	REAL		SAV_Z,SAV_DZ		! its heights
+C
+	RECORD	/IFF_CBH/ CBH		! CB header part
+	RECORD	/IFF_CBD/ CBD		! CB data part
+C
+C - grid squares
+C
+	REAL*4		BGI		! basic grid interval
+	INTEGER		GX1,GY1,GX2,GY2	! grid squares
+	INTEGER		OX1,OY1,OX2,OY2	! grid square offsets
+	
+C
+C - displacements 
+C
+	REAL		DX,DY		! delta X,Y - ie X-SAV_X, etc
+C
+C - local flags
+C
+	LOGICAL		HAD_FIRST_CB	! true if had 1st CB record of a line,
+C					! symbol, or text substring (TS block)
+	LOGICAL		LINE_POINT	! true if line feature degenerates to a
+C					! point
+C - counters
+C
+	INTEGER		IREC		! outer loop counter (record loop)
+	INTEGER		I		! loop counter (points)
+	INTEGER		TX_COUNT	! TX record count
+C
+C initilize the output flags
+C
+	CHECK_FEATURE	= .FALSE.	! init. to flag failure
+	IGNORE		= .FALSE.	! init. to flag not ignorable
+	ORIENT		= .FALSE.	! init. to flag not orientable
+	NOTNF		= .FALSE.	! init. to flag NF record on entry	
+	BADFEATURE	= .FALSE.	! init. to flag feature is okay
+C
+	BGI = MHBGI			! basic grid interval
+C
+C check that the current IFF record is an 'NF', if it is then mark the
+C position of the 'NF' record and analyze the feature, if not, return
+C CHECK_FEATURE = .FALSE., NOTNF = .TRUE.
+C
+	CALL IFFPKE(IECODE, IELEN, LPOSH)	
+	IF ( IECODE.NE.'NF' ) THEN
+	   CALL LSL_PUTMSG(I2OSTF__NOTFOUND,'NF',IECODE)! issue a message
+	   CHECK_FEATURE = .FALSE.			! return failure
+	   NOTNF	 = .TRUE.			! set NOTNF flag
+	   RETURN
+	ENDIF
+C
+	CALL EIHRI(NFNUM,1,1)		! may need feature number for messages
+	NFPOSH = LPOSH			! save current position in IFF file
+C
+C next record should be an 'FS', which specifies the type of feature, i.e.
+C text, symbol, or line. However it may 'EF', indicating an empty feature. If
+C so issue a warning and return CHECK_FEATURE = .TRUE. (record okay), with
+C IGNORE = .TRUE. (ignorable feature). If the next record is not an 'FS' nor
+C an 'EF' issue a error message and return CHECK_FEATURE = .FALSE.,
+C BADFEATURE = .TRUE. (bad sequence of IFF records)
+C
+C
+	CALL IFFNXT(IECODE, IELEN)		! get next entry
+C
+	IF ( IECODE.NE.'FS' ) THEN
+	   IF ( IECODE.EQ.'EF' ) THEN		! empty feature
+	      CALL LSL_PUTMSG( I2OSTF__IGNORE, NFNUM)
+	      CHECK_FEATURE = .TRUE.		! flag feature is okay
+	      IGNORE	    = .TRUE.		! but ignorable
+	   ELSE					! error, bad IFF sequence
+	      CALL LSL_PUTMSG(I2OSTF__NOTFOUND,'FS',IECODE)
+	      CHECK_FEATURE = .FALSE.		! Flag problem with feature
+	      BADFEATURE    = .TRUE.		! Flag a bad IFF feature
+	   ENDIF
+	   RETURN
+	ENDIF
+C
+C Get the feature type from the FS record, code for this has been
+C copied from the FS code block in PROCFILE. This is necessary because
+C orientation data is encoded differently for lines, symbols, and text
+C strings
+C
+	CALL EIHRI(TXTDAT,1,3)			! read the text bits
+C
+	IF ( (TXTDAT.AND.'C000'X) .EQ. 0 ) THEN
+	   SYMBF = .FALSE.			! not a symbol feature
+	   TEXTF = .FALSE.			! nor a text   feature
+	ELSE
+	   SYMBF = (TXTDAT.AND.'4000'X) .NE. 0
+	   TEXTF = .NOT.SYMBF
+	ENDIF
+C
+	LINEF = .NOT.(SYMBF.OR.TEXTF)		! line feature flag
+
+C
+C At present, if the feature is a symbol don't bother to test for an
+C orientation.
+C
+C A more sophisticated procedure however would be to see if FRT data is
+C available (HAD_FRT (global) .TRUE.) and see if the symbol type is
+C unoriented, oriented or scaled. If it is of the latter two types, test
+C for orientation data using the procedure below for text and lines,
+C but if the symbol is of the unoriented type, accept it without testing
+C
+	IF ( SYMBF ) THEN			! currently accept all symbols
+C
+	   IGNORE = .FALSE.			! flag feature is not ignorable
+	   CALL IFFPKE(IECODE, IELEN, NFPOSH)	! reposition to 'NF' record
+	   IF ( IECODE.NE.'NF' ) THEN		! failed to reposition
+	      CALL LSL_PUTMSG(I2OSTF__NOTFOUND,'NF',IECODE)
+	      CHECK_FEATURE = .FALSE.		! flag bad result
+	      BADFEATURE    = .TRUE.		! flag bad feature records
+	   ELSE
+	      CHECK_FEATURE = .TRUE.		! reposition okay, good result
+	      BADFEATURE    = .FALSE.		! flag not bad feature records
+	   ENDIF
+	   RETURN
+C
+	ENDIF
+C
+C Analyze the IFF feature for orientation data. For lines, a (consecutive)
+C sequence of 'CB' records must contain at least two distinct points (x,y)
+C at OS resolution. For symbols or text strings, a (consecutive) sequence of
+C 'CB' records should contain two distinct points at IFF resolution, or
+C alternatively a single point in a 'CB' record and an associated 'RO' record
+C
+C If a 'TX' record is found (text string) without any associated orientation,
+C terminate the processing, issue warning, and return a value of 1 (feature
+C without orientation). If the feature is an unorientated symbol (point) or a
+C vertical line (OSTF) return a value of 1. If a line degenerates into a
+C point, return a value of -1 (ignorable feature). If a text, symbol, or line
+C feature is orientated, return a value of 0.
+C
+C Note an 'EF' record represents the end of a feature. A text feature may
+C contain several TX records, each of which must have associated CB (and RO)
+C records
+C 
+	ORIENT       = .FALSE.			! init. to no orientation
+	LINE_POINT   = .TRUE.			! init. to degenerate line
+	HAD_FIRST_CB = .FALSE.			! flag not had first CB record
+	TX_COUNT     = 0			! processed no TX records
+C
+	DO 1 IREC = 1 , 2**14			! effectively an infinite loop
+C
+	   CALL IFFNXT(IECODE, IELEN)		! get next record
+C
+	   IF ( IECODE.EQ.'EF' ) THEN		! end of feature
+C
+	      GOTO 2				! exit loop to set return value
+C
+	   ELSEIF ( IECODE.EQ.'TX') THEN	! TX record
+C
+	      TX_COUNT = TX_COUNT+1		! increment TX count
+	      IF ( .NOT.ORIENT ) GOTO 2		! no orientation, exit loop
+C
+	   ELSEIF ( IECODE.EQ.'TS') THEN	! new text block, reset flags
+C						! for the new text subtring
+	      ORIENT       = .FALSE.		! no orientation yet
+	      HAD_FIRST_CB = .FALSE.		! need new 'first' CB
+C
+	   ELSEIF ( IECODE.EQ.'RO' ) THEN	! RO, orientation record ignored
+C						! if not preceeded by CB
+C
+	      IF ( (TEXTF.OR.SYMBF) .AND. HAD_FIRST_CB ) THEN
+	         ORIENT = .TRUE.		! have an orientation
+	         IF ( SYMBF ) GOTO 2		! if symbol, no more processing
+	      ENDIF				! is necessary, exit the loop
+C
+	   ELSEIF ( IECODE.EQ.'CB' ) THEN	! CB record, code block is a
+C						! cut-down version of that in
+C						! PROCFILE.SRC
+C
+	      CALL EIHRCB_HEAD(CBH)		! get the header
+	      CALL EIHRCB_DATA(CBD)		! get the data
+C
+C read the points into buffers for convenience
+C
+	      STCOL(1) = CODE_X
+	      STCOL(2) = CODE_Y
+	      STPTR = CBH.NROW		 
+C
+C if it's an empty entry (which should never happen!) ignore it
+C
+	      IF (STPTR.EQ.0) GOTO 1
+C
+C Copy the CB data into arrays, if the output is OSTF+ then also
+C copy the height data (only, not interested in other data types).
+C If output is not OSTF+, ignore any height data
+C
+	      CALL IFS_CB_READ(CBH,CBD,STBUF,2,STCOL,1,STPTR)
+C
+	      IF (PLUS) THEN
+	         CALL IFS_CB_READ(CBH,CBD,ZBUF,1,CODE_Z,1,STPTR)
+	      ENDIF
+C
+C process each set of co-ordinates
+C
+	      DO 3 I = 1,STPTR
+C
+	         X     = STBUF(1,I)
+		 Y     = STBUF(2,I)
+C
+		 IF ( PLUS ) THEN			! OSTF+ output
+		    Z  = ZBUF(I)			! want height data
+		 ENDIF
+C
+C remember 1st point of '1st' CB record, set HAD_FIRST_CB to true,
+C then get the next point
+C
+		 IF ( I.EQ.1 .AND. .NOT.HAD_FIRST_CB ) THEN
+		    SAV_X     = STBUF(1,1)
+		    SAV_Y     = STBUF(2,1)
+		    IF ( PLUS ) THEN
+		       SAV_Z  = ZBUF(1)
+		    ENDIF
+	            HAD_FIRST_CB = .TRUE.
+		    GOTO 3
+		 ENDIF
+C
+C Two distinct points are required to calculate an orientation from a CB
+C record (text/symbols only require a single point as the orientation may be
+C specfied by a following RO record )
+C
+ 		 IF ( LINEF ) THEN			! line feature
+C
+C For line features, the orientation calculation involves coordinate
+C differences at OSTF resolution, not IFF resolution. For line
+C features we also need to known whether the feature degenerates to
+C a point, or is a vertical line (OSTF+ has height data)
+C
+		    CALL CNVTOS(SAV_X,SAV_Y,BGI,GX1,GY1,OX1,OY1)
+		    CALL CNVTOS(    X,    Y,BGI,GX2,GY2,OX2,OY2)
+		    DX = BGI*( (GX2+OX2/1000.0) - (GX1+OX1/1000.0) )
+		    DY = BGI*( (GY2+OY2/1000.0) - (GY1+OY1/1000.0) )
+C
+		    IF ( DX.NE.0.0 .OR. DY.NE.0.0) THEN
+		       ORIENT = .TRUE.			! have orientation data
+		       LINE_POINT = .FALSE.		! not degenerate
+		       GOTO 2				! exit outer loop
+C
+C OS want all lines which degenerate to points to be removed, even if there is
+C a height change. SPR 1334.
+C
+C		    ELSEIF ( PLUS .AND. LINE_POINT .AND. Z.NE.SAV_Z ) THEN
+C		       LINE_POINT = .FALSE.		! OSTF+ output, heights
+C							! differ,not degenerate
+		    ENDIF
+C
+		 ELSE					! text or symbols
+C
+C For text or symbols, orientation information exists if 
+C coordinates differ at IFF resolution. If the feature is a
+C symbol, no more processing is necessary. If it is a text
+C string, then other text strings may also exist whose orientations
+C have to be checked
+C
+		    IF ( X.NE.SAV_X .OR. Y.NE.SAV_Y ) THEN
+		       ORIENT = .TRUE.			! have an orientation
+		       IF ( SYMBF ) THEN		! symbol, stop IFF
+			  GOTO 2			! record processing
+		       ELSE
+			  GOTO 1			! text, process the
+		       ENDIF				! next IFF record
+		    ENDIF
+		 ENDIF
+C
+C Save current coordinates (this may not be necessary)
+C
+		 SAV_X     = X
+		 SAV_Y     = Y
+		 IF ( PLUS ) THEN
+		    SAV_Z  = Z
+		 ENDIF
+C
+3	      CONTINUE
+C
+	   ENDIF
+1	CONTINUE
+C
+C set return values
+C
+	NOTNF = .FALSE.				! ensure this flag is false
+C
+2	IF ( ORIENT ) THEN			! orientated feature
+	   IGNORE = .FALSE.			! flag feature is not ignorable
+	   CALL IFFPKE(IECODE, IELEN, NFPOSH)	! reposition to 'NF' record
+	   IF ( IECODE.NE.'NF' ) THEN		! failed to reposition
+	      CALL LSL_PUTMSG(I2OSTF__NOTFOUND,'NF',IECODE)
+	      CHECK_FEATURE = .FALSE.		! flag bad result
+	      BADFEATURE    = .TRUE.		! flag bad feature records
+	   ELSE
+	      CHECK_FEATURE = .TRUE.		! reposition okay, good result
+	      BADFEATURE    = .FALSE.		! flag not bad feature records
+	   ENDIF
+C
+	ELSEIF ( LINEF .AND. LINE_POINT ) THEN	! degenerate line
+	   IGNORE = .TRUE.			! flag feature is ignorable
+	   IF ( IECODE.NE.'EF') THEN		! Current record should be EF
+	      CALL LSL_PUTMSG(I2OSTF__NOTFOUND,'EF',IECODE)
+	      CHECK_FEATURE = .FALSE.		! flag bad result
+	      BADFEATURE    = .TRUE.		! flag bad feature records
+	   ELSE
+	      CALL LSL_PUTMSG(I2OSTF__IGNORE,NFNUM) ! issue warning message
+	      CHECK_FEATURE = .TRUE.		! reposition okay, good result
+	      BADFEATURE    = .FALSE.		! flag not bad feature records
+	   ENDIF
+C
+	ELSE					! feature without orientation
+C						! issue error messages
+	   IF ( TEXTF ) THEN
+	      CALL LSL_PUTMSG( I2OSTF__NORIENT, 'text', NFNUM)
+	   ELSEIF ( SYMBF ) THEN
+	      CALL LSL_PUTMSG( I2OSTF__NORIENT, 'symbol', NFNUM)
+	   ELSE
+	      CALL LSL_PUTMSG( I2OSTF__NORIENT, 'line', NFNUM)
+	   ENDIF
+	   CHECK_FEATURE = .FALSE.		! flag bad result
+	   IGNORE        = .FALSE.		! flag feature is not ignorable
+	   BADFEATURE    = .FALSE.		! flag not bad feature records
+	ENDIF
+C
+	RETURN
+	END

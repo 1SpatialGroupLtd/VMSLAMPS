@@ -1,0 +1,217 @@
+	SUBROUTINE EDIT_AC
+C
+***	IDENT	23DE87
+***	MODULE	EDIT_AC
+C
+C Copyright (C) LaserScan Laboratories Ltd, Cambridge, England
+C
+C Author TJ Ibbs, 31 July 1986
+C
+C to edit the current AC entry
+C
+	IMPLICIT NONE
+C
+C **********************************************************************
+C parameter files
+C
+	INCLUDE	'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'HERE:IPATCHMSG.PAR'	! for error numbers
+	INCLUDE	'HERE:USEFUL.PAR'
+C
+C common files
+C
+  	INCLUDE	'LSL$CMNLSL:CMDCOM.CMN'	! for NOMESS
+  	INCLUDE	'HERE:ENTRY.CMN'	! for entry details
+  	INCLUDE	'LSL$CMNFRT:FRTACD.CMN'
+	INCLUDE	'HERE:SWITCHES.CMN'	! for FATAL_ERROR
+C
+C functions
+C
+	LOGICAL		RDCHS		! read a character
+	LOGICAL		READ_PROMPT
+	LOGICAL		READ_WILD_ACTYPE
+	LOGICAL		READ_WILD_ACVAL
+	INTEGER		READSTR		! read a string
+	LOGICAL		PROMPT_TEXT	! and a text
+	LOGICAL		EDIT_AC_CMD	! read an AC edit command
+	LOGICAL		CHECK_EOL	! look for rubbish at end of line
+	LOGICAL		CHECK_ACD_RANGE	! check AC value
+	INTEGER		RDCOMM		! read a command
+	EXTERNAL	EDIT_AC_CMD_TABLE
+C
+C workspace
+C
+	LOGICAL		OK		! function result
+	INTEGER		I		! for a DO loop
+	BYTE		ICH		! single character
+	LOGICAL		WILD		! true if it is wildcarded
+	LOGICAL		OLD_AC_DATATYPE	! as it says
+	INTEGER		OLD_AC_IVALUE	! the original value
+	INTEGER*2	DCP		! saved decode pointer
+	INTEGER		NUMBER		! scratch number
+	CHARACTER*(TEXT_MAX)	TSTR	! temporary string
+	INTEGER		TLEN		! it's length
+	INTEGER		CMD		! AC edit command number
+	CHARACTER*9	DNAM(5)		! names for AC types
+	INTEGER		DLEN(5)		! their lengths
+	DATA DNAM/'integer','real','character','date','time'/
+	DATA DLEN/7,4,9,4,4/
+C
+C **********************************************************************
+C remember the original AC datatype
+C
+	OLD_AC_DATATYPE = AC_DATATYPE
+C
+C remember the original AC value
+C
+	OLD_AC_IVALUE = AC_IVALUE
+C
+C **********************************************************************
+C check if we have anything on the rest of this line
+C
+	IF ( .NOT.RDCHS(ICH) ) GOTO 1000
+C
+C nothing on the line - so prompt the user
+C
+100	IF ( READ_PROMPT('AC type: ', ' ') ) GOTO 9000
+	IF ( .NOT.RDCHS(ICH) ) THEN		! something on line
+	   CALL BSCH
+	   WILD = .FALSE.			! don't want wildcard
+	   IF ( READ_WILD_ACTYPE( AC_TYPE, WILD ) ) GOTO 100
+	   IF ( CHECK_EOL() ) GOTO 100
+	ENDIF
+	CALL ACDFND( AC_TYPE, .FALSE.)		! load FRTACD common
+	AC_DATATYPE = ACD_DATA_TYPE		! new datatype
+C
+200	IF ( READ_PROMPT('AC value ('//
+     &	   DNAM(AC_DATATYPE)(:DLEN(AC_DATATYPE))//'): ', ' ')) GOTO 9000
+	IF ( .NOT.RDCHS(ICH) ) THEN		! something on line
+	   CALL BSCH
+	   WILD = .FALSE.			! don't want wildcard
+	   IF ( READ_WILD_ACVAL( AC_IVALUE, AC_TYPE, WILD) ) GOTO 200
+	   IF ( CHECK_EOL() ) GOTO 200
+	ENDIF
+C
+C and for the text - note that we cannot output a text longer or shorter
+C than the text originally found in the AC. Thus if there was no text
+C there originally, we don't prompt for one, and if there was one, we
+C prompt but ignore the length returned - we will use the old length
+C
+	IF ( TEXT_LEN.GT.0 ) THEN
+	   IF ( PROMPT_TEXT('AC text: ',TEXT_DSC,TLEN) ) GOTO 9000
+	ENDIF
+C
+C and go off to update the AC
+C
+	GOTO 8500
+C
+C **********************************************************************
+C there was something on the line - unread the character and see if
+C it is an AC editing command. If not, then read it as an AC type
+C
+1000	CALL BSCH
+	CALL DCPSAV(DCP)		! save decode pointer
+C
+C so read the command
+C
+	NOMESS = .TRUE.			! suppress errors from RDCOMM
+	CMD = RDCOMM( EDIT_AC_CMD_TABLE )
+	NOMESS = .FALSE.		! allow errors again
+	IF ( CMD.GT.0 ) THEN		! got a command
+	   IF ( EDIT_AC_CMD(CMD) ) GOTO 9000
+	   GOTO 8000
+	ENDIF
+	WILD = .TRUE.			! wildcard is acceptable
+	CALL DCPSET(DCP)		! restore decode pointer
+	IF ( READ_WILD_ACTYPE( NUMBER, WILD ) ) GOTO 9000
+C
+C so we have a number, or a wildcard...
+C in any case, set up FRTACD common
+C
+	IF (.NOT.WILD) AC_TYPE = NUMBER
+	CALL ACDFND( AC_TYPE, .FALSE.) 
+	AC_DATATYPE = ACD_DATA_TYPE		! new datatype
+C
+C and try to read the AC value
+C
+	WILD = .TRUE.			! wildcard acceptable
+	IF ( READ_WILD_ACVAL( NUMBER, AC_TYPE, WILD) ) GOTO 8000
+	IF (.NOT.WILD) AC_IVALUE = NUMBER
+C
+C if there is a text, read it in
+C - first get the opening quote
+C
+	IF ( RDCHS(ICH) ) GOTO 8000
+	IF ( ICH.NE.Q1 .AND. ICH.NE.Q2 ) THEN
+	   CALL LSL_PUTMSG( LSL__UNEXPCH, ICH )
+	   GOTO 9000
+	ENDIF
+C
+C and then read the string itself
+C - note that if it is too long, we use the truncated version
+C
+	TLEN = READSTR( TSTR(:TEXT_LEN),ICH,ON_CHAR2,.FALSE.,OK )
+C
+	IF ( .NOT.OK ) THEN
+	   CALL LSL_PUTMSG( OK )
+	   IF (OK.NE.LSL__STRTOOLONG) GOTO 9000
+	ENDIF
+C
+C now, if the AC had no text, complain!
+C
+	IF ( TEXT_LEN.EQ.0 ) THEN
+	   CALL LSL_PUTMSG( IPATCH__ACNOTEXT )
+	   GOTO 9000
+	ENDIF
+C
+C otherwise copy the string over (which pads with spaces if necessary)
+C
+	CALL COPY_STRING( TSTR(:TLEN), TEXT_DSC )
+C
+C **********************************************************************
+C check for rubbish at the end of the line
+C
+8000	IF ( CHECK_EOL() ) GOTO 9000
+C
+C and all routes join up here to write the entry back
+C - first the AC type
+C
+8500	CALL EIHW( AC_TYPE, 1, 1 )
+C
+C it is a problem that some ACs have different datatypes for their value
+C If the AC type has been changed in such a way that the value's
+C data-type has changed to/from a real, but a new value has not been
+C supplied, then we must coerce it for them
+C NB. dates, times, and characters are treated as integer for this
+C purpose, so it is quite possible that a silly value will result
+C
+	IF ( OLD_AC_DATATYPE.NE.AC_DATATYPE .AND.
+     &	     OLD_AC_IVALUE.EQ.AC_IVALUE ) THEN
+	   IF ( AC_DATATYPE.EQ.ACD_DATATYPE_R .AND.
+     &		OLD_AC_DATATYPE.EQ.ACD_DATATYPE_I ) THEN
+	      AC_RVALUE = FLOAT(AC_IVALUE)
+	      CALL LSL_PUTMSG( IPATCH__ACNOWREAL )
+	   ELSEIF ( AC_DATATYPE.EQ.ACD_DATATYPE_I .AND.
+     &		OLD_AC_DATATYPE.EQ.ACD_DATATYPE_R ) THEN
+	      AC_IVALUE = NINT(AC_RVALUE)
+	      CALL LSL_PUTMSG( IPATCH__ACNOWINT )
+	   ELSEIF ( CHECK_ACD_RANGE( AC_IVALUE) ) THEN
+	      AC_IVALUE = IFF_ABSENT
+	      CALL LSL_PUTMSG( IPATCH__ACNOWABSENT )
+	   ENDIF
+	ENDIF
+C
+C and write the AC code out, whatever its data-type
+C
+	CALL EIHWL( AC_IVALUE, 1, 2 )
+C
+C and if there was any text, write that out as well
+C
+	IF ( IELEN.GT.3 ) CALL EIHWI( TEXT_BUF, IELEN-3, 4 )
+C
+C **********************************************************************
+C and that's it
+C
+9000	RETURN                      
+	END

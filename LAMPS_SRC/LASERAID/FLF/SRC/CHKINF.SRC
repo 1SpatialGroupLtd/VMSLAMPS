@@ -1,0 +1,212 @@
+	SUBROUTINE CHKINF(ST,ID,NERRS)
+C
+***	MODULE	CHKINF
+***	IDENT	07AP86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	More tests; uses direction info; tidied	 DM	25-Mar-1986
+CMOD	Amend for new SSG (!) but still needs
+CMOD	  more work for dirn info		WJJ	14-Feb-1983
+CMOD	IDU*ID(IU) changed to .XOR.		AJW	12-Aug-1981
+CMOD	T T W L I N changed to LINOUT		AJW	 3-Jul-1981
+CMOD	Tidied, and NUMC replaces EXPC		AJW	 6-May-1981
+CMOD	((IDV1ST.LE.0).XOR.(IDV.LE.0)) replaces
+CMOD	IDV1ST*IDV to avoid integer overflow	AJW	12-Dec-1980
+C	Created					MCF	 4-Jul-1977
+C
+C Checks the results of a scan.
+C Assumes that IMOD is 0 or 1 at present.
+C
+**	IF VAX
+	IMPLICIT NONE
+**	ENDC
+C
+***	PARAMETER/PARAMS/
+	PARAMETER NOTTOP='77777'O	! mask for .NOT.TOPBIT 
+C
+C arguments:
+	REAL	  ST(2)	! start point
+	INTEGER   ID(2)	! scan vector
+	INTEGER   NERRS	! no. of errors found or -1 if aborted with FB16
+C
+C common blocks:
+***	COMMON/ISCBUF/
+***	COMMON/RSE/
+***	COMMON/SCCORR/
+***	COMMON/SCPARM/
+C
+C local workspace:
+	INTEGER   I,J,K			! temporary variables
+	INTEGER   IDU,IDV		! increments
+	INTEGER   IDV1ST		! 1st IDV on current scan line
+	INTEGER   IE(2)			! width info for 2 adjacent encs
+	INTEGER   IOVLP			! line overlap
+	INTEGER   ISCAN			! encounter number
+	INTEGER   IU,IV			! scan direction components
+	INTEGER	  IW,IWW		! width info
+	INTEGER   LSTSCN		! 1st enc on previous scan line
+	INTEGER   MISSED		! number of m/c encs passed over
+	INTEGER	  NEMPTY		! number of empty scan lines
+	INTEGER   THSSCN		! 1st enc on current scan line
+	INTEGER   V(2)			! V coords of 2 adjacent encs
+	INTEGER   WAY			! 1/2 ==> moving in +ve/-ve V
+	LOGICAL*1 HADMES		! had the scan direction msg ?
+	LOGICAL*1 MULT			! subsequent enc on scan line ?
+	REAL	  DV			! V offset due to scan gradient
+C
+C functions:
+	INTEGER	  NEGET
+	INTEGER	  WRITEF
+C
+	SAVE	  HADMES		! preserve between calls
+C
+	DATA	  HADMES/.FALSE./	! initialise
+C
+C ......................................................................
+C
+	IF (IMOD.LT.0.OR.IMOD.GT.1) THEN
+	  CALL WRITEF('Unexpected MOD value (%N)',IMOD)
+	  GO TO 70			! give up
+	ENDIF
+C
+C perform the scan.
+	CALL SETDIR(ID,IDIR,IU,IV)
+	CALL DISMOD(0)
+	CALL FBWT16(TOPBIT)
+	CALL MOVTO(ST(X),ST(Y))
+	CALL SCANBY(ID(X),ID(Y),1)
+	CALL SCSET(0)
+C
+C fill ENCBUF.
+	IUTB=1				! enable direction information
+	INE=NEGET(ENCBUF,-NESIZE)
+	CALL FBRD(K)
+	IF (K.EQ.16) GO TO 70		! given up ?
+	NERRS=0
+	IF (INE.LE.0) GO TO 80		! empty scan ?
+C
+C check the results.
+	LSTSCN=0
+	THSSCN=0
+	MISSED=1			! ignore the DMA word count
+	DO 60 ISCAN=1,INE		! loop through encounters
+	  CALL FBRD(K)
+	  IF (K.EQ.16) GO TO 70		! given up ?
+	  K=0				! no error messages yet
+	  IW=(ENCBUF(W,ISCAN).AND.NOTTOP)
+	  MULT=((IW.AND.NEGMUL).NE.0)	! subsequent encounter ?
+	  IF (ISCAN.EQ.1.AND.MULT) K=WRITEF('First encounter multiple')
+	  IWW=(IW.AND..NOT.NEGMUL)	! remove subsequent enc bit
+	  IF (IMOD.EQ.0) THEN		! edge mode
+	    IF ((IWW.NE.NEGNEG).AND.(IWW.NE.NEGPOS))
+     &	       K=WRITEF('Width of %P0%O6 while MOD=0',IW)
+	  ELSE				! line mode
+	    IF (IWW.LE.NEGLIN) MISSED=MISSED + 1   ! one enc 'swallowed'
+	  ENDIF
+	  IF (MULT) GO TO 20
+C
+C ......................................................................
+C
+C first encounter on new scan line.
+	  LSTSCN=THSSCN
+	  THSSCN=ISCAN
+	  IF (LSTSCN.EQ.0) GO TO 30	! first scan line ?
+	  IDU=ENCBUF(IU,THSSCN) - ENCBUF(IU,LSTSCN)
+	  IF ((IDU.LT.0).XOR.(ID(IU).LT.0))
+     &      K=WRITEF('IDU (%N) and ID(IU) (%N) have opposite sign',
+     &			   IDU,		 ID(IU))
+	  NEMPTY=MAX(ABS(IDU)/IPIT-1,0)	! any empty scan lines ?
+	  IF (HADMES) GO TO 10		! already found duff scan ?
+	  IW=(ENCBUF(W,THSSCN).AND.TOPBIT)
+	  IF ((NEMPTY.AND.1).EQ.0) IW=(IW.XOR.TOPBIT)
+	  IF (IW.NE.(ENCBUF(W,LSTSCN).AND.TOPBIT)) THEN
+	    HADMES=.TRUE.		! only moan once
+	    CALL WRITEF(
+     &	      'Scan direction is not alternating between scan lines')
+	    IF (IFRQ.GT.4.AND.IWID.GT.31) THEN
+	      CALL WRITEF(
+     &	      'FRQ and WID are large so this is probably OK')
+	    ELSE
+	      K=WRITEF(
+     &	      'FRQ and/or WID are not large so this may be a fault')
+	    ENDIF
+	  ENDIF
+10	  IF (IDU.EQ.0) THEN
+	    K=WRITEF('Not multiple encounter, but IDU=0')
+	  ELSE
+	    MISSED=MISSED + NEMPTY	! skipped 'new line' m/c encs
+	  ENDIF
+	  GO TO 30
+C
+C ......................................................................
+C
+C subsequent encounter on current scan line.
+20	  IDU=ENCBUF(IU,ISCAN) - ENCBUF(IU,ISCAN-1)
+	  IF (IDU.NE.0)
+     &      K=WRITEF('Multiple encounter but IDU=%N.',IDU)
+	  V(1)=ENCBUF(IV,ISCAN)
+	  V(2)=ENCBUF(IV,ISCAN-1)
+	  IDV=V(1) - V(2)
+	  IF ((ISCAN-THSSCN).EQ.1) IDV1ST=IDV
+	  IF ((IDV1ST.LE.0).XOR.(IDV.LE.0)) K=WRITEF(
+     &      'Encounters reversed along scan line (DV1 %N., DV %N.)',
+     &						     IDV1ST,IDV)
+	  IW=(ENCBUF(W,ISCAN).AND.TOPBIT)
+	  IF (IW.NE.(ENCBUF(W,ISCAN-1).AND.TOPBIT)) K=WRITEF(
+     &	    'Inconsistent direction information along scan line')
+	  IF (((IDV.AND.TOPBIT).XOR.IW).EQ.0) K=WRITEF(
+     &	    'Direction information does not match encounter positions')
+	  IE(1)=ENCBUF(W,ISCAN).AND.NEGWID
+	  IE(2)=ENCBUF(W,ISCAN-1).AND.NEGWID
+	  IF ((IE(1).EQ.IE(2)).AND.(IMOD.EQ.0))
+     &      K=WRITEF('Edge (%O6) repeated',IE(1))
+	  IF (IMOD.EQ.1) THEN		! check for overlapping lines
+	    IF (IE(1).EQ.NEGPOS.OR.IE(1).EQ.NEGNEG) GO TO 30
+	    IF (IE(2).EQ.NEGPOS.OR.IE(2).EQ.NEGNEG) GO TO 30
+	    WAY=1
+	    IF (IDV.LE.0) WAY=2
+	    IOVLP=(V(WAY) - IE(WAY)/2) - (V(3-WAY) + IE(3-WAY)/2)
+	    IF (IOVLP.LE.0)
+     &        K=WRITEF('Adjacent lines overlap by %N.',IOVLP)
+	  ENDIF
+C
+30	  IF (K.EQ.0) GO TO 60 		! any errors ?
+C
+C ......................................................................
+C
+C had an error - print out the relevant part of the encounter buffer ...
+	  NERRS=NERRS + 1
+	  DO 40 I=MAX(1,ISCAN-2),MIN(INE,ISCAN+2)
+	    IF (I.EQ.ISCAN) THEN
+	      J='*'			! flag suspect encounter
+	    ELSE
+	      J=' '
+	    ENDIF
+	    DV=(FLOAT(ENCBUF(IU,I))/FLOAT(ID(IU)))*FLOAT(ID(IV))
+	    CALL WRITEF('%C%I4 %P0%O6%P  %I6. %I6. (%P0%O4)',
+     &                    J,I,ENCBUF(W,I),ENCBUF(X,I),ENCBUF(Y,I),
+     &		      NINT((FLOAT(ENCBUF(IV,I))-DV)/CR(IV)).AND.'7777'O)
+40	  CONTINUE
+C
+C and the original m/c encounters.
+	  J=ISCAN + MISSED		! offset into DMA buffer
+	  CALL EXPAND
+	  DO 50 I=MAX(2,J-4),MIN(ISIZE,J+3)
+	    IF (I.EQ.J) CALL APPEND(' *')
+	    CALL APPEND(' %P0%O2.%O4',
+     &		       ISHFT(IBUF(I),-12).AND.'17'O,IBUF(I).AND.'7777'O)
+50	  CONTINUE
+	  CALL LINOUT
+	  CALL WRITEF(' ')
+C
+60	CONTINUE
+	GO TO 80			! looked at all points
+C
+C abandoned.
+70	NERRS=-1
+	HADMES=.FALSE.			! clear the 'had message' flag
+C
+80	IUTB=0				! disable direction info again
+	RETURN
+	END
