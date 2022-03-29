@@ -1,5 +1,5 @@
 	SUBROUTINE 	PROCESS
-CDEC$	IDENT	'18AP91'
+CDEC$	IDENT	'19AP91'
 C
 C	Copyright (C)				Laser-Scan Ltd., Cambridge
 C	Created					11-Jun-1990	John Cadogan
@@ -39,7 +39,6 @@ C
 	LOGICAL		RDREAL
 	LOGICAL		RDDBLE
 C
-	INTEGER		RECNUM
 	INTEGER		LEN
 	INTEGER*2	ACLEN
 	INTEGER		I
@@ -57,8 +56,6 @@ C
 	LOGICAL		FIRST_FEATURE
 	LOGICAL		HAD_H_OR_L
 	LOGICAL		HAD_AC
-	LOGICAL		FIRST_COORD
-	LOGICAL		NEXT_COORD
 C
 C Record types
 C
@@ -75,8 +72,6 @@ C
 	FIRST_FEATURE = .TRUE.
 	HAD_RANGE_SET = .FALSE.
 	HAD_H_OR_L    = .FALSE.
-	FIRST_COORD   = .FALSE.
-	NEXT_COORD    = .FALSE.
 C
 	SEGMENT = 'SEGMENT'
 	CODE    = 'CODE'
@@ -131,10 +126,13 @@ C
 	IF ( RECTYPE(1:LEN) .EQ. SEGMENT) THEN
 	   STATUS = RDINT(FSN)
 C	   CALL WRITEF( 'FSN #%^W%I0', FSN)
+C
 	   ZSPTR = 0
 	   PEN_UP  = .TRUE.
 	   DONE_ZS = .FALSE.
 	   HAD_AC  = .FALSE.
+	   IS_SYMBOL = .FALSE.
+	   DONE_START_FEATURE = .FALSE.
 C
 	   STATUS = RDCHS(ICH)
 	   IF (STATUS) GOTO 500		! no char found
@@ -171,9 +169,14 @@ C CODE command
 C
 	ELSEIF( RECTYPE(1:LEN) .EQ. CODE) THEN
 C
+C Store line number of code
+C
+	   CODENUM = RECNUM
+C
 C Get first part of real AA FC
 C
 	   IF (HAD_PAR) THEN
+	      DEFAULT_FC = .FALSE.
 	      LEN = READSTR(ACODE,,ON_SPACE)
 C
 	      DO 99 I = 1,FC_CNT
@@ -185,8 +188,12 @@ C
 C
 C No FC matching found, use default of 0
 C
-	      CALL LSL_PUTMSG(AA2I__FCDEFAULT, ACODE(1:LEN),RECNUM)
-	      FC = 0
+	      if (had_log) CALL LSL_PUTMSG
+     &			(AA2I__FCDEFAULT,ACODE(1:LEN),CODENUM)
+C
+C Set default FC flag to set depending on no. of coords found later
+C
+	      DEFAULT_FC = .TRUE.
 	      GOTO 500
 	   ELSE
 C
@@ -239,36 +246,102 @@ C Read block of coords.
 C
 	ELSE
 	   CALL BSLN
+	   STATUS = RDDBLE(X)
+	   IF (STATUS) THEN				! no coord
+	      CALL LSL_PUTMSG(AA2I__NOCOORD,RECNUM)
+	      GOTO 501					! go back and re-read
+	   ENDIF
 C
-C Set ISQ to 0 to count
+C Set ISQ to 0 to count ISN and start feature
 C
 	   ISQ = 0
 	   CALL IFFNF(FSN, ISQ)
-C
-	   CALL START_FEATURE
-	   I = ACLEN
-	   IF (HAD_AC) CALL IFFAC(1,I,ACBYTE,ACLEN)
-C
-20	   STATUS = RDDBLE(X)
-	   IF (STATUS) THEN		! not another coord
-C
-C Output any points remaining unflushed
-C
-	      IF (ZSPTR.GT.0) CALL FLUSH
-C
-	      CALL IFFEF
-	      GOTO 501
-	   ENDIF
-C
-C Next coord if had a first one
-
-	   IF (FIRST_COORD) NEXT_COORD = .TRUE.
-	   FIRST_COORD = .TRUE.			 ! always
 C
 	   STATUS = RDDBLE(Y)
 	   STATUS = RDDBLE(Z)
 C	   CALL WRITEF( 'Coordinate (%F10.1,%F10.1,%F10.1)',X,Y,Z )
 	   CALL COORD( X,Y,Z )
+C
+	   STATUS = FLRLIN()
+	   RECNUM = RECNUM + 1
+	   IF ( STATUS .EQ. LSL__EOF ) THEN
+	      STATUS = LSL__NORMAL
+C
+C Output any points remaining unflushed
+C
+	      IF (ZSPTR.GT.0) CALL FLUSH
+	      CALL IFFEF
+	      GOTO 999
+	   ENDIF
+C
+C Try to read second line as coord 
+C
+	   CALL BSLN
+	   STATUS = RDDBLE(X)
+C
+	   IF (STATUS) THEN		! not a second coord - Symbol
+	      IS_SYMBOL = .TRUE.
+	      IF (DEFAULT_FC) FC = 999
+	   ELSE
+	      IS_SYMBOL = .FALSE.
+	      IF (DEFAULT_FC) FC = 0
+	   ENDIF
+C
+	   CALL START_FEATURE
+	   I = ACLEN
+	   IF (HAD_AC) CALL IFFAC(1,I,ACBYTE,ACLEN)
+C
+	   IF (STATUS) THEN		! not a second coord
+C
+C Output any points remaining unflushed
+C
+	      IF (ZSPTR.GT.0) CALL FLUSH
+	      CALL IFFEF
+	      GOTO 501			! go back and re-read the line
+	   ENDIF
+C
+C Was a second coord line, continue reading y,z
+C
+	   STATUS = RDDBLE(Y)
+	   STATUS = RDDBLE(Z)
+C	   CALL WRITEF( 'Coordinate (%F10.1,%F10.1,%F10.1)',X,Y,Z )
+	   CALL COORD( X,Y,Z )
+C
+C Cycle round further coord lines
+C
+20	   STATUS = FLRLIN()
+	   RECNUM = RECNUM + 1
+	   IF (STATUS .EQ. LSL__EOF) THEN
+	      STATUS = LSL__NORMAL
+C
+C Output any points remaining unflushed
+C
+	      IF (ZSPTR.GT.0) CALL FLUSH
+	      CALL IFFEF
+	      GOTO 999
+	   ENDIF
+C
+	   CALL BSLN
+	   STATUS = RDDBLE(X)
+	   IF (STATUS) THEN		! not a coord
+C
+C Output any points remaining unflushed
+C
+	      IF (ZSPTR.GT.0) CALL FLUSH
+C	      CALL IFFEF
+	      GOTO 501			! go back and re-read the line
+	   ENDIF
+C
+C Was a second coord line, continue reading y,z
+C
+	   STATUS = RDDBLE(Y)
+	   STATUS = RDDBLE(Z)
+C	   CALL WRITEF( 'Coordinate (%F10.1,%F10.1,%F10.1)',X,Y,Z )
+	   CALL COORD( X,Y,Z )
+C
+	   GOTO 20
+	ENDIF
+C
 C
 C	   IF (.NOT.HAD_H_OR_L) THEN
 C	      STATUS = RDCHS(ICH)
@@ -289,26 +362,6 @@ C		 ENDIF
 C	      ENDIF
 C	   ENDIF
 C
-	   STATUS = FLRLIN()
-	   IF ( STATUS .EQ. LSL__EOF ) THEN
-	      STATUS = LSL__NORMAL
-C
-C Output any points remaining unflushed
-C
-	      IF (ZSPTR.GT.0) CALL FLUSH
-C
-C and end the feature
-C
-	      CALL IFFEF
-C
-	      GOTO 999
-	   ENDIF
-C
-	   RECNUM = RECNUM + 1
-	   CALL BSLN
-C
-	   GOTO 20
-	ENDIF
 C
 C Tidy up
 C

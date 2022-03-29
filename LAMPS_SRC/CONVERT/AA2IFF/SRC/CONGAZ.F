@@ -1,5 +1,5 @@
 	SUBROUTINE 	CONGAZ
-CDEC$	IDENT	'17AP91'
+CDEC$	IDENT	'19AP91'
 C
 C	Copyright (C)			Laser-Scan Ltd., Cambridge
 C	Created				11-Jun-1990	John Cadogan
@@ -33,7 +33,6 @@ C
 	LOGICAL		READSTR
 	LOGICAL		RDINT
 C
-	INTEGER		RECNUM
 	INTEGER		LEN,CATLEN,LEVLEN
 	INTEGER		I
 	INTEGER*2	OLDLAYER
@@ -78,8 +77,8 @@ C
 C read the name text string
 C
 	LEN = READSTR(TEXT)
-	IF (OUTPUT) CALL WRITEF( 'Record #%^L%I0 is type %S',
-     &					RECNUM,TEXT(1:LEN) )
+C	IF (OUTPUT) CALL WRITEF( 'Record #%^L%I0 is type %S',
+C     &					RECNUM,TEXT(1:LEN) )
 	NCHS = LEN
 C
 C County Number
@@ -132,7 +131,10 @@ C
 C Create a string from category and level as real number to compare with
 C the parameter file entry
 C
+	CODENUM = RECNUM
+C
 	IF (HAD_PAR) THEN
+	   DEFAULT_FC = .FALSE.
 	   ACODE = CAT//'.'//LEV
 	   LEN = CATLEN + LEVLEN + 1
 C
@@ -143,7 +145,8 @@ C
 	      ENDIF
 99	   CONTINUE
 C
-	   CALL LSL_PUTMSG(AA2I__FCDEFAULT, ACODE(1:LEN),RECNUM)
+	   DEFAULT_FC = .TRUE.
+	   CALL LSL_PUTMSG(AA2I__FCDEFAULT,ACODE(1:LEN),CODENUM)
 	   FC = 999
 C
 	ELSE
@@ -151,7 +154,7 @@ C
 	      LAYER = 1
 	      CALL IFFNO(LAYER,0,0)		! start new layer
 	      OLDLAYER = LAYER
-	      IF (OUTPUT) CALL WRITEF( 'LAYER #%^W%I0',LAYER )
+C	      IF (OUTPUT) CALL WRITEF( 'LAYER #%^W%I0',LAYER )
 	      FIRST_FEATURE = .FALSE.
 	   ENDIF   
 C
@@ -162,7 +165,7 @@ C
 	      LPOSNO = LPOSE
 	      CALL IFFNO(LAYER,0,0)		! start new layer
 	      OLDLAYER = LAYER
-	      IF (OUTPUT) CALL WRITEF( 'LAYER #%^W%I0',LAYER )
+C	      IF (OUTPUT) CALL WRITEF( 'LAYER #%^W%I0',LAYER )
 	   ENDIF
 	ENDIF
 C
@@ -177,6 +180,7 @@ C
 	   STATUS = FLRLIN()
 	ENDIF
 C
+	DONE_START_FEATURE = .FALSE.
 	FSN = FSN + 1
 	ISQ = 0
 	CALL IFFNF(FSN,ISQ)
