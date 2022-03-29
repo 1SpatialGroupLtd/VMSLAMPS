@@ -1,0 +1,182 @@
+	LOGICAL*4 FUNCTION FIX()
+C
+***	MODULE FIX
+***	IDENT	13JL93
+C
+C	Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+CMOD 521 Now renumbers all the way to 65535!		TJH 20-Oct-1987
+CMOD	 FSN's as unsigned word corrected for first NF	ATT 10-Dec-1986
+C
+C	Author  : A.T. Timms
+C	Created : 13 August 1986
+C
+C	Function to renumber FSN's in DCWFIX
+C
+	IMPLICIT NONE
+C
+C
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNDCWFIX:DCWFIXMSG.PAR'
+	INCLUDE 'LSL$CMNDCWFIX:DCWFIX.CMN'
+	INCLUDE '($SSDEF)'
+C
+C w/s
+	INTEGER*2	IECODE	! entry code for the entry-in-hand
+	INTEGER*2	IELEN	! length of the entry-in-hand
+	INTEGER*2	ISQNUM	! internal sequence number
+	INTEGER*2	NONUM	! current overlay number
+C
+	INTEGER*4	LPOSNO	! IFF address of NO
+	INTEGER*4	NFNUM	! old feature number
+	INTEGER*4	NEWNUM	! new feature number
+	INTEGER*4	NREN	! number of features renumbered
+	INTEGER*4	NLEFT	! number of features not renumbered
+	INTEGER*4	UWNEWN	! new FSN as unsigned word
+	REAL*4		STBUF(2,200)
+	INTEGER*2	PREV_IENDS,IENDS,PREV_NPTS,NPTS,ST
+C
+C.......................................................................
+C
+C initailise a few variables
+	NREN = 0
+	NLEFT = 0
+	NEWNUM = BASE_NUM
+C
+C Convert NEWNUM to unsigned word for re-writing to IFF file
+	  IF (NEWNUM.GT.32767) THEN
+	    UWNEWN=NEWNUM-65536
+	  ELSE
+	    UWNEWN=NEWNUM
+	  ENDIF
+C
+C
+C Let us say what we are doing if we have had /LOG
+	IF (HAD_LOG) THEN 
+	  FIX = IREN__FSNINCBAS
+	  CALL LSL_PUTMSG(FIX,INCRMT_NUM,BASE_NUM)
+	  CALL WRITEF
+     &	  ('between LOWER_LIMIT %N and UPPER_LIMIT %N',LOW_LIM,UP_LIM)
+	ENDIF
+C
+C Select input file and rewind 
+	CALL IFFSEL(INLUN)
+	CALL IFFRWD
+C
+C main loop
+10	CALL IFFSEL(INLUN)
+	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.LT.0) GOTO 90		! unexpected EOF
+	IF (IECODE.EQ.'VO') GOTO 10	! Ignore voids
+	IF (IECODE.EQ.'NF') GOTO 20	! New feature
+	IF (IECODE.EQ.'ST') GOTO 21	! ST
+	IF (IECODE.EQ.'EF') GOTO 30	! End of feature
+	IF (IECODE.EQ.'NO') GOTO 40	! New overlay
+	IF (IECODE.EQ.'EO') GOTO 50	! End overlay
+	IF (IECODE.EQ.'EJ') GOTO 60 	! finished...end of file
+C 
+C If we are not working in_situ then copy entry to output file
+	IF (.NOT.HAD_IN_SITU) CALL EIHCPY(OUTLUN)
+	GOTO 10				! get next IFF entry
+C
+C.......................................................................
+C
+C NF - new feature - to be fixbered ?
+20	NFNUM = 0			! clear longword
+	CALL EIHRI(NFNUM,1,1)		! read NF number
+	CALL EIHRI(ISQNUM,1,2)		! and internal sequence no.
+C
+	CALL IFFSEL(OUTLUN)
+	CALL IFFNF(NFNUM,ISQNUM) ! write NF
+	CALL IFFSEL(INLUN)	! re-select infile
+C
+	ST = 0
+	GOTO 10 			! Get next feature
+C
+C.......................................................................
+C ST
+21	CALL EIHRS(NPTS,IENDS)
+	ST = ST + 1
+	IF (ST.EQ.1) THEN
+	   CALL EIHCPY(OUTLUN)
+	ELSE
+	   IF (IENDS.EQ.0) THEN
+	      ! split previous ST entry
+	      IF (ST.GT.2) THEN
+		 CALL IFFSEL(OUTLUN)
+		 CALL IFFST(STBUF,PREV_NPTS-1,PREV_IENDS)
+		 CALL IFFST(STBUF(1,PREV_NPTS),1,0)
+	      ENDIF
+	   ELSE
+	      IF (ST.GT.2) THEN
+		 CALL IFFSEL(OUTLUN)
+		 CALL IFFST(STBUF,PREV_NPTS,PREV_IENDS)
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+	CALL EIHRR(STBUF,NPTS*2,1)
+	PREV_NPTS = NPTS
+	PREV_IENDS = IENDS
+	GOTO 10
+C
+C.......................................................................
+C EF end of feature so if not in_situ then ....
+30      IF (ST.GT.1) THEN
+	   CALL IFFSEL(OUTLUN)
+	   CALL IFFST(STBUF,PREV_NPTS-1,PREV_IENDS)
+	   CALL IFFST(STBUF(1,PREV_NPTS),1,0)
+	ENDIF
+	IF (.NOT.HAD_IN_SITU) THEN
+	  CALL IFFSEL(OUTLUN) 		! select output file
+	  CALL IFFEF			! write EF entry
+	  CALL IFFSEL(INLUN) 		! re-select input file
+	ENDIF	
+	GOTO 10 			! Get next feature
+C
+C.......................................................................
+C NO - New Overlay - report it if we need to 
+40	CALL EIHRI(NONUM,1,1)		! read OV number
+	IF (HAD_LOG) CALL LSL_PUTMSG(IREN__LAYER,NONUM)
+C
+C If not in_situ then ....
+	IF (.NOT.HAD_IN_SITU) THEN
+	  CALL IFFSEL(OUTLUN) 		! select output file
+	  LPOSNO = LPOSE		! remember position of the NO
+	  CALL IFFNO(NONUM,0,0)		! write a dummy NO entry
+	  CALL IFFSEL(INLUN) 		! re-select input file
+	ENDIF	
+C
+	GOTO 10 			! Get next feature
+C
+C.......................................................................
+C EO _ End overlay....if not in_situ then ....
+50	IF (.NOT.HAD_IN_SITU) THEN
+	  CALL IFFSEL(OUTLUN) 		! select output file
+	  CALL IFFUNO(LPOSNO)		! patch correct NO entry
+	  CALL IFFEO			! output EO entry
+	  CALL IFFSEL(INLUN) 		! re-select input file
+	ENDIF	
+C
+	GOTO 10 			! Get next feature
+C
+C.......................................................................
+C EJ _ end of file ... if not in_situ then copy to outfile
+60	IF (.NOT.HAD_IN_SITU) CALL EIHCPY(OUTLUN)
+	IF (HAD_LOG) THEN
+	  CALL WRITEF('%N features fixbered',NREN)
+	  CALL WRITEF('%N features ignored',NLEFT)
+	ENDIF
+C
+	GOTO 100
+C
+C.......................................................................
+C Error - unexpected end of IFF file !!
+90	FIX = IREN__UNEXPEOF
+	CALL LSL_PUTMSG(FIX)
+C
+C.......................................................................
+100	IF (FIX) FIX = SS$_NORMAL	        ! normal completion
+	RETURN
+	END
