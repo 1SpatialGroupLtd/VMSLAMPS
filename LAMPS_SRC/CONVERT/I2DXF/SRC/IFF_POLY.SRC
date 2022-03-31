@@ -1,6 +1,6 @@
-	LOGICAL FUNCTION IFF_POLY( )
+	LOGICAL FUNCTION IFF_POLY(WITH_COORDS)
 C
-***	IDENT	02SE92
+***	IDENT	11JA94
 ***	MODULE 	IFF_POLY
 C
 C Copyright (C) Laser-Scan Ltd, Cambridge, England
@@ -8,15 +8,27 @@ C
 C Author  :  Paul Pan, 5 September 1989
 C Modified:  Paul Pan, 13 March 1990 to introduce PARAMETER file handling
 C
-CMOD960	     Jon Barber 				4 Feb 1991
+CMOD960	     Jon Barber 				04 Feb 1991
 C	     Output AC heights to group 38, ZS contents only to 3x groups
 C
 CMOD1125     Jon Barber				 	13-Jul-1992
 C	     Use abs coords for /ABSOLUTE qualifier
 C
 CMOD1146     Jon Barber				 	01-Sep-1992
-C	     Fix breaks between coordinate blocks by using the
-C	     last point as the first point of the next block
+C	     Fix breaks between coordinate blocks by outputting
+C	     the whole feature as a single POLYLINE
+C	     Also start new polyline an in-feature pen-up move
+C	     Pass new argument WITH_COORDS to enable being called
+C	     from IFF_LINE with the ST/ZS entry already read in cmn
+C
+CMOD1324     Jon Barber				 	13-Dec-1993
+C	     Fix the output of NF, FS, ST 6 0, ST 6 0, EF;
+C	     ie. strings of invisible breaks to be output as separate
+C	     features.
+C	     Add /DECIMAL_PLACES to specify output format for the x,y
+C	     coordinates.
+C	     Add /IGNORE=INVISIBLE to ignore invisible moves within a
+C	     feature.
 C
 C Purpose :  Convert IFF Interpolated Curve, Symbol String and Area 
 C		features into DXF Polyline format
@@ -24,133 +36,178 @@ C
         IMPLICIT NONE
 C
 C Messages:
-C
-	INCLUDE	 'HERE:I2DXFMSG.PAR'
+	INCLUDE	 'LSL$CMNI2DXF:I2DXFMSG.PAR'
 C
 C Common Blocks:
-C
-        INCLUDE  'LSL$CMNIFF:MD2DES.CMN'
-        INCLUDE  'LSL$CMNFRT:FRTCOM.CMN'        ! added on 17 October 89
+        INCLUDE  'LSL$CMNFRT:FRTCOM.CMN'
 	INCLUDE  'LSL$CMNDXFPAR:LOOKUP.CMN'
-	INCLUDE  'HERE:I2DXF.CMN'		! added on 28/02/90
-        INCLUDE  'HERE:FEATURE.CMN'
-        INCLUDE  'HERE:POINT.CMN'
+        INCLUDE  'LSL$CMNI2DXF:FEATURE.CMN'
+	INCLUDE  'LSL$CMNI2DXF:I2DXF.CMN'
+        INCLUDE  'LSL$CMNI2DXF:POINT.CMN'
+C
+C Argument
+	LOGICAL	    WITH_COORDS		! got coords etc. in cmn
 C
 C Workspace:
-C
-	INTEGER     I		        ! DO loop counter
+	INTEGER     I,COUNT	        ! DO loop counter, pt count
 	INTEGER*2   IELEN		! end of file/entry length
         INTEGER*2   IECODE   
-        INTEGER     TEMP_COUNTER
-	real	    last_coord(3)
+C
+	LOGICAL	    IN_POLYLINE		! started polyline?
+	LOGICAL	    HAD_FIRST_COORD	! had first coord
+	REAL	    FIRST_COORD(3)	! first coordinate for closure
+	REAL	    LAST_COORD(3)	! last coordinate for closure
+	REAL	    X,Y			! coords of single point
 C
 C----------------------------------------------------------------
 C output DXF file has already been selected
 C
-        IFF_POLY = I2DXF__NORMAL
+        IFF_POLY 	= I2DXF__NORMAL
+	HAD_FIRST_COORD = .FALSE.
+	IN_POLYLINE	= .FALSE.
+C
+	COUNT = 0
+	IF (WITH_COORDS) COUNT = NO_OF_PTS
+C
+C Check if already read coords
+C
+	IF (WITH_COORDS) GOTO 100
 C
 C----------------------------------------------------------------
 C test whether input DXF ENTITY type is legal for this routine
 C    valid DXF entry is:
 C    	   POLYLINE
 C
-	IF (DXFENTTYP(SELENTIND).EQ.DXFPOLYLINE) GOTO 104
+	IF (DXFENTTYP(SELENTIND).EQ.DXFPOLYLINE) GOTO 94
 C
 C report illegal cross-referencing and leave the routine
-C	
+C
         IFF_POLY = I2DXF__BADCROSREF
 	CALL LSL_PUTMSG(I2DXF__BADCROSREF)
 	CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
-	GOTO 1000
+	GOTO 2000
 C
 C----------------------------------------------------------------
 C extract record by record from the IFF file 
-C    we just consider the entry containing the area boundary data points
+C we just consider the entry containing the area boundary data points
 C
-104	CALL IFFNXT( IECODE,IELEN )
-        IF( IECODE.EQ.'ST' ) GOTO 102
-        IF( IECODE.EQ.'ZS' ) GOTO 102
-        IF( IECODE.EQ.'EF' ) GOTO 1000
+94	CALL IFFNXT(IECODE,IELEN)
 C
-	GOTO 104
+        IF (IECODE.EQ.'EF') THEN
+	   GOTO 1001
 C
-C read the data points
-C    extract total number of points in the feature
+        ELSEIF (IECODE.EQ.'ST' .OR. IECODE.EQ.'ZS' ) THEN
+	   CALL EIHRS(NO_OF_PTS,PEN)
 C
-102     CONTINUE
+	   IF (PEN.EQ.PEN_UP .AND. IN_POLYLINE) THEN	! new feature, with
+C							! one already going
+C Finish stored point buffer ...
+C check for the graphical type
 C
-        CALL EIHRS(NO_OF_PTS,PEN)
+	      IF (FRTGTTYPE(SELENTIND).EQ.ARETYP) THEN 
 C
-C extract the data points now
+C check whether the area closes, and close it if not
+		IF ( (LAST_COORD(1) .NE. FIRST_COORD(1)) .OR. 
+     &		     (LAST_COORD(2) .NE. FIRST_COORD(2)) ) THEN
+		  CALL FLWSTR( '  0' )
+		  CALL FLWSTR( 'VERTEX' )
+		  CALL FLWSTR( '  8' )
+		  CALL FLWRTF( '%S',DXFLAYNAM(SELLAYIND)
+     &				(1:DXFLAYLEN(SELLAYIND)) ) 
+		  CALL FLWSTR( ' 62' )
+		  CALL FLWRTF( '%^W%N6',ENTCOLOUR(SELENTIND) ) 
 C
-	IF ( IECODE.EQ.'ZS' ) THEN
+		  IF (HAD_ZS) THEN
+		    CALL FLWSTR( ' 70' )		! output flag denoting
+		    CALL FLWSTR( '    32' )		! 3D polyline vertex
+		  ENDIF
 C
-C Read block of x, y, z points into buffer
-C If pen down, get last point of previous block to start this block
+		  CALL OUTPUT_COORD(FIRST_COORD(1), FIRST_COORD(2), 1)
 C
-	   IF (PEN.EQ.PEN_DOWN)	THEN
-	      PT_BUFFER(1,1) = LAST_COORD(1)
-	      PT_BUFFER(2,1) = LAST_COORD(2)
-	      PT_BUFFER(3,1) = LAST_COORD(3)
+		  IF (HAD_ZS) THEN
+		    CALL FLWSTR( ' 30' )
+		    CALL FLWRTF( '%F',FIRST_COORD(3) )
+		  ENDIF
+		ENDIF				! not closed
+	      ENDIF				! area type
 C
-	      CALL EIHRR(PT_BUFFER(1,2), NO_OF_PTS*3, 1)  ! ZS - read 3 values
+	      CALL FLWSTR( '  0' )
+	      CALL FLWSTR( 'SEQEND' )
 C
-	      NO_OF_PTS = NO_OF_PTS + 1			  ! appended to last pt
-	   ELSE
-	      CALL EIHRR(PT_BUFFER, NO_OF_PTS*3, 1)	  ! ZS - read 3 values
+	      IN_POLYLINE = .FALSE.
+	   ENDIF				! pen up and in_polyline
+C
+	   IF (PEN.EQ.PEN_DOWN) THEN
+	      COUNT = COUNT + NO_OF_PTS		! update point count
+	   ELSEIF (PEN.EQ.PEN_UP) THEN
+	      COUNT = NO_OF_PTS			! update point count
 	   ENDIF
 C
-	   HAD_ZS = .TRUE.
-	ELSE
-	   IF (PEN.EQ.PEN_DOWN)	THEN
-	      PT_BUFFER(1,1) = LAST_COORD(1)
-	      PT_BUFFER(2,1) = LAST_COORD(2)
+C ... and read another coord block
 C
-	      DO 97 I = 1,NO_OF_PTS
+	   IF (IECODE.EQ.'ST') THEN
+	      HAD_ZS = .FALSE.
 C
-C Read 1 point at a time because reading a block would mix up the values
-C by putting a pair of values into a 3D array.
-	         CALL EIHRR(PT_BUFFER(1,I+1),2,I*4-3)
-97	      CONTINUE
+C read block of x, y points into buffer
 C
-	      NO_OF_PTS = NO_OF_PTS + 1
-	   ELSE
 	      DO 98 I = 1,NO_OF_PTS
-	         CALL EIHRR(PT_BUFFER(1,I),2,I*4-3)
+	        CALL EIHRR(PT_BUFFER(1,I),2,I*4-3)
 98	      CONTINUE
+C
+	   ELSEIF (IECODE.EQ.'ZS') THEN
+	      HAD_ZS = .TRUE.
+C read block of x, y, z points into buffer
+C
+	      CALL EIHRR(PT_BUFFER, NO_OF_PTS*3, 1)	! ZS - read 3 values
 	   ENDIF
+C
+C Store single point coords
+C
+	   IF (NO_OF_PTS.EQ.1) THEN
+		X = PT_BUFFER(1,1)
+		Y = PT_BUFFER(2,1)
+	   ENDIF
+C
+	   GOTO 100
 	ENDIF
 C
-C Store last coord in case the next ST/ZS block is pen down
+	GOTO 94						! get next if not used
 C
-	LAST_COORD(1) = PT_BUFFER(1,NO_OF_PTS)
-	LAST_COORD(2) = PT_BUFFER(2,NO_OF_PTS)
-	IF (HAD_ZS) LAST_COORD(3) = PT_BUFFER(3,NO_OF_PTS)
+C Check if starting a new feature, or ending the old
 C
-C now check for the graphical types
+100	CONTINUE
 C
-	IF (FRTGTTYPE(SELENTIND).EQ.ARETYP) THEN 
+	IF (PEN.EQ.PEN_UP) THEN				! new feature
+	   FIRST_COORD(1) = PT_BUFFER(1,1)
+	   FIRST_COORD(2) = PT_BUFFER(2,1)
+	   IF (HAD_ZS) FIRST_COORD(3) = PT_BUFFER(3,1)
+	   HAD_FIRST_COORD = .TRUE.
 C
-C check whether the area closes
+	   IF (IN_POLYLINE) THEN
+	      GOTO 1001					! finish old polyline
+	   ELSE
+	      GOTO 103					! start new polyline
+	   ENDIF
 C
-C****************************************************************
-C
-C NB. THIS ONLY CLOSES THE FIRST BLOCK. IF MORE THAN ONE BLOCK OF
-C     COORDINATES, STRANGE RESULTS WILL RESULT
-C
-C****************************************************************
-C
-	   IF ( PT_BUFFER(1,1).NE.PT_BUFFER(1,NO_OF_PTS) .OR. 
-     &		PT_BUFFER(2,1).NE.PT_BUFFER(2,NO_OF_PTS) ) THEN
-	      NO_OF_PTS = NO_OF_PTS + 1
-              PT_BUFFER( 1,NO_OF_PTS ) = PT_BUFFER( 1,1 )
-              PT_BUFFER( 2,NO_OF_PTS ) = PT_BUFFER( 2,1 )
-           ENDIF
+	ELSE
+	   GOTO 105					! continue polyline
 	ENDIF
 C
-C output the area now
+C Start a new polyline
 C
-105	CONTINUE
+103	CONTINUE
+C
+C If less than or equal one point, give up, with a warning
+C
+	IF (COUNT.LE.1) THEN
+	   IF (.NOT.HAD_QUIET .AND. COUNT.EQ.1) THEN
+		CALL LSL_PUTMSG(I2DXF__SINGPNTDEL)
+	   	CALL LSL_ADDMSG(I2DXF__ATPOSITION,X,Y)
+	   	CALL LSL_ADDMSG(I2DXF__ATFSNFC,CURRFSN,IFFFCCODE(SELENTIND))
+	   ENDIF
+C
+	   GOTO 94
+	ENDIF
 C
         CALL FLWSTR( '  0' )
         CALL FLWSTR( 'POLYLINE' )
@@ -171,13 +228,17 @@ C
 	ENDIF
 C
 	IF (HAD_ZS) THEN
-	   CALL FLWSTR( ' 70' )		! output flag denoting
-	   CALL FLWSTR( '     8' )	! 3D polyline
+	   CALL FLWSTR( ' 70' )			! output flag denoting
+	   CALL FLWSTR( '     8' )		! 3D polyline
 	ENDIF
 C
-C now output each VERTEX of the POLYLINE
+	IN_POLYLINE = .TRUE.
 C
-        DO 101 TEMP_COUNTER = 1,NO_OF_PTS
+C Output each VERTEX of the POLYLINE
+C
+105	CONTINUE
+C
+        DO 106 I = 1,NO_OF_PTS
            CALL FLWSTR( '  0' )
            CALL FLWSTR( 'VERTEX' )
            CALL FLWSTR( '  8' )
@@ -191,29 +252,67 @@ C
 	      CALL FLWSTR( '    32' )		! 3D polyline vertex
 	   ENDIF
 C
-	   IF (HAD_ABS) THEN
-	      CALL FLWSTR( ' 10' )
-	      CALL FLWRTF( '%^D%F',PT_BUFFER(1,TEMP_COUNTER) + MD2LOC(1) )
-	      CALL FLWSTR( ' 20' )
-	      CALL FLWRTF( '%^D%F',PT_BUFFER(2,TEMP_COUNTER) + MD2LOC(2) )
-	   ELSE
-	      CALL FLWSTR( ' 10' )
-	      CALL FLWRTF( '%F',PT_BUFFER(1,TEMP_COUNTER) )
-	      CALL FLWSTR( ' 20' )
-	      CALL FLWRTF( '%F',PT_BUFFER(2,TEMP_COUNTER) )
-	   ENDIF
+	   CALL OUTPUT_COORD(PT_BUFFER(1,I), PT_BUFFER(2,I), 1)
 C
 	   IF (HAD_ZS) THEN
 	      CALL FLWSTR( ' 30' )
-	      CALL FLWRTF( '%F',PT_BUFFER(3,TEMP_COUNTER) )
+	      CALL FLWRTF( '%F',PT_BUFFER(3,I) )
 	   ENDIF
-101     CONTINUE
+106     CONTINUE
 C
-        CALL FLWSTR( '  0' )
-        CALL FLWSTR( 'SEQEND' )
-        GOTO 104
+C Save the last coord of this block
+C
+	LAST_COORD(1) = PT_BUFFER(1,NO_OF_PTS)
+	LAST_COORD(2) = PT_BUFFER(2,NO_OF_PTS)
+	IF (HAD_ZS) LAST_COORD(3) = PT_BUFFER(3,NO_OF_PTS)
+C
+	GOTO 94				! get next entry
+C
+C Finish the polyline block
+C
+1001	CONTINUE			! had EF or pen up move to a new entity
+C
+C now check for the graphical types
+C
+	IF (FRTGTTYPE(SELENTIND).EQ.ARETYP) THEN 
+C
+C check whether the area closes, and close it if not
+	   IF ( (LAST_COORD(1) .NE. FIRST_COORD(1)) .OR. 
+     &		(LAST_COORD(2) .NE. FIRST_COORD(2)) ) THEN
+	      CALL FLWSTR( '  0' )
+              CALL FLWSTR( 'VERTEX' )
+              CALL FLWSTR( '  8' )
+              CALL FLWRTF( '%S',DXFLAYNAM(SELLAYIND)
+     &				(1:DXFLAYLEN(SELLAYIND)) ) 
+              CALL FLWSTR( ' 62' )
+              CALL FLWRTF( '%^W%N6',ENTCOLOUR(SELENTIND) ) 
+C
+	      IF (HAD_ZS) THEN
+	         CALL FLWSTR( ' 70' )		! output flag denoting
+	         CALL FLWSTR( '    32' )	! 3D polyline vertex
+	      ENDIF
+C
+	      CALL OUTPUT_COORD(FIRST_COORD(1), FIRST_COORD(2), 1)
+C
+	      IF (HAD_ZS) THEN
+	        CALL FLWSTR( ' 30' )
+	        CALL FLWRTF( '%F',FIRST_COORD(3) )
+	      ENDIF
+           ENDIF
+	ENDIF
+C
+	CALL FLWSTR( '  0' )
+	CALL FLWSTR( 'SEQEND' )
+C
+	IN_POLYLINE = .FALSE.
+C
+	IF (IECODE.EQ.'EF') THEN
+	   GOTO 2000			! finish
+	ELSE
+	   GOTO 94			! get next entry
+	ENDIF
 C
 C Exit
-1000	RETURN
+2000	RETURN
 	END 
 C
