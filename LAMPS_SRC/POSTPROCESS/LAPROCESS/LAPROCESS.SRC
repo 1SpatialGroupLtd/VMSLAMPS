@@ -1,0 +1,634 @@
+	PROGRAM LAPROCESS
+C
+***	MODULE	LAPROCESS
+***	IDENT	03AP87
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+CMOD	Fix error in range determination	 DM	03-Apr-1987
+CMOD	Fix problems with applying CCs to CPs and
+CMOD	determining the sense of closed features DM	23-Mar-1987
+C	Created 				 DM	03-Jul-1986
+C
+C Processing program for data digitised using Laseraid.
+C
+	IMPLICIT NONE
+C
+C parameters:
+	INCLUDE 'LSL$CMNIFF:IFFPAR.PAR'
+	INCLUDE 'LSL$CMNLAPROCESS:LAPROCESSMSG.PAR'
+C
+	INTEGER*4 MAXPTS
+	PARAMETER (MAXPTS=200)	! maximum number of points in o/p ST
+	INTEGER*4 MAXST
+	PARAMETER (MAXST=65535)	! maximum number of STs in feature.
+C
+C common blocks:
+	CHARACTER*4 ERRCOD	! IFF error code
+	COMMON /ERRCMC/ ERRCOD
+	LOGICAL*4 OK		! return status
+	COMMON /ERRCML/ OK
+C
+	INCLUDE 'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+	INCLUDE 'LSL$CMNIFF:IFFJUN.CMN'
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'
+C
+C local workspace:
+	CHARACTER*255 INFIL	! input IFF filename
+	CHARACTER*255 OUTFIL	! output IFF filename
+	INTEGER*2 IECODE,IELEN	! IFF entry
+	INTEGER*2 IFLAGS(4)	! flags from FS entry
+	INTEGER*2 IFLSAV	! saved value of IFLAGS(2)
+	INTEGER*2 IUNIT,OUNIT	! input, output unit numbers
+	INTEGER*2 NARMS		! number of arms belonging to junction
+	INTEGER*2 NFNUM(2)	! feature/internal sequence numbers
+	INTEGER*2 NPTS,IENDS	! ST entry details
+	INTEGER*4 FSTPT		! flag for first point in feature
+	INTEGER*4 III,JJJ,KKK,LLL,MMM  ! temporary variables
+	INTEGER*4 INLEN,OUTLEN	! length of INFIL, OUTFIL
+	INTEGER*4 LPOS		! position of current entry in o/p file
+	INTEGER*4 LPOSFS	! position of FS entry in input file
+	INTEGER*4 LPOSRA	! position of RAnge entry in o/p file
+	INTEGER*4 MODE		! calling mode for in-line 'subroutine'
+	INTEGER*4 STINDX(MAXST)	! index of ST positions
+	INTEGER*4 STNUM		! number of STs in feature so far
+	INTEGER*4 TRNOVR	! 'turnover' ST no. for REORDR feature
+	LOGICAL*1 CLOSED	! closed feature ?
+	LOGICAL*1 FLIPST	! need to flip (reverse) this ST ?
+	LOGICAL*1 POONLY	! 'paintout only' feature ?
+	LOGICAL*1 REORDR	! do we need to re-order this feature ?
+	LOGICAL*1 REVRSE	! do we need to reverse this feature ?
+	LOGICAL*1 USECC,USECP	! non-unity transforms ?
+	LOGICAL*4 ABSENT	! file specification absent ?
+	LOGICAL*4 APLYCC	! want to apply CCs ?
+	LOGICAL*4 ELA		! processing an old ELA file ?
+	LOGICAL*4 FLF		! processing an old FLF file ?
+	LOGICAL*4 LOG		! informational messages ?
+	LOGICAL*4 OLDLAJ	! processing pre-convergence LAJ file ?
+	LOGICAL*4 WARN		! warning messages ?
+	REAL	  AREA		! area of CLOSED feature (to get sense)
+	REAL	  CCOEFF(10,2)	! cubic coefficients
+	REAL	  COORD		! temporary variable
+	REAL	  CPTS(4,4)	! latest control point entry
+	REAL	  JPOS(2)	! junction position
+	REAL	  MAXX,MINX	! X range
+	REAL	  MAXY,MINY	! Y range
+	REAL	  RANGE(4)	! IFF range (equivalenced to MINX etc)
+	REAL	  STPNTS(2,MAXPTS)   ! points in ST entry
+	REAL	  UNITCC(10,2)	! unity CC entry
+	REAL	  X1,Y1,XP,YP	! used in area determination
+	REAL	  YOFF		! used in area determination
+C
+C functions:
+	LOGICAL*4 CPSET		! sets up a 4-point transform
+	LOGICAL*4 DCL_FILE
+	LOGICAL*4 DCL_STARTUP
+	LOGICAL*4 DCL_QUAL
+	INTEGER*4 IFFREP
+	EXTERNAL  IFFREP	! handles IFF error reporting
+	INTEGER*4 LAPROCESS_CLD
+	EXTERNAL  LAPROCESS_CLD	! command language definitions
+C
+	INTEGER*4 SS$_NORMAL
+	EXTERNAL  SS$_NORMAL	! normal successful completion
+C
+	EQUIVALENCE (MINX,RANGE(1))
+	EQUIVALENCE (MAXX,RANGE(2))
+	EQUIVALENCE (MINY,RANGE(3))
+	EQUIVALENCE (MAXY,RANGE(4))
+C
+	DATA IUNIT/1/,OUNIT/2/
+	DATA UNITCC/0.0,1.0,10*0.0,1.0,7*0.0/
+C
+C ......................................................................
+C
+C ... get the command line.
+	CALL LSL_INIT
+C
+	OK=DCL_STARTUP('LAPROCESS',.FALSE.,LAPROCESS_CLD,.FALSE.)
+	IF (.NOT.OK) GO TO 390
+C
+C ... decode it.
+	OK=DCL_QUAL('APPLY_CC',APLYCC,III,JJJ,.FALSE.)
+	IF (.NOT.OK) GO TO 390
+C
+	OK=DCL_QUAL('ELA',ELA,III,JJJ,.FALSE.)
+	IF (.NOT.OK) GO TO 390
+C
+	OK=DCL_QUAL('FLF',FLF,III,JJJ,.FALSE.)
+	IF (.NOT.OK) GO TO 390
+C
+	OK=DCL_QUAL('LOG',LOG,III,JJJ,.FALSE.)
+	IF (.NOT.OK) GO TO 390
+C
+	OK=DCL_QUAL('OLD_LAJ',OLDLAJ,III,JJJ,.FALSE.)
+	IF (.NOT.OK) GO TO 390
+C
+	OK=DCL_QUAL('WARNINGS',WARN,III,JJJ,.FALSE.)
+	IF (.NOT.OK) GO TO 390
+C
+	OK=DCL_FILE('FROM','LSL$IF:IFF.IFF',ABSENT,.FALSE.,.FALSE.)
+	IF (.NOT.OK) GO TO 390
+	INLEN=FIL_LEN(1)
+	INFIL=FILARY(1)(:INLEN)
+C
+	OK=DCL_FILE('TO',INFIL(:INLEN),ABSENT,.FALSE.,.FALSE.)
+	IF (.NOT.OK) GO TO 390
+	IF (ABSENT) THEN
+	   OUTFIL=INFIL				! default to i/p name
+	   HAD_VER=.FALSE.
+	   CALL EXPFLN(OUTFIL,OUTLEN)		! strip off version no.
+	ELSE
+	   OUTLEN=FIL_LEN(1)
+	   OUTFIL=FILARY(1)(:OUTLEN)
+	ENDIF
+C
+C ......................................................................
+C
+C ... open the IFF files.
+	CALL IFFTDY(IFFREP)
+	CALL IFFERM(.FALSE.)			! turn off IFF messages
+C
+	CALL IFFOPN(IUNIT,INFIL(:INLEN),0)	! open input file
+	IF (IERCD.EQ.0) THEN			! success
+	   IF (LOG) THEN
+	      CALL IFFINQ(INFIL,INLEN,JPOS,JPOS,III)	! JPOS is dummy
+	      CALL LSL_PUTMSG(LAPROC__IFFOPNINP,INFIL(:INLEN))
+	   ENDIF
+	ELSE					! failure
+	   CALL LSL_PUTMSG(LAPROC__ERROPIN,INFIL(:INLEN))
+	   IF (OK.EQ.%LOC(SS$_NORMAL)) THEN
+	      CALL IFFERM(.TRUE.)		! IFF internal error
+	      CALL IFFERR(ERRCOD,OK)
+	   ELSE
+	      CALL LSL_ADDMSG(OK)		! system error
+	   ENDIF
+	   GO TO 400
+	ENDIF
+	CALL IFFRWD				! rewind the IFF file
+C
+	CALL IFFOPN(OUNIT,OUTFIL(:OUTLEN))	! open output file
+	IF (IERCD.EQ.0) THEN			! success
+	   IF (LOG) THEN
+	      CALL IFFINQ(OUTFIL,OUTLEN,JPOS,JPOS,III)	! JPOS is dummy
+	      CALL LSL_PUTMSG(LAPROC__IFFOPNOUT,OUTFIL(:OUTLEN))
+	   ENDIF
+	ELSE					! failure
+	   CALL LSL_PUTMSG(LAPROC__ERROPOUT,OUTFIL(:OUTLEN))
+	   IF (OK.EQ.%LOC(SS$_NORMAL)) THEN
+	      CALL IFFERM(.TRUE.)		! IFF internal error
+	      CALL IFFERR(ERRCOD,OK)
+	   ELSE
+	      CALL LSL_ADDMSG(OK)		! system error
+	   ENDIF
+	   CALL IFFCLO(IUNIT)			! close input file
+	   GO TO 400
+	ENDIF
+C
+	CALL IFFERM(.TRUE.)			! enable IFF messages
+C
+C ......................................................................
+C
+C ... let's process !
+	LPOSRA=-1
+	MINX=1.0E38
+	MAXX=-5.0E37
+	MINY=1.0E38
+	MAXY=-5.0E37
+C
+10	CALL IFFSEL(IUNIT)
+20	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) GO TO 370		! unexpected end of file
+	IF (IECODE.EQ.'ST') GO TO 80
+	IF (IECODE.EQ.'FS') GO TO 50
+	IF (IECODE.EQ.'JP') GO TO 70
+	IF (IECODE.EQ.'NF') GO TO 40
+	IF (IECODE.EQ.'EF') GO TO 140
+	IF (IECODE.EQ.'JB') GO TO 250
+	IF (IECODE.EQ.'CP') GO TO 270
+	IF (IECODE.EQ.'CC') GO TO 320
+	IF (IECODE.EQ.'RA') GO TO 360
+	IF (IECODE.EQ.'EJ') GO TO 380
+30	CALL EIHCPY(OUNIT)			! copy entry to o/p file
+	GO TO 20
+C
+C ... NF entry - create one and remember where it is.
+40	CALL EIHRI(NFNUM,2,1)
+	CALL IFFSEL(OUNIT)
+	LPOS=LPOSE
+	CALL IFFNF(NFNUM(1),NFNUM(2))		! create the NF ...
+	CALL IFFPKE(IECODE,IELEN,LPOS)		! take it in hand ...
+	CALL EIHMK(1)				! and mark it
+	STNUM=0
+	GO TO 10
+C
+C ... FS entry - extract and/or set relevant flags in second word.
+50	LPOSFS=LPOSH				! remember where it is
+	CALL IFFSEL(OUNIT)
+	LPOS=LPOSE				! find where it will go
+	CALL IFFSEL(IUNIT)
+	CALL EIHCPY(OUNIT)			! copy it away
+	CALL EIHRI(IFLAGS,4,1)			! read the flags
+	POONLY=((IFLAGS(2).AND.16).NE.0)	! paintout only ?
+	IF (POONLY) GO TO 60
+	CALL IFFSEL(OUNIT)
+	CALL EIHMK(0)				! no - remove mark
+	CLOSED=((IFLAGS(2).AND.1).NE.0)
+	REVRSE=((IFLAGS(2).AND.4).NE.0)
+	REORDR=((IFLAGS(2).AND.8).NE.0)
+	IFLSAV=IFLAGS(2)
+	IF (ELA) IFLAGS(2)=IFLAGS(2).AND.(.NOT.2)	! edge mode
+	IF (FLF.OR.OLDLAJ) IFLAGS(2)=IFLAGS(2).OR.2	! line mode
+	IF (REORDR) IFLAGS(2)=IFLAGS(2).AND.(.NOT.8)	! reordered
+	IF (IFLAGS(2).EQ.IFLSAV) GO TO 10	! anything changed ?
+	CALL IFFPKE(IECODE,IELEN,LPOS)		! take FS in hand ...
+	CALL EIHWI(IFLAGS,4,1)			! and write it back
+	GO TO 10
+C
+C ... 'paintout only' feature - delete it.
+C ... do this messily by copying all the entries and then voiding them
+C ... (so as to avoid upsetting all the addresses).
+60	CALL IFFNXT(IECODE,IELEN)		! get next entry
+	IF (IELEN.EQ.-1) GO TO 370
+	IF (IECODE.EQ.'EF') GO TO 240		! up to next EF
+	CALL EIHCPY(OUNIT)
+	GO TO 60
+C
+C ... JP entry - can't re-order or reverse junction feature.
+70	IF (REORDR.OR.CLOSED) THEN
+	   IF (REORDR.AND.WARN)
+     &	      CALL LSL_PUTMSG(LAPROC__REORDERJUNC,NFNUM(1),NFNUM(2))
+	   IF (CLOSED.AND.REVRSE.AND.WARN)
+     &	      CALL LSL_PUTMSG(LAPROC__REVERSEJUNC,NFNUM(1),NFNUM(2))
+	   CALL IFFSEL(OUNIT)
+	   CALL IFFDEL				! delete output feature
+	   CALL IFFNF(NFNUM(1),NFNUM(2))	! re-create the NF ...
+	   CALL IFFFS(IFLAGS)			! and the FS
+	   CLOSED=.FALSE.
+	   REORDR=.FALSE.
+	   CALL IFFSEL(IUNIT)
+	   CALL IFFPKE(IECODE,IELEN,LPOSFS)	! go back to FS
+	   IF (IECODE.NE.'FS') THEN
+	      CALL LSL_PUTMSG(LAPROC__ERRFINDFS)
+	      GO TO 400
+	   ENDIF
+	   GO TO 20				! re-copy rest of ftr
+	ENDIF
+	GO TO 30
+C
+C ... ST entry.
+80	STNUM=STNUM + 1
+	CALL EIHRS(NPTS,IENDS)
+	IF (REORDR.OR.CLOSED) THEN		! if order matters ...
+	   IF (STNUM.GT.MAXST) THEN		! and room in index ...
+	      CALL LSL_PUTMSG(LAPROC__TOOMNYSTS,NFNUM(1),NFNUM(2))
+	      GO TO 400
+	   ENDIF
+	   STINDX(STNUM)=LPOSH			! remember positions
+	   IF (CLOSED) GO TO 20
+	   IF ((IENDS.AND.1).EQ.0) TRNOVR=STNUM	! 'turnover' point
+	   GO TO 20
+	ELSE
+	   MODE=1				! copy it straight away
+	   FLIPST=.FALSE.			! as it stands
+	ENDIF
+C
+C ......................................................................
+C
+C ... in-line subroutine to read and write STs in maximum blocks of
+C ... MAXPTS points, possibly reversing them.
+C ... the return is handled by MODE.
+90	KKK=0
+100	JJJ=MIN(NPTS,MAXPTS)
+	CALL EIHRR(STPNTS,2*JJJ,4*KKK+1)
+	IF (USECC) THEN
+	   DO 110 III=1,JJJ			! apply cubic coeffs
+	      CALL CCUSE(STPNTS(1,III),STPNTS(2,III),CCOEFF)
+110	   CONTINUE
+	ENDIF
+	DO 120 III=1,JJJ			! apply 4-pnt transform
+	   IF (USECP) CALL CPUSE(STPNTS(1,III),STPNTS(2,III))
+	   MINX=MIN(MINX,STPNTS(1,III))
+	   MAXX=MAX(MAXX,STPNTS(1,III))
+	   MINY=MIN(MINY,STPNTS(2,III))
+	   MAXY=MAX(MAXY,STPNTS(2,III))
+120	CONTINUE
+C
+C ... if necessary flip the ST (N.B. we have already guaranteed that
+C ... NPTS will never be greater than MAXPTS in this situation).
+	IF (FLIPST) THEN
+	   DO 130 III=1,JJJ/2
+	      MMM=JJJ - III + 1
+	      COORD=STPNTS(1,III)
+	      STPNTS(1,III)=STPNTS(1,MMM)
+	      STPNTS(1,MMM)=COORD
+	      COORD=STPNTS(2,III)
+	      STPNTS(2,III)=STPNTS(2,MMM)
+	      STPNTS(2,MMM)=COORD
+130	   CONTINUE
+	ENDIF
+C
+C ... create the output ST.
+	CALL IFFSEL(OUNIT)
+	CALL IFFST(STPNTS,JJJ,IENDS)		! create transformed ST
+	CALL IFFSEL(IUNIT)
+	NPTS=NPTS - JJJ
+	IF (NPTS.EQ.0) GO TO (20,190,220),MODE	! we've read it all now
+	IENDS=1					! pen down for rest
+	KKK=JJJ
+	GO TO 100
+C
+C ......................................................................
+C
+C ... EF entry - end the feature.
+C ... if REORDR or CLOSED we have some work to do first !
+140	IF (.NOT.(REORDR.OR.CLOSED)) GO TO 240
+	IF (STNUM.EQ.0) GO TO 240		! easy if no STs (!!)
+C
+C ... read through the list of STs for this feature.
+C ... N.B. we assume that closed features have no internal invisible
+C ... steps, and re-order features have only one (the 'turnover' point).
+	IF (CLOSED) THEN			! determine sense
+	   AREA=0.0
+	   FSTPT=2				! flag new feature
+	   TRNOVR=1
+	   DO 170 LLL=1,STNUM
+	      CALL IFFPKE(IECODE,IELEN,STINDX(LLL))
+	      IF (IECODE.NE.'ST') THEN
+		 CALL LSL_PUTMSG(LAPROC__ERRFINDST)
+		 GO TO 400
+	      ENDIF
+	      CALL EIHRS(NPTS,IENDS)
+	      KKK=0
+150	      JJJ=MIN(NPTS,MAXPTS)
+		 CALL EIHRR(STPNTS,2*JJJ,4*KKK+1)
+C
+C ... accumulate the area of the polygon (well, twice it actually).
+		 IF (FSTPT.EQ.2) THEN		! 1st point in feature ?
+		    XP=STPNTS(1,1)		! 'previous' point
+		    YP=0.0
+		    YOFF=STPNTS(2,1)		! origin offset
+		 ENDIF
+C
+		 DO 160 III=FSTPT,JJJ
+		    X1=STPNTS(1,III)
+		    Y1=STPNTS(2,III) - YOFF
+		    AREA=AREA + (X1 - XP)*(Y1 + YP)
+		    XP=X1
+		    YP=Y1
+160		 CONTINUE
+		 FSTPT=1
+		 NPTS=NPTS - JJJ
+		 IF (NPTS.EQ.0) GO TO 170	! we've read it all now
+		 KKK=JJJ
+	      GO TO 150
+170	   CONTINUE
+C
+	   IF (AREA.GT.1.0E-6) THEN		! clockwise
+	      IF (REVRSE) GO TO 210
+	      TRNOVR=STNUM + 1
+	   ELSEIF (AREA.LT.-1.0E-6) THEN	! anti-clockwise
+	      IF (.NOT.REVRSE) GO TO 210
+	      TRNOVR=STNUM + 1
+	   ELSE					! can't determine sense
+	      IF (WARN)
+     &		 CALL LSL_PUTMSG(LAPROC__SENSEUNKN,NFNUM(1),NFNUM(2))
+	      GO TO 210				! copy it as it stands
+	   ENDIF
+	ENDIF
+C
+C ... output STs backwards from the turnover point ...
+	MODE=2
+	FLIPST=.TRUE.
+	DO 200 LLL=TRNOVR-1,1,-1
+	   CALL IFFPKE(IECODE,IELEN,STINDX(LLL))
+	   IF (IECODE.NE.'ST') THEN
+	      CALL LSL_PUTMSG(LAPROC__ERRFINDST)
+	      GO TO 400
+	   ENDIF
+	   CALL EIHRS(KKK,IENDS)
+	   IENDS=1
+180	   NPTS=MIN(MAXPTS,KKK)
+	   KKK=KKK - NPTS
+	   IF ((LLL.EQ.TRNOVR-1).AND.(KKK.EQ.0)) IENDS=0 ! new first ST
+	   GO TO 100				! call the o/p 'routine'
+190	   IF (KKK.NE.0) GO TO 180
+200	CONTINUE
+C
+C ... then forwards to complete the feature.
+210	MODE=3
+	FLIPST=.FALSE.
+	DO 220 LLL=TRNOVR,STNUM
+	   CALL IFFPKE(IECODE,IELEN,STINDX(LLL))
+	   IF (IECODE.NE.'ST') THEN
+	      CALL LSL_PUTMSG(LAPROC__ERRFINDST)
+	      GO TO 400
+	   ENDIF
+	   CALL EIHRS(NPTS,IENDS)
+	   IF (LLL.GT.1) IENDS=1
+	   GO TO 90				! call the o/p 'routine'
+220	CONTINUE
+C
+C ... all STs done - get back to our EF.
+	CALL IFFPKE(IECODE,IELEN,STINDX(STNUM))	! move to last ST in ftr
+230	CALL IFFNXT(IECODE,IELEN)
+	IF (IECODE.EQ.'VO') GO TO 230		! ignore VO
+	IF (IECODE.NE.'EF') THEN
+	   CALL LSL_PUTMSG(LAPROC__UNEXPENT,
+     &			   IECODE,'ST','EF',NFNUM(1),NFNUM(2))
+	   GO TO 400
+	ENDIF
+C
+C ... now actually create the EF.
+240	CALL IFFSEL(OUNIT)
+	CALL IFFEF
+	IF (.NOT.POONLY) GO TO 10		! if paintout only ...
+	CALL IFFUPP(LPOSF,LPOSM,LPOSE,LPOSE)	! advance past EF ...
+	CALL IFFVOM				! void from NF to EF
+	CALL EIHMK(0)				! remove the mark
+	GO TO 10
+C
+C ... JB entry - update the junction positions.
+250	CALL IFFSEL(OUNIT)
+	LPOS=LPOSE				! find where it will go
+	CALL IFFSEL(IUNIT)
+	CALL EIHCPY(OUNIT)			! copy it away
+	CALL IFFSEL(OUNIT)
+	CALL IFFPKE(IECODE,IELEN,LPOS)		! find it in output file
+	IFPOSJ=0				! move to start of it
+260	CALL IFJNXT(JPOS(1),JPOS(2),NARMS)	! get next junction
+	   IF (NARMS.EQ.-1) GO TO 10		! found end of JB ?
+	   IF (USECC) CALL CCUSE(JPOS(1),JPOS(2),CCOEFF)
+	   IF (USECP) CALL CPUSE(JPOS(1),JPOS(2))
+	   MINX=MIN(MINX,JPOS(1))
+	   MAXX=MAX(MAXX,JPOS(1))
+	   MINY=MIN(MINY,JPOS(2))
+	   MAXY=MAX(MAXY,JPOS(2))
+	   CALL EIHWR(JPOS(1),1,IFPOSJ+JEPOSX)	! patch coordinates back
+	   CALL EIHWR(JPOS(2),1,IFPOSJ+JEPOSY)
+	GO TO 260				! get next junction
+C
+C ... CP entry - set up 4-point transform.
+270	CALL IFFSEL(OUNIT)
+	LPOS=LPOSE				! find where it will go
+	CALL IFFSEL(IUNIT)
+	CALL EIHCPY(OUNIT)			! copy it away
+	CALL EIHRR(CPTS,16,1)			! read the entry
+	IF (USECC) THEN
+	   DO 280 III=1,4			! apply cubic coeffs
+	      IF (USECC) CALL CCUSE(CPTS(1,III),CPTS(2,III),CCOEFF)
+280	   CONTINUE
+	ENDIF
+	DO 290 III=1,4				! spot unit transform
+	   IF (ABS(CPTS(1,III)-CPTS(3,III)).GE.1.0E-6) GO TO 300
+	   IF (ABS(CPTS(2,III)-CPTS(4,III)).GE.1.0E-6) GO TO 300
+290	CONTINUE
+	USECP=.FALSE.				! unit transform
+	IF ((.NOT.OLDLAJ).AND.LOG) CALL LSL_PUTMSG(LAPROC__UNITCP)
+	GO TO 20
+C
+300	IF (CPSET(CPTS)) THEN			! set up 4-pnt transform
+	   IF (USECC) THEN
+	      CALL LSL_PUTMSG(LAPROC__BADCPORCC)
+	   ELSE
+	      CALL LSL_PUTMSG(LAPROC__BADCP)
+	   ENDIF
+	   GO TO 400
+	ENDIF
+	USECP=.TRUE.
+	DO 310 III=1,4				! transform the l.h.s.
+	   CALL CPUSE(CPTS(1,III),CPTS(2,III))
+310	CONTINUE
+	CALL IFFSEL(OUNIT)			! write the CP back
+	CALL IFFPKE(IECODE,IELEN,LPOS)
+	CALL EIHWR(CPTS,16,1)
+	GO TO 10
+C
+C ... CC entry - just over-write it unless /APPLY_CC etc specified.
+320	CALL IFFSEL(OUNIT)
+	LPOS=LPOSE				! find where it will go
+	CALL IFFSEL(IUNIT)
+	CALL EIHCPY(OUNIT)			! copy it away
+	USECC=.FALSE.
+	IF (.NOT.(APLYCC.OR.ELA.OR.FLF)) GO TO 350  ! need to apply it ?
+	CALL EIHRR(CCOEFF,20,1)			! yes
+	DO 330 III=1,10				! check not unity CC
+	   IF (CCOEFF(III,1).NE.UNITCC(III,1)) GO TO 340
+	   IF (CCOEFF(III,2).NE.UNITCC(III,2)) GO TO 340
+330	CONTINUE
+	IF (LOG) CALL LSL_PUTMSG(LAPROC__UNITCC)
+	GO TO 20
+C
+340	USECC=.TRUE.				! need to use CCOEFF
+350	CALL IFFSEL(OUNIT)			! write unity CC back
+	CALL IFFPKE(IECODE,IELEN,LPOS)
+	CALL EIHWR(UNITCC,20,1)
+	IF (LOG) CALL LSL_PUTMSG(LAPROC__UPDATEDCC)
+	GO TO 10
+C
+C ... RA entry - remember where it is in the output file.
+360	CALL IFFSEL(OUNIT)
+	LPOSRA=LPOSE
+	CALL IFFSEL(IUNIT)
+	GO TO 30
+C
+C ... unexpected end of IFF file - moan and fall through to EJ case.
+370	CALL LSL_PUTMSG(LAPROC__UNEXPEOF)
+C
+C ... EJ entry - write back range and close everything down.
+380	CALL IFFSEL(OUNIT)
+	CALL IFFEJ				! create the EJ
+	CALL IFFPKE(IECODE,IELEN,LPOSRA)
+	IF (IECODE.NE.'RA') THEN
+	   CALL LSL_PUTMSG(LAPROC__ERRFINDRA)
+	   GO TO 400
+	ENDIF
+	CALL EIHWR(RANGE,4,1)
+	CALL IFFCLO(IUNIT)
+	CALL IFFCLO(OUNIT)
+	IF (OK) THEN
+	   LSL_STATUS=(%LOC(SS$_NORMAL).OR.LSL_QUIET)
+	   GO TO 400
+	ENDIF
+C
+C ... report error.
+390	CALL LSL_PUTMSG(OK)
+C	
+400	CALL EXIT(LSL_STATUS)
+	END
+C
+	SUBROUTINE CCUSE(X,Y,C)
+C
+***	MODULE	CCUSE
+***	IDENT	08JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+C	Created from Laseraid's TRXUSE		 DM	08-Jul-1986
+C
+C Applies bicubic coefficients in C to coordinates (X,Y).
+C
+	IMPLICIT NONE
+C
+C arguments:
+	REAL	  X,Y		! input and output coordinates
+	REAL	  C(10,2)	! bicubic coefficients
+C
+	REAL	  T		! temporary variable
+C
+C ......................................................................
+C
+	T=C(1,1) + X*(C(2,1) + X*(C(4,1) + X*C(7,1))) +
+     &		   X*Y*(C(5,1) + X*C(8,1) + Y*C(9,1)) +
+     &		   Y*(C(3,1) + Y*(C(6,1) + Y*C(10,1))) 
+	Y=C(1,2) + X*(C(2,2) + X*(C(4,2) + X*C(7,2))) +
+     &		   X*Y*(C(5,2) + X*C(8,2) + Y*C(9,2)) +
+     &		   Y*(C(3,2) + Y*(C(6,2) + Y*C(10,2))) 
+	X=T
+	RETURN
+	END
+C
+	SUBROUTINE IFFREP
+C
+***	MODULE	IFFREP
+***	IDENT	11JL86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader
+C
+C	Created 				 DM	04-Jul-1986
+C
+C IFF error handler - returns IERCD (IFF internal error code) in ERRCOD
+C and IERNM (VMS error code) in OK.
+C
+	IMPLICIT NONE
+C
+	CHARACTER*4 ERRCOD	! IFF error code
+	COMMON /ERRCMC/ ERRCOD
+	LOGICAL*4 OK		! return status
+	COMMON /ERRCML/ OK
+C
+	INCLUDE 'LSL$CMNIFF:IFFHAN.CMN'
+C
+	BYTE	  CODEB(4)
+	INTEGER*4 CODE
+	INTEGER*4 III
+C
+	EQUIVALENCE (CODEB(1),CODE)
+C
+C ......................................................................
+C
+	CODE=IERCD
+	DO 10 III=1,4
+	   ERRCOD(III:III)=CHAR(CODEB(III))
+10	CONTINUE
+	OK=IERNM
+	RETURN
+	END
