@@ -1,0 +1,210 @@
+	PROGRAM	IPOLYGON
+C
+***	MODULE	IPOLYGON
+***	IDENT	06MY92
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England
+C
+CMOD	As POLYGONS_INIT now also does dynamic memory allocation, it also
+C	sets the value of LSL_STATUS. if LSL_STATUS is set FALSE then there is 
+C	obviously no need to do anything else.		 SG  06-May-1992
+C
+CMOD1056 Remove some command variables common to POLMERGE and IPOLYGON
+C	from COMMAND.CMN into SERVICE:PARAMS.PAR for the addition of 
+C	/ABS in IPOLYGON				 JB  31-Oct-1991
+
+CMOD	Added version announcement			PGH  11-May-1991
+CMOD	Added AC propagation stuff			SGH  20-Nov-1989
+CMOD	Major upgrade for new version 			AC   20-May-1988
+CMOD	Major upgrade for creation of polygons from left-right
+C	Coded segments	(Work ins. W87/8)		TJH  27-Aug-1987
+C
+C	Author						TJH  11-Feb-1987
+C 
+C IPOLYGON is the Laser-Scan automatic IFF POLYGON creation and
+C labelling utility. It is the primary IFF polygon creation utility and
+C forms the basis for the Laser-Scan POLYGONS Package. 
+C 
+C IPOLYGON is designed to be run in batch mode and all options may be
+C specified on the command line. No user interaction is required during
+C processing. 
+C 
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'../../service/src/params.par'
+	INCLUDE 	'ipolygonmsg.par'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Common:
+	INCLUDE		'command.cmn'
+C
+	INCLUDE		'../../service/src/array_ptrs.cmn'
+C
+	INCLUDE		'../../service/src/file.cmn'
+	INCLUDE 	'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 	'LSL$CMNLSL:TXTC.CMN'
+	INCLUDE 	'LSL$CMNLSL:CLD.CMN'
+	INCLUDE 	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 	'LSL$CMNLSL:STATUS.CMN'
+C
+C W/S
+	LOGICAL		OK,STATUS	! temp storage for $STATUS
+	INTEGER		NPOLY		! number of polygons
+	INTEGER		NTREE		! number of trees
+	INTEGER		NISOL		! number of isolations
+C
+C Functions: (in order of appearance)
+	INTEGER    	CMDLIN		! decodes cmd. line/open files
+	INTEGER    	TAB_BUILD	! tabulates positions
+	INTEGER    	SEED_CHECK	! checks seed point features
+	INTEGER    	FORM_POLYGONS	! forms polygons (!)
+	INTEGER    	FORM_BOXES	! forms box structure
+	INTEGER		GET_BOUNDING	! determines bounding polygon
+	INTEGER		ISOLATIONS	! determines isolated polygons
+	INTEGER		NESTS		! determines polygon nesting
+	INTEGER		LOCATE_TREES	! determines tree nesting
+	INTEGER		ASSIGN_SEED	! assigns seed point to polygons
+	INTEGER		ASSIGN_LRCODE	! assigns L/R codes to polygons
+	INTEGER		INDEX_SEGMENTS	! set up arrays for polygon tracing
+	INTEGER		PROPAGATE_COVER	! propagates partial AC coding
+	INTEGER		ASSIGN_COVER	! assigns multiple codes to polygons
+	INTEGER		OUTOPT		! fills various output files
+	INTEGER    	CLOSE_FILES	! closes files
+C
+C ..............................................................................
+C Increase default size of TXTBUF and EXPBUF to allow for 255 byte AC, CH, TC,
+C and TX strings 
+C
+	CALL SET_EXPMAX(255)
+	CALL SET_TXTLIM(255)
+C
+	CALL LSL_INIT				! Initialise LSLLIB
+	CALL VERSION('IPOLYGON')		! announce ourself
+	CALL POLYGONS_INIT			! Initialise POLYGONS library
+C
+C ..............................................................................
+C Get, parse and decode IPOLYGON command line. All results returned via
+C /COMMAND/ or /PARAMS/ common blocks. All error message output is done within
+C CMDLIN(). CMDLIN() uses OPEN_INPUT() and OPEN_OUTPUT() to open all files which
+C are needed. 
+C
+	IF (LSL_STATUS) LSL_STATUS=CMDLIN()
+C
+C ..............................................................................
+C If CMDLIN() has succeeded all the groundwork will have been done and the
+C input file(s) are ready for processing. Build address tables and perform some
+C of the basic suitability checks. 
+C
+	IF (LSL_STATUS) THEN
+	   IF (HAD_LIS) CALL FLWSEL(LISLUN)
+	   CALL FRAMED_MES('Building IFF Address Tables',27)
+	   LSL_STATUS=TAB_BUILD(
+     &			HAD_SEED,HAD_SEED_FILE,HAD_LRCODE,
+     &			LFT_CODE,RGT_CODE,ONE_WARN)
+	ENDIF
+C
+C ..............................................................................
+C locate the seed points. Then do the optional seed point checks. 
+
+	IF (LSL_STATUS) LSL_STATUS=SEED_CHECK()
+C
+C ..............................................................................
+C If all is well we can go ahead and track through the junction structure using
+C the tabulated pointers in /TABLES/ and so form lists of the segments which
+C form each polygon. 
+C
+	IF (LSL_STATUS) THEN
+	   CALL FRAMED_MES('Forming Polygons',16)		
+	   LSL_STATUS=FORM_POLYGONS(CLOCK,ONE_USE,.FALSE.,NPOLY,NTREE)
+	ENDIF
+C
+C ..............................................................................
+C Determine which is the bounding polygon. (It would be pretty unpleasant to do
+C the nested polygon tests of that one!) 
+C
+	IF (LSL_STATUS)  LSL_STATUS=GET_BOUNDING(CLOCK)
+C
+C ..............................................................................
+C We now have polygons, polygon ranges and, if specified, seed point addresses.
+C Set up a "sectored spatial index" (box structure) to speed searching for
+C seedpoints in polygons and nested polygons. 
+C
+	IF (LSL_STATUS) LSL_STATUS=FORM_BOXES()
+C
+C ..............................................................................
+C Isolated polygons will muck up the seed point assignment process. Identify
+C isolated polygons and flag them in /POLYGONS/POLY_START 
+C
+	IF (LSL_STATUS) THEN
+	   CALL FRAMED_MES('Identifying Isolated Polygons',29)	
+	   LSL_STATUS=ISOLATIONS(CLOCK,HAD_AREA,NISOL)
+	ENDIF
+C
+C ..............................................................................
+C We now have sectored workspace . "quickly" determine any polygon nesting... 
+C
+	IF (LSL_STATUS.AND.(NISOL.GT.0)) THEN
+	   CALL FRAMED_MES('Identifying Nested Polygons',27)
+	   LSL_STATUS=NESTS()
+	ENDIF
+C
+C ..............................................................................
+C find out which polygons isolated trees (if any) belong to....	
+C
+	IF (LSL_STATUS.AND.ONE_USE.AND.(NTREE.GT.0)) THEN 
+	   CALL FRAMED_MES('Identifying Nested Linework',27)
+     	   LSL_STATUS=LOCATE_TREES()
+	ENDIF
+C
+C ..............................................................................
+C Having determined any nested polygons it is now quite trivial to assign seed
+C points or L/R codes to each polygon (cough, splutter etc). 
+C
+C 	........................................................................
+C	If /SEED then check the assignment of seed points to polygons
+C
+	IF (HAD_SEED.AND.LSL_STATUS) LSL_STATUS=ASSIGN_SEED()
+C
+C 	........................................................................
+C	If /LRCODE then check the assignment of L/R codes to polygons
+C
+	IF (HAD_LRCODE.AND.LSL_STATUS) LSL_STATUS=ASSIGN_LRCODE()
+C
+C 	........................................................................
+C	If /PROPAGATE then set up the polygon list and segment index arrays
+C
+	IF (HAD_PROP.AND.LSL_STATUS) LSL_STATUS=INDEX_SEGMENTS()
+C 	........................................................................
+C	then propagate the coverages
+C
+	IF (HAD_PROP.AND.LSL_STATUS) LSL_STATUS=PROPAGATE_COVER()
+C 	........................................................................
+C	then check the assignment of L/R codes to polygons
+C
+	IF (HAD_PROP.AND.LSL_STATUS) LSL_STATUS=ASSIGN_COVER()
+C
+C 	........................................................................
+C	output to any selected IFF and text output files.
+C
+	IF (LSL_STATUS) LSL_STATUS=OUTOPT()
+C
+C ..............................................................................
+C Close all opened files
+C
+	STATUS = LSL_STATUS
+	OK=CLOSE_FILES()
+C
+C set $STATUS to original error
+	IF (.NOT.OK .AND. .NOT.STATUS) LSL_STATUS = STATUS
+C
+	IF (PME) CALL PME_EXIT
+C
+C ..............................................................................
+C Finished...
+	CALL LSL_EXIT(LSL_STATUS)
+	END
+C
