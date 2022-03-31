@@ -1,0 +1,284 @@
+	LOGICAL FUNCTION ARITHM()
+C
+***	MODULE	ARITHM
+***	IDENT	06JL92
+C
+C	Copyright (C), Laser-Scan Ltd., Cambridge, England
+C
+CMOD    Make result null if any nulls in input	       MWSR 09-Dec-1988
+CMOD    Treat bytes as unsigned			       MWSR 24-Nov-1988
+CMOD	Classification added				JHR 23-Sep-1988
+CMOD	Comments tidied					TJH 12-Sep-1988
+CMOD	Corrected bug in variable mapping		 SG 18-Apr-1991
+CMOD	Modified to deal with matrix or real_world 
+C	coords outside input file			 SG 24-Apr-1991
+C
+C	Created						TJH 18-Jan-1988
+C
+C Function to apply the expression to the input DTI files 
+C and write the result into the output DTI file
+C
+C Function returns SS$_NORMAL if all is well, otherwise SS$_ABORT
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters
+	INCLUDE	'LSL$DTMCREATESYS:MESPAR.PAR'
+	INCLUDE	'LSL$CMNDTI:DTIPAR.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'($SSDEF)/NOLIST'
+C
+C Common:
+	INCLUDE	'LSL$CMNDTI:DTIHDR.CMN'
+	INCLUDE	'LSL$CMNDTICOMBINE:CONTROL.CMN'
+	INCLUDE	'LSL$CMNDTICOMBINE:FILES.CMN'
+	INCLUDE	'LSL$CMNDTICOMBINE:XPRCMN.CMN'
+	INCLUDE	'LSL$CMNLSL:EXCEPTION.CMN'
+C
+C Functions:
+	INTEGER	DTI_READ_BYTE_DATA
+	INTEGER	DTI_READ_WORD_DATA
+	INTEGER	DTI_READ_LONG_DATA
+	INTEGER	DTI_READ_REAL_DATA
+	INTEGER	DTI_WRITE_BYTE_DATA
+	INTEGER	DTI_WRITE_WORD_DATA
+	INTEGER	DTI_WRITE_LONG_DATA
+	INTEGER	DTI_WRITE_REAL_DATA
+	INTEGER	DTI_MINMAX_DATA
+	INTEGER	EVLXPR			! evaluate expression
+	INTEGER LIB$PUT_OUTPUT
+C W/s
+	INTEGER		IERR		! function return
+	INTEGER		I,J,K,INLUN	! loop vars
+	INTEGER*2 	AWORD		! temp storage
+	INTEGER*4	ALONG
+C
+	BYTE		ABYTE
+	INTEGER*2	UNSIGNED_ABYTE
+	EQUIVALENCE(UNSIGNED_ABYTE,ABYTE) ! treat byte values as unsigned
+C
+	INTEGER*4	ROW,COL
+	INTEGER*4	WIN_ROW,WIN_COL
+	INTEGER		MODVAL
+	INTEGER		NON_NULL
+C
+	REAL		REAL_ROW,REAL_COL
+	REAL		AREAL
+	REAL		APOST(MAX_DTI-1)  ! apost from each in-file
+C
+	LOGICAL		IS_NULL		  ! is it a null result?
+C
+	CHARACTER	FILE_ROW
+	CHARACTER*1	ESC
+	PARAMETER	(ESC = CHAR(27))
+C
+C ......................................................................
+C  if window hasn't been set, set window to be entire file
+C
+	DO 10 I=1,MAX_DTI-1
+	   IF (.NOT.WIN_SET(I)) THEN
+	      DTI_WINDOW_SWX(I)=1
+	      DTI_WINDOW_SWY(I)=1
+	      DTI_WINDOW_NEX(I)=X_EXTENT(I)
+	      DTI_WINDOW_NEY(I)=Y_EXTENT(I)
+	   ENDIF
+10	CONTINUE
+C
+C ......................................................................
+C Show expression for diagnostics
+	MODVAL = X_SIZE/15
+C
+	IF(MODVAL.EQ.0) MODVAL =1		! TO prevent divide by zero err
+C
+	IF (DIAG) THEN
+c	    CALL LIB$PUT_OUTPUT(ESC//'[?3l'//ESC//'[1;1H')
+	    CALL WRITEF (EXPSTR)
+	ENDIF
+C..........................................................................
+C for each matrix unit in output file calculate a result
+C
+	DO 50 I=1,X_SIZE			! for each row
+	   IF (( .NOT.DIAG ).AND.( MOD(I,MODVAL).EQ.1 ))
+     &		CALL WRITEF('%N COLUMNS TO GO',X_SIZE-I)
+	   DO 40  J=1,Y_SIZE			! for each column
+	      IS_NULL = .FALSE.			! reset flagS
+	      NON_NULL = 0
+C
+C	      ............ real world coordinates .......................
+C
+	      REAL_ROW = X_OFFSET(OUTLUN) + I * X_GRID(OUTLUN)
+	      REAL_COL = Y_OFFSET(OUTLUN) + J * Y_GRID(OUTLUN)
+	      IF (DIAG) THEN			! assumes a VT100 terminal
+c		CALL LIB$PUT_OUTPUT(ESC//'[3;1H')
+	        CALL WRITEF ('matrix: row= %I , col= %I%T',I,J)
+	        CALL WRITEF ('real  : row= %F , col= %F%T',REAL_ROW,REAL_COL)
+		CALL WRITEF
+	      ENDIF		
+C
+	      DO 20 INLUN=1,MAX_DTI-1		! for each file
+	         IF (DTILUN_INUSE(INLUN)) THEN
+C
+C		    ............. matrix coords in INLUN .....................
+C		 	   	
+		    ROW= NINT( (REAL_ROW-X_OFFSET(INLUN))/X_GRID(INLUN))
+		    COL= NINT( (REAL_COL-Y_OFFSET(INLUN))/Y_GRID(INLUN))
+C
+C		    .... are we in range of window of interest in INLUN ......
+C
+		    IF ( (ROW.LT.DTI_WINDOW_SWX(INLUN)) .OR.
+     &			 (ROW.GT.DTI_WINDOW_NEX(INLUN)) .OR.
+     &			 (COL.LT.DTI_WINDOW_SWY(INLUN)) .OR.
+     &			 (COL.GT.DTI_WINDOW_NEY(INLUN)) ) THEN
+		       IS_NULL = .TRUE.
+		    ELSE
+		       IF (DATA_TYPE(INLUN).EQ.DATA_BYTE) THEN
+		          ARITHM=DTI_READ_BYTE_DATA(INLUN,ABYTE,ROW,COL)
+		          IF(NULL_HANDLING.AND.(ABYTE.EQ.DTI_NULL_BYTE)) THEN
+			    IS_NULL = .TRUE.
+		          ELSEIF (ARITHM) THEN	
+		   	    APOST(INLUN) = UNSIGNED_ABYTE
+		          ENDIF
+	               ELSEIF (DATA_TYPE(INLUN).EQ.DATA_WORD) THEN
+		          ARITHM=DTI_READ_WORD_DATA(INLUN,AWORD,ROW,COL)
+		          IF(NULL_HANDLING.AND.(AWORD.EQ.DTI_NULL_WORD)) THEN
+			    IS_NULL = .TRUE.
+		          ELSEIF (ARITHM) THEN	
+			    APOST(INLUN)=AWORD
+		          ENDIF
+	               ELSEIF (DATA_TYPE(INLUN).EQ.DATA_LONG) THEN
+		          ARITHM=DTI_READ_LONG_DATA(INLUN,ALONG,ROW,COL)
+		          IF(NULL_HANDLING.AND.(ALONG.EQ.DTI_NULL_LONG)) THEN
+		            IS_NULL = .TRUE.
+		          ELSEIF (ARITHM) THEN	
+			    APOST(INLUN)=ALONG
+		          ENDIF
+	               ELSEIF (DATA_TYPE(INLUN).EQ.DATA_REAL) THEN
+	                  ARITHM=DTI_READ_REAL_DATA(INLUN,AREAL,ROW,COL)
+		          IF(NULL_HANDLING.AND.(AREAL.EQ.DTI_NULL_REAL)) THEN
+		            IS_NULL = .TRUE.
+		          ELSEIF (ARITHM) THEN
+			    APOST(INLUN) = AREAL
+		          ENDIF
+	               ENDIF
+		    ENDIF
+		    IF (.NOT.ARITHM) THEN
+			CALL LSL_PUTMSG(ARITHM)
+			GOTO 60
+		    ELSEIF (IS_NULL) THEN
+		       APOST(INLUN) = DTI_NULL_REAL
+		    ELSE
+		       NON_NULL = NON_NULL +1
+		    ENDIF
+		    IF (DIAG) THEN
+			WIN_ROW = ROW - DTI_WINDOW_SWX(INLUN)
+			WIN_COL = COL - DTI_WINDOW_SWY(INLUN)
+			CALL EXPAND('file :%C%T','A'+INLUN-1)
+			CALL APPEND('abs (%I4 , %I4 ) ,', ROW    , COL    )
+			CALL APPEND('win (%I4 , %I4 ) ,', WIN_ROW, WIN_COL)
+		        CALL WRITAP('value = %F%T',APOST(INLUN) )
+		    ENDIF
+	         ENDIF
+20	      CONTINUE
+	      IF (NON_NULL.EQ.0) GOTO 35		!no inputs
+C
+C..........................................................................
+C We now have in APOST(1) a real value for the post in FILEA file
+C and in APOST(n) a real value for the corresponding post in the FILEn
+C file
+C We can now substitute these values into our expression.
+C..........................................................................
+C
+	      DO 30 K=1,ARGNUM
+	         IF (ARGMAP(K).NE.0)  ARGLST(K)=APOST(ARGMAP(K))	
+30	      CONTINUE
+C
+C..........................................................................
+C Now evaluate the expression
+C..........................................................................
+C
+	      IERR=EVLXPR(EXPRSN,EXPRLN,ARGLST,ARGNUM,XPRVAL)
+	      IF (IERR.GE.0) THEN
+		 CALL EXPAND (ERROR//'evaluating expression')
+		 IF (IERR.EQ.1) CALL WRITAP('- Invalid RP syntax')
+		 IF (IERR.EQ.2) CALL WRITAP('- insufficient operators')
+		 IF (IERR.EQ.3) CALL WRITAP('- invalid character')
+		 IF (IERR.EQ.4) CALL WRITAP('- wrong number of operands')
+		 IF (IERR.EQ.5) CALL WRITAP('- forbidden operation')
+	         GOTO 60
+	      ENDIF
+	      IF ( CLASS_ENABLED )  THEN	! is classification active
+		CALL CLASS_INVOKE(XPRVAL)	! check value against classes
+	      ENDIF
+C
+C..........................................................................
+C Now (if necessary) convert the result to fit the data type of the
+C output DTI file. We must of course check that the result will fit
+C without overflow or underflow!
+C..........................................................................
+C
+35	      IF (DIAG)	CALL WRITEF ('result: %F%T',XPRVAL)
+	      ARITHM = .FALSE.
+	      IF (BYTE_RESULT) THEN
+		 IF(NON_NULL.EQ.0) THEN
+	            UNSIGNED_ABYTE = DTI_NULL_BYTE
+		    ARITHM = .TRUE.
+	         ELSEIF (XPRVAL.LT.0.0) THEN
+	            CALL WRITEF(ERROR//'Byte underflow at X= %N, Y= %N',I,J)
+	         ELSEIF (XPRVAL.GT.255.0) THEN
+	            CALL WRITEF(ERROR//'Byte  overflow at X= %N, Y= %N',I,J)
+	         ELSE
+	            UNSIGNED_ABYTE=INT(XPRVAL)	! convert real to byte
+		    ARITHM = .TRUE.
+		 ENDIF
+	         IF (ARITHM) ARITHM = DTI_WRITE_BYTE_DATA(OUTLUN,ABYTE,I,J)
+	      ELSEIF (WORD_RESULT) THEN
+		 IF(NON_NULL.EQ.0) THEN
+	            UNSIGNED_ABYTE = DTI_NULL_BYTE
+		    ARITHM = .TRUE.
+	         ELSEIF (XPRVAL.LT.-32768) THEN
+	            CALL WRITEF(ERROR//'Word underflow at X= %N, Y= %N',I,J)
+	         ELSEIF (XPRVAL.GT.32767) THEN
+	            CALL WRITEF(ERROR//'Word  overflow at X= %N, Y= %N',I,J)
+	         ELSE
+	            AWORD=INT(XPRVAL)		! convert real to word
+		    ARITHM = .TRUE.
+		 ENDIF
+		 IF (ARITHM)  ARITHM=DTI_WRITE_WORD_DATA(OUTLUN,AWORD,I,J)
+	      ELSEIF (LONG_RESULT) THEN
+		 ARITHM = .TRUE.
+		 IF (NON_NULL.EQ.0) THEN
+		    ALONG = DTI_NULL_LONG
+		 ELSE
+	            ALONG = INT(XPRVAL)
+		 ENDIF
+	         ARITHM=DTI_WRITE_LONG_DATA(OUTLUN,ALONG,I,J)
+	      ELSEIF (REAL_RESULT) THEN
+	         ARITHM = .TRUE.
+		 ARITHM=DTI_WRITE_REAL_DATA(OUTLUN,XPRVAL,I,J)
+	      ENDIF
+	      IF (.NOT.ARITHM) THEN
+	         CALL LSL_PUTMSG(ARITHM)
+	         ARITHM=.FALSE.
+	         GOTO 60
+	      ENDIF
+40	   CONTINUE
+50	CONTINUE
+C
+C..........................................................................
+C Patch in the output file z-range
+C..........................................................................
+C
+	ARITHM=DTI_MINMAX_DATA(OUTLUN,.TRUE.,IERR)
+	IF (.NOT.ARITHM) THEN
+	   CALL LSL_PUTMSG(ARITHM)
+	   CALL LSL_ADDMSG(IERR)
+	ENDIF
+60	IF (ARITHM) THEN
+	   ARITHM=SS$_NORMAL
+	ELSE
+	   ARITHM=SS$_ABORT
+	ENDIF
+	RETURN
+	END
