@@ -1,0 +1,397 @@
+	PROGRAM IFJ
+C
+***	MODULE	IFJ
+***	IDENT	04SE87
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+CMOD	Reset STPOS2 if have to split ST	 DM	04-Sep-1987
+CMOD	Give all 4 args to IFFUPP as required	CCB	26-Oct-1985
+CMOD	Correct EO address patched into NO entry,
+CMOD	filenames now CHARACTER*60		TJH	28-May-1985
+CMOD	Handles filenames correctly		 DM	29-Mar-1985
+CMOD	Max NF number up to 65535		ACM	26-Mar-1985
+CMOD	LPOSST set up correctly for multiple STs,
+CMOD	range entry enlarged to stop sector errs,
+CMOD	preserves old FSNs (new ISQs generated)	 DM	10-May-1984
+CMOD	Tests for zero length segments		 DM	13-Apr-1984
+CMOD	Never attaches a junction to a 1 pnt ST,
+CMOD	output file is of type .IFJ, tidied	 DM 	29-Mar-1984
+CMOD	Patch ST entries correctly		 DM	15-Mar-1984
+CMOD	Outputs in same format as LAJ		 DM	05-Mar-1984
+CMOD	Adjustment of end points to junctions	 RD	06-May-1983
+CMOD	Made to work (with JP entries)		 RD	19-Apr-1983
+CMOD	To VAX					AJW	11-Feb-1982
+C	Created 				MCF	08-Feb-1980
+C
+C Program to put IFF junction structure entries into an IFF file.
+C Junction pointer (JP) entries are inserted at the ends of ST
+C entries. Junction block (JB) entries and sector header (SH) entries
+C are also created.
+C Options are:
+C	/NS:int:int	- number of sectors in each axis
+C			  (default is 10*10).
+C	/TO:real	- end matching tolerance in IFF coord
+C			  units (default is 0).
+C	/TY		- diagnostic typing (default is off).
+C	/AR:int		- maximum number of arms/junction
+C			  (default is 4).
+C
+C Input is an IFF file holding segments as separate features.
+C Any junction entries already present in this file (correct or
+C incorrect) are ignored and not reflected in the output file.
+C End points of segments are adjusted to match the junction
+C coords. The default input name is: LSL$IF:.IFF
+C
+C Output is a copy of the input file with IFF junction entries
+C inserted. Isolated islands consisting of 1 feature will have
+C JPs added to both end points. The end points of islands should
+C therefore be identical.
+C
+	IMPLICIT NONE
+C
+	PARAMETER INLUN=1
+	PARAMETER OUTLUN=2
+	PARAMETER MAXST=128
+C
+C Common blocks.
+***	COMMON/CMN:HIT/
+***	COMMON/CMN:IFJ/
+***	COMMON/LSL$CMNIFF:IFFHAN/
+***	COMMON/LSL$CMNIFF:IFFJUN/
+***	COMMON/LSL$CMNVIO:EXPC/
+***	COMMON/LSL$CMNVIO:TXTC/
+C
+	INTEGER*4 JPPOSF,JPPOSL	! holds pos of 1st,last JP in feature
+	INTEGER*4 LPOSNO	! remember position of NO entry
+	INTEGER*4 LPOSST	! pos of ST BEFORE 1 pnt ST in i/p file
+	INTEGER*4 OUTPOS	! remember output file end position.
+	INTEGER*4 STPOS1,STPOS2	! hold positions of the 1st and last
+C				! ST entries of a ft in output file.
+	INTEGER*2 SWTAB(4)	! switch table.
+	INTEGER*2 I,J
+	INTEGER*2 NPTS,IENDS
+	INTEGER*2 INDX,WAY
+	INTEGER*2 IPLEN		! length of input filename
+	INTEGER*4 ISQ		! internal sequence number from NF.
+	INTEGER*2 IECODE,IELEN
+	INTEGER*2 NOVER		! overlay number
+	LOGICAL*1 HADST		! has an ST entry in this feature ?
+	REAL JCPOSF(2),JCPOSL(2) ! hold position of 1st, 2nd jncs in ftr
+	REAL NXTPNT(2)		! second point in feature (in segment)
+	REAL OLDPSF(2),OLDPSL(2) ! hold position of 1st, last pts in ftr
+	REAL RANGE(4)		! range values
+	REAL SEGLEN		! dist between 1st two points in segment
+	REAL SEGTOL		! tolerance to keep segment
+	REAL STBUF(2,MAXST)	! buffer for ST coords
+	CHARACTER*60 IFNAM1,IFNAM2	! title of input/output files.
+C
+C Functions:
+	INTEGER EXPAND
+	INTEGER TXTCML
+	LOGICAL RDFILT
+	LOGICAL RDSWVI,RDSWVR
+C
+	DATA SWTAB/'NS','TO','TY','AR'/		! switches.
+C
+C ......................................................................
+C
+C Initialise.
+	CALL IFFTDY
+	HTPOSH=0
+	HTPOSJ=0
+	TXTCLI=0
+C
+C Read command line.
+10	IF (TXTCLI.EQ.1) GO TO 330		! already had command ?
+	I=TXTCML('IFJ> ')
+	IF (I) 20,10,30
+C
+C Eof or error
+20	IF (I.NE.-10) CALL WRITEF('Command line error %N',I)
+	GO TO 330
+C
+C Decode command line & create file name.
+30	CALL BSLN
+	IF (RDFILT(IFNAM1,60,'LSL$IF:.IFF;0',
+     &		   .FALSE.,.TRUE.,.FALSE.,I)) GO TO 60
+C
+C Read switch options, setting defaults first.
+	HITTOL=0.0
+	MAXARM=4
+	TYPNO=0
+	SECTX =10
+	SECTY =10
+40	CALL RDSWCH(SWTAB,4,INDX,WAY)
+	IF (INDX) 60,140,50
+50	GO TO (70,100,110,120),INDX
+60	CALL WRITEF('Syntax error in command line')
+	GO TO 10
+C
+C /NS:<int>:<int> - set number of sectors in x and y.
+70	IF (RDSWVI(SECTX)) GO TO 80
+	IF (RDSWVI(SECTY)) GO TO 80
+	IF (SECTX.LE.0 .OR. SECTY.LE.0) GO TO 90
+	GO TO 40
+80	CALL WRITEF('Sector numbers must be given as /NS:int:int')
+	GO TO 10
+90	CALL WRITEF('Sector numbers must be greater than zero')
+	GO TO 10
+C
+C /TO:<real> - set tolerance for end-point matching.
+100	IF (.NOT.(RDSWVR(HITTOL))) GO TO 40
+	CALL WRITEF('Tolerance must be specified as /TO:real')
+	GO TO 10
+C
+C /TY - do diagnostic typing
+110	TYPNO=1
+	GO TO 40
+C
+C /AR - set the maximum number of arms allowed per junction.
+120	IF (RDSWVI(MAXARM)) GO TO 130
+	IF (MAXARM.LE.10) GO TO 40
+	CALL WRITEF('Too many arms specified with /AR (limit is 10)')
+	GO TO 10
+130	CALL WRITEF('Number of arms must be specified as /AR:int')
+	GO TO 10
+C
+C Now set up the input (and output) IFF file.
+140	IPLEN=EXPAND('Input file:  %S',IFNAM1) - 13
+	CALL TTWLIN
+	CALL IFFOPN(INLUN,IFNAM1,0)
+	IF (IERCD.NE.0) GO TO 330
+	CALL IFFRWD
+C
+C The output filename is of type .IFJ
+C Construct the output filename from the input filename.
+	I=MAX(INDEX(IFNAM1,':'),INDEX(IFNAM1,'>'),INDEX(IFNAM1,']')) + 1
+	J=INDEX(IFNAM1(I:),'.') - 1		! ignore the file type
+	IF (J.LE.0) J=IPLEN - I + 1
+	IFNAM2=IFNAM1(:I+J-1)
+	IFNAM2(I+J:)='.IFJ'
+	CALL WRITEF('Output file: %S;0',IFNAM2(:I+J+3))
+	CALL IFFOPN(OUTLUN,IFNAM2)
+C
+C Main loop through the input IFF file.
+150	CALL IFFSEL(INLUN)
+	CALL IFFNXT(IECODE,IELEN)
+C
+C Is this the end of the input IFF file?
+C We cannot assume that EJ is the end of the file since SH and JB
+C entries can appear afterwards (not that they are used at all).
+	IF (IELEN.EQ.-1) GO TO 320
+	IF (TYPNO.GT.0) CALL WRITEF('%C %N',IECODE,IELEN)
+C
+C Don't copy ST until a JP entry has been inserted.
+160	IF (IECODE.EQ.'ST') GO TO 270
+C
+C Copy NFs and EFs directly rather than with EIHCPY since it
+C leaves the 'in feature' variable incorrect (library bug).
+	IF (IECODE.EQ.'NF') GO TO 170 
+	IF (IECODE.EQ.'EF') GO TO 200
+C
+C similarly don't copy the NO and EO entries as the EO address in the NO
+C entry will be wrong for the new, enlarged, file
+	IF (IECODE.EQ.'NO') GO TO 180
+	IF (IECODE.EQ.'EO') GO TO 190
+C
+C Ignore void entries and old junction stuff.
+	IF (IECODE.EQ.'VO') GO TO 150
+	IF (IECODE.EQ.'JP') GO TO 150
+	IF (IECODE.EQ.'JB') GO TO 150
+	IF (IECODE.EQ.'SH') GO TO 150
+C
+C Copy other entries into the output file.
+	CALL EIHCPY(OUTLUN)
+C
+C If this is a range entry then use it to set up the SH entry.
+	IF (IECODE.NE.'RA') GO TO 150
+C
+C RA - set up the sector header.
+	CALL EIHRR(RANGE,4,1)	! read range (xmin,xmax,ymin,ymax).
+	CALL IFFSEL(OUTLUN)
+	CALL IFFSH(RANGE(1)-0.001,RANGE(3)-0.001,
+     &		   (RANGE(2)-RANGE(1))/SECTX+0.001,
+     &		   (RANGE(4)-RANGE(3))/SECTY+0.001,SECTX,SECTY)
+	GO TO 150
+C
+C NF - simple copy to output file since can't use EIHCPY.
+170	CALL EIHRI(NFNUM,1,1)
+	NFNUM = IAND(NFNUM,65535)	! covert to unsigned longword
+	CALL EIHRI(ISQ,1,2)
+	ISQ = IAND(ISQ,65535)		! convert to unsigned longword
+	IF (TYPNO.GT.0) CALL WRITEF('(%C %^L%N %N)',IECODE,NFNUM,ISQ)
+	ISQ=0				! generate new sequence numbers
+	HADST=.FALSE.
+	CALL IFFSEL(OUTLUN)
+	CALL IFFNF(NFNUM,ISQ)
+	GO TO 150
+C
+C NO - New overlay
+180	CALL EIHRI(NOVER,1,1)		! read overlay number
+	CALL IFFSEL(OUTLUN)
+	LPOSNO=LPOSE
+	CALL IFFNO(NOVER,0,0)
+	GO TO 150
+C
+C EO - End overlay
+190	CALL IFFSEL(OUTLUN)
+	CALL IFFPKE(IECODE,IELEN,LPOSNO)
+	IF (IECODE.NE.'NO') GO TO 250
+	CALL EIHWL(LPOSE,1,3)
+	CALL IFFEO
+	GO TO 150
+C
+C EF - simple copy to output file since can't use EIHCPY.
+200	CALL IFFSEL(OUTLUN)
+	CALL IFFEF
+	IF (.NOT.HADST) GO TO 150	! nothing else to do ?
+C
+C We've had one or more ST entries - set up the junction structure.
+	OLDPSF(1)=JCPOSF(1)		! save current values
+	OLDPSF(2)=JCPOSF(2)
+	CALL ADDNOD(JCPOSF(1),JCPOSF(2),STPOS1,1)
+C
+C Now that the position of the junction entry is known we can enter
+C it into the JP entry.
+	CALL IFFPKE(IECODE,IELEN,JPPOSF)
+	IF (IECODE.NE.'JP') GO TO 240
+	CALL EIHWI(HTPOSH,2,1)
+	CALL EIHWI(HTPOSJ,1,3)
+C
+C Repeat for the 2nd end point.
+	OLDPSL(1)=JCPOSL(1)
+	OLDPSL(2)=JCPOSL(2)
+	CALL ADDNOD(JCPOSL(1),JCPOSL(2),STPOS2,NPTS)
+	CALL IFFPKE(IECODE,IELEN,JPPOSL)
+	IF (IECODE.NE.'JP') GO TO 240
+	CALL EIHWI(HTPOSH,2,1)
+	CALL EIHWI(HTPOSJ,1,3)
+C
+C Rewind to the STs to put in the correct end points.
+	CALL IFFPKE(IECODE,IELEN,STPOS1)
+	IF (IECODE.NE.'ST') GO TO 230
+	CALL EIHRS(NPTS,IENDS)
+	CALL EIHWR(JCPOSF,2,1)		  ! rewrite the 1st end point
+	IF (STPOS1.EQ.STPOS2) GO TO 210   ! are end pts in the same ST ?
+	CALL IFFPKE(IECODE,IELEN,STPOS2)
+	IF (IECODE.NE.'ST') GO TO 230
+	CALL EIHRS(NPTS,IENDS)
+210	CALL EIHWR(JCPOSL,2,(NPTS-1)*4+1) ! rewrite the 2nd end point
+	IF (SEGLEN.LT.1.0E-6) GO TO 220	  ! was original segment null ?
+	IF ((JCPOSL(1)-JCPOSF(1))**2+(JCPOSL(2)-JCPOSF(2))**2.GT.
+     &	   HITTOL*HITTOL) GO TO 150	  ! junctions superimposed ?
+C
+C Examine the segment to see if it is a loop.
+	SEGTOL=(OLDPSL(1) - OLDPSF(1))**2 + (OLDPSL(2) - OLDPSF(2))**2
+	IF (SEGTOL.LT.1.0E-6) GO TO 150
+C
+C Errors.
+	CALL WRITEF(
+     &	  'Warning - segment in NF %^L%N shrunk to zero length',NFNUM)
+	CALL EXPAND('To keep this segment, the tolerance would have')
+	CALL WRITAP(' to be less than %F0.3',SQRT(SEGTOL))
+	GO TO 150
+220	CALL EXPAND('Warning - segment in NF %^L%N already has',NFNUM)
+	CALL WRITAP(' zero length or repeated points')
+	GO TO 150
+230	CALL WRITEF(
+     &	  'Unexpected %C entry found while rewriting the ST end points',
+     &		   IECODE)
+	GO TO 260
+240	CALL WRITEF(
+     &	  'Unexpected %C entry found while patching the JP entries',
+     &		   IECODE)
+	GO TO 260
+250	CALL WRITEF(
+     &	  'Unexpected %C entry found while patching a NO entry',
+     &		   IECODE)
+260	CALL WRITEF('(after NF %^L%N in output file)',NFNUM)
+	GO TO 150
+C
+C ST - output the ST with a JP and set up the junction entries for
+C the 2 end points. The JP entry has to be output empty initially
+C and set up later. This is because it has to point to the JB entry
+C which points back to the corresponding ST. Consequently the ST
+C has to be output before anything else can be done.
+270	HADST=.TRUE.
+	CALL IFFSEL(OUTLUN)
+	JPPOSF=LPOSE			! remember position of 1st JP
+	CALL IFFJP(HTPOSH,HTPOSJ)	! create empty JP entry
+	STPOS1=LPOSE			! remember position of 1st ST
+	CALL IFFSEL(INLUN)
+	CALL EIHRS(NPTS,IENDS)
+	CALL EIHRR(JCPOSF,2,1)		! get 1st point in 1st ST
+C
+C Set up SEGLEN so that we can check for 'lost' segments later. We want
+C to know if this segment already has zero length, so we look at the
+C first two points. If this ST only has one point or the first two are
+C identical then it's an error anyway.
+	CALL EIHRR(JCPOSL,2,(MIN(2,NPTS)-1)*4+1)   ! JCPOSL is temp var.
+	SEGLEN=(JCPOSL(1)-JCPOSF(1))**2 + (JCPOSL(2)-JCPOSF(2))**2
+C
+C Loop through all STs in this feature until the 2nd end point is known.
+C First read the last point in the previous ST.
+280	CALL IFFSEL(OUTLUN)
+	   STPOS2=LPOSE			! position of latest ST
+	   CALL IFFSEL(INLUN)
+	   CALL EIHCPY(OUTLUN)		! copy the ST entry
+	   LPOSST=LPOSH			! remember pos of ST in i/p file
+	   CALL EIHRR(JCPOSL,2,(NPTS-1)*4+1)
+	   CALL IFFNXT(IECODE,IELEN)	! get next IFF entry
+	   IF (IELEN.EQ.-1) GO TO 320	! end of file ?
+	   IF (TYPNO.GT.0) CALL WRITEF('%C %N',IECODE,IELEN)
+	   IF (IECODE.NE.'ST') GO TO 310	
+	   CALL EIHRS(NPTS,IENDS)
+	IF (NPTS.GT.1) GO TO 280
+C
+C Found a 1 point ST.
+C Presumably this is the last ST in the feature and the previous one
+C was just too big for some program's buffer (probably LITES).
+C Back up over the ST that we've just created in the output file and
+C generate one or more new ones incorporating that extra point.
+	CALL EIHRR(JCPOSL,2,1)		! remember the ST entry
+	CALL IFFSEL(OUTLUN)
+	CALL IFFUPP(LPOSF,LPOSM,LPOSH,STPOS2)	! back up output file
+	CALL IFFSEL(INLUN)
+	CALL IFFPKE(IECODE,IELEN,LPOSST)
+	CALL EIHRS(NPTS,IENDS)		! the ST before the 1 pnt one
+	I=NPTS				! total number of points
+	J=0				! no. of points output so far
+290	NPTS=MIN(MAXST-1,I-J)		! room for NPTS+1 in buffer ?
+	   CALL EIHRR(STBUF,2*NPTS,4*J+1)
+	   IF (NPTS.EQ.I-J) GO TO 300
+	   CALL IFFSEL(OUTLUN)		! no - need more than 1 ST
+	   CALL IFFST(STBUF,NPTS,IENDS)	! create the o/p ST entry
+	   CALL IFFSEL(INLUN)
+	   IENDS=1			! assume pen down now
+	   J=J + MAXST - 1		! bump number of points output
+	GO TO 290	
+300	NPTS=NPTS + 1
+	STBUF(1,NPTS)=JCPOSL(1)		! tag on the final point
+	STBUF(2,NPTS)=JCPOSL(2)
+	CALL IFFSEL(OUTLUN)
+	STPOS2=LPOSE			! new position of latest ST
+	CALL IFFST(STBUF,NPTS,IENDS)	! create the o/p ST entry
+	CALL IFFSEL(INLUN)
+	CALL IFFNXT(IECODE,IELEN)	! re-read the 1 pnt ST; get ...
+	CALL IFFNXT(IECODE,IELEN)	! next entry (not ST I hope !!)
+	IF (IECODE.NE.'ST') GO TO 310
+	CALL EXPAND('Fatal error - unexpected 1 point ST found ')
+	CALL WRITAP('in input file (NF %^L%N) !',NFNUM)
+	GO TO 320
+C
+C Found last ST in feature - output a JP now.
+310	CALL IFFSEL(OUTLUN)
+	JPPOSL=LPOSE			! remember position of 2nd JP
+	CALL IFFJP(HTPOSH,HTPOSJ)	! create empty JP entry
+	CALL IFFSEL(INLUN)
+	GO TO 160			! back to main loop (no IFFNXT)
+C
+C End of input file found so tidy up.
+320	CALL IFFCLO(INLUN)
+	CALL IFFCLO(OUTLUN)
+	GO TO 10			! for next command line
+C
+330	CALL EXIT
+	END
