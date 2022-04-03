@@ -1,0 +1,378 @@
+C
+C-------------------------------------------------------------------------------
+C				THE WRAPPER
+C-------------------------------------------------------------------------------
+C
+C
+C
+C
+	LOGICAL*4 FUNCTION CHECK_COVER_LABEL(POLY_INDX,UNDEF)
+C
+***	MODULE	CHECK_COVER_LABEL
+***	IDENT	08MY92
+C
+	IMPLICIT NONE
+C
+C	Copyright Laser Scan Ltd, Cambridge, England
+C
+C	Author		Sunil Gupta			30-april-1992
+C
+C
+C	........................................................................
+C
+	INCLUDE 'LSL$CMNPOLYGONS:ARRAY_PTRS.CMN'
+C
+C Arguments:
+	INTEGER		POLY_INDX	! the polygon in question
+	LOGICAL		UNDEF		! .T. if undefined polygon
+C
+	LOGICAL*4	ACTUAL_CHECK_COVER_LABEL
+C	........................................................................
+C
+	CHECK_COVER_LABEL = ACTUAL_CHECK_COVER_LABEL(
+     &			POLY_INDX,UNDEF,
+     &			POLMAX,TABMAX,POLNEST_MAX, PARTS_MAX,
+     &			%VAL(PTR$_COVER_POINT) ,
+     &			%VAL(PTR$_POLY_LIST),
+     &			%VAL(PTR$_POLY_PARTS),
+     &			%VAL(PTR$_POLY_START),
+     &			%VAL(PTR$_SEGMENT_INDEX),
+     &			%VAL(PTR$_SEGTAB),
+     &			%VAL(PTR$_STTAB)
+     &		  )
+C
+C	........................................................................
+C
+	RETURN
+	END
+C
+C-------------------------------------------------------------------------------
+C			    THE PROPER FUNCTION
+C-------------------------------------------------------------------------------
+C
+C
+C
+	LOGICAL*4 FUNCTION ACTUAL_CHECK_COVER_LABEL(
+     &		POLY_INDX,UNDEF,
+     &		POLMAX,TABMAX,POLNEST_MAX,PARTS_MAX,
+     &		COVER_POINT ,
+     &		POLY_LIST,
+     &		POLY_PARTS,
+     &		POLY_START,
+     &		SEGMENT_INDEX,
+     &		SEGTAB,
+     &		STTAB
+     &	)
+C
+C
+***	MODULE	ACTUAL_CHECK_COVER_LABEL
+***	IDENT	30OC91
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	Author						SH  08-Nov-1989
+C
+C All the segments forming a polygon are found and the appropriate left or 
+C right ACs are read. The user is warned if the polygon has conflicting segment 
+C texts and ACTUAL_CHECK_COVER_LABEL returns UNDEF as true. This will cause omission
+C of the polygon from the output file.
+C
+C Nests are included (this differs from, eg, CHECK_LRCODE_LABEL, but the calling
+C routine accounts for it)
+C
+C Function returns SS$_NORMAL if all is well or one of a variety of
+C IPOLYGON error codes on failure.
+C
+C ......................................................................
+C
+	IMPLICIT NONE
+C
+C Parameters:
+	INCLUDE 	'LSL$CMNPOLYGONS:PARAMS.PAR'
+	INCLUDE 	'LSL$CMNIPOLYGON:IPOLYGONMSG.PAR'
+	INTEGER		SS$_NORMAL
+	EXTERNAL	SS$_NORMAL	! normal successful completion
+C
+C Arguments:
+	INTEGER		POLY_INDX	! the polygon in question
+	LOGICAL		UNDEF		! .T. if undefined polygon
+C
+	INTEGER*4	POLMAX
+	INTEGER*4	TABMAX
+	INTEGER*4	POLNEST_MAX
+	INTEGER*4	PARTS_MAX
+C
+	INTEGER*4	COVER_POINT(-TABMAX:TABMAX,COVMAX)
+	INTEGER*4	POLY_LIST(2,TABMAX*2)
+	INTEGER		POLY_PARTS(2,POLMAX*4)
+	INTEGER		POLY_START(3,POLMAX)
+	INTEGER*4	SEGMENT_INDEX(-TABMAX:TABMAX)
+	INTEGER*4	SEGTAB(2,TABMAX)
+	INTEGER*4	STTAB(2,TABMAX)
+
+C
+C Common:
+	INCLUDE		'LSL$CMNIPOLYGON:COMMAND.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:COVERAGES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:FILE.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:POLYGONS.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:TABLES.CMN'
+	INCLUDE		'LSL$CMNPOLYGONS:SECTOR.CMN'
+	INCLUDE		'LSL$CMNLSL:TXTC.CMN'
+C
+C W/s
+	INTEGER		COVER
+	CHARACTER*255	TEXT(COVMAX)		! the polygon labels
+	INTEGER*2	LENGTH(COVMAX)		! the lengths of TEXT
+	CHARACTER*255	OLD_TEXT(COVMAX)	! the previous segment labels
+	INTEGER*2 	OLD_LENGTH(COVMAX)	! prev. segment label lengths
+	INTEGER		PRV_POINT(COVMAX)	! associated seg for prev seg
+	LOGICAL	  	FIRST_SEG		! reading first seg. in polygon?
+	INTEGER*2	PFXLEN
+C
+	INTEGER*2 ACTYPE	! type of AC 
+	INTEGER*2	ACLEN
+	INTEGER*4	ACDSC(2)	! fake string descriptor
+	EQUIVALENCE	(ACDSC,ACLEN)
+	BYTE		ACBUF(256)
+	CHARACTER*256	ACTEXT
+	INTEGER   FSN,ISQ	! feature serial number, internal no.
+	INTEGER*2 IECODE,IELEN	! IFF entry code and length
+	LOGICAL	  HAD_LEFT	! had label for left poly
+	LOGICAL	  HAD_RIGHT	! had label for right poly
+	INTEGER   I		! temp. vars.
+	INTEGER*2 IENDS		! line state (coded bitwise)
+	INTEGER	  IREV		! if -ve then reverse segment
+	CHARACTER*256 MESTXT	! error message text
+	INTEGER*2 MESLEN	! its length
+	INTEGER*2 NPTS		! number of coord pairs to be read
+	INTEGER   SEG
+	INTEGER   ASEG
+	INTEGER   SEGPTR
+	INTEGER   LISTPTR
+C
+C Functions:
+	INTEGER	  EXPAND	! format messages
+	INTEGER	  STR$COMPARE_EQL	
+C				! string comparison 
+C
+C
+C!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+C	for each segment of the polygon,
+C 	for each cover,
+C		get its associated segment
+C		if same as for previous segment, go to next cover
+C		get its L & R codes
+C		check equal to those of previous segment
+C 	repeat for next cover
+C	repeat until end of polygon
+C		
+C!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+C ......................................................................
+C
+	ACTUAL_CHECK_COVER_LABEL=%LOC(SS$_NORMAL)
+C
+	CALL IFFSEL(INLUN)
+C
+C First segment of the polygon
+	SEGPTR=IABS(POLY_START(1,POLY_INDX))
+	SEG=POLY_PARTS(1,SEGPTR)
+C
+C Get the start of the polygon in POLY_LIST - this may seem circuitous,
+C but it sets up LISTPTR so we can go through the polygon and its first
+C order nests easily
+	LISTPTR=SEGMENT_INDEX(SEG)
+	SEG=POLY_LIST(1,LISTPTR)
+C
+	FIRST_SEG=.TRUE.
+C
+C ......................................................................
+C		N E X T   S E G M E N T
+C
+C for each cover:
+10	DO 100 COVER=1,NUM_COVER
+C
+C get the associated segment:
+	ASEG=COVER_POINT(SEG,COVER)
+	IF(ASEG.EQ.0)GOTO 230		! unassociated segment
+C
+C if the same as for previous segment, no need to look at the IFF file
+	IF((.NOT.FIRST_SEG).AND.ASEG.EQ.PRV_POINT(COVER))GOTO 100
+	PRV_POINT(COVER)=ASEG
+C
+C Store sign of associated segment
+	IREV=SIGN(1,ASEG)
+C
+C Jump to the associated segment
+	CALL IFFPKE(IECODE,IELEN,SEGTAB(2,IABS(ASEG)))
+	IF (IELEN.LE.-1) GOTO 210	! eof?
+	IF (IECODE.NE.'NF') THEN
+	   ACTUAL_CHECK_COVER_LABEL=IPOL__LOST
+	   CALL LSL_PUTMSG(ACTUAL_CHECK_COVER_LABEL,IECODE)
+	   GOTO 300
+	ENDIF
+C
+C This is a new segment...
+	HAD_LEFT=.FALSE.
+	HAD_RIGHT=.FALSE.
+	CALL EIHRI(FSN,1,1)
+	CALL EIHRI(ISQ,1,2)
+C
+C ......................................................................
+C		N E X T   E N T R Y   I N   S E G M E N T
+C
+30	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.LE.-1) GOTO 210	! eof?
+C
+C only interested in AC entries - an EF indicates we have gone too far
+	IF (IECODE.NE.'EF'.AND.IECODE.NE.'AC') GOTO 30
+C
+C if we get an EF now, then the most recent segment did not have the relevant 
+C left/right codes - thus report the error
+	IF (IECODE.EQ.'EF') GOTO 230
+C
+C AC found - read type and text, and act depending on the direction of polygon
+C formation and direction of this segment. The rules are:
+C
+C 	Polygon formed clockwise:
+C		 Use type RIGHT AC if segment used forwards  (IREV =  1)
+C		 Use type LEFT  AC if segment used backwards (IREV = -1)
+C 	Polygon formed anticlockwise:
+C		 Use type LEFT  AC if segment used forwards  (IREV =  1)
+C		 Use type RIGHT AC if segment used backwards (IREV = -1)
+C
+C AC found - read type and text
+	CALL EIHRI(ACTYPE,1,1)
+	CALL EIHR(TXTBUF,IELEN-3,4)
+	TXTPTR=(IELEN-3)*2
+	ACLEN=TXTPTR
+	IF(TXTPTR.GT.0)THEN
+	   IF (TXTBUF(TXTPTR).EQ.0) TXTPTR=TXTPTR-1
+	   CALL COPY_STRING(TXTDSC,ACTEXT)
+	ENDIF
+C
+C do we have a prefix match?
+	DO 40 I=1,NUM_TXT(COVER)
+	PFXLEN=IN_CVR_LEN(I,COVER)
+	IF(PFXLEN.EQ.0)GOTO 45
+	IF(ACLEN.LT.PFXLEN)GOTO 40
+	IF(ACTEXT(:PFXLEN).EQ.IN_CVR_TXT(I,COVER)(:PFXLEN))GOTO 45
+40	CONTINUE
+	GOTO 30					! no prefix match
+C
+45	IF (ACTYPE.EQ.LFT_CVR_CODE(COVER)) THEN
+	   IF (HAD_LEFT) GOTO 30		! use only 1st LFT_CODE AC
+	   HAD_LEFT=.TRUE.
+	ENDIF
+	IF (ACTYPE.EQ.RGT_CVR_CODE(COVER)) THEN
+	   IF (HAD_RIGHT) GOTO 30		! use only 1st RGT_CODE AC 
+	   HAD_RIGHT=.TRUE.
+	ENDIF
+C
+C Have a left/right code that we have not seen before
+	IF (CLOCK) THEN				! clockwise polygon
+	   IF (ACTYPE.EQ.RGT_CVR_CODE(COVER).AND.IREV.EQ.1	! read this AC?
+     &			.OR.
+     &	       ACTYPE.EQ.LFT_CVR_CODE(COVER).AND.IREV.EQ.-1) THEN
+	      CALL READ_AC_TEXT(TEXT(COVER),LENGTH(COVER),IELEN)
+	   ELSE
+	      GOTO 30				! unwanted AC
+	   ENDIF	   
+	ELSE					! anticlockwise poly
+	   IF (ACTYPE.EQ.LFT_CVR_CODE(COVER).AND.IREV.EQ.1	! read this AC?
+     &			.OR.
+     &	       ACTYPE.EQ.RGT_CVR_CODE(COVER).AND.IREV.EQ.-1) THEN
+	      CALL READ_AC_TEXT(TEXT(COVER),LENGTH(COVER),IELEN)
+	   ELSE
+	      GOTO 30				! unwanted AC
+	   ENDIF	   
+	ENDIF
+C
+C When we get here we have a polygon label read from the AC text field.
+C If first segment for polygon simply get next segment. Otherwise we
+C must test that the ACs are consistent for this polygon.
+	IF (FIRST_SEG) THEN
+	   OLD_TEXT(COVER)=TEXT(COVER)	   		! remember text
+	   OLD_LENGTH(COVER)=LENGTH(COVER)		! and length
+	ELSE
+C
+C Have left/right codes that should be tested against the previous one
+	   I=STR$COMPARE_EQL
+	1	(TEXT(COVER)(:LENGTH(COVER)),
+	1	OLD_TEXT(COVER)(:OLD_LENGTH(COVER)))
+	   IF (I.EQ.1) THEN
+	      I=COVER
+	      GOTO 220
+	   ENDIF
+	ENDIF
+100	CONTINUE
+C
+C ......................................................................
+C		M O V E   O N T O   N E X T   S E G M E N T
+C
+C Have we finished the polygon? If not get next segment forming the polygon
+C
+	FIRST_SEG=.FALSE.
+	LISTPTR=LISTPTR+1
+	IF (POLY_LIST(2,LISTPTR).GT.0) GOTO 300	! end of polygon
+	SEG=POLY_LIST(1,LISTPTR)
+	GOTO 10
+C
+C ......................................................................
+C		U N E X P E C T E D   E O F
+C
+210	ACTUAL_CHECK_COVER_LABEL=IPOL__UNEXPEOF
+	CALL LSL_PUTMSG(ACTUAL_CHECK_COVER_LABEL,SEED_FILE(:SEED_LEN))
+	GOTO 300
+C
+C ......................................................................
+C		I N C O N S I S T E N T   A C    C O D E S
+C	
+220	CALL LSL_PUTMSG(IPOL__ACINCON,FSN,ISQ)
+	CALL LSL_ADDSTR
+	1	('Current segment: '//TEXT(I)(:LENGTH(I)))
+	CALL LSL_ADDSTR
+	1	('Previous segment: '//OLD_TEXT(I)(:OLD_LENGTH(I)))
+	MESLEN=EXPAND('%WSPolygon labels in AC texts '//
+     &			'inconsistent in feature with '//
+     &		 	'FSN %N - polygon abandoned',MESTXT,FSN)
+	GOTO 240
+C
+C ......................................................................
+C 		N O   L E F T / R I G H T   A C   C O D E
+C
+230	CALL LSL_PUTMSG(IPOL__ACMISS,FSN,ISQ)
+	MESLEN=EXPAND('%WSUnable to find polygon label in AC texts '//
+     &			'in feature with FSN %N - polygon abandoned',
+     &			MESTXT,FSN)
+C
+C .....................................................................
+C
+C		W R I T E   B U G   R E P O R T 
+C
+C Get the coordinate string so can locate error
+240	CALL IFFPKE(IECODE,IELEN,STTAB(1,IABS(POLY_PARTS(1,SEGPTR))))
+	IF (IELEN.LT.0) THEN
+	   ACTUAL_CHECK_COVER_LABEL=IPOL__LOST
+	   CALL LSL_PUTMSG(ACTUAL_CHECK_COVER_LABEL)
+	   GOTO 300
+	ENDIF
+	CALL EIHRS(NPTS,IENDS)
+	CALL EIHRR(POLY_BUF(1,1),2,1)
+C
+C Write out to LITES
+	IF (HAD_LITES) THEN
+	   CALL FLWSEL(LITESLUN)
+	   CALL FLWRTF('%%MESSAGE Polygon labelling error:')
+	ENDIF
+	CALL MES_OUT(POLY_BUF(1,1),MESTXT,MESLEN)
+C
+C Don't try to get any more segments for this polygon
+	TEXT(1)='Undefined polygon'
+	LENGTH(1)=17
+	UNDEF=.TRUE.
+C
+C ......................................................................
+C
+300	RETURN
+	END
