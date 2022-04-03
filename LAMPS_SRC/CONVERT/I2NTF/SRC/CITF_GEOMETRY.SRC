@@ -1,0 +1,731 @@
+	LOGICAL FUNCTION CITF_GEOMETRY(DIM,TOTPTS,NPTS,CBH,RPTS,
+     &				       IPTS,CPTS,IS_LINE,IS_TEXT,
+     &				       FIRST,LAST,XYZ)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C	Author						IM	27-Apr-1987
+C
+CMOD	Created from GEOMETRY for CITF			JB	03-Dec-1992
+CMOD    Mod 1240. Fix for [GEOMETRY1/2] problem		ST	18-Jun-1993
+CMOD	Checks for duplicate points (Mod 1295)		ST	15-Sep-1993
+CMOD1301Count number of ACRDRECS properly, omitting any
+C	blanks or ABSENTs				JB	05-Oct-1993
+CMOD    Check if Z is absent before dividing by Z_MULT  ST	18-Oct-1993
+C       to prevent floating exception on AXP. MOD 1306.
+CMOD    Implement CITF96 changes (WI/CC 1545)           TJM     14-Jun-1996
+C
+C Builds and outputs GEOMETRY records.
+C
+	IMPLICIT NONE
+C
+C Common:
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+	INCLUDE	'CMN:I2NTFMSG.PAR'
+	INCLUDE 'CMN:COMMANDS.CMN'
+	INCLUDE 'CMN:CITFATTS.CMN'
+	INCLUDE 'CMN:FTRCMN.CMN'
+	INCLUDE	'CMN:DUPPTS.CMN'
+C
+C Arguments:
+	INTEGER		DIM		!  CB col nos
+	INTEGER 	TOTPTS		!  Number of points in feature
+	INTEGER 	NPTS		!  Number of points in PTS
+	REAL    	RPTS(DIM,NPTS)	!  Points in this CB
+	INTEGER		IPTS(DIM,NPTS)	!  Points in this CB
+	CHARACTER*4 	CPTS(DIM,NPTS)	!  Points in this CB
+	LOGICAL		IS_LINE		!  Is it a linear feature
+	LOGICAL		IS_TEXT		!  Is it a text feature
+	LOGICAL		FIRST		!  Is this the first CB
+	LOGICAL		LAST		!  Or the last CB
+	LOGICAL		XYZ		!  Is it a 3D [GEOMETRY2] record
+C
+	RECORD /IFF_CBH/ CBH		!  CB header
+C
+C Function:
+	LOGICAL		ACDFND
+	INTEGER*2	EXPAND
+	INTEGER		ROUND
+C
+C Workspace:
+	LOGICAL		OK,FAILED
+	INTEGER 	I,J,PT		!  Index for PTS
+	INTEGER		ID		!  Feature ID for NTF
+C
+	INTEGER		NUM_PPATTS	! num of per-point atts in this feature
+	LOGICAL		PPATT_FIXED(IFF_MAXCBATT)
+	INTEGER 	PPATT_CODE(IFF_MAXCBATT)
+	INTEGER	 	PPATT_TYPE(IFF_MAXCBATT)
+	INTEGER		PPATT_IND(IFF_MAXCBATT)
+C
+	INTEGER		QPLAN_IND,
+     &			XYACQ_IND,
+     &			DIFHT_IND,
+     &			ZACQ_IND,
+     &			QHT_IND,
+     &			QDHT_IND
+C
+	CHARACTER*1	GTYPE		!  Geometry type
+	CHARACTER*1	QPLAN
+	CHARACTER*1	XY_ACQ_METH
+	CHARACTER*1	Z_ACQ_METH
+	CHARACTER*1	QHT
+	CHARACTER*1	QDIFF_HT
+C
+	REAL		X,Y,Z		! If fixed x,y,z
+	REAL		DIFF_HT
+	INTEGER		I_EQ_X,I_EQ_Y,I_EQ_Z
+	INTEGER		I_EQ_DFH
+C
+	EQUIVALENCE	(X,I_EQ_X)
+	EQUIVALENCE	(Y,I_EQ_Y)
+	EQUIVALENCE	(Z,I_EQ_Z)
+	EQUIVALENCE	(DIFF_HT,I_EQ_DFH)
+C
+	INTEGER		VALUE		! Any coord value to be converted
+	REAL*8		RVALUE1,	! Any coord value to be converted
+     &			RVALUE2,
+     &			RVALUE
+	INTEGER		IVALUE
+	EQUIVALENCE	(RVALUE,IVALUE)
+C
+	INTEGER		X_IND,
+     &			Y_IND,
+     &			Z_IND
+C
+	CHARACTER*(MAX_XY_LEN)
+     &		 	TMPSTORE	! Temporary coordinate store
+C
+C Our record output environment - if we have several CBs in one feature,
+C we must output the points from them as a continuous stream, with no
+C unnecessary record breaks
+C
+	CHARACTER*80	STRING		! NTF output record
+	SAVE		STRING		! Remember it over calls of STRING
+	INTEGER*2	LENGTH
+C
+	INTEGER 	CPOS		! Current position in STRING
+	SAVE		CPOS		! Remember it over calls
+C
+	INTEGER*4	ANINT
+	REAL*4		REALINT
+	CHARACTER*4	CHARINT
+	EQUIVALENCE	(ANINT,REALINT)
+	EQUIVALENCE	(ANINT,CHARINT)
+	CHARACTER*80	ACRDREC(20)
+	INTEGER*4	ACRDREC_LEN(20)
+	CHARACTER*80	VAL
+	INTEGER*4	LENVAL,L
+	INTEGER*4	NUM_ATTS
+	LOGICAL		GOT_ATTRIB
+	INTEGER		DX,DY,DZ
+	LOGICAL		BAD_ZERO	    ! IFF_ABSENT is a dirty zero on AXP
+	LOGICAL		PREV_BAD_ZERO	    ! Applies to previous point
+	INTEGER		ICOORD
+	REAL		RCOORD
+	EQUIVALENCE	(ICOORD,RCOORD)
+C
+C .........................................................................
+C
+	OK = .TRUE.
+	BAD_ZERO = .FALSE.
+	PREV_BAD_ZERO = .FALSE.
+C
+C If there is only one point in the feature, assume that it is a symbol
+C (if it isn't flagged as such, give a warning)
+C
+C NOTE that to cope with GTYPE correctly, we would need to read an FRT and
+C      look at the IFF graphical type - including possibly playing with
+C      circle arcs to get them into a correct form
+C
+	IF (TOTPTS.EQ.1 .AND. .NOT.IS_TEXT) THEN
+	   IF (IS_LINE) CALL LSL_PUTMSG(I2NTF__ONEPT,FSN,ISN)
+	   GTYPE = '1'			! point (symbol or text or node)
+	ELSE
+	   GTYPE = '2'			! linear
+	ENDIF
+C
+C If this is the first record of a feature's points, then output a new
+C GEOMETRY record
+C
+	NUM_PPATTS = 0
+C
+	QPLAN       = ' '
+	XY_ACQ_METH = ' '
+	Z_ACQ_METH  = ' '
+	QHT         = ' '
+	QDIFF_HT    = ' '
+	I_EQ_Z      = IFF_ABSENT
+	I_EQ_DFH    = IFF_ABSENT
+C
+	X_IND     = 0
+	Y_IND     = 0
+	Z_IND     = 0
+	DIFHT_IND = 0
+	XYACQ_IND = 0
+	ZACQ_IND  = 0
+	QPLAN_IND = 0
+	QHT_IND   = 0
+	QDHT_IND  = 0
+C
+C Get the AC names for the fixed attributes
+C
+	DO 8 I = 1,CBH.NATT
+	   FAILED = ACDFND(CBH.ATT(I).ATTC)		! find the AC
+	   IF (FAILED) GOTO 8
+C
+	   IF (ACD_NAME(1:ACD_NAME_LEN).EQ.'X') THEN
+	      X = CBH.ATT(I).RATTV
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Y') THEN
+	      Y = CBH.ATT(I).RATTV
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z') THEN
+	      Z   = CBH.ATT(I).RATTV
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'DIFF_HT') THEN
+	      DIFF_HT = CBH.ATT(I).RATTV
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'XY_ACQ_METH') THEN
+	      XY_ACQ_METH = CBH.ATT(I).CATTV(1:1)
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z_ACQ_METH') THEN
+	      Z_ACQ_METH = CBH.ATT(I).CATTV(1:1)
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'QPLAN') THEN
+	      QPLAN = CBH.ATT(I).CATTV(1:1)
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'QHT') THEN
+	      QHT = CBH.ATT(I).CATTV(1:1)
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'QDIFF_HT') THEN
+	      QDIFF_HT = CBH.ATT(I).CATTV(1:1)
+	   ELSE
+	      NUM_PPATTS = NUM_PPATTS + 1
+	      PPATT_FIXED(NUM_PPATTS) = .TRUE.
+	      PPATT_TYPE(NUM_PPATTS) = ACD_DATA_TYPE
+	      PPATT_CODE(NUM_PPATTS) = CBH.ATT(I).ATTC
+	      PPATT_IND(NUM_PPATTS) = I
+	   ENDIF
+C
+8	CONTINUE
+C
+C Get the AC names per column for the CB columns, including x,y and z in 
+C case they are in a strange order
+C
+	DO 9 I = 1,DIM
+	   FAILED = ACDFND(CBH.COLH(I))			! find the AC
+	   IF (FAILED) GOTO 9
+C
+	   IF (ACD_NAME(1:ACD_NAME_LEN).EQ.'X') THEN
+	      X_IND = I
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Y') THEN
+	      Y_IND = I
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z') THEN
+	      Z_IND = I
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'DIFF_HT') THEN
+	      DIFHT_IND = I
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'XY_ACQ_METH') THEN
+	      XYACQ_IND = I
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z_ACQ_METH') THEN
+	      ZACQ_IND = I
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'QPLAN') THEN
+	      QPLAN_IND = I
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'QHT') THEN
+	      QHT_IND = I
+	   ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'QDIFF_HT') THEN
+	      QDHT_IND = I
+	   ELSE
+	      NUM_PPATTS = NUM_PPATTS + 1
+	      PPATT_FIXED(NUM_PPATTS) = .FALSE.
+	      PPATT_TYPE(NUM_PPATTS) = ACD_DATA_TYPE
+	      PPATT_CODE(NUM_PPATTS) = CBH.COLH(I)
+	      PPATT_IND(NUM_PPATTS) = I
+	   ENDIF
+C
+9	CONTINUE
+C
+	IF (FIRST) THEN
+	   IF (XYZ) THEN
+	      CALL EXPAND('%WS% 22%S1%I4',
+     &					STRING,
+     &			   		GTYPE,
+     &			   		TOTPTS)
+	   ELSE
+	      CALL EXPAND('%WS% 21%S1%I4',
+     &			   		STRING,
+     &			   		GTYPE,
+     &			   		TOTPTS)
+	   ENDIF
+	   CPOS = 8			! next free character
+C
+	   PREV_XVAL = NINT(RPTS(X_IND,1)/XY_MULT)	! first point
+           IF (ABS(PREV_XVAL).GT.999999 .AND. HAD_ROUND) ! round to 7 figures
+     &         PREV_XVAL = ROUND(PREV_XVAL)		 ! if needed/wanted
+	   PREV_YVAL = NINT(RPTS(Y_IND,1)/XY_MULT)
+           IF (ABS(PREV_YVAL).GT.999999 .AND. HAD_ROUND) ! round to 7 figures
+     &         PREV_YVAL = ROUND(PREV_YVAL)		 ! if needed/wanted
+C
+C Check for an ABSENT Z because this is a dirty zero on the AXP, so when we
+C translate (VEST) I2NTF, it gives a floating exception.
+C
+	   IF (HADZ) THEN
+	      IF (Z_IND.EQ.0) THEN
+		 RCOORD = Z				! use fixed Z value
+	      ELSE
+		 RCOORD = RPTS(Z_IND,1)			! use per-point Z
+	      ENDIF
+	      PREV_BAD_ZERO = ICOORD.EQ.IFF_ABSENT
+	      IF (.NOT.PREV_BAD_ZERO) THEN
+	         PREV_ZVAL = NINT(RCOORD/Z_MULT)
+                 IF (ABS(PREV_ZVAL).GT.999999 .AND. HAD_ROUND) ! round to 7 figs
+     &               PREV_ZVAL = ROUND(PREV_ZVAL)	      ! if needed/wanted
+	      ENDIF
+	   ENDIF
+	ENDIF
+C
+C Now start checking the in the points
+C
+	DO 1000 PT=1,NPTS
+C
+	   IF (IS_TEXT .OR. .NOT.IS_LINE) GOTO 500	! only check lines
+	   IF (FIRST .AND. PT.EQ.1) GOTO 500		! don't check 1st point
+C
+	   IF (X_IND.EQ.0) THEN
+	      XVAL = NINT(X/XY_MULT)
+	   ELSE
+	      XVAL = NINT(RPTS(X_IND,PT)/XY_MULT)
+	   ENDIF
+           IF (ABS(XVAL).GT.999999 .AND. HAD_ROUND) 	! round to 7 figures
+     &         XVAL = ROUND(XVAL)		 	! if needed/wanted
+C
+	   IF (Y_IND.EQ.0) THEN
+	      YVAL = NINT(Y/XY_MULT)
+	   ELSE
+	      YVAL = NINT(RPTS(Y_IND,PT)/XY_MULT)
+	   ENDIF
+           IF (ABS(YVAL).GT.999999 .AND. HAD_ROUND) 	! round to 7 figures
+     &         YVAL = ROUND(YVAL)		 	! if needed/wanted
+C
+	   BAD_ZERO = .FALSE.
+	   IF (HADZ) THEN
+	      IF (Z_IND.EQ.0) THEN
+		 RCOORD = Z				! use fixed Z value
+	      ELSE
+		 RCOORD = RPTS(Z_IND,PT)		! use per-point Z
+	      ENDIF
+	      BAD_ZERO = ICOORD.EQ.IFF_ABSENT
+	      IF (.NOT.BAD_ZERO) THEN
+                 ZVAL = NINT(RCOORD/Z_MULT)
+                 IF (ABS(ZVAL).GT.999999 .AND. HAD_ROUND) ! round to 7 figures
+     &              ZVAL = ROUND(ZVAL)		 	  ! if needed/wanted
+	      ENDIF
+	   ENDIF
+C
+	   DX = ABS(XVAL - PREV_XVAL)
+   	   DY = ABS(YVAL - PREV_YVAL)
+   	   IF (HADZ .AND. .NOT.BAD_ZERO) DZ = ABS(ZVAL - PREV_ZVAL)
+C
+	   IF (DX.EQ.0 .AND. DY.EQ.0) THEN
+	      IF (HADZ) THEN
+		 IF (BAD_ZERO .AND. PREV_BAD_ZERO) THEN
+		    GOTO 1000		! X and Y same, both Zs absent, ignore
+		 ENDIF
+		 IF (DZ.EQ.0 .AND. .NOT.BAD_ZERO) THEN
+		    GOTO 1000		! X & Y & Z same, ignore it
+		 ENDIF
+	      ELSE
+		 GOTO 1000		! X & Y same, no Z to check, ignore it
+	      ENDIF
+	   ENDIF
+C
+	   PREV_XVAL = XVAL
+	   PREV_YVAL = YVAL
+	   IF (HADZ) PREV_ZVAL = ZVAL
+	   PREV_BAD_ZERO = BAD_ZERO
+C
+C Get points to check for other things... overflow etc..
+C
+500	   IF (X_IND.NE.0) THEN
+	      RVALUE = (RPTS(X_IND,PT)/XY_MULT)
+	      IF (IPTS(X_IND,PT) .EQ. IFF_ABSENT) THEN
+		 TMPSTORE = ' '
+		 GOTO 2111
+	      ENDIF
+	   ELSE
+	      RVALUE = (X/XY_MULT)
+	      IF (I_EQ_X .EQ. IFF_ABSENT) THEN
+		 TMPSTORE = ' '
+		 GOTO 2111
+	      ENDIF
+	   ENDIF
+C
+C Check the x value fits into an integer
+	   IF (RVALUE.GT.MAXINT-1 .OR. RVALUE.LT.-MAXINT) THEN
+	      CALL LSL_PUTMSG(I2NTF__INTCONERR,RVALUE)
+	      OK = I2NTF__ABORT
+	      GOTO 999
+	   ENDIF
+C
+	   IF (X_IND.NE.0) THEN
+	      VALUE = NINT(RPTS(X_IND,PT)/XY_MULT)
+	   ELSE
+	      VALUE = NINT(X/XY_MULT)
+	   ENDIF
+           IF (ABS(VALUE).GT.999999 .AND. HAD_ROUND) 	! round to 7 figures
+     &         VALUE = ROUND(VALUE)		 	! if needed/wanted
+C
+C Check it fits the x,y field
+	   RVALUE1 = 10**REAL(XY_LEN) - 1
+	   RVALUE2 = -(10**REAL(XY_LEN-1) - 1)
+C
+	   IF (VALUE .GT. RVALUE1 .OR. VALUE .LT. RVALUE2) THEN
+	       CALL LSL_PUTMSG(I2NTF__OUTCONERR,RVALUE,XY_LEN)
+	       OK = I2NTF__ABORT
+	       GOTO 999
+	   ENDIF
+C
+	   WRITE (TMPSTORE,1111) VALUE
+1111	   FORMAT(I<XY_LEN>)
+C
+2111	   IF (CPOS+XY_LEN.GE.80) THEN
+	      STRING(CPOS:CPOS) = '1'		! need a continuation
+	      LENGTH = CPOS+1
+	      CALL WSTR(STRING,LENGTH)		! write this record
+	      CALL EXPAND('%WS% 00',STRING)	! continuation record
+	      CPOS = 3				! next free character
+	   ENDIF
+C
+	   STRING(CPOS:CPOS+XY_LEN-1) = TMPSTORE ! X coordinate
+	   CPOS = CPOS+XY_LEN
+C
+C Check the y value fits into an integer
+	   IF (Y_IND.NE.0) THEN
+	      RVALUE = (RPTS(Y_IND,PT)/XY_MULT)
+	      IF (IPTS(Y_IND,PT) .EQ. IFF_ABSENT) THEN
+		 TMPSTORE = ' '
+		 GOTO 3111
+	      ENDIF
+	   ELSE
+	      RVALUE = (Y/XY_MULT)
+	      IF (I_EQ_Y .EQ. IFF_ABSENT) THEN
+		 TMPSTORE = ' '
+		 GOTO 3111
+	      ENDIF
+	   ENDIF
+C
+	   IF (RVALUE.GT.MAXINT-1 .OR. RVALUE.LT.-MAXINT) THEN
+	      CALL LSL_PUTMSG(I2NTF__INTCONERR,RVALUE)
+	      OK = I2NTF__ABORT
+	      GOTO 999
+	   ENDIF
+C
+C Check it fits the field
+	   IF (Y_IND.NE.0) THEN
+	      VALUE = NINT(RPTS(Y_IND,PT)/XY_MULT)
+	   ELSE
+	      VALUE = NINT(Y/XY_MULT)
+	   ENDIF
+           IF (ABS(VALUE).GT.999999 .AND. HAD_ROUND) 	! round to 7 figures
+     &         VALUE = ROUND(VALUE)		 	! if needed/wanted
+C
+	   IF (VALUE .GT. RVALUE1 .OR. VALUE .LT. RVALUE2) THEN
+	      CALL LSL_PUTMSG(I2NTF__OUTCONERR,RVALUE,XY_LEN)
+	      OK = I2NTF__ABORT
+	      GOTO 999
+	   ENDIF
+C
+	   WRITE (TMPSTORE,1111) VALUE
+C
+3111	   IF (CPOS+XY_LEN.GE.80) THEN
+	      STRING(CPOS:CPOS) = '1'		! need a continuation
+	      LENGTH = CPOS+1
+	      CALL WSTR(STRING,LENGTH)		! write this record
+	      CALL EXPAND('%WS% 00',STRING)	! continuation record
+	      CPOS = 3				! next free character
+	   ENDIF
+	   STRING(CPOS:CPOS+XY_LEN-1) = TMPSTORE ! Y coordinate
+	   CPOS = CPOS+XY_LEN
+C
+C Add point attributes
+C
+C XY_ACQ_METH only applies to CITF93
+C
+	   IF (HAD_CITF93) THEN
+	      IF (XYACQ_IND.NE.0) XY_ACQ_METH = CPTS(XYACQ_IND,PT)(1:1)
+	      IF (ICHAR(XY_ACQ_METH).EQ.0) XY_ACQ_METH = ' ' ! allow for absent
+C
+	      IF (CPOS+1.GE.80) THEN
+		 STRING(CPOS:CPOS) = '1'       ! need a continuation
+		 LENGTH = CPOS+1
+		 CALL WSTR(STRING,LENGTH)      ! write this record
+		 CALL EXPAND('%WS% 00',STRING) ! continuation record
+		 CPOS = 3	               ! next free character
+	      ENDIF
+C
+	      STRING(CPOS:CPOS) = XY_ACQ_METH
+	      CPOS = CPOS+1
+	   ENDIF
+C
+C QPLAN only applies to CITF93
+C
+	   IF (HAD_CITF93) THEN
+	      IF (QPLAN_IND.NE.0) QPLAN = CPTS(QPLAN_IND,PT)(1:1)
+	      IF (ICHAR(QPLAN).EQ.0) QPLAN = ' ' ! allow for absent
+C
+	      IF (CPOS+1.GE.80) THEN
+		 STRING(CPOS:CPOS) = '1'       ! need a continuation
+		 LENGTH = CPOS+1
+		 CALL WSTR(STRING,LENGTH)      ! write this record
+		 CALL EXPAND('%WS% 00',STRING) ! continuation record
+		 CPOS = 3	               ! next free character
+	      ENDIF
+C
+	      STRING(CPOS:CPOS) = QPLAN	! QPLAN
+	      CPOS = CPOS+1
+	   ENDIF
+C
+	   IF (XYZ) THEN
+	      IF (Z_IND.NE.0) THEN
+		 IF (IPTS(Z_IND,PT) .EQ. IFF_ABSENT) THEN
+		    TMPSTORE = ' '
+		    GOTO 3112
+		 ENDIF
+		 RVALUE = (RPTS(Z_IND,PT)/Z_MULT)
+	      ELSE
+		 IF (I_EQ_Z .EQ. IFF_ABSENT) THEN
+		    TMPSTORE = ' '
+		    GOTO 3112
+		 ENDIF
+		 RVALUE = (Z/Z_MULT)
+	      ENDIF
+C
+C Check the z value fits into an integer
+	      IF (RVALUE.GT.MAXINT-1 .OR. RVALUE.LT.-MAXINT) THEN
+	         CALL LSL_PUTMSG(I2NTF__INTCONERR,RVALUE)
+	         OK = I2NTF__ABORT
+	         GOTO 999
+	      ENDIF
+C
+C This division by Z_MULT will not fail on the AXP because it was
+C already detected above.
+C
+	      IF (Z_IND.NE.0) THEN
+		 VALUE = NINT(RPTS(Z_IND,PT)/Z_MULT)
+	      ELSE
+		 VALUE = NINT(Z/Z_MULT)
+	      ENDIF
+           IF (ABS(VALUE).GT.999999 .AND. HAD_ROUND) 	! round to 7 figures
+     &         VALUE = ROUND(VALUE)		 	! if needed/wanted
+C
+	      RVALUE1 = 10**REAL(Z_LEN) - 1
+	      RVALUE2 = -(10**REAL(Z_LEN-1) - 1)
+C
+	      IF (VALUE .GT. RVALUE1 .OR. VALUE .LT. RVALUE2) THEN
+		 CALL LSL_PUTMSG(I2NTF__OUTCONERR,RVALUE,Z_LEN)
+		 OK = I2NTF__ABORT
+		 GOTO 999
+	      ENDIF
+C
+	      WRITE (TMPSTORE,1112) VALUE
+1112	      FORMAT(I<Z_LEN>)
+C
+3112	      IF (CPOS+Z_LEN.GE.80) THEN
+		 STRING(CPOS:CPOS) = '1'		! need a continuation
+		 LENGTH = CPOS+1
+		 CALL WSTR(STRING,LENGTH)		! write this record
+		 CALL EXPAND('%WS% 00',STRING) 		! continuation record
+		 CPOS = 3				! next free character
+	      ENDIF
+C
+	      STRING(CPOS:CPOS+Z_LEN-1) = TMPSTORE	! Z coordinate
+	      CPOS = CPOS+Z_LEN
+C
+	      IF (DIFHT_IND.NE.0) THEN
+		 IF (IPTS(DIFHT_IND,PT) .EQ. IFF_ABSENT) THEN
+		    TMPSTORE = ' '
+		    GOTO 3113
+		 ENDIF
+		 RVALUE = (RPTS(DIFHT_IND,PT)/Z_MULT)
+	      ELSE
+		 IF (I_EQ_DFH .EQ. IFF_ABSENT) THEN
+		    TMPSTORE = ' '
+		    GOTO 3113
+		 ENDIF
+		 RVALUE = (DIFF_HT/Z_MULT)
+	      ENDIF
+C
+C Check the diff ht value fits into an integer
+	      IF (RVALUE.GT.MAXINT-1 .OR. RVALUE.LT.-MAXINT) THEN
+	         CALL LSL_PUTMSG(I2NTF__INTCONERR,RVALUE)
+	         OK = I2NTF__ABORT
+	         GOTO 999
+	      ENDIF
+C
+	      IF (DIFHT_IND.NE.0) THEN
+		 VALUE = NINT(RPTS(DIFHT_IND,PT)/Z_MULT)
+	      ELSE
+		 VALUE = NINT(DIFF_HT/Z_MULT)
+	      ENDIF
+              IF (ABS(VALUE).GT.999999 .AND. HAD_ROUND) ! round to 7 figures
+     &            VALUE = ROUND(VALUE)		 	! if needed/wanted
+C
+	      RVALUE1 = 10**REAL(DIFF_HT_LEN) - 1
+	      RVALUE2 = -(10**REAL(DIFF_HT_LEN-1) - 1)
+	      IF (VALUE .GT. RVALUE1 .OR. VALUE .LT. RVALUE2) THEN
+		 CALL LSL_PUTMSG(I2NTF__OUTCONERR,RVALUE,DIFF_HT_LEN)
+		 OK = I2NTF__ABORT
+		 GOTO 999
+	      ENDIF
+C
+	      WRITE (TMPSTORE,1113) VALUE
+1113	      FORMAT(I<DIFF_HT_LEN>)
+C
+3113	      IF (CPOS+DIFF_HT_LEN.GE.80) THEN
+		 STRING(CPOS:CPOS) = '1'		! need a continuation
+		 LENGTH = CPOS+1
+		 CALL WSTR(STRING,LENGTH)		! write this record
+		 CALL EXPAND('%WS% 00',STRING)		! continuation record
+		 CPOS = 3				! next free character
+	      ENDIF
+C
+	      STRING(CPOS:CPOS+DIFF_HT_LEN-1) = TMPSTORE ! Z diff coordinate
+	      CPOS = CPOS+DIFF_HT_LEN
+C
+C Z_ACQ_METH only applies to CITF93
+C
+	      IF (HAD_CITF93) THEN
+		 IF (ZACQ_IND.NE.0) Z_ACQ_METH = CPTS(ZACQ_IND,PT)(1:1)
+		 IF (ICHAR(Z_ACQ_METH).EQ.0) Z_ACQ_METH = ' ' ! allow for absent
+C
+		 IF (CPOS+1.GE.80) THEN
+		    STRING(CPOS:CPOS) = '1'       ! need a continuation
+		    LENGTH = CPOS+1
+		    CALL WSTR(STRING,LENGTH)      ! write this record
+		    CALL EXPAND('%WS% 00',STRING) ! continuation record
+		    CPOS = 3	! next free character
+		 ENDIF
+C
+		 STRING(CPOS:CPOS) = Z_ACQ_METH
+		 CPOS = CPOS+1
+	      ENDIF
+C
+C QHT only applies to CITF93
+C
+	      IF (HAD_CITF93) THEN
+		 IF (QHT_IND.NE.0) QHT = CPTS(QHT_IND,PT)(1:1)
+		 IF (ICHAR(QHT).EQ.0) QHT = ' '	  ! allow for absent
+C
+		 IF (CPOS+1.GE.80) THEN
+		    STRING(CPOS:CPOS) = '1'       ! need a continuation
+		    LENGTH = CPOS+1
+		    CALL WSTR(STRING,LENGTH)      ! write this record
+		    CALL EXPAND('%WS% 00',STRING) ! continuation record
+		    CPOS = 3	                  ! next free character
+		 ENDIF
+C
+		 STRING(CPOS:CPOS) = QHT
+		 CPOS = CPOS+1
+	      ENDIF
+C
+C QDIFF_HT only applies to CITF93
+C
+	      IF (HAD_CITF93) THEN
+		 IF (QDHT_IND.NE.0) QDIFF_HT = CPTS(QDHT_IND,PT)(1:1)
+		 IF (ICHAR(QDIFF_HT).EQ.0) QDIFF_HT = ' ' ! allow for absent
+C
+		 IF (CPOS+1.GE.80) THEN
+		    STRING(CPOS:CPOS) = '1'       ! need a continuation
+		    LENGTH = CPOS+1
+		    CALL WSTR(STRING,LENGTH)      ! write this record
+		    CALL EXPAND('%WS% 00',STRING) ! continuation record
+		    CPOS = 3	                  ! next free character
+		 ENDIF
+C
+		 STRING(CPOS:CPOS) = QDIFF_HT
+		 CPOS = CPOS+1
+	      ENDIF
+	   ENDIF
+C
+1000	CONTINUE
+C
+C .........................................................................
+C Write out the last record
+C
+	IF (LAST) THEN				! if this is the last CB
+	   LENGTH = CPOS + 1
+	   STRING(LENGTH-1:LENGTH-1)='0'	! then we are not continued
+	   CALL WSTR(STRING,LENGTH)		! write out the final record
+	ENDIF
+C
+	OK = .TRUE.
+	IF (NUM_PPATTS.EQ.0) GOTO 999
+C
+C Now output any attribute coordinate (ACRDREC) records.
+C
+	DO 900 I = 1,NPTS
+	   NUM_ATTS = 0
+C
+	   DO 800 J = 1, NUM_PPATTS
+	      GOT_ATTRIB = .FALSE.
+C
+C Do the fixed attributes first, and output for each point in feature ...
+C
+	      IF (PPATT_FIXED(J)) THEN
+		 IF ((PPATT_TYPE(J).EQ.ACD_DATATYPE_I).OR.
+     &		     (PPATT_TYPE(J).EQ.ACD_DATATYPE_D).OR.
+     &		     (PPATT_TYPE(J).EQ.ACD_DATATYPE_T)) THEN 
+		    ANINT = CBH.ATT(PPATT_IND(J)).IATTV
+		    CALL CITF_ACRDREC(GOT_ATTRIB,VAL,LENVAL,
+     &			 	      ACD_DATATYPE_I,PPATT_CODE(J),ANINT)
+C
+		 ELSEIF (PPATT_TYPE(J).EQ.ACD_DATATYPE_R) THEN
+		    REALINT = CBH.ATT(PPATT_IND(J)).RATTV
+		    CALL CITF_ACRDREC(GOT_ATTRIB,VAL,LENVAL,
+     &			 	      ACD_DATATYPE_R,PPATT_CODE(J),ANINT)
+C
+		 ELSEIF (PPATT_TYPE(J).EQ.ACD_DATATYPE_C) THEN
+		    CHARINT = CBH.ATT(PPATT_IND(J)).CATTV
+		    CALL CITF_ACRDREC(GOT_ATTRIB,VAL,LENVAL,
+     &			 	      ACD_DATATYPE_C,PPATT_CODE(J),ANINT)
+		 ENDIF
+C
+C ...followed by any per-point attributes
+C
+	      ELSE
+		 IF (IPTS(PPATT_IND(J),I).NE.IFF_ABSENT) THEN
+		    IF ((PPATT_TYPE(J).EQ.ACD_DATATYPE_I) .OR.
+     &			(PPATT_TYPE(J).EQ.ACD_DATATYPE_D) .OR.
+     &			(PPATT_TYPE(J).EQ.ACD_DATATYPE_T)) THEN 
+		       ANINT = IPTS(PPATT_IND(J),I)
+		       CALL CITF_ACRDREC(GOT_ATTRIB,VAL,LENVAL,
+     &			    		 ACD_DATATYPE_I,PPATT_CODE(J),ANINT)
+C
+		    ELSEIF (PPATT_TYPE(J).EQ.ACD_DATATYPE_R) THEN
+		       REALINT = RPTS(PPATT_IND(J),I)
+		       CALL CITF_ACRDREC(GOT_ATTRIB,VAL,LENVAL,
+     &			    		 ACD_DATATYPE_R,PPATT_CODE(J),ANINT)
+C
+		    ELSEIF (PPATT_TYPE(J).EQ.ACD_DATATYPE_C) THEN
+		       CHARINT = CPTS(PPATT_IND(J),I)
+		       CALL CITF_ACRDREC(GOT_ATTRIB,VAL,LENVAL,
+     &			    		 ACD_DATATYPE_C,PPATT_CODE(J),ANINT)
+		    ENDIF
+		 ENDIF
+	      ENDIF
+C
+C Store the usable attributes into ACRDREC arrays
+C
+	      IF (GOT_ATTRIB) THEN
+		 NUM_ATTS = NUM_ATTS + 1
+		 ACRD_ATTS(NUM_ATTS, NUM_ACRDRECS+1)(1:LENVAL) = VAL(1:LENVAL)
+		 ACRD_LEN (NUM_ATTS,NUM_ACRDRECS+1) = LENVAL
+	      ENDIF
+800	   CONTINUE
+C
+C Count output ACRDRECS
+C
+	   IF (NUM_ATTS.GT.0) THEN
+	      NUM_ACRDRECS = NUM_ACRDRECS + 1
+	      ACRD_NUM_ATTS(NUM_ACRDRECS) = NUM_ATTS
+	   ENDIF
+900	CONTINUE
+C
+999	CITF_GEOMETRY = OK
+C
+	RETURN
+	END
+C

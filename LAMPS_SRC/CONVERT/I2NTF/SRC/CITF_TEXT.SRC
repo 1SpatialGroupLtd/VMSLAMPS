@@ -1,0 +1,457 @@
+	LOGICAL FUNCTION CITF_TEXT(FSFLAG)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C
+C	Author						 IM	27-Apr-1987
+C	Modified					TJI	 1-Oct-1987
+C
+CMOD	Created for CITF from TEXT			 JB	02-Dec-1992
+CMOD    Mod 1240. Fix for [GEOMETRY1/2] problem		 ST	18-Jun-1993
+CMOD    Mod 1301. Initialise HADZ to .FALSE. so no	 ST	08-Oct-1993
+C       attempt is made to read a Z from 2D coord array.
+CMOD    Implement CITF96 changes (WI/CC 1545)           TJM     20-May-1996
+CMOD    Implement CITF96 fixes   (WI/CC 1547)           TJM     06-Aug-1996
+C
+C Builds the text record and calls TEXTREC to write it out
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE 'I2NTFMSG.PAR'
+C
+C Common:
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+	INCLUDE 'LSL$CMNIFF:IFFSTR.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'		! default attribute info
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE 'LOOKUP.CMN'
+	INCLUDE	'FTRCMN.CMN'
+	INCLUDE	'DUPPTS.CMN'
+C
+C Argument:
+	INTEGER*2	FSFLAG		!  Description of text from FS
+C
+C Function
+	INTEGER 	CITF_TEXTREC	!  Write out text record
+	INTEGER*2	EXPAND
+	LOGICAL		ACDFND
+C
+	REAL		PI
+	PARAMETER	(PI=3.1415926)
+C
+C Workspace:
+	LOGICAL		FIELD			! was it a feature field AC?
+	INTEGER		MAX_TX_LEN
+	PARAMETER	(MAX_TX_LEN = 255)
+C
+	INTEGER		N_CURV_CHARS 		! Number of chars in curv_text
+	REAL		CURV_POS(2,MAX_TX_LEN)
+	REAL		CURV_ROT(MAX_TX_LEN)
+	BYTE		CURV_TEXT(MAX_TX_LEN)
+	BYTE 		TX(MAX_TX_LEN)		! Contains text string for one
+C						! position in POS, or several
+C						! in CURV_POS
+	INTEGER		I
+	CHARACTER*72	VALUE			! AC value	
+	CHARACTER*80	STRING
+	INTEGER		LENGTH
+	INTEGER 	DIGPOS			! 0-8 posit. of dig. point
+	INTEGER 	FONT,CATEGORY		! Text font used
+	INTEGER 	OK			! Function return
+	INTEGER		TH			! Text height in 100th mm
+	INTEGER 	NCHS			! No of chars in text string
+	REAL 		TEXT_HT			! Text height
+	REAL 		TEMP_ROTATE
+	REAL 		ROTATE(1)		! Text rotation
+	REAL 		POS(2,1)		! Position of text
+	LOGICAL 	POSIT			! True if a CB was found
+	LOGICAL 	TSFLAG			! TS already found ?
+	LOGICAL 	CURVED			! CURV_TEXT required
+	LOGICAL 	IS_CURVE		! Text is curved
+	LOGICAL		XYZ			! Should be GEOMETRY2
+	INTEGER*2 	NPTS			! Number of points (should be 1)
+	INTEGER*2 	IENDS			! Pen up/down
+	INTEGER*2 	IELEN			! Length of entry
+	INTEGER*2 	IECODE			! Entry code
+	REAL		OS_POINT_SIZE(24)
+	CHARACTER*1	CONT			! continuation character
+	INTEGER		P,Q,LEFT,SIZE
+	INTEGER*2	NUM_RECORDS		! Number of attribute records
+	CHARACTER*255	ATTREC(500)		! Attribute records
+	INTEGER		ATTLEN(500)		! Length of attribute records
+	LOGICAL		ATTSPLIT(500)		! Is attribute is splittable
+	LOGICAL		GOT_ATTRIBS		! Whether we need to output an 
+C						! attribute record
+C
+	RECORD /IFF_CBH/ TMP_CBH
+	RECORD /IFF_CBD/ TMP_CBD
+C
+	RECORD /IFF_CBH/ CBH(MAX_TX_LEN)	! Array of CB structures for
+	RECORD /IFF_CBD/ CBD(MAX_TX_LEN)	! all text points in TS block
+C
+C NB point sizes are in mm/100
+	DATA OS_POINT_SIZE /      0.0,     0.0,   85.0,    0.0,
+     &				110.0,   125.0,  140.0,  160.0, 
+     &				175.0,   205.0,  220.0,  245.0,
+     &				  0.0,   290.0,    0.0,  325.0,
+     &				  0.0,   360.0,    0.0,  395.0, 
+     &				  0.0,   445.0,    0.0,  500.0 /
+C .......................................................................
+C Set defaults
+C
+	XYZ	  = .FALSE.		! assume it is a [GEOMETRY1]
+	HADZ 	  = .FALSE.		! Does the CB have a Z value
+	FIELD     = .FALSE.
+	POSIT     = .FALSE.
+	TSFLAG    = .FALSE.
+	CURVED    = .FALSE.
+	IS_CURVE  = .FALSE.
+	GOT_ATTRIBS = .FALSE.
+	TEXT_HT   = 0.0
+	ROTATE(1) = 0.0
+C
+	NUM_RECORDS = 0
+C .......................................................................
+C Find the font and the digitised position
+C
+C ***** FONT is not an IFF field - use the text category **************
+C
+	IF (NTF_FC.EQ.28) THEN
+	  FONT = FSFLAG.AND.'30'X			! get text style
+	  FONT = ISHFT(FONT,-4)
+	  CATEGORY =  (FSFLAG.AND.'0FC0'X)		! bits 6-11
+	  CATEGORY = ISHFT(CATEGORY,-6)			! shift left by 6 bits
+	  FC = CATEGORY+1000				! set the feature code
+	  NTF_FC = FC					! and the NTF version
+	  IF (HAD_FC_LOOKUP)				! Translate?
+     &	    CALL FC_TRANS(%VAL(LUT_BASE_ADDR), FC, NTF_FC) 
+C
+C Count the feature code for [SUMMREC]
+C
+	  NFC(FC,1) = NFC(FC,1) + 1		! Count it
+	  IF (NFC(FC,2).EQ.0) THEN 		! Haven't seen it before
+	     NDIFF_FC = NDIFF_FC + 1 		! Count no of different FC's
+	     IFC(NDIFF_FC) = FC			! Different FC, store it
+	     NFC(FC,2) = 1			! Mark is as seen
+	  ENDIF
+	   
+	ELSE
+	  FONT = (FSFLAG.AND.'0FC0'X)		! bits 6-11 (values 0-63)
+	  FONT = ISHFT(FONT,-6)			! shift left by 6 bits
+	ENDIF
+C
+	DIGPOS=(FSFLAG.AND.'000F'X)
+	IF (DIGPOS.GT.8) THEN
+	   CALL LSL_PUTMSG(I2NTF__BADTEXTPOS,FSN)
+	   DIGPOS = 0
+	ENDIF
+C
+C  .....................................................................
+C Loop round examining all the features
+C
+100	CALL IFFNXT(IECODE,IELEN)
+C
+	IF (IECODE.EQ.'RO') THEN
+	   CALL EIHRR(ROTATE(1),1,1)
+C
+C Convert from radians to degrees as required by NTF
+C
+	   ROTATE(1)=(ROTATE(1)*180)/PI
+121	   IF (ROTATE(1).LT.0.0) THEN
+	      ROTATE(1) = ROTATE(1) + 360
+	      GOTO 121
+	   ENDIF
+C
+	ELSEIF (IECODE.EQ.'TH') THEN
+	   CALL EIHRI(TH,1,1)
+C
+C text height should be mm/100
+	   IF (HAD_POINT) THEN			! Height is a point size
+	      IF (.NOT.HAD_TEXT) CALL LSL_PUTMSG(I2NTF__ASSUMEPTSIZ)
+	      HAD_TEXT = .TRUE.			! output the message only once
+C
+	      IF (TH.LT.1 .OR. TH.GT.24) THEN
+	         CALL LSL_PUTMSG(I2NTF__BADPTSIZ,TH,FSN)
+	         TH = 24
+	      ENDIF
+C
+	      TEXT_HT = OS_POINT_SIZE(TH)
+	      IF (TEXT_HT.EQ.0.0) THEN
+	         CALL LSL_PUTMSG(I2NTF__BADPTSIZ,TH,FSN)
+	         TH = 24
+	         TEXT_HT = OS_POINT_SIZE(TH)
+	      ENDIF
+	   ELSE
+	      TEXT_HT = FLOAT(TH)
+	   ENDIF
+C
+	ELSEIF (IECODE.EQ.'TS') THEN
+	   IF (TSFLAG) THEN		! Already had TX
+	      IF (CURVED) THEN		! Form characters into text string
+		 N_CURV_CHARS = N_CURV_CHARS + 1
+		 CURV_TEXT(N_CURV_CHARS)  = TX(1)
+		 CURV_ROT(N_CURV_CHARS)   = ROTATE(1)
+		 CURV_POS(1,N_CURV_CHARS) = POS(1,1)		
+		 CURV_POS(2,N_CURV_CHARS) = POS(2,1)		
+C
+		 CBH(N_CURV_CHARS) = TMP_CBH
+		 CBD(N_CURV_CHARS) = TMP_CBD
+	      ELSE
+C
+C Write out namepos & namerec records
+C
+	         OK = CITF_TEXTREC(TMP_CBH ,
+     &				TMP_CBD    ,
+     &				TX	   ,	!  contains text string
+     &			  	MAX_TX_LEN ,	!  max length of text string
+     &				NCHS       ,	!  no. of chars. in text string
+     &	      			FONT       ,	!  text font
+     &				DIGPOS     ,	!  dig. position 1-9
+     &				TEXT_HT    ,	!  height of text
+     &				POS	   ,	!  text position x,y
+     &				ROTATE(1)  ,	!  angle of text
+     &				CURVED     ,	!  use CURVTEXT record
+     &				POSIT      )	!  was a CB entry given?
+C
+	         IF (.NOT.OK) GOTO 999
+	      ENDIF
+	   ELSE
+C
+C Check for curved text
+	      CALL EIHMK(1)			! Mark our position
+C
+	      CALL IFFNXC('RO',IELEN)
+	      IF (IELEN.EQ.-1) GOTO 110
+	      CALL EIHRR(ROTATE(1),1,1)
+C
+	      CALL IFFNXC('TX',IELEN)
+	      IF (IELEN.EQ.-1) GOTO 110
+C
+	      CALL EIHR(TX,IELEN,1)
+	      NCHS=IELEN*2
+	      IF (TX(NCHS).EQ.0) NCHS=NCHS-1
+	      IF (NCHS.NE.1) GOTO 110
+C
+105	      TEMP_ROTATE = ROTATE(1)
+	      CALL IFFNXC('RO',IELEN)
+	      IF (IELEN.EQ.-1) GOTO 108
+	      CALL EIHRR(ROTATE(1),1,1)
+	      IF (ROTATE(1).NE.TEMP_ROTATE) IS_CURVE = .TRUE.  ! Text not straight
+C
+	      CALL IFFNXC('TX',IELEN)
+	      IF (IELEN.EQ.-1) GOTO 108
+C
+	      CALL EIHR(TX,IELEN,1)
+	      NCHS=IELEN*2
+	      IF (TX(NCHS).EQ.0) NCHS=NCHS-1
+	      IF (NCHS.NE.1) GOTO 110
+C
+	      GOTO 105
+C
+C Jump to here if each text component is 1 character
+C
+108	      IF (IS_CURVE) CURVED = .TRUE.
+C
+110	      CALL IFFRWM		! Back to marked position
+C
+	      TSFLAG=.TRUE.
+	   ENDIF
+C
+	ELSEIF (IECODE.EQ.'TX') THEN
+	   CALL EIHR(TX,IELEN,1)
+	   NCHS=IELEN*2
+	   IF (TX(NCHS).EQ.0) THEN
+	      NCHS=NCHS-1
+	   ELSEIF (NCHS.LT.MAX_TX_LEN) THEN
+	      TX(NCHS+1)=0
+	   ENDIF
+C
+	ELSEIF (IECODE.EQ.'AC') THEN
+	   CALL CITF_ANCIL(GOT_ATTRIBS,NUM_RECORDS,
+     &		           ATTREC,ATTLEN,ATTSPLIT,IELEN,OK)
+	   IF (.NOT.OK) GOTO 100		! warning message already given
+C
+	   IF (FIELD) GOTO 100			! don't output message
+C
+C	   IF (LOG) CALL LSL_PUTMSG(I2NTF__ACIGNORE,FSN,ISN)
+C
+	ELSEIF (IECODE.EQ.'CB') THEN
+	   CALL EIHRCB_HEAD(TMP_CBH)
+	   CALL EIHRCB_DATA(TMP_CBD)
+C
+	   POS(1,1) = TMP_CBD.R(1)
+	   POS(2,1) = TMP_CBD.R(2)
+	   POSIT=.TRUE.
+C
+C Check the per-point attributes to determine if it should be a [GEOMETRY1]
+C or [GEOMETRY2] record
+C
+C First check the fixed attributes
+C
+	   DO 8 I = 1,TMP_CBH.NATT
+	      IF (ACDFND(TMP_CBH.ATT(I).ATTC)) GOTO 8	! find the AC
+	      IF ((ACD_NAME(1:ACD_NAME_LEN).EQ.'Z').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'DIFF_HT').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z_ACQ_METH').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'QHT').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'QDIFF_HT')) XYZ = .TRUE.
+8	   CONTINUE
+C
+C Now check the the CB columns in case they are in strange order.
+C
+	   DO 9 I = 1,TMP_CBH.NCOL
+	      IF (ACDFND(TMP_CBH.COLH(I))) GOTO 9		! find the AC
+	      IF ((ACD_NAME(1:ACD_NAME_LEN).EQ.'Z').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'DIFF_HT').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z_ACQ_METH').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'QHT').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'QDIFF_HT')) XYZ = .TRUE.
+9	   CONTINUE
+C
+	ELSEIF (IECODE.EQ.'EF') THEN
+	  IF (CURVED) THEN			! Store last character
+	     N_CURV_CHARS = N_CURV_CHARS + 1
+	     CURV_TEXT(N_CURV_CHARS) = TX(1)
+	     CURV_ROT(N_CURV_CHARS)  = ROTATE(1)
+	     CURV_POS(1,N_CURV_CHARS) = POS(1,1)		
+	     CURV_POS(2,N_CURV_CHARS) = POS(2,1)		
+C
+	     CBH(N_CURV_CHARS) = TMP_CBH
+	     CBD(N_CURV_CHARS) = TMP_CBD
+	  ENDIF
+C
+	  GOTO 200
+C
+	ELSEIF (IECODE.NE.'VO') THEN
+C
+C If we get here then it was an illegal record,	flag error
+C
+	  CALL LSL_PUTMSG(I2NTF__BADFEAT,FSN,ISN)
+	  CALL LSL_ADDMSG(I2NTF__BADTXT,IECODE)
+	  OK = .FALSE.
+	  GOTO 999
+	ENDIF
+C
+	GOTO 100   
+C
+C .....................................................................
+C EF entry found so write out records	   
+C
+200	IF (CURVED) THEN
+	   OK = CITF_TEXTREC(	CBH	   ,
+     &				CBD	   ,
+     &				CURV_TEXT  ,	!  contains text string
+     &				MAX_TX_LEN ,	!  max length of text string
+     &  			N_CURV_CHARS,	!  no. of chars. in text string
+     &  			FONT       ,	!  text font
+     &				DIGPOS     ,	!  dig. position 1-9
+     &				TEXT_HT    ,	!  height of text
+     &				CURV_POS   ,	!  text position x,y
+     &				CURV_ROT   ,	!  angle of text
+     &				CURVED     ,	!  use CURVTEXT record
+     &				POSIT      ,	!  was a CB entry given?
+     &				XYZ        )	!  should it be [GEOMETRY2] ?
+	ELSE
+	   OK = CITF_TEXTREC(   TMP_CBH    ,
+     &				TMP_CBD    ,
+     &				TX	   ,	!  contains text string
+     &				MAX_TX_LEN ,	!  max length of text string
+     &  			NCHS       ,	!  no. of chars. in text string
+     &  			FONT       ,	!  text font
+     &				DIGPOS     ,	!  dig. position 1-9
+     &				TEXT_HT    ,	!  height of text
+     &				POS        ,	!  text position x,y
+     &				ROTATE(1)  ,	!  angle of text
+     &				CURVED     ,	!  use CURVTEXT record
+     &				POSIT      ,	!  was a CB entry given?
+     &				XYZ        )	!  should it be [GEOMETRY2] ?
+	ENDIF
+	IF (.NOT.OK) GOTO 999
+C
+C  ....................................................................
+C If we have any attributes to write out then do it now (level 2+ only)
+C
+550	IF (GOT_ATTRIBS) THEN
+C
+	   NO_ATTREC  = NO_ATTREC + 1
+C
+C Initialise STRING and its pointer P (which points to last element in STRING)
+C
+	   IF (HAD_CITF93) THEN
+ 	      P = EXPAND('%WS% 14%^W%I2',STRING,NUM_RECORDS)
+	   ELSEIF (HAD_CITF96) THEN
+ 	      P = EXPAND('%WS% 14%^W%I4',STRING,NUM_RECORDS)
+	   ENDIF
+C
+	   DO 830 I = 1,NUM_RECORDS
+C
+C Is there room for the next attribute?
+C
+810	      IF (P + ATTLEN(I).LE.78) THEN
+	         STRING(P+1:P+ATTLEN(I)) = ATTREC(I)(1:ATTLEN(I))
+	         P = P + ATTLEN(I)
+C
+C ...if not, then output the current STRING or split the attribute
+C
+	      ELSE
+C
+		 IF (ATTSPLIT(I)) THEN
+C
+C			Attribute may be split
+C
+C don't split the two-character code (VAL_TYPE)
+	            IF (P.GT.76) THEN
+	               P = P + 1
+		       STRING(P:P) = '1'
+		       P = P + 1
+		       CALL WSTR(STRING,P)
+		       P = EXPAND('%WS% 00',STRING)
+	            ENDIF
+		    Q = 0
+820		    LEFT = 78-P
+		    SIZE = MIN(LEFT,ATTLEN(I)-Q)
+		    STRING(P+1:P+SIZE) = ATTREC(I)(Q+1:Q+SIZE)
+		    P = P + SIZE
+		    Q = Q + SIZE
+		    IF (Q.LT.ATTLEN(I)) THEN
+		       P = P + 1
+		       STRING(P:P) = '1'
+		       P = P + 1
+		       CALL WSTR(STRING,P)
+		       P = EXPAND('%WS% 00',STRING)
+		       GOTO 820  
+		    ENDIF
+C
+		 ELSE
+C
+C			Attribute must not be split ...so output current STRING
+C
+	            P = P + 1
+		    STRING(P:P) = '1'
+		    P = P + 1
+		    CALL WSTR(STRING,P)
+		    P = EXPAND('%WS% 00',STRING)
+		    GOTO 810
+		 ENDIF
+	      ENDIF
+830	   CONTINUE
+C
+C Finally, flush out STRING
+C
+	   IF (P.GT.0) THEN
+	      P = P + 1
+	      STRING(P:P) = '0'
+	      P = P + 1
+	      CALL WSTR(STRING,P)
+	   ENDIF
+C
+	ENDIF
+C
+C .......................................................................
+	OK = .TRUE.
+C
+999	CITF_TEXT = OK
+	RETURN
+	END
+C

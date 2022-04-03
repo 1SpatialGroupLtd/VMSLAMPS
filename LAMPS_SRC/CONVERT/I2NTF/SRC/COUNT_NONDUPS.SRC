@@ -1,0 +1,170 @@
+	INTEGER FUNCTION COUNT_NONDUPS(COUNT,IS_CITF,DIM,NPTS,
+     &	                               TOT_SO_FAR,CBH,RPTS,MESSAGES)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C	Author						     ST	14-Sep-1993
+CMOD    Check if Z is absent before dividing by Z_MULT	     ST 18-Oct-1993
+C       to prevent floating exception on AXP. MOD 1306.
+CMOD    New args COUNT and MESSAGES. COUNT is the number     ST 12-Jan-1994
+C       of the CB within the feature and MESSAGES is a
+C       logical which says if messages should be output.
+C       Mod 1329.
+C
+C Checks the IFF coordinates to see if any adjacent points will map to the
+C same coordinates due to lower precision of NTF and counts them. Actual
+C removal is done by GEOMETRY and CITF_GEOMETRY
+C It can be called for NTF which only handles STs or for CITF which has all
+C the coords in a CB block. Returns the count of the number of points in the
+C array after ignoring duplicate and give warnings.
+C
+	IMPLICIT NONE
+C
+C Common:
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+	INCLUDE	'I2NTFMSG.PAR'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE 'CITFATTS.CMN'
+	INCLUDE 'FTRCMN.CMN'
+	INCLUDE 'DUPPTS.CMN'
+C
+C Arguments:
+	INTEGER		COUNT		! Number of the CB within the feature
+	LOGICAL		IS_CITF		! Is this CITF or NTF. Hence CB or ST?
+	INTEGER		DIM		! Number of columns in CB
+	INTEGER 	NPTS		! Number of points in RPTS
+	INTEGER 	TOT_SO_FAR	! Total number of points so far
+	REAL    	RPTS(DIM,NPTS)	! Points in this CB
+	LOGICAL		MESSAGES	! TRUE is to output messages
+C
+	RECORD /IFF_CBH/ CBH		! CB header
+C
+C Function:
+	LOGICAL		ACDFND
+C
+C Workspace:
+	LOGICAL		OK,FAILED
+	INTEGER 	I,J,PT		!  Index for PTS
+	INTEGER		DX,DY,DZ
+	INTEGER		NUM,START
+	INTEGER		X_IND,Y_IND,Z_IND
+	LOGICAL		DUP		    ! do we have a duplicate point?
+	LOGICAL		BAD_ZERO	    ! IFF_ABSENT is a dirty zero on AXP
+	LOGICAL		PREV_BAD_ZERO	    ! Applies to previous point
+	INTEGER		ICOORD
+	REAL		RCOORD
+	EQUIVALENCE	(ICOORD,RCOORD)
+C
+C .........................................................................
+C
+	OK = .TRUE.
+	DUP = .FALSE.
+	BAD_ZERO = .FALSE.
+	PREV_BAD_ZERO = .FALSE.
+	X_IND = 1
+	Y_IND = 2
+	Z_IND = 3
+C
+C Find the position of the X, Y and Z within a CB
+C
+	IF (IS_CITF) THEN
+	   DO 10 I = 1,DIM
+	      FAILED = ACDFND(CBH.COLH(I))
+	      IF (FAILED) GOTO 10
+C       
+	      IF (ACD_NAME(1:ACD_NAME_LEN).EQ.'X') THEN
+		 X_IND = I
+	      ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Y') THEN
+		 Y_IND = I
+	      ELSEIF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z') THEN
+		 Z_IND = I
+	      ENDIF
+10	   CONTINUE
+	ENDIF
+C
+C Get the NTF representation of the first point (or the last from the
+C previous CB)
+C
+	IF (COUNT.EQ.1) THEN
+	   PREV_XVAL = NINT(RPTS(X_IND,1)/XY_MULT)	! first point
+	   PREV_YVAL = NINT(RPTS(Y_IND,1)/XY_MULT)
+C
+C Check for an ABSENT Z because this is a dirty zero on the AXP, so when we
+C translate I2NTF, it gives a floating exception.
+C
+	   IF (HADZ) THEN
+	      RCOORD = RPTS(Z_IND,1)
+	      IF (ICOORD.EQ.IFF_ABSENT) THEN
+		 PREV_BAD_ZERO = .TRUE.
+	      ELSE
+		 PREV_ZVAL = NINT(RCOORD/XY_MULT)
+	      ENDIF
+	   ENDIF
+	   START = 2	! compare 2nd with first
+	   NUM = 1	! 1 coord so far - always keep 1st point of 1st CB
+	ELSE
+	   IF (LEVEL.EQ.3 .AND. MESSAGES) THEN
+	      START = 2	! compare 2nd with first
+	      NUM = 1	! 1 coord so far - always keep 1st point of 1st CB
+	   ELSE
+	      START = 1	! compare 1st with last of previous CB
+	      NUM = 0	! no coords in the CB yet - in case 1st is same as last
+	   ENDIF
+	ENDIF
+C
+C Now start checking the in the points
+C
+	DO 100 PT=START,NPTS
+C
+	   BAD_ZERO = .FALSE.
+	   XVAL = NINT(RPTS(X_IND,PT)/XY_MULT)
+	   YVAL = NINT(RPTS(Y_IND,PT)/XY_MULT)
+	   IF (HADZ) THEN
+	      RCOORD = RPTS(Z_IND,PT)	    ! ICOORD is EQUIVALENCE onto RCOORD
+	      IF (ICOORD.EQ.IFF_ABSENT) THEN
+		 BAD_ZERO = .TRUE.
+	      ELSE
+		 ZVAL = NINT(RCOORD/XY_MULT)
+	      ENDIF
+	   ENDIF
+C
+	   DX = ABS(XVAL - PREV_XVAL)
+   	   DY = ABS(YVAL - PREV_YVAL)
+   	   IF (HADZ .AND. .NOT.BAD_ZERO) DZ = ABS(ZVAL - PREV_ZVAL)
+C
+	   DUP = .FALSE.
+	   IF (DX.EQ.0 .AND. DY.EQ.0) THEN
+	      IF (HADZ) THEN
+		 IF (BAD_ZERO .AND. PREV_BAD_ZERO) THEN
+		    DUP = .TRUE.	! X and Y same, both Zs absent
+		 ENDIF
+		 IF (DZ.EQ.0 .AND. .NOT.BAD_ZERO) THEN
+		    DUP = .TRUE.	! X & Y & Z same
+		 ENDIF
+	      ELSE
+		 DUP = .TRUE.		! X & Y same,no Z to check
+	      ENDIF
+	   ENDIF
+C
+C Report on the duplicate point and ignore it or count it if it's unique
+C
+	   IF (DUP) THEN
+	      IF (MESSAGES) CALL LSL_PUTMSG(I2NTF__DUPPTS,
+     &		   			    FSN,TOT_SO_FAR+PT)
+	   ELSE
+	      NUM = NUM + 1
+	   ENDIF
+C
+C Make this point the previous one for next time round the loop
+C
+	   PREV_XVAL = XVAL
+	   PREV_YVAL = YVAL
+	   IF (HADZ) PREV_ZVAL = ZVAL
+	   PREV_BAD_ZERO = BAD_ZERO
+100	CONTINUE
+C
+	COUNT_NONDUPS = NUM
+	RETURN
+	END
+C

@@ -1,0 +1,224 @@
+	LOGICAL FUNCTION RDATT
+C
+C
+C	Copyright Laser-Scan Ltd., Cambridge, England.
+C
+C	Created, based on IFF2IMAP RDPAR	IMcL	31-Jul-1989
+CMOD	Include annotation and collection flags  VLG	21-Mar-1990
+CMOD	Reserve mnemonics FC and OR at level 3   VLG	19-Jun-1990
+CMOD	Move FRTINI to OBEY_QUALS so /CITF can 	  JB	13-Nov-1992
+C	find it
+C
+C	CONVERT I2NTF Utility - Read attribute file
+C
+C Description
+C
+C	Reads the attribute file which associates IFF attribute names
+C	to an NTF mnemonic. The details of what the IFF attributes are
+C	will be read from the FRT as required.
+C
+C	For ordinary errors, we attempt to continue with the file
+C
+C	Returns FALSE if something drastic goes wrong, TRUE otherwise
+C
+	IMPLICIT NONE
+C
+C Included Parameter Files
+	INCLUDE 'HERE:I2NTFMSG.PAR'	    ! message definitions
+	INCLUDE 'LSL$CMNLSL:LSLLIBMSG.PAR'  ! LSLLIB message definitions
+	INCLUDE 'HERE:LUNS.PAR'		    ! Logical units
+C
+C Local Parameters
+	BYTE		PLING		! comment delimiter
+	PARAMETER	(PLING = '!')
+C
+C Common Blocks
+	INCLUDE 'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'HERE:ATTRIBUTE.CMN'	! attribute description table
+	INCLUDE 'HERE:FILENAME.CMN'	! Filenames and lengths
+	INCLUDE 'HERE:COMMANDS.CMN'	! various options
+	INCLUDE 'LSL$CMNLSL:CMDCOM.CMN'	! command decoding
+	INCLUDE 'LSL$CMNLSL:STATUS.CMN'	! LSLLIB status flag
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'	! Attributes in FRT
+C
+C Functions called
+	INTEGER*4	FLROPN		! open file for reading
+	INTEGER*4	FLRCLO		! close file for reading
+	INTEGER*4	FLRLIN		! read in line from file
+	INTEGER*4	RDCOMM		! read a command
+	LOGICAL		ACDFND_NAME	! Find an ACD entry in FRT
+	LOGICAL		RDCHS		! read next character
+	LOGICAL		RDFDT		! read a feature description
+	LOGICAL		RDADT		! read an ancillary code descr.
+	LOGICAL		RDTEL		! read a TRANS_ERROR_LINES entry
+	LOGICAL		RDTES		! read a TRANS_ERROR_SYMBOLS entry
+	LOGICAL		RDTET		! read a TRANS_ERROR_TEXT entry
+C
+C Local Variables
+	INTEGER*4	LINE		! count line numbers
+	INTEGER*4	I,J		! counters
+	INTEGER*4	RESULT		! command read result
+	INTEGER*4	ERRCOD		! LSLLIB error code
+	INTEGER*4	RETCOD		! system error code
+	LOGICAL 	OTEXT		! put text in opt. AC text ?
+	LOGICAL 	ANNOTATE	! AC for text annotations
+	LOGICAL 	COLLECT		! AC for collection objects
+	CHARACTER*32	IFFNAME		! IFF attribute name
+	INTEGER*2	IFFLEN		! ...and its length
+	CHARACTER*2	NTFNAME		! NTF attribute mnemonic
+	BYTE		CH		! character read
+C
+	DATA NTF_ATT_NAME/MAX_ATTR_NUM*'  '/
+C ..................................................................
+C Assume that everything goes well
+C
+	RDATT = .TRUE.
+C
+C Open our attribute file, read only
+C
+	ERRCOD = FLROPN(ATTLUN,ATTFIL(:ATTLEN),RETCOD)
+C
+C If unsuccessful output message
+C
+	IF (.NOT. ERRCOD) THEN
+	   CALL LSL_PUTMSG(I2NTF__ERROPNATT,ATTFIL(1:ATTLEN))
+	   CALL LSL_ADDMSG(ERRCOD)
+	   IF (ERRCOD .EQ. LSL__SYSOPEN) CALL LSL_ADDMSG(RETCOD)
+	   GOTO 999
+C
+C Otherwise let them know what we are doing if that's what they'd like
+C
+	ELSEIF (LOG) THEN
+	   CALL LSL_PUTMSG(I2NTF__ATTFILOPN,ATTFIL(1:ATTLEN))
+	ENDIF
+C
+C Haven't got a line yet
+C
+	LINE = 0
+	ATTR_PTR = 0	! Or an attribute
+C
+C So let us read in the lines, one by one
+C
+500	LINE = LINE+1
+C
+	ERRCOD = FLRLIN(,,,RETCOD)
+	IF (ERRCOD .EQ. LSL__EOF) GOTO 800
+C
+C If unsuccessful output message
+C
+	IF (.NOT. ERRCOD) THEN
+	   CALL LSL_PUTMSG(I2NTF__ERRRDATT)
+	   CALL LSL_ADDMSG(ERRCOD)
+	   IF (ERRCOD .EQ. LSL__SYSREAD) CALL LSL_ADDMSG(RETCOD)
+	   GOTO 999
+	ENDIF
+C
+C Now reset the decoding pointer to the start of the line
+C
+	CALL BSLN
+C
+C Check for a comment delimiter - ignore an empty line
+C
+	IF ( RDCHS( CH ) ) GOTO 500
+	IF ( CH.EQ.PLING ) THEN
+	   GOTO 500			! ignore line
+	ELSE
+	   CALL BSCH			! unread non-pling
+	ENDIF
+C
+C Now, read the command from the line
+C
+	CALL READ_COMMAND(IFFNAME,IFFLEN,NTFNAME,OTEXT,ANNOTATE,
+	1						COLLECT,RETCOD)
+C
+C and check that there was a valid one
+C
+	IF (RETCOD.NE.0) GOTO 5555
+C
+C Check mnemonics FC and OR are not used at level 3 - they are reserved
+C for the feature code and rotation.
+C
+	IF (LEVEL.EQ.3) THEN
+	   IF (NTFNAME.EQ.'FC' .OR. NTFNAME.EQ.'OR') THEN
+	      CALL LSL_PUTMSG(I2NTF__INVALIDATT,NTFNAME)
+	      GOTO 999
+	   ENDIF
+	ENDIF
+	      
+C .................................................................
+C ATTR - Attribute assignment, store the values
+C
+510	IFFLEN = MIN (IFFLEN,20) 		! Truncate to 20 chars
+	ATTR_PTR = ATTR_PTR + 1
+	IFF_ATT_NAME(ATTR_PTR) = IFFNAME(:IFFLEN)
+	IFF_ATT_LEN (ATTR_PTR) = IFFLEN
+	NTF_ATT_NAME(ATTR_PTR) = NTFNAME
+	IFF_OPT_TEXT(ATTR_PTR) = OTEXT
+	IFF_ANNOTATE(ATTR_PTR) = ANNOTATE
+	IFF_COLLECT (ATTR_PTR) = COLLECT
+	GOTO 500
+C ..................................................................
+C Error decoding line
+C
+5555	CALL LSL_ADDMSG(I2NTF__LINEINATT)
+	CALL LSL_ADDSTR(LINE)
+	LSL_STATUS = I2NTF__LINEINATT		! reduce error status
+	GOTO 500
+C ..................................................................
+C Close the attribute file
+C
+800	ERRCOD = FLRCLO(ATTLUN,RETCOD)
+C
+C If unsuccessful output message
+C
+	IF (.NOT. ERRCOD) THEN
+	   CALL LSL_PUTMSG(I2NTF__ERRCLOATT,ATTFIL(1:ATTLEN))
+	   CALL LSL_ADDMSG(ERRCOD)
+	   IF (ERRCOD.EQ.LSL__SYSCLOSE) CALL LSL_ADDMSG(RETCOD)
+	   GOTO 999
+	ELSEIF ( LOG ) THEN
+	   CALL LSL_PUTMSG (I2NTF__ATTFILCLO,ATTFIL(1:ATTLEN))
+	ENDIF
+C ..................................................................
+C Now we have read the attribute names from the file - look up the 
+C details of each in the FRT file -
+C Loop round each attribute given above
+C
+	DO 301 I = 1,ATTR_PTR
+C
+	   IF (ACDFND_NAME(IFF_ATT_NAME(I)(:IFF_ATT_LEN(I)) )) THEN
+C
+C Attribute not found - outputs own message, add to it
+C
+	      CALL LSL_PUTMSG(I2NTF__ATTNOTFND, 
+     &			      IFF_ATT_NAME(I)(:IFF_ATT_LEN(I)))
+	      GOTO 999
+	   ELSE
+C
+C We have found the attribute in the FRT - read and store its data
+C
+	      IFF_ATT_NUM(I) = ACD_CODE
+C
+	      IF (IFF_OPT_TEXT(I)) THEN			! Just want the optional
+	         ATTR_TRANS (I) = ACD_DATATYPE_TX	! text string
+	      ELSE
+	         ATTR_TRANS (I) = ACD_DATA_TYPE
+	      ENDIF
+C
+	      ATT_MM_I (1,I) = ACD_MIN_MAX_I(1)
+	      ATT_MM_I (2,I) = ACD_MIN_MAX_I(2)
+	      ATT_MM_R (1,I) = ACD_MIN_MAX_R(1)
+	      ATT_MM_R (2,I) = ACD_MIN_MAX_R(2)
+	   ENDIF
+301	CONTINUE
+C .....................................................................
+C Finish
+	GOTO 9000
+C
+C Failure
+999	RDATT = .FALSE.
+C
+C Return
+9000	RETURN
+	END
+C

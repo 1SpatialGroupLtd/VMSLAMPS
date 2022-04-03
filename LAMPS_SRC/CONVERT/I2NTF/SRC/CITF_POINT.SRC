@@ -1,0 +1,600 @@
+	LOGICAL FUNCTION CITF_POINT(IS_LINE)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C
+C	Author					 IM	27-Apr-1987
+C
+CMOD	Created from POINT for CITF			JB	02-Dec-1992
+CMOD    Mod 1240. Fix for [GEOMETRY1/2] problem		ST	18-Jun-1993
+CMOD	Calls COUNT_NONDUPS which checks for		ST	15-Sep-1993
+C	duplicate points (Mod 1295)
+CMOD    Mod 1301. Doesn't use fixed Z attribute for	ST	08-Oct-1993
+C	checking non-dups as they are all the same.
+CMOD	Mod 1306. Ensure orientation lies in 0-3599	ST	18-Oct-1993
+CMOD	Change call to COUNT_NONDUPS to include new	ST	12-Jan-1994
+C	first arg - the number of the CB. Mod 1329.
+CMOD    If a line degenerates to a point, remove it	ST	20-Jun-1995
+C       from the IFC and NFC lists used for the
+C       [SUMMREC] record. (Mod 1501)
+CMOD    Implement CITF96 changes (WI/CC 1545)          TJM      20-May-1996
+CMOD    Implement CITF96 fixes   (WI/CC 1547)          TJM      08-Aug-1996
+C
+C Outputs LINEREC and POINTREC records 
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	LOGICAL		IS_LINE			! TRUE if data is a line
+C
+C Common:
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW_MH.CMN'	! for OSMH
+	INCLUDE	'LSL$CMNIFF:IFFHAN.CMN'		! for LPOSH
+	INCLUDE	'LSL$CMNIFF:CB.STR'		! for CB's
+	INCLUDE	'LSL$CMNIFF:IFFSTR.CMN'		! for CB's
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'		! default attribute info
+	INCLUDE 'LSL$CMNFRT:FRTCOM.CMN'		! feature info
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'FTRCMN.CMN'
+	INCLUDE	'ATTRIBUTE.CMN'
+	INCLUDE	'DUPPTS.CMN'
+C
+C Messages:
+	INCLUDE 'I2NTFMSG.PAR'
+C
+C Functions:
+	LOGICAL		ACDFND
+	LOGICAL		FRTFND
+	LOGICAL		CITF_WRITE_LINE
+	INTEGER		COUNT_NONDUPS
+	INTEGER*2	EXPAND
+C
+C Workspace:
+	INTEGER		NUM_ATT
+	INTEGER*2	NUM_RECORDS	!  Number of attribute records
+	CHARACTER*255	ATTREC(500)	!  Attribute records
+	INTEGER		ATTLEN(500)	!  Length of attribute records
+	LOGICAL		ATTSPLIT(500)	! Is attribute is splittable
+	LOGICAL		CB_OUTPUT	!  True if last CB has been output 
+C					   as a GEOMETRY record
+	LOGICAL		HAD_SZ		!  True if had a symbol size
+	LOGICAL		HAD_RO		!  True if had a rotation
+	LOGICAL		HAD_CB		!  True if had a CB
+	LOGICAL		XYZ		!  True if feature should be GEOMETRY2
+	INTEGER		FCPOS		!  Position of FC in IFC list
+	INTEGER		I,II,J,P,Q	!  Loop counter
+	LOGICAL 	OK		!  Function return 
+	LOGICAL		FAILED		!  Function return
+	INTEGER 	TOTAL		!  Number of points in whole feature
+	INTEGER 	TOTPTS		!  As above but after removal of dups
+	INTEGER		DIM,NPT		!  NCOL,NROW of CB
+	INTEGER		NPTS		!  No of points in CB
+	INTEGER*2	TH(1)		!  Line thickness (not yet used in NTF)
+	INTEGER*2	IENDS		!  Pen up/down flag
+	INTEGER*2 	IELEN		!  Length of record
+	INTEGER*2 	IECODE		!  IFF entry
+	INTEGER*2 	EXPLEN		!  Expand size
+	REAL 		SYMBOL_SIZE	!  Symbol size required
+	REAL 		ROTATE		!  Angle of rotation required
+	REAL 		DX,DY		!  For of rotation required
+	LOGICAL		GOT_ATTRIBS	!  Whether we need to output an 
+C					!  attribute record
+	REAL		PI
+	PARAMETER	(PI = 3.1415926)
+C
+	CHARACTER*80	STRING		!  NTF output record
+	INTEGER*2	LENGTH		!  of STRING
+C
+	CHARACTER*6	AC_OR		!  OR field in attrec (rotation)
+	CHARACTER*7	AC_DT		!  DT field in attrec (symbol size)
+	CHARACTER*1	CONT		!  Continuation flag
+C
+	INTEGER		REM,LEN,OUT
+	INTEGER		CPOS	!  Field counts
+	INTEGER		FEATGT
+	INTEGER		DTVAL
+	INTEGER		ORVAL
+	INTEGER		PTR,LEFT,SIZE
+C
+	RECORD /IFF_CBH/ CBH		! CB header
+	RECORD /IFF_CBD/ CBD		! CB data
+C
+C .......................................................................
+C Initialise
+C
+	TOTPTS      = 0		! and the point count
+	TOTAL       = 0		!  and the point count
+	TEXT_GEOM   = 0
+	NUM_RECORDS = 0
+	CBNUM       = 0		! The number of the current CB being read
+	HADZ 	    = .FALSE.	! Does the CB have a Z value
+	XYZ         = .FALSE.	! assume it is a [GEOMETRY1]
+	GOT_ATTRIBS = .FALSE.	! Not had any AC's yet
+	HAD_RO      = .FALSE.	! No orientation angle yet
+	HAD_SZ      = .FALSE.	! No symbol size yet
+	HAD_CB      = .FALSE.	! No CB yet
+C
+C......................................................................
+C Get the GT for the feature
+C
+	FAILED = FRTFND(FC)
+	IF (FAILED) THEN
+	   CALL LSL_PUTMSG(I2NTF__FRTFCERR,FC)
+	   OK = I2NTF__ABORT
+	   GOTO 999
+	ENDIF
+C
+	FEATGT = FRTGT
+C
+C......................................................................
+C Process feature
+C
+	CALL EIHMK(1)				!  Mark the start of the feature
+C
+	IF (.NOT.IS_LINE) THEN			!  Symbol -look for RO entry
+C
+	   ROTATE = 0
+	   HAD_RO = .FALSE.
+	   HAD_SZ = .FALSE.
+C
+30	   CALL IFFNXT(IECODE,IELEN)		!  Read the next entry
+C
+	   IF (IECODE.EQ.'RO') THEN
+C RO entry
+	      CALL EIHRR(ROTATE,1,1)
+	      ROTATE = ROTATE*(180/PI)		! Convert Rad => Degrees
+121	      IF (ROTATE.LT.0.0) THEN
+		 ROTATE = ROTATE + 360
+		 GOTO 121
+	      ENDIF
+	      HAD_RO = .TRUE.
+C
+	   ELSEIF (IECODE.EQ.'CB') THEN
+	      CALL EIHRCB_HEAD(CBH)
+	      DIM = CBH.NCOL
+	      NPT = CBH.NROW
+C
+	      IF (NPT.EQ.2) THEN		! 2 points, get angle
+		 CALL EIHRCB_DATA(CBD)
+		 DX = CBD.R(1+DIM) - CBD.R(1)
+		 DY = CBD.R(2+DIM) - CBD.R(2)
+		 SYMBOL_SIZE = SQRT(DX*DX + DY*DY)
+		 HAD_SZ = .TRUE.
+C
+		 IF (DX.NE.0 .OR. DY.NE.0) THEN
+		    ROTATE = ATAN2(DY,DX) * (180/PI)
+		    HAD_RO = .TRUE.
+		 ENDIF
+	      ENDIF
+C
+	   ELSEIF (IECODE.EQ.'EF') THEN
+	      IF (.NOT.HAD_RO) ROTATE = 0.0
+	      GOTO 90
+	   ENDIF
+C
+	   GOTO 30
+C
+C Store the rotation and symbol size for later output
+C
+90	   CONTINUE
+C
+91	   IF (ROTATE.LT.0) THEN
+	      ROTATE = ROTATE + 360
+	      GOTO 91
+	   ENDIF
+C
+	   DTVAL = NINT(SYMBOL_SIZE*100)
+	   ORVAL = NINT(ROTATE*10)
+	   IF (ORVAL.GE.3600) ORVAL = MOD(ORVAL,3600)
+	   CALL EXPAND('%WS% OR%I4',AC_OR,ORVAL)
+	   CALL EXPAND('%WS% DT%I5',AC_DT,DTVAL)
+C
+C......................................................................
+C The Orientation (OR) and Symbol size (DT) must be output in
+C an ATTREC record later
+C
+	   IF (FEATGT.EQ.9) THEN
+	      IF (ORVAL.NE.0) THEN
+		 NUM_RECORDS = NUM_RECORDS + 1
+		 ATTLEN(NUM_RECORDS) = EXPAND('%WS% %S6%A1',
+     &				             ATTREC(NUM_RECORDS),AC_OR,DIVIDER)
+CCC		 NO_ATTREC = NO_ATTREC + 1
+		 GOT_ATTRIBS = .TRUE.
+	      ENDIF
+	      IF (DTVAL.NE.0) THEN
+		 NUM_RECORDS = NUM_RECORDS + 1
+		 ATTLEN(NUM_RECORDS) = EXPAND('%WS% %S7%A1',
+     &				             ATTREC(NUM_RECORDS),AC_DT,DIVIDER)
+CCC		 NO_ATTREC = NO_ATTREC + 1
+		 GOT_ATTRIBS = .TRUE.
+	      ENDIF
+	   ELSEIF (FEATGT.EQ.8 .AND. ORVAL.NE.0) THEN
+	      NUM_RECORDS = NUM_RECORDS + 1
+	      ATTLEN(NUM_RECORDS) = EXPAND('%WS% %S6%A1',
+     &					    ATTREC(NUM_RECORDS),AC_OR,DIVIDER)
+CCC	      NO_ATTREC = NO_ATTREC + 1
+	      GOT_ATTRIBS = .TRUE.
+	   ENDIF
+	ENDIF
+C
+C......................................................................
+C Start reading the feature again
+C
+	CALL IFFRWM				! Back to marked position
+100	CALL IFFNXT(IECODE,IELEN)		! Read the next entry
+C
+110	IF (IECODE.EQ.'CB') THEN
+	   HAD_CB    = .TRUE.
+	   CB_OUTPUT = .FALSE.			! not output yet
+C
+	   CALL EIHRCB_HEAD(CBH)		! Read the header
+	   IENDS = CBH.FLAGS
+	   NPTS  = CBH.NROW
+	   IF (NPTS.GT.IFF_MAXCBROW) THEN	! Too many points ?
+	      CALL LSL_PUTMSG(I2NTF__TOOMNYPTS,FSN,ISN,NPTS,IFF_MAXCBROW)
+	      OK = .FALSE.
+	      GOTO 999
+	   ENDIF
+C
+	   CBNUM = CBNUM + 1			! Count this CB for dups
+C
+C Check the per-point attributes to determine if it should be a [GEOMETRY1]
+C or [GEOMETRY2] record
+C
+C First check the fixed attributes
+C
+	   DO 8 I = 1,CBH.NATT
+	      IF (ACDFND(CBH.ATT(I).ATTC)) GOTO 8	! find the AC
+	      IF ((ACD_NAME(1:ACD_NAME_LEN).EQ.'Z').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'DIFF_HT').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z_ACQ_METH').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'QHT').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'QDIFF_HT')) XYZ = .TRUE.
+C
+C Don't check fixed attributes for Z value for counting non-dups because
+C it'll be the same for all the points and hence is not needed.
+C	      IF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z') HADZ = .TRUE.
+C
+8	   CONTINUE
+C
+C Now check the the CB columns in case they are in strange order.
+C
+	   DO 9 I = 1,CBH.NCOL
+	      IF (ACDFND(CBH.COLH(I))) GOTO 9		! find the AC
+	      IF ((ACD_NAME(1:ACD_NAME_LEN).EQ.'Z').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'DIFF_HT').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z_ACQ_METH').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'QHT').OR.
+     &		   (ACD_NAME(1:ACD_NAME_LEN).EQ.'QDIFF_HT')) XYZ = .TRUE.
+	      IF (ACD_NAME(1:ACD_NAME_LEN).EQ.'Z') HADZ = .TRUE.
+9	   CONTINUE
+C
+C Populate the CB structure
+C
+	   CALL EIHRCB_DATA(CBD)
+C
+C Now count all the non-duplicate points
+C
+	   TOTPTS = TOTPTS + COUNT_NONDUPS(CBNUM,.TRUE.,CBH.NCOL,NPTS,
+     &					   TOTAL,CBH,CBD.R,.TRUE.)
+C
+C Keep a count of the total number of points in CBs
+C (not after removal of duplicates)
+C
+	   TOTAL = TOTAL + NPTS
+C
+	ELSEIF (IECODE.EQ.'AC') THEN
+	   CALL CITF_ANCIL(GOT_ATTRIBS,NUM_RECORDS,
+     &		           ATTREC,ATTLEN,ATTSPLIT,IELEN,OK)
+	   IF (.NOT.OK) GOTO 100
+C
+	   GOTO 100				! Ignore it
+	ELSEIF (IECODE.EQ.'EF') THEN
+	   GOTO 200				! Finished feature
+	ELSEIF (IECODE.EQ.'VO') THEN
+	   GOTO 100				! Ignore it
+	ELSEIF (IECODE.EQ.'RO') THEN
+	   GOTO 100				! Already dealt with this
+	ELSEIF (IECODE.EQ.'TH') THEN
+	   CALL EIHRI(TH,1,1)			! Read TH and ignore it
+	ELSE
+	   CALL LSL_PUTMSG(I2NTF__BADFEAT,FSN,ISN)
+	   CALL LSL_ADDMSG(I2NTF__UNEXPENT,IECODE)
+	   OK=.FALSE.
+	   GOTO 999
+	ENDIF
+C
+	GOTO 100
+C
+C  .................................................................
+C
+C Let's see after purging all the duplicate points if there are at least 2
+C to make a line feature
+C
+200	IF (IS_LINE .AND. TOTPTS.LT.2) THEN
+	   CALL LSL_PUTMSG(I2NTF__DEGEN,FSN)
+C
+C Uncount (?!?) the number of occurances of this feature code for CITF
+C so we get a correct SUMMREC [82] record.
+C
+	   IF (FC.NE.28) THEN
+C
+C If the number of occurances falls to zero, we must find it in the IFC list,
+C remove it, and shuffle all the others up. Damn, what a nuisance.
+C
+	      IF (NFC(FC,1).EQ.1) THEN
+		 DO 210 II = 1,NDIFF_FC
+		    IF (IFC(II).EQ.FC) THEN
+C
+C Found the offending FC in the list
+C
+		       FCPOS = II
+		       IF (II.EQ.NDIFF_FC) THEN
+			  GOTO 220		!its the last one, adjust count
+		       ELSE
+			  GOTO 215		!remove it by shuffling rest up
+		       ENDIF
+		    ENDIF
+210		 CONTINUE
+215		 DO 220 II = FCPOS,NDIFF_FC-1
+		    IFC(II) = IFC(II+1)
+220		 CONTINUE
+		 NDIFF_FC = NDIFF_FC - 1 	! Reduce the count by 1
+		 NFC(FC,2) = 0			! Flag that we never saw it
+	      ENDIF
+	      NFC(FC,1) = NFC(FC,1) - 1		! Reduce number of occurances
+	   ENDIF
+C
+C Jump out of routine
+C
+	   OK = .TRUE.
+	   GOTO 999
+	ENDIF
+C
+C If there are no points at all in the feature, give an error
+C
+	IF (TOTPTS.EQ.0 .AND. .NOT.CB_OUTPUT) THEN
+	   CALL LSL_PUTMSG(I2NTF__BADFEAT,FSN,ISN)
+	   CALL LSL_ADDMSG(I2NTF__NOPOS)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C..........................................................................
+C Write the LINE/POINT record
+C
+	IF (IS_LINE) THEN			! write out a LINEREC
+C
+	   LINE_ID = LINE_ID + 1		! increment as normal
+C
+	   IF (HAD_CITF93) THEN
+	     CALL EXPAND('%WS% 23%I6%I4%S8%S1',
+     &		 			STRING,
+     &					FSN,
+     &					NTF_FC,
+     &					UPDATE_DATE,
+     &					UPDATE_STATUS)
+             CPOS = 22
+	   ELSEIF (HAD_CITF96) THEN
+	     CALL EXPAND('%WS% 23%I6%I8%S8%S1',
+     &		 			STRING,
+     &					FSN,
+     &					NTF_FC,
+     &					UPDATE_DATE,
+     &					UPDATE_STATUS)
+             CPOS = 26
+	   ENDIF
+	   NO_LINEREC = NO_LINEREC + 1
+	ELSE 					! write out a POINTREC
+	   SYMB_ID = SYMB_ID+1
+C
+	   IF (HAD_CITF93) THEN
+	     CALL EXPAND('%WS% 15%I6%I4%S8%S1',
+     &					STRING,
+     &					FSN,
+     &					NTF_FC,
+     &					UPDATE_DATE,
+     &					UPDATE_STATUS)
+             CPOS = 22
+	   ELSEIF (HAD_CITF96) THEN
+	     CALL EXPAND('%WS% 15%I6%I8%S8%S1',
+     &					STRING,
+     &					FSN,
+     &					NTF_FC,
+     &					UPDATE_DATE,
+     &					UPDATE_STATUS)
+             CPOS = 26
+	   ENDIF
+	   NO_POINTREC = NO_POINTREC + 1
+	ENDIF
+C
+	IF (HAD_CITF96 .OR.
+     &      LEN_SPEC.EQ.0) GOTO 12
+C
+C Fit SPEC field, or as much as poss
+C
+	OUT = 0
+11	REM = 78 - CPOS + 1
+	LEN = MIN(REM,LEN_SPEC-OUT)
+C
+	STRING(CPOS:CPOS+LEN-1) = SPEC(OUT+1:OUT+LEN)
+	CPOS = CPOS + LEN
+	OUT  = OUT  + LEN
+C
+	IF (OUT.LT.LEN_SPEC) THEN		! need continuation
+	   STRING(CPOS:CPOS) = '1'
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	   GOTO 11				! continue SPEC
+	ENDIF
+C
+12	CONTINUE
+C
+	IF ((CPOS+1).GT.78) THEN		! no room for divider -
+	   STRING(CPOS:CPOS) = '1'		! so continue
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	ENDIF
+C
+	STRING(CPOS:CPOS) = MH_CITF_DIVIDER
+	CPOS = CPOS + 1
+C
+	IF (HAD_CITF96 .OR.
+     &      PROCESS.EQ.' '.OR.PROCESS.EQ.CHAR(0)) GOTO 31
+C
+	IF (CPOS+LEN_PROCESS.GT.78) THEN	! no room for PROCESS -
+	   STRING(CPOS:CPOS) = '1'			! so continue
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	ENDIF
+C
+	STRING(CPOS:CPOS+LEN_PROCESS-1) = PROCESS
+	CPOS = CPOS + LEN_PROCESS
+C
+CCC31	IF (PROCESS.EQ.' ') GOTO 32
+31	IF (HAD_CITF96 .OR.
+     &      DATE_OF_PROCESS.EQ.' '.OR.
+     &      DATE_OF_PROCESS.EQ.CHAR(0)) GOTO 32
+C
+	IF (CPOS+LEN_DATE_OF_PROCESS.GT.78) THEN 	! no room for
+	   STRING(CPOS:CPOS) = '1'			! DATE_OF_PROCESS -
+	   LENGTH = CPOS + 1				! so continue
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	ENDIF
+C
+	STRING(CPOS:CPOS+LEN_DATE_OF_PROCESS-1) = DATE_OF_PROCESS
+	CPOS = CPOS + LEN_DATE_OF_PROCESS
+C
+32	IF ((CPOS+1).GT.78) THEN		! no room for divider -
+	   STRING(CPOS:CPOS) = '1'		! so continue
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	ENDIF
+C
+	STRING(CPOS:CPOS) = MH_CITF_DIVIDER
+	CPOS = CPOS + 1
+C
+	IF (HAD_CITF96 .OR.
+     &      PHYS_STAT.EQ.' '.OR.PHYS_STAT.EQ.CHAR(0)) GOTO 33
+	IF (CPOS+LEN_PHYS_STAT.GT.78) THEN	! no room for PHYS_STAT -
+	   STRING(CPOS:CPOS) = '1'		! so continue
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	ENDIF
+C
+	STRING(CPOS:CPOS+LEN_PHYS_STAT-1) = PHYS_STAT
+	CPOS = CPOS + LEN_PHYS_STAT
+C
+C Write out final record
+C
+33	STRING(CPOS:CPOS) = '0'			! so finish
+	LENGTH = CPOS + 1
+	CALL WSTR(STRING,LENGTH)
+C
+C  ..................................................................
+C
+	CALL IFFRWM			! Go back to start
+	CALL EIHMK(0)			! Take out the marker
+C
+	IF (.NOT.IS_LINE) TOTPTS = 1
+	OK = CITF_WRITE_LINE(CBNUM,TOTPTS,IS_LINE,XYZ)
+	IF (.NOT.OK) GOTO 999
+C
+C  ....................................................................
+C If we have any attributes to write out then do it now (level 2+ only)
+C
+550	IF (GOT_ATTRIBS) THEN
+C
+	   NO_ATTREC  = NO_ATTREC + 1
+C
+C Initialise STRING and its pointer P (which points to last element in STRING)
+C
+	   IF (HAD_CITF93) THEN
+ 	      P = EXPAND('%WS% 14%^W%I2',STRING,NUM_RECORDS)
+	   ELSEIF (HAD_CITF96) THEN
+ 	      P = EXPAND('%WS% 14%^W%I4',STRING,NUM_RECORDS)
+	   ENDIF
+C
+	   DO 830 I = 1,NUM_RECORDS
+C
+C Is there room for the next attribute?
+C
+810	      IF (P + ATTLEN(I).LE.78) THEN
+	         STRING(P+1:P+ATTLEN(I)) = ATTREC(I)(1:ATTLEN(I))
+	         P = P + ATTLEN(I)
+C
+C ...if not, then output the current STRING or split the attribute
+C
+	      ELSE
+C
+		 IF (ATTSPLIT(I)) THEN
+C
+C			Attribute may be split
+C
+C don't split the two-character code (VAL_TYPE)
+	            IF (P.GT.76) THEN
+	               P = P + 1
+		       STRING(P:P) = '1'
+		       P = P + 1
+		       CALL WSTR(STRING,P)
+		       P = EXPAND('%WS% 00',STRING)
+	            ENDIF
+		    Q = 0
+820		    LEFT = 78-P
+		    SIZE = MIN(LEFT,ATTLEN(I)-Q)
+		    STRING(P+1:P+SIZE) = ATTREC(I)(Q+1:Q+SIZE)
+		    P = P + SIZE
+		    Q = Q + SIZE
+		    IF (Q.LT.ATTLEN(I)) THEN
+		       P = P + 1
+		       STRING(P:P) = '1'
+		       P = P + 1
+		       CALL WSTR(STRING,P)
+		       P = EXPAND('%WS% 00',STRING)
+		       GOTO 820  
+		    ENDIF
+C
+		 ELSE
+C
+C			Attribute must not be split ...so output current STRING
+C
+	            P = P + 1
+		    STRING(P:P) = '1'
+		    P = P + 1
+		    CALL WSTR(STRING,P)
+		    P = EXPAND('%WS% 00',STRING)
+		    GOTO 810
+		 ENDIF
+	      ENDIF
+830	   CONTINUE
+C
+C Finally, flush out STRING
+C
+	   IF (P.GT.0) THEN
+	      P = P + 1
+	      STRING(P:P) = '0'
+	      P = P + 1
+	      CALL WSTR(STRING,P)
+	   ENDIF
+C
+	ENDIF
+C
+C  ....................................................................
+	OK=.TRUE.
+C
+999	CITF_POINT=OK
+	RETURN
+	END
+C

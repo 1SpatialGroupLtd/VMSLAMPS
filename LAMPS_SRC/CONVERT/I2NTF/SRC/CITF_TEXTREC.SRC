@@ -1,0 +1,325 @@
+	LOGICAL FUNCTION CITF_TEXTREC(CBH,CBD,TX,MAX_TX_LEN,
+     &					NCHS,FONT,DIGPOS,TEXT_HT,
+     &					POS,ROTATE,CURVED,POSIT,XYZ)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C	Author					IM	27-Apr-1987
+C
+CMOD	Copied from TEXTREC for CITF			JB	14-Dec-1992
+CMOD    Mod 1240. Fix for [GEOMETRY1/2] problem		ST	18-Jun-1993
+CMOD    Mod 1301. Output [ACRDREC]s for text features	ST	08-Oct-1993
+CMOD	Mod 1306. Ensure orientation lies in 0-3599	ST	18-Oct-1993
+CMOD    Implement CITF96 changes (WI/CC 1545)          TJM      20-May-1996
+C
+C Writes out NAMEREC, NAMPOSTN and GEOMETRY records for a text feature.
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE 'I2NTFMSG.PAR'
+C
+C Commons:
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW_MH.CMN'
+	INCLUDE 'LSL$CMNIFF:CB.STR'
+	INCLUDE 'CITFATTS.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'FTRCMN.CMN'
+C
+C Arguments:
+	INTEGER 	MAX_TX_LEN		!  Length of an IFF text string
+	BYTE 		TX(MAX_TX_LEN)		!  Contains text string
+	INTEGER 	NCHS			!  No of chars in text string
+	INTEGER 	DIGPOS			!  0-8 posit. of dig. point
+	INTEGER 	FONT			!  Text font used
+	REAL 		TEXT_HT			!  Text height
+	REAL 		POS(2,MAX_TX_LEN)	!  Position of text
+	REAL 		ROTATE(MAX_TX_LEN)	!  Text rotation
+	LOGICAL 	CURVED			!  True if CURVTEXT record req'd
+	LOGICAL 	POSIT			!  True if a CB was found
+	LOGICAL		XYZ			! Should be GEOMETRY2
+C
+	RECORD /IFF_CBH/ CBH(MAX_TX_LEN)
+	RECORD /IFF_CBD/ CBD(MAX_TX_LEN)
+C
+C Functions:
+	LOGICAL		CITF_GEOMETRY
+	INTEGER*2	EXPAND
+	REAL		PI
+	PARAMETER	(PI=3.1415926)
+C
+C Workspace:
+	INTEGER		I,J,L,N
+	INTEGER		DIM,NPTS
+	INTEGER		CPOS
+C
+	INTEGER 	HT		!  Height of text * 10
+	INTEGER 	OK		!  Function return
+	INTEGER		ORVAL		!  Orientation as an integer
+	CHARACTER*100 	TXT_STR		!  Contains truncated text string
+C
+	CHARACTER*100	FORMAT		!  LSLLIB EXPAND format
+	INTEGER*2	FORMLEN		!  Its length
+C
+	CHARACTER*80	STRING		!  NTF output record
+	INTEGER*2	LENGTH		!  Of STRING
+	CHARACTER*4	TMPORIENT	!  Temporary orientation store
+C
+	INTEGER		REM,LEN,OUT
+	REAL		TEMP,RAD
+C
+C ........................................................................
+C
+	NUM_ACRDRECS = 0
+C
+C If no positional entry (i.e. CB) then flag error
+C
+	IF (.NOT.POSIT) THEN
+	   CALL LSL_PUTMSG(I2NTF__BADFEAT,FSN,ISN)
+	   CALL LSL_ADDMSG(I2NTF__NOPOS)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C Without redefining the NTF TEXT_LEN field, NAMEREC can only hold
+C 99 characters (ie length specified by a 2 digit field)
+C
+	CALL EXPAND('%WS% %A99',TXT_STR,TX)
+C
+C If it was truncated then output a warning
+C
+	IF (NCHS.GT.99) THEN
+	   CALL LSL_PUTMSG(I2NTF__LONGTXT)
+	   CALL LSL_ADDMSG(I2NTF__TRUNCTXT,FSN,ISN)
+	   CALL LSL_ADDSTR(TXT_STR(:99))
+	ENDIF
+C
+C a counter is used for the NTF name_id entry as use of the
+C FSN would not allow multiple TS entries
+C
+	TEXT_ID = FSN				! use FSN as NAME_ID
+C
+C Convert the height - IFF stores it as mm/100, but NTF wants mm/10
+C
+	HT = INT(TEXT_HT/10)
+C
+C ......................................................................
+C Now we can write out the records
+C
+C First the NAMEREC containing the text
+C Fit SPEC field, or as much as poss
+C
+	NO_NAMEREC = NO_NAMEREC + 1
+	IF (HAD_CITF93) THEN
+	  CALL EXPAND('%WS% 11%I6%I4%I2%S8%S1',
+     &		      STRING,FSN,NTF_FC,NCHS,UPDATE_DATE,UPDATE_STATUS)
+          CPOS = 24
+	ELSEIF (HAD_CITF96) THEN
+	  CALL EXPAND('%WS% 11%I6%I8%I2%S8%S1',
+     &		      STRING,FSN,NTF_FC,NCHS,UPDATE_DATE,UPDATE_STATUS)
+          CPOS = 28
+	ENDIF
+C
+	IF (LEN_SPEC.EQ.0) GOTO 12
+C
+	OUT = 0
+11	REM = 78 - CPOS + 1
+	LEN = MIN(REM,LEN_SPEC-OUT)
+C
+	STRING(CPOS:CPOS+LEN-1) = SPEC(OUT+1:OUT+LEN)
+	CPOS = CPOS + LEN
+	OUT  = OUT  + LEN
+C
+	IF (OUT.LT.LEN_SPEC) THEN		! need continuation
+	   STRING(CPOS:CPOS) = '1'
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	   GOTO 11				! continue SPEC
+	ENDIF
+C
+12	CONTINUE
+C
+	IF ((CPOS+1).GT.78) THEN		! no room for divider -
+	   STRING(CPOS:CPOS) = '1'		! so continue
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	ENDIF
+C
+	STRING(CPOS:CPOS) = MH_CITF_DIVIDER
+	CPOS = CPOS + 1
+C
+	IF (CPOS+LEN_MARGINAL_TXT.GT.78) THEN	! no room for MARGINAL_TXT -
+	   STRING(CPOS:CPOS) = '1'			! so continue
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	ENDIF
+C
+	STRING(CPOS:CPOS+LEN_MARGINAL_TXT-1) = MARGINAL_TXT
+	CPOS = CPOS + LEN_MARGINAL_TXT
+C
+	OUT = 0					! no of text chars output
+21	REM = 78 - CPOS + 1
+	LEN = MIN(REM,NCHS-OUT)
+C
+	DO 6 I = 1,LEN
+	   STRING(CPOS+I-1:CPOS+I-1) = CHAR(TX(OUT+I))
+6	CONTINUE
+C
+	OUT  = OUT  + LEN
+	CPOS = CPOS + LEN
+C
+	IF (OUT.LT.NCHS) THEN			! need continuation
+	   STRING(CPOS:CPOS) = '1'
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	   GOTO 21				! continue TX
+	ENDIF
+C
+	IF (PHYS_STAT.EQ.' '.OR.PHYS_STAT.EQ.CHAR(0)) GOTO 33
+	IF (CPOS+LEN_PHYS_STAT.GT.78) THEN	! no room for PHYS_STAT -
+	   STRING(CPOS:CPOS) = '1'		! so continue
+	   LENGTH = CPOS + 1
+	   CALL WSTR(STRING,LENGTH)
+	   CALL EXPAND('%WS% 00',STRING)	! continuation record
+	   CPOS = 3				! next free character
+	ENDIF
+C
+	STRING(CPOS:CPOS+LEN_PHYS_STAT-1) = PHYS_STAT
+	CPOS = CPOS + LEN_PHYS_STAT
+C
+C Write out final record
+C
+33	STRING(CPOS:CPOS) = '0'			! so continue
+	LENGTH = CPOS + 1
+	CALL WSTR(STRING,LENGTH)
+C .............................................................................
+C Now for the NAMPOSTN, or CURVTEXT
+C
+	IF (CURVED) THEN			! CURVTEXT record
+	   CALL EXPAND('%WS% 13%I4%I3',
+     &			   STRING,FONT,HT)
+	   CPOS = 10
+C
+C Start filling in the rotations
+C
+	   DO 1000 I=1,NCHS
+C
+	      IF (CPOS+4.GE.79) THEN
+	         STRING(79:79) = '1'		! need a continuation
+	         LENGTH = 80
+	         CALL WSTR(STRING,LENGTH)
+C
+	         CALL EXPAND('%WS% 00',STRING)	! continuation record
+	         CPOS = 3			! next free character
+	      ENDIF
+C
+	      ORVAL = NINT(ROTATE(I)*10)
+	      IF (ORVAL.GE.3600) ORVAL = MOD(ORVAL,3600)
+C
+	      WRITE (TMPORIENT,1111) ORVAL
+1111	      FORMAT(I4)
+C
+	      STRING (CPOS:CPOS+3) = TMPORIENT
+	      CPOS = CPOS+4
+C
+1000	   CONTINUE
+C
+	   LENGTH = CPOS + 2
+	   STRING(LENGTH-1:LENGTH-1)='0'
+	   CALL WSTR(STRING,LENGTH)
+C
+	ELSE					! NAMEPOSTN record
+	   ORVAL = NINT(ROTATE(1)*10)
+	   IF (ORVAL.GE.3600) ORVAL = MOD(ORVAL,3600)
+	   CALL EXPAND('%WS% 12%I4%I3%I1%I4% 0',
+     &			STRING,FONT,HT,DIGPOS,ORVAL)
+	   LENGTH = 16
+	   CALL WSTR(STRING,LENGTH)
+	ENDIF
+C .............................................................................
+C Use the DIGPOS to find second coord.
+C
+	IF (DIGPOS.NE.0) THEN
+C
+C convert the text height from mm/10 on map to metres on ground
+C
+!	   TEMP = TEXT_HT*MD2SCL/10000.0
+	   TEMP = TEXT_HT/100.0
+	   RAD  = ROTATE(1)/180.0*PI
+C
+C and 'move' to position 0
+C
+	   CBH(1).NROW = 2
+	   CALL NEWSTART(CBD(1).R(1),CBD(1).R(2),CBD(1).R(3),CBD(1).R(4),
+     &		         DIGPOS,RAD,TEMP,NCHS,TX)
+C
+ 	ELSE
+	   CBH(1).NROW = 2
+	   CBD(1).R(3) = CBD(1).R(1)	! otherwise, use the first point
+	   CBD(1).R(4) = CBD(1).R(2)	! for this text
+	ENDIF
+C .............................................................................
+C Now give the position of the text in a GEOMETRY* record
+C
+	IF (CURVED) THEN
+	   DO 2000 I = 1,NCHS
+	      DIM  = CBH(I).NCOL
+	      NPTS = CBH(I).NROW		! should be 1
+C
+	      OK = CITF_GEOMETRY(DIM,NPTS,NPTS,CBH(I),
+     &				CBD(I).R,CBD(I).I,CBD(I).C,
+     &				.FALSE.,.TRUE.,.TRUE.,.TRUE.,XYZ)
+2000	   CONTINUE
+	ELSE
+	   DIM  = CBH(1).NCOL
+	   NPTS = CBH(1).NROW
+C
+	   OK = CITF_GEOMETRY(DIM,NPTS,NPTS,CBH(1),
+     &				CBD(1).R,CBD(1).I,CBD(1).C,
+     &				.FALSE.,.TRUE.,.TRUE.,.TRUE.,XYZ)
+	ENDIF
+C
+	IF (.NOT.OK) GOTO 999
+C .............................................................................
+C Rattle off any [ACRDREC] records
+C
+	IF (NUM_ACRDRECS.GT.0) THEN
+	   DO 300 I = 1,NUM_ACRDRECS
+	      N = ACRD_NUM_ATTS(I)	 ! make an INTEGER*4 copy of this byte
+	      L = 1 + EXPAND('%WS% 85%I4%I2',STRING,I,N)
+C
+	      DO 200 J = 1, ACRD_NUM_ATTS(I)
+		 IF (L + ACRD_LEN(J,I).GT.78) THEN
+		    STRING(L:L) = '1'
+		    L = L + 1
+		    CALL WSTR(STRING,L)
+		    L = 1 + EXPAND('%WS% 00',STRING)
+		 ENDIF
+		 STRING(L:L+ACRD_LEN(J,I))=ACRD_ATTS(J,I)(1:ACRD_LEN(J,I))
+		 L = L + ACRD_LEN(J,I)
+200	      CONTINUE
+C
+	      STRING(L:L) = '0'
+	      L = L + 1
+	      CALL WSTR(STRING,L) 		! write this record
+300	   CONTINUE
+	ENDIF
+C
+	NO_ACRDREC = NO_ACRDREC + NUM_ACRDRECS
+C
+C .............................................................................
+C
+	OK = .TRUE.
+C
+999	CITF_TEXTREC = OK
+	RETURN
+	END
+C

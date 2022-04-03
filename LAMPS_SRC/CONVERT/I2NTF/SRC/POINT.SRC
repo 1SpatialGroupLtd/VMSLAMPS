@@ -1,0 +1,621 @@
+	LOGICAL FUNCTION POINT(IS_LINE)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C
+C	Author						 IM	27-Apr-1987
+C	Modified					TJI	29-Sep-1987
+CMOD	Handle NTF level 3 output			VLG	09-Feb-1990
+CMOD	Output CLINE for level 3 features		VLG	18-Jun-1990
+CMOD	Bugfix for SPR 951				VLG	17-Jan-1991
+CMOD	Bugfix for level 1 data, incorrect use of EXPAND SG	19-Sep-1991
+CMOD	BS7567 (v2.0) support added (W93/12)		 ST	20-May-1993
+CMOD	Calls COUNT_NONDUPS which checks for		 ST	15-Sep-1993
+C	duplicate points (Mod 1295)
+CMOD	Calls CHECK_DUP_PTS to check if level 3		 ST	12-Jan-1994
+C	feature reduces to < 2 points and hence 
+C	should not be output. Also calls COUNT_NONDUPS
+C	with new arguments.
+CMOD	Made output of CLINE record depend on the	 ST	17-Jan-1995
+C	version of NTF and give the appropriate
+C	record. Mod 1454.
+CMOD    Increased the number of STs that can be chained  ST	20-Jun-1995
+C       together (the array LINKS) from 50 to 500,
+C       permitting upto 100,000 points per feature.
+C       (Mod 1501).
+C
+C Outputs LINEREC and POINTREC records using GEO_2D and _3D to give the points.
+C If level 3 output is requested, also outputs CHAIN and CLINE records.
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	LOGICAL		IS_LINE			! TRUE if data is a line
+C
+C Common:
+	INCLUDE	'LSL$CMNIFF:IFFHAN.CMN'		! for LPOSH
+	INCLUDE	'LSL$CMNIFF:IFFJUN.CMN'		! for junction data
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'FTRCMN.CMN'
+	INCLUDE	'STORE.CMN'
+	INCLUDE	'NODECMN.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTACD.CMN'		! default attribute info
+	INCLUDE	'ATTRIBUTE.CMN'
+	INCLUDE	'DUPPTS.CMN'
+C
+C Messages:
+	INCLUDE 'I2NTFMSG.PAR'
+C
+C Functions:
+	INTEGER*2	EXPAND
+	INTEGER		GET_NODE
+	INTEGER		COUNT_NONDUPS
+	INTEGER		CHECK_DUP_PTS
+	LOGICAL		STORE_GEOM
+	LOGICAL		WRITE_LINE
+	LOGICAL		GEOMETRY
+C
+C Workspace:
+	CHARACTER*8	IDENT		!  Id to be used in collect record
+	INTEGER*2	NUM_RECORDS	!  Number of attribute records
+	CHARACTER*80	ATTREC(50)	!  Attribute records
+	INTEGER*2	ATTLEN(50)	!  Length of attribute records
+	INTEGER		NODE_NUM	!  Node number found
+	INTEGER		TEMP_ID		!  Temporary GEOM_ID
+	INTEGER		ATT_NUM		!  ATT_ID used in ATTREC
+	INTEGER		FOUND_ATT	!  ATT_ID of previous ATTREC
+	INTEGER		STADDR		!  Start address of ST
+	INTEGER*4	JBPOSN		!  Start address of JB
+	INTEGER*4	JPMARK		!  Remembered position
+	INTEGER*2	OFFSET		!  Offset in JB
+	INTEGER		NUM_LINKS	!  Current link total for feature
+	INTEGER		LINKS(2,500)	!  Allow a maximum of 500 links
+	INTEGER*2	PENUP		!  pen-up=0,pen-down=1
+	LOGICAL		IS_NODE		!  True if a node feature
+	LOGICAL		ST_OUTPUT	!  True if last ST has been output 
+C					   as a GEOMETRY record
+	LOGICAL		HAD_RO		!  True if had an RO
+	LOGICAL		HAD_JP		!  True if had a JP
+	LOGICAL		NEED_LNK	!  True if link needed for a JP
+	LOGICAL		HAD_ST		!  True if had a ST
+	LOGICAL		REC_OUTPUT	!  True if a LINEREC or POINTREC 
+C					   has been output
+	INTEGER 	DIMENSION	!  Is it a 2D or 3D feature
+	LOGICAL 	OK		!  Function return 
+	INTEGER 	STCOUNT		!  ST/ZS counter
+	INTEGER 	START		!  Position in STBUF
+	INTEGER 	TOTAL		!  Number of points in whole feature
+	INTEGER 	TOTPTS		!  As above but after removal of dups
+	INTEGER 	COUNT		!  Index
+	INTEGER		NPTS		!  No of points in ST/ZS
+	INTEGER		PTS_IN_THIS_ST  !  No of points in current ST
+	INTEGER		LEVEL3_NUMPTS	!  Number of points for level 3
+	INTEGER*2	I,INPTS		!  Loop counter
+	INTEGER*2	TH(1)		!  Line thickness (not yet used in NTF)
+	INTEGER*2	IENDS		!  Pen up/down flag
+	INTEGER*2 	IELEN		!  Length of record
+	INTEGER*2 	IECODE		!  IFF entry
+	REAL 		STBUF(3*200)	!  Records the points of the feature
+C					!  (in either 2D or 3D)
+	REAL 		ROTATE		!  Angle of rotation required
+	LOGICAL		MODIFIED
+	LOGICAL		GOT_ATTRIBS	!  Whether we need to output an 
+C					!  attribute record
+	REAL		PI
+	PARAMETER	(PI = 3.1415926)
+C
+	CHARACTER*80	STRING		!  NTF output record
+	INTEGER*2	LENGTH		!  of STRING
+C
+	CHARACTER*8	CONTOUR		!  VALUE field with AC contour height
+	CHARACTER*8	ORIENTATE	!  VALUE field with rotation
+	CHARACTER*8	AC_ROTATE	!  OR field in attrec (rotation)
+C
+	CHARACTER*1	SECURITY	!  Security for this feature
+	DATA		SECURITY /' '/	!  Not currently used
+C
+	CHARACTER*7	CHANGE		!  Change field
+	DATA		CHANGE	 /' 000000'/
+C .......................................................................
+C Initialise
+C
+	STCOUNT     = 0				!  Initialise ST/ZS count
+	TOTAL       = 0				!  and the point count
+	TOTPTS      = 0				!  and the point count
+	CONTOUR     = ' '			!  No contour read
+	ORIENTATE   = ' '			!  Point/text not orientated
+	TEXT_GEOM   = 0
+	FOUND_ATT   = 0
+	ATT_NUM     = 0
+	NUM_RECORDS = 1				!  The first attribute record
+	NUM_LINKS   = 0				!  No links yet
+	NAME_ID     = 0				!  No name id
+	MODIFIED    = .FALSE.
+	GOT_ATTRIBS = .FALSE.			!  Not had any AC's yet
+	REC_OUTPUT  = .FALSE.			!  No LINEREC or POINTREC yet
+	HAD_RO      = .FALSE.			!  No RO yet
+	HAD_JP      = .FALSE.			!  No JP yet
+	NEED_LNK    = .FALSE.			!  No JP yet
+	HAD_ST      = .FALSE.			!  No ST yet
+	SAV_FEAT    = .FALSE.			!  Feature can be output
+C
+	DO 10 I = 1,N_AC_COLL
+	   COLL_FEAT(I) = 0			!  Feature is not part of a 
+10	CONTINUE				!  collect object
+	N_AC_COLL = 0				!  Initialise ac collect counter
+C
+C Process feature
+C
+	CALL EIHMK(1)				!  Mark the start of the feature
+	IF (.NOT.IS_LINE) THEN			!  Symbol -look for RO entry
+30	   CALL IFFNXT(IECODE,IELEN)		!  Read the next entry
+C
+C *** SHOULD LOOK FOR A SECOND POINT AS WELL ***
+C
+	   IF (IECODE.EQ.'RO') GOTO 40
+	   IF (IECODE.EQ.'EF') THEN
+	      ROTATE = 0.0
+	      GOTO 45
+	   ENDIF
+	   GOTO 30
+C
+C RO entry
+40	   CALL EIHRR(ROTATE,1,1)
+	   ROTATE = ROTATE * 180.0/PI		! Convert Rad => Degrees
+41	   IF (ROTATE.LT.0.0) THEN
+	      ROTATE = ROTATE + 360.0
+	      GOTO 41
+	   ENDIF
+42	   IF (ROTATE.GE.360.0) THEN
+	      ROTATE = ROTATE - 360.0
+	      GOTO 42
+	   ENDIF
+C
+45	   CALL EXPAND('%WS% OR%P0%I6',ORIENTATE,NINT(ROTATE*10))
+	   CALL EXPAND('%WS% OR%P0%I6',AC_ROTATE,NINT(ROTATE*1000))
+	   HAD_RO = .TRUE.
+	ENDIF
+C
+C......................................................................
+C At level 3 the FC and Orientation (if required) must be output in
+C an ATTREC record - output this now 
+C
+	IF (LEVEL.EQ.3) THEN
+	   IF (IS_LINE) THEN			! Output FC
+C
+C Check an ATTREC does not already exist for this FC
+	      DO 50 I=1,FC_COUNT
+		 IF (CODES(I,1).EQ.FC) THEN
+		    FOUND_ATT = CODES(I,2)
+		    GOTO 90
+		 ENDIF
+50	      CONTINUE
+C
+90	      ATT_ID = ATT_ID + 1
+	      ATT_NUM = ATT_ID
+C	      ATTLEN(NUM_RECORDS) = EXPAND('%WS% 14%I6%P0FC%I4',
+	      ATTLEN(NUM_RECORDS) = EXPAND('%WS% 14%P0%I6FC%I4',
+     &				ATTREC(NUM_RECORDS),ATT_NUM,NTF_FC) 
+C
+C	      NO_ATTREC = NO_ATTREC + 1
+	      GOT_ATTRIBS = .TRUE.
+	   ELSE				! Symbol -need rotation
+C
+C If /WATER_DISTRIB then FC 999 is code for annotation point=> no FC required
+	      IF (.NOT.(WATER_DISTRIB .AND. FC.EQ.999)) THEN
+C
+C Check an ATTREC does not already exist for this FC
+	         DO 55 I=1,FC_COUNT
+		    IF (CODES(I,1).EQ.FC) THEN
+		       FOUND_ATT = CODES(I,2)
+		       GOTO 95
+		    ENDIF
+55	         CONTINUE
+C
+95	         ATT_ID = ATT_ID + 1
+	         ATT_NUM = ATT_ID
+C	         ATTLEN(NUM_RECORDS) = EXPAND('%WS% 14%I6%P0FC%I4%S8',
+	         ATTLEN(NUM_RECORDS) = EXPAND('%WS% 14%P0%I6FC%I4%S8',
+     &			ATTREC( NUM_RECORDS ),ATT_NUM,NTF_FC,AC_ROTATE) 
+C
+C	         NO_ATTREC = NO_ATTREC + 1
+	         GOT_ATTRIBS = .TRUE.
+	      ENDIF
+	   ENDIF
+	ENDIF
+C......................................................................
+C
+	CALL IFFRWM				! Back to marked position
+100	CALL IFFNXT(IECODE,IELEN)		! Read the next entry
+C
+C Because the order of outputting points at level 3 is different, checking
+C for duplicate points is a bit of a pig, so we use a routine to count them
+C all first and then decide whether to output the feature or not.
+C
+	IF (LEVEL.EQ.3 .AND. STCOUNT.EQ.0) THEN
+	   STADDR = LPOSH	   
+	   IF (IECODE.EQ.'ST' .OR. IECODE.EQ.'ZS') THEN
+	      LEVEL3_NUMPTS = CHECK_DUP_PTS(IS_LINE,IECODE,IELEN,STADDR)
+	      IF (LEVEL3_NUMPTS.EQ.-1) GOTO 200
+	      IF (IS_LINE.AND.LEVEL3_NUMPTS.LT.2) GOTO 200
+	   ENDIF
+	ENDIF
+C
+110	IF (IECODE.EQ.'ST' .OR. IECODE.EQ.'ZS') THEN
+	   HAD_ST    = .TRUE.
+	   ST_OUTPUT = .FALSE.			! not output yet
+	   STADDR = LPOSH
+	   IF (IECODE.EQ.'ST') THEN
+	      DIMENSION=2   
+	   ELSE
+	      DIMENSION=3
+	   ENDIF
+C
+	   CALL EIHRS(INPTS,IENDS)		! Read the descriptor
+	   NPTS = INPTS
+	   IF (NPTS.GT.200) THEN		! Too many points ?
+	      CALL LSL_PUTMSG(I2NTF__TOOMNYPTS,FSN,ISN,NPTS,200)
+	      OK = .FALSE.
+	      GOTO 999
+	   ENDIF
+C
+	   PTS_IN_THIS_ST = 0
+	   STCOUNT=STCOUNT+1			! Count this ST/ZS
+	   PENUP = IENDS
+	   CALL EIHRR(STBUF,INPTS*DIMENSION,1)
+C	   
+	   PTS_IN_THIS_ST = COUNT_NONDUPS(STCOUNT,.FALSE.,DIMENSION,NPTS,
+     &					  TOTAL,0,STBUF,.TRUE.)
+	   TOTPTS = TOTPTS + PTS_IN_THIS_ST
+C
+C Keep a count of the total number of points in CBs
+C (not after removal of duplicates)
+C
+	   TOTAL = TOTAL + NPTS
+C
+	   IF (LEVEL.EQ.3) THEN			! Output GEOMETRY
+	      IF (SAV_FEAT .AND. .NOT.IS_LINE) THEN 	! Save GEOMETRY
+		 FEAT_COORDS(FEATURE_PTR,1) = STBUF(1)
+		 FEAT_COORDS(FEATURE_PTR,2) = STBUF(2)
+	      ELSEIF (TEXT_GEOM.NE.0 .AND. .NOT.IS_LINE) THEN	! Use text
+		 TEMP_ID = TEXT_GEOM				! GEOMETRY
+	      ELSE
+C		 OK = GEOMETRY(DIMENSION,TOTPTS,NPTS,STBUF,IS_LINE,
+C     &			 	.FALSE.,.FALSE.,.TRUE.,.TRUE.,PENUP)
+		 OK = GEOMETRY(DIMENSION,PTS_IN_THIS_ST,NPTS,STBUF,IS_LINE,
+     &			 	.FALSE.,.FALSE.,.TRUE.,.TRUE.,PENUP)
+		 IF (.NOT.OK) GOTO 999
+C
+	         TEMP_ID = GEOM_ID
+	      ENDIF
+C
+C	      STCOUNT = 0			! Reset counters
+C	      TOTPTS  = 0
+	      ST_OUTPUT = .TRUE.
+	      IF (IS_LINE) THEN
+	         NUM_LINKS = NUM_LINKS + 1
+	         IF (NUM_LINKS.GT.500) THEN
+	            CALL LSL_PUTMSG(I2NTF__TOOMNYLNKS,FSN,500)
+	            OK = .FALSE.
+	            GOTO 999
+	         ENDIF
+	         LINKS(1,NUM_LINKS) = GEOM_ID	! Remember this GEOMETRY
+	         LINKS(2,NUM_LINKS) = DIR
+	      ENDIF
+C
+	      IF (HAD_JP .AND. NEED_LNK) THEN	! Had a previous JP
+	        OK = STORE_GEOM(NODE_NUM,STADDR,IS_LINE) 
+	        IF (.NOT.OK) THEN
+ 	           CALL LSL_PUTMSG(I2NTF__NOST,NODE_NUM)
+	           GOTO 999
+	        ENDIF
+		NEED_LNK = .FALSE.
+	      ENDIF
+	   ENDIF
+C
+	ELSEIF (IECODE.EQ.'AC') THEN
+	   IF (LEVEL.EQ.1) THEN
+	      CALL L1ANCIL(CONTOUR)		! Only 1 attribute (CONTOUR)
+	   ELSE
+	      CALL ANCIL(GOT_ATTRIBS,NUM_RECORDS,ATTREC,ATTLEN,IELEN,OK)
+	      IF (.NOT.OK) GOTO 100		! GOTO 999
+C
+	      IF (ATT_NUM.EQ.0 .AND. GOT_ATTRIBS) ATT_NUM = ATT_ID
+	   ENDIF
+C N.B. we only use the VALUE field in the POINT record for ROtation,
+C not for ACs.
+C
+	ELSEIF (IECODE.EQ.'JP') THEN
+	   IF (LEVEL.NE.3) GOTO 100		! Ignore if level<>3
+C
+	   IF (.NOT.HAD_SH) THEN
+	      CALL LSL_PUTMSG(I2NTF__SHMISS,FSN)
+	      GOTO 100
+	   ENDIF
+C
+	   CALL EIHRL(JBPOSN,1,1)		! Read JB position
+	   CALL EIHRI(OFFSET,1,3)		! Read junction offset
+	   NODE_NUM = GET_NODE(JBPOSN,OFFSET)
+	   IF (NODE_NUM.EQ.-1) THEN
+	      OK = .FALSE.
+	      CALL LSL_PUTMSG(I2NTF__NONODE,FSN)
+	      GOTO 999
+	   ENDIF
+C
+	   HAD_JP = .TRUE.
+	   NEED_LNK = .TRUE.
+	   IF (HAD_ST) THEN
+	      OK = STORE_GEOM(NODE_NUM,STADDR,IS_LINE)
+	      IF (.NOT.OK) THEN
+	         CALL LSL_PUTMSG(I2NTF__NOST,NODE_NUM)
+		 GOTO 999
+	      ENDIF
+	      IF (.NOT.IS_LINE) NEED_LNK = .FALSE.
+	   ENDIF
+C
+	ELSEIF (IECODE.EQ.'EF') THEN
+	   GOTO 200				! Finished feature
+	ELSEIF (IECODE.EQ.'VO') THEN
+	   GOTO 100				! Ignore it
+	ELSEIF (IECODE.EQ.'RO') THEN
+	   GOTO 100				! Already dealt with this
+	ELSEIF (IECODE.EQ.'TH') THEN
+	   CALL EIHRI(TH,1,1)			! Read TH and ignore it
+	ELSE
+	   CALL LSL_PUTMSG(I2NTF__BADFEAT,FSN,ISN)
+	   CALL LSL_ADDMSG(I2NTF__UNEXPENT,IECODE)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+	GOTO 100
+C
+C  .................................................................
+C
+C Let's see after purging all the duplicate points if there are at least 2
+C to make a line feature
+C
+!!!!200	IF (IS_LINE .AND. TOTPTS.LT.2 .AND. LEVEL.LT.3) THEN
+200	IF (IS_LINE .AND. TOTPTS.LT.2) THEN
+	   CALL LSL_PUTMSG(I2NTF__DEGEN,FSN)
+	   OK = .TRUE.
+	   GOTO 999
+	ENDIF
+C
+C If there are no points at all in the feature, give an error
+C
+	IF (TOTPTS.EQ.0 .AND. .NOT.ST_OUTPUT) THEN
+	   CALL LSL_PUTMSG(I2NTF__BADFEAT,FSN,ISN)
+	   CALL LSL_ADDMSG(I2NTF__NOPOS)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C..........................................................................
+C If no AC entries for a line at level 3 see if a previous ATTREC
+C was found
+C
+	IF (LEVEL.EQ.3 .AND. ATTLEN(NUM_RECORDS).EQ.15 .AND.
+     &						FOUND_ATT.NE.0) THEN
+	   ATT_ID = ATT_ID - 1		! Drop the attrec we had formed
+	   GOT_ATTRIBS = .FALSE.	! No need to output attrec now
+	   ATT_NUM = FOUND_ATT
+	ENDIF
+C
+C......................................................................
+C Write the LINE/POINT record
+C
+C - for the point record, the VALUE field is used for the
+C   orientation of the point feature.
+C - at level 1 the line record VALUE field is used for CONTOUR height
+C   at other levels it is not used.
+C
+260	IF (IS_LINE) THEN			! write out a LINEREC
+C
+	   IF (LEVEL.EQ.3) THEN			! GEOMETRY has been output
+C
+	      IF (NUM_LINKS.GT.1 .OR. WATER_DISTRIB) GOTO 300  ! Output a CLINE
+C
+	      TEMP_ID = GEOM_ID
+	      IF (SAV_FEAT) THEN		! Save feature - must be 
+		 FEAT_ID(FEATURE_PTR,1) = 23	! annotated
+		 FEAT_ID(FEATURE_PTR,2) = TEMP_ID
+		 FEAT_ID(FEATURE_PTR,3) = ATT_NUM
+		 FEAT_ID(FEATURE_PTR,4) = NAME_ID
+C
+		 DO 261 I = 1,N_AC_COLL		! Collect records this 
+C						! feature is in.
+	            FEAT_ID_COLL(FEATURE_PTR,I) = COLL_FEAT(I)
+261		 CONTINUE
+C
+		 FEAT_N_AC_COLL(FEATURE_PTR) = N_AC_COLL
+		 REC_OUTPUT = .TRUE.
+		 GOTO 550
+	      ENDIF
+C
+	      LINE_ID = LINE_ID + 1
+	      IF (VERSION.EQ.2.0) THEN
+		 CALL EXPAND('%WS% 23%P0%I6',IDENT,LINE_ID)
+		 CALL EXPAND('%WS% 23%P0%I6%I6% 01%I6% 0',
+     &		      STRING,LINE_ID,TEMP_ID,ATT_NUM)
+	      ELSE
+		 CALL EXPAND('%WS% 23%P0%I6',IDENT,LINE_ID)
+		 CALL EXPAND('%WS% 23%P0%I6%I6%I6%I6% 0',
+     &		      STRING,LINE_ID,TEMP_ID,ATT_NUM,NAME_ID)
+	      ENDIF
+	      NO_LINEREC = NO_LINEREC + 1
+C
+	   ELSE
+	      IF (OS_DATA) THEN			! matches NTF2I
+	        LINE_ID = FSN			! use the FSN as ID
+	      ELSE
+	        LINE_ID = LINE_ID + 1		! increment as normal
+	      ENDIF
+C
+C	      CALL EXPAND('%WS% 23%I6%S8%P0%I4  000000 000000 0',
+	      CALL EXPAND('%WS% 23%P0%I6%P %S8%P0%I4  000000 0000000',
+     &					STRING,LINE_ID,CONTOUR,NTF_FC)
+	      NO_LINEREC = NO_LINEREC + 1
+	   ENDIF
+	ELSE 					! write out a POINTREC
+C
+	   IF (LEVEL.EQ.3) THEN			! GEOMETRY has been output
+	      IF (SAV_FEAT) THEN		! Save feature - must be 
+		 FEAT_ID(FEATURE_PTR,1) = 15	! annotated
+		 FEAT_ID(FEATURE_PTR,2) = 0	! GEOMETRY not output
+		 FEAT_ID(FEATURE_PTR,3) = ATT_NUM
+		 FEAT_ID(FEATURE_PTR,4) = NAME_ID
+C
+		 DO 262 I = 1,N_AC_COLL 	! Collect records this feature
+C						! is in
+	            FEAT_ID_COLL(FEATURE_PTR,I) = COLL_FEAT(I)
+262		 CONTINUE
+C
+		 FEAT_N_AC_COLL(FEATURE_PTR) = N_AC_COLL
+	  	 REC_OUTPUT = .TRUE.
+		 GOTO 550
+	      ENDIF
+C
+	      IF (HAD_SH) CALL CHECK_POINT(TEMP_ID,STBUF(1),STBUF(2))
+C
+	      SYMB_ID = SYMB_ID+1
+	      IF (VERSION.EQ.2.0) THEN
+		 CALL EXPAND('%WS% 15%P0%I6',IDENT,SYMB_ID)
+		 CALL EXPAND('%WS% 15%P0%I6%I6% 01%I6% 0',
+     &		      STRING,SYMB_ID,TEMP_ID,ATT_NUM)
+	      ELSE
+		 CALL EXPAND('%WS% 15%P0%I6',IDENT,SYMB_ID)
+		 CALL EXPAND('%WS% 15%P0%I6%I6%I6%I6% 0',
+     &		      STRING,SYMB_ID,TEMP_ID,ATT_NUM,NAME_ID)
+	      ENDIF
+	      NO_POINTREC = NO_POINTREC + 1
+C
+	   ELSE						! not at level 3
+	      IF (OS_DATA) THEN				! matches NTF2I
+	        SYMB_ID = FSN				! use the FSN as ID
+	      ELSE
+	        SYMB_ID = SYMB_ID+1
+	      ENDIF
+C
+C POINTREC record, with orientation value
+C
+C	      CALL EXPAND('%WS% 15%I6%S8%I4  000000 000000 0',
+	      IF (LEVEL.EQ.1) THEN
+		 CALL EXPAND('%WS% 15%P0%I6%P %S8%P0%I4  000000 0000000',
+     &					STRING,SYMB_ID,CONTOUR,NTF_FC)
+	      ELSE
+		 CALL EXPAND('%WS% 15%P0%I6%P %S8%P0%I4  000000 0000000',
+     &					STRING,SYMB_ID,ORIENTATE,NTF_FC)
+	      ENDIF
+	      NO_POINTREC = NO_POINTREC + 1
+	   ENDIF
+	ENDIF
+C
+	IF (LEVEL.EQ.3) THEN
+	   IF (VERSION.EQ.2.0) THEN
+	      LENGTH = 24
+	   ELSE
+	      LENGTH = 28
+	   ENDIF
+	ELSEIF (LEVEL.EQ.2) THEN
+	   IF (VERSION.EQ.2.0) THEN		! not needed but makes it clear
+	      LENGTH = 37
+	   ELSE
+	      LENGTH = 37
+	   ENDIF
+	ELSE					! Don't need the last bit
+	   LENGTH = 22
+	   STRING(LENGTH-1:LENGTH-1) = '0'
+	ENDIF
+C
+	CALL WSTR(STRING,LENGTH)
+	REC_OUTPUT = .TRUE.
+C  ..................................................................
+C
+	IF (LEVEL.NE.3) THEN			! Output GEOMETRY
+	   CALL IFFRWM				! Go back to start
+	   CALL EIHMK(0)			! Take out the marker
+	   OK = WRITE_LINE(STCOUNT,TOTPTS,DIMENSION,IS_LINE)
+	   IF (.NOT.OK) GOTO 999
+	ENDIF
+C  ....................................................................
+C
+300	IF (.NOT.REC_OUTPUT) THEN		! Need to output CLINE
+	   CALL CHAIN(NUM_LINKS,LINKS)
+	   IF (SAV_FEAT) THEN			! Save feature - must be
+	      FEAT_ID(FEATURE_PTR,1) = 26	! annotated
+	      FEAT_ID(FEATURE_PTR,2) = CHAIN_ID
+	      FEAT_ID(FEATURE_PTR,3) = ATT_NUM
+	      FEAT_ID(FEATURE_PTR,4) = NAME_ID
+	      DO 263 I = 1,N_AC_COLL 		! The Collect records which 
+						! this feature is in.
+	         FEAT_ID_COLL(FEATURE_PTR,I) = COLL_FEAT(I)
+263	      CONTINUE
+C
+	      FEAT_N_AC_COLL(FEATURE_PTR) = N_AC_COLL
+	      REC_OUTPUT = .TRUE.
+	      GOTO 550
+	   ENDIF
+C
+	   CLINE_ID = CLINE_ID + 1
+	   IF (VERSION.EQ.2.0) THEN
+	      CALL EXPAND('%WS% 26%P0%I6',IDENT,CLINE_ID)
+	      CALL EXPAND('%WS% 26%P0%I6%I6% 01%I6% 0', 
+     &			STRING,CLINE_ID,CHAIN_ID,ATT_NUM)
+	      LENGTH = 24
+	   ELSE
+	      CALL EXPAND('%WS% 26%P0%I6',IDENT,CLINE_ID)
+	      CALL EXPAND('%WS% 26%P0%I6%I6%I6%I6% 0', 
+     &			STRING,CLINE_ID,CHAIN_ID,ATT_NUM,NAME_ID)
+	      LENGTH = 29
+	   ENDIF
+	   CALL WSTR(STRING,LENGTH)
+	ENDIF
+C ....................................................................
+C See if the feature is part of one or more COLLECT records
+C
+	IF (N_AC_COLL.GT.0 .AND. .NOT.SAV_FEAT) THEN	! Add the feature 
+							! to a collect
+	   DO 301 I = 1,N_AC_COLL
+	      IF (COLLECT_NUM(COLL_FEAT(I)).LT.50) THEN
+		 COLLECT_NUM(COLL_FEAT(I)) = COLLECT_NUM(COLL_FEAT(I)) + 1
+		 COLLECT_ID(COLL_FEAT(I),COLLECT_NUM(COLL_FEAT(I))) = IDENT
+	      ENDIF
+301	   CONTINUE
+	ENDIF
+C  ....................................................................
+C If we have any attributes to write out then do it now (level 2+ only)
+C
+550	IF (GOT_ATTRIBS) THEN
+C
+C Finish last record
+	   ATTLEN(NUM_RECORDS) = ATTLEN(NUM_RECORDS) + 1
+	   ATTREC(NUM_RECORDS)(ATTLEN(NUM_RECORDS):ATTLEN(NUM_RECORDS)) = '0'
+	   ATTLEN(NUM_RECORDS) = ATTLEN(NUM_RECORDS) + 1
+C
+	   DO 600 I=1,NUM_RECORDS
+	      CALL WSTR(ATTREC(I),ATTLEN(I))
+600	   CONTINUE
+C 
+C If ATTREC just contains FC then remember it
+C 
+	   IF (LEVEL.EQ.3 .AND. ATTLEN(NUM_RECORDS).EQ.17 .AND.
+     &						FOUND_ATT.NE.0) THEN
+	      FC_COUNT = FC_COUNT + 1
+	      IF (FC_COUNT.GT.300) THEN
+		 CALL LSL_PUTMSG(I2NTF__TOOMNYFC,300)
+		 OK = .FALSE.
+		 GOTO 999
+	      ENDIF
+	      CODES(FC_COUNT,1) = FC
+	      CODES(FC_COUNT,2) = ATT_NUM
+	   ENDIF
+	ENDIF
+C
+C  ....................................................................
+	OK = .TRUE.
+C
+999	POINT = OK
+	RETURN
+	END
+C

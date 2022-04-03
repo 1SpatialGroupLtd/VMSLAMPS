@@ -1,0 +1,259 @@
+	LOGICAL FUNCTION SECTION(FCOUNT,FID)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C	Author						IM	06-05-87
+C
+C	Modified					TJI	29-Sep-1987
+CMOD	Handle NTF level 3 output			VLG	09-Feb-1990
+CMOD	BS7567 (v2.0) support added (W93/12)		 ST	24-May-1993
+CMOD    This routine destroyed the status returned from	 ST	20-Jun-1995
+C	POINT. See I2NTF.UPD file for full description
+C       (Mod 1501).
+CMOD    Implement CITF96 changes                        TJM     20-May-1996
+C
+C Builds and outputs all NTF records at section level or below
+C
+C Returns TRUE for successful completion, otherwise FALSE
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE 'I2NTFMSG.PAR'
+C
+C Common:
+	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE	'FILENAME.CMN'
+	INCLUDE	'FTRCMN.CMN'
+	INCLUDE	'STORE.CMN'
+	INCLUDE	'LUNS.PAR'
+C
+C Functions:
+	LOGICAL 	SECHREC		!   Write the section header record
+	LOGICAL 	GEOMETRY
+	INTEGER	 	FEATURE		!   Output a feature
+	INTEGER 	IFFNXC		!   Find next feature
+	INTEGER 	IFFOPEN		!   Open IFF file for read
+	LOGICAL		WRITE_NODES
+C
+C Arguments:
+	INTEGER 	FCOUNT		!   Map index
+	INTEGER		FID(7)		!   File ID
+C
+C Workspace:
+	LOGICAL 	OK		!   True if all OK
+	INTEGER		I,J
+	INTEGER*2	IECODE		!   Entry code
+	INTEGER*2 	IELEN		!   -1 if no more features
+	INTEGER*2	LAYER		!   Layer number
+	INTEGER*4	EOPTR		!   Address of EO entry
+	LOGICAL		GOT_EOPTR
+C
+	INTEGER		LENGTH
+	CHARACTER*80	STRING		!   NTF output record
+	CHARACTER*8	IDENT
+	REAL*4		PT_COORD(2)
+C
+C   ...............................................................
+C Open up the input file using the FID to identify the file, and
+C remembering to pass the filename to it for its information
+C - NB open it at input revision level 0, so that CBs get converted
+C   to ST or SZ entries
+C   
+	OK = IFFOPEN(IFFLUN,INFILE(FCOUNT)(1:INLEN(FCOUNT)),
+     &			  FID,LOG,REVISION)
+	IF (.NOT.OK) GOTO 999
+C
+C   ..............................................................
+C Initialise NTF feature id counters
+C
+	LINE_ID = 0
+	SYMB_ID = 0
+	TEXT_ID = 0
+	GEOM_ID = 0
+	ATT_ID  = 0
+	NODE_ID = 0
+	CHAIN_ID = 0
+	CLINE_ID = 0
+	NAME_ID  = 0
+	FC_COUNT = 0
+	HAD_TEXT = .FALSE.
+	FEATURE_PTR = 0
+	TEXT_PTR    = 0
+	COLLECT_PTR = 0
+	N_AC_COLL   = 0
+C
+	DO 10 I=1,MAX_STORE
+	   COLLECT_NUM(I) = 0
+10	CONTINUE
+C
+C Section Header 
+	OK = SECHREC(FCOUNT)
+	IF (.NOT.OK) GOTO 200
+C   ...............................................................
+C Rest of data
+C
+C Find a feature
+C
+100	CALL IFFNXT(IECODE,IELEN)
+	IF (IELEN.EQ.-1) THEN		! If there are none left
+	   IF (HAD_CITF93.OR.HAD_CITF96) GOTO 200
+C
+	   GOTO 150
+	ENDIF
+	IF (IECODE.EQ.'EJ') THEN
+	   OK = .TRUE.
+	   GOTO 200
+	ENDIF
+C
+	IF (IECODE.EQ.'NO') THEN	! check for layer 0
+C
+	   OK = .FALSE.			! assume the worst
+C
+	   CALL EIHRI(LAYER,1,1)
+	   IF ( LAYER.EQ.0 ) THEN	! we want to ignore layer 0
+	      IF (LOG) CALL LSL_PUTMSG(I2NTF__IGNORE, LAYER)
+C
+	      IF (IELEN.LT.4) THEN
+		 GOT_EOPTR = .FALSE.
+	      ELSE
+		 CALL EIHRL(EOPTR,1,3)
+		 IF (EOPTR.EQ.0) THEN
+		    GOT_EOPTR = .FALSE.
+		 ELSE
+		    GOT_EOPTR = .TRUE.
+		 ENDIF
+	      ENDIF
+C
+	      IF (GOT_EOPTR) THEN
+		 CALL IFFPKE(IECODE,IELEN,EOPTR)
+		 IF (IECODE.NE.'EO') THEN
+		    CALL LSL_PUTMSG(I2NTF__BADEOPTR)
+		    OK = .FALSE.
+		    GOTO 200
+		 ELSEIF ( IELEN.EQ.-1 ) THEN
+		    CALL LSL_PUTMSG(I2NTF__UNEXPEOF)
+		    OK = .FALSE.
+		    GOTO 200
+		 ENDIF
+	      ELSE
+		 CALL IFFNXC('EO',IELEN)
+		 IF (IELEN.EQ.-1) THEN
+		    CALL LSL_PUTMSG(I2NTF__UNEXPEOF)
+		    OK = .FALSE.
+		    GOTO 200
+		 ENDIF
+	      ENDIF
+C
+	   ELSE
+	      IF (LOG) CALL LSL_PUTMSG(I2NTF__LAYER,LAYER)
+	   ENDIF
+C
+	ELSEIF (IECODE.EQ.'NF') THEN
+	   OK = FEATURE(FCOUNT)
+	   IF (.NOT.OK) GOTO 200
+	ENDIF
+C
+	GOTO 100			!  And get the next
+C   ...............................................................
+C Output any remaining features for which annotation texts weren't found
+C
+150	DO 145 I = 1,FEATURE_PTR
+	   IF (FEAT_ID(I,4).EQ.0) THEN   		! text not found
+	      IF (FEAT_ID(I,1).EQ.23) THEN		! is line feature
+	         LINE_ID = LINE_ID + 1
+C	         CALL EXPAND ('%WS% 23%I6',IDENT,LINE_ID)
+	         CALL EXPAND ('%WS% 23%P0%I6',IDENT,LINE_ID)
+		 NO_LINEREC = NO_LINEREC + 1
+C
+	      ELSEIF (FEAT_ID(I,1).EQ.15) THEN		! is point feature
+		 PT_COORD(1) = FEAT_COORDS(I,1)
+		 PT_COORD(2) = FEAT_COORDS(I,2)
+	         OK = GEOMETRY(2,1,1,PT_COORD,.FALSE.,
+     &			 	.FALSE.,.FALSE.,.TRUE.,.TRUE.,0)
+		 IF (.NOT.OK) GOTO 200
+C
+		 FEAT_ID(I,2) = GEOM_ID
+C
+	         IF (HAD_SH) THEN
+C No JP entry in this feature
+C See if there is a node at this position
+		    CALL CHECK_POINT(FEAT_ID(I,2),PT_COORD(1),PT_COORD(2))
+	         ENDIF
+C
+	         SYMB_ID = SYMB_ID + 1
+C	         CALL EXPAND ('%WS% 15%I6',IDENT,SYMB_ID)
+	         CALL EXPAND ('%WS% 15%P0%I6',IDENT,SYMB_ID)
+		 NO_POINTREC = NO_POINTREC + 1
+C
+	      ELSEIF (FEAT_ID(I,1).EQ.26) THEN		! is cline feature
+	         CLINE_ID = CLINE_ID + 1
+C	         CALL EXPAND ('%WS% 26%I6',IDENT,CLINE_ID)
+	         CALL EXPAND ('%WS% 26%P0%I6',IDENT,CLINE_ID)
+	      ENDIF
+C
+C 	      CALL EXPAND('%WS% %S8%I6%I6%I6 0',STRING,IDENT,
+ 	      CALL EXPAND('%WS% %S8%P0%I6%I6%I6 0',STRING,IDENT,
+     &				FEAT_ID(I,2),FEAT_ID(I,3),FEAT_ID(I,4))
+	      LENGTH = 29
+	      CALL WSTR(STRING,LENGTH)
+	      CALL LSL_PUTMSG(I2NTF__NOTEXT,IDENT)
+C
+	      DO 300 J = 1,FEAT_N_AC_COLL(I)
+	         COLL_FEAT(J) = FEAT_ID_COLL(I,J)
+300	      CONTINUE
+C
+	      IF (FEAT_N_AC_COLL(I).GT.0) THEN		! is part of a collect
+		 DO 301 J = 1,FEAT_N_AC_COLL(I)
+	            COLLECT_NUM(COLL_FEAT(J)) = COLLECT_NUM(COLL_FEAT(J)) + 1
+	            COLLECT_ID(COLL_FEAT(J),COLLECT_NUM(COLL_FEAT(J))) = IDENT
+301		 CONTINUE
+	      ENDIF
+	   ENDIF
+145	CONTINUE
+C...................................................................
+C Output any COLLECT records
+C
+	DO 148 I=1,COLLECT_PTR
+C	   CALL EXPAND ('%WS% 34%I6%I4',STRING,I,COLLECT_NUM(I))
+	   CALL EXPAND ('%WS% 34%P0%I6%I4',STRING,I,COLLECT_NUM(I))
+	   LENGTH = 12
+	   DO 147 J=1,COLLECT_NUM(I)
+	      IF ((LENGTH + 8).GE.77) THEN 	! We need a new record
+	         LENGTH = LENGTH + 1
+	         STRING(LENGTH:LENGTH) = '1'	! finish the old one
+	         LENGTH = LENGTH + 1
+	         CALL WSTR(STRING,LENGTH)
+	 	 CALL EXPAND('%WS% 00%S8',STRING,COLLECT_ID(I,J)) 
+		 LENGTH = 10
+	      ELSE
+	 	 CALL EXPAND('%WS% %S%S8',STRING,STRING(1:LENGTH),
+	1						COLLECT_ID(I,J))
+		 LENGTH = LENGTH + 8
+	      ENDIF
+147	   CONTINUE
+C
+	   LENGTH = LENGTH + 1
+	   STRING(LENGTH:LENGTH) = '0'		! finish the record
+	   LENGTH = LENGTH + 1
+	   CALL WSTR(STRING,LENGTH)
+148	CONTINUE
+C .....................................................................
+C Output node records if level 3 output is selected
+C
+200	IF (.NOT.OK) GOTO 999
+	IF (LEVEL.EQ.3 .AND. HAD_SH) THEN
+	   OK = WRITE_NODES()
+	   IF (.NOT.OK) GOTO 200
+	ENDIF
+C
+	OK = .TRUE.
+C  ...............................................................
+C Close the IFF file
+999	CALL IFFCLO(IFFLUN)
+C
+	SECTION = OK
+	RETURN
+	END
+C

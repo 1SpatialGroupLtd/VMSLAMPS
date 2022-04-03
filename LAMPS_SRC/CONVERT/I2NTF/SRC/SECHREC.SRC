@@ -1,0 +1,1105 @@
+	LOGICAL FUNCTION SECHREC(FCOUNT)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C	Author							 IM 27-Apr-1987
+C
+C	Modified						TJI 29-Sep-1987
+CMOD	Handle NTF 1.1						VLG 31-Oct-1989
+CMOD								VLG 30-Jan-1990
+CMOD	Handle NTF level 3					VLG 14-Feb-1990
+CMOD	Increase length of comment string			VLG 01-Jun-1990
+CMOD	Add CITF translation				 	 JB 27-Nov-1992
+C	Move FEATCLASS stuff here so that any in the CITF
+C	MH take priority
+C	Bummer - what a thing to be working on on my birthday;
+C	why couldn't I be on something interesting like ILINK?
+CMOD	BS7567 (v2.0) support added (W93/12)		 	 ST 20-May-1993
+CMOD    Now calls PADINT for v1.1 data so that -ve signs	 ST 20-Jul-1993
+C       come before the leading zeros. (Mod 1257).
+CMOD    Accept Map Descriptor UNIT of 3 (seconds of arc)	 ST 26-Apr-1994
+C       and set the XY_UNIT to 4 in NTF. (Mod 1358).
+CMOD    Output more of a COMMENT record with LSL specific info	 ST 26-Apr-1994
+C       so that NTF2I will not match `World Geodetic' against
+C       the first WGS one (WGS 66) in the MD2_SPH list and
+C	therefore gets the wrong one - which defeats the whole
+C	point of keeping this info (Mod 1358).
+CMOD    Implement CITF96 changes (WI/CC 1545)                   TJM 20-May-1996
+C
+C Build and output the section header record, also (if level 3)
+C node GEOMETRY records
+C
+C Returns TRUE for successful completion, otherwise FALSE
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE 'LSL$CMNOSMH:OSMHLIBMSG.PAR'
+	INCLUDE 'I2NTFMSG.PAR'
+C
+C Commons:
+	INCLUDE 'LSL$CMNOSMH:OSMH_NEW_MH.CMN'
+	INCLUDE	'LSL$CMNIFF:IFFHAN.CMN'		! for LPOSH
+	INCLUDE	'LSL$CMNLSL:FILENAME.CMN'
+	INCLUDE 'LSL$CMNIFF:MD2DES.CMN'		!  Common for version 2 MD
+	INCLUDE 'LSL$CMNIFF:MD2NAM.CMN'
+	INCLUDE 'LSL$CMNIFF:MHDMB.CMN'  	!  OS map header common
+	INCLUDE 'LSL$CMNIFF:MHOSGB.CMN'  	!  OS map header common
+	INCLUDE 'COMMANDS.CMN' 		    	!  I2NTF common
+	INCLUDE	'FILENAME.CMN'
+C
+C Arguments:
+	INTEGER 	FCOUNT			!  the current map number
+C
+C Functions:
+	LOGICAL		OSMH_FROM_BINDAY
+	LOGICAL		OSMH_UPGRADE
+	LOGICAL		FEATCLASS
+	LOGICAL		CITF_SECHREC_READ	!  Read CITF MH SECHREC records
+	INTEGER		OSMH_NEW_GET_CITF_LINE	!  Read MH CITF line
+	CHARACTER*10	PADINT
+	INTEGER		ROUND
+C
+C Workspace:
+	INTEGER		POSN,POSN2		!  position in file
+	INTEGER		I,J			!  DO loop counters
+	LOGICAL		OK			!  true if all ok
+	INTEGER		BITS
+	REAL		TMP
+	INTEGER 	COTYPE			!  Co-ordinate type 1 or 2
+	INTEGER 	UNTIND			!  index for units
+	INTEGER		SPHIND			!  and spheroid
+	INTEGER		PRJIND			!  and projection
+	INTEGER 	DAY,MONTH,YEAR
+	INTEGER 	YEAR1,YEAR2
+	INTEGER*2 	IECODE,IELEN		!  length of IFF entry
+	CHARACTER*4	HOUSE_COUNT		!  house unit count
+	CHARACTER*8	MUL_HI,MUL_LO		!  multiple hi/lo water
+	CHARACTER*10	REFERENCE		!  section reference
+	CHARACTER*8	SURV_DATE		!  survey date
+	CHARACTER*4	MSURV(2)		!  multiple survey dates
+	CHARACTER*8	SPEC_NUM		!  Specification number
+	CHARACTER*8	LAST_AMND		!  date of last ammendt
+	CHARACTER*9	STORAGE_SCL		!  storage scale
+	CHARACTER*24	BOUNDINF1		!  boundary info
+	CHARACTER*76	BOUNDINF2		!  boundary info
+	CHARACTER*76	BOUNDINF3		!  boundary info
+	CHARACTER*64	BOUNDINF4		!  boundary info
+	CHARACTER*4	CONT_VI			!  contour vert interval
+	CHARACTER*6	DU_DATE 		!  dig. update date
+	CHARACTER*4	DU_COUNT		!  digital update count
+	CHARACTER*6	BOUNDATE		!  boundary date
+	CHARACTER*8	DATABANK		!  date of databanking
+	CHARACTER*6	REV_DATE		!  latest revision date
+	CHARACTER*2	NOR,EAS,SOU,WES		!  edge match status
+	CHARACTER*12 	TYPE			!  Co-ordinate type name
+	CHARACTER*7	UNITS			!  Co-ordinate unit name
+	CHARACTER*7	ZUNITS			!  Co-ordinate unit name (Z)
+	BYTE		LETTERS(240)		!  stores the boundary info
+	BYTE		SURVEY_TYPE(4)		!  survey type
+	BYTE		CONT_INDIC(8)		!  content indicator
+	BYTE		EDITION(12)		!  edition
+C
+	CHARACTER*10	XYSTR(4)		!  XMIN etc as a padded string
+	CHARACTER*80	STRING			!  NTF output record
+	INTEGER*2	LENGTH			!  of STRING
+	CHARACTER*80	STR			!  MH output record
+	INTEGER*2	LEN			!  of STR
+	CHARACTER*2	RECORD			!  NTF record
+	BYTE		MHHDR(4)		!  MH desc
+	INTEGER		NLINES			!  no. of MH CITF lines 
+	INTEGER		NBYTES			!  no. of MH CITF bytes 
+C
+	LOGICAL		HAD_SECHREC		!  MH record flags
+	LOGICAL		HAD_TRANSFORM
+	LOGICAL		HAD_MANINFREC
+	LOGICAL		HAD_EXTREC
+C
+	LOGICAL		IN_FEATCLS		!  MH record flags
+	LOGICAL		IN_SECHREC
+	LOGICAL		IN_TRANSFORM
+	LOGICAL		IN_MANINFREC
+	LOGICAL		IN_EXTREC
+C
+C Initialise
+	OK     = .TRUE.
+	POSN   = 0
+	POSN2  = 0
+	HAD_SH = .FALSE.
+C
+C Assume that the MH is not OS specific
+C
+	SURV_DATE = '00000000'				! no survey date
+	LAST_AMND = '00000000'				! date of last amendment
+	IF (.NOT.HAD_COPY) CCOPYRIGHT= '00000000'	! copyright date
+C
+C ...............................................................
+C Read the range first as it is the first entry
+C
+	CALL IFFNXC('RA',IELEN)
+	CALL EIHRR(RANGE,4,1)
+C
+C Check it
+C
+	IF ((RANGE(1).GT.RANGE(2)).OR.(RANGE(3).GT.RANGE(4))) THEN
+	   CALL LSL_PUTMSG(I2NTF__BADRANGE)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C Check now to see if the points (range), when scaled will fit 
+C into the field size given by XY_LEN with minus sign if necessary.
+C If not give error message and suggest alternative size
+C
+CC	DO 112 I=1,4
+CC	   CONVRAN=RANGE(I)/XY_MULT
+CC	   IF ( ( (CONVRAN) .GT. (  10**REAL (XY_LEN)   -1 ) ).OR.
+CC    &	        ( (CONVRAN) .LT. ( -10**REAL (XY_LEN-1) +1 ) ) ) THEN
+C
+CC	      DO 113 J=1,30				! Find better size
+CC	         IF (ABS(CONVRAN)/(10**REAL(J)-1).LT.1) GOTO 114
+CC113	      CONTINUE
+C
+CC114	      IF (CONVRAN.LT.0) J=J+1 		! Room for minus
+CC	      CALL LSL_PUTMSG(I2NTF__TOONARROW,XY_LEN)
+CC	      CALL LSL_ADDMSG(I2NTF__SUGGEST,J)
+CC	      OK = .FALSE.
+CC	      GOTO 999
+CC	   ENDIF
+CC112	CONTINUE
+C
+C .........................................................................
+C If level 3, need to read SH entry for junction points details
+C
+	IF (LEVEL.EQ.3) THEN
+	   CALL EIHMK(1)			! mark our position
+	   CALL IFFNXC('SH',IELEN)		! look for SH entry
+	   IF (IELEN.EQ.-1) THEN 
+	      CALL LSL_PUTMSG(I2NTF__NOSH,
+     &			   INFILE(FCOUNT)(1:INLEN(FCOUNT)))
+	      CALL IFFRWM			! back to position
+	   ELSE
+	      HAD_SH = .TRUE.
+	      POSN = LPOSH			! remember our position
+	      CALL EIHMK(0)			! delete the marker
+	   ENDIF				! (read MD entry first)
+	ENDIF
+C
+C .........................................................................
+C Find the map descriptor
+C
+	CALL IFFNXC('MD',IELEN)
+C
+C If it wasn't there flag exit
+C
+	IF (IELEN.EQ.-1) THEN 
+	   CALL LSL_PUTMSG(I2NTF__NOMD,
+     &			   INFILE(FCOUNT)(1:INLEN(FCOUNT)))
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C Read the MD data into the MD2DES and MD2NAM commons
+C
+	CALL EIHRI(MD2ARR,MIN(IELEN,MD2LEN),1)
+C
+C ..................................................................
+C If MD not set, output error message and exit
+C
+	IF (MATV2.EQ.-1) THEN
+	   CALL LSL_PUTMSG(I2NTF__NOTSET,
+     &			   INFILE(FCOUNT)(1:INLEN(FCOUNT)))
+	   CALL LSL_ADDMSG(I2NTF__USEITRANS)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C   ................................................................
+C If type 1 MD used flag error and exit
+C
+	IF ((MATV2.EQ.0).OR.(MATV2.EQ.1)) THEN
+	   CALL LSL_PUTMSG(I2NTF__TYPE1MD,
+     &			   INFILE(FCOUNT)(1:INLEN(FCOUNT)))
+	   CALL LSL_ADDMSG(I2NTF__USEITRANS)
+	   OK = .FALSE.
+	   GOTO 999
+	ENDIF
+C
+C ................................................................
+C Work out the coordinate type
+C  NTF recognises : 	1 ... geographic
+C			2 ... rectangular
+C
+C First translate MD2UNT into a digit 1..13
+C
+	DO 200 UNTIND=1,MD2_NOUNT
+	   IF (MD2UNT.EQ.MD2_UNTCD(UNTIND)) GOTO 210
+200	CONTINUE
+	CALL LSL_PUTMSG(I2NTF__BADUNT,MD2UNT)
+	OK = .FALSE.
+	GOTO 999
+C
+C And then the same for the spheroid
+C
+210	DO 220 SPHIND=1,MD2_NOSPH
+	   IF (MD2SPH.EQ.MD2_SPHCD(SPHIND)) GOTO 230
+220	CONTINUE
+	CALL LSL_PUTMSG(I2NTF__BADSPH,MD2SPH)
+	OK = .FALSE.
+	GOTO 999
+C
+C And the projection
+C
+230	DO 240 PRJIND=1,MD2_NOPRJ
+	   IF (MD2PRJ.EQ.MD2_PRJCD(PRJIND)) GOTO 250
+240	CONTINUE
+	CALL LSL_PUTMSG(I2NTF__BADPRJ,MD2PRJ)
+	OK = .FALSE.
+	GOTO 999
+C
+250	CONTINUE
+C
+C   ...................................................................
+C If rectangular coordinates given
+C find out if metres or feet and set the unit code
+C
+	IF ( MD2UNT.EQ.1 ) THEN
+	   XY_UNIT=3					! feet
+	   COTYPE =2					! rectangular
+	   TYPE   ='rectangular'
+	   UNITS  ='feet'
+	ELSEIF ( MD2UNT.EQ.0 .OR. MD2UNT.EQ.2 ) THEN
+	   XY_UNIT=2					! metres
+	   COTYPE =2					! rectangular
+	   TYPE   ='rectangular'
+	   UNITS  ='metres'
+	ELSEIF ( MD2UNT.EQ.4 ) THEN
+	   XY_UNIT=1					! degrees
+	   COTYPE =1					! geographic
+	   TYPE   ='geographical'
+	   UNITS  ='degrees'
+	ELSEIF ( MD2UNT.EQ.3 ) THEN
+	   XY_UNIT=4					! new one - sec/arc
+	   COTYPE =1					! geographic
+	   TYPE   ='geographical'
+	   UNITS  ='seconds'
+	ELSE
+           CALL LSL_PUTMSG(I2NTF__BADUNIT,
+     &			   INFILE(FCOUNT)(1:INLEN(FCOUNT)))
+	   CALL LSL_ADDSTR(MD2_UNT(UNTIND))
+	   CALL LSL_ADDMSG(I2NTF__CONVERT)
+	   OK = .FALSE. 
+	   GOTO 999
+	ENDIF
+C
+C Now check the Z units
+C
+	IF ((Z_UNIT.LT.1).OR.(Z_UNIT.GT.3)) THEN
+	   CALL LSL_PUTMSG(I2NTF__BADZUNIT,Z_UNIT)
+	   CALL LSL_ADDMSG(I2NTF__DEFZUNIT)
+	   Z_UNIT=2
+	ENDIF
+C
+	IF (Z_UNIT.EQ.1) THEN
+	   ZUNITS = 'degrees'
+	ELSEIF ( Z_UNIT.EQ.2 ) THEN
+	   ZUNITS = 'metres'
+	ELSE
+	   ZUNITS = 'feet'
+	ENDIF
+C
+C Set the source scale
+C
+	SOURCE_SCALE=MD2SCL		! use map descriptor value
+C
+C Process the range values to give the NTF max & min X and Y values 
+C
+C Worst case for overflow would be if XY_MULT was 0.001 (the smallest it can be
+C due to 3 decimal places max). Therefore the range must be 2147483.648 for
+C this case but we should make this bigger if XY_MULT is bigger.
+C
+	IF (ABS(XY_MULT).GT.0.0.AND.ABS(XY_MULT).LT.1.0) THEN
+	   TMP = XY_MULT * 1000
+	   IF ((ABS(RANGE(1)).GT.2100000.0*TMP).OR.
+     &	       (ABS(RANGE(2)).GT.2100000.0*TMP).OR.
+     &	       (ABS(RANGE(3)).GT.2100000.0*TMP).OR.
+     &	       (ABS(RANGE(4)).GT.2100000.0*TMP)) THEN   ! overflow will occur
+	       CALL LSL_PUTMSG(I2NTF__RANGEOVER)
+	       OK = .FALSE.
+	       GOTO 999
+	    ENDIF
+	ENDIF
+C	
+	XMIN=NINT(RANGE(1)/XY_MULT)
+	IF (ABS(XMIN).GT.999999 .AND. HAD_ROUND)	! round to 7 figures
+     &     XMIN = ROUND(XMIN)				! if wanted/needed
+C
+	XMAX=NINT(RANGE(2)/XY_MULT)
+	IF (ABS(XMAX).GT.999999 .AND. HAD_ROUND)	! round to 7 figures
+     &     XMAX = ROUND(XMAX)				! if wanted/needed
+C
+	YMIN=NINT(RANGE(3)/XY_MULT)
+	IF (ABS(YMIN).GT.999999 .AND. HAD_ROUND)	! round to 7 figures
+     &     YMIN = ROUND(YMIN)				! if wanted/needed
+C
+	YMAX=NINT(RANGE(4)/XY_MULT)
+	IF (ABS(YMAX).GT.999999 .AND. HAD_ROUND)	! round to 7 figures
+     &     YMAX = ROUND(YMAX)				! if wanted/needed
+C
+C .........................................................................
+C And write some comments to the NTF file
+C OS want no comments for Version 2.0
+C
+	IF (.NOT.OS_DATA .OR. VERSION.EQ.1.1) THEN
+	   CALL COMMENT(' ')
+C
+	   CALL EXPAND('%WS% IFF file        %S',STRING,
+     &		    INFILE(FCOUNT)(:INLEN(FCOUNT)) )
+	   CALL COMMENT(STRING(:(16+INLEN(FCOUNT))))
+C
+	   STRING=' '
+	   CALL EXPAND('%WS% Spheroid        %S',STRING,MD2_SPH(SPHIND))
+	   CALL COMMENT(STRING(:49))
+C
+	   STRING=' '
+	   CALL EXPAND('%WS% Projection      %S',STRING,MD2_PRJ(PRJIND))
+	   CALL COMMENT(STRING(:49))
+C
+	   STRING=' '
+	   CALL EXPAND('%WS% Scale           %N',STRING,NINT(MD2SCL))
+	   CALL COMMENT(STRING(:49))
+C
+	   STRING=' '
+	   CALL EXPAND('%WS% Units           %S',STRING,MD2_UNT(UNTIND))
+	   CALL COMMENT(STRING(:49))
+C
+	   STRING=' '
+	   CALL EXPAND('%WS% Height data     %S',STRING,ZUNITS)
+	   CALL COMMENT(STRING(:49))
+	ENDIF
+C
+C Work out a section reference from the sheet name
+C
+	CALL PUTFLN(INFILE(FCOUNT))
+	REFERENCE = STR_NAM(1:LEN_NAM)
+C
+C ................................................................
+C Get MH header for type of MH
+C
+	IF (HAD_CITF93 .OR. HAD_CITF96 .OR. OS_DATA) THEN
+	   CALL IFFRWD
+	   CALL IFFNXC('MH',IELEN)		! IELEN in words
+	   NBYTES = (IELEN-2)*2			! no. of data bytes
+C
+	   CALL EIHRI(MHHDR,1,1)		! get first 2 words, 4 bytes
+	ENDIF
+C
+C If had CITF, and header is CITF
+C
+	IF ((HAD_CITF93.OR.HAD_CITF96) .AND. HAD_MHTYPE4(FCOUNT)) THEN
+	   CALL EIHRI(MH2ARR,MIN(MH2LEN,IELEN),1)
+	   NLINES = MIN(NBYTES,MH2BYSZ)/80	   ! no. of CITF lines in MH 
+C
+	   HAD_SECHREC   = .FALSE.
+	   HAD_TRANSFORM = .FALSE.
+	   HAD_MANINFREC = .FALSE.
+	   HAD_EXTREC    = .FALSE.
+C
+	   IN_SECHREC    = .FALSE.
+	   IN_FEATCLS    = .FALSE.
+	   IN_TRANSFORM  = .FALSE.
+	   IN_MANINFREC  = .FALSE.
+	   IN_EXTREC     = .FALSE.
+C
+C Output these lines
+C
+	   I = 0
+C
+C Get header lines
+9	   I = I+1
+	   IF (I.GT.NLINES) GOTO 10
+C
+	   OK = OSMH_NEW_GET_CITF_LINE(I,STR,LEN)
+C
+	   IF (OK.EQ.OSMHLIB__BLANKLINE) THEN
+	      OK = I2NTF__NORMAL
+	      GOTO 9						! get next
+C
+	   ELSEIF (OK.EQ.OSMHLIB__NOEORCHAR) THEN
+	      GOTO 999						! exit
+C
+	   ELSE					! write out the CITF lines
+	      IF (STR(LEN:LEN).NE.MH_CITF_EOR) 
+     &			 CALL LSL_PUTMSG(I2NTF__CITFEORERR,STR(1:LEN))
+C
+	      RECORD = STR(1:2)
+C
+C Check for invalid records
+	      IF (RECORD.NE.'05' .AND. RECORD.NE.'07' .AND.
+     &		  RECORD.NE.'83' .AND. RECORD.NE.'81' .AND.  
+     &		  RECORD.NE.'80' .AND. RECORD.NE.'00') THEN
+C
+		 CALL LSL_PUTMSG(I2NTF__CITFINVALREC,STR(1:LEN))
+		 GOTO 9						! get next
+	      ENDIF
+C
+C process each record in turn, checking its validity and order as much as
+C possible
+C Continuation record, check we are in a record
+C
+	      IF (RECORD.EQ.'00') THEN
+C
+C If continuation not of first IFF file FEATCLASS, ignore
+		 IF (IN_FEATCLS .AND. FCOUNT.NE.1) THEN
+		    CALL LSL_PUTMSG(I2NTF__CITFIGNFEAT,STR(1:LEN))
+		    GOTO 9
+		 ENDIF
+C
+		 IF (IN_FEATCLS .OR. IN_SECHREC .OR. IN_TRANSFORM .OR.
+     &				     IN_MANINFREC .OR. IN_EXTREC) THEN
+		    LEN = LEN-1		! remove EOR, to be replaced by WSTR
+		    CALL EXPAND('%WS% %S',STRING,STR(1:LEN))
+		    LENGTH = LEN+1
+		    CALL WSTR(STRING,LENGTH)
+		 ELSE
+		    CALL LSL_PUTMSG(I2NTF__CITFNOTCONT,STR(1:LEN))
+		 ENDIF
+C
+		 GOTO 9				! get next
+C
+C Get 05 FEATCLASS records; must come only from the first IFF file, 
+C or default ones used if absent
+C
+	      ELSEIF (RECORD.EQ.'05') THEN
+		 IN_FEATCLS   = .TRUE.
+		 IN_SECHREC   = .FALSE.
+		 IN_MANINFREC = .FALSE.
+		 IN_TRANSFORM = .FALSE.
+		 IN_EXTREC    = .FALSE.
+C
+		 IF (HAD_SECHREC .OR. HAD_TRANSFORM .OR.
+     &		     HAD_MANINFREC .OR. HAD_EXTREC) THEN
+		    IN_FEATCLS = .FALSE.
+		    CALL LSL_PUTMSG(I2NTF__CITFINVALREC,STR(1:LEN))
+C
+		    GOTO 9				! get next
+		 ENDIF
+C
+		 IF (FCOUNT.NE.1) THEN
+		    CALL LSL_PUTMSG(I2NTF__CITFIGNFEAT,STR(1:LEN))
+		    GOTO 9
+		 ENDIF
+C
+		 LEN = LEN-1		! remove EOR, to be replaced by WSTR
+		 CALL EXPAND('%WS% %S',STRING,STR(1:LEN))
+		 LENGTH = LEN+1
+		 CALL WSTR(STRING,LENGTH)
+C
+		 HAD_FEATCLS = .TRUE.
+C
+		 GOTO 9				! get next
+C
+	      ELSEIF (RECORD.EQ.'07') THEN
+		 IN_SECHREC   = .TRUE.
+		 IN_FEATCLS   = .FALSE.
+		 IN_MANINFREC = .FALSE.
+		 IN_TRANSFORM = .FALSE.
+		 IN_EXTREC    = .FALSE.
+C
+		 IF (HAD_TRANSFORM .OR. HAD_MANINFREC .OR.
+     &					HAD_EXTREC) THEN
+		    IN_SECHREC = .FALSE.
+		    CALL LSL_PUTMSG(I2NTF__CITFINVALREC,STR(1:LEN))
+C
+		    GOTO 9				! get next
+		 ENDIF
+C
+		 IF (HAD_SECHREC) THEN
+		    CALL LSL_PUTMSG(I2NTF__CITFIGNSECH,STR(1:LEN))
+		    GOTO 9					! get next
+		 ENDIF
+C
+		 HAD_SECHREC = .TRUE.
+C
+C Read SECHREC records and decode the first, and alter the first if some
+C qualifiers have been given, and subsequently output the first
+C
+		 OK = CITF_SECHREC_READ(I,STR,LEN)
+		 IF (.NOT.OK) GOTO 999
+C
+C Returns with the first continuation record, output it
+C
+		 LEN = LEN-1		! remove EOR, to be replaced by WSTR
+		 CALL EXPAND('%WS% %S',STRING,STR(1:LEN))
+		 LENGTH = LEN+1
+		 CALL WSTR(STRING,LENGTH)
+C
+		 GOTO 9				! get next
+C
+	      ELSEIF (RECORD.EQ.'83' .OR. RECORD.EQ.'81' .OR.
+     &		      RECORD.EQ.'80') THEN
+C
+		 IN_FEATCLS = .FALSE.
+		 IN_SECHREC = .FALSE.
+C
+C Create SECHREC from data if not present in the map header
+C
+		 IF (.NOT.HAD_SECHREC) THEN
+		    CALL EXPAND
+     &			('%WS% 07%S10%I1% 1%I5%I1%I10%I5%I1%I10%I10%I10%I10% 1',
+     &		 	STRING,
+     &			REFERENCE,			! Map name (short form)
+     &			COTYPE,				! Co-ord type number
+     &			XY_LEN,				! Length of x,y coords
+     &			XY_UNIT,			! Ground unit code
+     &	 		NINT(XY_MULT*1000),		! Ground unit multiplier
+     &			Z_LEN,				! Length of z coord
+     &			Z_UNIT,				! Height unit code
+     &			NINT(Z_MULT*1000),		! Height unit multiplier
+     &			NINT(MD2LOC(1)),		! X origin from MD
+     &			NINT(MD2LOC(2)),		! Y origin from MD
+     &			NINT(Z_DATUM) )			! Z datum from user
+C
+		    LENGTH = 78
+		    CALL WSTR(STRING,LENGTH)
+C
+C .........................................................................
+C First continuation record:
+C
+		    CALL EXPAND
+     &			('%WS% 00%I10%I10%I10%I10          %S8%S8%S8% 1',
+     &		 	STRING,
+     &			XMIN,YMIN,			! Range values
+     &	 		XMAX,YMAX,
+     &	 		SURV_DATE,LAST_AMND,CCOPYRIGHT)	! Dates from OS MH
+C
+		    LENGTH = 78
+		    CALL WSTR(STRING,LENGTH)
+C
+C Write final continuation records with source scale from MD2, and 
+C DIFF_HT_LEN from command line
+C
+		    CALL CITF_SECHREC_EXTN()
+C
+		    HAD_SECHREC = .TRUE.
+		 ENDIF
+C
+		 IF (RECORD.EQ.'83') THEN
+		    IF (HAD_MANINFREC .OR. HAD_EXTREC) THEN
+		       CALL LSL_PUTMSG(I2NTF__CITFINVALREC,STR(1:LEN))
+		       GOTO 9				! get next
+		    ENDIF
+C
+		    IN_TRANSFORM = .TRUE.
+		    IN_MANINFREC = .FALSE.
+		    IN_EXTREC    = .FALSE.
+C
+ 		 ELSEIF (RECORD.EQ.'81') THEN
+		    IF (HAD_EXTREC) THEN
+		       CALL LSL_PUTMSG(I2NTF__CITFINVALREC,STR(1:LEN))
+		       GOTO 9				! get next
+		    ENDIF
+C
+		    IN_MANINFREC = .TRUE.
+		    IN_TRANSFORM = .FALSE.
+		    IN_EXTREC    = .FALSE.
+C
+ 		 ELSEIF (RECORD.EQ.'80') THEN
+		    IN_EXTREC    = .TRUE.
+		    IN_MANINFREC = .FALSE.
+		    IN_TRANSFORM = .FALSE.
+		 ENDIF
+		 LEN = LEN-1		! remove EOR, to be replaced by WSTR
+		 CALL EXPAND('%WS% %S',STRING,STR(1:LEN))
+		 LENGTH = LEN+1
+		 CALL WSTR(STRING,LENGTH)
+C
+		 IF (RECORD.EQ.'83') HAD_TRANSFORM = .TRUE.
+		 IF (RECORD.EQ.'81') HAD_MANINFREC = .TRUE.
+		 IF (RECORD.EQ.'80') HAD_EXTREC    = .TRUE.
+C
+		 GOTO 9				! get next
+	      ENDIF				! end of records in MH
+C
+	   ENDIF				! successfully get MH line
+C
+C If we are trying to output OS style data, then we must look at the
+C map header - NOTE that I2NTF itself already ascertained that all
+C of the maps have OS map headers
+C						! end of CITF
+	ELSEIF (OS_DATA) THEN			!  - OS DATA
+	   CALL EIHRI(MHARR,MIN(MHLEN,IELEN),1)
+	   OK = OSMH_UPGRADE()
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(I2NTF__MHUPGRADE)
+	      CALL LSL_ADDMSG(OK)
+	   ENDIF
+C
+C get the survey date from the map header
+C
+	   IF (MHSURD.EQ.0) THEN
+	      SURV_DATE = '00000000'
+	   ELSE
+	      CALL OSMH_GETMY(MHSURD, MONTH,YEAR)
+C	      CALL EXPAND('%WS% %I4%I2% 01',SURV_DATE,YEAR,MONTH)
+	      CALL EXPAND('%WS% %P0%I4%I2% 01',SURV_DATE,YEAR,MONTH)
+	   ENDIF
+C
+C get the date of last amendment from the map header
+C
+	   OK = OSMH_FROM_BINDAY(MHDLA, DAY,MONTH,YEAR)
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(I2NTF__MHDATE,'MHDLA - date of last amendment')
+	      CALL LSL_ADDMSG(OK)
+	      GOTO 999
+	   ENDIF
+	   CALL EXPAND('%WS% %I4%P0%I2%I2',LAST_AMND,YEAR,MONTH,DAY)
+C
+C sort out the copyright date
+C
+	   IF (CCOPYRIGHT.EQ.' ') THEN
+	      CCOPYRIGHT='00000000'
+	      CALL EXPAND('%WS% %P0%I4% 0101',CCOPYRIGHT,MHCPYD)
+	   ENDIF
+	ENDIF					! end of CITF or OS_DATA
+C
+C .........................................................................
+10	CONTINUE
+C
+C If had CITF, the FEATCLASS records will not have been output yet.
+C Read the featclass file (if any) and output FEATCLASS records if
+C not already done from the CITF MH
+C
+	IF (FCOUNT.EQ.1 .AND. 
+     &	   (HAD_CITF93.OR.HAD_CITF96) .AND.
+     &      .NOT.HAD_FEATCLS) THEN
+C
+	   IF (HAD_FEATCLASS) THEN 
+	      OK = FEATCLASS()
+	      IF (.NOT.OK) GOTO 999
+C
+	      HAD_FEATCLS = .TRUE.
+	   ENDIF
+	ENDIF
+C
+	IF (HAD_SECHREC) GOTO 999	! got SECHREC from CITF map header
+C
+C Now output the first part of the section header record, if not already done
+C from the CITF header
+C			   ie this is vector data (STRUC_TYP)
+C				     |
+C				     v
+	IF (HAD_CITF93.OR.HAD_CITF96) THEN
+	   CALL EXPAND('%WS% 07%S10%I1% 1%I5%I1%I10%I5'//
+     &		       '%I1%I10%I10%I10%I10% 1',
+     &	 	STRING,
+     &		REFERENCE,			! Map name (short form)
+     &		COTYPE,				! Co-ord type number
+     &		XY_LEN,				! Length of x,y coords
+     &		XY_UNIT,			! Ground unit code
+     &	 	NINT(XY_MULT*1000),		! Ground unit multiplier
+     &		Z_LEN,				! Length of z coord
+     &		Z_UNIT,				! Height unit code
+     &		NINT(Z_MULT*1000),		! Height unit multiplier
+     &		NINT(MD2LOC(1)),		! X origin from MD
+     &		NINT(MD2LOC(2)),		! Y origin from MD
+     &		NINT(Z_DATUM) )			! Z datum from user
+	   LENGTH = 78
+	ELSEIF (VERSION.EQ.1.1) THEN
+C
+C NB. field Z_DATUM is I8 in NTF version 1.1 but I10 in NTF version 2.0
+C
+	   CALL EXPAND('%WS% 07%S10%I1% 1%I5%I1%I10%I5'//
+     &		       '%I1%I10%I10%I10%I8% 1',
+     &	 	STRING,
+     &		REFERENCE,			! Map name (short form)
+     &		COTYPE,				! Co-ord type number
+     &		XY_LEN,				! Length of x,y coords
+     &		XY_UNIT,			! Ground unit code
+     &	 	NINT(XY_MULT*1000),		! Ground unit multiplier
+     &		Z_LEN,				! Length of z coord
+     &		Z_UNIT,				! Height unit code
+     &		NINT(Z_MULT*1000),		! Height unit multiplier
+     &		NINT(MD2LOC(1)),		! X origin from MD
+     &		NINT(MD2LOC(2)),		! Y origin from MD
+     &		NINT(Z_DATUM) )			! Z datum from user
+	   LENGTH = 76
+	ELSEIF (VERSION.EQ.2.0) THEN
+	   CALL EXPAND('%WS% 07%S10%P0%I1% 1%I5%I1%I10%I5'//
+     &		       '%I1%I10%I10%I10%I10% 1',
+     &	 	STRING,
+     &		REFERENCE,			! Map name (short form)
+     &		COTYPE,				! Co-ord type number
+     &		XY_LEN,				! Length of x,y coords
+     &		XY_UNIT,			! Ground unit code
+     &	 	NINT(XY_MULT*1000),		! Ground unit multiplier
+     &		Z_LEN,				! Length of z coord
+     &		Z_UNIT,				! Height unit code
+     &		NINT(Z_MULT*1000),		! Height unit multiplier
+     &		NINT(MD2LOC(1)),		! X origin from MD
+     &		NINT(MD2LOC(2)),		! Y origin from MD
+     &		NINT(Z_DATUM))			! Z datum from user
+	   LENGTH = 78
+	ENDIF
+C
+	CALL WSTR(STRING,LENGTH)
+C
+C .........................................................................
+C First continuation record:
+C
+CC The NTF header no longer has the range written to it.
+CC
+CC	DUMMY(1:10)='          '
+CC	CALL EXPAND('%WS% 00%S10%S10%S10%S10          %S8%S8%S8% 1',
+CC    &	 	STRING,
+CC    &		DUMMY(1:10),DUMMY(1:10),DUMMY(1:10),DUMMY(1:10),
+CC    &	 	SURV_DATE,LAST_AMND,CCOPYRIGHT)	! Dates from OS MH
+CC
+C
+C	CALL EXPAND('%WS% 00%I10%I10%I10%I10          %S8%S8%S8% 1',
+	XYSTR(1)(1:10)=PADINT(XMIN,10)
+	XYSTR(2)(1:10)=PADINT(YMIN,10)
+	XYSTR(3)(1:10)=PADINT(XMAX,10)
+	XYSTR(4)(1:10)=PADINT(YMAX,10)
+	IF (VERSION.EQ.1.1) THEN
+	   CALL EXPAND('%WS% 00%P0%S10%S10%S10%S10          %S8%S8%S8% 1',
+     &	 	STRING,
+     &		XYSTR(1),XYSTR(2),			! Range values
+     &	 	XYSTR(3),XYSTR(4),
+     &	 	SURV_DATE,LAST_AMND,CCOPYRIGHT)	! Dates from OS MH
+	ELSE
+	   CALL EXPAND('%WS% 00%P0%S10%S10%S10%S10% 0000000000%S8%S8%S8% 1',
+     &	 	STRING,
+     &		XYSTR(1),XYSTR(2),			! Range values
+     &	 	XYSTR(3),XYSTR(4),
+     &	 	SURV_DATE,LAST_AMND,CCOPYRIGHT)	! Dates from OS MH
+	ENDIF
+C
+	LENGTH = 78
+	CALL WSTR(STRING,LENGTH)
+C
+C .........................................................................
+C Second (and further for OS & CITF) continuation records:
+C
+C If it is OS data, need to build the section header extension
+C
+	IF (OS_DATA) THEN
+C
+C get the storage scale
+C
+	   IF (MHSTSC.EQ.' ') THEN
+	      STORAGE_SCL = '000000000'
+	   ELSE
+	      IF (VERSION.EQ.2.0) THEN
+		 CALL EXPAND('%WS% %P0%I9', STORAGE_SCL, MHSTSC)
+	      ELSE
+		 CALL EXPAND('%WS% %I6', STORAGE_SCL(1:6), MHSTSC)
+	      ENDIF
+	   ENDIF
+C
+C get the initial databank date
+C
+	   OK = OSMH_FROM_BINDAY( MHDIDB, DAY,MONTH,YEAR )
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(I2NTF__MHDATE,'MHDIDB - databank date')
+	      CALL LSL_ADDMSG(OK)
+	      GOTO 999
+	   ENDIF
+	   CALL EXPAND('%WS% %I4%P0%I2%I2',DATABANK,YEAR,MONTH,DAY)
+C
+C edition
+	   CALL OSMH_GETCHAR(EDITION, MHEDTN, 12)
+C
+C survey type
+	   CALL OSMH_GETCHAR(SURVEY_TYPE, MHSURT, 4)
+C
+C content indicator
+	   CALL OSMH_GETCHAR(CONT_INDIC, MHCIND, 8)
+C
+C latest revision date
+C
+	   IF (MHLFRD.EQ.0) THEN
+	      REV_DATE = '000000'
+	   ELSE
+	      CALL OSMH_GETMY( MHLFRD, MONTH,YEAR )
+	      CALL EXPAND('%WS% %I4%P0%I2',
+     &				REV_DATE,YEAR,MONTH )
+	   ENDIF
+C
+C form the second continuation record
+C
+	   IF (VERSION.EQ.1.1) THEN
+	      CALL EXPAND('%WS% 00                            '//
+     &		   '%S6%S8%A12%A4%A8%S6% 1',
+     &		   STRING, STORAGE_SCL(1:6), DATABANK, EDITION,
+     &		   SURVEY_TYPE, CONT_INDIC, REV_DATE)
+	      LENGTH = 76
+	   ELSE
+	      CALL EXPAND('%WS% 00                    00000000'//
+     &		   '%S9% 0000000000000000000000000000000000001',
+     &		   STRING, STORAGE_SCL)
+	      LENGTH = 77
+	   ENDIF
+C
+	   CALL WSTR(STRING,LENGTH)
+C
+C.......................................................................
+C
+	   IF (VERSION.EQ.1.1) THEN
+C
+C boundary date
+C
+	      IF (MHBOUD.EQ.0) THEN
+		 BOUNDATE = '000000'
+	      ELSE
+		 CALL OSMH_GETMY(MHBOUD, MONTH,YEAR)
+		 CALL EXPAND('%WS% %I4%P0%I2',BOUNDATE,YEAR,MONTH)
+	      ENDIF
+C
+C digital update date
+C
+	      IF (MHSDUP.EQ.0) THEN
+		 DU_DATE = '000000'
+	      ELSE
+		 OK = OSMH_FROM_BINDAY(MHSDUP,DAY,MONTH,YEAR)
+		 IF (.NOT.OK) THEN
+		    CALL LSL_PUTMSG(I2NTF__MHDATE,'MHSDUP - update date')
+		    CALL LSL_ADDMSG(OK)
+		    GOTO 999
+		 ENDIF
+		 CALL EXPAND('%WS% %I4%P0%I2%I2',DU_DATE,YEAR,MONTH,DAY)
+	      ENDIF
+C
+C form the next continuation record
+C
+	      CALL EXPAND('%WS% 00        %S6%S6%(56 %)% 1',
+     &  			STRING, BOUNDATE, DU_DATE)
+C
+	      LENGTH = 80
+	   ELSE
+	      CALL EXPAND('%WS% 00          000000000000000000'//
+     &		   '00000          00000000 0000000000000000        1',STRING)
+	      LENGTH = 80
+	   ENDIF
+	   CALL WSTR(STRING,LENGTH)
+C
+C ......................................................................
+C survey dates first and last
+C
+	   IF (VERSION.EQ.1.1) THEN
+	      IF (MHOSUR(1).EQ.0) THEN
+		 MSURV(1) = '0000'
+	      ELSE
+		 CALL OSMH_GETMY( MHOSUR(1), MONTH,YEAR)
+		 CALL EXPAND('%WS% %I2%I2', MSURV(1),YEAR,MONTH)
+	      ENDIF
+C
+	      IF (MHOSUR(2).EQ.0) THEN
+		 MSURV(2) = '0000'
+	      ELSE
+		 CALL OSMH_GETMY( MHOSUR(2), MONTH,YEAR)
+		 CALL EXPAND('%WS% %I2%I2', MSURV(2),YEAR,MONTH)
+	      ENDIF
+C
+C contour vertical interval
+C
+	      IF (MHCVI.EQ.' ') THEN
+		 CONT_VI = '0000'
+	      ELSE
+		 CALL EXPAND('%WS% %I4', CONT_VI, MHCVI)
+	      ENDIF
+C
+C specification number
+C
+	      IF (MHMSPC.EQ.' ') THEN
+		 SPEC_NUM = '00000000'
+	      ELSE
+		 CALL EXPAND('%WS% %I8', SPEC_NUM, MHMSPC)
+	      ENDIF
+C       
+C edge match status
+C
+	      IF (MHEMSN.EQ.' ') THEN
+		 NOR = '00'
+	      ELSE
+		 CALL EXPAND('%WS% %I2', NOR, MHEMSN)
+	      ENDIF
+C
+	      IF (MHEMSE.EQ.' ') THEN
+		 EAS = '00'
+	      ELSE
+		 CALL EXPAND('%WS% %I2', EAS, MHEMSE)
+	      ENDIF
+C
+	      IF (MHEMSS.EQ.' ') THEN
+		 SOU = '00'
+	      ELSE
+		 CALL EXPAND('%WS% %I2', SOU, MHEMSS)
+	      ENDIF
+C
+	      IF (MHEMSW.EQ.' ') THEN
+		 WES = '00'
+	      ELSE
+		 CALL EXPAND('%WS% %I2', WES, MHEMSW)
+	      ENDIF
+C
+C multi year hwm date
+C
+	      IF (MHMHWM.EQ.0) THEN
+		 MUL_HI = '00000000'
+	      ELSE
+		 CALL OSMH_GETHALVES( MHMHWM, YEAR1,YEAR2)
+		 CALL EXPAND('%WS% %I4%I4', MUL_HI,YEAR1,YEAR2)
+	      ENDIF
+C
+C multi year lwm date
+C
+	      IF (MHMLWM.EQ.0) THEN
+		 MUL_LO = '00000000'
+	      ELSE
+		 CALL OSMH_GETHALVES( MHMLWM, YEAR1,YEAR2)
+		 CALL EXPAND('%WS% %I4%I4', MUL_LO,YEAR1,YEAR2)
+	      ENDIF
+C
+C house unit count
+	      IF (MHHUC.EQ.' ') THEN
+		 HOUSE_COUNT = '0000'
+	      ELSE
+		 CALL EXPAND('%WS% %I4', HOUSE_COUNT, MHHUC)
+	      ENDIF
+C
+C boundary information
+C first transfer all information to a buffer
+C
+	      J = 0
+	      DO 500 I = 1,80,8
+		 J = J + 1
+		 CALL OSMH_GETCHAR(LETTERS(I),MHABI1(J),4)
+		 J = J + 1
+		 CALL OSMH_GETCHAR(LETTERS(I+4),MHABI1(J),4)
+500	      CONTINUE
+C
+	      J = 0
+	      DO 510 I = 81,160,8
+		 J = J + 1
+		 CALL OSMH_GETCHAR(LETTERS(I),MHABI2(J),4)
+		 J = J + 1
+		 CALL OSMH_GETCHAR(LETTERS(I+4),MHABI2(J),4)
+510	      CONTINUE
+C
+	      J = 0
+	      DO 520 I = 161,240,8
+		 J = J + 1
+		 CALL OSMH_GETCHAR(LETTERS(I),MHABI3(J),4)
+		 J = J + 1
+		 CALL OSMH_GETCHAR(LETTERS(I+4),MHABI3(J),4)
+520	      CONTINUE
+C
+C then expand into the required strings
+C
+	      CALL EXPAND('%WS% %A24',BOUNDINF1,LETTERS(1))
+	      CALL EXPAND('%WS% %A76',BOUNDINF2,LETTERS(25))
+	      CALL EXPAND('%WS% %A76',BOUNDINF3,LETTERS(101))
+	      CALL EXPAND('%WS% %A64',BOUNDINF4,LETTERS(177))
+C
+C digital update count
+C
+	      IF (MHDUPC.EQ.' ') THEN
+		 DU_COUNT = '0000'
+	      ELSE
+		 CALL EXPAND('%WS% %I4', DU_COUNT, MHDUPC)
+	      ENDIF
+C
+C next continuation record
+C
+	      CALL EXPAND('%WS% 00%S4%S4%S4%S8%S2%S2%S2%S2%S8'//
+     &					'%S8    %S4%S24% 1',	
+     &					STRING,MSURV(1),MSURV(2),
+     &					CONT_VI,SPEC_NUM,
+     &					NOR,EAS,SOU,WES,    ! edge match status	
+     &					MUL_HI,MUL_LO,HOUSE_COUNT,
+     &					BOUNDINF1)
+C
+	      LENGTH = 80
+	      CALL WSTR(STRING,LENGTH)
+C
+C next continuation record
+C
+	      CALL EXPAND('%WS% 00%S76% 1',STRING,BOUNDINF2)
+C
+	      LENGTH = 80
+	      CALL WSTR(STRING,LENGTH)
+C
+C next continuation record
+C
+	      CALL EXPAND('%WS% 00%S76% 1',STRING,BOUNDINF3)
+C
+	      LENGTH = 80
+	      CALL WSTR(STRING,LENGTH)
+C
+C next continuation record
+C
+	      CALL EXPAND('%WS% 00%S64%S4    % 0',
+     &				STRING,BOUNDINF4,DU_COUNT)
+C
+	      LENGTH = 76
+	      CALL WSTR(STRING,LENGTH)
+C
+	   ELSE   			
+C
+C OS_DATA and NTF v2.0
+C
+	      CALL EXPAND('%WS% 000000000000000000                 '//
+     &		          '00000000  00000000  00000000  0000000000001',
+     &	                  STRING)
+	      LENGTH = 79
+	      CALL WSTR(STRING,LENGTH)
+C
+	      CALL EXPAND('%WS% 00\0',STRING)
+	      LENGTH = 5
+	      CALL WSTR(STRING,LENGTH)
+	   ENDIF
+C
+	ELSEIF (HAD_CITF93.OR.HAD_CITF96) THEN		! CITF specific data
+C
+C Write final continuation records with source scale from MD2, and 
+C DIFF_HT_LEN from command line
+C
+	   CALL CITF_SECHREC_EXTN()
+C
+	ELSE 					! not OS DATA or CITFOA
+	   IF (VERSION.EQ.1.1) THEN
+	      CALL EXPAND('%WS% 00',STRING)	! empty continuation record
+	      LENGTH = 32			! = SQNAME, SQDATE
+	      STRING(LENGTH-1:LENGTH-1) = '0'
+	   ELSE
+	      CALL EXPAND('%WS% 00                    00000000'//
+     &		          '%P0%I9% 0000000000000000000000000000000000001',
+     &		          STRING, NINT(MD2SCL))
+	      LENGTH = 77
+	      CALL WSTR(STRING,LENGTH)
+	      CALL EXPAND('%WS% 00          00000000000000000000000'//
+     &		          '          00000000 000000000%',STRING)
+	      LENGTH = 64
+	   ENDIF
+	   CALL WSTR(STRING,LENGTH)
+	ENDIF
+C
+C .........................................................................
+C Now read the sector header, if required
+C
+	IF (POSN.NE.0) THEN
+	   POSN2 = LPOSH			! remember where we are now
+	   CALL IFFPKE(IECODE,IELEN,POSN)	! back to sector header
+	   CALL READ_SH(OK,IELEN)
+	   IF (.NOT.OK) GOTO 999
+	   CALL IFFPKE(IECODE,IELEN,POSN2)	! back to remembered position
+	ENDIF
+C
+	OK = .TRUE.
+C .........................................................................
+C
+999	SECHREC = OK
+	RETURN
+	END	
+C

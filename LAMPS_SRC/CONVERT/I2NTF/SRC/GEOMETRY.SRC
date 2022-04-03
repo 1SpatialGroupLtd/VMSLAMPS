@@ -1,0 +1,338 @@
+	LOGICAL FUNCTION GEOMETRY(DIM,TOTPTS,NPTS,PTS,IS_LINE,IS_TEXT,
+     &				IS_NODE,FIRST,LAST,PENUP)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C	Author						 IM	27-Apr-1987
+C
+C	Modified					TJI	29-Sep-1987
+CMOD	Handle NTF level 3 output			VLG	09-Feb-1990
+CMOD	Implement penup argument			VLG	01-Jun-1990
+CMOD	Amend output of z coord				VLG	28-Nov-1990
+CMOD	Remove hardcoded STRING(79:79)			 ST	14-Nov-1991
+CMOD	Change decln of PTS(DIM,NPTS+1) to PTS(DIM,PTS)
+C	Check for coordinate overflow			 JB	09-Dec-1992
+CMOD	BS7567 (v2.0) support added (W93/12)		 ST	20-May-1993
+CMOD	Checks for duplicate points (Mod 1295)		 ST	15-Sep-1993
+C
+C Builds and outputs GEOMETRY records.
+C
+	IMPLICIT NONE
+C
+C Common:
+	INCLUDE	'I2NTFMSG.PAR'
+	INCLUDE 'COMMANDS.CMN'
+	INCLUDE 'FTRCMN.CMN'
+	INCLUDE 'DUPPTS.CMN'
+C
+C Arguments:
+	INTEGER		DIM		!  2 or 3 for ST or ZS
+	INTEGER 	TOTPTS		!  Number of points in feature
+	INTEGER 	NPTS		!  Number of points in PTS
+	REAL    	PTS(DIM,NPTS)	!  Points in this ST/ZS
+	LOGICAL		IS_LINE		!  Is it a linear feature
+	LOGICAL		IS_TEXT		!  Is it a text feature
+	LOGICAL		IS_NODE		!  Is it a node
+	LOGICAL		FIRST		!  Is this the first ST/ZS
+	LOGICAL		LAST		!  Or the last ST/ZS
+	INTEGER*2	PENUP		!  pen-up=0,pen-down=1
+C
+C Functions:
+	INTEGER		ROUND
+C
+C Workspace:
+	LOGICAL		OK
+	INTEGER 	PT		!  Index for PTS
+	INTEGER		ID		!  Feature ID for NTF
+	CHARACTER*1	GTYPE		!  Geometry type
+	CHARACTER*1	PENFLAG		!  Pen up/down flag
+C
+	CHARACTER*(MAX_XY_LEN)
+     &		 	TMPSTORE	!  Temporary coordinate store
+	CHARACTER*(MAX_XY_LEN)
+     &		 	PADINT		!  Temporary coordinate store
+C
+C Our record output environment - if we have several ST/ZSs in one feature,
+C we must output the points from them as a continuous stream, with no
+C unnecessary record breaks
+C
+	CHARACTER*80	STRING		!  NTF output record
+	SAVE		STRING		!  Remember it over calls
+	INTEGER*2	LENGTH		!  of STRING
+C
+	INTEGER 	CPOS		!  Current position in STRING
+	SAVE		CPOS		!  Remember it over calls
+C
+	INTEGER		VALUE		!  Generel coord values
+	REAL		RVALUE1,
+     &			RVALUE2,
+     &			RVALUE
+	INTEGER		DX,DY,DZ
+C .........................................................................
+C
+	OK = .TRUE.
+C
+C If there is only one point in the feature, assume that it is a symbol
+C (if it isn't flagged as such, give a warning)
+C
+C NOTE that to cope with GTYPE correctly, we would need to read an FRT and
+C      look at the IFF graphical type - including possibly playing with
+C      circle arcs to get them into a correct form
+C
+	IF (TOTPTS.EQ.1 .OR. .NOT.IS_LINE) THEN
+	   IF (IS_LINE) CALL LSL_PUTMSG(I2NTF__ONEPT,FSN,ISN )
+	   GTYPE = '1'			! point (symbol or text or node)
+	ELSE
+	   GTYPE = '2'			! linear
+	ENDIF
+C
+C Work out the feature ID we will use in the NTF file
+C
+	IF (FIRST) THEN
+	   IF (LEVEL.EQ.3) THEN		! If level 3 use next id
+	      GEOM_ID = GEOM_ID + 1
+	   ELSEIF (IS_LINE) THEN	! If level 1 or 2 use feature id
+	      GEOM_ID = LINE_ID
+	   ELSEIF (IS_TEXT) THEN
+	      GEOM_ID = TEXT_ID
+	   ELSE
+	      GEOM_ID = SYMB_ID
+	   ENDIF
+	ENDIF
+C
+C If this is the first record of a feature's points, then output a new
+C GEOMETRY record
+C
+	IF (FIRST) THEN
+	   IF (DIM.EQ.2) THEN
+C	      CALL EXPAND('%WS% 21%I6%S1%I4',
+C     &			   STRING,GEOM_ID,GTYPE,TOTPTS)
+	      CALL EXPAND('%WS% 21%P0%I6%S1%I4',
+     &			   STRING,GEOM_ID,GTYPE,TOTPTS)
+	   ELSE
+C	      CALL EXPAND('%WS% 22%I6%S1%I4',
+	      CALL EXPAND('%WS% 22%P0%I6%S1%I4',
+     &			   STRING,GEOM_ID,GTYPE,TOTPTS)
+	      PREV_ZVAL = NINT(PTS(3,1)/XY_MULT)
+              IF (ABS(PREV_ZVAL).GT.999999 .AND. HAD_ROUND) ! round to 7 figures
+     &           PREV_ZVAL = ROUND(PREV_ZVAL)		    ! if needed/wanted
+	      ZVAL = PREV_ZVAL
+	   ENDIF
+	   CPOS = 14		! next free character is number 14:14
+	   PREV_XVAL = NINT(PTS(1,1)/XY_MULT)	! first point x coordinate
+           IF (ABS(PREV_XVAL).GT.999999 .AND. HAD_ROUND)    ! round to 7 figures
+     &        PREV_XVAL = ROUND(PREV_XVAL)		    ! if needed/wanted
+	   XVAL = PREV_XVAL
+	   PREV_YVAL = NINT(PTS(2,1)/XY_MULT)
+           IF (ABS(PREV_YVAL).GT.999999 .AND. HAD_ROUND)    ! round to 7 figures
+     &        PREV_YVAL = ROUND(PREV_YVAL)		    ! if needed/wanted
+	   YVAL = PREV_YVAL
+	ENDIF
+C
+C Now start filling in the points
+C
+	DO 1000 PT=1,NPTS
+	   IF (FIRST .AND. PT.EQ.1) GOTO 500	! don't check very first point
+C
+	   XVAL = NINT(PTS(1,PT)/XY_MULT)
+           IF (ABS(XVAL).GT.999999 .AND. HAD_ROUND)	! round to 7 figures
+     &        XVAL = ROUND(XVAL)			! if needed/wanted
+	   YVAL = NINT(PTS(2,PT)/XY_MULT)
+           IF (ABS(YVAL).GT.999999 .AND. HAD_ROUND)	! round to 7 figures
+     &        YVAL = ROUND(YVAL)			! if needed/wanted
+	   IF (DIM.EQ.3) THEN
+	      ZVAL = NINT(PTS(3,PT)/XY_MULT)
+              IF (ABS(ZVAL).GT.999999 .AND. HAD_ROUND)	! round to 7 figures
+     &           ZVAL = ROUND(ZVAL)			! if needed/wanted
+	   ENDIF
+C
+	   DX = ABS(XVAL - PREV_XVAL)
+   	   DY = ABS(YVAL - PREV_YVAL)
+   	   IF (DIM.EQ.3) DZ = ABS(ZVAL - PREV_ZVAL)
+C
+	   IF (DX.EQ.0 .AND. DY.EQ.0) THEN
+	      IF (DIM.EQ.3) THEN
+		 IF (DZ.EQ.0) THEN
+		    GOTO 1000		! X & Y & Z same, ignore it
+		 ENDIF
+	      ELSE
+		 GOTO 1000		! X & Y same, no Z to check, ignore it
+	      ENDIF
+	   ENDIF
+C
+	   PREV_XVAL = XVAL
+	   PREV_YVAL = YVAL
+	   IF (DIM.EQ.3) PREV_ZVAL = ZVAL
+C
+C Check the x value fits an integer
+C
+500	   RVALUE = (PTS(1,PT)/XY_MULT)
+	   IF (RVALUE.GT.MAXINT-1 .OR. RVALUE.LT.-MAXINT) THEN
+	      CALL LSL_PUTMSG(I2NTF__INTCONERR,RVALUE)
+	      OK = I2NTF__ABORT
+	      GOTO 999
+	   ENDIF
+C
+	   VALUE = XVAL
+C
+C Check it fits the x,y field
+	   RVALUE1 = 10**REAL(XY_LEN) - 1
+	   RVALUE2 = -(10**REAL(XY_LEN-1) - 1)
+	   IF (VALUE.GT.RVALUE1 .OR. VALUE.LT.RVALUE2) THEN
+	      CALL LSL_PUTMSG(I2NTF__OUTCONERR,RVALUE,XY_LEN)
+	      OK = I2NTF__ABORT
+	      GOTO 999
+	   ENDIF
+C
+	   TMPSTORE = PADINT(VALUE,XY_LEN)
+C
+	   IF (CPOS+XY_LEN.GE.80) THEN
+	      STRING(CPOS:CPOS) = '1'		! need a continuation
+	      LENGTH = CPOS+1
+	      CALL WSTR(STRING,LENGTH)		! write this record
+	      CALL EXPAND('%WS% 00',STRING)	! continuation record
+	      CPOS = 3				! next free character
+	   ENDIF
+	   STRING (CPOS:CPOS+XY_LEN-1) = TMPSTORE	! X coordinate
+	   CPOS = CPOS+XY_LEN
+C
+C Check the y value fits an integer
+	   RVALUE = (PTS(2,PT)/XY_MULT)
+	   IF (RVALUE.GT.MAXINT-1 .OR. RVALUE.LT.-MAXINT) THEN
+	      CALL LSL_PUTMSG(I2NTF__INTCONERR,RVALUE)
+	      OK = I2NTF__ABORT
+	      GOTO 999
+	   ENDIF
+C
+	   VALUE = YVAL
+C
+C Check it fits the x,y field
+	   RVALUE1 = 10**REAL(XY_LEN) - 1
+	   RVALUE2 = -(10**REAL(XY_LEN-1) - 1)
+	   IF (VALUE.GT.RVALUE1 .OR. VALUE.LT.RVALUE2) THEN
+	      CALL LSL_PUTMSG(I2NTF__OUTCONERR,RVALUE,XY_LEN)
+	      OK = I2NTF__ABORT
+	      GOTO 999
+	   ENDIF
+C
+	   TMPSTORE = PADINT(VALUE,XY_LEN)
+	   IF (CPOS+XY_LEN.GE.80) THEN
+	      STRING(CPOS:CPOS) = '1'		! need a continuation
+	      LENGTH = CPOS+1
+	      CALL WSTR(STRING,LENGTH)		! write this record
+	      CALL EXPAND('%WS% 00',STRING)	! continuation record
+	      CPOS = 3				! next free character
+	   ENDIF
+	   STRING (CPOS:CPOS+XY_LEN-1) = TMPSTORE	! Y coordinate
+	   CPOS = CPOS+XY_LEN
+C
+	   IF (CPOS+1.GE.80) THEN
+	      STRING(CPOS:CPOS) = '1'		! need a continuation
+	      LENGTH = CPOS+1
+	      CALL WSTR(STRING,LENGTH)		! write this record
+	      CALL EXPAND('%WS% 00',STRING)	! continuation record
+	      CPOS = 3				! next free character
+	   ENDIF
+	   IF (LEVEL.EQ.1) THEN
+	      IF (PENUP.EQ.0 .AND. PT.EQ.1) THEN
+		 PENFLAG = '0'
+	      ELSE
+		 PENFLAG = '1'
+	      ENDIF
+	   ELSE
+	      PENFLAG = ' '
+	   ENDIF
+	   STRING(CPOS:CPOS)=PENFLAG
+C
+	   CPOS = CPOS+1
+C
+	   IF (DIM.EQ.3) THEN
+C
+C Check the z value fits an integer
+	      RVALUE = (PTS(3,PT)/Z_MULT)
+	      IF (RVALUE.GT.MAXINT-1 .OR. RVALUE.LT.-MAXINT) THEN
+	         CALL LSL_PUTMSG(I2NTF__INTCONERR,RVALUE)
+	         OK = I2NTF__ABORT
+	         GOTO 999
+	      ENDIF
+C
+	      VALUE = ZVAL
+C
+C Check it fits the x,y field
+	      RVALUE1 = 10**REAL(Z_LEN) - 1
+	      RVALUE2 = -(10**REAL(Z_LEN-1) - 1)
+	      IF (VALUE.GT.RVALUE1 .OR. VALUE.LT.RVALUE2) THEN
+	         CALL LSL_PUTMSG(I2NTF__OUTCONERR,RVALUE,Z_LEN)
+	         OK = I2NTF__ABORT
+	         GOTO 999
+	      ENDIF
+C
+	      TMPSTORE = PADINT(ZVAL,Z_LEN)
+C
+	      IF (CPOS+Z_LEN.GE.80) THEN
+		 STRING(CPOS:CPOS) = '1'		! need a continuation
+		 LENGTH = CPOS+1
+		 CALL WSTR(STRING,LENGTH)		! write this record
+		 CALL EXPAND('%WS% 00',STRING)		! continuation record
+		 CPOS = 3				! next free character
+	      ENDIF
+	      STRING(CPOS:CPOS+Z_LEN-1) = TMPSTORE	! Z coordinate
+	      CPOS = CPOS+Z_LEN
+C
+	      IF (CPOS+1.GE.80) THEN
+		 STRING(CPOS:CPOS) = '1'		! need a continuation
+		 LENGTH = CPOS+1
+		 CALL WSTR(STRING,LENGTH)		! write this record
+		 CALL EXPAND('%WS% 00',STRING)		! continuation record
+		 CPOS = 3				! next free character
+	      ENDIF
+	      STRING(CPOS:CPOS) = ' '			! Q height (unused)
+	      CPOS = CPOS+1
+	   ENDIF
+C
+1000	CONTINUE
+C
+C .........................................................................
+C Write out the last record
+C
+	IF (LAST) THEN				! if this is the last ST/ZS
+	   IF (LEVEL.NE.3) GOTO 1500
+C
+C Add ATT_ID field if this is NTF level 3
+	   IF (CPOS.LE.73) THEN			! It'll fit in this record
+	      IF (VERSION.EQ.1.1) THEN
+		 STRING(CPOS:CPOS + 5) = '     0'
+	      ELSE
+		 STRING(CPOS:CPOS + 5) = '000000'
+	      ENDIF
+	      CPOS = CPOS + 6
+	   ELSE					! Needs a new record
+C	      STRING(79:79) = '1'		! Finish this record
+C	      LENGTH = 80
+C
+C STRING(79:79) should not be hard coded for variabler length records, so...
+	      STRING(CPOS:CPOS) = '1'		! need a continuation
+	      LENGTH = CPOS+1
+	      CALL WSTR(STRING,LENGTH)
+	      IF (VERSION.EQ.1.1) THEN
+		 CALL EXPAND('%WS% 00     0',STRING)
+	      ELSE
+		 CALL EXPAND('%WS% 00000000',STRING)
+	      ENDIF
+	      CPOS = 9
+	   ENDIF
+C
+CWrong!
+C1500	   LENGTH = CPOS + 2
+C
+1500	   LENGTH = CPOS + 1
+	   STRING( LENGTH -1:LENGTH -1)='0'	! then we are not continued
+	   CALL WSTR(STRING,LENGTH)		! and write out the final record
+	ENDIF
+C
+	OK = .TRUE.
+C
+999	GEOMETRY = OK
+	RETURN
+	END
+C

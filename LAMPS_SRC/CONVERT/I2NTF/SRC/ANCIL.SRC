@@ -1,0 +1,344 @@
+	SUBROUTINE ANCIL(GOT_ATTRIB,NUM_RECORDS,ATTREC,ATTLEN,IELEN,
+     &							SUCCESS)
+C
+C
+C	Copyright Laser-Scan Ltd, Cambridge, England
+C	Author					IMcL	05-Aug-1989
+C
+CMOD	Handle NTF level 3 output		VLG	09-Feb-1990
+CMOD	Do not output annotate or collect ACs	VLG	19-Jun-1990
+CMOD	BS7567 (v2.0) support added (W93/12)	 ST	20-May-1993
+C
+C	Build attribute records for output at levels 2 or 3
+C	Returns SUCCESS = .TRUE. if success
+C
+	IMPLICIT NONE
+C
+C Arguments:
+	LOGICAL		GOT_ATTRIB	! If we have a valid attrib. record
+	INTEGER*2	NUM_RECORDS	! Number of attribute records
+	INTEGER*2	IELEN		! Length of IFF AC entry
+	CHARACTER*80	ATTREC(50)	! Attribute records
+	INTEGER*2	ATTLEN(50)	! Length of attribute records
+	LOGICAL		SUCCESS		! TRUE if succeed
+C
+C Common:
+	INCLUDE 	'LSL$CMNFRT:FRTCOM.CMN'	! general FRT stuff
+	INCLUDE 	'LSL$CMNFRT:FRTACD.CMN'	! default attribute info
+	INCLUDE 	'ATTRIBUTE.CMN'		! Att. desc. table
+	INCLUDE		'COMMANDS.CMN'
+	INCLUDE		'FTRCMN.CMN'
+	INCLUDE		'STORE.CMN'
+C
+C Messages:
+	INCLUDE 	'I2NTFMSG.PAR'
+C
+C Functions:
+	INTEGER*2	EXPAND
+C
+C Local parameters
+	BYTE		BLANK
+	PARAMETER	(BLANK = ' ')
+C
+C Workspace:
+	INTEGER*2	I,J,K		! Loop counters
+	INTEGER*2	ATNO		! Pointer to the attribute table
+	INTEGER*2	ACTYPE		! Type of AC
+	INTEGER*4	LCODE		! Value (interpretation depends
+					!         on the AC type )
+C
+	INTEGER*2	RDARR(3)	! Temp storage for ACTYPE,LCODE
+	EQUIVALENCE	(ACTYPE, RDARR(1))
+	EQUIVALENCE	(LCODE , RDARR(2))
+C
+	REAL		R_VALUE		! Separate storage for LCODE so
+					! we can convert to integer
+	EQUIVALENCE	(LCODE,R_VALUE)
+C
+	BYTE		TEXT(256)	! Optional text string
+	CHARACTER*128	CTEXT		! character version
+	EQUIVALENCE	(TEXT,CTEXT)
+C
+	CHARACTER*72	VALUE		! Field to be put into record
+	INTEGER*2	RLEN		! Length of VALUE
+	INTEGER*2	POS,LEN		! temporary working length
+C
+	INTEGER*4	MONTH		! for date AC's
+C
+	CHARACTER*12	DATE,TIME	! Temp storage
+C
+	INTEGER*2	LENGTH		! of TEXT
+	CHARACTER*3	MONTHS(12)	! JAN, FEB,...,DEC
+C	CHARACTER*6	NODATA(6)	! what field should hold if no data
+	CHARACTER*12	NODATA(6)	! what field should hold if no data
+C
+	DATA MONTHS /	'JAN','FEB','MAR','APR','MAY','JUN',
+     &			'JUL','AUG','SEP','OCT','NOV','DEC' /
+C
+C	DATA NODATA/'     0','   0.0','      ','      ','::    ','      '/
+C
+C These empty fields only exist for Int, Real and Character fields
+C
+	DATA NODATA/'00000000000','000000000000','    ',' ',' ',' '/
+C
+	SUCCESS = .TRUE.
+C
+C.........................................................................
+C Get the attribute code (type)
+C
+	CALL EIHRI (RDARR,3,1)
+C .........................................................................
+C First see if it's an attribute number we know something about
+C
+	ATNO = 0	! Start at the beginning
+C
+10	DO 150 I=ATNO+1,ATTR_PTR
+	   IF (ACTYPE.EQ.IFF_ATT_NUM(I)) THEN
+	      ATNO = I
+	      GOTO 151
+	   ENDIF
+150	CONTINUE
+C
+	IF (LOG .AND. HAD_ATTRIBUTE .AND.
+     &	    ACTYPE.GT.999 .AND. ATNO.EQ.0)	    ! warn if ATTRIB file given
+     &		CALL LSL_PUTMSG(I2NTF__ACNOTATT,ACTYPE,FSN,ISN)
+C
+	GOTO 900				! It ain't
+C
+C .......................................................................
+C So read the value 
+C
+C Integer
+C
+151	IF (ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_I) THEN	
+	   IF (LCODE.EQ.0) THEN
+	      RLEN = EXPAND('%WS%P0%S2%S11',VALUE,NTF_ATT_NAME(ATNO),
+     &				NODATA(ATTR_TRANS(ATNO)))
+	   ELSE
+	      RLEN = EXPAND('%WS%P0%S2%I11',VALUE,NTF_ATT_NAME(ATNO),
+     &						LCODE)
+	   ENDIF
+C .......................................................................
+C Real
+C
+	ELSEIF (ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_R) THEN
+	   LCODE = NINT(R_VALUE*1000)	! Convert from R12.3 to an integer
+					! NB the ATTDESC tells how to get back
+C
+	   IF (LCODE.EQ.0) THEN
+	      RLEN = EXPAND('%WS%P0%S2%S12',VALUE,NTF_ATT_NAME(ATNO),
+     &				NODATA(ATTR_TRANS(ATNO)))
+	   ELSE
+	      RLEN = EXPAND('%WS%P0%S2%I12',VALUE,NTF_ATT_NAME(ATNO),
+     &						LCODE)
+	   ENDIF
+C .......................................................................
+C Character
+C
+	ELSEIF (ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_C) THEN
+	   IF (LCODE.EQ.0) THEN
+	      RLEN = EXPAND('%WS%P0%S2%S4',VALUE,NTF_ATT_NAME(ATNO),
+     &				NODATA(ATTR_TRANS(ATNO)))
+	   ELSE
+	      RLEN = EXPAND('%WS%P0%S2%A4',VALUE,NTF_ATT_NAME(ATNO),
+     &						LCODE)
+	   ENDIF
+C .......................................................................
+C Date
+C
+	ELSEIF (ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_D) THEN
+C
+C The date needs some converting, it comes as an integer...
+C
+	   CALL EXPAND('%WS%P0%DD',DATE,LCODE)
+C
+C ...which has now been expanded into the form dd-mmm-yyyy, but NTF 
+C wants yyymmdd
+C
+C First translate the month from chars (e.g. 'APR') into integer (03)
+C
+	   DO 101 J=1,12		! Check which month
+	      IF (DATE(4:6) .EQ. MONTHS(J)) THEN
+	         MONTH = J  
+		 GOTO 103
+	      ENDIF
+101	   CONTINUE
+C
+103	   IF (DATE(1:1).EQ.' ') DATE(1:1) = '0'
+C
+C Then re-write the date in the new order
+C
+	   RLEN = EXPAND('%WS%P0%S2%S4%I2%S2',	VALUE,
+     &						NTF_ATT_NAME(ATNO),
+     &						DATE(8:11),
+     &						MONTH,
+     &						DATE(1:2))
+C .......................................................................
+C And Time
+C
+	ELSEIF (ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_T) THEN
+C
+C There is no time format in NTF so output as a string
+C
+	   RLEN = EXPAND('%WS%P0%S2%DT',	VALUE,NTF_ATT_NAME(ATNO),
+     &						LCODE)
+C
+C ....................................................................
+C Optional text string
+C
+	ELSEIF (ATTR_TRANS(ATNO).EQ.ACD_DATATYPE_TX) THEN
+C
+	   DO 410 I=1,80
+	      TEXT(I) = BLANK
+410	   CONTINUE
+C
+	   RLEN = MIN((IELEN-3)*2,64)		! Make sure we dont go too far
+C
+	   IF (RLEN .GT. 0) THEN
+	      CALL EIHRI(TEXT,IELEN-3,4)
+C
+C and adjust the length if we have an odd number of characters
+C
+	      IF (TEXT(RLEN).EQ.0) THEN
+	         TEXT(RLEN) = BLANK
+	         RLEN = RLEN - 1
+	      ENDIF
+C
+C otherwise make the text a blank
+C
+	   ELSE
+	      RLEN = 1
+	   ENDIF
+C
+C build the field
+C
+	   RLEN = EXPAND('%WS% %P0%S2%S%A1',VALUE,NTF_ATT_NAME(ATNO)
+     &					,CTEXT(:RLEN),DIVIDER)
+C
+	ENDIF
+C
+C .......................................................................
+C Do not output this attribute if used to annotate or collect features
+C
+	IF (IFF_ANNOTATE(ATNO).OR.IFF_COLLECT(ATNO)) GOTO 930
+C
+C We have built the fields we want to add 
+C
+800	IF (.NOT.GOT_ATTRIB) THEN	! we haven't started any records yet
+	   ATT_ID = ATT_ID + 1
+	   ATTLEN(NUM_RECORDS) = EXPAND('%WS% 14%P0%I6%S',
+     &						ATTREC(NUM_RECORDS),
+     &						ATT_ID,VALUE(:RLEN)) 
+C
+C	   NO_ATTREC = NO_ATTREC + 1
+	   GOT_ATTRIB = .TRUE.
+C
+	ELSE			! We have a record already started
+C
+!	   IF (RLEN+ATTLEN(NUM_RECORDS).GE.77) THEN 	! We need a new record
+	   IF (RLEN+ATTLEN(NUM_RECORDS).GT.78) THEN 	! We need a new record
+C
+	      IF ((ATTR_TRANS(ATNO).NE.ACD_DATATYPE_TX) .OR.
+     &		  (ATTLEN(NUM_RECORDS).GT.76)) THEN ! cant fit just the mnem on
+C
+C Can't split the field so finish off old record
+C
+		ATTLEN(NUM_RECORDS) = ATTLEN(NUM_RECORDS) + 1
+	       ATTREC(NUM_RECORDS)(ATTLEN(NUM_RECORDS):ATTLEN(NUM_RECORDS))='1'
+C
+C Increment pointers/counters
+C
+		ATTLEN(NUM_RECORDS) = ATTLEN(NUM_RECORDS) + 1
+		NUM_RECORDS = NUM_RECORDS + 1
+C
+C And start the new record
+C
+		ATTLEN(NUM_RECORDS) = EXPAND('%WS% 00%S',
+     &						  ATTREC(NUM_RECORDS),
+     &						  VALUE(:RLEN)) 
+C
+	     ELSE
+C
+C Split the text string
+C
+		LEN = ATTLEN(NUM_RECORDS)
+		POS = 78-LEN
+		ATTREC(NUM_RECORDS)(LEN+1:79) = VALUE(1:POS)//'1'
+		ATTLEN(NUM_RECORDS) = 80   ! including <EOR> character to come
+C
+		NUM_RECORDS = NUM_RECORDS + 1
+C
+C Continuation
+C
+		ATTLEN(NUM_RECORDS) = EXPAND('%WS% 00%S',
+     &						ATTREC(NUM_RECORDS),
+     &		     				VALUE(MIN(RLEN,POS+1):RLEN)) 
+	     ENDIF
+	   ELSE
+C
+C We can fit the new field in at the end of this record
+C
+	      ATTLEN(NUM_RECORDS) = EXPAND('%WS%S%S',	
+     &			ATTREC(NUM_RECORDS),
+     &			ATTREC(NUM_RECORDS)(:ATTLEN(NUM_RECORDS)),
+     &			VALUE(:RLEN))
+C
+	   ENDIF
+	ENDIF
+C
+C Go back up to see if we have another translation for this attribute
+C i.e. do we want the optional text string or the value as well
+C
+	GOTO 10
+C
+900	IF (ATNO.EQ.0) GOTO 999		! No AC
+C
+C Feature may be annotated or be part of one or more COLLECT objects
+C - level 3 only
+C
+930	IF (LEVEL.NE.3) GOTO 999
+C
+	IF (IFF_ANNOTATE(ATNO)) THEN
+	   DO 935 I=1,TEXT_PTR
+	      IF (TEXTS_VAL(I).EQ.VALUE) THEN		! Found the text
+		NAME_ID = TEXTS_ID(I)
+		TEXT_GEOM = TXT_GEOM(I)
+		GOTO 950
+	      ENDIF
+935	   CONTINUE
+C
+	   FEATURE_PTR = FEATURE_PTR + 1
+	   IF (FEATURE_PTR.GT.MAX_STORE) THEN
+	      CALL LSL_PUTMSG(I2NTF__TOOMNYFEAT,MAX_STORE)
+	      SUCCESS = .FALSE.
+	      GOTO 999
+	   ENDIF
+	   SAV_FEAT = .TRUE.		! Save the feature until text is found
+	   FEAT_VAL(FEATURE_PTR) = VALUE
+	ENDIF
+C
+950	IF (IFF_COLLECT(ATNO)) THEN
+	   N_AC_COLL = N_AC_COLL + 1
+	   DO 940 I=1,COLLECT_PTR	! loop through each collect to see which
+C					! one(s) feature will be included in
+	      IF (COLLECT_VAL(I).EQ.VALUE) THEN	   ! Already started the record
+		 COLL_FEAT(N_AC_COLL) = I	   
+		 GOTO 999
+	      ENDIF
+940	   CONTINUE
+C
+	   COLLECT_PTR = COLLECT_PTR + 1
+	   IF (COLLECT_PTR.GT.MAX_STORE) THEN
+	      CALL LSL_PUTMSG(I2NTF__TOOMNYCOLL,MAX_STORE)
+	      SUCCESS = .FALSE.
+	      GOTO 999
+	   ENDIF
+	   COLL_FEAT(N_AC_COLL) = COLLECT_PTR		! Begin a new record
+	   COLLECT_VAL(COLL_FEAT(N_AC_COLL)) = VALUE
+	ENDIF
+C
+C.........................................................................
+C
+999	RETURN
+	END
+C
