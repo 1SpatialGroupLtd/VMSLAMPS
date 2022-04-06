@@ -16,7 +16,7 @@ def main():
 	except IOError:
 		print("Can\'t open output html file for writing. "+outhtmlfilename)
 		sys.exit(0)
-        outhtmlfile.write("<!DOCTYPE HTML PUBLIC ""-//W3C//DTD HTML 3.2 Final//EN"">\n")
+	outhtmlfile.write("<!DOCTYPE HTML PUBLIC ""-//W3C//DTD HTML 3.2 Final//EN"">\n")
 	outhtmlfile.write("<HTML><HEAD><TITLE>VMS LAMPS Software Source index</TITLE>\n")
 	outhtmlfile.write("<LINK rel=""stylesheet"" type=""text/css"" href=""lamps.css""></HEAD>\n")
 	outhtmlfile.write("<H1>VMS LAMPS Software Source Index</H1>\n")
