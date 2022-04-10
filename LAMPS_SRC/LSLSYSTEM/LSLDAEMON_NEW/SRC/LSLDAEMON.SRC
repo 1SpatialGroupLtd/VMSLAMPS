@@ -1,0 +1,662 @@
+	PROGRAM LSLDAEMON
+C
+***	MODULE LSLDAEMON
+***	IDENT 17OC91
+C
+C Created (Based on QUO by AJW et al)			PGH	17-Aug-1988
+C (V0.1) Completed					PGH	28-Nov-1988
+C (V0.2) handle file locked better			PGH	30-Nov-1988
+C (V0.3) keep count of idle time			PGH	 1-Dec-1988
+C (V1.1) use Config file and actually delete processes 	PGH	10-Jan-1989
+C (V1.2) add settle time to Config			PGH	13-Jan-1989
+C (V1.3) allow excluded users				PGH	14-Feb-1989
+C (V1.4) allow safe programs 				PGH	15-Jan-1991
+C (V1.5) allow sleep and wake times			PGH	17-Oct-1991
+C
+C Program to act as an idle process killer daemon
+C
+C To cover all processes, this should be installed with WORLD privilege,
+C or run by a user with SYSPRV, eg SYSTEM.
+C
+	IMPLICIT NONE
+C
+C functions:
+	INTEGER SYS$GETJPI	! Get Job/Process Information
+	INTEGER SYS$WAITFR	! Wait for event flag
+	INTEGER SYS$BRDCST	! send message
+	INTEGER SYS$DELPRC	! Delete process
+	INTEGER INDEX		! locate character
+	REAL	SECNDS		! time since midnight
+C
+C parameters:
+	INCLUDE '($SSDEF)'
+	INCLUDE '($JPIDEF)'
+	PARAMETER MAXPROC	=100	! maximum processes
+	PARAMETER MAXIDLE	=50	! maximum idle processes
+	PARAMETER MAXEXCLUDE	=10	! maximum excluded users
+	PARAMETER MAXSAFE	=10	! maximum safe programs
+	PARAMETER SCH$C_COLPG	= 1
+	PARAMETER SCH$C_MWAIT	= 2
+	PARAMETER SCH$C_CEF	= 3
+	PARAMETER SCH$C_PFW	= 4
+	PARAMETER SCH$C_LEF	= 5
+	PARAMETER SCH$C_LEFO	= 6
+	PARAMETER SCH$C_HIB	= 7
+	PARAMETER SCH$C_HIBO	= 8
+	PARAMETER SCH$C_SUSP	= 9
+	PARAMETER SCH$C_SUSPO	= 10
+	PARAMETER SCH$C_FPG	= 11
+	PARAMETER SCH$C_COM	= 12
+	PARAMETER SCH$C_COMO	= 13
+	PARAMETER SCH$C_CUR	= 14
+C
+C workspace:
+	INTEGER   PIDADR	! PID passed to GETJPI
+	INTEGER   IERR		! Error from queing of System service
+	INTEGER   FORTERR	! Error from FORTRAN
+	INTEGER   IOSB		! status at completion of Sys service
+	INTEGER   OPENERR	! count of open errors
+	INTEGER*2 IOSBW(2)	! bottom word is error code
+	EQUIVALENCE (IOSB,IOSBW)
+	INTEGER   RETLEN	! general purpose return length
+	INTEGER	  I,J		! loop count
+	CHARACTER DATE*24	! current date/time
+	INTEGER   MINUTES	! minutes
+	CHARACTER MINSTR*4	! minutes string
+	INTEGER	  MINPTR	! and offset
+	CHARACTER*80 LINE	! for putting the text into
+	CHARACTER*4  COMMAND	! Config command
+	INTEGER	  PLINGPOS	! position of "!"
+	INTEGER	  SPACEPOS	! position of " "
+	INTEGER	  TABPOS	! position of "tab"
+	INTEGER	  STARTPOS	! position of "space/tab"
+	INTEGER	  LINLEN	! Line length
+C
+	INTEGER   ITMLEN	! size of item list
+	PARAMETER (ITMLEN=79)
+	INTEGER*4 ITMLST(ITMLEN)
+	INTEGER*2 ITMLST2(2*ITMLEN)
+	EQUIVALENCE (ITMLST,ITMLST2)
+C
+	INTEGER	      INTERVAL	! time interval in minutes
+	INTEGER	      WARNINGS	! number of warnings before kill
+	INTEGER	      SETTLE	! settling time in secs
+	INTEGER	      SLEEP	! sleep time in secs
+	INTEGER	      WAKE	! wake time in secs
+	INTEGER	      NOW	! time now in secs since midnight
+	INTEGER	      T_VALUE	! temporary value
+	INTEGER	      PURGE(2)	! address range to purge
+	CHARACTER*128 IMAGNAME	! name of image being executed
+	INTEGER       IMAGELEN	! no. of chars
+	INTEGER       IMAGESTART! offset
+	INTEGER       PID	! PID
+	CHARACTER*8   HEXPID	! same as Hex characters
+	CHARACTER*15  PROCNAME	! name of process
+	INTEGER       PROCLEN	! no. of chars
+	INTEGER       MODE	! process mode
+	INTEGER       PRCCNT	! process count
+	INTEGER       STATE	! Process state (current,COM,LEF,etc)
+	CHARACTER*7   TERMINAL	! terminal name
+	INTEGER       TERMLEN	! no. of chars
+	INTEGER       UIC	! UIC ...
+	INTEGER*2     UICW(2)	! ... as two words
+	EQUIVALENCE   (UIC,UICW)! ... are the same
+	CHARACTER*15  USERNAME	! name of user
+	INTEGER       USERLEN	! no. of chars
+	INTEGER       CPUTIM	! CPU time so far
+	INTEGER       BUFIO	! Buffered I/O so far
+	INTEGER       DIRIO	! Direct I/O so far
+	INTEGER       PAGEFLTS	! Page faults so far
+	INTEGER       PROCESSES	! processes so far
+	INTEGER       PROCIND	! index of current process
+	INTEGER	      SAVPID(MAXPROC)	! saved info about processes
+	INTEGER	      SAVCPU(MAXPROC)	! saved info about processes
+	INTEGER	      SAVBUF(MAXPROC)	! saved info about processes
+	INTEGER	      SAVDIR(MAXPROC)	! saved info about processes
+	INTEGER	      SAVPAG(MAXPROC)	! saved info about processes
+	INTEGER	      DIFCPU	! difference since last time
+	INTEGER	      DIFBUF	! difference since last time
+	INTEGER	      DIFDIR	! difference since last time
+	INTEGER	      DIFPAG	! difference since last time
+	INTEGER	      IDLEPID(MAXIDLE)	! processes warned this time
+	INTEGER	      IDLENUM(MAXIDLE)	! number of times warned
+	INTEGER	      IDLECNT		! count of idle processes
+	INTEGER	      PREVPID(MAXIDLE)	! processes warned previous time
+	INTEGER	      PREVNUM(MAXIDLE)	! number of times warned
+	INTEGER	      PREVCNT		! count of idle processes
+	INTEGER	      EXCLUDECNT	! count of excluded users
+	CHARACTER*15  EXCLUDED(MAXEXCLUDE)	! excluded users
+	INTEGER	      SAFECNT		! count of safe programs
+	CHARACTER*40  SAFEPROG(MAXSAFE)	! safe programs
+	INTEGER	      SAFELEN		! length of safe program name
+	LOGICAL       SUSPND		! this processes is suspended
+	LOGICAL	      SEEN(MAXPROC)	! this process seen recently
+	LOGICAL       KILLTHIS		! kill this process
+	LOGICAL	      KILLING		! not just looking on this pass
+	LOGICAL	      SLEEPING		! sleeping this pass
+	CHARACTER*1   KILLMARK		! marker character
+	CHARACTER*25  PROBLEM		! problem found
+	CHARACTER*50  MESSAGE		! message to output
+C
+C presets:
+C
+	CHARACTER*5   STATES(14)
+	DATA 	      STATES/	'COLPG','MWAIT','CEF  ','PFW  ','LEF  ',
+     &				'LEFO ','HIB  ','HIBO ','SUSP ','SUSPO',
+     &				'FPG  ','COM  ','COMO ','CUR  '/
+
+	DATA	      PURGE/0,'7FFFFFFF'X/	! address range
+	DATA	      INTERVAL,WARNINGS,SETTLE/20,2,10/	! minutes, times, secs
+C
+C code:
+C
+C set up the item list ( see SYSTEM SERVICES Reference Manual)
+C
+	ITMLST2(1)   =128
+	ITMLST2(2)   =JPI$_IMAGNAME
+	ITMLST (3/2+1) =%LOC(IMAGNAME)
+	ITMLST (5/2+1) =%LOC(IMAGELEN)
+C
+	ITMLST2(7)   =4
+	ITMLST2(8)   =JPI$_PID
+	ITMLST (9/2+1) =%LOC(PID)
+	ITMLST (11/2+1)=%LOC(RETLEN)
+C
+	ITMLST2(13)  =15
+	ITMLST2(14)  =JPI$_PRCNAM
+	ITMLST (15/2+1)=%LOC(PROCNAME)
+	ITMLST (17/2+1)=%LOC(PROCLEN)
+C
+	ITMLST2(19)  =4
+	ITMLST2(20)  =JPI$_MODE
+	ITMLST (21/2+1)=%LOC(MODE)
+	ITMLST (23/2+1)=%LOC(RETLEN)
+C
+	ITMLST2(25)  =4
+	ITMLST2(26)  =JPI$_PRCCNT
+	ITMLST (27/2+1)=%LOC(PRCCNT)
+	ITMLST (29/2+1)=%LOC(RETLEN)
+C
+	ITMLST2(31)  =7
+	ITMLST2(32)  =JPI$_TERMINAL
+	ITMLST (33/2+1)=%LOC(TERMINAL)
+	ITMLST (35/2+1)=%LOC(TERMLEN)
+C
+	ITMLST2(37)  =4
+	ITMLST2(38)  =JPI$_UIC
+	ITMLST (39/2+1)=%LOC(UIC)
+	ITMLST (41/2+1)=%LOC(RETLEN)
+C
+	ITMLST2(43)  =15
+	ITMLST2(44)  =JPI$_USERNAME
+	ITMLST (45/2+1)=%LOC(USERNAME)
+	ITMLST (47/2+1)=%LOC(USERLEN)
+C
+	ITMLST2(49)  =4
+	ITMLST2(50)  =JPI$_STATE
+	ITMLST (51/2+1)=%LOC(STATE)
+	ITMLST (53/2+1)=%LOC(RETLEN)
+C
+	ITMLST2(55)  =4
+	ITMLST2(56)  =JPI$_CPUTIM
+	ITMLST (57/2+1)=%LOC(CPUTIM)
+	ITMLST (59/2+1)=%LOC(RETLEN)
+C
+	ITMLST2(61)  =4
+	ITMLST2(62)  =JPI$_BUFIO
+	ITMLST (63/2+1)=%LOC(BUFIO)
+	ITMLST (65/2+1)=%LOC(RETLEN)
+C
+	ITMLST2(67)  =4
+	ITMLST2(68)  =JPI$_DIRIO
+	ITMLST (69/2+1)=%LOC(DIRIO)
+	ITMLST (71/2+1)=%LOC(RETLEN)
+C
+	ITMLST2(73)  =4
+	ITMLST2(74)  =JPI$_PAGEFLTS
+	ITMLST (75/2+1)=%LOC(PAGEFLTS)
+	ITMLST (77/2+1)=%LOC(RETLEN)
+C
+	ITMLST (79)  =0			! to terminate it
+C
+	PROCESSES = 0			! no processes so far
+	EXCLUDECNT = 0			! no excluded users so far
+	SAFECNT = 0			! no safe programs so far
+	SLEEP = 24*60*60		! sleep at midnight
+	WAKE = 0			! and wake immediately after
+	KILLING = .FALSE.		! only looking first time
+	OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='NEW',
+     &        CARRIAGECONTROL='LIST')
+	CALL SYS$ASCTIM(,DATE,,)	! get date and time
+	WRITE(1,1000)DATE
+1000	FORMAT('LSLDAEMON at ',A,' Starting version V1.5')
+	CLOSE (UNIT=1)
+	OPENERR=0
+	IDLECNT=0
+	PREVCNT=0
+	SLEEPING=.FALSE.
+C
+C get timing information from Config file
+C
+	PROBLEM='Config OPEN problem'
+	OPEN (UNIT=2, NAME='SYS$MANAGER:LSLDAEMON.CONFIG', TYPE='OLD', ERR=920)
+2	PROBLEM='Config READ problem'
+	READ(2,2000,ERR=920)LINLEN,LINE
+2000	FORMAT(Q,A)
+	PLINGPOS=INDEX(LINE(1:LINLEN),'!')
+	IF (PLINGPOS.GT.0) LINLEN=PLINGPOS-1	! strip comment
+	IF (LINLEN.LE.0) GOTO 2			! empty line
+	CALL STR$UPCASE(LINE(1:LINLEN),LINE(1:LINLEN))
+	CALL STR$TRIM(LINE,LINE(1:LINLEN),LINLEN)
+	IF (LINLEN.LE.0) GOTO 2			! empty line
+	SPACEPOS=INDEX(LINE(1:LINLEN),' ')
+	TABPOS=INDEX(LINE(1:LINLEN),'	')
+	IF (SPACEPOS.NE.0) THEN
+	   IF (TABPOS.NE.0) THEN
+	      IF (TABPOS.LT.SPACEPOS) THEN
+	         STARTPOS=TABPOS	! tab before space
+	      ELSE
+	         STARTPOS=SPACEPOS	! space before tab
+	      ENDIF
+	   ELSE
+	      STARTPOS=SPACEPOS		! only a space
+	   ENDIF
+	ELSE
+	   IF (TABPOS.NE.0) THEN
+	      STARTPOS=TABPOS		! only a tab
+	   ELSE
+	      STARTPOS=1		! neither space nor tab
+	   ENDIF
+	ENDIF
+3	IF (LINE(STARTPOS:STARTPOS).EQ.' '.OR.
+     &      LINE(STARTPOS:STARTPOS).EQ.'	') THEN
+	   STARTPOS=STARTPOS+1
+	   IF (STARTPOS.LE.LINLEN) GOTO 3
+	   ENDIF
+	IF (STARTPOS.GT.LINLEN) GOTO 2
+	COMMAND=LINE(1:STARTPOS)
+C
+C what sort of config line is it ?
+C
+	IF (COMMAND.EQ.'INTE') THEN 		! INTERVAL command
+	   READ(LINE(STARTPOS:LINLEN),2010,ERR=920)T_VALUE
+2010	   FORMAT(I12)
+	   IF (T_VALUE.LT.2.OR.T_VALUE.GT.60*24*7) THEN
+	      PROBLEM='Config invalid INTERVAL'
+	      GOTO 905
+	   ELSE
+	      INTERVAL=T_VALUE
+	   ENDIF
+	ELSEIF (COMMAND.EQ.'WARN') THEN 	! WARNINGS command
+	   READ(LINE(STARTPOS:LINLEN),2010,ERR=920)T_VALUE
+	   IF (T_VALUE.LT.0.OR.T_VALUE.GT.99) THEN
+	      PROBLEM='Config invalid WARNINGS'
+	      GOTO 905
+	   ELSE
+	      WARNINGS=T_VALUE
+	   ENDIF
+	ELSEIF (COMMAND.EQ.'SETT') THEN  	! SETTLE command
+	   READ(LINE(STARTPOS:LINLEN),2010,ERR=920)T_VALUE
+	   IF (T_VALUE.LT.1.OR.T_VALUE.GT.99) THEN
+	      PROBLEM='Config invalid SETTLE'
+	      GOTO 905
+	   ELSE
+	      SETTLE=T_VALUE
+	   ENDIF
+	ELSEIF (COMMAND.EQ.'SLEE') THEN  	! SLEEP command
+	   READ(LINE(STARTPOS:LINLEN),2010,ERR=920)T_VALUE
+	   IF (T_VALUE.LT.0.OR.T_VALUE.GT.24) THEN
+	      PROBLEM='Config invalid SLEEP'
+	      GOTO 905
+	   ELSE
+	      SLEEP=T_VALUE*60*60 ! in seconds
+	   ENDIF
+	ELSEIF (COMMAND.EQ.'WAKE') THEN  	! WAKE command
+	   READ(LINE(STARTPOS:LINLEN),2010,ERR=920)T_VALUE
+	   IF (T_VALUE.LT.0.OR.T_VALUE.GT.24) THEN
+	      PROBLEM='Config invalid WAKE'
+	      GOTO 905
+	   ELSE
+	      WAKE=T_VALUE*60*60 ! in seconds
+	   ENDIF
+	ELSEIF (COMMAND.EQ.'EXCL') THEN  	! EXCLUDE command
+	   IF (EXCLUDECNT.GE.MAXEXCLUDE) THEN
+	      PROBLEM='Config invalid EXCLUDE'
+	      T_VALUE=MAXEXCLUDE
+	      GOTO 905
+	   ELSE
+	      EXCLUDECNT = EXCLUDECNT+1
+	      EXCLUDED(EXCLUDECNT)=LINE(STARTPOS:LINLEN)
+	   ENDIF
+	ELSEIF (COMMAND.EQ.'SAFE') THEN  	! SAFE command
+	   IF (SAFECNT.GE.MAXSAFE) THEN
+	      PROBLEM='Config invalid SAFE'
+	      T_VALUE=MAXSAFE
+	      GOTO 905
+	   ELSE
+	      SAFECNT = SAFECNT+1
+	      SAFEPROG(SAFECNT)=LINE(STARTPOS:LINLEN)
+	   ENDIF
+	ELSE
+	   PROBLEM='Config invalid COMMAND'
+	   GOTO 905
+	ENDIF
+	GOTO 2
+C
+C here at end of config file
+C
+905	CLOSE (UNIT=2)
+	GOTO 4
+C
+C here with error on config file open or read
+C
+920	CALL ERRSNS(FORTERR,,,,T_VALUE)
+	IF (FORTERR.EQ.24) THEN 	! FOR$_ENDDURREA
+	   PROBLEM=' '			! not a problem
+	   GOTO 905			! end of file
+	ENDIF
+C
+C record current settings
+C
+4	OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='OLD',
+     &        ACCESS='APPEND', CARRIAGECONTROL='LIST', ERR=910)
+	CALL SYS$ASCTIM(,DATE,,)	! get date and time
+	IF (PROBLEM.NE.' ') WRITE(1,1091)DATE,PROBLEM,T_VALUE
+1091	FORMAT('LSLDAEMON at ',A,' ',A, I12)
+	CALL SYS$ASCTIM(,DATE,,)	! get date and time
+	WRITE(1,1092)DATE
+1092	FORMAT('LSLDAEMON at ',A,' Configuration information:')
+	WRITE(1,1093)INTERVAL,WARNINGS,SETTLE
+1093	FORMAT('...       Interval',I5,' mins, Warnings',I3,
+     &         ', Settle',I3,' secs')
+	WRITE(1,1094)SLEEP/60/60,WAKE/60/60
+1094	FORMAT('...       Sleep at ',I2,', Wake at ',I2)
+	DO I=1,EXCLUDECNT
+	   WRITE(1,1095)EXCLUDED(I)
+1095	   FORMAT('...       Excluded ',A)
+	ENDDO
+	DO I=1,SAFECNT
+	   WRITE(1,1096)SAFEPROG(I)
+1096	   FORMAT('...       Safe program ',A)
+	ENDDO
+	CLOSE (UNIT=1)
+	PROBLEM=' '
+C
+C loop back to here at time intervals
+C
+5	PIDADR=-1			! to start a wildcard GETJPI search
+C
+C see if we should be asleep
+C
+	NOW=SECNDS(0.0)
+	SLEEPING=((NOW.GE.SLEEP).AND.(NOW.LE.WAKE))
+	IF (SLEEPING) THEN
+	   KILLING=.FALSE.
+	   OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='OLD',
+     &           ACCESS='APPEND', CARRIAGECONTROL='LIST', ERR=910)
+	   OPENERR=0
+	   CALL SYS$ASCTIM(,DATE,,)	! get date and time
+	   WRITE(1,1010)DATE
+1010	   FORMAT('LSLDAEMON at ',A,' Asleep, but listening')
+	ENDIF
+C
+C start a new log entry
+C
+	IF (KILLING) THEN
+	   OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='OLD',
+     &           ACCESS='APPEND', CARRIAGECONTROL='LIST', ERR=910)
+	   OPENERR=0
+	   CALL SYS$ASCTIM(,DATE,,)	! get date and time
+	   WRITE(1,1011)DATE
+1011	   FORMAT('LSLDAEMON at ',A,' Now checking processes')
+	ENDIF
+C
+C loop back to here for each process
+C
+10	CONTINUE
+C
+C	queue the inquiry request
+	IERR=SYS$GETJPI(%VAL(0),	! efn
+     &                  PIDADR,		! pidadr
+     &                  ,		! prcnam
+     &                  ITMLST,		! itmlst
+     &                  IOSB,		! iosb
+     &                  ,		! astadr
+     &                  ,)		! astprm
+C
+C check that it queued OK
+	SUSPND=(IERR.EQ.SS$_SUSPENDED)
+	IF (IERR.NE.SS$_NORMAL.AND..NOT.SUSPND) GOTO 900
+C
+C wait for the information to come back
+	IERR=SYS$WAITFR(%VAL(0))
+	IF (IERR.NE.SS$_NORMAL) GOTO 950	! exit if failed
+C
+C did the request complete OK ? - exit if it failed
+	IF (IOSBW(1).EQ.SS$_NORMAL) GOTO 15
+        IF (IOSBW(1).NE.SS$_SUSPENDED) THEN
+	   IERR=IOSBW(1)
+	   GOTO 950				! exit if failed
+	ENDIF
+	SUSPND=.TRUE.
+	IMAGNAME='N/A (suspended)'
+	IMAGELEN=15
+C
+C discard any detached processes etc
+C
+15	IF (MODE.NE.JPI$K_INTERACTIVE) GOTO 10
+C
+C discard any processes in irrelevant states
+C
+	IF (STATE.EQ.SCH$C_COLPG) GOTO 10 
+	IF (STATE.EQ.SCH$C_MWAIT) GOTO 10
+	IF (STATE.EQ.SCH$C_CEF) GOTO 20
+	IF (STATE.EQ.SCH$C_PFW) GOTO 10
+	IF (STATE.EQ.SCH$C_LEF) GOTO 20
+	IF (STATE.EQ.SCH$C_LEFO) GOTO 20
+	IF (STATE.EQ.SCH$C_HIB) GOTO 20
+	IF (STATE.EQ.SCH$C_HIBO) GOTO 20
+	IF (STATE.EQ.SCH$C_SUSP) GOTO 10
+	IF (STATE.EQ.SCH$C_SUSPO) GOTO 10
+	IF (STATE.EQ.SCH$C_FPG) GOTO 10
+	IF (STATE.EQ.SCH$C_COM) GOTO 10
+	IF (STATE.EQ.SCH$C_COMO) GOTO 10
+	IF (STATE.EQ.SCH$C_CUR) GOTO 10
+C
+C discard any processes with subprocesses, or no terminal
+C
+20	IF (PRCCNT.NE.0) GOTO 10
+	IF (TERMLEN.EQ.0) GOTO 10
+C
+C sanitise the fields
+C
+	IF (IMAGELEN.EQ.0) THEN
+	   IMAGNAME='(DCL)'
+	   IMAGELEN=5
+	   IMAGESTART=1
+	ELSE
+	   IMAGESTART=0
+	   DO 18 I=1,IMAGELEN
+	      IF (IMAGNAME(I:I).EQ.' ') GOTO 18
+	      IF (IMAGNAME(I:I).EQ.'.') GOTO 18
+	      IF (IMAGNAME(I:I).EQ.'$') GOTO 18
+	      IF (IMAGNAME(I:I).EQ.'_') GOTO 18
+	      IF (IMAGNAME(I:I).EQ.'-') GOTO 18
+	      IF (IMAGNAME(I:I).EQ.';') GOTO 18
+	      IF (IMAGNAME(I:I).GE.'A'.AND.IMAGNAME(I:I).LE.'Z') GOTO 18
+	      IF (IMAGNAME(I:I).GE.'0'.AND.IMAGNAME(I:I).LE.'9') GOTO 18
+	      IMAGESTART=I
+18	   CONTINUE
+	   IMAGESTART=IMAGESTART+1
+	ENDIF
+	USERLEN=INDEX(USERNAME(1:USERLEN),' ')-1
+	IF (USERLEN.LE.0) USERLEN=15
+C
+	USERNAME=USERNAME(1:USERLEN)
+	PROCNAME=PROCNAME(1:PROCLEN)
+	TERMINAL=TERMINAL(1:TERMLEN)
+C
+C discard any processes running a safe program
+C
+	DO I=1,SAFECNT
+	   SAFELEN=INDEX(SAFEPROG(I),' ')-1
+	   IF (IMAGNAME(IMAGESTART:IMAGESTART+SAFELEN-1).EQ.
+     &         SAFEPROG(I)(1:SAFELEN)) GOTO 10
+	ENDDO
+C
+C compare with previous
+C
+	PROCIND=0
+	KILLTHIS=.FALSE.
+	DO 40 I=1,PROCESSES
+	   IF (PID.EQ.SAVPID(I)) THEN
+	      PROCIND=I
+	      DIFCPU=CPUTIM-SAVCPU(I)
+	      DIFBUF=BUFIO-SAVBUF(I)
+	      DIFDIR=DIRIO-SAVDIR(I)
+	      DIFPAG=PAGEFLTS-SAVPAG(I)
+	      SEEN(I)=.TRUE.
+	      IF (DIFCPU.NE.0.OR.DIFBUF.NE.0.OR.DIFDIR.NE.0.OR.
+     &            DIFPAG.NE.0) GOTO 40
+	      KILLTHIS=.TRUE.
+	      GOTO 45
+	   ENDIF
+40	CONTINUE
+45	IF (PROCIND.EQ.0) THEN
+	   PROCESSES=PROCESSES+1
+	   PROCIND=PROCESSES
+	ENDIF
+	SAVPID(PROCIND)=PID
+	SAVCPU(PROCIND)=CPUTIM
+	SAVBUF(PROCIND)=BUFIO
+	SAVDIR(PROCIND)=DIRIO
+	SAVPAG(PROCIND)=PAGEFLTS
+C
+C final checks
+C
+	IF (.NOT.KILLING) GOTO 90
+	IF (.NOT.KILLTHIS) GOTO 90
+C
+C have we seen this offender before ?
+C
+	IDLECNT=IDLECNT+1	! one more seen now
+	IDLEPID(IDLECNT)=PID	! remember him/her/it
+	IDLENUM(IDLECNT)=1	! at least one warning now
+	DO 80 I=1,PREVCNT	! look for previous offences
+	   IF (PID.NE.PREVPID(I)) GOTO 80
+	   IDLENUM(IDLECNT)=PREVNUM(I)+1
+	   GOTO 85
+80	CONTINUE
+85	MINUTES=IDLENUM(IDLECNT)*INTERVAL
+	IF (MINUTES.GT.9999) MINUTES=9999
+	WRITE(MINSTR,700),MINUTES
+700	FORMAT(I4)
+	MINPTR=1
+	IF (MINUTES.LT.1000) MINPTR=2
+	IF (MINUTES.LT.100) MINPTR=3
+	IF (MINUTES.LT.10) MINPTR=4
+	IF (WARNINGS.GT.0.AND.IDLENUM(IDLECNT).EQ.WARNINGS+1) THEN
+	   MESSAGE='This process will be killed now.'
+	   KILLMARK='K'
+	ELSEIF (WARNINGS.GT.0.AND.IDLENUM(IDLECNT).GT.WARNINGS) THEN
+	   MESSAGE='Trying again to kill process now.'
+	   KILLMARK='D'
+	ELSEIF (WARNINGS.GT.0.AND.IDLENUM(IDLECNT).EQ.WARNINGS) THEN
+	   MESSAGE='Process will be killed next pass if still idle.'
+	   KILLMARK='N'
+	ELSE
+	   MESSAGE='Please logoff if not active.'
+	   KILLMARK=' '
+	ENDIF
+C
+C discard any processes owned by an excluded user
+C
+	DO I=1,EXCLUDECNT
+	   IF (USERNAME.EQ.EXCLUDED(I)) THEN
+	      IF (KILLMARK.EQ.'K') THEN
+	         KILLMARK='E'	! Excluded
+	      ELSE
+	         KILLMARK='I'	! Ignored
+	      ENDIF
+	      MESSAGE='Process not killed because USERNAME is excluded.'
+	   ENDIF
+	ENDDO
+C
+C send warning message to user, and log in file
+C
+	WRITE(HEXPID,701)PID
+701	FORMAT(Z8)
+	WRITE(1,1020) KILLMARK, MINSTR,' ',TERMINAL,' ',HEXPID,' ',USERNAME,
+     &         PROCNAME,STATES(STATE),' ',IMAGNAME(IMAGESTART:IMAGELEN)
+1020	FORMAT(12A)
+CCCCC	IF (USERNAME(1:USERLEN).NE.'PAUL') GOTO 90 ! debug exclude others
+	IF (KILLMARK.EQ.'I') GOTO 90	! ignore this one (excluded)
+	CALL SYS$ASCTIM(,DATE,,)	! get date and time
+	IERR=SYS$BRDCST('** Message from '//'LSLDAEMON'//' to '//
+     &		 USERNAME(1:USERLEN)//' at '//DATE(13:20)//
+     &           CHAR(13)//CHAR(10)//'** '//
+     &           'This process has been "idle" for at least '//
+     &		 MINSTR(MINPTR:4)//' minutes. '//
+     &           CHAR(13)//CHAR(10)//'** '//
+     &           MESSAGE//
+     &           CHAR(7),TERMINAL(1:TERMLEN))
+	IF (.NOT.IERR) THEN
+	   WRITE(1,1023)DATE,IERR
+1023	   FORMAT('...          ',A,' Failed to broadcast, code',I12)
+	ENDIF
+C
+	IF (KILLMARK.EQ.'K'.OR.KILLMARK.EQ.'D') THEN
+	   IERR=SYS$DELPRC(PID,)
+	   IF (.NOT.IERR) THEN
+	      CALL SYS$ASCTIM(,DATE,,)	! get date and time
+	      WRITE(1,1025)DATE,IERR
+1025	      FORMAT('...          ',A,' Failed to kill, code',I12)
+	   ENDIF
+	ENDIF
+C
+C end of loop for this process
+C
+90	GOTO 10			! and go back for the next process
+C
+C here if GETJPI failed to queue
+900	CONTINUE
+	IF (IERR.EQ.SS$_NOPRIV) GOTO 10		! OK if no privilege
+C if no more processes, loop back
+	IF (IERR.EQ.SS$_NOMOREPROC) THEN
+	   KILLING=.NOT.KILLING
+	   IF (.NOT.KILLING) THEN	! we were killing on this pass
+	      CLOSE (UNIT=1)		! finished recording
+	      DO 100 I=1,IDLECNT
+		PREVPID(I)=IDLEPID(I)	! save info on warned processes
+		PREVNUM(I)=IDLENUM(I)
+100	      CONTINUE
+	      PREVCNT=IDLECNT
+	      IDLECNT=0
+	      PROCESSES=0		! about to go and remember again
+	      CALL LIB$WAIT(SETTLE*1.0)	! but let things settle first
+	   ELSE
+	      OPEN (UNIT=1, NAME='SYS$MANAGER:LSLDAEMON.LOG', TYPE='OLD',
+     &              ACCESS='APPEND', CARRIAGECONTROL='LIST',ERR=910)
+	      CALL SYS$ASCTIM(,DATE,,)	! get date and time
+	      WRITE(1,1030)DATE
+1030	      FORMAT('LSLDAEMON at ',A,' Now hibernating')
+	      CLOSE (UNIT=1)
+	      CALL SYS$PURGWS(PURGE)
+	      CALL LIB$WAIT((INTERVAL*60.0)-SETTLE)
+	   ENDIF
+	   GOTO 5
+	ENDIF
+	GOTO 950
+C here with error on log file open - retry 10 times, then exit
+910	CALL LIB$WAIT(60.0)
+	OPENERR=OPENERR+1
+	IF (OPENERR.LT.10) GOTO 5
+	GOTO 930
+C here on FORTRAN error
+930	CALL ERRSNS(,,,,IERR)
+C here on VMS error 
+950	CALL LIB$SIGNAL(%VAL(IERR))
+C here to exit with error
+990	CONTINUE
+	CALL EXIT(IERR)
+	END
