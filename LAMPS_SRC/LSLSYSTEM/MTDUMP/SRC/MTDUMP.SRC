@@ -1,0 +1,324 @@
+	PROGRAM MTDUMP
+C
+**	MODULE MTDUMP
+**	IDENT  08JA87
+C
+C  MTDUMP - magtape dump program  
+C
+C Copyright Laser-Scan Laboratories. Ltd., Cambridge, England
+C
+C VAX version from PDP MTD version		CCB	28NO86
+C
+	IMPLICIT NONE
+C
+	INCLUDE	'HERE:MTDUMPMSG.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+	INCLUDE	'LSL$CMNLSL:EXCEPTION.CMN'
+	INCLUDE	'HERE:MTD.CMN'
+	INCLUDE	'LSL$CMNLSL:MTIVCM.CMN'
+C
+C functions called
+	INTEGER*4	OBEY
+	INTEGER*4	FLWOPN,FLWCLO,FLWSPL
+	INTEGER*4	MTINIT
+	INTEGER*4	MTIRDB
+	LOGICAL		RDCH
+	BYTE		MTISTR,MTICH
+	INTEGER*2	MTI16B
+	INTEGER*4	MTI24B,MTI32B
+C
+C w/s
+	INTEGER*4 OK
+	INTEGER*4 IERR
+	INTEGER   LSTNBL,LSTLEN
+	INTEGER*4 NNN
+C
+	LOGICAL*1 HASHBK,QUOTBK
+	INTEGER   NPL,NSPF
+	BYTE	  ICH1,ICH2
+	INTEGER   JJJ
+	INTEGER   NFIELD,NF,NL
+	INTEGER*4 LONG
+	CHARACTER*1	CH
+C
+	CALL LSL_INIT(.TRUE.)		! initialise LSLLIB
+C
+	OK = OBEY()		! decode command line
+	IF (.NOT.OK) GOTO 999	! failed
+C
+C open the magtape
+	OK = MTINIT(TAPE(:TAPELEN))
+	IF (.NOT.OK) THEN	! failed
+	   CALL LSL_PUTMSG(MTDUMP__NOMAGTAPE,TAPE(:TAPELEN))
+	   IF (OK.EQ.LSL__SYSERR) THEN
+	      CALL LSL_ADDMSG(MTIERR)
+	   ELSE
+	      CALL LSL_ADDMSG(OK)
+	   ENDIF
+	   GOTO 999
+	ENDIF
+C
+C open the output file
+	OK = FLWOPN(1,OUTFIL(:OUTLEN),IERR)
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(MTDUMP__NOOUTPUT,OUTFIL(:OUTLEN))
+	   IF (IERR.EQ.LSL__SYSOPEN) THEN
+	      CALL LSL_ADDMSG(IERR)
+	   ELSE
+	      CALL LSL_ADDMSG(OK)
+	   ENDIF
+	   GOTO 999
+	ENDIF
+C	
+C skip to requisite block if necessary
+	DO 90 JJJ=1,START-1
+	   OK = MTIRDB(MTIBUF,MTISIZ,MTILEN)
+	   IF (.NOT.OK.AND.OK.NE.LSL__EOF) THEN
+	      CALL LSL_PUTMSG(MTDUMP__ERREAD,MTINBL)
+	      IF (OK.EQ.LSL__SYSERR) THEN
+	         CALL LSL_ADDMSG(MTIERR)
+	      ELSE
+	         CALL LSL_ADDMSG(OK)
+	      ENDIF
+	   ENDIF
+90	CONTINUE
+C
+C set defaults
+	IF (.NOT.(HADCH.OR.HADMPS.OR.HADICL.OR.HADWO.OR.HADBYT)
+     &						) HADLON = .TRUE.
+	IF (.NOT.(HADDEC.OR.HADOCT)) HADHEX = .TRUE.
+C
+C sort out how many fields per line (try to fit in 72 columns)
+	IF (MAXWID.GT.0) THEN
+	   NPL = MAXWID
+	ELSEIF (HADCH.OR.HADMPS) THEN
+	   NPL = 72
+	ELSEIF (HADWO) THEN
+	   IF (HADOCT) NPL = 10
+	   IF (HADDEC) NPL = 12
+	   IF (HADHEX) NPL = 14
+	ELSEIF (HADLON) THEN
+	   IF (HADOCT.OR.HADDEC) NPL = 6
+	   IF (HADHEX) NPL = 8
+	ELSEIF (HADICL) THEN
+	   IF (HADOCT) NPL = 8
+	   IF (HADDEC) NPL = 9
+	   IF (HADHEX) NPL = 10
+	ELSE
+	   IF (HADOCT.OR.HADDEC) NPL = 18
+	   IF (HADHEX) NPL = 24
+	ENDIF
+C
+C set number of stripes per field
+	NSPF = 1
+	IF (HADWO) NSPF = 2
+	IF (HADICL) NSPF = 3
+	IF (HADLON) NSPF = 4
+	LSTNBL = -1
+	LSTLEN = -1
+C
+C header line
+	CALL FLWRTF
+	IF (HADSUM) THEN
+	   CALL EXPAND('Summary')
+	ELSE
+	   CALL EXPAND('Dump')
+	ENDIF
+	CALL APPEND(' of tape %S',TAPE(:TAPELEN))
+	IF (HADBL) THEN
+	   IF (END.LE.0.OR.START.EQ.END) THEN
+	      CALL APPEND(' block %N',START)
+	      IF (END.LE.0) CALL APPEND (' onwards')
+	   ELSE
+	      CALL APPEND(' blocks %N to %N',START,END)
+	   ENDIF
+	ENDIF
+C
+	IF (HADMPS) THEN
+	   CALL APPEND(' as MPS')
+	ELSEIF (.NOT.HADSUM) THEN
+	   IF (HADCH) THEN
+	      IF (HADEB) THEN
+	         CALL APPEND(' as EBCDIC')
+	      ELSE
+	         CALL APPEND(' as ASCII')
+	      ENDIF
+	   ELSE
+	      IF (HADDEC) CALL APPEND(' in decimal')
+	      IF (HADHEX) CALL APPEND(' in hexadecimal')
+	      IF (HADOCT) CALL APPEND(' in octal')
+	      IF (HADBYT) CALL APPEND(' bytes')
+	      IF (HADWO ) CALL APPEND(' 16 bit words')
+	      IF (HADLON) CALL APPEND(' 32 bit longwords')
+	      IF (HADICL) CALL APPEND(' ICL 24 bit words')
+	   ENDIF
+	ENDIF
+	CALL FLWLIN
+C
+C Loop reading blocks
+140	OK = MTIRDB(MTIBUF,MTISIZ,MTILEN)
+	IF (.NOT.OK) GOTO 360
+C
+	MTIPTR = 0
+	HASHBK = .FALSE.
+	QUOTBK = .FALSE.
+	IF (HADSUM) GOTO 270		! summary
+	IF (HEADER) THEN
+	   CALL FLWRTF
+	   CALL FLWRTF('Block  %I4 contains %I4 stripes',MTINBL,MTILEN)
+	ENDIF
+C
+C calculate number of lines
+	IF (HADMPS) THEN
+	   NFIELD = (MTILEN*4)/3	! 4 chars per ICL word
+	ELSE
+	   NFIELD = MTILEN/NSPF
+	ENDIF
+	NF = 0
+C loop for lines
+	NL = 1
+150	CALL EXPAND
+	   DO 250 JJJ = 1,NPL
+	      NF = NF+1
+	      IF (NF.GT.NFIELD) GOTO 260 ! end of block
+C
+C read one field from tape
+	      IF (HADMPS) THEN
+	         NNN = MTICH()		! MPS 6 bit char
+	      ELSEIF (HADICL) THEN
+	         LONG = MTI24B()	! ICL 24 bit word
+	      ELSEIF (HADWO) THEN
+	         NNN = MTI16B()		! 16 bit word
+	      ELSEIF (HADLON) THEN
+	         LONG = MTI32B()	! 32 bit longword
+	      ELSE
+	         NNN = MTISTR()		! byte
+	      ENDIF
+C
+C print out the field
+	      IF (HADCH.OR.HADMPS) THEN
+	         IF (HADEB) THEN
+	            CALL LIB$TRA_EBC_ASC(CHAR(NNN),CH)
+	            NNN = ICHAR(CH)
+	         ENDIF
+	         IF (NNN.EQ.11) GOTO 250  ! ignore line feeds
+	         IF (NNN.EQ.13) GOTO 260  ! end line on carriage return
+	         CALL APPEND('%C',NNN)  ! print anything else
+	      ELSEIF (HADWO) THEN
+	         IF (HADOCT) CALL APPEND('%^W%O7',NNN)
+	         IF (HADDEC) CALL APPEND('%^W%I6',NNN)
+	         IF (HADHEX) CALL APPEND(' %P0%^W%X4',NNN)
+	      ELSEIF (HADLON) THEN
+	         IF (HADOCT) CALL APPEND('%O12',LONG)
+	         IF (HADDEC) CALL APPEND('%I11',LONG)
+	         IF (HADHEX) CALL APPEND(' %P0%X8',LONG)
+	      ELSEIF (HADICL) THEN
+	         IF (HADDEC.AND.((LONG.AND.'800000'X).NE.0))
+     &            LONG = LONG.OR.'FF000000'X	! sign extend
+	         IF (HADOCT) CALL APPEND('%O9',LONG)
+	         IF (HADDEC) CALL APPEND('%I8',LONG)
+	         IF (HADHEX) CALL APPEND(' %P0%X6',LONG)
+	      ELSE
+	         IF (HADOCT) CALL APPEND('%^B%O4',NNN)
+	         IF (HADDEC) CALL APPEND('%^B%I4',NNN)
+	         IF (HADHEX) CALL APPEND(' %P0%^B%X2',NNN)
+	      ENDIF
+250	      CONTINUE
+260	   CALL FLWLIN
+	   NL = NL+1
+	   IF (MAXLIN.GT.0.AND.NL.GT.MAXLIN) GOTO 400
+	   IF (NF.GT.NFIELD) GOTO 400
+	   GOTO 150
+C
+C check #* and ^" if MPS summary
+270	IF (HADMPS) THEN
+	   ICH1 = MTICH()
+	   ICH2 = MTICH()
+	   IF (ICH1.EQ.'#'.AND.ICH2.EQ.'*') THEN
+	      HASHBK = .TRUE.
+	   ELSEIF (ICH1.EQ.'^'.AND.ICH2.EQ.'"') THEN
+	      QUOTBK = .TRUE.
+	   ENDIF
+	ENDIF
+C
+C Here to do summary
+290	IF (LSTLEN.GE.0) THEN
+	   IF (.NOT.(HASHBK.OR.QUOTBK).AND.(LSTLEN.EQ.MTILEN)) GOTO 340
+	   IF (.NOT.HADMPS) CALL FLWRTF
+	   IF (MTINBL.NE.LSTNBL+1) THEN
+C
+C here with a group of blocks
+	      CALL FLWRTF('Blocks %I4 to %I4 each contain %I4 stripes',
+     &				LSTNBL,MTINBL-1,LSTLEN)
+	   ELSE
+C
+C here with an isolated block
+	      CALL FLWRTF('Block  %I4 contains             %I4 stripes',
+     &				LSTNBL,LSTLEN)
+	   ENDIF
+	ENDIF
+C
+	LSTNBL = MTINBL
+	LSTLEN = MTILEN
+C
+340	IF (HASHBK.OR.QUOTBK) THEN
+C
+C Report #* and ^" blocks if MPS summary
+	   IF (QUOTBK) CALL FLWRTF
+	   CALL EXPAND('Block  %I4 contains             %I4 stripes',
+     &				MTINBL,MTILEN)
+	   IF (HASHBK) CALL APPEND(' ( MPS #* block )')
+	   IF (QUOTBK) CALL APPEND(' ( MPS ^" block )')
+	   CALL FLWLIN
+	   HASHBK = .FALSE.
+	   QUOTBK = .FALSE.
+	   MTILEN = -1  ! to force print next time
+	   LSTNBL = MTINBL
+	   LSTLEN = MTILEN
+	ENDIF
+	IF (.NOT.HADSUM) GOTO 420	! tidying up at end
+	IF (.NOT.OK) GOTO 370		! error outstanding
+	GOTO 400
+C
+C Tape mark or other error
+360	MTILEN = -1		! do not report length of block
+	IF (HADSUM) GOTO 290
+370	IF (OK.EQ.LSL__EOF) THEN
+	   CALL FLWRTF
+	   CALL FLWRTF('Block  %I4 is a tape mark',MTINBL)
+	ELSE
+	   CALL LSL_PUTMSG(MTDUMP__ERREAD,MTINBL)
+	   IF (OK.EQ.LSL__SYSERR) THEN
+	      CALL LSL_ADDMSG(MTIERR)
+	   ELSE
+	      CALL LSL_ADDMSG(OK)
+	   ENDIF
+	ENDIF
+C
+400	IF (END.LE.0.OR.MTINBL.LT.END) GOTO 140	! round again
+C
+C Done
+410	IF (HADSUM) THEN
+	   HADSUM = .FALSE.
+	   MTINBL = MTINBL+1
+	   MTILEN = -1
+	   GOTO 290
+	ENDIF
+C
+420	IF (PRINT) THEN
+	   OK = FLWSPL(1,IERR)
+	ELSE
+	   OK = FLWCLO(1,IERR)
+	ENDIF
+	IF (.NOT.OK) THEN
+	   CALL LSL_PUTMSG(MTDUMP__ERRCLOFIL)
+	   IF (OK.EQ.LSL__SYSCLOSE) THEN
+	      CALL LSL_ADDMSG(IERR)
+	   ELSE
+	      CALL LSL_ADDMSG(OK)
+	   ENDIF
+	ENDIF
+C
+999	CALL LSL_EXIT(OK)
+C
+	END
