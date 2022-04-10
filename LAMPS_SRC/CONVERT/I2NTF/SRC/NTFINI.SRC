@@ -1,0 +1,383 @@
+	LOGICAL FUNCTION NTFINI( FILNAM )
+C
+C
+C Copyright Laser-Scan Ltd., Cambridge, England.
+C
+C Author Paul Hardy (FRTLIB version - FRTINI), 16 June 1984
+C Stolen and modified for IFF2SIF by TJ Ibbs, 29 January 1985
+C Re-stolen for I2NTF I McLeman 10 June 1987
+C Modified by TJ Ibbs, 30 September 1987
+C
+C Returns TRUE if it succeeds in opening, reading, and closing
+C the specified NTF representation file, called FILNAM
+C
+C The contents of the file are left set up in the common block
+C in /COMMANDS/
+C
+	IMPLICIT NONE
+C
+C Messages:
+	INCLUDE 'HERE:I2NTFMSG.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+C
+C Commons:
+C
+C TXTC - text input and command decoding
+C
+CMOD	Tony J Ibbs, 23-Mar-1987	mod 2/432
+CMOD	Increase DEF_TXTLIM from 80 to 255
+C
+C Parameters
+C
+	INTEGER*4	MAX_TXTLIM	! maximum possible buffer length
+	PARAMETER	(MAX_TXTLIM = 1024)
+	INTEGER*4	DEF_TXTLIM	! default buffer length
+	PARAMETER	(DEF_TXTLIM = 255)
+C
+C Variables
+C
+	INTEGER*2 	DCPTR   	! decode pointer
+	INTEGER*2 	TXTPTR  	! end of line pointer
+	BYTE		TXTTYP  	! type of fake string
+	BYTE		TXTCLA  	! class of fake string
+	INTEGER*4 	TXTADD  	! address of buffer
+	INTEGER*2 	TXTLIM  	! actual buffer length
+	BYTE 		TXTBUF(MAX_TXTLIM)  	! text buffer
+C
+C Aliases
+C
+	INTEGER*4	TXTDSC(2)	! fake string descriptor
+	EQUIVALENCE	(TXTDSC,TXTPTR)
+C
+C Common block
+C
+	COMMON/LSL_TXTC/DCPTR,TXTPTR,TXTTYP,TXTCLA,TXTADD,TXTLIM,TXTBUF
+C
+C Notes
+C
+C 1) TXTBUF must remain at the end of the common (to allow users to 
+C    extend it)
+C
+C 2) TXTPTR,TXTTYP,TXTCLA,TXTADD must remain in the given order, to 
+C    preserve the 'fake' string descriptor
+C
+C
+C Common block holding command arguments and other control, for RDCOMM
+C
+	INTEGER*4	INTARG(8)
+	REAL		REALAR(8)
+	INTEGER*2	CMDNLE,SECNLE,STARLE
+	INTEGER*4	CMDNST(2),SECNST(2),STARST(2)
+	INTEGER*4	CMDFST(2)	! copy of 'descriptor' for
+C					!  command actually found
+	INTEGER*4	CMSFST(2)	! ditto for secondary command
+	INTEGER*4	CMDAST(2)	! copy of same for subject
+C					!  of any ambiguity
+	INTEGER*4	CMDNUM
+	INTEGER*4	TABFLG,CMDFLG
+	INTEGER*4	SECMDN		! secondary command number
+	INTEGER*4	SECTAB		! table secondary command is to
+C					!   be looked up in
+	INTEGER*4	CMDACT,CMDICT,CMDRCT
+	INTEGER*4	DEFBASE
+	LOGICAL*1	ARGMSG,CMDNEG,HADDOT,NOMESS
+	BYTE		INEQUAL
+	LOGICAL*1	NOUFLG		! TRUE => no user flags with
+C					!	  this table
+	LOGICAL*1	NSUFLG		! ditto for 2ndary table
+	BYTE		UNXCHR		! 'unexpected character' that
+C					!   would be output for error
+C					!   messages
+	INTEGER*4	UFLAG		! user flag found, if any
+	INTEGER*4	SUFLAG		! secondary table user flag
+C
+	COMMON /LSL_CMDCOM/	INTARG,REALAR,
+     &				CMDNST,SECNST,STARST,
+     &				CMDFST,CMSFST,CMDAST,
+     &				CMDNUM,TABFLG,CMDFLG,
+     &				SECMDN,SECTAB,
+     &				CMDACT,CMDICT,CMDRCT,
+     &				DEFBASE,
+     &				ARGMSG,CMDNEG,HADDOT,NOMESS,
+     &				INEQUAL,
+     &				NOUFLG,NSUFLG,UNXCHR,UFLAG,SUFLAG
+C
+	EQUIVALENCE (CMDNLE,CMDNST)
+	EQUIVALENCE (SECNLE,SECNST)
+	EQUIVALENCE (STARLE,STARST)
+C
+C INTARG,REALAR hold arguments found
+C
+C CMDNST is a descriptor for the command string
+C	 (CMDNLE is the length part of it)
+C SECNST is a descriptor for any secondary command name string
+C	 (SECNLE is the length part of it)
+C STARST is a descriptor for the staring argument string
+C	 (STARLE is the length part of it)
+C
+C CMDNUM is the 'number' of the command read, as returned by FINCMD
+C	 (it's also what's returned by RDCOMM)
+C
+C TABFLG holds table flags from the last table used for command look-up
+C CMDFLG holds command flags from the last command actually found
+C
+C CMDACT is the total argument count from last successful command
+C	 (integers, reals, and strings)
+C CMDICT is the count of integer arguments (...)
+C CMDRCT is the count of real argument (...)
+C
+C DEFBASE is the default base to use in reading integer arguments
+C	  (0=>decimal)
+C
+C ARGMSG is TRUE iff an argument was missing from the last command read
+C CMDNEG is TRUE iff the last command had a logical argument '-'
+C HADDOT is TRUE iff some real argument couldn't have been an integer
+C NOMESS is FALSE if RDCOMM is to produce error messages, TRUE if not
+C
+C INEQUAL is the inequality to be satisfied by the command argument
+C	=0 => no inequality, or '='
+C	=1 => '>'
+C	=2 => '>='
+C	=3 => '<'
+C	=4 => '<='
+C	=5 => '<>' (not equal)
+C
+C
+C Common block used by I2NTF
+C - details which command qualifiers were specified, etc
+C
+	INTEGER		MAX_XY_LEN	! maximum value of XY_LEN
+	PARAMETER	(MAX_XY_LEN=20)
+C
+	REAL*8		MAXINT		! max integer values
+	PARAMETER	(MAXINT = 2.0**31)
+C
+	INTEGER		XMIN,XMAX,YMIN,YMAX	! section extent
+	INTEGER		SOURCE_SCALE		! MD2 scale
+C
+	REAL		RANGE(4)		! IFF range
+C
+	COMMON /RANGE/	XMIN,XMAX,YMIN,YMAX,SOURCE_SCALE,RANGE
+C
+C .....................................................................
+C
+	LOGICAL 	LOG,		! TRUE if log qualifier given
+     &			SERIAL_MAG,	! TRUE if /serial_magtape given
+     &			OUTPUT,		! TRUE if /output was given
+     &			LOGLUNOP,	! TRUE if a log file is open
+     &			IS_MAGTAPE,	! TRUE if outputting to tape
+     &			OS_DATA,	! TRUE if outputting OS data
+     &			WATER_DISTRIB,	! TRUE if outputting water dist'n data
+     &			FIXED,		! TRUE for fixed length records
+     &			HAD_SH,		! TRUE if we have had SH entry
+     &			HAD_TEXT	! TRUE if we have had a text feature
+C
+     	LOGICAL		HAD_CITF93,	! TRUE if we have had /CITF=93
+     &			HAD_CITF96,	! TRUE if we have had /CITF=96 or /CITF
+     &			HAD_FRT,	! TRUE if we have had /FRT
+     &			HAD_POINT,	! TRUE if we have had /POINT_SIZE
+     &			HAD_ATTRIBUTE,	! TRUE if we have had /ATTRIBUTE
+     &			HAD_RECIPIENT,	! TRUE if we have had /RECIPIENT
+     &			HAD_FEATCLASS,	! TRUE if we have had /FEATCLASS_FILE
+     &			HAD_FC_LOOKUP,	! TRUE if we have had /FC_LOOKUP
+     &			HAD_ROUND	! TRUE if we have had /ROUND
+C
+C
+	COMMON	/COMMANDS_LOG/	LOG,SERIAL_MAG,OUTPUT,LOGLUNOP,IS_MAGTAPE,
+     &				OS_DATA,WATER_DISTRIB,FIXED,HAD_FRT,
+     &				HAD_POINT,HAD_SH,HAD_TEXT,HAD_ATTRIBUTE,
+     &				HAD_RECIPIENT,HAD_FEATCLASS,
+     &				HAD_CITF93,HAD_CITF96,HAD_FC_LOOKUP,
+     &				HAD_ROUND
+C
+	INTEGER		SERIAL,		! serial number (< 10000)
+     &			LEVEL,		! NTF level (1,2 or 3)
+     &			REVISION,	! revision level
+     &			DENSITY,	! tape density (800 or 1600)
+     &			XY_LEN,		! length of x,y units (I<XY_LEN>)
+     &			Z_LEN,		! length height unit code 
+C					!    ( Fixed at Level 1 )
+     &			XY_UNIT,	! x,y coord unit code 
+     &			Z_UNIT,		! height unit code 
+     &			DIFF_HT_LEN,	! height difference
+     &			NOW_YEAR,	! this year
+     &			NOW_MONTH,	! this month
+     &			NOW_DAY		! today
+	REAL		VERSION		! version 1.1 or 2.0
+C
+	COMMON	/COMMANDS_INT/	SERIAL,LEVEL,REVISION,DENSITY,XY_LEN,
+     &				Z_LEN,XY_UNIT,Z_UNIT,DIFF_HT_LEN,
+     &				NOW_YEAR,NOW_MONTH,NOW_DAY,VERSION
+C
+	REAL 		XY_MULT,	! ground unit multiplier )
+     &			Z_MULT,		! height  "       "	 ) see NTF spec
+     &			Z_DATUM		! z origin		 )
+C
+	COMMON	/COMMANDS_REAL/	XY_MULT,Z_MULT,Z_DATUM
+C
+C
+	CHARACTER*20	RECIP,		! recipient of data
+     &			DONOR,		! donor of data
+     &			DBNAME,		! Name of database
+     &			DDNAME,		! Data dictionary
+     &			DDBASE,		! Base data dictionary
+     &			FCNAME		! Feature classification scheme
+	CHARACTER*8	CCOPYRIGHT,	! copyright date
+     &			DDATE,		! Dictionary date
+     &			DDBDATE,	! Base dictionary date
+     &			FCDATE		! Feature classification date
+	CHARACTER*4	NTF_VERSION	! Version of NTF
+	CHARACTER*1	EOR_CHAR	! End-of-record character
+C
+	COMMON /COMMANDS_CHR/	RECIP,DONOR,DBNAME,DDNAME,DDBASE,FCNAME,
+     &				CCOPYRIGHT,DDATE,DDBDATE,FCDATE,NTF_VERSION,
+     &				EOR_CHAR
+C
+	LOGICAL		HAD_DONOR,	! donor of data
+     &			HAD_LEVEL,	! level of data
+     &			HAD_COPY,	! copyright date
+     &			HAD_SERIAL,	! copyright date
+     &			HAD_DBNAME,	! name of database
+     &			HAD_DDNAME,	! data dictionary
+     &			HAD_DDATE,	! data Base date
+     &			HAD_FCNAME,	! feature classification scheme
+     &			HAD_FCDATE,	! feature classification date
+C
+     &			HAD_XYUNIT,
+     &			HAD_ZUNIT,
+     &			HAD_ZDATUM,
+     &			HAD_XYMULT,
+     &			HAD_ZMULT,
+     &			HAD_XYLEN,
+     &			HAD_ZLEN,
+     &			HAD_DIFFHTLEN
+C
+	LOGICAL		HAD_FEATCLS	! output FEATCLASS records?
+C
+	COMMON /COMMANDS_QUAL/	HAD_DONOR,HAD_COPY,HAD_SERIAL,HAD_LEVEL,
+     &				HAD_DBNAME,HAD_DDNAME,HAD_DDATE,
+     &				HAD_FCNAME,HAD_FCDATE,HAD_ZDATUM,
+     &				HAD_XYUNIT,HAD_ZUNIT,HAD_XYLEN,HAD_ZLEN,
+     &				HAD_DIFFHTLEN,HAD_XYMULT,HAD_ZMULT,
+     &				HAD_FEATCLS
+C
+C
+C
+C Parameters defining file units
+C
+	INTEGER		IFFLUN,		! IFF file unit
+     &			OUTLUN,		! output file unit
+     &			LOGLUN,		! log file unit
+     &			CMDLUN,		! command file unit
+     &			FRTLUN,		! FRT file unit
+     &			ATTLUN,		! attribute file unit
+     &			FEATLUN,	! featclass file unit
+     &			INLUN,		! input list file unit
+     &			LUTLUN		! FC lookup file unit
+C
+	PARAMETER	(IFFLUN=10,OUTLUN=11,LOGLUN=12)
+	PARAMETER	(FRTLUN=13, ATTLUN=14, FEATLUN=18)
+	PARAMETER	(CMDLUN=15, INLUN=16, LUTLUN=19)
+C
+C
+C functions:
+	INTEGER		FLROPN		! open file for read
+	INTEGER		FLRCLO		! close it again
+	INTEGER		FLRSTR		! read a line from it
+	INTEGER 	OBEY_LINE	! interprets command line
+C
+C Argument:
+	CHARACTER*(*)	FILNAM		! filename
+C
+C workspace:
+	INTEGER		OK		! Function return
+	INTEGER		IERR		! Error flag
+	INTEGER		I		! DO loop counter
+	INTEGER		LINE		! line in cmd file
+	INTEGER		CMD		! command number from RDCOMM
+	LOGICAL		GIVEUP		! true if to give up file
+	BYTE		CHAR		! last-read character
+	INTEGER*4	TXLSAV		! save TXTLIM (max no of chars)
+	CHARACTER*100	COM_LINE	! The command line to be read
+	INTEGER		NCHS		! Number of chars read
+C
+	INTEGER		 TXTBFS
+	PARAMETER	(TXTBFS=132)	! increased TXTBUF size
+	CHARACTER*1	 PLING
+	PARAMETER	(PLING ='!')	! comment delimitor
+C
+C extend TXTBUF
+	TXLSAV = TXTLIM			! save TXTLIM
+	CALL SET_TXTLIM( TXTBFS )	! extend the buffer
+C  ...................................................................
+C
+	NTFINI = .FALSE.		! assume failure
+C
+C open up the file
+C
+	OK = FLROPN( CMDLUN, FILNAM, IERR )	! open command file
+	IF ( .NOT.OK ) THEN
+	   CALL LSL_PUTMSG( I2NTF__OPENERR, FILNAM)
+	   CALL LSL_ADDMSG(OK)
+	   IF ( OK.EQ.LSL__SYSOPEN ) CALL LSL_ADDMSG(IERR)
+	   GOTO 9999
+	ELSE IF (LOG) THEN
+	   CALL LSL_PUTMSG(I2NTF__PARFILOPN,FILNAM)
+	ENDIF
+C
+C open for business now
+C
+	LINE = 0			! no lines read yet
+	GIVEUP = .FALSE.		! assume don't give up yet
+C
+C  ...................................................................
+C now we read it in, line by line, and obey each line
+C
+50	LINE = LINE+1				! next line 
+	OK = FLRSTR(COM_LINE,NCHS,IERR)		! read into a string
+	IF (.NOT.OK) THEN
+	   IF (OK.EQ.LSL__EOF) THEN
+	      NTFINI = .TRUE.		! presumably success
+	   ELSE
+	      CALL LSL_PUTMSG( I2NTF__NTFLINE )
+	      CALL LSL_PUTMSG( I2NTF__INLINE, LINE, FILNAM )
+	      CALL LSL_ADDMSG(OK)
+	      IF (OK.EQ.LSL__SYSREAD) CALL LSL_ADDMSG(IERR)
+	   ENDIF
+	   GOTO 9000
+	ENDIF
+C  ...................................................................
+C we have a line - what is it ?
+C
+	IF (NCHS .EQ. 0) GOTO 50		! empty line
+	IF (COM_LINE(1:1).EQ.PLING) GOTO 50	! comment starting "!"
+C
+C send to OBEY_LINE to read the (presumed) commands on the line
+C
+	IF (.NOT.(OBEY_LINE(COM_LINE))) THEN
+	   CALL LSL_ADDMSG(I2NTF__INLINE,LINE,FILNAM)
+	   NTFINI=.FALSE.
+	   GOTO 9000
+	ENDIF	
+C
+C and off to read the next line in
+C
+	GOTO 50
+C  ...................................................................
+C and finally, come here to close the file
+C
+9000	OK = FLRCLO( CMDLUN, IERR )
+	IF ( .NOT.OK ) THEN
+	   CALL LSL_PUTMSG( I2NTF__CLOSERR, FILNAM )
+	   CALL LSL_ADDMSG(OK)
+	   IF ( OK.EQ.LSL__SYSCLOSE ) CALL LSL_ADDMSG(IERR)
+	ELSE IF (LOG) THEN
+	   CALL LSL_PUTMSG(I2NTF__PARFILCLO,FILNAM)
+	ENDIF
+C
+C that's all
+C
+9999	CALL SET_TXTLIM( TXLSAV ) 	! restore TXTLIM
+	RETURN
+	END
+C
