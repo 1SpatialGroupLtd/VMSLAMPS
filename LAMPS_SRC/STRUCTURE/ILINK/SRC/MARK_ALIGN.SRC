@@ -1,0 +1,403 @@
+	SUBROUTINE MARK_ALIGN(	PT,NXT,PRV,NEAREST,PT_DST,PT_PR_FTR,
+     &				PT_SEEN,QDAT,FTR_PTS,PNT_FTR,
+     &				MAXPTS,MAXOUTFTRS,ftr_ifc2)
+ 
+***	IDENT	04NO92
+***	MODULE	MARK_ALIGN
+ 
+C	Copyright : Laser-Scan Ltd., Cambridge, England
+C	Created   : 					ACM 06-Jul-1988
+C
+CMOD1156 Stop the un-marking of points in the %LABEL 110 routine which
+C	 results in the deletion of valid features - AGAIN
+C							 JB 26-Oct-1992
+C
+CMOD1073 Do not pass DX=0 & DY=0 to ATAN2 in the un-marking code
+C							 JB 13-Mar-1992
+C
+CMOD1063 Stop the un-marking of points in the %LABEL 110 routine which
+C	 results in either the non-alignment of valid features, or the
+C	 deletion of one of a pair of features valid for alignment if 
+C	 the 2 features have final segments at the same orientation
+C
+C	 Set up /MINLEN qualifier to set MINLEN instead of JNTOL*2 (as a 
+C	 debugging aid)
+C							 JB 18-Nov-1991
+C
+CMOD	Do better with closed features			WJJ 06-Feb-1990
+CMOD	Fix bug after label 60 (JPT1, not IPT1)		WJJ 05-Oct-1989
+CMOD	Changed criterion for whether points are marked
+C	as being on aligned sections			ACM 28-Sep-1988
+CMOD	Changed min length to align from 0.002*MAXRANGE
+C	to 2*JNTOL					ACM 27-Sep-1988
+
+	IMPLICIT NONE
+
+C Parameters
+	INTEGER*4	MAX_INTER
+	PARAMETER(	MAX_INTER = 100)
+
+	INCLUDE		'LSL$CMNILINK:ILINKMSG.PAR'
+
+C Commons
+	INCLUDE		'LSL$CMNILINK:ILINK.CMN'
+
+C Data in
+	INTEGER*4	MAXPTS,MAXOUTFTRS
+	INTEGER*4	NXT(MAXPTS)
+	INTEGER*4	PRV(MAXPTS)
+	INTEGER*4	NEAREST(MAXPTS)
+	INTEGER*4	FTR_PTS(2,MAXOUTFTRS)
+	INTEGER*4	PT_PR_FTR(MAXPTS)
+
+	REAL*4		PT(2,MAXPTS)
+	REAL*4		PT_DST(MAXPTS)
+
+	LOGICAL*1	QDAT(MAXPTS)
+	LOGICAL*1	PT_SEEN(MAXPTS)
+	LOGICAL*1	PNT_FTR(MAXOUTFTRS)
+	INTEGER*2	ftr_ifc2(MAXoutftrs)
+
+C Workspace
+	INTEGER*4	I,J,K			! misc integers
+	INTEGER*4	IPTSTA,IPTFIN		! ftr end pt PT indices
+	INTEGER*4	JPTSTA,JPTFIN		! ftr end pt PT indices
+	INTEGER*4	IPT1,IPT2,IPTPRV	! pt indices
+	INTEGER*4	JPT1,JPT2,KPT
+	INTEGER*4	IFTR,JFTR
+	INTEGER*4	IFTR1,IFTR2,JFTR1,JFTR2	! ftr indices
+	INTEGER*4	N_INTER			! inter pt count
+	INTEGER*4	INTER(MAX_INTER)	! inter pt PT indices
+	INTEGER*4	QDAT_COUNT		! count of adjacent
+C						! alignable points
+
+	REAL*4		FTR_LEN			! feature length
+	REAL*4		LEN			! link length
+	REAL*4		DX,DY			! seg vector
+	REAL*4		SEG_ANGLE,START_ANGLE	! orient'ns of segments
+	REAL*4		X0,Y0,X1,Y1
+
+	LOGICAL*4	CLOSED			! closed ftr?
+	LOGICAL*4	STARTED			! had pt after start?
+	LOGICAL*4	ALIGNED
+	LOGICAL*4	SAME_ANGLE		! segments at same angle?
+	LOGICAL*4	START_ANGLE_SET		! angle defined?
+	LOGICAL*4	NEXT_ANGLE_SET		! angle defined?
+ 
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C	Mark (with QDAT) all points which are on a feature section
+C	that may be aligned (to or from) according to NEAREST.
+C
+C	The criterion for whether or not the vector connecting any two
+C	consecutive points (IPT,NXT(IPT)) will be marked is that this
+C	pair must point via NEAREST either to a pair in another feature
+C	separated, if at all, only by points which are marked as 'seen'
+C	in PT_SEEN, or to the same point.
+C
+C	These inter-aligned seen but unused pts are also marked.
+C
+C	Note that PT_DST must be set on input, and also that closed
+C	features here are represented as circular linked lists.
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+	IF (.NOT.HAD_MINLEN) MINLEN = 2*JNTOL
+
+	CALL VIOCLR(QDAT,N_PTS)			! set all QDAT = .FALSE.
+
+	DO 30 IFTR = 1,N_PR_FTRS			! for every feature
+	  IF (PNT_FTR(IFTR)) GOTO 30			! point ftr?
+	  IPTSTA = FTR_PTS(1,IFTR)			! first pt in ftr
+	  IPTFIN = FTR_PTS(2,IFTR)			! last pt in ftr
+	  IF (IPTSTA.LT.1.OR.IPTFIN.LT.1) GOTO 30	! ftr deleted?
+	  IF (NXT(IPTSTA).EQ.NIL) GOTO 30		! point ftr
+	  IF (NXT(IPTFIN).EQ.IPTSTA) IPTFIN = IPTSTA	! closed ftr
+	  IPT2 = IPTSTA
+
+C Find a segment IPT1 - IPT2 with NEAREST points JPT1 set at IPT1
+C and JPT2 set at IPT2
+
+10	  IPT1 = IPT2
+	  IPT2 = NXT(IPT1)
+
+C Find a point IPT1 with  NEAREST set at JPT1
+
+	  JPT1 = IPT1
+15	  JPT1 = NEAREST(JPT1)
+
+	  IF (JPT1.NE.NIL) THEN			! found a JPT1 for an IPT1
+
+C Find a point JPT2 with  NEAREST set at IPT2
+
+	    JPT2 = IPT2
+20	    JPT2 = NEAREST(JPT2)
+
+	    IF (JPT2.NE.NIL) THEN
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C old criterion
+C	      ALIGNED = NXT(JPT1).EQ.JPT2 .OR. NXT(JPT2).EQ.JPT1
+C     &               .OR. JPT1.EQ.JPT2
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+C new criterion
+	      IF (JPT1.EQ.JPT2) THEN
+	        ALIGNED = .TRUE.
+	        GOTO 24
+	      ENDIF
+
+C Aligned if JPT1 is not separated from JPT2 by any 'unseen' points
+
+	      ALIGNED = .FALSE.			! assume not aligned
+	      KPT = JPT1
+	      N_INTER = 0
+
+21	      KPT = NXT(KPT)
+	      IF (KPT.EQ.JPT2) THEN
+	        ALIGNED = .TRUE.
+	        GOTO 24
+	      ELSE IF (KPT.EQ.NIL.OR.KPT.EQ.JPT1) THEN
+	        GOTO 22				! not aligned forwards
+	      ELSE IF (PT_SEEN(KPT)) THEN
+	        IF (N_INTER.LT.MAX_INTER) THEN
+	          N_INTER = N_INTER+1	! up to MAX_INTER inter pts
+	          INTER(N_INTER) = KPT
+	          GOTO 21
+	        ENDIF
+	      ENDIF
+
+22	      KPT = JPT2
+	      N_INTER = 0
+
+23	      KPT = NXT(KPT)
+	      IF (KPT.EQ.JPT1) THEN
+	        ALIGNED = .TRUE.
+	      ELSE IF (KPT.EQ.NIL.OR.KPT.EQ.JPT2) THEN
+	        GOTO 24				! not aligned backwards
+	      ELSE IF (PT_SEEN(KPT)) THEN
+	        IF (N_INTER.LT.MAX_INTER) THEN
+	          N_INTER = N_INTER+1  ! count up to MAX_INTER inter pts
+	          INTER(N_INTER) = KPT
+	          GOTO 23
+	        ENDIF
+	      ENDIF
+
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+24	      IF (ALIGNED) THEN			! mark as aligned
+	        QDAT(IPT1) = .TRUE.
+	        QDAT(IPT2) = .TRUE.
+	        QDAT(JPT1) = .TRUE.
+	        QDAT(JPT2) = .TRUE.
+
+	        DO 27 I = 1,N_INTER		! also mark inter-pts
+	          QDAT(INTER(I)) = .TRUE.
+27	        CONTINUE
+
+	        GOTO 25
+	      ENDIF
+	      GOTO 20
+	    ENDIF
+
+	    GOTO 15			! JPT2 = NIL, get next JPT1
+	  ENDIF
+
+25	  IF (IPT2.NE.IPTFIN) GOTO 10	! JPT1 = NIL, get next IPT1
+
+30	CONTINUE
+
+C Use some MINLEN test to avoid too much break up of closely aligned
+C crossing features
+
+C Unmark all aligned sections with length < MINLEN where whole feature
+C is not being aligned or aligned onto
+
+	DO 110 IFTR = 1,N_PR_FTRS
+	  IF (PNT_FTR(IFTR)) GOTO 110		! point-ftr
+	  IPTSTA = FTR_PTS(1,IFTR)		! first pt in ftr
+	  IF (IPTSTA.EQ.NIL) GOTO 110		! ftr shared or deleted
+	  IF (NXT(IPTSTA).EQ.NIL) GOTO 110	! single-pt ftr
+
+	  IPTFIN = FTR_PTS(2,IFTR)		! last pt in ftr
+	  CLOSED = NXT(IPTFIN).EQ.IPTSTA	! closed ftr?
+	  FTR_LEN = PT_DST(IPTFIN)		! length of ftr IFTR
+
+	  IF (CLOSED)THEN
+	    DX = PT(1,IPTSTA)-PT(1,IPTFIN)
+	    DY = PT(2,IPTSTA)-PT(2,IPTFIN)
+	    FTR_LEN = FTR_LEN+SQRT(DX*DX+DY*DY)
+
+C find better start/end point for closed features
+C  by searching for first unaligned point (QDAT = 0)
+
+	    GOTO 35
+
+33	    IF (IPTSTA.EQ.IPTFIN) GOTO 110 	! whole feature is aligned
+	    IPTSTA = NXT(IPTSTA)		! continue search ...
+
+35	    IF (QDAT(IPTSTA)) GOTO 33		! ... for unaligned point
+
+	    IPTFIN = PRV(IPTSTA)	! found it, so set IPTFIN to previous
+	  ENDIF
+
+	  IPT2 = IPTSTA
+	  GOTO 50
+ 
+C Find start of next run of aligned pts (IPT1)
+
+40	  IPT2 = NXT(IPT2)
+
+50	  IF (.NOT.QDAT(IPT2)) THEN    		! pt not aligned
+	     IF (IPT2.NE.IPTFIN) GOTO 40	! loop for next pt
+
+	     GOTO 110				! last pnt, get next ftr
+	  ENDIF
+
+	  IPT1 		  = IPT2		! start of aligned run
+	  QDAT_COUNT 	  = 1
+	  START_ANGLE_SET = .FALSE.		! initialise
+	  NEXT_ANGLE_SET  = .FALSE.
+	  SAME_ANGLE 	  = .TRUE.
+
+C Find end of run of aligned pts (IPT2)
+
+60	  IF (IPT2.EQ.IPTFIN) GOTO 70		! end of ftr
+
+	  IPTPRV = IPT2
+
+	  X0 = PT(1,IPT2)			! start position
+	  Y0 = PT(2,IPT2)
+
+	  IPT2 = NXT(IPT2)
+
+	  IF (QDAT(IPT2)) THEN
+	     QDAT_COUNT = QDAT_COUNT + 1
+C
+C Don't bother checking any more angles if SAME_ANGLE is already false
+C
+	     IF (.NOT.SAME_ANGLE) GOTO 60
+C
+	     X1 = PT(1,IPT2)			! start position
+	     Y1 = PT(2,IPT2)
+	     DX = X1-X0
+	     DY = Y1-Y0
+C
+C Check for 0/0
+	     IF (DX.EQ.0 .AND. DY.EQ.0) THEN
+		GOTO 60				! change nothing
+	     ELSE
+		SEG_ANGLE = ATAN2(DY,DX)
+
+		IF (.NOT.START_ANGLE_SET) THEN	! no start angle
+		   START_ANGLE     = SEG_ANGLE
+		   START_ANGLE_SET = .TRUE.
+		   NEXT_ANGLE_SET  = .FALSE.
+		ELSE				! next angle
+		   NEXT_ANGLE_SET  = .TRUE.
+		ENDIF
+	     ENDIF
+
+c	     IF (START_ANGLE_SET .AND. NEXT_ANGLE_SET .AND.
+c     &		ABS( abs(SEG_ANGLE) - abs(START_ANGLE)) .GT. 1E-4)
+c     &						SAME_ANGLE = .FALSE.
+
+	     IF (START_ANGLE_SET .AND. NEXT_ANGLE_SET .AND.
+     &		ABS( (SEG_ANGLE) - (START_ANGLE)) .GT. 1E-4)
+     &						SAME_ANGLE = .FALSE.
+	     GOTO 60
+	  else
+	     goto 65
+	  ENDIF
+
+	  IF (PT_SEEN(IPT2)) GOTO 60		! good idea???
+
+65	  IPT2 = IPTPRV
+
+C Points IPT1 to IPT2 inclusive all have QDAT set true, and eligible
+C for merging
+
+C Do not unmark if feature is completely aligned, there are less than 3 
+C points eligible for alignment, or if length of the aligned run is 
+C reasonably long
+
+70	  LEN = PT_DST(IPT2)-PT_DST(IPT1)	! length of aligned run
+
+C Allow for run crossing the closure point of closed features
+
+	  IF (LEN.LT.0) LEN = LEN + FTR_LEN	
+
+	  IF (IPT1.EQ.IPTSTA .AND. IPT2.EQ.IPTFIN) GOTO 100
+
+
+
+c	  IF (QDAT_COUNT.EQ.1) GOTO 75			! ***
+
+c	  IF (QDAT_COUNT.LE.2) GOTO 100			! ***
+
+c	  IF (LEN.GT.MINLEN) GOTO 100			! ***
+
+c	  IF (SAME_ANGLE) GOTO 100			! ***
+
+75	  JPT1 = NEAREST(IPT1)			! pt mapped onto by IPT1
+	  JPT2 = NEAREST(IPT2)			! pt mapped onto by IPT2
+
+	  IF (JPT1.NE.NIL) THEN
+
+C Do not unmark if marked onto same point ...
+	    IF (JPT2.EQ.JPT1) GOTO 100 		! *** same NEAREST point
+
+	    JFTR = PT_PR_FTR(JPT1)
+	    JPTSTA = FTR_PTS(1,JFTR)
+	    JPTFIN = FTR_PTS(2,JFTR)
+
+C Do not unmark if ftr being aligned onto is completely aligned
+CCCWJJ NOTE: does not detect a whole feature being aligned onto this.
+
+	    IF ((JPT1.EQ.JPTSTA .AND. JPT2.EQ.JPTFIN) .OR.
+     &	        (JPT1.EQ.JPTFIN .AND. JPT2.EQ.JPTSTA)) GOTO 100
+
+C Unmark points separated by less than MINLEN to avoid too many feature
+C distortions or cross_overs joined by very small segments arising from 
+C points within tolerance from other features.
+C Do not unmark for simple cases of alignment, and runs of lines not 
+C crossing each other (same angle for all segments).
+C Use MINLEN or SAME_ANGLE criteria, set up in QDAT, only if a run of 3
+C or more points needed aligning, leaving them marked.
+
+c	    IF (QDAT_COUNT.EQ.1) GOTO 100		! *** 
+
+	    IF (QDAT_COUNT.LE.2) GOTO 100		! *** test_lpj
+
+c	    IF (LEN.GT.MINLEN)	 GOTO 100		! ***
+
+c	    IF (SAME_ANGLE) 	 GOTO 100		! ***
+
+	  elseif (jpt2.eq.jpt1) then				! *** both null
+	     if (qdat_count.eq.1) then				! *** either 
+								!     first/last
+	 	if (ipt1.eq.iptsta .or. ipt2.eq.iptfin) goto 100! ***
+
+		goto 77
+	     elseif (qdat_count.le.2) then
+		goto 100					! *** 
+
+	     endif
+
+	  ENDIF
+
+C Unmark all pts from IPT1 to IPT2 inclusive
+
+77	  KPT = IPT1
+
+	  GOTO 90
+
+80	  KPT = NXT(KPT)
+90	  QDAT(KPT) = .FALSE.
+	  IF (KPT.NE.IPT2) GOTO 80
+ 
+100	  IF (IPT2.NE.IPTFIN) GOTO 40		! loop for next pt
+110	CONTINUE				! loop for next ftr
+
+	END
+ 
