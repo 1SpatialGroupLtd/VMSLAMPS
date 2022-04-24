@@ -1,0 +1,230 @@
+	LOGICAL*4 FUNCTION BUNCH(XB,YB,FORCED)
+C
+***	MODULE	BUNCH
+***	IDENT	17NO86
+C
+C Copyright Laser-Scan Laboratories Limited, Cambridge, England.
+C
+C Author: D. Meader (after original version by M. Fulford)
+C
+CMOD	Substantially modified for general use:	RJH	15-Oct-1986
+CMOD	   roll-back functions removed,
+CMOD	   junctions not taken into account,
+CMOD	   amended common blocks/parameters,
+CMOD	   now calls BUNCH_FLUSH, BUNCH_FILTER,
+CMOD	   uses RES for resolution
+CMOD	Re-enable S if VEXing (and S > 0)	 DM	20-Oct-1983
+CMOD	Rehashed (again !!)			 DM	18-Oct-1982
+C	Created 				 DM	23-Sep-1982
+C
+C By default, (if FORCED is 0), we examine a point (XB,YB) (in absolute
+C coordinates) to see if we need to create a new master point. If we
+C don't, the point is added to the backlog buffer and used to calculate
+C a new straight line approximation to the line segment being followed.
+C If FORCED is 2, we tidy up the backlogged points (probably producing a
+C new master point), ignoring (XB,YB). If FORCED is 1, we also tidy up
+C but this time we take account of (XB,YB) first.
+C Value returned is .TRUE. if we create a new master point.
+C
+	IMPLICIT NONE
+C
+***	PARAMETER/CMN:PARAMS/
+C
+***	COMMON/CMN:BLG/
+***	COMMON/CMN:MPAUX/
+***	COMMON/CMN:MPEP/
+C
+	INTEGER	  FORCED	! flag for special functions (0:2)
+	INTEGER	  I		! general variable
+	INTEGER	  MPINIT	! number of master points when we start
+	INTEGER	  NPTS		! number of points used in line fitting
+	REAL	  DELTA		! offset for line intersection
+	REAL	  DX,DY,DS	! relative coordinates
+	REAL	  DXTEMP,DYTEMP	! temporary relative coordinates
+	REAL	  DZERO		! dist. from (0.0,0.0) to (XZERO,YZERO) 
+	REAL	  HI		! residual error normal to line
+	REAL	  HMAX		! maximum HI
+	REAL	  RI		! distance along line
+	REAL	  RMAX		! maximum RI
+	REAL	  SINTMP,COSTMP	! temporary sin,cos
+	REAL	  ST1MT2	! SIN(THETA1 - THETA2)
+	REAL	  THETA		! 'slope' of current 'best' line
+	REAL	  XB,YB		! absolute coordinates of point
+	REAL	  XZERO,YZERO	! latest (temporary) origin for vector
+C
+C ......................................................................
+C
+C ... do we have any master points yet ?
+	MPINIT=NMP(1)
+	IF (MPINIT.GT.0) GO TO 110
+C
+C ... no - set up the first one 
+	NMP(1)=1
+	MP1(X,1)=XB
+	MP1(Y,1)=YB
+	FITPMP(X)=0.0
+	FITPMP(Y)=0.0
+	FITLEN=0.0
+	INDEX(1)=0
+	GO TO 290
+C
+C ......................................................................
+C
+C ... we've already got some master points (usual case).
+C ... consider (XB,YB) to see if it is approximately on the straight
+C ... line defined by the points in the backlog buffer.
+C ... check that the backlog buffer isn't full, deal with FORCED, etc.
+110	IF (INDEX(1).LT.MAXBLG.AND.FORCED.LE.1) GO TO 140
+	IF (INDEX(1).LE.0) GO TO 290		! deal with FORCED=2
+120	GO TO 230				! tidy up as required
+C
+C ... flush buffer
+130	CALL BUNCH_FLUSH(.TRUE.)	! no - create a master point
+	CALL BUNCH_FILTER		! check NMP-1 is not spurious
+	IF (FORCED.GE.2) GO TO 290		! deal with FORCED=2
+C
+C ... get coordinates of new (XB,YB) relative to last master point.
+140	DX=XB - MP1(X,NMP(1))
+	DY=YB - MP1(Y,NMP(1))
+	DS=DX*DX + DY*DY
+C
+C ... is (XB,YB) superfluous (i.e. a repeated point) ?
+	IF (DS.LT.RES) GO TO 290
+	IF (INDEX(1).LT.1) GO TO 150
+	IF (ABS(DX-XBLG(1,INDEX(1))).GE.RES.OR.
+     &      ABS(DY-YBLG(1,INDEX(1))).GE.RES) GO TO 150
+	IF (FORCED.NE.1) GO TO 290
+	IF (INDEX(1).EQ.1) GO TO 280		! FORCED=1 
+	GO TO 190				! tidy up
+C
+C ... no - add the point to the backlog buffer.
+150	INDEX(1)=INDEX(1) + 1
+	XBLG(1,INDEX(1))=DX
+	YBLG(1,INDEX(1))=DY
+	IF (INDEX(1).GT.1) GO TO 180
+C
+C ......................................................................
+C
+C ... this is the first point in the backlog buffer.
+	FITPMP(X)=DX		! store it as a potential master point
+	FITPMP(Y)=DY
+	FITLEN=SQRT(DS)
+	COSTH=DX/FITLEN		! approximate the new vector direction
+	SINTH=DY/FITLEN
+C
+C ... save the direction of the previous vector. (N.B. we may have
+C ... rolled back, so we can't assume that we know where we are).
+	IF (NMP(1).GT.1) GO TO 160
+	COSSAV=COSTH
+	SINSAV=SINTH
+	XORIG=MP1(X,1)
+	YORIG=MP1(Y,1)
+	GO TO 170
+160	DXTEMP=MP1(X,NMP(1)) - MP1(X,NMP(1)-1)
+	DYTEMP=MP1(Y,NMP(1)) - MP1(Y,NMP(1)-1)
+	DS=SQRT(DXTEMP*DXTEMP + DYTEMP*DYTEMP)
+	COSSAV=DXTEMP/DS
+	SINSAV=DYTEMP/DS
+	XORIG=MP1(X,NMP(1))
+	YORIG=MP1(Y,NMP(1))
+C
+170	SX=DX			! (re)initialise all the sums
+	SY=DY
+	SXX=DX*DX
+	SXY=DX*DY
+	SYY=DY*DY
+	IF (FORCED.EQ.1) GO TO 280
+	GO TO 290
+C
+C ......................................................................
+C
+C ... prevent long line segments.
+180	IF (S(1).GT.0.AND.DS.GT.S(1)*S(1)) GO TO 120
+C
+C ... see if this point can be added to the current segment.
+C ... fit a line to the backlogged points using a rotationally stable
+C ... least-squares technique.
+	SX=SX + DX		! compute sums of various terms
+	SY=SY + DY
+	SXX=SXX + DX*DX
+	SXY=SXY + DX*DY
+	SYY=SYY + DY*DY
+C
+C ... calculate the angle between the 'best' line and the x-axis.
+C ... this could be 180 degrees out, but it doesn't matter.
+C ... then, for each backlogged point, compute the residual error and
+C ... the distance along the fitted line, remembering the largest
+C ... occurrence of each. (For a derivation of the formulae, see DM).
+190	HMAX=0.0
+	RMAX=0.0
+C
+C ......................................................................
+C
+C ... usually, 'master point' NMP is only used as a temporary origin.
+C ... when we need to create the NEXT 'master point' (i.e. NMP+1),
+C ... the current and previous 'best' lines are intersected, defining
+C ... the *true* position of NMP.
+210	NPTS=INDEX(1) + 1	! give some weight to master point NMP
+	THETA=0.5*ATAN2(2.0*(NPTS*SXY - SX*SY),
+     &			NPTS*(SXX-SYY) - (SX*SX-SY*SY))
+	COSTMP=COS(THETA)	! components of 'best' vector
+	SINTMP=SIN(THETA)
+	DZERO=(SINTMP*SX - COSTMP*SY)/NPTS
+	XZERO=DZERO*SINTMP	! origin of 'best' vector
+	YZERO=-DZERO*COSTMP
+	DO 220 I=1,INDEX(1)	! find residual error normal to line
+	   DXTEMP=XBLG(1,I) - XZERO
+	   DYTEMP=YBLG(1,I) - YZERO
+	   HI=DXTEMP*SINTMP - DYTEMP*COSTMP
+	   RI=DXTEMP*COSTMP + DYTEMP*SINTMP
+	   IF (ABS(HI).GT.HMAX) HMAX=ABS(HI)
+	   IF (ABS(RI).GT.ABS(RMAX)) RMAX=RI
+220	CONTINUE
+	IF (HMAX.LE.H(1)) GO TO 270
+C
+C ... residual too large - calculate *true* position of NMP.
+C ... (we also come here to tidy up if the backlog buffer is full 
+230	IF (NMP(1).EQ.1) GO TO 240	! deal with the first point
+	ST1MT2=SINSAV*COSTH - COSSAV*SINTH
+	IF (ABS(ST1MT2).GE.0.1) GO TO 250
+C
+C ... the lines are parallel - project NMP onto the current best line.
+240	DELTA=(MP1(X,NMP(1))-XORIG)*COSTH + (MP1(Y,NMP(1))-YORIG)*SINTH
+	MP1(X,NMP(1))=XORIG + DELTA*COSTH
+	MP1(Y,NMP(1))=YORIG + DELTA*SINTH
+	GO TO 260		! calculate new offsets for BUNCH_FLUSH
+C
+C ... usual case - intersect the lines.
+250	DELTA=((MP1(X,NMP(1)-1)-XORIG)*SINTH -
+     &	       (MP1(Y,NMP(1)-1)-YORIG)*COSTH)/ST1MT2
+	MP1(X,NMP(1))=MP1(X,NMP(1)-1) + DELTA*COSSAV
+	MP1(Y,NMP(1))=MP1(Y,NMP(1)-1) + DELTA*SINSAV
+C
+260	FITPMP(X)=FITPMP(X) + XORIG - MP1(X,NMP(1))
+	FITPMP(Y)=FITPMP(Y) + YORIG - MP1(Y,NMP(1))
+	FITLEN=SQRT(FITPMP(X)*FITPMP(X) + FITPMP(Y)*FITPMP(Y))
+	GO TO 130		! flush buffer
+C
+C ... save current best line - if the next (XB,YB) produces too large a
+C ... residual error, these are the values which will be used.
+270	SINTH=SINTMP
+	COSTH=COSTMP
+	XORIG=MP1(X,NMP(1)) + XZERO
+	YORIG=MP1(Y,NMP(1)) + YZERO
+	FITLEN=ABS(RMAX)
+	FITPMP(X)=RMAX*COSTH	! -ve RMAX ==> THETA is 180 degrees out
+	FITPMP(Y)=RMAX*SINTH
+	IF (FORCED.NE.1) GO TO 290   	! deal with FORCED
+C
+	FITPMP(X)=FITPMP(X) + XZERO
+	FITPMP(Y)=FITPMP(Y) + YZERO
+	FITLEN=SQRT(FITPMP(X)*FITPMP(X) + FITPMP(Y)*FITPMP(Y))
+C
+C ......................................................................
+C
+280	CALL BUNCH_FLUSH(.TRUE.)	! deal with FORCED=1 
+	CALL BUNCH_FILTER
+C
+290	BUNCH=NMP(1).GT.MPINIT
+	RETURN
+	END
