@@ -1,0 +1,223 @@
+	.TITLE	MAKSEC
+	.IDENT	/07SE84/
+;
+; Copyright LaserScan Laboratories Ltd., Cambridge, England
+;
+; Author TJ Ibbs, 6 nov 81
+;
+; to create/open a file and set it up as a global section.
+; for use with MCE digitiser tables
+;
+; NOERR = MAKSEC( GSDNAM, RETADR, PAGCNT, CHAN )
+;
+; GSDNAM - address of descriptor - name to be used for file/section
+;	   should just be the body of the name - ie. no device or extensions
+; RETADR - int*4 array(2) - where to put low/high address of section ends
+; PAGCNT - int*4 page count - how many pages we want, and returns how many
+;	   we actually got, if that is larger
+; CHAN   - where to put the channel number at the end
+;
+; note that the file may GROW if a larger menu is requested...
+; also, if we then map back to the larger menu, we'll always map to all
+; of it
+;
+
+	.LIBRARY	/LSL$LIBRARY:LSLMACLIB/
+	.LIBRARY	/SYS$LIBRARY:LIB/
+
+
+	$SSDEF
+	$SECDEF
+	$FIBDEF
+	$FATDEF
+	$ATRDEF
+
+	.PSECT	MAKSEC_DATA
+
+; define the FAB for this file-to-be
+
+SEC_FAB:	$FAB	FOP=<UFO,CBT,CIF>,-
+			DNM=<LSL$MGMT:.SEC>,-
+			NAM=SEC_NAM
+
+SEC_NAM:	$NAM			; blank NAM block
+
+; now we must define a FIB, so we can (possibly) extend the file
+
+SEC_FIBBLK:	.BLKB	FIB$K_LENGTH	; block to hold it
+
+; and define a FIB descriptor
+
+SEC_FIBDSC:	.LONG	FIB$K_LENGTH	; length of FIB
+		.LONG	SEC_FIBBLK	; pointer to it
+
+; and a FATRAT for obscure reasons (file attributes, record ditto)
+
+SEC_FATRAT:	.BLKB	ATR$S_RECATTR
+SEC_FAT:	.WORD	ATR$S_RECATTR
+		.WORD	ATR$C_RECATTR
+		.LONG	SEC_FATRAT
+		.LONG	0		; to terminate
+
+; and for the extending QIO we need...
+
+SEC_IOSB:	.BLKW	4		; return from our QIO
+
+
+; the following is just to establish where our space will be created
+
+SEC_INADR:	.LONG	^X200		; hex 200 - address in P0
+		.LONG	^X200		;	    space
+
+
+	.PSECT	MAKSEC_CODE, NOWRT
+
+; and now for the program...
+
+	.ENTRY	MAKSEC,^M<R2,R3,R4,R5,R6,R11>
+	JSB	VIO$1ST			; init arg reading mechanism
+	JSB	VIO$GNA			; get GSDNAM
+	BCC	10$			; branch if got it
+;
+; now prepare appropriate complaint if arg not given to us...
+;
+99$:	MOVL	#SS$_INSFARG,R0		; complain not enough args
+	RET				; and return to moan about it
+;
+; so we have the name of our file/section
+;
+10$:	MOVAQ	(R0),R5			; remember where it is
+;
+	JSB	VIO$GNA			; get RETADR address
+	BCS	99$
+	MOVL	R0,R2			; R2 is address of RETADR
+;
+	JSB	VIO$GNA			; get where PAGCNT is
+	BCS	99$
+	MOVL	R0,R6			; remember address of PAGCNT
+	MOVL	(R0),R3			; PAGCNT (number) is now in R3
+;
+	JSB	VIO$GNA			; get address to put channel no. into
+	BCS	99$
+	MOVL	R0,R4			; remember where to put channel number
+;
+; so we now have all our args succesfully read in - lets create a file
+; (or open it if it already exists).
+; the name of the file is constructed as lsl$mgmt:GSDNAM.sec
+;
+	$FAB_STORE	FAB=SEC_FAB,-
+			FNA=@4(R5),-	; name given us
+			FNS=(R5),-	; length of name
+			ALQ=R3		; initial size wanted
+;
+; and now create/open the file...
+;
+	$CREATE		FAB=SEC_FAB	; make our file
+	BLBCW	R0,100$			; return with any error
+;
+; so we have our file - but is it big enough?
+; if the file already existed, it may have been smaller than we need
+; so we must consider EXTENDing it
+;
+	MOVAL	SEC_FAB,R11		; get where FAB is
+	CMPL	FAB$L_ALQ(R11),R3	; compare actual length with wanted
+	BLSS	14$			; too small - go & extend it
+;
+; thus we can store the actual length of the file in R3, instead of
+; the required length. This is GE the required length, so we guarantee to
+; map to all of the file
+;
+	MOVL	FAB$L_ALQ(R11),R3	; copy the file's length
+	BRW	50$			; OK, off to use the file
+;
+; if the file is not large enough, we must extend it
+; this is awkward, 'cos we don't have access to RMS facilities (we opened
+; the thing UFO (unidentified file-type object??)), so we resort to FIBbing
+; (with credit to AJW who worked out to do it)
+;
+; copy the file identifying stuff to the File Information Block
+;
+14$:	MOVW	SEC_NAM+NAM$W_FID,	SEC_FIBBLK+FIB$W_FID
+	MOVW	SEC_NAM+NAM$W_FID+2,	SEC_FIBBLK+FIB$W_FID+2
+	MOVW	SEC_NAM+NAM$W_FID+4,	SEC_FIBBLK+FIB$W_FID+4
+;
+; now, we must first get the existing attributes
+;
+	$QIOW_S	CHAN=FAB$L_STV(R11),-
+		FUNC=#IO$_ACCESS,-
+		IOSB=SEC_IOSB,-
+		P1=SEC_FIBDSC,-
+		P5=#SEC_FAT
+	BLBC	R0,15$			; branch on error
+	BLBS	SEC_IOSB,20$		; check the status block
+	MOVZWL	SEC_IOSB,R0		; remember any errors
+15$:	BRW	100$
+;
+; ask that the file header be written straightway
+;
+20$:	MOVL	#FIB$M_WRITETHRU,	SEC_FIBBLK+FIB$L_ACCTL
+;
+; we are extending, contiguous best try
+;
+	MOVW	#FIB$M_EXTEND!FIB$M_ALCONB,-
+					SEC_FIBBLK+FIB$W_EXCTL
+;
+; the new allocation is the difference between what we found and what
+; we requested...
+;
+	SUBL3	FAB$L_ALQ(R11), R3, SEC_FIBBLK+FIB$L_EXSZ
+;
+; and the highest allocated virtual block number (which is really the start of 
+; the next block)
+;
+	INCL	R3
+	EXTV	#0,#16,R3,R0				; extract the word
+	MOVW	R0,	SEC_FATRAT+FAT$W_EFBLKL		; and copy it
+	EXTV	#16,#16,R3,R0				; and the same with
+	MOVW	R0,	SEC_FATRAT+FAT$W_EFBLKH		; the other word
+	DECL	R3
+;
+; so we can now extend the file (hurrah)
+;
+	$QIOW_S	CHAN=FAB$L_STV(R11),-
+		FUNC=#IO$_MODIFY,-
+		IOSB=SEC_IOSB,-
+		P1=SEC_FIBDSC,-
+		P5=#SEC_FAT
+	BLBC	R0,100$			; branch on error
+	BLBS	SEC_IOSB,50$		; check the status return
+	MOVZWL	SEC_IOSB,R0		; remember an error
+	BRB	100$
+;
+; and now we have a file, lets proceed to set it up as a global section...
+;
+50$:	MOVL	FAB$L_STV(R11),R11	; and get our channel number
+;
+; and now the big moment...
+;
+	$CRMPSC_S	INADR =SEC_INADR,-
+			RETADR=(R2),-
+			FLAGS =#SEC$M_GBL!SEC$M_WRT!SEC$M_EXPREG,-
+			GSDNAM=(R5),-
+			CHAN  =R11,-
+			PAGCNT=R3
+	BLBC	R0,100$
+;
+; just want to return the channel number...
+;
+	MOVL	R11,(R4)		; put it away
+;
+; and the length mapped to
+;
+	MOVL	R3,(R6)			; store new page count
+;
+; and so, we have it set up - we must now clear the FIB block so that if
+; we try to extend then it will be safely empty, as required for things to
+; work
+;
+	MOVC5	#0,B^100$,#0,#FIB$K_LENGTH,SEC_FIBBLK
+;
+	MOVL	#1,R0			; return TRUE, success
+100$:	RET				; and return safely
+;
+	.END
