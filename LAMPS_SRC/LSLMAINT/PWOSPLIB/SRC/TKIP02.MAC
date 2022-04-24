@@ -1,6 +1,5 @@
-
 	.TITLE	TKIP
-	.IDENT	/28NO83/
+	.IDENT	/11FE85/
 	.MCALL	CLEF$S, SETF$S, DIR$, ASTX$S, QIO$S, DSAR$S, ENAR$S
  
 ; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
@@ -241,14 +240,14 @@ TKMAPT:: JSR	PC, FTNFPU		; NB steps R5 over count
 	SOB	R1, 13$			; all saved?
 
 ; calc X,Y - tablet counts corr. to 0,0 in user units
-; XX=((-TKCENX)/TKTR(1)-TKRUOX-TKOFFX)/TKSCAL
-; YY=((-TKCENY)/TKTR(4)-TKRUOY-TKOFFY)/TKSCAL
+; XX=((-32768-OFSETX)/TKTR(1)-TKOFFX)/TKSCAL
+; YY=((-32768-OFSETY)/TKTR(4)-TKOFFY)/TKSCAL
 ; X =(XX*TKROTC)+(YY*TKROTS)
 ; Y =(YY*TKROTC)-(XX*TKROTS)
 
-	CLRF	F1
+	CLRF	F1			; 0,0 TEK counts
 	CLRF	F3
-	JSR	PC, TKUSER		; intermediate result in F0, F2
+	JSR	PC, TKUSER		; in user units in F0, F2
 	STF	F0, F1
 	SUBF	TKOFFX, F1
 	SUBF	TKOFFY, F2
@@ -267,7 +266,7 @@ TKMAPT:: JSR	PC, FTNFPU		; NB steps R5 over count
 	STCFL	F3, (R0)+		; store X,Y in mapping workspace
 	STCFL	F1, (R0)+
 
-; calculate revised 'scale' SCA=(4096/TKTR(1))/SCALE
+; calculate revised 'scale' SCA=(4096/TKTR(1))/TKSCAL
 	LDF	#^F4096, F0
 	STF	F0, F2			; another copy for ROT
 	DIVF	TKTR, F0
@@ -308,16 +307,7 @@ TKMAPT:: JSR	PC, FTNFPU		; NB steps R5 over count
 	SOB	R4, 15$			; any more words?
 	JMP	SUCESS			; no
  
-
-; Unsolicited input AST
-; Issues a read with timeout to local buffer
-
-UNAST::	DIR$	#QI.DPB			; expects parameters set already
-	TST	(SP)+			; tidy stack
-	ASTX$S				; return
-
-
-
+ 
 ; Read completion AST
 ; determines whether input from terminal or bitpad
 ; 	moves it to appropriate buffer ( decoding if for bitpad/digitiser)
@@ -362,8 +352,9 @@ RDAST::	TSTB	TKENBL			; TEK enabled?
 
 ; input from bitpad - R2 points at 1st byte beyond escape sequence
 	TSTB	TKIOSB			; error in read ?
-	BLT	24$			; yes - don't decode
-	CMP	TKCHCT, #13.		; correct number of characters ?
+	BPL	5$			; no
+	BR	24$			; yes - don't decode
+5$:	CMP	TKCHCT, #13.		; correct number of characters ?
 	BEQ	10$
 	MOV	#IE.SPC, TKIOSB		; mark error in iosb
 	BR	24$			; don't try to decode
@@ -457,7 +448,7 @@ RDAST::	TSTB	TKENBL			; TEK enabled?
 	MOV	TKIOSB+2, (R0)+		; second word (TKCHCT)
 	BR	90$
 80$:	TSTB	TKIOSB			; error from qio and no iosb
-	BGE	90$
+	BPL	90$
 	CLR	@(R1)			; indicate error by LENRD = 0
 90$:	TST	6(R1)			; ASTADR supplied ?
 	BEQ	100$			; if EQL, no
@@ -465,7 +456,6 @@ RDAST::	TSTB	TKENBL			; TEK enabled?
 100$:	MOV	2(R1),R0		; efn supplied ?
 	BLT	110$			; if less, no
 	SETF$S	R0			; set efn
-
 ; If input not terminated by CR then cancel TMU read
 110$:	CLR	-4(R1)			; mark buffer finished with
 	CMP	TKIOSB,#IS.CR		; is terminator CR ?
@@ -486,7 +476,13 @@ CANTMU:	JSR	R5, $CHKBF		; ensure sequence contiguous
 	JSR	PC, $TKWCH
 	JSR	PC, $FLUSH		; transmit immediately
  
-REENBL:	MOV	(SP)+, R5		; restore regs
+REENBL:	DIR$	#QI.DPB			; set a new read going
+	BCC	10$
+	MOV	R0, -(SP)
+	MOV	$DSW, R0
+	BPT
+	MOV	(SP)+, R0
+10$:	MOV	(SP)+, R5		; restore regs
 	MOV	(SP)+, R4
 	MOV	(SP)+, R3
 	MOV	(SP)+, R2
@@ -507,7 +503,6 @@ REENBL:	MOV	(SP)+, R5		; restore regs
  
  
  
- 
 ; decode biased number pointed to by R2 into R5
 ;  (R2 incremented to point to next)
  
@@ -519,17 +514,18 @@ DECNUM:	MOVB	(R2)+, R5		; get it
  
  
 ; transform Tektronix counts into user units
-;	F0 = (F1 - TKCENX)/TKTR(1) -TKRUOX
-;	F2 = (F3 - TKCENY)/TKTR(4) -TKRUOY
+;	F0 = (F1 - 32768 - OFSETX)/TKTR(1)
+;	F2 = (F3 - 32768 - OFSETY)/TKTR(4)
 ; F1,F3 are corrupted
  
-TKUSER:: SUBF	TKCENX, F1
+TKUSER:: LDCIF	#100000, F0		; i.e. -32768
+	ADDF	F0, F1			; convert to signed
+	ADDF	F0, F3
+	SUBF	OFSETX, F1
 	DIVF	TKTR, F1
-	SUBF	TKRUOX, F1
 	STF	F1, F0
-	SUBF	TKCENY, F3
+	SUBF	OFSETY, F3
 	DIVF	TKTR+12., F3
-	SUBF	TKRUOY, F3
 	STF	F3, F2
 	RTS	PC
 

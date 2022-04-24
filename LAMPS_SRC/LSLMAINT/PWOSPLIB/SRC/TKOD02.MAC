@@ -7,7 +7,7 @@
 	.IFF
 	.TITLE	TKOD
 	.ENDC
-	.IDENT	/04JN84/
+	.IDENT	/26JN84/
 	.ENABL	LC
 
 ; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
@@ -27,21 +27,41 @@
 	.IF NE LCD14
 TKEXT:	.FLT2	30.0
 	.FLT2	30.0
-TRANX:	.FLT2	400.0
-	.FLT2	400.0
+TRANX:	.FLT2	1600.0	; 400 counts/cm *4 to shift to 16 bit
+	.FLT2	1600.0
+LIMITS:	.FLT2	-24000.0
+	.FLT2	24000.0
+	.FLT2	-24000.0
+	.FLT2	24000.0
+OFFS:	.FLT2	0.0
+	.FLT2	0.0
 	.IFF
 TKEXT:	.FLT2	36.40455
 	.FLT2	36.40455
-TRANX:	.FLT2	112.485941
-	.FLT2	112.485941
+TRANX:	.FLT2	1799.77506	; 112 counts/cm *16 to shift to 16 bit
+	.FLT2	1799.77506
+LIMITS:	.FLT2	-32768.0
+	.FLT2	32767.0
+	.FLT2	-32768.0
+	.FLT2	32767.0
+OFFS:	.FLT2	0.0
+	.FLT2	0.0
 	.ENDC
 	.IFF
 TKEXT:	.FLT2	36.40455
 	.FLT2	27.30119
-TRANX:	.FLT2	112.485941
-	.FLT2	112.485941
+TRANX:	.FLT2	1799.77506	; 112 counts/cm *16 to shift to 16 bit
+	.FLT2	1799.77506
+LIMITS:	.FLT2	-32768.0
+	.FLT2	32767.0
+	.FLT2	-32768.0
+	.FLT2	16383.0
+OFFS:	.FLT2	0.0
+	.FLT2	-8192.0
 	.ENDC
 
+MINOFF:	.FLT2	-10.0		; minimum offset
+MAXOFF:	.FLT2	10.0		; maximum offset
 
 ; User access to variables
 
@@ -99,10 +119,19 @@ O$RIG:	INCB	TKSCUN		; mark change in origin
 	STF	F1, (R0)+	; preserve display values
 	STF	F3, (R0)+
 	LDF	TKSCF, F0	; current scale
-SETUO:	DIVF	F0, F1
+	DIVF	F0, F1
 	STF	F1, (R0)+	; user values
 	DIVF	F0, F3
-	STF	F3, (R0)
+	STF	F3, (R0)+
+	JSR	PC, TKTRMT	; transform F1, F3 to Tek counts
+	STF	F0, (R0)+
+	STF	F2, (R0)
+$SETOR:	LDF	TKRTOX, F0	; origin in Tek counts
+	LDF	TKRTOY, F2
+	ADDF	TKCENX, F0	; add TKOFF offsets
+	ADDF	TKCENY, F2
+	STF	F0, OFSETX	; store away final offset
+	STF	F2, OFSETY
 
 ; move to new origin
 $MOVT0:: CLRF	F1
@@ -128,8 +157,11 @@ U$NIT:	INCB	TKSCUN		; mark change in scale
 	MOV	#TKRDOX, R0
 	LDF	(R0)+, F1
 	LDF	(R0)+, F3
-	BR	SETUO
-
+	DIVF	F0, F1
+	STF	F1, (R0)+
+	DIVF	F0, F3
+	STF	F3, (R0)
+	BR	$MOVT0		; move to the origin
 
 ; TKOFF(X,Y)	offset the centre of the screen by (X,Y) counts
 ;		(-10. <= X,Y <= +10.)
@@ -138,7 +170,8 @@ TKOFF::	JSR	PC, FTNFPU
 	LDF	@(R5)+, F1	; X
 	LDF	@(R5)+, F3	; Y
 
-TK$OFF:: CMPF	MINOFF, F1	; force X in range
+TK$OFF:: INCB	TKSCUN		; mark origin change
+	CMPF	MINOFF, F1	; force X in range
 	CFCC
 	BLE	10$
 	LDF	MINOFF, F1
@@ -154,12 +187,13 @@ TK$OFF:: CMPF	MINOFF, F1	; force X in range
 	CFCC
 	BGE	40$
 	LDF	MAXOFF, F3
-40$:	ADDF	BSCENX, F1
+40$:	MULF	#16.0, F1	; scale up from 12 to 16 bit
+	MULF	#16.0, F3
+	ADDF	BASOFX, F1	; add in base offsets
+	ADDF	BASOFY, F3
 	STF	F1, TKCENX
-	ADDF	BSCENY, F3
 	STF	F3, TKCENY
-	RTS	PC
-
+	BR	$SETOR		; set new origin
 
 
 ; TKSTYL - set Tek line style
@@ -260,14 +294,7 @@ $TKINI:: MOV	@(R5)+, R0	; SW argument
 	BCC	1$
 	BPT			; assignment of LUN failed - forgot to ASN?
 1$:	MOV	#IO.ATT, QI.FUN	; prepare to attach
-	BIT	#1000, (SP)	; bit 9 set?
-	BNE	20$		; yes - no unsolicited input notification
-	DSAR$S			; disable AST for the moment
-	BIS	#TF.AST!TF.NOT!TF.XCC, QI.FUN	; add extra functions
-	CLR	QI.AST		; clear completion AST
-	MOV	#UNAST, QI.PL1	; unsolicited input AST (in IP)
-	CLR	QI.PL3		; clear other AST
-20$:	DIR$	#QI.DPB		; attach the display
+	DIR$	#QI.DPB		; attach the display
 	BCC	2$
 	BPT			; eh?
 2$:	WTSE$S	QI.EFN		; wait for completion
@@ -275,11 +302,9 @@ $TKINI:: MOV	@(R5)+, R0	; SW argument
 	BPL	3$
 	BPT			; eh???
 ; set functions in QI.DPB ready for read
-3$:	MOV	#IO.RLB!TF.TMO, QI.FUN	; read with timeout
+3$:	MOV	#IO.RLB, QI.FUN	; read
 	MOV	#RDAST, QI.AST	; completion AST
 	MOV	#TKIBUF, QI.PL1	; input buffer
-	MOV	#1, QI.PL3	; timeout (10 second units!)
-	ENAR$S			; enable the unsolicited input AST
 	MOVB	#'0, TKOSEL	; make sure TKOSEL is sensible
 	MOV	TKCBUF, R0	; pointer to buffer
 	TST	(R0)+		; increment by 2
@@ -295,22 +320,27 @@ $TKINI:: MOV	@(R5)+, R0	; SW argument
 	JSR 	R5, $TKW2C
 	.BYTE	'V, ALT.ESC
 	DECB	TKENBL		; Tek now thought to be enabled
+	BIT	#1000, (SP)	; bit 9 set?
+	BNE	4$		; yes - no input
+	DIR$	#QI.DPB		; set a read going
+	BCC	4$		; OK?
+	BPT
 
-; set up base transformation matrix
-; set up base screen centres from SCEXTX/Y
+; set up device dependent parameters in common block
 
-	LDCIF	#SCEXTX+1/2, F0
-	STF	F0, BSCENX
-	LDCIF	#SCEXTY+1/2, F0
-	STF	F0, BSCENY
-	MOV	#BASETR, R0	; point to base transform matrix
+4$:	MOV	#BASETR, R0	; point to base transform matrix
 	MOV	#TRANX, R1
 	LDF	(R1)+, F0
 	STF	F0, (R0)+
 	CLRF	(R0)+		; zero off diagonal matrix elements
 	CLRF	(R0)+
-	LDF	(R1), F0
-	STF	F0, (R0)
+	LDF	(R1)+, F0
+	STF	F0, (R0)+
+	MOV	#6, R2		; number of values to copy
+5$:	LDF	(R1)+, F0
+	STF	F0, (R0)+
+	SOB	R2, 5$
+	
 	
 
 ; Tek was already on - ensure not refreshing!
@@ -322,14 +352,14 @@ ONOK:	JSR	PC, $ESCE0
 	JSR	PC, TKCLR	; yes - do it then
 1$:	BIT	#4, (SP)+	; scales and origin?
 	BEQ	2$		; no
+	CLRF	F1
+	CLRF	F3
+	JSR	PC, TK$OFF	; use actual screen centre as default
 	LDF	#^F1.0, F0	; default scale
 	JSR	PC, U$NIT	; set it
 	CLRF	F1		; default origin
 	CLRF	F3
 	JSR	PC, O$RIG	; set it, too
-	CLRF	F1
-	CLRF	F3
-	JSR	PC, TK$OFF	; use actual screen centre as default
 
 	.IF DF LCDISP
 	LDF	#^F1.0, F1	; default carriage spacing

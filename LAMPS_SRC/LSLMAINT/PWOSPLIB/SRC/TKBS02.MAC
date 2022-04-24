@@ -1,0 +1,188 @@
+	.TITLE	TKBS
+	.IDENT	/25JN84/
+	.ENABL	LC
+
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+; Author  Clarke Brunt from originals by R. Fairbairns,
+; from originals by P.A. Woodsford, P. Cross, et al.
+
+
+; B a s i c   T e k t r o n i x   4 0 1 x   g r a p h i c   l i b r a r y   s u p p o r t
+
+
+; P r i m i t i v e   l i n e - d r a w i n g   e n t r i e s
+
+; i n c r e m e n t a l
+
+; null move
+
+MOVB00:: JSR	PC, FTNFPU
+$MOV00::			; for historical reasons!
+$MOVB0:: CLRF	F1
+	CLRF	F3
+	BR	$MOVBY
+
+; move by
+
+MOVBY::	JSR	PC, FTNFPU
+	LDF	@(R5)+, F1
+	LDF	@(R5)+, F3
+$MOVBY:: CLR	R0
+	BR	MLBY
+
+; line by
+
+LINBY::	JSR	PC, FTNFPU
+	LDF	@(R5)+, F1
+	LDF	@(R5)+, F3
+$LINBY:: MOV	#1, R0
+MLBY:	TST	$DIVRF		; in refresh?
+	BEQ	LBGEN
+	JMP	$RFBY		; yes - divert
+LBGEN::	ADDF	TKRUX, F1	; form endpoint in user space
+	ADDF	TKRUY, F3
+	BR	LTGEN
+
+
+; a b s o l u t e
+
+; move to
+
+MOVTO::	JSR	PC, FTNFPU
+	LDF	@(R5)+, F1
+	LDF	@(R5)+, F3
+$MOVTO:: CLR	R0
+	BR	MLTO
+
+; line to
+
+LINTO::	JSR	PC, FTNFPU
+	LDF	@(R5)+, F1
+	LDF	@(R5)+, F3
+$LINTO:: MOV	#1, R0
+MLTO:	TST	$DIVRF		; in refresh?
+	BEQ	LTGEN
+	JMP	$RFTO		; yes - divert
+LTGEN::
+; establish at line-drawing position, and then divert for thick, etc.,
+;  if required
+
+LR1EST:	TST	TKLNCH		; have we been drawing chars?
+	BEQ	$IFTHK
+	STF	F1, -(SP)	; preserve where we
+	STF	F3, -(SP)	;  were going to
+	MOV	R0, -(SP)	; and how!
+	CLR	TKLNCH		; clear recursive loop
+	BIS	#TRANSPAR, FLAGW	; force output of all bytes
+	JSR	PC, $MOVB0	; move back to last line-drawing position
+	MOV	(SP)+, R0	; recover
+	LDF	(SP)+, F3
+	LDF	(SP)+, F1
+$IFTHK:: BIT	#IFTHK, FLAGW
+	BEQ	NOTHK
+
+; R0=visibility and endpoint in F1,F3
+	JMP	T.DDC
+
+NOTHK::	STF	F1, TKRUX
+	STF	F3, TKRUY
+	JSR	PC, TKTRMT	; transform
+	ADDF	OFSETX, F0	; add offset
+	ADDF	OFSETY, F2
+	JMP	$TKMOV
+
+
+; TKTRMU performs linear transformation of [F1,F3] by matrix pointed
+;  to by R1. Result in [F0,F2].
+
+TKTRMT:: MOV	#TKTR, R1	; standard matrix entry
+TKTRMU:	LDF	F1, F2		; preserve X
+	MULF	(R1)+, F1	; (1,1) * X
+	LDF	F3, F0
+	MULF	(R1)+, F0	; (1,2) * Y
+	ADDF	F1, F0		; X result
+	MULF	(R1)+, F2	; (2,1) * X
+	MULF	(R1), F3	; (2,2) * Y
+	ADDF	F3, F2		; Y result
+	RTS	PC
+
+
+
+; return beam to origin and wait until all drawing done
+
+LDCMPL:: JSR	PC, FTNFPU
+$LDCMP:: JSR	PC, $MOVT0	; go to origin
+	BR	$LDWAIT
+
+; wait until outstanding moves completed
+
+LDWAIT::
+$LDWAIT:: JSR	PC, $MOVB0
+	 JMP	$FLUSH		; flush out buffer
+
+
+; C h a r a c t e r   ' d r a w i n g '
+
+
+; basic 'print' character
+
+PLTCHR::			; can't be implemented as for HRD:
+				; this is the best we can do
+PRTCHR:: JSR	PC, FTNFPU
+$PRTCH:: MOVB	@(R5)+, R1	; character
+PRTR1:	BIC	#177600, R1	; clear junk
+	CMP	R1, #40		; control char?
+	BGE	1$		; no
+	CMP	R1, #AS.LF	; line feed?
+	BEQ	1$		; allowed
+	CMP	R1, #AS.CR	; carriage return?
+	BEQ	1$		; allowed
+	CMP	R1, #AS.BS	; backspace?
+	BNE	CHRTS		; nothing else allowed
+	RTS	PC
+1$:	TST	$DIVRF		; in refresh?
+	BEQ	CHGEN
+	JMP	$RFCH		; yes - divert
+
+; generate character R1
+CHGEN::	TST	TKLNCH		; already drawing characters?
+	BNE	3$		; yes
+	MOV	R1, -(SP)	; preserve character
+	JSR	PC, T.FLSH	; ensure at correct position
+	MOV	#AS.US, R0	; get out of graphic mode
+	JSR	PC, $TKWCH
+	MOV	(SP)+, R1	; recover character
+3$:	MOVB	R1, R0		; character to where it's needed
+	INC	TKLNCH		; count characters transmitted
+	JSR	PC, $TKWCH	; transmit character
+	JSR	R5, $CHKBF
+	.WORD	0
+CHRTS:	RTS	PC
+
+; string of characters
+
+CHARS::	JSR	PC, FTNFPU
+	MOV	(R5)+, -(SP)	; string pointer
+1$:	MOV	(SP)+, R2	; recover string pointer
+	MOVB	(R2)+, R1	; next character of string
+	BEQ	CHRTS		; nul => end
+	MOV	R2, -(SP)	; preserve pointer
+	JSR	PC, PRTR1	; output character
+	BR	1$
+
+; counted string of characters
+
+CHARC::	JSR	PC, FTNFPU
+	MOV	(R5), R2	; pointer to argument
+	MOVB	(R2)+, -(SP)	; character count
+	MOV	R2, -(SP)	; string pointer
+1$:	MOV	(SP)+, R2	; recover string pointer
+	MOVB	(R2)+, R1	; next character of string
+	MOV	R2, -(SP)	; preserve pointer
+	JSR	PC, PRTR1	; output character
+	DECB	2(SP)		; decrement count
+	BNE	1$
+	ADD	#4, SP		; tidy stack
+	RTS	PC
+
+	.END
