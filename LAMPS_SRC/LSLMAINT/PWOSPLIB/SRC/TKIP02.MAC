@@ -1,0 +1,561 @@
+
+	.TITLE	TKIP
+	.IDENT	/28NO83/
+	.MCALL	CLEF$S, SETF$S, DIR$, ASTX$S, QIO$S, DSAR$S, ENAR$S
+ 
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+; Author: Clarke Brunt from original by Susan Manning
+;	  
+; T e k t r o n i x    D i s p l a y    I n p u t    M e c h a n i s m
+ 
+ 
+; TKREAD(CHAN,BUFFER,MAXLEN,LENRD,[EFN,][IOSB,][ASTADR])
+ 
+; CHAN specifies the device	1 => terminal
+;				2 => bitpad/digitiser
+;				0 => call from CSRD
+; the remaining parameters are stored for use when input
+; is received from that device
+ 
+; error conditions are marked by appropriately setting R0 and cancelling
+; the input request
+ 
+TKREAD:: MOV	(R5)+, R2		; get argument count
+	BLE	BADPAR			; any arguments?
+	MOV	(R5)+, R1		; get address of channel num arg
+	CMP	R1, #-1			; no such arg ?
+	BEQ	BADPAR			; complain if so
+	MOV	(R1), R1		; get channel num (device)
+	BEQ	5$			; was it CSRD?
+	CMP	R1, #1
+	BEQ	10$			; was it terminal?
+	CMP	R1, #2
+	BEQ	15$			; was it bitpad/digitiser?
+	JMP	INVCHN			; no such channel then - error.
+ 
+; parameters for CSRD
+5$:	MOV	#CSBFAD, R3
+	BR	20$
+ 
+; parameters for the terminal
+10$:	MOV	#TTBFAD, R3		; get start of terminal workspace
+	BR	20$
+ 
+; parameters for the bitpad/digitiser
+15$:	MOV	#BPBFAD, R3		; get start of bitpad workspace
+20$:	MOV	R3, R4			; remember start of current workspace
+ 
+; disable ASTs so that our read AST does not access the data structure
+; while we are modifying it
+	DSAR$S
+; loop to store remaining parameters
+	MOV	#2, R1			; set argument count
+30$:	CMP	R1, R2
+	BGT	40$
+	MOV	(R5)+, R0		; get address of next argument
+	CMP	R0, #-1			; is argument missing ?
+	BEQ	40$			; branch if it is
+	MOV	R0, (R3)+		; no - store it away
+	BR	50$
+40$:	CMP	R1, #4			; yes
+	BLE	BADKIL			; was it an optional argument?
+	CLR	(R3)+			; mark as absent
+50$:	INC	R1
+	CMP	R1, #7
+	BLE	30$			; any more arguments?
+ 
+; store values of efn (if present) and buffer length
+	TST	6(R4)			; efn specified ?
+	BEQ	70$			; no
+	MOV	@6(R4), 6(R4)		; get value of efn
+	CLEF$S	6(R4)			; clear caller's efn
+	BR	80$
+70$:	DEC	6(R4)			; mark absent by setting efn = -1
+80$:	MOV	^D8(R4), R0		; IOSB address
+	BEQ	90$			; if 0, none
+	CLR	(R0)+			; clear IOSB low word
+	CLR	(R0)			; high word
+90$:	MOV	@2(R4), 2(R4)		; value of buffer length
+	BR	SUCESS
+ 
+; error conditions
+INVCHN: MOV	#IE.DUN, R0
+	BR	ERREXT
+BADKIL:	CLR	(R4)			; cancel i/p req. for valid channel
+BADPAR:	MOV	#IE.BAD, R0
+	BR	ERREXT
+ 
+SUCESS: MOV	#IS.SUC, R0
+ERREXT:	ENAR$S				; re-enable ASTs
+	RTS	PC
+
+
+; TKKILL(CHAN)
+
+; Cancel input request on device specified by CHAN
+;			1 => terminal
+;			2 => bitpad/digitiser
+
+; error conditions are marked in R0
+
+TKKILL:: MOV	(R5)+, R2	; argument count
+	BLE	BADPAR
+	MOV	@(R5)+, R1	; channel number
+	CMP	R1, #1
+	BEQ	10$		; terminal
+	CMP	R1, #2
+	BNE	INVCHN
+	CLR	BPBFAD		; bitpad
+	BR	SUCESS
+10$:	CLR	TTBFAD
+	BR	SUCESS
+
+; utility to check for valid line number as first arg
+; valid arg returned in R3
+; if invalid, then returns through caller's return address
+
+GETLIN:	MOV	(R5)+, R1		; get argument count
+	MOV	#1, R0			; start counting the args
+	CMP	R1, R0			; any more?
+	BLT	BADPAR			; no
+	MOV	@(R5)+, R3		; line number
+	CMP	R3, #2			; valid line number (2 or 3)?
+	BLT	5$
+	CMP	R3, #3
+	BGT	5$
+	RTS	PC
+5$:	TST	(SP)+			; remove return address
+	JMP	INVCHN			; invalid 
+
+; TKIDEV(LINE,TABLET [,MODE])
+
+; enable tablet on specified line (2 or 3 only)
+; tablet type:	1 => bitpad
+;		2 => freescan
+;		3 => SID
+;		4 => GTCO Digipad
+;		5 => Supergrid
+	
+TKIDEV:: JSR	PC, GETLIN		; get line number
+	
+; get tablet type and validate
+	INC	R0			; inc argument number
+	CMP	R1, R0
+	BLT	BADPAR
+	MOV	@(R5)+, R2		; tablet type
+	BLE	BADPAR			; is type 1 to 5?
+	CMP	R2, #5
+	BGT	BADPAR
+
+; get mode, if not present default to zero
+	CLR	R4			; default mode zero
+	INC	R0			; any args left?
+	CMP	R1, R0
+	BLT	20$
+	MOV	@(R5)+, R4		; mode
+
+; transmit enabling sequence  <esc = T <n> <t> <mode>>
+20$:	JSR	R5, $CHKBF		; ensure sequence contiguous
+	.WORD	6
+	JSR	R5, $TKW2C		; esc = T
+	.BYTE	AS.ESC, '=
+	MOV	#'T, R0
+	JSR	PC, $TKWCH
+	MOV	R3, R1			; for TKWBN
+	JSR	PC, $TKWBN		; <line number>
+	MOV	R2, R1
+	JSR	PC, $TKWBN		; <type>
+	MOV	R4, R1
+	JSR	PC, $TKWBN		; <mode>
+	JMP	SUCESS
+
+
+; TKTRAC(LINE, BUTTON)
+
+; enable tracking on LINE with BUTTON
+; LINE (1 to 3 only)
+; BUTTON = 63  => disable tracking on line
+
+TKTRAC:: MOV	(R5)+, R1		; get argument count
+	MOV	#1, R0			; start counting the args
+	CMP	R1, R0			; any more?
+	BGE	5$			; yes
+	JMP	BADPAR
+5$:	MOV	@(R5)+, R3		; line number
+	CMP	R3, #1			; valid line number (1 to 3)?
+	BGE	10$
+	JMP	INVCHN
+10$:	CMP	R3, #3
+	BLE	15$
+	JMP	INVCHN
+15$:	INC	R0
+	CMP	R1, R0			; any args left?
+	BGE	20$			; yes
+	JMP	BADPAR			; no
+20$:	MOV	@(R5)+, R2		; get button number
+
+; transmit enable tracking sequence <escape=S <n> <b>>
+	JSR	R5, $CHKBF		; ensure seq contiguous
+	.WORD	5
+	JSR	R5, $TKW2C		; esc = S
+	.BYTE	AS.ESC, '=
+	MOV	#'S, R0
+	JSR	PC, $TKWCH
+	MOV	R3, R1
+	JSR	PC, $TKWBN		; <line number>
+	MOV	R2, R1
+	JSR	PC, $TKWBN		; <button number>
+	JMP	SUCESS
+
+
+; TKMAPT(LINE,MATRIX)
+
+; set MATRIX on specified line
+; MATRIX specifies start of 5 reals
+
+TKMAPT:: JSR	PC, FTNFPU		; NB steps R5 over count
+	TST	-(R5)			; so step it back again
+	JSR	PC, GETLIN
+	INC	R0
+	CMP	R1, R0			; any more args?
+	BGE	2$			; yes
+	JMP	BADPAR			; no
+2$:	MOV	(R5)+, -(SP)		; get matrix address
+
+; transmit <esc = Q <line>> part of sequence
+	JSR	R5, $CHKBF		; ensure entire seq contiguous
+	.WORD	23
+	JSR	R5, $TKW2C		; esc=Q
+	.BYTE	AS.ESC, '=
+	MOV	#'Q, R0
+	JSR	PC, $TKWCH
+	MOV	R3, R1
+	JSR	PC, $TKWBN		; line number
+
+; save matrix for mapping tablet counts into user units 
+	MOV	#TKOFFX, R0
+	MOV	#5, R1			; word count
+	MOV	(SP)+, R2		; restore MATRIX address
+13$:	LDF	(R2)+, F0		; save next real
+	STF	F0, (R0)+
+	SOB	R1, 13$			; all saved?
+
+; calc X,Y - tablet counts corr. to 0,0 in user units
+; XX=((-TKCENX)/TKTR(1)-TKRUOX-TKOFFX)/TKSCAL
+; YY=((-TKCENY)/TKTR(4)-TKRUOY-TKOFFY)/TKSCAL
+; X =(XX*TKROTC)+(YY*TKROTS)
+; Y =(YY*TKROTC)-(XX*TKROTS)
+
+	CLRF	F1
+	CLRF	F3
+	JSR	PC, TKUSER		; intermediate result in F0, F2
+	STF	F0, F1
+	SUBF	TKOFFX, F1
+	SUBF	TKOFFY, F2
+	DIVF	TKSCAL, F1
+	DIVF	TKSCAL,	F2
+	STF	F2, F0			; swap X,Y to get correct
+	STF	F1, F2			; sign applied by TKROT
+	JSR	PC, TKROT		; apply rotation
+
+; store X,Y in mapping workspace
+; first change fps to use long integers
+	STFPS	-(SP)
+	LDFPS	#1500			; enable long integers
+
+	MOV	#TKMPSP, R0		; get work space address
+	STCFL	F3, (R0)+		; store X,Y in mapping workspace
+	STCFL	F1, (R0)+
+
+; calculate revised 'scale' SCA=(4096/TKTR(1))/SCALE
+	LDF	#^F4096, F0
+	STF	F0, F2			; another copy for ROT
+	DIVF	TKTR, F0
+	DIVF	TKSCAL, F0
+	STCFL	F0, (R0)+		; store
+
+; calculate revised rotation ROT=TKROTS*4096
+; and reset fps to word integers for this field
+	LDFPS	(SP)+
+	MULF	TKROTS, F2
+	STCFI	F2, (R0)		; store
+
+; transmit each of 3 longwords as 4*6 bit biased numbers
+; the last (4th) word is transmitted as 3 biased numbers (4,6,6 bits)
+	MOV	#TKMPSP, R5		; get workspace address
+	MOV	#4, R4			; set word count
+15$:	CLR	R2
+	CMP	#1, R4			; is next word the last one?
+	BEQ	20$			; yes
+	MOV	(R5)+, R2		; get next word	
+	ASHC	#-2, R2			; position
+	BIC	#177700, R2		; clear rubbish
+	MOV	R2, R1 
+	JSR	PC, $TKWBN		; transmit bits 18-23
+	ASHC	#2, R2			; bits 16-17 at bottom of R2
+20$:	MOV	(R5)+, R3		; next word
+	ASHC	#4, R2			; now have bits 12-17
+	MOV	R2, R1
+	JSR	PC, $TKWBN		; transmit
+	CLR	R2
+	ASHC	#6, R2			; extract bits 6-11
+	MOV	R2, R1
+	JSR	PC, $TKWBN		; transmit
+	CLR	R2
+	ASHC	#6, R2			; extract bits 0-5
+	MOV	R2, R1
+	JSR	PC, $TKWBN		; transmit
+	SOB	R4, 15$			; any more words?
+	JMP	SUCESS			; no
+ 
+
+; Unsolicited input AST
+; Issues a read with timeout to local buffer
+
+UNAST::	DIR$	#QI.DPB			; expects parameters set already
+	TST	(SP)+			; tidy stack
+	ASTX$S				; return
+
+
+
+; Read completion AST
+; determines whether input from terminal or bitpad
+; 	moves it to appropriate buffer ( decoding if for bitpad/digitiser)
+;	sets LNRD,IOSB,EFN parameters supplied in call to TKREAD
+;	calls user's AST routine (if present)
+ 
+ 
+; <altescape = W> sequence in buffer => bitpad/digitiser input
+RDAST::	TSTB	TKENBL			; TEK enabled?
+	BNE	1$			; if not do nothing
+	TST	(SP)+			; tidy stack
+	ASTX$S				; exit
+1$:	STFPS	-(SP)			; save fpp status
+	LDFPS	#1500			; fpp status for long integers
+	STF	F0, -(SP)		; save f regs
+	STF	F1, -(SP)
+	STF	F2, -(SP)
+	STF	F3, -(SP)
+	LDF	F4, F0
+	STF	F0, -(SP)
+	LDF	F5, F0
+	STF	F0, -(SP)
+	MOV	R0, -(SP)		; save regs
+	MOV	R1, -(SP)
+	MOV	R2, -(SP)
+	MOV	R3, -(SP)
+	MOV	R4, -(SP)
+	MOV	R5, -(SP)
+
+	CMPB	#IS.TMO, TKIOSB		; was it timed out?
+	BNE	3$			; no
+	JMP	TIMOUT	 
+3$:	CMP	TKCHCT,#3		; enough to look for sequence ?
+	BLT	30$			; no -assume terminal
+	MOV	#TKIBUF, R2
+	MOV	#ALTESC, R1
+	CMP	(R1), (R2)		; are 1st 3 bytes  'altesc=W'
+	BNE	30$
+	CMPB	2(R1), 2(R2)
+	BNE	30$
+	ADD	#3, R2 			; move past escape sequence
+
+; input from bitpad - R2 points at 1st byte beyond escape sequence
+	TSTB	TKIOSB			; error in read ?
+	BLT	24$			; yes - don't decode
+	CMP	TKCHCT, #13.		; correct number of characters ?
+	BEQ	10$
+	MOV	#IE.SPC, TKIOSB		; mark error in iosb
+	BR	24$			; don't try to decode
+; decode and validate line number
+10$:	JSR	PC, DECNUM
+	CMP	#1, R5			; CSRD?
+	BEQ	12$			; yes
+	CMP	#2, R5			; bitpad?
+	BEQ	14$
+	CMP	#3, R5			; digitiser?
+	BEQ	14$
+	MOV	#IE.BDV, TKIOSB		; here if invalid -mark error in iosb
+	BR	24$			; don't try to decode
+ 
+; read initiated by CSRD
+12$:	MOV	#CSLNRD, R0		; ready for common code
+	MOV	CSBFAD, R1
+	BR	16$
+ 
+; usual read from tablet
+14$:	MOV	#BPLNRD, R0		; ready for common code
+	MOV	BPBFAD, R1
+ 
+16$:	BNE	17$			; appropriate buffer declared ?
+	JMP	REENBL			; if EQL, no - ignore input
+ 
+17$:	MOV	R5, (R1)+		; move line number to buffer
+	JSR	PC, DECNUM		; decode button number
+	MOV	R5, (R1)+		; move button number to buffer
+; decode 4 bytes into 24 bit sign extended number
+; for both X and Y coordinates
+	MOV	R0, -(SP)		; preserve register
+	MOV	#2,R0			; count for loop
+20$:	JSR	PC, DECNUM		; decode most sig. byte
+	MOVB	R5, R4			; to bottom of R4
+	JSR	PC, DECNUM		; decode next byte
+	ASH	#12, R5			; to top of R5
+	ASHC	#12, R4			; 12 bits to top of R4
+	ASHC	#-10, R4		; high order word complete
+	SUB	#2, SP			; reserve space for low word
+	MOV	R4, -(SP)		; push high word
+	ASHC	#4, R4			; bits 12-15 at bottom of R4
+	JSR	PC, DECNUM		; decode next byte
+	ASH	#6, R4			
+	BIS	R5, R4			; bits 6-15 at bottom of R4
+	JSR	PC, DECNUM		; decode next byte
+	ASH	#6, R4
+	BIS	R5, R4			; low order word complete
+	MOV	R4, 2(SP)		; put onto stack
+	LDCLF	(SP)+, F0		; get long integer
+	STF	F0, (R1)+		; return into callers buffer
+	DEC	R0
+	BNE	20$			; do same for Y
+	MOV	(SP)+, R0		; restore register
+	BR	25$
+ 
+; on error assume usual read from bitpad
+24$:	MOV	#BPLNRD, R0
+ 
+; set up pointer for joining common code
+25$:	MOV	R0, R1
+	MOV	#4, @(R1)		; fake LENRD = no. of items in buffer
+	BR	70$			; join common code
+ 
+ 
+; terminal buffer processing
+30$:	TST	TTBFAD			; buffer declared ?
+	BNE	32$			; if NEQ, yes
+	JMP	REENBL			; ignore input
+; get minimum of length read and buffer size into R0
+32$:	CMP	TKCHCT, TTMXLN
+	BGE	35$
+	MOV	TKCHCT, R0
+	BEQ	50$			; just in case 0
+	BR	40$
+35$:	MOV	TTMXLN, R0
+; copy characters into caller's buffer
+40$:	MOV	#TKIBUF, R3
+	MOV	TTBFAD, R2
+	MOV	R0, R4			; take copy of length
+45$:	MOVB	(R3)+, (R2)+		; copy byte
+	SOB	R4, 45$			; until none left
+50$:	MOV	#TTLNRD, R1		; set up pointer into parameters
+	MOV	R0, @(R1)		; and length copied
+ 
+ 
+; common code for processing/completing remainder of caller's parameters
+70$:	MOV	4(R1),R0		; iosb supplied ?
+	BEQ	80$			; if EQL, no
+	MOV	TKIOSB, (R0)+		; move first word
+	MOV	TKIOSB+2, (R0)+		; second word (TKCHCT)
+	BR	90$
+80$:	TSTB	TKIOSB			; error from qio and no iosb
+	BGE	90$
+	CLR	@(R1)			; indicate error by LENRD = 0
+90$:	TST	6(R1)			; ASTADR supplied ?
+	BEQ	100$			; if EQL, no
+	JSR	PC, @6(R1)		; call AST
+100$:	MOV	2(R1),R0		; efn supplied ?
+	BLT	110$			; if less, no
+	SETF$S	R0			; set efn
+
+; If input not terminated by CR then cancel TMU read
+110$:	CLR	-4(R1)			; mark buffer finished with
+	CMP	TKIOSB,#IS.CR		; is terminator CR ?
+	BNE	CANTMU			; no
+	BR	REENBL			; re-enable
+ 
+  
+; on timeout, output message, transmit escape sequence
+TIMOUT:	QIO$S	#IO.WLB,QO.LUN,,,,,<#TIMMSG,#TIMSZ>
+
+; this should WBT too if possible
+
+CANTMU:	JSR	R5, $CHKBF		; ensure sequence contiguous
+	.WORD	3
+	JSR	R5, $TKW2C		; issue <ESC=X> seq
+	.BYTE	AS.ESC, '=
+	MOV	#'X, R0
+	JSR	PC, $TKWCH
+	JSR	PC, $FLUSH		; transmit immediately
+ 
+REENBL:	MOV	(SP)+, R5		; restore regs
+	MOV	(SP)+, R4
+	MOV	(SP)+, R3
+	MOV	(SP)+, R2
+	MOV	(SP)+, R1
+	MOV	(SP)+, R0
+	LDF	(SP)+, F0		; restore f regs
+	STF	F0, F5
+	LDF	(SP)+, F0
+	STF	F0, F4
+	LDF	(SP)+, F3
+	LDF	(SP)+, F2
+	LDF	(SP)+, F1
+	LDF	(SP)+, F0
+	LDFPS	(SP)+			; restore fpp status
+
+	TST	(SP)+
+	ASTX$S				; AST exit
+ 
+ 
+ 
+ 
+; decode biased number pointed to by R2 into R5
+;  (R2 incremented to point to next)
+ 
+DECNUM:	MOVB	(R2)+, R5		; get it
+	SUB	#AS.NBI, R5		; subtract bias
+	BIC	#177700, R5		; mask to 6 bits
+	RTS	PC
+ 
+ 
+ 
+; transform Tektronix counts into user units
+;	F0 = (F1 - TKCENX)/TKTR(1) -TKRUOX
+;	F2 = (F3 - TKCENY)/TKTR(4) -TKRUOY
+; F1,F3 are corrupted
+ 
+TKUSER:: SUBF	TKCENX, F1
+	DIVF	TKTR, F1
+	SUBF	TKRUOX, F1
+	STF	F1, F0
+	SUBF	TKCENY, F3
+	DIVF	TKTR+12., F3
+	SUBF	TKRUOY, F3
+	STF	F3, F2
+	RTS	PC
+
+
+; apply rotation
+;
+; F1=(F0*TKROTC)-(F2*TKROTS)
+; F3=(F2*TKROTC)+(F0*TKROTS)
+; F0, F2, F4, F5 are corrupted
+;
+; N.B from CSRD   X,Y=F0,F2
+;     from TKMAPT X,Y=F2,F0
+
+TKROT:: STF	F0, F4			; copy
+	STF	F2, F5			; copy
+	MULF	TKROTC, F0
+	MULF	TKROTS, F2
+	SUBF	F2, F0
+	STF	F0, F1
+
+	LDF	F4, F0			; recover
+	LDF	F5, F2
+	MULF	TKROTC, F2
+	MULF	TKROTS, F0
+	ADDF	F0, F2
+	STF	F2, F3
+	RTS	PC
+
+	.END
