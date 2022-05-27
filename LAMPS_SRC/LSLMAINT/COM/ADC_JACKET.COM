@@ -1,3 +1,22 @@
+$!
+$! * This file is part of the LAMPS distribution, released as a software
+$! * preservation project to archive digital history for future historians.
+$! * Copyright (c) 1980-2002 Laser-Scan Ltd, 1Spatial Group Ltd
+$! *
+$! * Timestamp of this file for the 2002 release was: 1999-08-17 14:24:44.000000000 +0100
+$! *
+$! * This program is free software: you can redistribute it and/or modify
+$! * it under the terms of the GNU General Public License as published by
+$! * the Free Software Foundation, version 3.
+$! *
+$! * This program is distributed in the hope that it will be useful, but
+$! * WITHOUT ANY WARRANTY; without even the implied warranty of
+$! * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+$! * General Public License for more details.
+$! *
+$! * You should have received a copy of the GNU General Public License
+$! * along with this program. If not, see http://www.gnu.org/licenses/.
+$!
 $	ver=f$verify(0)
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $!
@@ -15,11 +34,11 @@ $! VAX, the original ADC program will be used.
 $!
 $! The format of the old ADC is :
 $!
-$!	ADC RDPAR/CO = RDPAR,RDLAYER,RDENTITY,RDTEXT
+$!	ADC RDPAR/CO = TRUTH.TR/TR,RDPAR,RDLAYER,RDENTITY,RDTEXT
 $!
 $! which must be turned into:
 $!
-$!	ADCC/COMMENT=ALL RDPAR,RDLAYER,RDENTITY,RDTEXT  RDPAR
+$!	ADCC/COMMENT=ALL/TRUTH=TRUTH.TR RDPAR,RDLAYER,RDENTITY,RDTEXT  RDPAR
 $!
 $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $!
@@ -77,9 +96,17 @@ $	   IF F$EXTRACT(0,2,QUAL).EQS."DE" THEN OUTQ = OUTQ + "/DEBUG"
 $	   IF F$EXTRACT(0,2,QUAL).EQS."CD" THEN OUTQ = OUTQ + "/CD"
 $	   IF F$EXTRACT(0,2,QUAL).EQS."LL" THEN OUTQ = OUTQ + "/"+QUAL
 $	   IF F$EXTRACT(0,2,QUAL).EQS."IN" THEN OUTQ = OUTQ + "/IN"
-$	   IF F$EXTRACT(0,2,QUAL).EQS."TR" THEN OUTQ = OUTQ + "/TR"
 $	   QUALLINE = F$EXTRACT(POS+1,F$LENGTH(QUALLINE),QUALLINE)
 $	   GOTO again
+$	ENDIF
+$!
+$! Now look for a truth file at the start of the right string
+$!
+$	POS = F$LOCATE("/TR,",RGHTSTR)
+$	IF POS.LT.F$LENGTH(RGHTSTR)
+$	THEN
+$	   OUTQ = OUTQ + "/TR=" + F$EXTRACT(0,POS,RGHTSTR)
+$	   RGHTSTR = F$EXTRACT(POS+4,F$LENGTH(RGHTSTR),RGHTSTR)
 $	ENDIF
 $!
 $! Run appropriate version of ADC
@@ -102,4 +129,4 @@ $!
 $	ADCPROG 'CLINE
 $!
 $the_end:
-$	IF VER THEN SET VERIFY
+$	IF VER THEN SET VERIFY
