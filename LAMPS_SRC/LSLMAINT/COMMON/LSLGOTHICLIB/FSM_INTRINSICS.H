@@ -17,4 +17,1663 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-#ifndef _FSM_INTRINSICS#define _FSM_INTRINSICS/* $Header: /gothic/hdr/fsmlib/v1-12a-5/RCS/hdr.fsm_intrinsics.h,v 1.18.2.1 1995/02/23 17:51:43 clarke Exp $								*//* 									*//* $Log: hdr.fsm_intrinsics.h,v $ * Revision 1.18.2.1  1995/02/23  17:51:43  clarke * Version v1-12a-5 derived from v1-12a-4 * Fix bug in conversion of VAX to IEEE where output bits are not * set to zero. * WICC 371. * * Revision 1.18  1994/05/24  17:51:58  jon * Version v1-12a-4 derived from v1-12a-3 * Changes to ensure compilation on VMS. * WICC 284 * Moved fsm_free_fac and fsm_fix_fac to fsm_channel from fsm_lock. Seems a * better place for them to be and fsm_lock has many system depenedent features * which these two routines do not need. * * Revision 1.17  1994/02/16  19:11:21  olivia * Version v1-12a-3 derived from v1-12a-2 * WICC 239 * Update fsm_fast_extend_alloc to work for file * structure types other than FS_CONTIGOUS. * * Fix 32-bit signed integer overflow calculating spam file * offsets.  Use a temporary variable to ensure that the calculations are * done in the correct order.  Add new function * spam_get_data_offset_from_index().  See Gothic error log 20. * * Fix bug in fsm_get_spam_long_runlength() by ensuring that a run is not * continued across SPAM pages unless it should be (don't continue if a * different run starts on the next page. * * Revision 1.16  1993/09/15  15:54:56  stevewi * Version v1-12a-2 derived from v1-12a-1 * See Gothic WICC 126. * * Increase FSM_FD_MARGIN to allow more files to be opened outside FSMLIB's control. * Opening of UID files, password files etc was failing. * Undo part of previous modification to fsm_read_line(). * PSLIB checks for FSMREADERROR on end of file, but FSMLIB * was returning GOTH__FSM. This has been changed back to * GOTH__FSMREADERROR. * See WICC GOTHIC 134. * Frozen for BNSC IGIS Analysis integration testing. * * Revision 1.15  1993/09/09  15:11:38  davida * Version v1-12a-1 derived from v1-12 * WICC 127 * Make fsm_read_line() and fsm_write_line() ensure that the file * is open before accessing it. * * Revision 1.14  1993/08/10  21:52:41  jon * Version v1-12 derived from v1-11 * See Gothic WICC 1. * * Develop a method of writing a block of data representing a single * transaction. * * Develop compression of spam files with reading and writing of compressed data. * * Develop routine `fsm_get_size()' and `fsm_get_size_from_fac()'. * * Fix bug in `fsm_convert_double()' where VMS real is converted to IEEE. * The output real should be set to zero before bitwise operations are * performed in conversion. (See also Gothic WICC 87). * * Fix bug in `fsm_clear_spam_bit_run()'. Clearing a run at the end of one spam * page could result in the run at the start of the next page also being cleared. * If the second run is later explicitly cleared, a GOTH__SPAMNOTALLOC error * occurs. * * Modified `fsm_sos_wildcard_delete()' and `fsm_spam_initialise()' to fix leaks. * * Revision 1.13  1993/04/22  10:15:42  davidm * Version v1-11 derived from v1-10 * added prototypes for fsm_channel routines to enable HP compilation * * Revision 1.12  1993/03/30  13:19:47  jon * Version v1-10 derived from v1-9 * SOS translation modified such that undefined fields in a sos are translated * as environment variables * * Modified `fsm_lock()' and `fsm_inquire_remote_lock()' so that a start offset * of zero (when specified in conjunction with a length of zero) does not have * a file header size correction added to it prior to the lock being requested. * This ensures that the entire file, including any FSMLIB header is locked. * On the SUN, this also avoids an apparent bug in `fcntl()', which always * returns an error if a zero length is specified with a non-zero start * offset. * * Added macro `FSM_CORRECTION()' to `fsm_internals.h' and replaced all other * code in FSMLIB for calculating header size corrections with the macro. * * Revision 1.11  1993/02/04  16:22:52  jon * Version v1-9 derived from v1-8 * addition of NFS file locking (using 'fcntl') * * Revision 1.10  1992/10/22  10:36:12  davidr * Version v1-8 derived from v1-7 * changed 'fsm_sos_wildcard_delete' to use individual 'unlink's rather than * 'system' to delete files * * Revision 1.9  1992/09/06  20:01:05  jon * Version v1-7 derived from v1-6 * fixed bug (log 44 in Xlate testing) whereby 'fsm_sos_to_sys_spec' was * crashing if the sos is a simple filename (e.g "test" ) * * Revision 1.8  1992/08/26  20:18:58  jon * Version v1-6 derived from v1-5 * added function 'fsm_sos_to_dir' to translate an SOS to its directory * component * * Revision 1.7  1992/08/10  17:47:44  adrian * Version v1-5 derived from v1-4 * Addition of a routine which allows the machine type of a file to be * extracted from a FAC. * * Revision 1.6  1992/07/11  12:57:58  jon * Version v1-4 derived from v1-3 * FO_WRITE_TEXT mode added * Added jacket routine for `fsm_sos_default_to_sys_spec()' * * Revision 1.5  1992/06/05  15:20:43  jon * Version v1-3 derived from v1-2-1 * Extracted to allow implementation of `fsm_fast_extend_alloc()'. * Added `fsm_test.lull' program to allow testing of SPAM and * CONTIGUOUS file structures. * Substantially modified routine which writes out free space list for * contiguous file and slightly changed routine which extends contiguous * file to fix file corruption problem which resulted in part of free * space being lost, and the rest being written over data held in the file. * Modified sos deletion and spam sos deletion routines to return specific * status codes to indicate that file deletion has failed or that spam bitmap * file deletion has failed. * Modified `morefile()' routine used to extend contiguous allocation files * so that it combines the free space added to the end of the file with any * existing block of free space at the end of the file. This solves a problem * which could result in excessive fragmentation of space in contiguous files. * File structure parameter initialised for raw and text files within fsm_build_fac * so that files are readable when asked to store integers or reals. * Fixed bug in fsm_seek preventing seeks to end of FS_TEXT files. * * Revision 1.4  1992/05/12  14:41:46  davidm * Version v1-2-1 derived from v1-2 * Extracted to fix bug which ensures that all unstructured files have their * file structure set to FS_RAW in the DED - due to an `=' instead of an `==' in * an if-statement. * * Revision 1.3  1992/04/28  17:37:08  jon * Version v1-2 derived from v1-1 * Correct status code checking bugs and continue with development of new * file structures. * Completed SPAM file structure. * Improved contiguous allocation algorithms. * Removed debugging printouts. * * Revision 1.2  1992/03/16  17:29:53  jon * Version v1-1 derived from v1-0 * Version containing `test' alternative (SPAM files etc) copied over from original system *								*//************************************************************************//* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*//* Author    Jonathan Billing,  6-Jun-1991				*//************************************************************************//************************************************************************//*									*//*		    F S M _ I N T R I N S I C S . H 			*//*									*//* Part of GOTHIC module FSMLIB						*//* Part of GOTHIC module FSMLIB						*//* Version 0.1, Jonathan Billing  6-Jun-1991				*//************************************************************************//*>>> EXTERN functions from FSM.C <<<*//*----------------------------------------------------------------------*//* EXTERN fsm_build_fac							*//*......................................................................*//* creates a FAC from an SOS						*//* Arguments:								*//*    fac_id         - returns created FAC				*//*    sos            - SOS string					*//*    access_mode    - FA_NORMAL (normal file)				*//*                     FA_MAPPED (VMS mapped file)			*//*    opening_mode   - FO_CREATE_NEW (initialise new file,overwrite	*//*                                    existing old file)		*//*                     FO_CREATE (initialise new file only if it does	*//*                                not already exist) 			*//*                     FO_READ  (open existing file read-only)		*//*                     FO_WRITE (open existing file for update)		*//*		       FO_READ_TEXT (open existing text file for reading*//* Optional arguments   						*//*    file_structure (only used if creating the file)			*//*                     FS_NORMAL      - unstructured file		*//*                     FS_CONTIGUOUS  - structured with fixed size  	*//*                                      blocks and a free space list	*//*		       FS_TEXT	      - text file			*//*    atom_size (FS_CONTIGUOUS)       - block size in bytes		*//*									*//* Errors:								*//*    GOTH__FSMFILEOPEN     - error opening file			*//*    GOTH__FSMFILECLOSE    - error closing file			*//*    GOTH__FSMFILEEXISTS   - file exists				*//*    GOTH__FSMNOFILEEXISTS - file does not exist			*//*    GOTH__FSMWRITEERROR   - i/o error on write			*//*    GOTH__BADFSMACCESS    - invalid access mode			*//*    GOTH__BADFSMOPENING   - invalid opening mode			*//*    GOTH__MALLOC          - insufficient virtual memory		*//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_build_fac(GOTH_DESCRIPTOR 	*fac_id,				 GOTH_STRING 	 	sos,				 FSM_ACCESS_TYPE	access_mode,				 FSM_OPENING_TYPE	opening_mode,/* optional arguments							*//*				 FSM_STRUCTURE_TYPE	file_structure, *//*                               GOTH_INTEGER		atom_size)      */				 ...);/*----------------------------------------------------------------------*//* EXTERN fsm_destroy_fac						*//*......................................................................*//* destroys a FAC							*//* Arguments:								*//*    fac_id - descriptor of FAC					*//* 									*//* Errors:								*//*    GOTH__FSMFILEOPEN     - error opening file			*//*    GOTH__FSMFILECLOSE    - error closing file			*//*    GOTH__FSMFILEEXISTS   - file exists				*//*    GOTH__FSMNOFILEEXISTS - file does not exist			*//*    GOTH__FSMWRITEERROR   - i/o error on write			*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_destroy_fac(GOTH_DESCRIPTOR fac_id);/*----------------------------------------------------------------------*//* EXTERN fsm_analyse							*//*......................................................................*//* prints details of a file opened by FSMLIB 				*//* ARGUMENTS								*//* 	fac	file descriptor						*//* 	stream	output stream on which to print details			*//* 	verbose if true give extra information on structured files	*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_analyse(GOTH_DESCRIPTOR	fac,			       GOTH_DESCRIPTOR	stream,			       GOTH_BOOLEAN	verbose);/*>>> EXTERN functions from FSM_ALLOC.C <<<*//*----------------------------------------------------------------------*//* EXTERN fsm_alloc_initialise						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* This routine intialises the FSMLIB file allocation handling, 	*//* including the creation of any caches used as part of the allocation	*//* management.								*//*									*//* This routine should never be called directly by an application.	*//*									*//*..ARGUMENTS...........................................................*//*									*//* cache_id	-out-	The descriptor for the cache DED created	*//* 			to cache FSMLIB file information.		*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_alloc_initialise(					GD_CACHE	*cache_id,					GOTH_INTEGER	hash_table_size);/*----------------------------------------------------------------------*//* EXTERN fsm_set_batch_allocation					*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Sets the strategy for allocating file space - we either allocate	*//* in large blocks which is wasteful of disk space but gives better	*//* performance,or allocate only the amount requested.			*//*									*//* This has no real meaning for the SPAM allocation strategy, since	*//* we will always allocate in large blocks.				*//*									*//*..ARGUMENTS...........................................................*//*									*//* fac		-in- 	descriptor of FAC				*//* batchit	-in- 	if TRUE we allocate in large blocks		*//* 			if FALSE we only allocate requested amount	*//*									*//*..RETURN-CODES........................................................*//*									*//*  GOTH__NORMAL							*//*  GOTH__DESC								*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_set_batch_allocation(					    GOTH_DESCRIPTOR 	fac_id,					    GOTH_BOOLEAN	batchit);/*----------------------------------------------------------------------*//* EXTERN fsm_get_alloc_size						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Gets the size of a previously allocated region			*//*									*//*..ARGUMENTS...........................................................*//*									*//*    fac      - descriptor of FAC					*//*    offset   - offset of start of region				*//*    size     - returned size						*//*									*//*..RETURN-CODES........................................................*//*									*//*    GOTH__ERROR - region was not obtained from fsm_alloc		*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_alloc_size(				      GOTH_DESCRIPTOR	fac_id,				      GOTH_INTEGER	offset,				      GOTH_INTEGER	*size);/*----------------------------------------------------------------------*//* EXTERN fsm_alloc							*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* This routine hands back a region of file at least size bytes long.	*//* rounded up if necessary to a multiple of the atomic block size	*//*									*//*..ARGUMENTS...........................................................*//*									*//*    fac      - descriptor of FAC					*//*    size     - minimum length of region on bytes			*//*    offset   - returned offset in file				*//*									*//*..RETURN-CODES........................................................*//*									*//*    GOTH__FSM_CORRUPTLIST - internal list of file blocks corrupt	*//*    GOTH__MALLOC          - insufficient virtual memory		*//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_alloc(			     GOTH_DESCRIPTOR 	fac_id,			     GOTH_INTEGER 	size,			     GOTH_INTEGER 	*offset);/*----------------------------------------------------------------------*//* EXTERN fsm_fast_extend_alloc						*//*......................................................................*//* 									*//* This routine hands back a region of file at least new_size bytes     *//* long, rounded up if necessary to a multiple of the atomic block size	*//* 									*//*..ARGUMENTS...........................................................*//* 									*//* fac_id	-in-	descriptor of FAC				*//* 									*//* old_size 	-in-	the size of the block to be replaced		*//* 									*//* old_offset	-in-	the offset of the block to be replaced		*//* 									*//* new_size 	-out-	the new size of the block			*//* 									*//* new_offset	-out-	the new offset of the block			*/ /* 									*//*..RETURN-CODES........................................................*//* 									*//*    GOTH__FSM_CORRUPTLIST - internal list of file blocks corrupt	*//*    GOTH__MALLOC          - insufficient virtual memory		*//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_fast_extend_alloc(GD_FAC		 fac_id,					 GOTH_INTEGER    old_size,					 GOTH_INTEGER    old_offset,					 GOTH_INTEGER    new_size,					 GOTH_INTEGER    *new_offset);/*----------------------------------------------------------------------*//* EXTERN fsm_free							*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* frees filespace previously allocated by fsm_alloc			*//*									*//*..ARGUMENTS...........................................................*//*									*//*    fac     - descriptor of FAC					*//*    offset  - offset of start of previously allocated region		*//*									*//*..RETURN-CODES........................................................*//*									*//*    GOTH__MALLOC - insufficient virtual memory 			*//*    GOTH__ERROR  - the region was not obtained from fsm_alloc		*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_free(			    GOTH_DESCRIPTOR 	fac_id,			    GOTH_INTEGER 	offset);/*----------------------------------------------------------------------*//* EXTERN fsm_realloc							*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Extends or contracts a region obtained from fsm_alloc		*//*									*//*..ARGUMENTS...........................................................*//*									*//*    fac        - descriptor of FAC					*//*    allow_move - are we allowed to copy the original region elsewhere	*//*    offset     - returned offset of region				*//*    size       - size of new region					*//*									*//*..RETURN-CODES........................................................*//*									*//*    GOTH__FSM_CORRUPTLIST - internal list of file blocks corrupt	*//*    GOTH__MALLOC          - insufficient virtual memory		*//*    GOTH__ERROR           - region was not obtained from fsm_alloc	*//*    GOTH__FSM_REALLOCFAIL - there was no room in the file to extend	*//*                            the region without copying.(returned if	*//*                            allow_move is false			*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_realloc(			       GOTH_DESCRIPTOR	fac_id,			       GOTH_BOOLEAN	allow_move,			       GOTH_INTEGER	*offset,			       GOTH_INTEGER	size);/*----------------------------------------------------------------------*//* EXTERN fsm_alloc_analyse						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//*									*//*..ARGUMENTS...........................................................*//*									*//*									*//*..RETURN-CODES........................................................*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_alloc_analyse(				     GOTH_DESCRIPTOR	fac_id,				     GOTH_DESCRIPTOR	stream,				     GOTH_BOOLEAN	verbose);/*>>> EXTERN functions from FSM_BASICS.C <<<*//*----------------------------------------------------------------------*//* EXTERN fsm_set_page_extend                                           *//*......................................................................*//* Set the maximum number of open channels                              *//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_set_page_extend(GOTH_DESCRIPTOR fac_id,                                        GOTH_INTEGER    nbytes) ;/*----------------------------------------------------------------------*//* EXTERN fsm_get_mapped_ptr                                            *//*......................................................................*//* Get the current address pointer for a mapped file                    *//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_mapped_ptr(GOTH_DESCRIPTOR fac_id,                                       VOID_P            *mapptr) ;/*----------------------------------------------------------------------*//* EXTERN fsm_get_access_type                                           *//*......................................................................*//* Get the access type on a fac                                         *//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_access_type(GOTH_DESCRIPTOR fac_id,                                        FSM_ACCESS_TYPE *access_type);/*----------------------------------------------------------------------*//* EXTERN fsm_get_open_type						*//*......................................................................*//* Get the opening mode of a fac                                        *//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_open_type(GOTH_DESCRIPTOR fac_id, 				     FSM_OPENING_TYPE *opening_type);/*----------------------------------------------------------------------*//* EXTERN fsm_get_file_structure					*//*......................................................................*//* Get the file structure of a fac                                      *//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_file_structure(GD_FAC	 	fac_id, 					  FSM_STRUCTURE_TYPE 	*file_structure);/*----------------------------------------------------------------------*//* EXTERN fsm_set_max_open_files					*//*......................................................................*//* Set the maximum number of open files					*//* Arguments:								*//*  nnormal - maximum number of open files				*//*  nmapped - maximum number of mapped files           			*//*            (ignored if platform is not VMS)				*//* Errors:								*//*  GOTH__MALLOC - insufficient virtual memory				*//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_set_max_open_files(GOTH_INTEGER nnormal,					  GOTH_INTEGER nmapped);/*----------------------------------------------------------------------*//* EXTERN fsm_check_file_access						*//*......................................................................*//*..DESCRIPTION.........................................................*//* checks for existence,readability or writability of a file		*//*									*//*..ARGUMENTS...........................................................*//* sos		- SOS specifier						*//* file_access	- FSM_EXISTS	tests for file's existence		*//* 		  FSM_READABLE  tests for readability			*//* 	  	  FSM_WRITABLE  tests for writability			*//* accessible	- returns TRUE or FALSE					*//*									*//*..RETURN-CODES........................................................*//*									*//*  GOTH__NORMAL							*//*  GOTH__MALLOC  - out of memory					*//*  GOTH__BAD_SOS - invalid SOS						*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_check_file_access(GOTH_STRING	sos,					 FSM_ACCESS	file_access,					 GOTH_BOOLEAN	*accessible);/*----------------------------------------------------------------------*//* EXTERN fsm_read                                                      *//*......................................................................*//* Read data from a fac                                                 *//* Arguments:								*//*   fac_id - FAC descriptor						*//*   buffer - area of memory into which to read data			*//*   size   - size in bytes of individual objects to be read		*//*   nobj   - number of objects to read					*//*   nread  - returns number of objects read				*//* Errors:								*//*   GOTH__DESC         - invalid descriptor				*//*   GOTH__FSMFILEOPEN  - error reopening file				*//*   GOTH__FSMSEEKERROR - error seeking to stored position		*//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read(GOTH_DESCRIPTOR fac_id, VOID_P buffer,                             GOTH_INTEGER size, GOTH_INTEGER nobj,                             GOTH_INTEGER *nread);/*----------------------------------------------------------------------*//* EXTERN fsm_write                                                     *//*......................................................................*//* Write data to a fac                                                  *//* Arguments:								*//*   fac_id - FAC descriptor						*//*   buffer - area of memory from which to write data			*//*   size   - size in bytes of individual objects to be written		*//*   nobj   - number of objects to write				*//* Errors:								*//*   GOTH__DESC          - invalid descriptor				*//*   GOTH__FSMFILEOPEN   - error reopening file				*//*   GOTH__FSMSEEKERROR  - error seeking to stored position		*//*   GOTH__FSMWRITEERROR - i/o error on write (e.g disk full)		*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write(GOTH_DESCRIPTOR fac_id, VOID_P buffer,                              GOTH_INTEGER size, GOTH_INTEGER nobj);/*----------------------------------------------------------------------*//* EXTERN fsm_seek                                                      *//*......................................................................*//* Set the current fac pointer. Seeking to beyond the end of a file     *//* extends the file                                                     *//* Arguments:								*//*    fac_id   - descriptor of fac					*//*    offset   - offset in bytes from origin				*//*    origin   - FW_START   = start of file				*//*               FW_CURRENT = current position				*//*               FW_END     = end of file				*//* Errors:								*//*    GOTH__DESC - invalid descriptor					*//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_seek(GOTH_DESCRIPTOR fac_id,			    GOTH_INTEGER offset_arg, 			    FSM_WHEREFROM_TYPE origin_arg);/*----------------------------------------------------------------------*//* EXTERN fsm_copy							*//*......................................................................*//* copies 'size' bytes of data in a file from location starting at	*//* 'oldoff' to location starting at 'newoff'. The routine does not 	*//* attempt to intelligently handle the case where the two areas overlap	*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_copy(GOTH_DESCRIPTOR	fac,			    GOTH_INTEGER	oldoff,			    GOTH_INTEGER	size,			    GOTH_INTEGER	newoff);/*----------------------------------------------------------------------*//* EXTERN fsm_convert_integers						*//*......................................................................*//* Converts an array of integers in memory between local machine format	*//* and the format appropriate to a FAC					*//*									*//* ARGUMENTS								*//* 	fac - FAC for a given file					*//*  to_file - TRUE if we wish to convert to the format for the file	*//*           FALSE if we wish to convert from that format		*//*  integer_mem - pointer to array of integere				*//*  num_ints    - number of integers to convert				*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_convert_integers(GOTH_DESCRIPTOR	fac,					GOTH_BOOLEAN	to_file,					GOTH_INTEGER	*integer_mem,					GOTH_INTEGER	num_ints);/*----------------------------------------------------------------------*//* EXTERN fsm_convert_reals						*//*......................................................................*//*									*//* Converts an array of GOTH_REALS in memory between local machine	*//* format and the format appropriate to a FAC				*//*									*//* ARGUMENTS								*//* 	fac - FAC for a given file					*//*  to_file - TRUE if we wish to convert to the format for the file	*//*           FALSE if we wish to convert from that format		*//*  real_mem - pointer to array of GOTH_REALS				*//*  num_reals  - number of GOTH_REALS to convert			*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_convert_reals(GOTH_DESCRIPTOR	fac,				     GOTH_BOOLEAN	to_file,				     GOTH_REAL		*real_mem,				     GOTH_INTEGER	num_reals);/*----------------------------------------------------------------------*//* EXTERN fsm_read_integer						*//*......................................................................*//* Read an integer from a file performing any necessary format		*//* conversion								*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   integer   - returns integer read					*//* Errors:								*//*   as for fsm_read							*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_integer(GOTH_DESCRIPTOR fac_id,                                    GOTH_INTEGER *integer);/*----------------------------------------------------------------------*//* EXTERN fsm_write_integer						*//*......................................................................*//* Write out an integer to a file performing any necessary		*//* representation conversions						*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   integer   - integer to write					*//* Errors:								*//*   as for fsm_write							*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_integer(GOTH_DESCRIPTOR fac_id,                                     GOTH_INTEGER integer);/*----------------------------------------------------------------------*//* EXTERN fsm_read_real							*//*......................................................................*//* Read a real from a file performing any necessary format		*//* conversion								*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   real      - returns real read					*//* Errors:								*//*   as for fsm_read							*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_real(GOTH_DESCRIPTOR fac_id,				 GOTH_REAL *real);/*----------------------------------------------------------------------*//* EXTERN fsm_write_real						*//*......................................................................*//* Write out a real to a file performing any necessary			*//* representation conversions						*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   integer   - integer to write					*//* Errors:								*//*   as for fsm_write							*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_real(GOTH_DESCRIPTOR fac_id,				  GOTH_REAL real);/*----------------------------------------------------------------------*//* EXTERN fsm_read_string						*//*......................................................................*//* Read a string from a file						*//* The string is stored byte-packed preceded by an integer count. 	*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   string    - returns string read					*//* Errors:								*//*   as for fsm_read						       	*//*   GOTH__MALLOC - insufficient memory to store string			*//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_string(GOTH_DESCRIPTOR fac_id,				   GOTH_STRING *string);/*----------------------------------------------------------------------*//* EXTERN fsm_write_string						*//*......................................................................*//* Write a string to a file						*//* The string is stored byte-packed preceded by an integer count. 	*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   string    - string to write	       				*//* Errors:								*//*   as for fsm_write							*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_string(GOTH_DESCRIPTOR fac_id,				    GOTH_STRING string);/*----------------------------------------------------------------------*//* EXTERN fsm_read_id							*//*......................................................................*//* reads a GOTH_ID 							*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   id        - returns id read					*//* Errors:								*//*   as for fsm_read							*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_id(GOTH_DESCRIPTOR fac_id,			       GOTH_ID *id);/*----------------------------------------------------------------------*//* EXTERN fsm_write_id							*//*......................................................................*//* writes a GOTH_ID							*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   id        - id to write	         				*//* Errors:								*//*   as for fsm_write							*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_id(GOTH_DESCRIPTOR fac_id,				GOTH_ID id);/*----------------------------------------------------------------------*//* EXTERN fsm_read_object_id						*//*......................................................................*//* reads an object id from a file					*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   obj_id    - returns object_id read					*//* Errors:								*//*   as for fsm_read							*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_object_id(GOTH_DESCRIPTOR fac_id,				      GOTH_OBJECT_ID *obj_id);/*----------------------------------------------------------------------*//* EXTERN fsm_write_object_id						*//*......................................................................*//* writes an object_id to a file					*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   obj_id    - object id to write	      				*//* Errors:								*//*   as for fsm_write							*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_object_id(GOTH_DESCRIPTOR fac_id,				       GOTH_OBJECT_ID obj_id);/*----------------------------------------------------------------------*//* EXTERN fsm_read_boolean						*//*......................................................................*//* reads a boolean value from a file.					*//* 'true' is represented by the single character 't'			*//* 'false'                                    by 'f'			*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   boolean   - returns boolean read					*//* Errors:								*//*   as for fsm_read							*//*   GOTH__FSM_BADBOOLEAN - neither 't' nor 'f' read			*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_boolean(GOTH_DESCRIPTOR	fac_id,				    GOTH_BOOLEAN	*boolean);/*----------------------------------------------------------------------*//* EXTERN fsm_write_boolean						*//*......................................................................*//* writes a boolean value to a file					*//* 'true' is represented by the single character 't'			*//* 'false'                                    by 'f'			*//* Arguments:								*//*   fac_id    - descriptor of FAC					*//*   boolean   - boolean to write	       				*//* Errors:								*//*   as for fsm_write							*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_boolean(GOTH_DESCRIPTOR	fac_id,				     GOTH_BOOLEAN	boolean);/*----------------------------------------------------------------------*//* EXTERN fsm_read_value						*//*......................................................................*//* reads a value of specified type into a GOTH_VALUE			*//* Arguments:								*//*   fac_id   - descriptor of FAC					*//*   type     - datatype to be read					*//*   value    - value returned						*//* Errors:								*//*   as from fsm_read							*//*   GOTH__FSM_INVALIDTYPE - type invalid or not handled		*//*   allowed types are INTEGER,REAL,STRING,BOOLEAN,ID,OBJECT_ID		*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_value(GOTH_DESCRIPTOR	fac_id,				  GOTH_DATATYPE		type,				  GOTH_VALUE		*value);/*----------------------------------------------------------------------*//* EXTERN fsm_write_value						*//*......................................................................*//*									*//* writes a value of specified type from a GOTH_VALUE			*//* Arguments:								*//*   fac_id   - descriptor of FAC					*//*   type     - datatype to be written					*//*   value    - value to write						*//* Errors:								*//*   as from fsm_write							*//*   GOTH__FSM_INVALIDTYPE - type invalid or not handled		*//*   allowed types are INTEGER,REAL,STRING,BOOLEAN,ID,OBJECT_ID		*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_value(GOTH_DESCRIPTOR	fac_id,				   GOTH_DATATYPE	type,				   GOTH_VALUE		value);/*----------------------------------------------------------------------*//* EXTERN fsm_sizeof							*//*......................................................................*//* returns size of a given value in bytes				*//*									*//* Arguments:								*//*   fac_id   - descriptor of FAC					*//*   type     - datatype 						*//*   value    - value 							*//* Errors:								*//*   GOTH__FSM_INVALIDTYPE - type invalid or not handled		*//*									*//*----------------------------------------------------------------------*/extern GOTH_INTEGER fsm_sizeof(GOTH_DESCRIPTOR	fac_id,			       GOTH_DATATYPE	type,			       GOTH_VALUE	value);/*----------------------------------------------------------------------*//* EXTERN fsm_tell                                                      *//*......................................................................*//* Return the current fac pointer                                       *//* Arguments:								*//*    fac_id   - descriptor of FAC					*//*    offset   - returns offset from beginning of file in bytes		*//* Errors:								*//*    GOTH__DESC - invalid descriptor					*//* 									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_tell(GOTH_DESCRIPTOR fac_id, GOTH_INTEGER *offset);/*----------------------------------------------------------------------*//* EXTERN fsm_sos_delete						*//*......................................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_delete(GOTH_STRING sos);/*----------------------------------------------------------------------*//* EXTERN fsm_sos_structure_delete					*//*......................................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_structure_delete(GOTH_STRING sos,					    FSM_STRUCTURE_TYPE file_structure);/*----------------------------------------------------------------------*//* EXTERN fsm_sos_wildcard_delete					*//*......................................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_wildcard_delete(GOTH_STRING sos);/*----------------------------------------------------------------------*//* EXTERN fsm_eof							*//*......................................................................*//* determines whether we are at end of file for the FAC 'fac_id'	*//* ateof returns TRUE if at end of file , FALSE otherwise		*//* function returns GOTH__FSM_WRONGFILETYPE if the file is not of type	*//* FS_NORMAL,FS_RAW or FS_TEXT						*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_eof(GOTH_DESCRIPTOR fac_id,GOTH_BOOLEAN *ateof);/*----------------------------------------------------------------------*//* EXTERN fsm_read_integer_array					*//*......................................................................*//*									*//* reads into an array of integers from a file				*//* ARGUMENTS								*//* 	fac_id		file descriptor					*//* 	num_elem	number of integers to read			*//* 	array		address of the array				*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_integer_array(GOTH_DESCRIPTOR	fac_id,					  GOTH_INTEGER		num_elem,					  GOTH_INTEGER		*array);/*----------------------------------------------------------------------*//* EXTERN fsm_write_integer_array					*//*......................................................................*//*									*//* writes an array of integers to a file				*//* ARGUMENTS								*//* 	fac_id		file descriptor					*//* 	num_elem	number of integers to write			*//* 	array		address of the array				*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_integer_array(GOTH_DESCRIPTOR	fac_id,					   GOTH_INTEGER		num_elem,					   GOTH_INTEGER		*array);/*----------------------------------------------------------------------*//* EXTERN fsm_read_real_array						*//*......................................................................*//* reads into an array of reals from a file				*//* ARGUMENTS								*//* 	fac_id		file descriptor					*//* 	num_elem	number of reals to read				*//* 	array		address of the array				*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_real_array(GOTH_DESCRIPTOR	fac_id,				       GOTH_INTEGER	num_elem,				       GOTH_REAL	*array);/*----------------------------------------------------------------------*//* EXTERN fsm_write_real_array						*//*......................................................................*//* writes an array of reals to a file					*//* ARGUMENTS								*//* 	fac_id		file descriptor					*//* 	num_elem	number of reals to write			*//* 	array		address of the array				*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_real_array(GOTH_DESCRIPTOR	fac_id,					GOTH_INTEGER	num_elem,					GOTH_REAL	*array);/*----------------------------------------------------------------------*//* EXTERN fsm_set_machine_type						*//*......................................................................*//* This routine is provided to change the machine type field in a fac	*//* and in its associated file - it is needed to handle the case where 	*//* a file created on machine B is to receive raw data from a file 	*//* created on machine A - the neatest solution is for the destination	*//* file to be have its machine type set to A				*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_set_machine_type(GOTH_DESCRIPTOR	to_fac_id,					GOTH_DESCRIPTOR from_fac_id);/*----------------------------------------------------------------------*//* EXTERN fsm_get_machine_type						*//*......................................................................*//* This routine is provided to get the machine type of a FAC.		*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_machine_type(GOTH_DESCRIPTOR	fac_id,					GOTH_INTEGER	*machine_type) ;/*----------------------------------------------------------------------*//* EXTERN fsm_read_line							*//*......................................................................*//*..DESCRIPTION.........................................................*//*  This routine reads a line from a text file.				*//*  The file must have been opened using the FS_TEXT file structure.	*//*  The line delimiter is not inserted in the buffer,which is always 	*//*  NULL-terminated.							*//*  The number of characters read (not including the delimiter) is	*//*  returned in retlen.							*//*  If the line is too long it is truncated,but the full number of 	*//*  characters is still returned in retlen.				*//*									*//*..ARGUMENTS...........................................................*//*									*//* 	fac_id		- FAC of input file				*//* 	buffer		- pointer to user's buffer(the buffer must be	*//* 			  at least maxlen+1 characters long)		*//* 	maxlen		- maximum number of characters to read		*//*	retlen		- number of characters read.			*//*									*//*..RETURN-CODES........................................................*//*									*//*	GOTH__NORMAL		Successful completion.			*//*	GOTH__DESC		Routine not passed a valid FAC		*//* 	GOTH__FSM_WRONGFILETYPE File was not opened as FS_TEXT		*//*	GOTH__FSMREADERROR	Error reading file			*//*      GOTH__LINETOOLONG	Line was too long for user's buffer	*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_read_line(GOTH_DESCRIPTOR	fac_id,				 GOTH_STRING		buffer,				 GOTH_INTEGER		maxlen,				 GOTH_INTEGER		*retlen);/*----------------------------------------------------------------------*//* EXTERN fsm_write_line						*//*......................................................................*//*..DESCRIPTION.........................................................*//* writes a line of text to a text file appending a record terminator	*//*									*//*..ARGUMENTS...........................................................*//*	fac_id 	-	FAC of output file				*//* 	buffer	-	NULL-terminated text buffer			*//*									*//*..RETURN-CODES........................................................*//*	GOTH__NORMAL		Successful completion			*//* 	GOTH__DESC		Routine not passed a valid FAC		*//* 	GOTH__FSM_WRONGFILETYPE File was not opened as FS_TEXT		*//* 	GOTH__FSMWRITEERROR	i/o error (e.g.disk full)		*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_write_line(GOTH_DESCRIPTOR	fac_id,				  GOTH_STRING		buffer);/*----------------------------------------------------------------------*//* EXTERN fsm_copy_sos							*//*......................................................................*//*..DESCRIPTION.........................................................*//*  This routine copies one file to another.				*//*									*//*..ARGUMENTS...........................................................*//*									*//*	input_sos	-in- SOS of source				*//*      output_sos 	-in- SOS of destination				*//*      allow_overwrite -in- if TRUE overwriting existing file allowed !*//*                           if FALSE the routine aborts if output_sos	*//*                           exists					*//*									*//*..RETURN-CODES........................................................*//*	GOTH__NORMAL	      successful completion			*//* 	GOTH__FSMNONEXISTENT  input_sos does not exist			*//*      GOTH__FSMEXISTS       allow_overwrite is FALSE and output_sos	*//*                            exists					*//*	GOTH__FSMFILEOPEN     system error opening file			*//*	GOTH__FSMREADERROR    system error on reading input_sos		*//*      GOTH__FSMWRITEERROR   system error writing output_sos		*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_copy_sos(GOTH_STRING	input_sos,				GOTH_STRING	output_sos,				GOTH_BOOLEAN	allow_overwrite);/*----------------------------------------------------------------------*//* EXTERN fsm_rename_sos						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//*  This routine renames one file to another.				*//*									*//*..ARGUMENTS...........................................................*//*									*//*	input_sos	-in- SOS of source				*//*      output_sos 	-in- SOS of destination				*//*      allow_overwrite -in- if TRUE overwriting existing file allowed !*//*                           if FALSE the routine aborts if output_sos	*//*                           exists					*//*									*//*..RETURN-CODES........................................................*//*	GOTH__NORMAL	      successful completion			*//* 	GOTH__FSMNONEXISTENT  input_sos does not exist			*//*      GOTH__FSMEXISTS       allow_overwrite is FALSE and output_sos	*//*                            exists					*//*      GOTH__FSMRENAMEERROR  system error on rename                    *//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_rename_sos(GOTH_STRING	input_sos,				  GOTH_STRING	output_sos,				  GOTH_BOOLEAN	allow_overwrite);/*----------------------------------------------------------------------*//* EXTERN fsm_get_size							*//*......................................................................*//*..DESCRIPTION.........................................................*//* 									*//*  This routine returns the size of a file in bytes.                   *//*  For SPAM files it returns the cumulative size of the data plus the  *//*  bitmap file.							*//*									*//*..ARGUMENTS...........................................................*//*									*//*     	sos	 -in-	SOS of file					*//*	filesize -out-	size of file in bytes				*//*									*//*..RETURN-CODES........................................................*//*									*//* GOTH__NORMAL		Completed OK					*//* GOTH__FSMNONEXISTENT File does not exist				*//* GOTH__UNTRANSOS	The SOS could not be translated 		*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_size(GOTH_STRING sos,				GOTH_INTEGER *filesize);/*----------------------------------------------------------------------*//* EXTERN fsm_get_size_from_fac						*//*......................................................................*//*..DESCRIPTION.........................................................*//* 									*//*  This routine determines the size of a file (in bytes) from its FAC. *//*  For SPAM files it returns the cumulative size of the data plus the  *//*  bitmap file.							*//*									*//*..ARGUMENTS...........................................................*//*									*//*	fac	 -in-	FAC of file					*//*	filesize -out-	size of file in bytes				*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*	GOTH__NORMAL	Completed OK					*//*	GOTH__DESC	FAC descriptor is the wrong datatype or it has  *//*			been corrupted					*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_size_from_fac(GD_FAC		fac,					 GOTH_INTEGER	*filesize);/*>>> EXTERN functions from FSM_SOS.C <<<*//*----------------------------------------------------------------------*//* EXTERN fsm_sos_create_directory					*//*......................................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_create_directory(GOTH_STRING parent_sos,					    GOTH_STRING name,					    GOTH_STRING prefix,					    GOTH_STRING suffix,					    GOTH_BOOLEAN complete);/*----------------------------------------------------------------------*//* EXTERN fsm_recursive_expand						*//*......................................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_recursive_expand(char *input_ptr,					int total_length,					char **output_ptr);/*----------------------------------------------------------------------*//* EXTERN fsm_substitute_variables					*//*......................................................................*//*									*//* Routine to scan a file specification for any strings enclosed in	*//* $(...). These strings will be expanded, using "getenv", and replaced	*//* with those expansions.						*//*									*//* The expanded filespec is passed back in outstring, which is 		*//* allocated by the routine. The caller is expected to free this	*//* filespec.								*//* 									*//* If have had:								*//* 									*//* 	setenv goth_example /usr/users/gothic/				*//*									*//* then:								*//* 									*//* 	$(goth_example)/subdir						*//*									*//* would be replaced with:						*//* 									*//* 	/usr/users/gothic//subdir					*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_substitute_variables(GOTH_STRING instring,					    GOTH_STRING *outstring);/*----------------------------------------------------------------------*//* EXTERN fsm_sos_to_sys_spec						*//*......................................................................*//* This routine translates a GOTHIC Saved Object Specification (SOS)	*//* to a (possibly) system-dependent file name.				*//* If the SOS directory "dir1" is defined as "prefix1" and "suffix1"	*//*                      "dir2"               "prefix2" and "suffix2"	*//* then the SOS dir1:dir2:file will be translated to			*//*      "prefix1""prefix2""file""suffix2""suffix1"			*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_to_sys_spec(GOTH_STRING sos_spec,				       GOTH_STRING *sys_spec);/*----------------------------------------------------------------------*//* EXTERN fsm_sos_to_dir						*//*......................................................................*//* This routine translates a GOTHIC Saved Object Specification (SOS)	*//* to a (possibly) system-dependent file name and returns the directory *//* component only							*//* Note that if the last component of the SOS is a subdirectory then it *//* must be followed by a colon. If the last component is not followed   *//* by a colon it is taken to be a filename and is ignored.              *//*								        *//* If the SOS directory "dir1" is defined as "prefix1" and "suffix1"	*//*                      "dir2"               "prefix2" and "suffix2"	*//* then the SOS dir1:dir2:file (or dir1:dir2:) will be translated to	*//*      "prefix1""prefix2"						*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_to_dir(GOTH_STRING sos_spec,				  GOTH_STRING *dirname);/*----------------------------------------------------------------------*//* EXTERN fsm_sos_initialise						*//*......................................................................*//* sets up SOS to filename translation by reading in a LULL file whose	*//* filename is given in 'config_spec'					*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_initialise(GOTH_STRING config_spec);/*----------------------------------------------------------------------*//* EXTERN fsm_sos_report						*//*......................................................................*//* enables/disables reporting of translation of SOS's to filenames	*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_report(GOTH_BOOLEAN do_reporting);/*----------------------------------------------------------------------*//* EXTERN fsm_sos_default_to_sys_spec					*//*......................................................................*//* if 'sos' contains a colon this routine emulates fsm_sos_to_sys_spec	*//* otherwise it appends 'sos' to 'default_stub' (inserting a colon if 	*//* necessary ) and calls fsm_sos_to_sys_spec with the resulting sos	*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_default_to_sys_spec(GOTH_STRING	sos,					       GOTH_STRING	default_stub,					       GOTH_STRING	*sys_spec);/*----------------------------------------------------------------------*//* EXTERN fsm_sos_default						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* This routine takes an sos, which may or may not be a complete sos,	*//* and a default initial stub for an sos. If the input sos does not	*//* contain a `:', defaulted_sos will be returned as the input sos	*//* prefixed with the default_stub. Otherwise, defaulted_sos is		*//* returned containing the same as sos. 				*//* 									*//* The caller is expected to free defaulted_sos.			*//*									*//*..ARGUMENTS...........................................................*//*									*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_sos_default(GOTH_STRING	sos,				   GOTH_STRING	default_stub,				   GOTH_STRING	*defaulted_sos);/*>>> EXTERN functions from FSM_LOCK.C <<<*//*----------------------------------------------------------------------*//* EXTERN fsm_lock							*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Locks the specified region for read or write                         *//*									*//*..ARGUMENTS...........................................................*//*			  						*//* fac_id	-in-	FAC of file to lock				*//* start_offset -in-    position in the file of the start of the region *//* length       -in-    length of the region                            *//* lock_type    -in-    type of lock (LKT_READ or LKT_WRITE             *//* wait_for_lock-in-    if the lock cannot be enforced and this argument*//*                      is true,sleep until lock is available           *//* lock_id      -out-   id of resulting lock                            *//*									*//*..RETURN-CODES........................................................*//*									*//*  GOTH__NORMAL        Success                                         *//*  GOTH__TOOMANYOPEN   Too many FACs already fixed in list	        *//*  GOTH__TOOMANYLOCKS  Too many locks applied to this file             *//*  GOTH__ALREADYLOCKED This lock conflicts with an existing one        *//*  GOTH__LOCKERROR     System error from 'fcntl'			*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_lock(GD_FAC		fac_id,			    GOTH_INTEGER	start_offset,			    GOTH_INTEGER	length,			    FSM_LOCK_TYPE	lock_type,			    GOTH_BOOLEAN	wait_for_lock,			    GOTH_ID		*lock_id);/*----------------------------------------------------------------------*//* EXTERN fsm_unlock							*//*......................................................................*//*..DESCRIPTION.........................................................*//*			        					*//*  Releases an existing lock on a file                                 *//*									*//*..ARGUMENTS...........................................................*//*									*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_unlock(GD_FAC	fac_id,			      GOTH_ID	lock_id);/*----------------------------------------------------------------------*//* EXTERN fsm_inquire_remote_lock					*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//*									*//*..ARGUMENTS...........................................................*//*									*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_inquire_remote_lock(GD_FAC	 fac_id,					   GOTH_INTEGER  start_offset,					   GOTH_INTEGER	 length,					   FSM_LOCK_TYPE *lock_type);/*----------------------------------------------------------------------*//* EXTERN fsm_inquire_local_lock					*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//*									*//*..ARGUMENTS...........................................................*//*									*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_inquire_local_lock(GD_FAC	fac_id,					  GD_COLLECTION *lock_set_id);/*----------------------------------------------------------------------*//* EXTERN fsm_get_lock_info						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//*									*//*..ARGUMENTS...........................................................*//*									*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_lock_info(GD_FAC		fac_id,				     GOTH_ID		lock_id,				     GOTH_INTEGER	*start_offset,				     GOTH_INTEGER	*length,				     FSM_LOCK_TYPE	*lock_type);/*----------------------------------------------------------------------*//* EXTERN fsm_block_start						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Initialise a FAC to do block mode access. This routine sets		*//* the FAC into block mode.						*//*									*//*..ARGUMENTS...........................................................*//*									*//* fac_id	-in- the FAC to set into block mode			*//* block_type   -in- the type of the block -			       !*//*		     FSM_BLOCK_NEW - the block is to contain new data  !*//*		     FSM_BLOCK_REPLACE - the block is to totally       !*//*					 replace existing data.	       !*//*		     FSM_BLOCK_READ - the block is to read old data    !*//* initial_size -in- the initial size fo the buffer to use for block	*//*		     mode.						*//* increment_size -in- the increment size of the block buffer		*//*									*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_block_start(GD_FAC         fac_id,				      FSM_BLOCK_TYPE block_type,				      GOTH_INTEGER   initial_size,				      GOTH_INTEGER   increment_size) ;/*----------------------------------------------------------------------*//* EXTERN fsm_block_abandon						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Abandon a transaction block without flushing any edited data.	*//* The fsm is retained in block mode.					*//*									*//*..ARGUMENTS...........................................................*//*									*//* fac_id	-in- the FAC to set into block mode			*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_block_abandon(GD_FAC       fac_id);/*----------------------------------------------------------------------*//* EXTERN fsm_block_finish						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Finish a block transmission. If the block has been edited the data   *//* is written to the file.						*//*									*//*..ARGUMENTS...........................................................*//*									*//* fac_id	-in- the FAC to set out of block mode			*//* offset       -out- the offset to seek to before trying to 		*//*		      offset the block.					*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS  fsm_block_finish(GD_FAC       fac_id,					GOTH_INTEGER *offset);/*----------------------------------------------------------------------*//* EXTERN fsm_block_size						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Get the current buffer size of the block buffer used by the FAC	*//*									*//*..ARGUMENTS...........................................................*//*									*//* fac_id	-in- the FAC to inquire					*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_block_size(GD_FAC fac_id,				  GOTH_INTEGER	*block_size) ;/*----------------------------------------------------------------------*//* EXTERN fsm_get_compression						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Get the current compression scheme for a FAC 			*//*									*//*..ARGUMENTS...........................................................*//*									*//* fac_id -in- the fac to use for the compression			*//* compression_scheme -ou- the COMPRESSLIB name of the compression      *//* currently in use.							*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_get_compression(GD_FAC       fac_id,				       GOTH_STRING  *compression_scheme) ;/*----------------------------------------------------------------------*//* EXTERN fsm_set_compression						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Set the current compression scheme for a FAC 			*//*									*//*..ARGUMENTS...........................................................*//*									*//* fac_id -in- the fac to use for the compression			*//* compression_scheme -in- the COMPRESSLIB name of the compression      *//* to use.								*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_set_compression(GD_FAC       fac_id,				       GOTH_STRING  compression_scheme) ;/*----------------------------------------------------------------------*//* EXTERN fsm_buffer_read						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Routine to perform a read operation from a file, and creating a 	*//* buffer of suitable size						*//*									*//*..ARGUMENTS...........................................................*//*									*//*   fac_id - FAC descriptor						*//*   *buffer - area of memory into which to read data			*//*   *buffer_size - the size of the buffer				*//*   size   - size in bytes of individual objects to be read		*//*   nobj   - number of objects to read					*//*   nread  - returns number of objects read				*//*									*//*..RETURN-CODES........................................................*//*									*//*   GOTH__DESC         - invalid descriptor				*//*   GOTH__FSMFILEOPEN  - error reopening file				*//*   GOTH__FSMSEEKERROR - error seeking to stored position		*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_buffer_read(			    GD_FAC 		fac_id, 			    VOID_P 		*buffer, 			    GOTH_INTEGER	*buffer_size,			    GOTH_INTEGER	size,			    GOTH_INTEGER	nobj, 			    GOTH_INTEGER	*nread) ;/*>>> EXTERN functions from FSM_CONCAT.C <<<*//*----------------------------------------------------------------------*//* EXTERN fsm_concatenate_single					*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//*									*//*..ARGUMENTS...........................................................*//*									*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_concatenate_single(GD_FAC	conc_fac_id,					  GOTH_STRING	virt_name,					  GD_FAC	phys_fac_id);/*----------------------------------------------------------------------*//* EXTERN fsm_concatenate_multiple					*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* Concatenates the files specified in 'phys_sos_list_id' into a single *//* file 'conc_sos'.							*//*									*//*..ARGUMENTS...........................................................*//*									*//*     	conc_sos 	-in- SOS for concatenated file                  *//*	virt_name_list	-in- list of virtual names by which the         *//*                           component files will be known              *//*	phys_sos_list	-in- list of SOSes for the component files      *//*      delete_phys     -in- delete the input files if the concatenation*//*			     is successful				*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_concatenate_multiple(GOTH_STRING		conc_sos,					    GD_COLLECTION	virt_name_list,					    GD_COLLECTION	phys_sos_list,					    GOTH_BOOLEAN	delete_phys);/*----------------------------------------------------------------------*//* EXTERN fsm_build_virtual_fac						*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//*									*//*..ARGUMENTS...........................................................*//*									*//*									*//*..RETURN-CODES........................................................*//*									*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS fsm_build_virtual_fac(GD_FAC			conc_fac_id,					 GOTH_STRING		virt_name,					 FSM_ACCESS_TYPE	access_mode,					 FSM_OPENING_TYPE	opening_mode,					 GD_FAC			*virtual_fac);#endif
+#ifndef _FSM_INTRINSICS
+#define _FSM_INTRINSICS
+/* $Header: /gothic/hdr/fsmlib/v1-12a-5/RCS/hdr.fsm_intrinsics.h,v 1.18.2.1 1995/02/23 17:51:43 clarke Exp $								*/
+/* 									*/
+/* $Log: hdr.fsm_intrinsics.h,v $
+ * Revision 1.18.2.1  1995/02/23  17:51:43  clarke
+ * Version v1-12a-5 derived from v1-12a-4
+ * Fix bug in conversion of VAX to IEEE where output bits are not
+ * set to zero.
+ * WICC 371.
+ *
+ * Revision 1.18  1994/05/24  17:51:58  jon
+ * Version v1-12a-4 derived from v1-12a-3
+ * Changes to ensure compilation on VMS.
+ * WICC 284
+ * Moved fsm_free_fac and fsm_fix_fac to fsm_channel from fsm_lock. Seems a
+ * better place for them to be and fsm_lock has many system depenedent features
+ * which these two routines do not need.
+ *
+ * Revision 1.17  1994/02/16  19:11:21  olivia
+ * Version v1-12a-3 derived from v1-12a-2
+ * WICC 239
+ * Update fsm_fast_extend_alloc to work for file
+ * structure types other than FS_CONTIGOUS.
+ *
+ * Fix 32-bit signed integer overflow calculating spam file
+ * offsets.  Use a temporary variable to ensure that the calculations are
+ * done in the correct order.  Add new function
+ * spam_get_data_offset_from_index().  See Gothic error log 20.
+ *
+ * Fix bug in fsm_get_spam_long_runlength() by ensuring that a run is not
+ * continued across SPAM pages unless it should be (don't continue if a
+ * different run starts on the next page.
+ *
+ * Revision 1.16  1993/09/15  15:54:56  stevewi
+ * Version v1-12a-2 derived from v1-12a-1
+ * See Gothic WICC 126.
+ *
+ * Increase FSM_FD_MARGIN to allow more files to be opened outside FSMLIB's control.
+ * Opening of UID files, password files etc was failing.
+ * Undo part of previous modification to fsm_read_line().
+ * PSLIB checks for FSMREADERROR on end of file, but FSMLIB
+ * was returning GOTH__FSM. This has been changed back to
+ * GOTH__FSMREADERROR.
+ * See WICC GOTHIC 134.
+ * Frozen for BNSC IGIS Analysis integration testing.
+ *
+ * Revision 1.15  1993/09/09  15:11:38  davida
+ * Version v1-12a-1 derived from v1-12
+ * WICC 127
+ * Make fsm_read_line() and fsm_write_line() ensure that the file
+ * is open before accessing it.
+ *
+ * Revision 1.14  1993/08/10  21:52:41  jon
+ * Version v1-12 derived from v1-11
+ * See Gothic WICC 1.
+ *
+ * Develop a method of writing a block of data representing a single
+ * transaction.
+ *
+ * Develop compression of spam files with reading and writing of compressed data.
+ *
+ * Develop routine `fsm_get_size()' and `fsm_get_size_from_fac()'.
+ *
+ * Fix bug in `fsm_convert_double()' where VMS real is converted to IEEE.
+ * The output real should be set to zero before bitwise operations are
+ * performed in conversion. (See also Gothic WICC 87).
+ *
+ * Fix bug in `fsm_clear_spam_bit_run()'. Clearing a run at the end of one spam
+ * page could result in the run at the start of the next page also being cleared.
+ * If the second run is later explicitly cleared, a GOTH__SPAMNOTALLOC error
+ * occurs.
+ *
+ * Modified `fsm_sos_wildcard_delete()' and `fsm_spam_initialise()' to fix leaks.
+ *
+ * Revision 1.13  1993/04/22  10:15:42  davidm
+ * Version v1-11 derived from v1-10
+ * added prototypes for fsm_channel routines to enable HP compilation
+ *
+ * Revision 1.12  1993/03/30  13:19:47  jon
+ * Version v1-10 derived from v1-9
+ * SOS translation modified such that undefined fields in a sos are translated
+ * as environment variables
+ *
+ * Modified `fsm_lock()' and `fsm_inquire_remote_lock()' so that a start offset
+ * of zero (when specified in conjunction with a length of zero) does not have
+ * a file header size correction added to it prior to the lock being requested.
+ * This ensures that the entire file, including any FSMLIB header is locked.
+ * On the SUN, this also avoids an apparent bug in `fcntl()', which always
+ * returns an error if a zero length is specified with a non-zero start
+ * offset.
+ *
+ * Added macro `FSM_CORRECTION()' to `fsm_internals.h' and replaced all other
+ * code in FSMLIB for calculating header size corrections with the macro.
+ *
+ * Revision 1.11  1993/02/04  16:22:52  jon
+ * Version v1-9 derived from v1-8
+ * addition of NFS file locking (using 'fcntl')
+ *
+ * Revision 1.10  1992/10/22  10:36:12  davidr
+ * Version v1-8 derived from v1-7
+ * changed 'fsm_sos_wildcard_delete' to use individual 'unlink's rather than
+ * 'system' to delete files
+ *
+ * Revision 1.9  1992/09/06  20:01:05  jon
+ * Version v1-7 derived from v1-6
+ * fixed bug (log 44 in Xlate testing) whereby 'fsm_sos_to_sys_spec' was
+ * crashing if the sos is a simple filename (e.g "test" )
+ *
+ * Revision 1.8  1992/08/26  20:18:58  jon
+ * Version v1-6 derived from v1-5
+ * added function 'fsm_sos_to_dir' to translate an SOS to its directory
+ * component
+ *
+ * Revision 1.7  1992/08/10  17:47:44  adrian
+ * Version v1-5 derived from v1-4
+ * Addition of a routine which allows the machine type of a file to be
+ * extracted from a FAC.
+ *
+ * Revision 1.6  1992/07/11  12:57:58  jon
+ * Version v1-4 derived from v1-3
+ * FO_WRITE_TEXT mode added
+ * Added jacket routine for `fsm_sos_default_to_sys_spec()'
+ *
+ * Revision 1.5  1992/06/05  15:20:43  jon
+ * Version v1-3 derived from v1-2-1
+ * Extracted to allow implementation of `fsm_fast_extend_alloc()'.
+ * Added `fsm_test.lull' program to allow testing of SPAM and
+ * CONTIGUOUS file structures.
+ * Substantially modified routine which writes out free space list for
+ * contiguous file and slightly changed routine which extends contiguous
+ * file to fix file corruption problem which resulted in part of free
+ * space being lost, and the rest being written over data held in the file.
+ * Modified sos deletion and spam sos deletion routines to return specific
+ * status codes to indicate that file deletion has failed or that spam bitmap
+ * file deletion has failed.
+ * Modified `morefile()' routine used to extend contiguous allocation files
+ * so that it combines the free space added to the end of the file with any
+ * existing block of free space at the end of the file. This solves a problem
+ * which could result in excessive fragmentation of space in contiguous files.
+ * File structure parameter initialised for raw and text files within fsm_build_fac
+ * so that files are readable when asked to store integers or reals.
+ * Fixed bug in fsm_seek preventing seeks to end of FS_TEXT files.
+ *
+ * Revision 1.4  1992/05/12  14:41:46  davidm
+ * Version v1-2-1 derived from v1-2
+ * Extracted to fix bug which ensures that all unstructured files have their
+ * file structure set to FS_RAW in the DED - due to an `=' instead of an `==' in
+ * an if-statement.
+ *
+ * Revision 1.3  1992/04/28  17:37:08  jon
+ * Version v1-2 derived from v1-1
+ * Correct status code checking bugs and continue with development of new
+ * file structures.
+ * Completed SPAM file structure.
+ * Improved contiguous allocation algorithms.
+ * Removed debugging printouts.
+ *
+ * Revision 1.2  1992/03/16  17:29:53  jon
+ * Version v1-1 derived from v1-0
+ * Version containing `test' alternative (SPAM files etc) copied over from original system
+ *								*/
+
+/************************************************************************/
+/* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*/
+/* Author    Jonathan Billing,  6-Jun-1991				*/
+/************************************************************************/
+
+/************************************************************************/
+/*									*/
+/*		    F S M _ I N T R I N S I C S . H 			*/
+/*									*/
+/* Part of GOTHIC module FSMLIB						*/
+/* Part of GOTHIC module FSMLIB						*/
+/* Version 0.1, Jonathan Billing  6-Jun-1991				*/
+/************************************************************************/
+
+
+/*>>> EXTERN functions from FSM.C <<<*/
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_build_fac							*/
+/*......................................................................*/
+/* creates a FAC from an SOS						*/
+/* Arguments:								*/
+/*    fac_id         - returns created FAC				*/
+/*    sos            - SOS string					*/
+/*    access_mode    - FA_NORMAL (normal file)				*/
+/*                     FA_MAPPED (VMS mapped file)			*/
+/*    opening_mode   - FO_CREATE_NEW (initialise new file,overwrite	*/
+/*                                    existing old file)		*/
+/*                     FO_CREATE (initialise new file only if it does	*/
+/*                                not already exist) 			*/
+/*                     FO_READ  (open existing file read-only)		*/
+/*                     FO_WRITE (open existing file for update)		*/
+/*		       FO_READ_TEXT (open existing text file for reading*/
+/* Optional arguments   						*/
+/*    file_structure (only used if creating the file)			*/
+/*                     FS_NORMAL      - unstructured file		*/
+/*                     FS_CONTIGUOUS  - structured with fixed size  	*/
+/*                                      blocks and a free space list	*/
+/*		       FS_TEXT	      - text file			*/
+/*    atom_size (FS_CONTIGUOUS)       - block size in bytes		*/
+/*									*/
+/* Errors:								*/
+/*    GOTH__FSMFILEOPEN     - error opening file			*/
+/*    GOTH__FSMFILECLOSE    - error closing file			*/
+/*    GOTH__FSMFILEEXISTS   - file exists				*/
+/*    GOTH__FSMNOFILEEXISTS - file does not exist			*/
+/*    GOTH__FSMWRITEERROR   - i/o error on write			*/
+/*    GOTH__BADFSMACCESS    - invalid access mode			*/
+/*    GOTH__BADFSMOPENING   - invalid opening mode			*/
+/*    GOTH__MALLOC          - insufficient virtual memory		*/
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_build_fac(GOTH_DESCRIPTOR 	*fac_id,
+				 GOTH_STRING 	 	sos,
+				 FSM_ACCESS_TYPE	access_mode,
+				 FSM_OPENING_TYPE	opening_mode,
+/* optional arguments							*/
+/*				 FSM_STRUCTURE_TYPE	file_structure, */
+/*                               GOTH_INTEGER		atom_size)      */
+				 ...);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_destroy_fac						*/
+/*......................................................................*/
+/* destroys a FAC							*/
+/* Arguments:								*/
+/*    fac_id - descriptor of FAC					*/
+/* 									*/
+/* Errors:								*/
+/*    GOTH__FSMFILEOPEN     - error opening file			*/
+/*    GOTH__FSMFILECLOSE    - error closing file			*/
+/*    GOTH__FSMFILEEXISTS   - file exists				*/
+/*    GOTH__FSMNOFILEEXISTS - file does not exist			*/
+/*    GOTH__FSMWRITEERROR   - i/o error on write			*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_destroy_fac(GOTH_DESCRIPTOR fac_id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_analyse							*/
+/*......................................................................*/
+/* prints details of a file opened by FSMLIB 				*/
+/* ARGUMENTS								*/
+/* 	fac	file descriptor						*/
+/* 	stream	output stream on which to print details			*/
+/* 	verbose if true give extra information on structured files	*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_analyse(GOTH_DESCRIPTOR	fac,
+			       GOTH_DESCRIPTOR	stream,
+			       GOTH_BOOLEAN	verbose);
+
+
+/*>>> EXTERN functions from FSM_ALLOC.C <<<*/
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_alloc_initialise						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* This routine intialises the FSMLIB file allocation handling, 	*/
+/* including the creation of any caches used as part of the allocation	*/
+/* management.								*/
+/*									*/
+/* This routine should never be called directly by an application.	*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* cache_id	-out-	The descriptor for the cache DED created	*/
+/* 			to cache FSMLIB file information.		*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_alloc_initialise(
+					GD_CACHE	*cache_id,
+					GOTH_INTEGER	hash_table_size);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_set_batch_allocation					*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Sets the strategy for allocating file space - we either allocate	*/
+/* in large blocks which is wasteful of disk space but gives better	*/
+/* performance,or allocate only the amount requested.			*/
+/*									*/
+/* This has no real meaning for the SPAM allocation strategy, since	*/
+/* we will always allocate in large blocks.				*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* fac		-in- 	descriptor of FAC				*/
+/* batchit	-in- 	if TRUE we allocate in large blocks		*/
+/* 			if FALSE we only allocate requested amount	*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*  GOTH__NORMAL							*/
+/*  GOTH__DESC								*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_set_batch_allocation(
+					    GOTH_DESCRIPTOR 	fac_id,
+					    GOTH_BOOLEAN	batchit);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_alloc_size						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Gets the size of a previously allocated region			*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*    fac      - descriptor of FAC					*/
+/*    offset   - offset of start of region				*/
+/*    size     - returned size						*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*    GOTH__ERROR - region was not obtained from fsm_alloc		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_alloc_size(
+				      GOTH_DESCRIPTOR	fac_id,
+				      GOTH_INTEGER	offset,
+				      GOTH_INTEGER	*size);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_alloc							*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* This routine hands back a region of file at least size bytes long.	*/
+/* rounded up if necessary to a multiple of the atomic block size	*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*    fac      - descriptor of FAC					*/
+/*    size     - minimum length of region on bytes			*/
+/*    offset   - returned offset in file				*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*    GOTH__FSM_CORRUPTLIST - internal list of file blocks corrupt	*/
+/*    GOTH__MALLOC          - insufficient virtual memory		*/
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_alloc(
+			     GOTH_DESCRIPTOR 	fac_id,
+			     GOTH_INTEGER 	size,
+			     GOTH_INTEGER 	*offset);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_fast_extend_alloc						*/
+/*......................................................................*/
+/* 									*/
+/* This routine hands back a region of file at least new_size bytes     */
+/* long, rounded up if necessary to a multiple of the atomic block size	*/
+/* 									*/
+/*..ARGUMENTS...........................................................*/
+/* 									*/
+/* fac_id	-in-	descriptor of FAC				*/
+/* 									*/
+/* old_size 	-in-	the size of the block to be replaced		*/
+/* 									*/
+/* old_offset	-in-	the offset of the block to be replaced		*/
+/* 									*/
+/* new_size 	-out-	the new size of the block			*/
+/* 									*/
+/* new_offset	-out-	the new offset of the block			*/ 
+/* 									*/
+/*..RETURN-CODES........................................................*/
+/* 									*/
+/*    GOTH__FSM_CORRUPTLIST - internal list of file blocks corrupt	*/
+/*    GOTH__MALLOC          - insufficient virtual memory		*/
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_fast_extend_alloc(GD_FAC		 fac_id,
+					 GOTH_INTEGER    old_size,
+					 GOTH_INTEGER    old_offset,
+					 GOTH_INTEGER    new_size,
+					 GOTH_INTEGER    *new_offset);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_free							*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* frees filespace previously allocated by fsm_alloc			*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*    fac     - descriptor of FAC					*/
+/*    offset  - offset of start of previously allocated region		*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*    GOTH__MALLOC - insufficient virtual memory 			*/
+/*    GOTH__ERROR  - the region was not obtained from fsm_alloc		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_free(
+			    GOTH_DESCRIPTOR 	fac_id,
+			    GOTH_INTEGER 	offset);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_realloc							*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Extends or contracts a region obtained from fsm_alloc		*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*    fac        - descriptor of FAC					*/
+/*    allow_move - are we allowed to copy the original region elsewhere	*/
+/*    offset     - returned offset of region				*/
+/*    size       - size of new region					*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*    GOTH__FSM_CORRUPTLIST - internal list of file blocks corrupt	*/
+/*    GOTH__MALLOC          - insufficient virtual memory		*/
+/*    GOTH__ERROR           - region was not obtained from fsm_alloc	*/
+/*    GOTH__FSM_REALLOCFAIL - there was no room in the file to extend	*/
+/*                            the region without copying.(returned if	*/
+/*                            allow_move is false			*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_realloc(
+			       GOTH_DESCRIPTOR	fac_id,
+			       GOTH_BOOLEAN	allow_move,
+			       GOTH_INTEGER	*offset,
+			       GOTH_INTEGER	size);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_alloc_analyse						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_alloc_analyse(
+				     GOTH_DESCRIPTOR	fac_id,
+				     GOTH_DESCRIPTOR	stream,
+				     GOTH_BOOLEAN	verbose);
+
+/*>>> EXTERN functions from FSM_BASICS.C <<<*/
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_set_page_extend                                           */
+/*......................................................................*/
+/* Set the maximum number of open channels                              */
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_set_page_extend(GOTH_DESCRIPTOR fac_id, 
+                                       GOTH_INTEGER    nbytes) ;
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_mapped_ptr                                            */
+/*......................................................................*/
+/* Get the current address pointer for a mapped file                    */
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_mapped_ptr(GOTH_DESCRIPTOR fac_id, 
+                                      VOID_P            *mapptr) ;
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_access_type                                           */
+/*......................................................................*/
+/* Get the access type on a fac                                         */
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_access_type(GOTH_DESCRIPTOR fac_id, 
+                                       FSM_ACCESS_TYPE *access_type);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_open_type						*/
+/*......................................................................*/
+/* Get the opening mode of a fac                                        */
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_open_type(GOTH_DESCRIPTOR fac_id, 
+				     FSM_OPENING_TYPE *opening_type);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_file_structure					*/
+/*......................................................................*/
+/* Get the file structure of a fac                                      */
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_file_structure(GD_FAC	 	fac_id, 
+					  FSM_STRUCTURE_TYPE 	*file_structure);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_set_max_open_files					*/
+/*......................................................................*/
+/* Set the maximum number of open files					*/
+/* Arguments:								*/
+/*  nnormal - maximum number of open files				*/
+/*  nmapped - maximum number of mapped files           			*/
+/*            (ignored if platform is not VMS)				*/
+/* Errors:								*/
+/*  GOTH__MALLOC - insufficient virtual memory				*/
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_set_max_open_files(GOTH_INTEGER nnormal,
+					  GOTH_INTEGER nmapped)
+;
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_check_file_access						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/* checks for existence,readability or writability of a file		*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/* sos		- SOS specifier						*/
+/* file_access	- FSM_EXISTS	tests for file's existence		*/
+/* 		  FSM_READABLE  tests for readability			*/
+/* 	  	  FSM_WRITABLE  tests for writability			*/
+/* accessible	- returns TRUE or FALSE					*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*  GOTH__NORMAL							*/
+/*  GOTH__MALLOC  - out of memory					*/
+/*  GOTH__BAD_SOS - invalid SOS						*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_check_file_access(GOTH_STRING	sos,
+					 FSM_ACCESS	file_access,
+					 GOTH_BOOLEAN	*accessible);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read                                                      */
+/*......................................................................*/
+/* Read data from a fac                                                 */
+/* Arguments:								*/
+/*   fac_id - FAC descriptor						*/
+/*   buffer - area of memory into which to read data			*/
+/*   size   - size in bytes of individual objects to be read		*/
+/*   nobj   - number of objects to read					*/
+/*   nread  - returns number of objects read				*/
+/* Errors:								*/
+/*   GOTH__DESC         - invalid descriptor				*/
+/*   GOTH__FSMFILEOPEN  - error reopening file				*/
+/*   GOTH__FSMSEEKERROR - error seeking to stored position		*/
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read(GOTH_DESCRIPTOR fac_id, VOID_P buffer, 
+                            GOTH_INTEGER size, GOTH_INTEGER nobj, 
+                            GOTH_INTEGER *nread);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write                                                     */
+/*......................................................................*/
+/* Write data to a fac                                                  */
+/* Arguments:								*/
+/*   fac_id - FAC descriptor						*/
+/*   buffer - area of memory from which to write data			*/
+/*   size   - size in bytes of individual objects to be written		*/
+/*   nobj   - number of objects to write				*/
+/* Errors:								*/
+/*   GOTH__DESC          - invalid descriptor				*/
+/*   GOTH__FSMFILEOPEN   - error reopening file				*/
+/*   GOTH__FSMSEEKERROR  - error seeking to stored position		*/
+/*   GOTH__FSMWRITEERROR - i/o error on write (e.g disk full)		*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_write(GOTH_DESCRIPTOR fac_id, VOID_P buffer, 
+                             GOTH_INTEGER size, GOTH_INTEGER nobj)
+;
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_seek                                                      */
+/*......................................................................*/
+/* Set the current fac pointer. Seeking to beyond the end of a file     */
+/* extends the file                                                     */
+/* Arguments:								*/
+/*    fac_id   - descriptor of fac					*/
+/*    offset   - offset in bytes from origin				*/
+/*    origin   - FW_START   = start of file				*/
+/*               FW_CURRENT = current position				*/
+/*               FW_END     = end of file				*/
+/* Errors:								*/
+/*    GOTH__DESC - invalid descriptor					*/
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_seek(GOTH_DESCRIPTOR fac_id,
+			    GOTH_INTEGER offset_arg, 
+			    FSM_WHEREFROM_TYPE origin_arg);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_copy							*/
+/*......................................................................*/
+/* copies 'size' bytes of data in a file from location starting at	*/
+/* 'oldoff' to location starting at 'newoff'. The routine does not 	*/
+/* attempt to intelligently handle the case where the two areas overlap	*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_copy(GOTH_DESCRIPTOR	fac,
+			    GOTH_INTEGER	oldoff,
+			    GOTH_INTEGER	size,
+			    GOTH_INTEGER	newoff);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_convert_integers						*/
+/*......................................................................*/
+/* Converts an array of integers in memory between local machine format	*/
+/* and the format appropriate to a FAC					*/
+/*									*/
+/* ARGUMENTS								*/
+/* 	fac - FAC for a given file					*/
+/*  to_file - TRUE if we wish to convert to the format for the file	*/
+/*           FALSE if we wish to convert from that format		*/
+/*  integer_mem - pointer to array of integere				*/
+/*  num_ints    - number of integers to convert				*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_convert_integers(GOTH_DESCRIPTOR	fac,
+					GOTH_BOOLEAN	to_file,
+					GOTH_INTEGER	*integer_mem,
+					GOTH_INTEGER	num_ints);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_convert_reals						*/
+/*......................................................................*/
+/*									*/
+/* Converts an array of GOTH_REALS in memory between local machine	*/
+/* format and the format appropriate to a FAC				*/
+/*									*/
+/* ARGUMENTS								*/
+/* 	fac - FAC for a given file					*/
+/*  to_file - TRUE if we wish to convert to the format for the file	*/
+/*           FALSE if we wish to convert from that format		*/
+/*  real_mem - pointer to array of GOTH_REALS				*/
+/*  num_reals  - number of GOTH_REALS to convert			*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_convert_reals(GOTH_DESCRIPTOR	fac,
+				     GOTH_BOOLEAN	to_file,
+				     GOTH_REAL		*real_mem,
+				     GOTH_INTEGER	num_reals);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_integer						*/
+/*......................................................................*/
+/* Read an integer from a file performing any necessary format		*/
+/* conversion								*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   integer   - returns integer read					*/
+/* Errors:								*/
+/*   as for fsm_read							*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_integer(GOTH_DESCRIPTOR fac_id,
+                                    GOTH_INTEGER *integer);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_integer						*/
+/*......................................................................*/
+/* Write out an integer to a file performing any necessary		*/
+/* representation conversions						*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   integer   - integer to write					*/
+/* Errors:								*/
+/*   as for fsm_write							*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+
+extern GOTH_STATUS fsm_write_integer(GOTH_DESCRIPTOR fac_id,
+                                     GOTH_INTEGER integer);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_real							*/
+/*......................................................................*/
+/* Read a real from a file performing any necessary format		*/
+/* conversion								*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   real      - returns real read					*/
+/* Errors:								*/
+/*   as for fsm_read							*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_real(GOTH_DESCRIPTOR fac_id,
+				 GOTH_REAL *real);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_real						*/
+/*......................................................................*/
+/* Write out a real to a file performing any necessary			*/
+/* representation conversions						*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   integer   - integer to write					*/
+/* Errors:								*/
+/*   as for fsm_write							*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+
+extern GOTH_STATUS fsm_write_real(GOTH_DESCRIPTOR fac_id,
+				  GOTH_REAL real);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_string						*/
+/*......................................................................*/
+/* Read a string from a file						*/
+/* The string is stored byte-packed preceded by an integer count. 	*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   string    - returns string read					*/
+/* Errors:								*/
+/*   as for fsm_read						       	*/
+/*   GOTH__MALLOC - insufficient memory to store string			*/
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_string(GOTH_DESCRIPTOR fac_id,
+				   GOTH_STRING *string);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_string						*/
+/*......................................................................*/
+/* Write a string to a file						*/
+/* The string is stored byte-packed preceded by an integer count. 	*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   string    - string to write	       				*/
+/* Errors:								*/
+/*   as for fsm_write							*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_write_string(GOTH_DESCRIPTOR fac_id,
+				    GOTH_STRING string);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_id							*/
+/*......................................................................*/
+/* reads a GOTH_ID 							*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   id        - returns id read					*/
+/* Errors:								*/
+/*   as for fsm_read							*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_id(GOTH_DESCRIPTOR fac_id,
+			       GOTH_ID *id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_id							*/
+/*......................................................................*/
+/* writes a GOTH_ID							*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   id        - id to write	         				*/
+/* Errors:								*/
+/*   as for fsm_write							*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_write_id(GOTH_DESCRIPTOR fac_id,
+				GOTH_ID id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_object_id						*/
+/*......................................................................*/
+/* reads an object id from a file					*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   obj_id    - returns object_id read					*/
+/* Errors:								*/
+/*   as for fsm_read							*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_object_id(GOTH_DESCRIPTOR fac_id,
+				      GOTH_OBJECT_ID *obj_id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_object_id						*/
+/*......................................................................*/
+/* writes an object_id to a file					*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   obj_id    - object id to write	      				*/
+/* Errors:								*/
+/*   as for fsm_write							*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_write_object_id(GOTH_DESCRIPTOR fac_id,
+				       GOTH_OBJECT_ID obj_id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_boolean						*/
+/*......................................................................*/
+/* reads a boolean value from a file.					*/
+/* 'true' is represented by the single character 't'			*/
+/* 'false'                                    by 'f'			*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   boolean   - returns boolean read					*/
+/* Errors:								*/
+/*   as for fsm_read							*/
+/*   GOTH__FSM_BADBOOLEAN - neither 't' nor 'f' read			*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_boolean(GOTH_DESCRIPTOR	fac_id,
+				    GOTH_BOOLEAN	*boolean);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_boolean						*/
+/*......................................................................*/
+/* writes a boolean value to a file					*/
+/* 'true' is represented by the single character 't'			*/
+/* 'false'                                    by 'f'			*/
+/* Arguments:								*/
+/*   fac_id    - descriptor of FAC					*/
+/*   boolean   - boolean to write	       				*/
+/* Errors:								*/
+/*   as for fsm_write							*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_write_boolean(GOTH_DESCRIPTOR	fac_id,
+				     GOTH_BOOLEAN	boolean);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_value						*/
+/*......................................................................*/
+/* reads a value of specified type into a GOTH_VALUE			*/
+/* Arguments:								*/
+/*   fac_id   - descriptor of FAC					*/
+/*   type     - datatype to be read					*/
+/*   value    - value returned						*/
+/* Errors:								*/
+/*   as from fsm_read							*/
+/*   GOTH__FSM_INVALIDTYPE - type invalid or not handled		*/
+/*   allowed types are INTEGER,REAL,STRING,BOOLEAN,ID,OBJECT_ID		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_value(GOTH_DESCRIPTOR	fac_id,
+				  GOTH_DATATYPE		type,
+				  GOTH_VALUE		*value);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_value						*/
+/*......................................................................*/
+/*									*/
+/* writes a value of specified type from a GOTH_VALUE			*/
+/* Arguments:								*/
+/*   fac_id   - descriptor of FAC					*/
+/*   type     - datatype to be written					*/
+/*   value    - value to write						*/
+/* Errors:								*/
+/*   as from fsm_write							*/
+/*   GOTH__FSM_INVALIDTYPE - type invalid or not handled		*/
+/*   allowed types are INTEGER,REAL,STRING,BOOLEAN,ID,OBJECT_ID		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_write_value(GOTH_DESCRIPTOR	fac_id,
+				   GOTH_DATATYPE	type,
+				   GOTH_VALUE		value);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sizeof							*/
+/*......................................................................*/
+/* returns size of a given value in bytes				*/
+/*									*/
+/* Arguments:								*/
+/*   fac_id   - descriptor of FAC					*/
+/*   type     - datatype 						*/
+/*   value    - value 							*/
+/* Errors:								*/
+/*   GOTH__FSM_INVALIDTYPE - type invalid or not handled		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_INTEGER fsm_sizeof(GOTH_DESCRIPTOR	fac_id,
+			       GOTH_DATATYPE	type,
+			       GOTH_VALUE	value);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_tell                                                      */
+/*......................................................................*/
+/* Return the current fac pointer                                       */
+/* Arguments:								*/
+/*    fac_id   - descriptor of FAC					*/
+/*    offset   - returns offset from beginning of file in bytes		*/
+/* Errors:								*/
+/*    GOTH__DESC - invalid descriptor					*/
+/* 									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_tell(GOTH_DESCRIPTOR fac_id, GOTH_INTEGER *offset);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_delete						*/
+/*......................................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_delete(GOTH_STRING sos);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_structure_delete					*/
+/*......................................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_structure_delete(GOTH_STRING sos,
+					    FSM_STRUCTURE_TYPE file_structure);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_wildcard_delete					*/
+/*......................................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_wildcard_delete(GOTH_STRING sos);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_eof							*/
+/*......................................................................*/
+/* determines whether we are at end of file for the FAC 'fac_id'	*/
+/* ateof returns TRUE if at end of file , FALSE otherwise		*/
+/* function returns GOTH__FSM_WRONGFILETYPE if the file is not of type	*/
+/* FS_NORMAL,FS_RAW or FS_TEXT						*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_eof(GOTH_DESCRIPTOR fac_id,GOTH_BOOLEAN *ateof);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_integer_array					*/
+/*......................................................................*/
+/*									*/
+/* reads into an array of integers from a file				*/
+/* ARGUMENTS								*/
+/* 	fac_id		file descriptor					*/
+/* 	num_elem	number of integers to read			*/
+/* 	array		address of the array				*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_integer_array(GOTH_DESCRIPTOR	fac_id,
+					  GOTH_INTEGER		num_elem,
+					  GOTH_INTEGER		*array);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_integer_array					*/
+/*......................................................................*/
+/*									*/
+/* writes an array of integers to a file				*/
+/* ARGUMENTS								*/
+/* 	fac_id		file descriptor					*/
+/* 	num_elem	number of integers to write			*/
+/* 	array		address of the array				*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_write_integer_array(GOTH_DESCRIPTOR	fac_id,
+					   GOTH_INTEGER		num_elem,
+					   GOTH_INTEGER		*array);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_real_array						*/
+/*......................................................................*/
+/* reads into an array of reals from a file				*/
+/* ARGUMENTS								*/
+/* 	fac_id		file descriptor					*/
+/* 	num_elem	number of reals to read				*/
+/* 	array		address of the array				*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_real_array(GOTH_DESCRIPTOR	fac_id,
+				       GOTH_INTEGER	num_elem,
+				       GOTH_REAL	*array);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_real_array						*/
+/*......................................................................*/
+/* writes an array of reals to a file					*/
+/* ARGUMENTS								*/
+/* 	fac_id		file descriptor					*/
+/* 	num_elem	number of reals to write			*/
+/* 	array		address of the array				*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_write_real_array(GOTH_DESCRIPTOR	fac_id,
+					GOTH_INTEGER	num_elem,
+					GOTH_REAL	*array);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_set_machine_type						*/
+/*......................................................................*/
+/* This routine is provided to change the machine type field in a fac	*/
+/* and in its associated file - it is needed to handle the case where 	*/
+/* a file created on machine B is to receive raw data from a file 	*/
+/* created on machine A - the neatest solution is for the destination	*/
+/* file to be have its machine type set to A				*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_set_machine_type(GOTH_DESCRIPTOR	to_fac_id,
+					GOTH_DESCRIPTOR from_fac_id);
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_machine_type						*/
+/*......................................................................*/
+/* This routine is provided to get the machine type of a FAC.		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_machine_type(GOTH_DESCRIPTOR	fac_id,
+					GOTH_INTEGER	*machine_type) ;
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_read_line							*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*  This routine reads a line from a text file.				*/
+/*  The file must have been opened using the FS_TEXT file structure.	*/
+/*  The line delimiter is not inserted in the buffer,which is always 	*/
+/*  NULL-terminated.							*/
+/*  The number of characters read (not including the delimiter) is	*/
+/*  returned in retlen.							*/
+/*  If the line is too long it is truncated,but the full number of 	*/
+/*  characters is still returned in retlen.				*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* 	fac_id		- FAC of input file				*/
+/* 	buffer		- pointer to user's buffer(the buffer must be	*/
+/* 			  at least maxlen+1 characters long)		*/
+/* 	maxlen		- maximum number of characters to read		*/
+/*	retlen		- number of characters read.			*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*	GOTH__NORMAL		Successful completion.			*/
+/*	GOTH__DESC		Routine not passed a valid FAC		*/
+/* 	GOTH__FSM_WRONGFILETYPE File was not opened as FS_TEXT		*/
+/*	GOTH__FSMREADERROR	Error reading file			*/
+/*      GOTH__LINETOOLONG	Line was too long for user's buffer	*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_read_line(GOTH_DESCRIPTOR	fac_id,
+				 GOTH_STRING		buffer,
+				 GOTH_INTEGER		maxlen,
+				 GOTH_INTEGER		*retlen);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_write_line						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/* writes a line of text to a text file appending a record terminator	*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*	fac_id 	-	FAC of output file				*/
+/* 	buffer	-	NULL-terminated text buffer			*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*	GOTH__NORMAL		Successful completion			*/
+/* 	GOTH__DESC		Routine not passed a valid FAC		*/
+/* 	GOTH__FSM_WRONGFILETYPE File was not opened as FS_TEXT		*/
+/* 	GOTH__FSMWRITEERROR	i/o error (e.g.disk full)		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_write_line(GOTH_DESCRIPTOR	fac_id,
+				  GOTH_STRING		buffer);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_copy_sos							*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*  This routine copies one file to another.				*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*	input_sos	-in- SOS of source				*/
+/*      output_sos 	-in- SOS of destination				*/
+/*      allow_overwrite -in- if TRUE overwriting existing file allowed !*/
+/*                           if FALSE the routine aborts if output_sos	*/
+/*                           exists					*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*	GOTH__NORMAL	      successful completion			*/
+/* 	GOTH__FSMNONEXISTENT  input_sos does not exist			*/
+/*      GOTH__FSMEXISTS       allow_overwrite is FALSE and output_sos	*/
+/*                            exists					*/
+/*	GOTH__FSMFILEOPEN     system error opening file			*/
+/*	GOTH__FSMREADERROR    system error on reading input_sos		*/
+/*      GOTH__FSMWRITEERROR   system error writing output_sos		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_copy_sos(GOTH_STRING	input_sos,
+				GOTH_STRING	output_sos,
+				GOTH_BOOLEAN	allow_overwrite);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_rename_sos						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/*  This routine renames one file to another.				*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*	input_sos	-in- SOS of source				*/
+/*      output_sos 	-in- SOS of destination				*/
+/*      allow_overwrite -in- if TRUE overwriting existing file allowed !*/
+/*                           if FALSE the routine aborts if output_sos	*/
+/*                           exists					*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*	GOTH__NORMAL	      successful completion			*/
+/* 	GOTH__FSMNONEXISTENT  input_sos does not exist			*/
+/*      GOTH__FSMEXISTS       allow_overwrite is FALSE and output_sos	*/
+/*                            exists					*/
+/*      GOTH__FSMRENAMEERROR  system error on rename                    */
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_rename_sos(GOTH_STRING	input_sos,
+				  GOTH_STRING	output_sos,
+				  GOTH_BOOLEAN	allow_overwrite);
+
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_size							*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/* 									*/
+/*  This routine returns the size of a file in bytes.                   */
+/*  For SPAM files it returns the cumulative size of the data plus the  */
+/*  bitmap file.							*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*     	sos	 -in-	SOS of file					*/
+/*	filesize -out-	size of file in bytes				*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/* GOTH__NORMAL		Completed OK					*/
+/* GOTH__FSMNONEXISTENT File does not exist				*/
+/* GOTH__UNTRANSOS	The SOS could not be translated 		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_size(GOTH_STRING sos,
+				GOTH_INTEGER *filesize);
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_size_from_fac						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/* 									*/
+/*  This routine determines the size of a file (in bytes) from its FAC. */
+/*  For SPAM files it returns the cumulative size of the data plus the  */
+/*  bitmap file.							*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*	fac	 -in-	FAC of file					*/
+/*	filesize -out-	size of file in bytes				*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*	GOTH__NORMAL	Completed OK					*/
+/*	GOTH__DESC	FAC descriptor is the wrong datatype or it has  */
+/*			been corrupted					*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_size_from_fac(GD_FAC		fac,
+					 GOTH_INTEGER	*filesize);
+/*>>> EXTERN functions from FSM_SOS.C <<<*/
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_create_directory					*/
+/*......................................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_create_directory(GOTH_STRING parent_sos,
+					    GOTH_STRING name,
+					    GOTH_STRING prefix,
+					    GOTH_STRING suffix,
+					    GOTH_BOOLEAN complete);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_recursive_expand						*/
+/*......................................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_recursive_expand(char *input_ptr,
+					int total_length,
+					char **output_ptr);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_substitute_variables					*/
+/*......................................................................*/
+/*									*/
+/* Routine to scan a file specification for any strings enclosed in	*/
+/* $(...). These strings will be expanded, using "getenv", and replaced	*/
+/* with those expansions.						*/
+/*									*/
+/* The expanded filespec is passed back in outstring, which is 		*/
+/* allocated by the routine. The caller is expected to free this	*/
+/* filespec.								*/
+/* 									*/
+/* If have had:								*/
+/* 									*/
+/* 	setenv goth_example /usr/users/gothic/				*/
+/*									*/
+/* then:								*/
+/* 									*/
+/* 	$(goth_example)/subdir						*/
+/*									*/
+/* would be replaced with:						*/
+/* 									*/
+/* 	/usr/users/gothic//subdir					*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_substitute_variables(GOTH_STRING instring,
+					    GOTH_STRING *outstring);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_to_sys_spec						*/
+/*......................................................................*/
+/* This routine translates a GOTHIC Saved Object Specification (SOS)	*/
+/* to a (possibly) system-dependent file name.				*/
+/* If the SOS directory "dir1" is defined as "prefix1" and "suffix1"	*/
+/*                      "dir2"               "prefix2" and "suffix2"	*/
+/* then the SOS dir1:dir2:file will be translated to			*/
+/*      "prefix1""prefix2""file""suffix2""suffix1"			*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_to_sys_spec(GOTH_STRING sos_spec,
+				       GOTH_STRING *sys_spec);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_to_dir						*/
+/*......................................................................*/
+/* This routine translates a GOTHIC Saved Object Specification (SOS)	*/
+/* to a (possibly) system-dependent file name and returns the directory */
+/* component only							*/
+/* Note that if the last component of the SOS is a subdirectory then it */
+/* must be followed by a colon. If the last component is not followed   */
+/* by a colon it is taken to be a filename and is ignored.              */
+/*								        */
+/* If the SOS directory "dir1" is defined as "prefix1" and "suffix1"	*/
+/*                      "dir2"               "prefix2" and "suffix2"	*/
+/* then the SOS dir1:dir2:file (or dir1:dir2:) will be translated to	*/
+/*      "prefix1""prefix2"						*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_to_dir(GOTH_STRING sos_spec,
+				  GOTH_STRING *dirname);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_initialise						*/
+/*......................................................................*/
+/* sets up SOS to filename translation by reading in a LULL file whose	*/
+/* filename is given in 'config_spec'					*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_initialise(GOTH_STRING config_spec);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_report						*/
+/*......................................................................*/
+/* enables/disables reporting of translation of SOS's to filenames	*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_report(GOTH_BOOLEAN do_reporting);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_default_to_sys_spec					*/
+/*......................................................................*/
+/* if 'sos' contains a colon this routine emulates fsm_sos_to_sys_spec	*/
+/* otherwise it appends 'sos' to 'default_stub' (inserting a colon if 	*/
+/* necessary ) and calls fsm_sos_to_sys_spec with the resulting sos	*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_default_to_sys_spec(GOTH_STRING	sos,
+					       GOTH_STRING	default_stub,
+					       GOTH_STRING	*sys_spec);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_sos_default						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* This routine takes an sos, which may or may not be a complete sos,	*/
+/* and a default initial stub for an sos. If the input sos does not	*/
+/* contain a `:', defaulted_sos will be returned as the input sos	*/
+/* prefixed with the default_stub. Otherwise, defaulted_sos is		*/
+/* returned containing the same as sos. 				*/
+/* 									*/
+/* The caller is expected to free defaulted_sos.			*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_sos_default(GOTH_STRING	sos,
+				   GOTH_STRING	default_stub,
+				   GOTH_STRING	*defaulted_sos);
+
+/*>>> EXTERN functions from FSM_LOCK.C <<<*/
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_lock							*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Locks the specified region for read or write                         */
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*			  						*/
+/* fac_id	-in-	FAC of file to lock				*/
+/* start_offset -in-    position in the file of the start of the region */
+/* length       -in-    length of the region                            */
+/* lock_type    -in-    type of lock (LKT_READ or LKT_WRITE             */
+/* wait_for_lock-in-    if the lock cannot be enforced and this argument*/
+/*                      is true,sleep until lock is available           */
+/* lock_id      -out-   id of resulting lock                            */
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*  GOTH__NORMAL        Success                                         */
+/*  GOTH__TOOMANYOPEN   Too many FACs already fixed in list	        */
+/*  GOTH__TOOMANYLOCKS  Too many locks applied to this file             */
+/*  GOTH__ALREADYLOCKED This lock conflicts with an existing one        */
+/*  GOTH__LOCKERROR     System error from 'fcntl'			*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_lock(GD_FAC		fac_id,
+			    GOTH_INTEGER	start_offset,
+			    GOTH_INTEGER	length,
+			    FSM_LOCK_TYPE	lock_type,
+			    GOTH_BOOLEAN	wait_for_lock,
+			    GOTH_ID		*lock_id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_unlock							*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*			        					*/
+/*  Releases an existing lock on a file                                 */
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_unlock(GD_FAC	fac_id,
+			      GOTH_ID	lock_id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_inquire_remote_lock					*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_inquire_remote_lock(GD_FAC	 fac_id,
+					   GOTH_INTEGER  start_offset,
+					   GOTH_INTEGER	 length,
+					   FSM_LOCK_TYPE *lock_type);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_inquire_local_lock					*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_inquire_local_lock(GD_FAC	fac_id,
+					  GD_COLLECTION *lock_set_id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_lock_info						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_lock_info(GD_FAC		fac_id,
+				     GOTH_ID		lock_id,
+				     GOTH_INTEGER	*start_offset,
+				     GOTH_INTEGER	*length,
+				     FSM_LOCK_TYPE	*lock_type);
+
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_block_start						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Initialise a FAC to do block mode access. This routine sets		*/
+/* the FAC into block mode.						*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* fac_id	-in- the FAC to set into block mode			*/
+/* block_type   -in- the type of the block -			       !*/
+/*		     FSM_BLOCK_NEW - the block is to contain new data  !*/
+/*		     FSM_BLOCK_REPLACE - the block is to totally       !*/
+/*					 replace existing data.	       !*/
+/*		     FSM_BLOCK_READ - the block is to read old data    !*/
+/* initial_size -in- the initial size fo the buffer to use for block	*/
+/*		     mode.						*/
+/* increment_size -in- the increment size of the block buffer		*/
+/*									*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_block_start(GD_FAC         fac_id,
+				      FSM_BLOCK_TYPE block_type,
+				      GOTH_INTEGER   initial_size,
+				      GOTH_INTEGER   increment_size) ;
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_block_abandon						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Abandon a transaction block without flushing any edited data.	*/
+/* The fsm is retained in block mode.					*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* fac_id	-in- the FAC to set into block mode			*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_block_abandon(GD_FAC       fac_id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_block_finish						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Finish a block transmission. If the block has been edited the data   */
+/* is written to the file.						*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* fac_id	-in- the FAC to set out of block mode			*/
+/* offset       -out- the offset to seek to before trying to 		*/
+/*		      offset the block.					*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS  fsm_block_finish(GD_FAC       fac_id,
+					GOTH_INTEGER *offset);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_block_size						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Get the current buffer size of the block buffer used by the FAC	*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* fac_id	-in- the FAC to inquire					*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_block_size(GD_FAC fac_id,
+				  GOTH_INTEGER	*block_size) ;
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_get_compression						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Get the current compression scheme for a FAC 			*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* fac_id -in- the fac to use for the compression			*/
+/* compression_scheme -ou- the COMPRESSLIB name of the compression      */
+/* currently in use.							*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_get_compression(GD_FAC       fac_id,
+				       GOTH_STRING  *compression_scheme) ;
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_set_compression						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Set the current compression scheme for a FAC 			*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* fac_id -in- the fac to use for the compression			*/
+/* compression_scheme -in- the COMPRESSLIB name of the compression      */
+/* to use.								*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_set_compression(GD_FAC       fac_id,
+				       GOTH_STRING  compression_scheme) ;
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_buffer_read						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Routine to perform a read operation from a file, and creating a 	*/
+/* buffer of suitable size						*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*   fac_id - FAC descriptor						*/
+/*   *buffer - area of memory into which to read data			*/
+/*   *buffer_size - the size of the buffer				*/
+/*   size   - size in bytes of individual objects to be read		*/
+/*   nobj   - number of objects to read					*/
+/*   nread  - returns number of objects read				*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*   GOTH__DESC         - invalid descriptor				*/
+/*   GOTH__FSMFILEOPEN  - error reopening file				*/
+/*   GOTH__FSMSEEKERROR - error seeking to stored position		*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_buffer_read(
+			    GD_FAC 		fac_id, 
+			    VOID_P 		*buffer, 
+			    GOTH_INTEGER	*buffer_size,
+			    GOTH_INTEGER	size,
+			    GOTH_INTEGER	nobj, 
+			    GOTH_INTEGER	*nread) ;
+
+
+/*>>> EXTERN functions from FSM_CONCAT.C <<<*/
+
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_concatenate_single					*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_concatenate_single(GD_FAC	conc_fac_id,
+					  GOTH_STRING	virt_name,
+					  GD_FAC	phys_fac_id);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_concatenate_multiple					*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* Concatenates the files specified in 'phys_sos_list_id' into a single */
+/* file 'conc_sos'.							*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*     	conc_sos 	-in- SOS for concatenated file                  */
+/*	virt_name_list	-in- list of virtual names by which the         */
+/*                           component files will be known              */
+/*	phys_sos_list	-in- list of SOSes for the component files      */
+/*      delete_phys     -in- delete the input files if the concatenation*/
+/*			     is successful				*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_concatenate_multiple(GOTH_STRING		conc_sos,
+					    GD_COLLECTION	virt_name_list,
+					    GD_COLLECTION	phys_sos_list,
+					    GOTH_BOOLEAN	delete_phys);
+/*----------------------------------------------------------------------*/
+/* EXTERN fsm_build_virtual_fac						*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/*									*/
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS fsm_build_virtual_fac(GD_FAC			conc_fac_id,
+					 GOTH_STRING		virt_name,
+					 FSM_ACCESS_TYPE	access_mode,
+					 FSM_OPENING_TYPE	opening_mode,
+					 GD_FAC			*virtual_fac);
+
+#endif

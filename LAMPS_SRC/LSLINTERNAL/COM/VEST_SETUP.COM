@@ -17,4 +17,24 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! VEST_SETUP.COM - procedure to setup environment to VEST LSL programs.$! Called from specific package procedures, such as LSLSYSTEM_VEST.COM.$! if P1 contains D then diagnostics are set on$! if P1 contains C then code listing is set on$! if P1 contains F then flowgraph is set on$!-----------------------------------------------------------------------$	set noon$	vest_program=="@LSL$COM:VEST_PROGRAM"$	lsl_vest_code==""$	lsl_vest_diag==""$	lsl_vest_errf==""$	lsl_vest_flow==""$	lsl_vest_perf==""$	if p1.eqs."" then goto exit$	if f$locate("C",p1).lt.f$len(p1) then lsl_vest_code=="Y"$	if f$locate("D",p1).lt.f$len(p1) then lsl_vest_diag=="Y"$	if f$locate("E",p1).lt.f$len(p1) then lsl_vest_errf=="Y"$	if f$locate("F",p1).lt.f$len(p1) then lsl_vest_flow=="Y"$	if f$locate("P",p1).lt.f$len(p1) then lsl_vest_perf=="Y"$!-----------------------------------------------------------------------$exit:	exit
+$! VEST_SETUP.COM - procedure to setup environment to VEST LSL programs.
+$! Called from specific package procedures, such as LSLSYSTEM_VEST.COM.
+$! if P1 contains D then diagnostics are set on
+$! if P1 contains C then code listing is set on
+$! if P1 contains F then flowgraph is set on
+$!-----------------------------------------------------------------------
+$	set noon
+$	vest_program=="@LSL$COM:VEST_PROGRAM"
+$	lsl_vest_code==""
+$	lsl_vest_diag==""
+$	lsl_vest_errf==""
+$	lsl_vest_flow==""
+$	lsl_vest_perf==""
+$	if p1.eqs."" then goto exit
+$	if f$locate("C",p1).lt.f$len(p1) then lsl_vest_code=="Y"
+$	if f$locate("D",p1).lt.f$len(p1) then lsl_vest_diag=="Y"
+$	if f$locate("E",p1).lt.f$len(p1) then lsl_vest_errf=="Y"
+$	if f$locate("F",p1).lt.f$len(p1) then lsl_vest_flow=="Y"
+$	if f$locate("P",p1).lt.f$len(p1) then lsl_vest_perf=="Y"
+$!-----------------------------------------------------------------------
+$exit:	exit

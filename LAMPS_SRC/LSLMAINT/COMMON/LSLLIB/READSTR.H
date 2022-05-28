@@ -17,4 +17,40 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-/************************************************************************//* Copyright Laser-Scan Laboratories Ltd, Cambridge CB4 4FY, England	*//* Author    TJ Ibbs, 16 May 1988       				*//*									*//*		        R E A D S T R . H				*//*									*//* This header file is a C version of the Fortran include file		*//* READSTR.PAR. It defines values for passing to the LSLLIB routine	*//* READSTR().								*//************************************************************************/ /************************************************************************/ /* Define termination condition values for READSTR, etc			*//*									*//*	ON_CMD		terminate as for commands - on any		*//*			character that is not alphabetic or '_'		*//*									*//*	ON_CHAR		terminate on the character TERM_CHAR		*//*									*//*	ON_CHAR2	as for ON_CH, but the sequence			*//*									*//*				TERM_CHAR TERM_CHAR			*//*									*//*			inserts TERM_CHAR into STRING			*//*									*//*	ON_SPACE	terminate on space or tab (as well as on	*//*			TERM_CHAR, if it is non-zero)			*//*									*//*	ON_EOL		terminate at end of line only			*//*									*//************************************************************************/ #define  ON_CMD		1#define  ON_CHAR	2#define  ON_CHAR2	3#define  ON_SPACE	4#define  ON_EOL		5
+/************************************************************************/
+/* Copyright Laser-Scan Laboratories Ltd, Cambridge CB4 4FY, England	*/
+/* Author    TJ Ibbs, 16 May 1988       				*/
+/*									*/
+/*		        R E A D S T R . H				*/
+/*									*/
+/* This header file is a C version of the Fortran include file		*/
+/* READSTR.PAR. It defines values for passing to the LSLLIB routine	*/
+/* READSTR().								*/
+/************************************************************************/ 
+
+/************************************************************************/ 
+/* Define termination condition values for READSTR, etc			*/
+/*									*/
+/*	ON_CMD		terminate as for commands - on any		*/
+/*			character that is not alphabetic or '_'		*/
+/*									*/
+/*	ON_CHAR		terminate on the character TERM_CHAR		*/
+/*									*/
+/*	ON_CHAR2	as for ON_CH, but the sequence			*/
+/*									*/
+/*				TERM_CHAR TERM_CHAR			*/
+/*									*/
+/*			inserts TERM_CHAR into STRING			*/
+/*									*/
+/*	ON_SPACE	terminate on space or tab (as well as on	*/
+/*			TERM_CHAR, if it is non-zero)			*/
+/*									*/
+/*	ON_EOL		terminate at end of line only			*/
+/*									*/
+/************************************************************************/ 
+
+#define  ON_CMD		1
+#define  ON_CHAR	2
+#define  ON_CHAR2	3
+#define  ON_SPACE	4
+#define  ON_EOL		5

@@ -17,4 +17,40 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! command file for setting up things so that we can generate$! a converged LITES version$!$! We expect P1 to be either C (colour), H (HRD ie SOL), or absent$!$ set noon$ if P1.eqs."" .or. P1.eqs."C" .or. P1.eqs."H" then goto GOTP1$ write sys$output "Unknown option ",P1$ write sys$output "Options are C for Colour or H for HRD/FASTRAK/LASERTRAK"$ exit$!$GOTP1:$ VERS = ""$ if P1.eqs."C" then VERS = "Colour "$ if P1.eqs."H" then VERS = "HRD "$ write sys$output "***   Version is converged ",VERS,"LITES"$!$! sort out which disk we're on$!$ DISC = f$logical("DEVT$DISK")-"_"-"_"$ if DISC .eqs. "" then DISC = f$logical("LSL$DISK")$!$ ASSIGN 'DISC'<LITES.COM> COM$ ASSIGN 'DISC'<LITES.SRC> SRC$ ASSIGN 'DISC'<LITES.CMN> CMN$ ASSIGN 'DISC'<LITES.MAR> MAR$ ASSIGN 'DISC'<LITES.'P1'OBJ> OBJ$ ASSIGN 'DISC'<LITES.'P1'EXE> EXE$ ASSIGN 'DISC'<LITES.COM> LISTQ$!$ XXX := 'SOLINI'$ IF XXX.NES."" THEN SOLINI$!$ TLITES  == "@COM:TLITES"	! to generate truth files$ MLITES  == "@COM:MLITES"	! to MAKE the command file$ LITESNV == "@COM:LITESNV"	! to edit a file$ SEARCHEDT == "@COM:SEARCHEDT"	! search then edit files
+$! command file for setting up things so that we can generate
+$! a converged LITES version
+$!
+$! We expect P1 to be either C (colour), H (HRD ie SOL), or absent
+$!
+$ set noon
+$ if P1.eqs."" .or. P1.eqs."C" .or. P1.eqs."H" then goto GOTP1
+$ write sys$output "Unknown option ",P1
+$ write sys$output "Options are C for Colour or H for HRD/FASTRAK/LASERTRAK"
+$ exit
+$!
+$GOTP1:
+$ VERS = ""
+$ if P1.eqs."C" then VERS = "Colour "
+$ if P1.eqs."H" then VERS = "HRD "
+$ write sys$output "***   Version is converged ",VERS,"LITES"
+$!
+$! sort out which disk we're on
+$!
+$ DISC = f$logical("DEVT$DISK")-"_"-"_"
+$ if DISC .eqs. "" then DISC = f$logical("LSL$DISK")
+$!
+$ ASSIGN 'DISC'<LITES.COM> COM
+$ ASSIGN 'DISC'<LITES.SRC> SRC
+$ ASSIGN 'DISC'<LITES.CMN> CMN
+$ ASSIGN 'DISC'<LITES.MAR> MAR
+$ ASSIGN 'DISC'<LITES.'P1'OBJ> OBJ
+$ ASSIGN 'DISC'<LITES.'P1'EXE> EXE
+$ ASSIGN 'DISC'<LITES.COM> LISTQ
+$!
+$ XXX := 'SOLINI'
+$ IF XXX.NES."" THEN SOLINI
+$!
+$ TLITES  == "@COM:TLITES"	! to generate truth files
+$ MLITES  == "@COM:MLITES"	! to MAKE the command file
+$ LITESNV == "@COM:LITESNV"	! to edit a file
+$ SEARCHEDT == "@COM:SEARCHEDT"	! search then edit files

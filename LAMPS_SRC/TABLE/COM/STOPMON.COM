@@ -17,4 +17,7 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! tentative stop table monitor procedure (still being developed by PGH)$	tabnam=f$logical("LSL$MONITOR_TABLE")-":"-"_"-"_"$	write sys$output "Stopping MONITOR_",tabnam$	stop MONITOR_'tabnam'
+$! tentative stop table monitor procedure (still being developed by PGH)
+$	tabnam=f$logical("LSL$MONITOR_TABLE")-":"-"_"-"_"
+$	write sys$output "Stopping MONITOR_",tabnam
+$	stop MONITOR_'tabnam'

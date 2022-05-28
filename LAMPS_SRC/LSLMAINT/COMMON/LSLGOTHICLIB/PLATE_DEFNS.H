@@ -17,4 +17,41 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-#ifndef _PLATE_DEFNS#define _PLATE_DEFNS#include "goth_config.h"#include "goth_datatypes.h"#include "goth_defns.h"#include "gothic_status_codes.h"#include "goth_streams.h"#include "goth_intrinsics.h"typedef enum _plate_comb_type{   PLATE_TRANSPARENT,   PLATE_MERGE,   PLATE_OPAQUE} PLATE_COMB_TYPE ;typedef enum _plate_print_style{   PLATE_PRINT_LSRPROCESS,   PLATE_PRINT_INPUT,   PLATE_PRINT_OUTPUT} PLATE_PRINT_STYLE ;#endif /* $Header: /gothic/hdr/platelib/v1-0/RCS/hdr.plate_defns.h,v 1.1 1994/05/03 15:11:35 davidm Exp $								*//* 									*//* $Log: hdr.plate_defns.h,v $ * Revision 1.1  1994/05/03  15:11:35  davidm * Version v1-0 derived from root * Initial development. * WICC 284. *								*/
+#ifndef _PLATE_DEFNS
+#define _PLATE_DEFNS
+
+#include "goth_config.h"
+#include "goth_datatypes.h"
+#include "goth_defns.h"
+#include "gothic_status_codes.h"
+#include "goth_streams.h"
+#include "goth_intrinsics.h"
+
+typedef enum _plate_comb_type
+{
+   PLATE_TRANSPARENT,
+   PLATE_MERGE,
+   PLATE_OPAQUE
+} PLATE_COMB_TYPE ;
+
+typedef enum _plate_print_style
+{
+   PLATE_PRINT_LSRPROCESS,
+   PLATE_PRINT_INPUT,
+   PLATE_PRINT_OUTPUT
+} PLATE_PRINT_STYLE ;
+
+
+
+#endif 
+
+
+
+/* $Header: /gothic/hdr/platelib/v1-0/RCS/hdr.plate_defns.h,v 1.1 1994/05/03 15:11:35 davidm Exp $								*/
+/* 									*/
+/* $Log: hdr.plate_defns.h,v $
+ * Revision 1.1  1994/05/03  15:11:35  davidm
+ * Version v1-0 derived from root
+ * Initial development.
+ * WICC 284.
+ *								*/

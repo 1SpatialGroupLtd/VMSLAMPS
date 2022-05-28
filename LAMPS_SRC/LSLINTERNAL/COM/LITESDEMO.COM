@@ -17,4 +17,5 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	IF P1.EQS."" THEN P1:=LITESDEMO$	LITES FAST IFF 'P1' 'P2' 'P3' 'P4' 'P5'
+$	IF P1.EQS."" THEN P1:=LITESDEMO
+$	LITES FAST IFF 'P1' 'P2' 'P3' 'P4' 'P5'

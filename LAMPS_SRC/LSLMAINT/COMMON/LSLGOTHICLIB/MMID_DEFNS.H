@@ -17,4 +17,76 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-#ifndef _MMID_DEFNS#define _MMID_DEFNS/*----------------------------------------------------------------------*//* CONST MP24_BASE                                                      *//*......................................................................*//*..DESCRIPTION.........................................................*//*                                                                      *//* This is the standard R, G, B colour palette multiplier used. Single	*//* integer values that represent R, G, B values between 0.0 and 1.0 are	*//* represented as							*//*                                                                      *//* (R * MP24_BASE * MP24_BASE) + (G * MP24_BASE) + B                    *//*                                                                      *//* This allows MP24BASE colours to be defined as R, G, B triplets.      *//*----------------------------------------------------------------------*/#define MP24_BASE 256#endif/* $Header: /usr/users/rogera/RCS/hdr.mmid_defns.h,v 1.11 1994/11/13 20:37:09 rogera Exp $								*//* 									*//* $Log: hdr.mmid_defns.h,v $ * Revision 1.11  1994/11/13  20:37:09  rogera * Version v1-10 derived from v1-9 * see authorisation file. * WICC 417. * * Addition of TELETIFFLIB module allowing export of RACs * to TIFF Image files. WICC TELECOMMS 46. * some other modules also added * * Revision 1.10  1994/09/20  18:04:02  adrian * Version v1-9 derived from v1-8 * Gothic WICC 323 * * Include initialisation of new modules. * * Include new error codes. * * Added topological model and spatial index VAC/DED roles. * * Add DED and VDED for metalib (ADE v2 schema) plus a load of new * metalib error codes. * * Move definition of Lull recover directory from the local sos init file * to the main file sos_unix_init.lull. * * Revision 1.9  1994/05/19  15:51:18  davida * Version v1-8 derived from v1-7 * Main development version. * * Add initialisation for xsapilib (See COMMERCIAL WICC 13). * * Revision 1.8  1994/04/06  20:29:08  davida * Version v1-7 derived from v1-5 * See Gothic WICC 263. * * Extracted to allow ongoing additions like status codes. * * NETXLIB declarations added. * * Added SOSes for UNIX domain sockets (`port:') and for method Lull source code * (`methods:'). * * Revision 1.2.1.6  1994/03/08  00:00:26  jon * Version v1-5 derived from v1-4 * compile date and time into 'main_time.o' to avoid recompilation of test_main.c * every time * * Revision 1.2  1994/03/08  00:00:26  jon * checked in as parent of branch *								*/
+#ifndef _MMID_DEFNS
+#define _MMID_DEFNS
+
+/*----------------------------------------------------------------------*/
+/* CONST MP24_BASE                                                      */
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*                                                                      */
+/* This is the standard R, G, B colour palette multiplier used. Single	*/
+/* integer values that represent R, G, B values between 0.0 and 1.0 are	*/
+/* represented as							*/
+/*                                                                      */
+/* (R * MP24_BASE * MP24_BASE) + (G * MP24_BASE) + B                    */
+/*                                                                      */
+/* This allows MP24BASE colours to be defined as R, G, B triplets.      */
+/*----------------------------------------------------------------------*/
+
+#define MP24_BASE 256
+
+#endif
+/* $Header: /usr/users/rogera/RCS/hdr.mmid_defns.h,v 1.11 1994/11/13 20:37:09 rogera Exp $								*/
+/* 									*/
+/* $Log: hdr.mmid_defns.h,v $
+ * Revision 1.11  1994/11/13  20:37:09  rogera
+ * Version v1-10 derived from v1-9
+ * see authorisation file.
+ * WICC 417.
+ *
+ * Addition of TELETIFFLIB module allowing export of RACs
+ * to TIFF Image files. WICC TELECOMMS 46.
+ * some other modules also added
+ *
+ * Revision 1.10  1994/09/20  18:04:02  adrian
+ * Version v1-9 derived from v1-8
+ * Gothic WICC 323
+ *
+ * Include initialisation of new modules.
+ *
+ * Include new error codes.
+ *
+ * Added topological model and spatial index VAC/DED roles.
+ *
+ * Add DED and VDED for metalib (ADE v2 schema) plus a load of new
+ * metalib error codes.
+ *
+ * Move definition of Lull recover directory from the local sos init file
+ * to the main file sos_unix_init.lull.
+ *
+ * Revision 1.9  1994/05/19  15:51:18  davida
+ * Version v1-8 derived from v1-7
+ * Main development version.
+ *
+ * Add initialisation for xsapilib (See COMMERCIAL WICC 13).
+ *
+ * Revision 1.8  1994/04/06  20:29:08  davida
+ * Version v1-7 derived from v1-5
+ * See Gothic WICC 263.
+ *
+ * Extracted to allow ongoing additions like status codes.
+ *
+ * NETXLIB declarations added.
+ *
+ * Added SOSes for UNIX domain sockets (`port:') and for method Lull source code
+ * (`methods:').
+ *
+ * Revision 1.2.1.6  1994/03/08  00:00:26  jon
+ * Version v1-5 derived from v1-4
+ * compile date and time into 'main_time.o' to avoid recompilation of test_main.c
+ * every time
+ *
+ * Revision 1.2  1994/03/08  00:00:26  jon
+ * checked in as parent of branch
+ *								*/

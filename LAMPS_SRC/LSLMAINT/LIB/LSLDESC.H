@@ -17,4 +17,24 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-/************************************************************************//*									*//*			 L S L D E S C . H				*//*									*//* A simple way of producing a string descriptor for use with routines	*//* such as WRITEF, EXPAND, etc						*//*									*//* Requires the inclusion of LSLDEF.H beforehand			*//*									*//* Copyright Laser-Scan Laboratories Ltd, Cambridge CB4 4FY, England    *//* Author    TJ Ibbs, 8 Sep 1988					*//************************************************************************/ /************************************************************************/ /* Define a format descriptor for use with EXPAND/WRITEF, and a macro	*//* that will use that as a temporary descriptor for a string...		*//************************************************************************/ static	LSL_DESC    format = {0,14,1,NULL};#define	s_Desc(s)   (format.pointer=(s),format.length=strlen((s)),&format)
+/************************************************************************/
+/*									*/
+/*			 L S L D E S C . H				*/
+/*									*/
+/* A simple way of producing a string descriptor for use with routines	*/
+/* such as WRITEF, EXPAND, etc						*/
+/*									*/
+/* Requires the inclusion of LSLDEF.H beforehand			*/
+/*									*/
+/* Copyright Laser-Scan Laboratories Ltd, Cambridge CB4 4FY, England    */
+/* Author    TJ Ibbs, 8 Sep 1988					*/
+/************************************************************************/ 
+
+/************************************************************************/ 
+/* Define a format descriptor for use with EXPAND/WRITEF, and a macro	*/
+/* that will use that as a temporary descriptor for a string...		*/
+/************************************************************************/ 
+
+static	LSL_DESC    format = {0,14,1,NULL};
+#define	s_Desc(s)   (format.pointer=(s),format.length=strlen((s)),&format)
+

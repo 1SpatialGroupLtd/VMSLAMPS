@@ -17,4 +17,18 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	ver_status=f$verify(0)$	on control then continue$	on error then continue$!$! Initialization file for UISMENUS$!$! FJB 04-August-1989$!$! Assign directory for .DAT , .CDL and .ICON files$	assign lsl$site_root:[lsl.cdl] lsl$cdl$!$	UISM*ENUS:==$LSL$EXE:UISMENUS$!$	if ver_status then set verify
+$	ver_status=f$verify(0)
+$	on control then continue
+$	on error then continue
+$!
+$! Initialization file for UISMENUS
+$!
+$! FJB 04-August-1989
+$!
+$! Assign directory for .DAT , .CDL and .ICON files
+$	assign lsl$site_root:[lsl.cdl] lsl$cdl
+$!
+$	UISM*ENUS:==$LSL$EXE:UISMENUS
+$!
+$	if ver_status then set verify
+

@@ -17,4 +17,38 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-#ifndef _LSRC_INTRINSICS#define _LSRC_INTRINSICS/************************************************************************//* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*//* Author    Mike Cook, 26-Oct-1994					*//************************************************************************//************************************************************************//*									*//*		     L S R C _ I N T R I N S I C S 			*//*									*//* Part of GOTHIC module LSRCLIB					*//* Version 0.1, Mike Cook 26-Oct-1994					*//************************************************************************/#include "goth_datatypes.h"/*----------------------------------------------------------------------*//* EXTERN lsr_tran_init                                                 *//*......................................................................*//*                                                                      *//* Initialise LSR raster processing functions                           *//*                                                                      *//*----------------------------------------------------------------------*/extern GOTH_STATUS  lsr_tran_init();     #endif/* $Header: /gothic/hdr/lsrclib/v1-17/RCS/hdr.lsrc_intrinsics.h,v 1.11 1995/03/13 11:22:08 clarke Exp $								*//* 									*/
+#ifndef _LSRC_INTRINSICS
+#define _LSRC_INTRINSICS
+
+/************************************************************************/
+/* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*/
+/* Author    Mike Cook, 26-Oct-1994					*/
+/************************************************************************/
+
+/************************************************************************/
+/*									*/
+/*		     L S R C _ I N T R I N S I C S 			*/
+/*									*/
+/* Part of GOTHIC module LSRCLIB					*/
+/* Version 0.1, Mike Cook 26-Oct-1994					*/
+/************************************************************************/
+
+#include "goth_datatypes.h"
+
+/*----------------------------------------------------------------------*/
+/* EXTERN lsr_tran_init                                                 */
+/*......................................................................*/
+/*                                                                      */
+/* Initialise LSR raster processing functions                           */
+/*                                                                      */
+/*----------------------------------------------------------------------*/
+
+extern GOTH_STATUS  lsr_tran_init();
+     
+
+#endif
+
+
+
+/* $Header: /gothic/hdr/lsrclib/v1-17/RCS/hdr.lsrc_intrinsics.h,v 1.11 1995/03/13 11:22:08 clarke Exp $								*/
+/* 									*/

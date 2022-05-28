@@ -17,4 +17,9 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	IF P1.EQS."" THEN P1=F$LOGICAL("LSL$PROMFUSER")$	@LSL$COM:SLAVE 'P1'$	SD DRA1:<ROM>$	RUN LSL$EXE:MLOADLSL$EXE:PFZ/ST$	SD .
+$	IF P1.EQS."" THEN P1=F$LOGICAL("LSL$PROMFUSER")
+$	@LSL$COM:SLAVE 'P1'
+$	SD DRA1:<ROM>
+$	RUN LSL$EXE:MLOAD
+LSL$EXE:PFZ/ST
+$	SD .

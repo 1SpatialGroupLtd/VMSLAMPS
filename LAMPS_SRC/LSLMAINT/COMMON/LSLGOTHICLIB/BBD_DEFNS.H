@@ -17,4 +17,24 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-#ifndef _BBD_DEFNS#define _BBD_DEFNS	typedef enum{   BBD_START,   BBD_CURRENT,   BBD_END}  BBD_WHEREFROM_TYPE	; #endif /* $Header: /lslhome/gothic/hdr/bbdlib/v1-0/RCS/hdr.bbd_defns.h,v 1.1 1993/08/10 21:53:09 jon Exp $								*//* 									*//* $Log: hdr.bbd_defns.h,v $ * Revision 1.1  1993/08/10  21:53:09  jon * Version v1-0 derived from root * Initial development *								*/
+#ifndef _BBD_DEFNS
+#define _BBD_DEFNS
+	
+typedef enum
+{
+   BBD_START,
+   BBD_CURRENT,
+   BBD_END
+}  BBD_WHEREFROM_TYPE	; 
+
+
+
+
+#endif 
+/* $Header: /lslhome/gothic/hdr/bbdlib/v1-0/RCS/hdr.bbd_defns.h,v 1.1 1993/08/10 21:53:09 jon Exp $								*/
+/* 									*/
+/* $Log: hdr.bbd_defns.h,v $
+ * Revision 1.1  1993/08/10  21:53:09  jon
+ * Version v1-0 derived from root
+ * Initial development
+ *								*/

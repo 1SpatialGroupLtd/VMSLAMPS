@@ -17,4 +17,25 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-#ifndef _LSRPROCESS_EXTERN_INIT#define _LSRPROCESS_EXTERN_INIT/************************************************************************//* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*//************************************************************************//************************************************************************//*									*//*		    L S R P R O C E S S _ E X T E R N _ I N I T		*//*									*//* Part of GOTHIC module LSRPROCESS					*//************************************************************************//* Prototype for external intialisation routine */typedef long int (*LSRPROCESS_INIT_FUNC)(TRN_USER_EXTERNAL_ROUTINE *external_routine,					 long int             user_integer) ;#endif
+#ifndef _LSRPROCESS_EXTERN_INIT
+#define _LSRPROCESS_EXTERN_INIT
+
+/************************************************************************/
+/* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*/
+/************************************************************************/
+
+/************************************************************************/
+/*									*/
+/*		    L S R P R O C E S S _ E X T E R N _ I N I T		*/
+/*									*/
+/* Part of GOTHIC module LSRPROCESS					*/
+/************************************************************************/
+
+/* Prototype for external intialisation routine */
+
+typedef long int (*LSRPROCESS_INIT_FUNC)(TRN_USER_EXTERNAL_ROUTINE *external_routine,
+					 long int             user_integer) ;
+
+
+
+#endif

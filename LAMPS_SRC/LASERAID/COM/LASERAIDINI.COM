@@ -17,4 +17,17 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	ver_status=f$verify(0)$	on control then continue$	on error then continue$!$! Command file to initialise Laser-Scan Package 'LASERAID'$!$	define		LSL$ERR		LSL$SITE_ROOT:[LASERAID.LOG]$	define		LSL$GU		LSL$IF$	define		LSL$LK		LSL$SITE_ROOT:[LASERAID.PATCH]$	define		LSL$FLFHLP	LSL$HELP:LASERAID$!$	LAJ		== "$LSL$EXE:LAJ"$!$	if ver_status then set verify
+$	ver_status=f$verify(0)
+$	on control then continue
+$	on error then continue
+$!
+$! Command file to initialise Laser-Scan Package 'LASERAID'
+$!
+$	define		LSL$ERR		LSL$SITE_ROOT:[LASERAID.LOG]
+$	define		LSL$GU		LSL$IF
+$	define		LSL$LK		LSL$SITE_ROOT:[LASERAID.PATCH]
+$	define		LSL$FLFHLP	LSL$HELP:LASERAID
+$!
+$	LAJ		== "$LSL$EXE:LAJ"
+$!
+$	if ver_status then set verify

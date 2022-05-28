@@ -17,4 +17,11 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! LITES2 command procedure to display sample DCW dataset$! Supplied as part of LAMPS V4.2	TAA	16-Aug-1993$!$DEFINE/JOB LSL$FILL_CUTSMAX 10000$DEFINE/JOB LSL$FILL_POINTSMAX 20000$IF "''LITES2'".EQS."" THEN @LSL$COM:LITES2INI$DEFINE/USER SYS$INPUT SYS$COMMAND$LITES2 @LSL$PUBLIC_ROOT:[LITES2.CMD]DCW_SAMPLE.LCM
+$! LITES2 command procedure to display sample DCW dataset
+$! Supplied as part of LAMPS V4.2	TAA	16-Aug-1993
+$!
+$DEFINE/JOB LSL$FILL_CUTSMAX 10000
+$DEFINE/JOB LSL$FILL_POINTSMAX 20000
+$IF "''LITES2'".EQS."" THEN @LSL$COM:LITES2INI
+$DEFINE/USER SYS$INPUT SYS$COMMAND
+$LITES2 @LSL$PUBLIC_ROOT:[LITES2.CMD]DCW_SAMPLE.LCM

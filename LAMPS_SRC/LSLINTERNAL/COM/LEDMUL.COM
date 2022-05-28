@@ -17,4 +17,28 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	ver:='f$verify(0)'$! (termporary) command file to run MUL to the LED printer on LTA500:$	if .not.f$getdvi("lta500:","spl") then write sys$output -		"*** LED line appears not to be spooled just now"$	if p1.eqs."" then inquire p1 "File"$	if p1.eqs."" then exit$	form="*"$check_form: p2=f$extract(0,1,f$edit(p2,"LOWERCASE,TRIM"))$	if p2.eqs."" then goto ask_for_form$	if p2.eqs."p" then form=""$	if p2.eqs."l" then form="l"$	if form.nes."*" then goto got_form$ask_for_form: inquire/nopunc p2 " What format (portrait or landscape) ? "$	goto check_form$!$got_form: output_file=f$parse("sys$scratch:.mul_output",p1)$	output_file=f$extract(0,f$locate(";",output_file),-				f$edit(output_file,"LOWERCASE"))$!	ss output_file$	width=80$	if form.nes."" then width=132$	mul 'p1'/w'width'/o'output_file'$	define/user	sys$output	nl:$	print/queue=led'form'_print	'output_file'/delete$	if ver then set verify
+$	ver:='f$verify(0)'
+$! (termporary) command file to run MUL to the LED printer on LTA500:
+$	if .not.f$getdvi("lta500:","spl") then write sys$output -
+		"*** LED line appears not to be spooled just now"
+$	if p1.eqs."" then inquire p1 "File"
+$	if p1.eqs."" then exit
+$	form="*"
+$check_form: p2=f$extract(0,1,f$edit(p2,"LOWERCASE,TRIM"))
+$	if p2.eqs."" then goto ask_for_form
+$	if p2.eqs."p" then form=""
+$	if p2.eqs."l" then form="l"
+$	if form.nes."*" then goto got_form
+$ask_for_form: inquire/nopunc p2 " What format (portrait or landscape) ? "
+$	goto check_form
+$!
+$got_form: output_file=f$parse("sys$scratch:.mul_output",p1)
+$	output_file=f$extract(0,f$locate(";",output_file),-
+				f$edit(output_file,"LOWERCASE"))
+$!	ss output_file
+$	width=80
+$	if form.nes."" then width=132
+$	mul 'p1'/w'width'/o'output_file'
+$	define/user	sys$output	nl:
+$	print/queue=led'form'_print	'output_file'/delete
+$	if ver then set verify

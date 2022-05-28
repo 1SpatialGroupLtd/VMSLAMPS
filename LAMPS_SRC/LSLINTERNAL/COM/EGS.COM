@@ -17,4 +17,17 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	FILE:='P1'$!NB Egs uses .LST as the default type of the listing file in agreement$!with the old assembler, the new assembler uses .LIS$	LST:="LST"$	FLEN='F$LOCATE(".",P1)$	IF FLEN .EQ. 'F$LEN(P1)' THEN GOTO NODOT$	FILE:='F$EXTRACT(0,FLEN,P1)'$	FLEN=FLEN+1$	LST:='F$EXTRACT(FLEN,3,P1)'$ NODOT:$	ASS/USER 'FILE'.DEF EGSOUT$	ASS/USER 'FILE'.'LST' EGSIN$	IF LST .EQS. "LIS" THEN RUN LSL$EXE:DEGS$	IF LST .NES. "LIS" THEN RUN LSL$EXE:EGS
+$	FILE:='P1'
+$!NB Egs uses .LST as the default type of the listing file in agreement
+$!with the old assembler, the new assembler uses .LIS
+$	LST:="LST"
+$	FLEN='F$LOCATE(".",P1)
+$	IF FLEN .EQ. 'F$LEN(P1)' THEN GOTO NODOT
+$	FILE:='F$EXTRACT(0,FLEN,P1)'
+$	FLEN=FLEN+1
+$	LST:='F$EXTRACT(FLEN,3,P1)'
+$ NODOT:
+$	ASS/USER 'FILE'.DEF EGSOUT
+$	ASS/USER 'FILE'.'LST' EGSIN
+$	IF LST .EQS. "LIS" THEN RUN LSL$EXE:DEGS
+$	IF LST .NES. "LIS" THEN RUN LSL$EXE:EGS

@@ -17,4 +17,62 @@ C *
 C * You should have received a copy of the GNU General Public License
 C * along with this program. If not, see http://www.gnu.org/licenses/.
 C
-	LOGICAL FUNCTION DECODE(BUFF,BUFLEN,BUT,X,Y)CC Copyright Laser Scan Laboratories Ltd., Cambridge, England.C	IMPLICIT NONECC Example DECODE routine for Table Monitor.C Must be linked as a shareable image with universal symbol DECODE.C e.g.C	$ FORTRAN DECODEC	$ LINK/SHARE DECODE,SYS$INPUT:/OPTC	UNIVERSAL=DECODEC	$ ...C It will be used by the Table Monitor if logical nameC LSL$TABMON_ROUTINE or LSL$TABMON_ROUTINE_terminal (for a namedC monitor) in group or system table points to the shareable image.CC TABMON function to decode string from TDS tableCC return TRUE if fail, FALSE if succeedC	BYTE		BUFF(18)	INTEGER*2	BUFLEN	INTEGER		BUT	INTEGER		X	INTEGER		YC	LOGICAL		GETCRDCC format is 'sxxxxx,syyyyy,bb,0' where bb is 1-16	DECODE = .TRUE.			! assume failure	IF (BUFLEN.NE.18) GOTO 9999	! wrong length	IF (GETCRD(X,BUFF(2),5)) GOTO 9999	! get x	IF (GETCRD(Y,BUFF(9),5)) GOTO 9999	! get y	IF (GETCRD(BUT,BUFF(15),2)) GOTO 9999	! get button	BUT = BUT-1C9000	DECODE = .FALSE.		! successC9999	RETURN	ENDC	LOGICAL FUNCTION GETCRD(C,BUFF,NUM)	IMPLICIT NONE	INTEGER	C	BYTE	BUFF(5)	INTEGER	NUMC	INTEGER	IC	GETCRD = .TRUE.	C = 0	DO 100 I = 1,NUM	   IF (BUFF(I).LT.'0'.OR.BUFF(I).GT.'9') GOTO 9999	   C = C*10 + BUFF(I) - 48100	CONTINUE	GETCRD = .FALSE.9999	RETURN	END
+	LOGICAL FUNCTION DECODE(BUFF,BUFLEN,BUT,X,Y)
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C
+	IMPLICIT NONE
+C
+C Example DECODE routine for Table Monitor.
+C Must be linked as a shareable image with universal symbol DECODE.
+C e.g.
+C	$ FORTRAN DECODE
+C	$ LINK/SHARE DECODE,SYS$INPUT:/OPT
+C	UNIVERSAL=DECODE
+C	$ ...
+C It will be used by the Table Monitor if logical name
+C LSL$TABMON_ROUTINE or LSL$TABMON_ROUTINE_terminal (for a named
+C monitor) in group or system table points to the shareable image.
+C
+C TABMON function to decode string from TDS table
+C
+C return TRUE if fail, FALSE if succeed
+C
+	BYTE		BUFF(18)
+	INTEGER*2	BUFLEN
+	INTEGER		BUT
+	INTEGER		X
+	INTEGER		Y
+C
+	LOGICAL		GETCRD
+C
+C format is 'sxxxxx,syyyyy,bb,0' where bb is 1-16
+	DECODE = .TRUE.			! assume failure
+	IF (BUFLEN.NE.18) GOTO 9999	! wrong length
+	IF (GETCRD(X,BUFF(2),5)) GOTO 9999	! get x
+	IF (GETCRD(Y,BUFF(9),5)) GOTO 9999	! get y
+	IF (GETCRD(BUT,BUFF(15),2)) GOTO 9999	! get button
+	BUT = BUT-1
+C
+9000	DECODE = .FALSE.		! success
+C
+9999	RETURN
+	END
+C
+	LOGICAL FUNCTION GETCRD(C,BUFF,NUM)
+	IMPLICIT NONE
+	INTEGER	C
+	BYTE	BUFF(5)
+	INTEGER	NUM
+C
+	INTEGER	I
+C
+	GETCRD = .TRUE.
+	C = 0
+	DO 100 I = 1,NUM
+	   IF (BUFF(I).LT.'0'.OR.BUFF(I).GT.'9') GOTO 9999
+	   C = C*10 + BUFF(I) - 48
+100	CONTINUE
+	GETCRD = .FALSE.
+9999	RETURN
+	END

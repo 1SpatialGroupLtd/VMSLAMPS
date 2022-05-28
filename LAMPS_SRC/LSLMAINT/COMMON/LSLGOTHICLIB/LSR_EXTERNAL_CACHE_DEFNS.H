@@ -17,4 +17,89 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-#ifndef _LSR_EXTERNAL_CACHE_DEFNS#define _LSR_EXTERNAL_CACHE_DEFNS/************************************************************************//* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*//* Author    David Miller, 13-May-1994					*//************************************************************************//************************************************************************//*									*//*		  L S R _ E X T E R N A L _ C A C H E _ D E F N S       *//*									*//* Part of GOTHIC module LSRLIB						*//* Version 0.1, David Miller 13-May-1994				*//************************************************************************/typedef GOTH_STATUS (*LSR_CACHE_DELETE_FUNC)(GD_RAC          rac_id, 					     GOTH_INTEGER    nextern_cache_params,					     GOTH_DATATYPE   *extern_cache_types,					     GOTH_VALUE	    *extern_cache_values) ;typedef GOTH_STATUS (*LSR_CACHE_GET_FUNC)(GD_RAC        rac_id,					  GOTH_INTEGER	tile1,					  GOTH_INTEGER	tile2,					  GOTH_BOOLEAN	read_for_read,					  GOTH_BOOLEAN	memory_read_only,					  VOID_P	*buffer,					  GOTH_BOOLEAN	*tile_unknown,					  GOTH_INTEGER  nextern_cache_params,					  GOTH_DATATYPE *extern_cache_types,					  GOTH_VALUE	*extern_cache_values) ;typedef GOTH_STATUS (*LSR_CACHE_PUT_FUNC)(GD_RAC        rac_id,					  GOTH_INTEGER	tile1,					  GOTH_INTEGER	tile2,					  VOID_P	buffer,					  GOTH_INTEGER  nextern_cache_params,					  GOTH_DATATYPE *extern_cache_types,					  GOTH_VALUE	*extern_cache_values) ;typedef GOTH_STATUS (*LSR_CACHE_LOCK_FUNC)(GD_RAC          rac_id,					   GOTH_INTEGER	   tile1,					   GOTH_INTEGER    tile2,					   GOTH_INTEGER	   nextern_cache_params,					   GOTH_DATATYPE   *extern_cache_types,					   GOTH_VALUE	   *extern_cache_values) ;typedef GOTH_STATUS (*LSR_CACHE_UNLOCK_FUNC)(GD_RAC          rac_id,					     GOTH_INTEGER    tile1,					     GOTH_INTEGER    tile2,					     GOTH_INTEGER    nextern_cache_params,					     GOTH_DATATYPE   *extern_cache_types,					   GOTH_VALUE	   *extern_cache_values) ;typedef GOTH_STATUS (*LSR_CACHE_ALTER_FUNC)(GD_RAC          rac_id,					    GOTH_INTEGER    tile1,					    GOTH_INTEGER    tile2, 					    GOTH_INTEGER    nextern_cache_params,					    GOTH_DATATYPE   *extern_cache_types,					    GOTH_VALUE	    *extern_cache_values) ;typedef GOTH_STATUS (*LSR_CACHE_FLUSH_FUNC)(GD_RAC          rac_id, 					    GOTH_INTEGER    nextern_cache_params,					    GOTH_DATATYPE   *extern_cache_types,					    GOTH_VALUE	    *extern_cache_values) ;typedef GOTH_STATUS (*LSR_CACHE_FREE_FUNC)(GD_RAC          rac_id, 					    GOTH_INTEGER    nextern_cache_params,					    GOTH_DATATYPE   *extern_cache_types,					    GOTH_VALUE	    *extern_cache_values) ;typedef GOTH_STATUS (*LSR_CACHE_DESTROY_FUNC)(GD_RAC          rac_id,					      GOTH_INTEGER    nextern_cache_params,					      GOTH_DATATYPE   *extern_cache_types,					      GOTH_VALUE	    *extern_cache_values) ;#endif/* $Header: /gothic/hdr/rasterlib/v1-20a-4/RCS/hdr.lsr_external_cache_defns.h,v 1.26 1995/03/13 11:44:36 clarke Exp $								*//* 									*//* $Header: /gothic/hdr/rasterlib/v1-20a-4/RCS/hdr.lsr_external_cache_defns.h,v 1.26 1995/03/13 11:44:36 clarke Exp $								*//* 									*/
+#ifndef _LSR_EXTERNAL_CACHE_DEFNS
+#define _LSR_EXTERNAL_CACHE_DEFNS
+
+/************************************************************************/
+/* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*/
+/* Author    David Miller, 13-May-1994					*/
+/************************************************************************/
+
+/************************************************************************/
+/*									*/
+/*		  L S R _ E X T E R N A L _ C A C H E _ D E F N S       */
+/*									*/
+/* Part of GOTHIC module LSRLIB						*/
+/* Version 0.1, David Miller 13-May-1994				*/
+/************************************************************************/
+
+
+
+typedef GOTH_STATUS (*LSR_CACHE_DELETE_FUNC)(GD_RAC          rac_id,
+ 					     GOTH_INTEGER    nextern_cache_params,
+					     GOTH_DATATYPE   *extern_cache_types,
+					     GOTH_VALUE	    *extern_cache_values) ;
+
+
+typedef GOTH_STATUS (*LSR_CACHE_GET_FUNC)(GD_RAC        rac_id,
+					  GOTH_INTEGER	tile1,
+					  GOTH_INTEGER	tile2,
+					  GOTH_BOOLEAN	read_for_read,
+					  GOTH_BOOLEAN	memory_read_only,
+					  VOID_P	*buffer,
+					  GOTH_BOOLEAN	*tile_unknown,
+					  GOTH_INTEGER  nextern_cache_params,
+					  GOTH_DATATYPE *extern_cache_types,
+					  GOTH_VALUE	*extern_cache_values) ;
+
+typedef GOTH_STATUS (*LSR_CACHE_PUT_FUNC)(GD_RAC        rac_id,
+					  GOTH_INTEGER	tile1,
+					  GOTH_INTEGER	tile2,
+					  VOID_P	buffer,
+					  GOTH_INTEGER  nextern_cache_params,
+					  GOTH_DATATYPE *extern_cache_types,
+					  GOTH_VALUE	*extern_cache_values) ;
+
+
+typedef GOTH_STATUS (*LSR_CACHE_LOCK_FUNC)(GD_RAC          rac_id,
+					   GOTH_INTEGER	   tile1,
+					   GOTH_INTEGER    tile2,
+					   GOTH_INTEGER	   nextern_cache_params,
+					   GOTH_DATATYPE   *extern_cache_types,
+					   GOTH_VALUE	   *extern_cache_values) ;
+
+typedef GOTH_STATUS (*LSR_CACHE_UNLOCK_FUNC)(GD_RAC          rac_id,
+					     GOTH_INTEGER    tile1,
+					     GOTH_INTEGER    tile2,
+					     GOTH_INTEGER    nextern_cache_params,
+					     GOTH_DATATYPE   *extern_cache_types,
+					   GOTH_VALUE	   *extern_cache_values) ;
+
+typedef GOTH_STATUS (*LSR_CACHE_ALTER_FUNC)(GD_RAC          rac_id,
+					    GOTH_INTEGER    tile1,
+					    GOTH_INTEGER    tile2,
+ 					    GOTH_INTEGER    nextern_cache_params,
+					    GOTH_DATATYPE   *extern_cache_types,
+					    GOTH_VALUE	    *extern_cache_values) ;
+
+
+typedef GOTH_STATUS (*LSR_CACHE_FLUSH_FUNC)(GD_RAC          rac_id,
+ 					    GOTH_INTEGER    nextern_cache_params,
+					    GOTH_DATATYPE   *extern_cache_types,
+					    GOTH_VALUE	    *extern_cache_values) ;
+
+typedef GOTH_STATUS (*LSR_CACHE_FREE_FUNC)(GD_RAC          rac_id,
+ 					    GOTH_INTEGER    nextern_cache_params,
+					    GOTH_DATATYPE   *extern_cache_types,
+					    GOTH_VALUE	    *extern_cache_values) ;
+
+typedef GOTH_STATUS (*LSR_CACHE_DESTROY_FUNC)(GD_RAC          rac_id,
+					      GOTH_INTEGER    nextern_cache_params,
+					      GOTH_DATATYPE   *extern_cache_types,
+					      GOTH_VALUE	    *extern_cache_values) ;
+
+#endif
+/* $Header: /gothic/hdr/rasterlib/v1-20a-4/RCS/hdr.lsr_external_cache_defns.h,v 1.26 1995/03/13 11:44:36 clarke Exp $								*/
+/* 									*/
+/* $Header: /gothic/hdr/rasterlib/v1-20a-4/RCS/hdr.lsr_external_cache_defns.h,v 1.26 1995/03/13 11:44:36 clarke Exp $								*/
+/* 									*/

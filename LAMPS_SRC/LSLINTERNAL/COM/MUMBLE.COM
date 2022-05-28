@@ -17,4 +17,10 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$ A:	IF P1 .EQS. "" THEN INQUIRE P1 "Which line"$	IF P1 .EQS. "" THEN GOTO A$	ALL 'P1$!	SET TERM 'P1/HOST/NOECHO/TYPE$	ASS/USER 'P1 LD$	ASS/USER 'F$LOG("TT")' SYS$INPUT$	RUN LSL$EXE:NATTER
+$ A:	IF P1 .EQS. "" THEN INQUIRE P1 "Which line"
+$	IF P1 .EQS. "" THEN GOTO A
+$	ALL 'P1
+$!	SET TERM 'P1/HOST/NOECHO/TYPE
+$	ASS/USER 'P1 LD
+$	ASS/USER 'F$LOG("TT")' SYS$INPUT
+$	RUN LSL$EXE:NATTER

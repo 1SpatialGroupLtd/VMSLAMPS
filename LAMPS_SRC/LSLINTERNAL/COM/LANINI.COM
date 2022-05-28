@@ -17,4 +17,24 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! Labour analysis initialisation file$!$	lan	=="$lsl$exe:lan"$	fur*anal =="$lsl$exe:furanal"$	pra	=="@lsl$com:printacct"$	recon*cile=="$lsl$lan_root:[progs]reconcile"$!$! directories to use$!$	root_address	= f$trnlnm("lsl$user_root","lnm$system_table")- -							"]"+"lan.]"$	define/tr=(c,t)	lsl$lan_root	 'root_address'$!$	bur*eau	==sd+" lsl$lan_root:bureau"$	comm	==sd+" lsl$lan_root:comm"$	devt	==sd+" lsl$lan_root:devt"$	do	==sd+" lsl$lan_root:do"$	npg	==sd+" lsl$lan_root:npg"$	sales	==sd+" lsl$lan_root:salesup"$	soft*ware ==sd+" lsl$lan_root:soft"$!
+$! Labour analysis initialisation file
+$!
+$	lan	=="$lsl$exe:lan"
+$	fur*anal =="$lsl$exe:furanal"
+$	pra	=="@lsl$com:printacct"
+$	recon*cile=="$lsl$lan_root:[progs]reconcile"
+$!
+$! directories to use
+$!
+$	root_address	= f$trnlnm("lsl$user_root","lnm$system_table")- -
+							"]"+"lan.]"
+$	define/tr=(c,t)	lsl$lan_root	 'root_address'
+$!
+$	bur*eau	==sd+" lsl$lan_root:bureau"
+$	comm	==sd+" lsl$lan_root:comm"
+$	devt	==sd+" lsl$lan_root:devt"
+$	do	==sd+" lsl$lan_root:do"
+$	npg	==sd+" lsl$lan_root:npg"
+$	sales	==sd+" lsl$lan_root:salesup"
+$	soft*ware ==sd+" lsl$lan_root:soft"
+$!

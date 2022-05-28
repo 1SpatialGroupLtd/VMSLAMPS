@@ -17,4 +17,101 @@ C *
 C * You should have received a copy of the GNU General Public License
 C * along with this program. If not, see http://www.gnu.org/licenses/.
 C
-	LOGICAL FUNCTION DECODE(BUFF,BUFLEN,BUT,X,Y)CC Copyright Laser Scan Laboratories Ltd., Cambridge, England.C Author	Clarke Brunt,	November 1985C Amended by	Tony J Ibbs,	November 1986C Amended by    Mike Bisset & Ron Streeter 25 Feb 1988C	IMPLICIT NONECC function to decode a digitising table stringC - returns TRUE if it fails, FALSE if it succeedsCC	 * * * * * * * * * * * * * * * * * * * * * * * * *C	 * * *   T E M P L A T E     v e r s i o n   * * *C	 * * * * * * * * * * * * * * * * * * * * * * * * *CC argumentsC	BYTE		BUFF(*)		! byte string to decode	INTEGER*2	BUFLEN		! length of byte string	INTEGER		BUT		! button number pressed	INTEGER		X		! x coordinate	INTEGER		Y		! y coordinateCC ----------------------------------------------------------------------C Example DECODE routine for use by programs to interpret digitisingC table input. It must be linked as a shareable image with universalC symbol DECODE, so that the program can pull it in at run-time.C e.g.C	$ FORTRAN DECODEC	$ LINK/SHARE DECODE,SYS$INPUT:/OPTC	UNIVERSAL=DECODEC      	$ ...CC The command file DECODE.COM in the same directory as the example willC perform this task for you.CC			 Use by programsC			 ---------------C In order to be used by a program, a logical name in either the groupC or system tables must be defined to point to the sharable image. TheC following programs currently use this facility:CC - Table MonitorC   Logical names LSL$TABMON_ROUTINEC	       or LSL$TABMON_ROUTINE_<terminal> (for a named monitor)CC - LITES2C   Logical name LSL$TABMON_ROUTINE_<terminal>CC - DIGSYSC   Logical name LSL$DIGSYS_DECODE<n>C   (where <n> is the same number used in the table name LSL$DIG<n>)CC ----------------------------------------------------------------------C - this version for Altek metric 0.01mmC	LOGICAL		GETCRD		! function to read a numberCC format is '$b,sxxxxxx,syyyyyy' where b is 0-9,A-F,HC	DECODE = .TRUE.			! assume failureC	IF (BUFLEN.NE.18) GOTO 9999	! wrong length	IF (BUFF(4).NE.'+'.OR.BUFF(12).NE.'+') GOTO 9999	IF (GETCRD(X,BUFF(5))) GOTO 9999	! get x	IF (GETCRD(Y,BUFF(13))) GOTO 9999	! get yC	IF (.NOT.((BUFF(2).GE.'0'.AND.BUFF(2).LE.'9').OR.     &            (BUFF(2).GE.'A'.AND.BUFF(2).LE.'F').OR.     &            (BUFF(2).EQ.'H'                   )) ) GOTO 9999 	BUT = BUFF(2)-'0'	IF (BUT.GT.9) BUT = BUT-7C9000	DECODE = .FALSE.		! successC9999	RETURN	ENDC ----------------------------------------------------------------------	LOGICAL FUNCTION GETCRD(C,BUFF)C	IMPLICIT NONEC	INTEGER	C	BYTE	BUFF(6)C	INTEGER	IC	GETCRD = .TRUE.	C = 0	DO 100 I = 1,6	   IF (BUFF(I).LT.'0'.OR.BUFF(I).GT.'9') GOTO 9999	   C = C*10 + BUFF(I) - 48100	CONTINUE	GETCRD = .FALSE.9999	RETURN	END
+	LOGICAL FUNCTION DECODE(BUFF,BUFLEN,BUT,X,Y)
+C
+C Copyright Laser Scan Laboratories Ltd., Cambridge, England.
+C Author	Clarke Brunt,	November 1985
+C Amended by	Tony J Ibbs,	November 1986
+C Amended by    Mike Bisset & Ron Streeter 25 Feb 1988
+C
+	IMPLICIT NONE
+C
+C function to decode a digitising table string
+C - returns TRUE if it fails, FALSE if it succeeds
+C
+C	 * * * * * * * * * * * * * * * * * * * * * * * * *
+C	 * * *   T E M P L A T E     v e r s i o n   * * *
+C	 * * * * * * * * * * * * * * * * * * * * * * * * *
+C
+C arguments
+C
+	BYTE		BUFF(*)		! byte string to decode
+	INTEGER*2	BUFLEN		! length of byte string
+	INTEGER		BUT		! button number pressed
+	INTEGER		X		! x coordinate
+	INTEGER		Y		! y coordinate
+C
+C ----------------------------------------------------------------------
+C Example DECODE routine for use by programs to interpret digitising
+C table input. It must be linked as a shareable image with universal
+C symbol DECODE, so that the program can pull it in at run-time.
+C e.g.
+C	$ FORTRAN DECODE
+C	$ LINK/SHARE DECODE,SYS$INPUT:/OPT
+C	UNIVERSAL=DECODE
+C      	$ ...
+C
+C The command file DECODE.COM in the same directory as the example will
+C perform this task for you.
+C
+C			 Use by programs
+C			 ---------------
+C In order to be used by a program, a logical name in either the group
+C or system tables must be defined to point to the sharable image. The
+C following programs currently use this facility:
+C
+C - Table Monitor
+C   Logical names LSL$TABMON_ROUTINE
+C	       or LSL$TABMON_ROUTINE_<terminal> (for a named monitor)
+C
+C - LITES2
+C   Logical name LSL$TABMON_ROUTINE_<terminal>
+C
+C - DIGSYS
+C   Logical name LSL$DIGSYS_DECODE<n>
+C   (where <n> is the same number used in the table name LSL$DIG<n>)
+C
+C ----------------------------------------------------------------------
+C - this version for Altek metric 0.01mm
+C
+	LOGICAL		GETCRD		! function to read a number
+C
+C format is '$b,sxxxxxx,syyyyyy' where b is 0-9,A-F,H
+C
+	DECODE = .TRUE.			! assume failure
+C
+	IF (BUFLEN.NE.18) GOTO 9999	! wrong length
+	IF (BUFF(4).NE.'+'.OR.BUFF(12).NE.'+') GOTO 9999
+	IF (GETCRD(X,BUFF(5))) GOTO 9999	! get x
+	IF (GETCRD(Y,BUFF(13))) GOTO 9999	! get y
+C
+	IF (.NOT.((BUFF(2).GE.'0'.AND.BUFF(2).LE.'9').OR.
+     &            (BUFF(2).GE.'A'.AND.BUFF(2).LE.'F').OR.
+     &            (BUFF(2).EQ.'H'                   )) ) GOTO 9999
+ 
+	BUT = BUFF(2)-'0'
+	IF (BUT.GT.9) BUT = BUT-7
+C
+9000	DECODE = .FALSE.		! success
+C
+9999	RETURN
+	END
+C ----------------------------------------------------------------------
+	LOGICAL FUNCTION GETCRD(C,BUFF)
+C
+	IMPLICIT NONE
+C
+	INTEGER	C
+	BYTE	BUFF(6)
+C
+	INTEGER	I
+C
+	GETCRD = .TRUE.
+	C = 0
+	DO 100 I = 1,6
+	   IF (BUFF(I).LT.'0'.OR.BUFF(I).GT.'9') GOTO 9999
+	   C = C*10 + BUFF(I) - 48
+100	CONTINUE
+	GETCRD = .FALSE.
+9999	RETURN
+	END

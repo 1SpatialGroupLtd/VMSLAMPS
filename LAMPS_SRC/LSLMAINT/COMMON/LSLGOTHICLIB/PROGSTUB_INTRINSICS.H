@@ -17,4 +17,38 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-/************************************************************************//* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*//* Author    Ian Fisher, 31-Mar-1994					*//************************************************************************//************************************************************************//*									*//*		 P R O G S T U B _ I N T R I N S I C S 			*//*									*//* Part of GOTHIC module PROGSTUBLIB					*//* Version 0.1, Ian Fisher 31-Mar-1994					*//************************************************************************/#ifndef _PROGSTUB_INTRINSICS#define  _PROGSTUB_INTRINSICS/*----------------------------------------------------------------------*//* EXTERN progstub_init							*//*......................................................................*//*..DESCRIPTION.........................................................*//*									*//* To initialise the gothic status code. 				*//*									*//*..ARGUMENTS...........................................................*//*									*//* None.								*//*									*//*..RETURN-CODES........................................................*//*									*//* GOTH__NORMAL		Normal, successful completion.			*//* GOTH__ERROR		Invalid vac_id specified.			*//*									*//*----------------------------------------------------------------------*/extern GOTH_STATUS progstub_init() ;#endif
+/************************************************************************/
+/* Copyright Laser-Scan Ltd, Cambridge CB4 4FY, England			*/
+/* Author    Ian Fisher, 31-Mar-1994					*/
+/************************************************************************/
+
+/************************************************************************/
+/*									*/
+/*		 P R O G S T U B _ I N T R I N S I C S 			*/
+/*									*/
+/* Part of GOTHIC module PROGSTUBLIB					*/
+/* Version 0.1, Ian Fisher 31-Mar-1994					*/
+/************************************************************************/
+#ifndef _PROGSTUB_INTRINSICS
+#define  _PROGSTUB_INTRINSICS
+
+/*----------------------------------------------------------------------*/
+/* EXTERN progstub_init							*/
+/*......................................................................*/
+/*..DESCRIPTION.........................................................*/
+/*									*/
+/* To initialise the gothic status code. 				*/
+/*									*/
+/*..ARGUMENTS...........................................................*/
+/*									*/
+/* None.								*/
+/*									*/
+/*..RETURN-CODES........................................................*/
+/*									*/
+/* GOTH__NORMAL		Normal, successful completion.			*/
+/* GOTH__ERROR		Invalid vac_id specified.			*/
+/*									*/
+/*----------------------------------------------------------------------*/
+extern GOTH_STATUS progstub_init() ;
+
+#endif

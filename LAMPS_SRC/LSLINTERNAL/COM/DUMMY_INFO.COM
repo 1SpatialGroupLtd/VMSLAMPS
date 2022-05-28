@@ -17,4 +17,13 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	verify:='f$verify(0)'$	write sys$output "*** The INFO command has been withdrawn"$	write sys$output "*** You can still mail notices to INFO, but to ",-				"read them you must now use NEWS"$	if f$search("sys$login:newsrc.").eqs.""$	then$	  copy/nolog lsl$info:proto_newsrc. sys$login:newsrc.$	  write sys$output "*** You have been `set up' to use NEWS to read INFO"$	endif$	if verify then set verify
+$	verify:='f$verify(0)'
+$	write sys$output "*** The INFO command has been withdrawn"
+$	write sys$output "*** You can still mail notices to INFO, but to ",-
+				"read them you must now use NEWS"
+$	if f$search("sys$login:newsrc.").eqs.""
+$	then
+$	  copy/nolog lsl$info:proto_newsrc. sys$login:newsrc.
+$	  write sys$output "*** You have been `set up' to use NEWS to read INFO"
+$	endif
+$	if verify then set verify

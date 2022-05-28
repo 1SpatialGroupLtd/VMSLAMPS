@@ -17,4 +17,9 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! plotter batch procedure, suppressing batch log printouts.$! Called from PPBATCH command.$! sets up options and calls central BATCH procedure$	BAT$QUEUE="PLOTBATCH"$	BAT$LOG="BUR$WORK:"$	@LSL$COM:BATCH 'P1' 'P2' 'P3' 'P4' 'P5' 'P6' 'P7' 'P8'
+$! plotter batch procedure, suppressing batch log printouts.
+$! Called from PPBATCH command.
+$! sets up options and calls central BATCH procedure
+$	BAT$QUEUE="PLOTBATCH"
+$	BAT$LOG="BUR$WORK:"
+$	@LSL$COM:BATCH 'P1' 'P2' 'P3' 'P4' 'P5' 'P6' 'P7' 'P8'

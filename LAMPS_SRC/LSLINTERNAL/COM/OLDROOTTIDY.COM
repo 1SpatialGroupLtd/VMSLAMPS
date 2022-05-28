@@ -17,4 +17,18 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! command file to tidy up [LSLOLD*...] directories$! Author PGH 04-Apr-1989$!$	TYPE SYS$INPUT:***	This procedure will delete all files older than 2 weeks on the two***	'old' trees of LSL$OLD_PUBLIC_ROOT:, and LSL$OLD_ISSUE_ROOT:.$	INQUIRE YES "Go ahead and do it ?  "$	IF .NOT.YES THEN EXIT$!$	DELETE/LOG/EXCLUDE=*.DIR/MOD/BEFORE="TODAY-14-" LSL$OLD_PUBLIC_ROOT:[*...]*.*;*$!$	DELETE/LOG/EXCLUDE=*.DIR/MOD/BEFORE="TODAY-14-" LSL$OLD_ISSUE_ROOT:[*...]*.*;*$!
+$! command file to tidy up [LSLOLD*...] directories
+$! Author PGH 04-Apr-1989
+$!
+$	TYPE SYS$INPUT:
+
+***	This procedure will delete all files older than 2 weeks on the two
+***	'old' trees of LSL$OLD_PUBLIC_ROOT:, and LSL$OLD_ISSUE_ROOT:.
+
+$	INQUIRE YES "Go ahead and do it ?  "
+$	IF .NOT.YES THEN EXIT
+$!
+$	DELETE/LOG/EXCLUDE=*.DIR/MOD/BEFORE="TODAY-14-" LSL$OLD_PUBLIC_ROOT:[*...]*.*;*
+$!
+$	DELETE/LOG/EXCLUDE=*.DIR/MOD/BEFORE="TODAY-14-" LSL$OLD_ISSUE_ROOT:[*...]*.*;*
+$!

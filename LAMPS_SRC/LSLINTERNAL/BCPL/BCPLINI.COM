@@ -17,4 +17,33 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$!$! command file to set up the BCPL 'world'$! - define where we expect to find things$!$	ass  'f$logical("LSL$PUBLIC")  bcpl$disk$	ass  'f$logical("BCPL$DISK")  bcpl$disc$!$	disc		:= 'f$logical("BCPL$DISK")$!$	bcpldir		:= lsl$public_root:[lslinternal.bcpl]$!$! and set up the relevant commands$!$	bcpl		:== $'bcpldir'bcpl	! the compiler itself$	vax		:== $'bcpldir'vax	! the codegenerator$	alpha		:== $'bcpldir'alpha	! ocode => text$!$! alias for getting at the help library$!$	helb*cpl	:== help/library=lsl$help:bcpl$!$! define our header file, and our run-time system$!$	define	libhdr	'bcpldir'dlib.hdr$	define	bcplrts	'bcpldir'rts.obj$!$! define the directory for outside use$!$	define	bcpldir     'bcpldir'$!
+$!
+$! command file to set up the BCPL 'world'
+$! - define where we expect to find things
+$!
+$	ass  'f$logical("LSL$PUBLIC")  bcpl$disk
+$	ass  'f$logical("BCPL$DISK")  bcpl$disc
+$!
+$	disc		:= 'f$logical("BCPL$DISK")
+$!
+$	bcpldir		:= lsl$public_root:[lslinternal.bcpl]
+$!
+$! and set up the relevant commands
+$!
+$	bcpl		:== $'bcpldir'bcpl	! the compiler itself
+$	vax		:== $'bcpldir'vax	! the codegenerator
+$	alpha		:== $'bcpldir'alpha	! ocode => text
+$!
+$! alias for getting at the help library
+$!
+$	helb*cpl	:== help/library=lsl$help:bcpl
+$!
+$! define our header file, and our run-time system
+$!
+$	define	libhdr	'bcpldir'dlib.hdr
+$	define	bcplrts	'bcpldir'rts.obj
+$!
+$! define the directory for outside use
+$!
+$	define	bcpldir     'bcpldir'
+$!

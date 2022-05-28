@@ -17,4 +17,5 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	IF P2 .EQS. "" THEN P2=100$	DIR 'P1' /SELECT=SIZE=MIN='P2'
+$	IF P2 .EQS. "" THEN P2=100
+$	DIR 'P1' /SELECT=SIZE=MIN='P2'

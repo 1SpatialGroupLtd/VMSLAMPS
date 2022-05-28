@@ -17,4 +17,25 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! command file for linking a shared image of Calcomp HCBS compatible routines$! this version for BP survey's Versatek (COL2V0)$!$	set noon$	set ver$	macro HCBSTVEC$	link/share=HCBSCOL2V0/MAP=HCBSCOL2V0 SYS$INPUT:/OPTCOL2V0/incl=(PLOT,PLOTS,NEWPEN,SYMBOL)/libCLUSTER=TRANSFER,,,HCBSTVECGSMATCH=LEQUAL,1,0PSECT_ATTR=BSORT,NOSHRPSECT_ATTR=CLRCOM,NOSHRPSECT_ATTR=DVCOM,NOSHRPSECT_ATTR=IOCOM,NOSHRPSECT_ATTR=KLCOM,NOSHRPSECT_ATTR=MSGCOM,NOSHRPSECT_ATTR=PRMCOM,NOSHRPSECT_ATTR=STKCOM,NOSHRPSECT_ATTR=VERSPL,NOSHRPSECT_ATTR=VRFCOM,NOSHR$	purge HCBS*.*$	set nover
+$! command file for linking a shared image of Calcomp HCBS compatible routines
+$! this version for BP survey's Versatek (COL2V0)
+$!
+$	set noon
+$	set ver
+$	macro HCBSTVEC
+$	link/share=HCBSCOL2V0/MAP=HCBSCOL2V0 SYS$INPUT:/OPT
+COL2V0/incl=(PLOT,PLOTS,NEWPEN,SYMBOL)/lib
+CLUSTER=TRANSFER,,,HCBSTVEC
+GSMATCH=LEQUAL,1,0
+PSECT_ATTR=BSORT,NOSHR
+PSECT_ATTR=CLRCOM,NOSHR
+PSECT_ATTR=DVCOM,NOSHR
+PSECT_ATTR=IOCOM,NOSHR
+PSECT_ATTR=KLCOM,NOSHR
+PSECT_ATTR=MSGCOM,NOSHR
+PSECT_ATTR=PRMCOM,NOSHR
+PSECT_ATTR=STKCOM,NOSHR
+PSECT_ATTR=VERSPL,NOSHR
+PSECT_ATTR=VRFCOM,NOSHR
+$	purge HCBS*.*
+$	set nover

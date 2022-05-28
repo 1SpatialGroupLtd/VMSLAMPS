@@ -17,4 +17,7 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	SD ROM$	ASSIGN/USER 'F$LOGICAL("TT")' SYS$INPUT$	MCR LSL$EXE:FROM 'P1'$	SD .
+$	SD ROM
+$	ASSIGN/USER 'F$LOGICAL("TT")' SYS$INPUT
+$	MCR LSL$EXE:FROM 'P1'
+$	SD .

@@ -17,4 +17,9 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! fast batch queue submit procedure$! Called from FBATCH command.$! sets up options and calls central BATCH procedure$	BAT$QUEUE="''F$TRNLNM("FASTBATCH")'"$	IF BAT$QUEUE .EQS. "" THEN BAT$QUEUE="FASTBATCH"$	@LSL$COM:BATCH 'P1' 'P2' 'P3' 'P4' 'P5' 'P6' 'P7' 'P8'
+$! fast batch queue submit procedure
+$! Called from FBATCH command.
+$! sets up options and calls central BATCH procedure
+$	BAT$QUEUE="''F$TRNLNM("FASTBATCH")'"
+$	IF BAT$QUEUE .EQS. "" THEN BAT$QUEUE="FASTBATCH"
+$	@LSL$COM:BATCH 'P1' 'P2' 'P3' 'P4' 'P5' 'P6' 'P7' 'P8'

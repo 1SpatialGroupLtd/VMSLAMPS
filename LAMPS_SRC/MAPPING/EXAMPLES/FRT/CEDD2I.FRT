@@ -1,1 +1,293 @@
-! this is the OS Feature Representation Table (FRT) file OS.FRT! version 2 DDE 6/6/84! version 3 OS from DOUG.FRT by PGH and DDE  8/11/84! then the SCT which defines symbol componentsFRT	1	12	1	0	0.0	0	! accuracy areaFRT	2	7	1	0	1.0	1	! registration pointFRT	3	12	1	0	0.0	0	! accuracy areaFRT     4       11	1	0	1.0	1       ! symbol stringFRT	5	1	1	0	1.0	0	! lineFRT	6	12	1	0	0.0	0	! area!   	FC	GT	Colour	Width	Size	SC	DescriptionSCT	0	1	0	0	0	0	! LINEARSCT	1	1	0	0	0	0	lineSCT	2	2	0	0	0	0	clockwise arcSCT	3	3	0	0	0	0	anticlockwise arcSCT	4	4	0	0	0	0	circumcircle arcSCT	5	5	0	0	0	0	full circumcircleSCT	6	6	0	0	0	0	interpolated curve!SCT	5	6	0	0	0	0	! INTERPOLATED CURVESCT	65	2	0	0	0	0	! CLOCKWISE ARCSCT	66	3	0	0	0	0	! ANTICLOCKWISE ARCSCT	67	4	0	0	0	0	! CIRCUMCIRCLE ARCSCT	68	5	0	0	0	0	! FULL CIRCUMCIRCLE! then the pattern definitions!	Pattern  Major  Minor  Major  Minor  Overall Major  Minor  Major  Minor!	Index	 UC     UC     Repeat Repeat Size    Size   Size   Width  WidthPATTERN	5        0      0      0      0      0.9     0.6    0.0    0.     0.PATTERN	6        5      0      0      0      1.8     0.6    0.0    0.3    0.PATTERN	7        12     0      0      0      2.58    1.8    0.0    0.9    0.PATTERN	8        0      0      0      0      2.4     1.44   0.0    0.     0.PATTERN	10       0      0      0      0      1.8     1.2    0.0    0.     0.PATTERN	12       0      0      0      0      2.76    2.16   0.0    0.     0.PATTERN	15       0      0      0      0      2.7     1.8    0.0    0.     0.PATTERN	20       1      0      0      0      4.0     3.99   0.0    2.0    0.PATTERN	22	 0      0      0      0      3.0     2.5    0.0    0.     0.PATTERN	25       0      0      0      0      4.5     3.0    0.0    0.     0.PATTERN	28       0      5      0      0      5.4     3.6    0.6    3.6    0.3PATTERN	30       0      0      0      0      5.4     3.6    0.0    0.     0.PATTERN	32       5      0      0      0      5.4     3.6    0.0    1.8    0.PATTERN	80       0      0      0      0      14.4    9.6    0.0    0.     0.PATTERN 81	 5	0      0      0      5.0     0.6    0.0    0.3    0.0PATTERN 82	 0	0      0      0      9.0     6.0    0.0    0.0    0.0PATTERN 83	 0	0      0      0      11.0    6.0    2.0    0.0    0.0PATTERN 84	 0	0      0      0      6.0     4.0    0.0    0.0    0.0PATTERN 85	 1      0      0      0      6.0     5.99   0.0    1.5    0.0   	   	 			! that's the end of OS.FRTACD	TABLE	1! AC's for the dataset as a wholeACD	C	1	Product_typeACD	C	2	Dataset_IDACD	I	3	Edition_no		0	999ACD	D	4	Compilation_dateACD	D	5	Revision_dateACD	D	6	IHO_Format_dateACD	D	7	FACS_Format_dateACD	C	8	Data_typeACD	C	9	Horiz_unitsACD	R	10	Horiz_resnACD	C	11	Geodetic_datumACD	C	12	EllipsoidACD	C	13	Vert_unitsACD	R	14	Vert_resnACD	C	15	Vert_ref_codeACD	C	16	Sounding_datumACD	I	17	X_false_originACD	I	18	Y_false_originACD	I	19	Z_false_originACD	C	20	ProjectionACD	C	21	Projn_parACD	I	22	Compn_count		0	99ACD	I	23	Revn_count		0	9ACD	C	24	Product_specACD	D	25	Product_spec_dateACD	I	26	Spec_change_number	0	999ACD	C	27	CountryACD	C	28	AgencyACD	C	29	BranchACD	C	30	Dig_systemACD	C	31	Proc_systemACD	C	32	Grid_codeACD	I	33	Abs_horiz_acc		0	9999ACD	I	34	Abs_vert_acc		0	9999ACD	I	35	Rel_horiz_acc		0	9999ACD	I	36	Rel_vert_acc		0	9999ACD	I	37	Height_acc		0	9999ACD	I	38	Data_gen		0	1ACD	I	39	N_mm_number		0	9ACD	I	40	E_mm_number		0	9ACD	I	41	S_mm_number		0	9ACD	I	42	W_mm_number		0	9ACD	D	43	N_mm_dateACD	D	44	E_mm_dateACD	D	45	S_mm_dateACD	D	46	W_mm_dateACD	D	47	Earliest_source_dateACD	D	48	Latest_source_dateACD	I	49	Data_colln_code		0	9ACD	I	50	Data_colln_crit		0	999ACD	C	51	StructureACD	I	52	Registration_ID		0	999999ACD	I	53	Control_X		0	999999ACD	I	54	Control_Y		0	999999ACD	I	55	Control_Z		0	999999ACD	I	56	Registration_latACD	I	57	Registration_longACD	I	58	Registration_elevACD	I	59	ACC_abs_horiz_acc	0	9999ACD	I	60	ACC_abs_vert_acc	0	9999ACD	I	61	ACC_rel_horiz_acc	0	9999ACD	I	62	ACC_rel_vert_acc	0	9999!  AC's for each featureACD	I	70	Source_code		0	99ACD	I	71	Source_scaleACD	D	72	Source_dateACD	I	73	Collection_system	0	99ACD	D	74	Maintenance_dateACD	I	75	Feature_horiz_acc	0	9999ACD	I	76	Feature_vert_acc	0	9999ACD	I	77	Base_product		0	999ACD	C	78	Security_classACD	C	79	Data_handlingACD	I	80	Portrayal		0	99ACD	C	81	FACS_prefixACD	C	82	FACS_codeACD	I	101	I_FACS_attribute_A	0	99ACD	I	102	I_FACS_attribute_B	0	99ACD	I	103	I_FACS_attribute_C	0	99ACD	I	104	I_FACS_attribute_D	0	99ACD	I	105	I_FACS_attribute_E	0	99ACD	I	106	I_FACS_attribute_F	0	99ACD	I	107	I_FACS_attribute_G	0	99ACD	I	108	I_FACS_attribute_H	0	99ACD	I	109	I_FACS_attribute_I	0	99ACD	R	110	R_FACS_attribute_J	0.0	999.0ACD	R	111	R_FACS_attribute_K	0.0	999.0ACD	R	112	R_FACS_attribute_L	0.0	999.0ACD	R	113	R_FACS_attribute_M	0.0	999.0ACD	I	114	I_FACS_attribute_N	0	99ACD	I	115	I_FACS_attribute_O	0	99ACD	I	116	I_FACS_attribute_P	0	99ACD	I	117	I_FACS_attribute_Q	0	99ACD	I	118	I_FACS_attribute_R	0	99ACD	I	119	I_FACS_attribute_S	0	99ACD	I	120	I_FACS_attribute_T	0	99ACD	I	121	I_FACS_attribute_U	0	99ACD	I	122	I_FACS_attribute_V	0	99ACD	R	123	R_FACS_attribute_W	0.0	999.0ACD	R	124	R_FACS_attribute_X	0.0	999.0ACD	R	125	R_FACS_attribute_Y	0.0	999.0ACD	R	126	R_FACS_attribute_Z	0.0	999.0ACD	R	201	Value_attribute_AACD	R	202	Value_attribute_BACD	R	203	Value_attribute_CACD	R	204	Value_attribute_DACD	R	205	Value_attribute_EACD	R	206	Value_attribute_FACD	R	207	Value_attribute_GACD	R	208	Value_attribute_HACD	R	209	Value_attribute_IACD	R	210	Value_attribute_JACD	R	211	Value_attribute_KACD	R	212	Value_attribute_LACD     I       300     Text_attribute		10	20
+! this is the OS Feature Representation Table (FRT) file OS.FRT
+! version 2 DDE 6/6/84
+! version 3 OS from DOUG.FRT by PGH and DDE  8/11/84
+! then the SCT which defines symbol components
+
+FRT	1	12	1	0	0.0	0	! accuracy area
+
+FRT	2	7	1	0	1.0	1	! registration point
+
+FRT	3	12	1	0	0.0	0	! accuracy area
+
+FRT     4       11	1	0	1.0	1       ! symbol string
+
+FRT	5	1	1	0	1.0	0	! line
+
+FRT	6	12	1	0	0.0	0	! area
+
+!   	FC	GT	Colour	Width	Size	SC	Description
+SCT	0	1	0	0	0	0	! LINEAR
+SCT	1	1	0	0	0	0	line
+SCT	2	2	0	0	0	0	clockwise arc
+SCT	3	3	0	0	0	0	anticlockwise arc
+SCT	4	4	0	0	0	0	circumcircle arc
+SCT	5	5	0	0	0	0	full circumcircle
+SCT	6	6	0	0	0	0	interpolated curve
+
+!SCT	5	6	0	0	0	0	! INTERPOLATED CURVE
+SCT	65	2	0	0	0	0	! CLOCKWISE ARC
+SCT	66	3	0	0	0	0	! ANTICLOCKWISE ARC
+SCT	67	4	0	0	0	0	! CIRCUMCIRCLE ARC
+SCT	68	5	0	0	0	0	! FULL CIRCUMCIRCLE
+
+! then the pattern definitions
+!	Pattern  Major  Minor  Major  Minor  Overall Major  Minor  Major  Minor
+!	Index	 UC     UC     Repeat Repeat Size    Size   Size   Width  Width
+
+PATTERN	5        0      0      0      0      0.9     0.6    0.0    0.     0.
+PATTERN	6        5      0      0      0      1.8     0.6    0.0    0.3    0.
+PATTERN	7        12     0      0      0      2.58    1.8    0.0    0.9    0.
+PATTERN	8        0      0      0      0      2.4     1.44   0.0    0.     0.
+PATTERN	10       0      0      0      0      1.8     1.2    0.0    0.     0.
+PATTERN	12       0      0      0      0      2.76    2.16   0.0    0.     0.
+PATTERN	15       0      0      0      0      2.7     1.8    0.0    0.     0.
+PATTERN	20       1      0      0      0      4.0     3.99   0.0    2.0    0.
+PATTERN	22	 0      0      0      0      3.0     2.5    0.0    0.     0.
+PATTERN	25       0      0      0      0      4.5     3.0    0.0    0.     0.
+PATTERN	28       0      5      0      0      5.4     3.6    0.6    3.6    0.3
+PATTERN	30       0      0      0      0      5.4     3.6    0.0    0.     0.
+PATTERN	32       5      0      0      0      5.4     3.6    0.0    1.8    0.
+PATTERN	80       0      0      0      0      14.4    9.6    0.0    0.     0.
+PATTERN 81	 5	0      0      0      5.0     0.6    0.0    0.3    0.0
+PATTERN 82	 0	0      0      0      9.0     6.0    0.0    0.0    0.0
+PATTERN 83	 0	0      0      0      11.0    6.0    2.0    0.0    0.0
+PATTERN 84	 0	0      0      0      6.0     4.0    0.0    0.0    0.0
+PATTERN 85	 1      0      0      0      6.0     5.99   0.0    1.5    0.0
+   	   	 			
+! that's the end of OS.FRT
+
+
+ACD	TABLE	1
+
+! AC's for the dataset as a whole
+
+ACD	C	1	Product_type
+
+ACD	C	2	Dataset_ID
+
+ACD	I	3	Edition_no		0	999
+
+ACD	D	4	Compilation_date
+
+ACD	D	5	Revision_date
+
+ACD	D	6	IHO_Format_date
+
+ACD	D	7	FACS_Format_date
+
+ACD	C	8	Data_type
+
+ACD	C	9	Horiz_units
+
+ACD	R	10	Horiz_resn
+
+ACD	C	11	Geodetic_datum
+
+ACD	C	12	Ellipsoid
+
+ACD	C	13	Vert_units
+
+ACD	R	14	Vert_resn
+
+ACD	C	15	Vert_ref_code
+
+ACD	C	16	Sounding_datum
+
+ACD	I	17	X_false_origin
+
+ACD	I	18	Y_false_origin
+
+ACD	I	19	Z_false_origin
+
+ACD	C	20	Projection
+
+ACD	C	21	Projn_par
+
+ACD	I	22	Compn_count		0	99
+
+ACD	I	23	Revn_count		0	9
+
+ACD	C	24	Product_spec
+
+ACD	D	25	Product_spec_date
+
+ACD	I	26	Spec_change_number	0	999
+
+ACD	C	27	Country
+
+ACD	C	28	Agency
+
+ACD	C	29	Branch
+
+ACD	C	30	Dig_system
+
+ACD	C	31	Proc_system
+
+ACD	C	32	Grid_code
+
+ACD	I	33	Abs_horiz_acc		0	9999
+
+ACD	I	34	Abs_vert_acc		0	9999
+
+ACD	I	35	Rel_horiz_acc		0	9999
+
+ACD	I	36	Rel_vert_acc		0	9999
+
+ACD	I	37	Height_acc		0	9999
+
+ACD	I	38	Data_gen		0	1
+
+ACD	I	39	N_mm_number		0	9
+
+ACD	I	40	E_mm_number		0	9
+
+ACD	I	41	S_mm_number		0	9
+
+ACD	I	42	W_mm_number		0	9
+
+ACD	D	43	N_mm_date
+
+ACD	D	44	E_mm_date
+
+ACD	D	45	S_mm_date
+
+ACD	D	46	W_mm_date
+
+ACD	D	47	Earliest_source_date
+
+ACD	D	48	Latest_source_date
+
+ACD	I	49	Data_colln_code		0	9
+
+ACD	I	50	Data_colln_crit		0	999
+
+ACD	C	51	Structure
+
+ACD	I	52	Registration_ID		0	999999
+
+ACD	I	53	Control_X		0	999999
+
+ACD	I	54	Control_Y		0	999999
+
+ACD	I	55	Control_Z		0	999999
+
+ACD	I	56	Registration_lat
+
+ACD	I	57	Registration_long
+
+ACD	I	58	Registration_elev
+
+ACD	I	59	ACC_abs_horiz_acc	0	9999
+
+ACD	I	60	ACC_abs_vert_acc	0	9999
+
+ACD	I	61	ACC_rel_horiz_acc	0	9999
+
+ACD	I	62	ACC_rel_vert_acc	0	9999
+
+!  AC's for each feature
+
+ACD	I	70	Source_code		0	99
+
+ACD	I	71	Source_scale
+
+ACD	D	72	Source_date
+
+ACD	I	73	Collection_system	0	99
+
+ACD	D	74	Maintenance_date
+
+ACD	I	75	Feature_horiz_acc	0	9999
+
+ACD	I	76	Feature_vert_acc	0	9999
+
+ACD	I	77	Base_product		0	999
+
+ACD	C	78	Security_class
+
+ACD	C	79	Data_handling
+
+ACD	I	80	Portrayal		0	99
+
+ACD	C	81	FACS_prefix
+
+ACD	C	82	FACS_code
+
+ACD	I	101	I_FACS_attribute_A	0	99
+
+ACD	I	102	I_FACS_attribute_B	0	99
+
+ACD	I	103	I_FACS_attribute_C	0	99
+
+ACD	I	104	I_FACS_attribute_D	0	99
+
+ACD	I	105	I_FACS_attribute_E	0	99
+
+ACD	I	106	I_FACS_attribute_F	0	99
+
+ACD	I	107	I_FACS_attribute_G	0	99
+
+ACD	I	108	I_FACS_attribute_H	0	99
+
+ACD	I	109	I_FACS_attribute_I	0	99
+
+ACD	R	110	R_FACS_attribute_J	0.0	999.0
+
+ACD	R	111	R_FACS_attribute_K	0.0	999.0
+
+ACD	R	112	R_FACS_attribute_L	0.0	999.0
+
+ACD	R	113	R_FACS_attribute_M	0.0	999.0
+
+ACD	I	114	I_FACS_attribute_N	0	99
+
+ACD	I	115	I_FACS_attribute_O	0	99
+
+ACD	I	116	I_FACS_attribute_P	0	99
+
+ACD	I	117	I_FACS_attribute_Q	0	99
+
+ACD	I	118	I_FACS_attribute_R	0	99
+
+ACD	I	119	I_FACS_attribute_S	0	99
+
+ACD	I	120	I_FACS_attribute_T	0	99
+
+ACD	I	121	I_FACS_attribute_U	0	99
+
+ACD	I	122	I_FACS_attribute_V	0	99
+
+ACD	R	123	R_FACS_attribute_W	0.0	999.0
+
+ACD	R	124	R_FACS_attribute_X	0.0	999.0
+
+ACD	R	125	R_FACS_attribute_Y	0.0	999.0
+
+ACD	R	126	R_FACS_attribute_Z	0.0	999.0
+
+ACD	R	201	Value_attribute_A
+
+ACD	R	202	Value_attribute_B
+
+ACD	R	203	Value_attribute_C
+
+ACD	R	204	Value_attribute_D
+
+ACD	R	205	Value_attribute_E
+
+ACD	R	206	Value_attribute_F
+
+ACD	R	207	Value_attribute_G
+
+ACD	R	208	Value_attribute_H
+
+ACD	R	209	Value_attribute_I
+
+ACD	R	210	Value_attribute_J
+
+ACD	R	211	Value_attribute_K
+
+ACD	R	212	Value_attribute_L
+
+ACD     I       300     Text_attribute		10	20
+

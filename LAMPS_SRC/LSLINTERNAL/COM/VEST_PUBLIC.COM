@@ -17,4 +17,5 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$ write sys$output "VEST_PUBLIC has been withdrawn. ",-	"Use VEST_PROGRAM.COM instead"
+$ write sys$output "VEST_PUBLIC has been withdrawn. ",-
+	"Use VEST_PROGRAM.COM instead"

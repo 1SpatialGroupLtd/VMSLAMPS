@@ -17,4 +17,27 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	IF P1.EQS."" THEN P1=F$TIME()$	AAA  =F$CVTIME(P1)$	IF .NOT.$STATUS THEN EXIT$	YEAR =F$INTEGER(F$EXTRACT(0,4,AAA))$	MONTH=F$INTEGER(F$EXTRACT(5,2,AAA))$	DAY  =F$INTEGER(F$EXTRACT(8,2,AAA))$	A=MONTH+10$	B=YEAR+(MONTH-14)/12$	C=(13*(A-(A/13)*12)-1)/5+DAY+77+-	  5*(B-(B/100)*100)/4+B/400-(B/100)*2$	C=C-(C/7)*7$	A0="Sunday"$	A1="Monday"$	A2="Tuesday"$	A3="Wednesday"$	A4="Thursday"$	A5="Friday"$	A6="Saturday"$	IF P2.EQS."" THEN GOTO 10$	  B="''P2'"$	  'B'==A'C'$	  GOTO 20$ 10:	WRITE SYS$OUTPUT A'C'$ 20:
+$	IF P1.EQS."" THEN P1=F$TIME()
+$	AAA  =F$CVTIME(P1)
+$	IF .NOT.$STATUS THEN EXIT
+$	YEAR =F$INTEGER(F$EXTRACT(0,4,AAA))
+$	MONTH=F$INTEGER(F$EXTRACT(5,2,AAA))
+$	DAY  =F$INTEGER(F$EXTRACT(8,2,AAA))
+$	A=MONTH+10
+$	B=YEAR+(MONTH-14)/12
+$	C=(13*(A-(A/13)*12)-1)/5+DAY+77+-
+	  5*(B-(B/100)*100)/4+B/400-(B/100)*2
+$	C=C-(C/7)*7
+$	A0="Sunday"
+$	A1="Monday"
+$	A2="Tuesday"
+$	A3="Wednesday"
+$	A4="Thursday"
+$	A5="Friday"
+$	A6="Saturday"
+$	IF P2.EQS."" THEN GOTO 10
+$	  B="''P2'"
+$	  'B'==A'C'
+$	  GOTO 20
+$ 10:	WRITE SYS$OUTPUT A'C'
+$ 20:

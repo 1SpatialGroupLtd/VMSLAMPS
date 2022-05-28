@@ -17,4 +17,18 @@
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see http://www.gnu.org/licenses/.
  */
-#ifndef _TEST_MAIN#define _TEST_MAIN#ifndef OBJLIBextern GOTH_STATUS obj_initialise();extern GOTH_STATUS obj_detach_database();extern GOTH_STATUS obj_attach_database(GOTH_ID		db_id);extern GOTH_STATUS obj_set_total_pool_size(GOTH_INTEGER	pool_size);#endif#endif /* _TEST_MAIN */
+#ifndef _TEST_MAIN
+#define _TEST_MAIN
+
+#ifndef OBJLIB
+extern GOTH_STATUS obj_initialise();
+
+extern GOTH_STATUS obj_detach_database();
+
+extern GOTH_STATUS obj_attach_database(GOTH_ID		db_id);
+
+extern GOTH_STATUS obj_set_total_pool_size(GOTH_INTEGER	pool_size);
+
+#endif
+
+#endif /* _TEST_MAIN */

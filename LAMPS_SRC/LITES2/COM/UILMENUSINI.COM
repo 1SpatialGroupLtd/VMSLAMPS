@@ -17,4 +17,39 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$	ver_status=f$verify(0)$	on control then continue$	on error then continue$!$! Initialization file for UILMENUS$!$! Created				CCB 09-Jan-1990$! Motif version			PGH 04-Jun-1990$! TV for Alpha AXP			CCB 17-Oct-1994$! Motif 1.2 and _AXP version		CCB 23-Sep-1996$!$! Allow for differences for OpenVMS Alpha AXP$!$	ARCH_NAME=F$GETSYI("ARCH_NAME")$	TVS=""$	AXPS=""$	IF ARCH_NAME.EQS."Alpha" $	THEN $	   TVS="_TV"$	   AXPS="_AXP"$	ENDIF$!$! Assume LSL$UIL is assigned already$!$	UILGEN:==$LSL$EXE:UILGENMOTIF'TVS'$!$! Run version depending on whether Motif 1.2 installed$!$	IF F$SEARCH("SYS$SHARE:DECW$XMLIBSHR12.EXE").NES.""$	THEN$	   UILMENUS:==$LSL$EXE:UILMENUSMOTIF12'AXPS'$	ELSE$	   UILMENUS:==$LSL$EXE:UILMENUSMOTIF'TVS'$	ENDIF$!$	if ver_status then set verify
+$	ver_status=f$verify(0)
+$	on control then continue
+$	on error then continue
+$!
+$! Initialization file for UILMENUS
+$!
+$! Created				CCB 09-Jan-1990
+$! Motif version			PGH 04-Jun-1990
+$! TV for Alpha AXP			CCB 17-Oct-1994
+$! Motif 1.2 and _AXP version		CCB 23-Sep-1996
+$!
+$! Allow for differences for OpenVMS Alpha AXP
+$!
+$	ARCH_NAME=F$GETSYI("ARCH_NAME")
+$	TVS=""
+$	AXPS=""
+$	IF ARCH_NAME.EQS."Alpha" 
+$	THEN 
+$	   TVS="_TV"
+$	   AXPS="_AXP"
+$	ENDIF
+$!
+$! Assume LSL$UIL is assigned already
+$!
+$	UILGEN:==$LSL$EXE:UILGENMOTIF'TVS'
+$!
+$! Run version depending on whether Motif 1.2 installed
+$!
+$	IF F$SEARCH("SYS$SHARE:DECW$XMLIBSHR12.EXE").NES.""
+$	THEN
+$	   UILMENUS:==$LSL$EXE:UILMENUSMOTIF12'AXPS'
+$	ELSE
+$	   UILMENUS:==$LSL$EXE:UILMENUSMOTIF'TVS'
+$	ENDIF
+$!
+$	if ver_status then set verify

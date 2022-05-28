@@ -17,4 +17,13 @@ $! *
 $! * You should have received a copy of the GNU General Public License
 $! * along with this program. If not, see http://www.gnu.org/licenses/.
 $!
-$! Procedure for starting a digitising table monitor detached process$! First attempt			PGH	19-Jun-1986$! Arguments are  <device>  <priority>  <group>  <named?>$!$	IF P1.EQS."" THEN P1="LSL$MONITOR_TABLE"$	IF P2.EQS."" THEN P2="16"$	IF P3.EQS."" THEN P3="100"$	IF P4.EQS."" THEN P4="Y"$	STARTMONX="$LSL$EXE:STARTMON"$	STARTMONX 'P1' 'P2' 'P3' 'P4'
+$! Procedure for starting a digitising table monitor detached process
+$! First attempt			PGH	19-Jun-1986
+$! Arguments are  <device>  <priority>  <group>  <named?>
+$!
+$	IF P1.EQS."" THEN P1="LSL$MONITOR_TABLE"
+$	IF P2.EQS."" THEN P2="16"
+$	IF P3.EQS."" THEN P3="100"
+$	IF P4.EQS."" THEN P4="Y"
+$	STARTMONX="$LSL$EXE:STARTMON"
+$	STARTMONX 'P1' 'P2' 'P3' 'P4'
