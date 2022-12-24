@@ -5,6 +5,8 @@
 #
 # Created PGH 2019-04-12
 # Modified PGH 2019-04-13 (better timestamps)
+# Modified PGH 2022-11-11 (merge missing source files from Public_root)
+
 
 import os, string, re, sys, time, datetime
 
@@ -20,9 +22,10 @@ def main():
 	outhtmlfile.write("<HTML><HEAD><TITLE>VMS LAMPS Software Source index</TITLE>\n")
 	outhtmlfile.write("<LINK rel=""stylesheet"" type=""text/css"" href=""lamps.css""></HEAD>\n")
 	outhtmlfile.write("<H1>VMS LAMPS Software Source Index</H1>\n")
-	outhtmlfile.write("This is an automatically generated index to the human-readable source code and build/test files of the VMS LAMPS digital mapping software suite.\n")	
+	outhtmlfile.write("This is an automatically generated index to the human-readable source code and build/test files of the VMS LAMPS digital mapping software suite.\n<P>\n")	
 	outhtmlfile.write("These were extracted en-mass from the original Laser-Scan VMS system by Paul Hardy aided by 1Spatial staff in 2016-2017.\n")
-	outhtmlfile.write("They were then disentangled and separated from binary and customer files by Paul Hardy during 2018-2019.\n")
+	outhtmlfile.write("They were disentangled and separated from binary and customer files, then pulled from VMS to Windows by Paul Hardy during 2018-2019.\n")
+	outhtmlfile.write("After sanity checking by Tim Bevan, some missing source files were merged from LSL$PUBLIC_ROOT by Paul Hardy during 2022.\n<P>\n")
 	outhtmlfile.write("See also the <A HREF=""lamps_doc_index.html"">index to LAMPS documentation sources</A>, and the <A HREF=""index.html"">index overview</A>.\n")
 # 
 	rootDir = '../../LAMPS_SRC'
@@ -49,11 +52,11 @@ def main():
 			modified = os.path.getmtime(fullpath)
 			modtime = time.strftime("%d-%b-%Y",time.localtime(modified))
 			relpath = fullpath.replace('../../', '../')
-			if fname.endswith( ('.SRC', '.F', '.FOR', '.MAR', '.MAC', '.C', 'CMN', '.PAR', '.BPL', '.BCPL_SRC', '.H', '.FRM', '.HLP', 'PAS', '.STR') ):
+			if fname.endswith( ('.SRC', '.F', '.FOR', '.MAR', '.MAC', '.C', 'CMN', '.PAR', '.BPL', '.BCPL_SRC', '.H', '.HDR', '.FRM', '.FLG', '.HLP', 'PAS', '.STR', '.UIL', '.UIM') ):
 #				print('\t%s is a source file, modified %s' % (fname, modtime))
 				outhtmlfile.write(fname + ' is a source file (<A href="' + relpath + '">download</A>),  modified ' + modtime + '<BR>\n')
 				identified=1
-			if fname.endswith( ('.OPT', '.MAPID', '.MES', '.CLD', 'CDL', 'COM', '.TREE', '.LNK', '.FAC', '.IDE', '.PAT') ):
+			if fname.endswith( ('.OPT', '.MAPID', '.MAP', '.MES', '.CLD', 'CDL', 'COM', '.TREE', '.LNK', '.FAC', '.IDE', '.PAT', '.IIF', '.FDL', '.EDT', '.ALL') ):
 #				print('\t%s is a build file, modified %s' % (fname, modtime))
 				outhtmlfile.write(fname + ' is a build file (<A href="' + relpath + '">download</A>),  modified ' + modtime + '<BR>\n')
 				identified=1
@@ -61,7 +64,8 @@ def main():
 #				print('\t%s is a text file, modified %s' % (fname, modtime))
 				outhtmlfile.write(fname + ' is a text file (<A href="' + relpath + '">download</A>),  modified ' + modtime + '<BR>\n')
 				identified=1
-			if fname.endswith( ('.LCM', '.DAT', '.DAT', '.FRT', '.NTF', '.FCC', '.FCP', '.SAMPLE', '.PSFONTLIST', '.TEST', '.CHART', '.SIF') ):
+			if fname.endswith( ('.LCM', '.DAT', '.DAT', '.FRT', '.NTF', '.NFF', '.NTF_ATTR', '.FC', '.FCC', '.FCT', '.ACT', '.FCP', '.LUT',
+					'.CODES', '.SAMPLE', '.PSFONTLIST', '.TEST', '.CHART', '.SIF', '.COL', '.FADT', '.BNT', '.SXF', '.I2SXF_PAR', '.IMAP2I_PAR') ):
 #				print('\t%s is a test file, modified %s' % (fname, modtime))
 				outhtmlfile.write(fname + ' is a test file (<A href="' + relpath + '">download</A>),  modified ' + modtime + '<BR>\n')
 				identified=1
