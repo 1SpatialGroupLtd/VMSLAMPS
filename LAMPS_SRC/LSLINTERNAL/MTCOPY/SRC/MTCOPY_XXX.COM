@@ -3,7 +3,7 @@ $! * This file is part of the LAMPS distribution, released as a software
 $! * preservation project to archive digital history for future historians.
 $! * Copyright (c) 1980-2002 Laser-Scan Ltd, 1Spatial Group Ltd
 $! *
-$! * Timestamp of this file for the 2002 release was: 1990-10-01 12:54:08.000000000 +0100
+$! * Timestamp of this file for the 2002 release was: 1990-10-01 11:54:08.000000000 +0100
 $! *
 $! * This program is free software: you can redistribute it and/or modify
 $! * it under the terms of the GNU General Public License as published by

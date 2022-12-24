@@ -3,7 +3,7 @@ $! * This file is part of the LAMPS distribution, released as a software
 $! * preservation project to archive digital history for future historians.
 $! * Copyright (c) 1980-2002 Laser-Scan Ltd, 1Spatial Group Ltd
 $! *
-$! * Timestamp of this file for the 2002 release was: 1988-10-06 15:18:56.000000000 +0100
+$! * Timestamp of this file for the 2002 release was: 1988-08-26 10:44:24.000000000 +0100
 $! *
 $! * This program is free software: you can redistribute it and/or modify
 $! * it under the terms of the GNU General Public License as published by
@@ -63,7 +63,7 @@ $ ws "''b_on'"
 $ ws "============================================================"
 $ ws "============    Laser-Scan Laboratories Ltd.    ============"
 $ ws "============       LAMPS package CONVERT        ============"
-$ ws "============           Module IFFMGD            ============"
+$ ws "============          Module IFFMGD             ============"   
 $ ws "============  Acceptance test command procedure ============"
 $ ws "============================================================"
 $	date_time=f$time()
@@ -319,11 +319,11 @@ $!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 $ ws "''b_on'"
 $ ws "============================================================"
 $ ws "============    Laser-Scan Laboratories Ltd.    ============"
-$ ws "============       LAMPS package CONVERT        ============"
-$ ws "============           Module IFFMGD            ============"
+$ ws "============     LAMPS package "CONVERT"        ============"
+$ ws "============          Module IFFMGD             ============"   
 $ ws "============  Acceptance test command procedure ============"
 $ ws "============================================================"
-$	date_time=f$time()
+$ date_time=f$time()
 $ ws "============  Completed ''date_time' ============"
 $ ws "============================================================"
 $ ws " "
