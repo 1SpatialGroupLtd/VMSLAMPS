@@ -1,0 +1,281 @@
+$	set noverify
+$	goto start_doing_things
+$!  
+$! *************************************************************************
+$!
+$!	Copyright Laser-Scan Laboratories Ltd., Cambridge, England.
+$!
+$!	OSMHLIB - Create or update the library
+$!
+$! *************************************************************************
+$!
+$! Description
+$!
+$!	Command file which creates or updates OSMHLIB, the OS map header
+$!	manipulation library. The library includes
+$!
+$!	The new routines:
+$!		- a initialisation routine
+$!		- a routine to get a field from the header
+$!
+$! *************************************************************************
+$!
+$start_doing_things:
+$!
+$	define/nolog cmn lsl$source_root:[lslmaint.osmhlib.common]
+$	assign  'f$logical("HERE")  start_directory
+$!
+$	on control_y then goto tidy_exit
+$	on error     then goto tidy_exit
+$!
+$! first define some symbols
+$!
+$	ws	= "write sys$output"
+$	wsb	= "write sys$output """""
+$	inq	= "inquire"
+$!
+$! *************************************************************************
+$!
+$!	inquire testing_version "Is this a testing version "
+$!
+$! we need to specify where the finished library will be put
+$!
+$!	if   testing_version -
+$!	then assign  lsl$source_root:[lslmaint.osmhlib.test]  osmhlib_destination
+$!	if   .not.testing_version -
+$	assign  lsl$source_root:[lslmaint.osmhlib]  osmhlib_destination
+$!
+$! and ensure that we are in the correct directory
+$!
+$	wsb
+$!	sd  osmhlib_destination
+$!
+$! *************************************************************************
+$! now, find out what we are meant to be doing...
+$!
+$	wsb
+$	inq	new_library	"Make a new library     "
+$!
+$	with_debug = 0
+$!	if testing_version then -
+$	inq	with_debug	"With debug             "
+$!
+$! *************************************************************************
+$! sort out subsidiary variables
+$!
+$	not_all = .not.new_library
+$	if with_debug then goto set_debug
+$!
+$	dbg     = ""
+$	cleanup = "delete/noconfirm"
+$	ver     = ";*"
+$	if .not.with_debug then goto no_debug
+$!
+$set_debug:
+$	dbg	= "/debug/noopt"
+$	cleanup	= "purge"
+$	ver	= ""
+$no_debug:
+$!
+$! *************************************************************************
+$! if we are creating a library from scratch, then we shall insert modules
+$! into it. If we are updating a library, then we shall replace modules in it
+$!
+$! first initialise the logicals
+$!
+$	   do_msg	= 0
+$	   do_ini	= 0
+$	   do_inq	= 0
+$	   do_getfld	= 0
+$	   do_putint	= 0
+$	   do_putstr	= 0
+$	   bin		= 0
+$	   my		= 0
+$	   chr		= 0
+$	   hav		= 0
+$	   bit		= 0
+$	   upg		= 0
+$!
+$!
+$! now do the action
+$!
+$	if .not.new_library then goto ask_what_to_replace
+$!
+$	library/create  osmhlib_destination:osmhlib
+$	libr = "library/insert/log osmhlib_destination:osmhlib"
+$	goto compilation
+$!
+$! *************************************************************************
+$ask_what_to_replace:
+$!
+$	libr = "library/replace/log  osmhlib_destination:osmhlib"
+$!
+$	wsb
+$	ws "What to replace -"
+$	wsb
+$	inq	do_msg     "OSMHLIB.MES       - new messages       "
+$	inq	do_inq	   "OSMH_NEW_INQTABLE - table inquire      "
+$	inq	do_ini	   "OSMH_NEW_INI      - initialisation     "
+$	inq	do_getfld  "OSMH_NEW_GETFLD   - get header field   "
+$	inq	do_putint  "OSMH_NEW_PUTINT   - put integer field  "
+$	inq	do_putstr  "OSMH_NEW_PUTSTR   - put string  field  "
+$	inq	bin        "OSMH_BINDAY               "
+$	inq	my         "OSMH_MY                   "
+$	inq	chr        "OSMH_CHAR                 "
+$	inq	hav        "OSMH_HALVES               "
+$	inq	bit        "OSMH_BITS                 "
+$	inq	upg        "OSMH_UPGRADE              "
+$!
+$! *************************************************************************
+$! now do the actual work...
+$!
+$compilation:	!set verify
+$!
+$	   ws "Compiling new routines..."
+$	   from = "[lslmaint.osmhlib.osmh_new]"
+$	   if not_all .and. .not. do_msg then goto no_msg
+$	   ws 			"OSMHLIB.MES"
+$	   newmsg 		'from'OSMHLIB/number=1039/runoff/hl=2
+$	   @OSMHLIB.TEMP_COM
+$	   purge		OSMHLIBMSG.*
+$	   rename 		OSMHLIBMSG.* CMN:
+$	   libr			OSMHLIB.PROMSG_OBJ
+$	   delete/noconfirm	OSMHLIB.PROMSG_OBJ;*
+$!
+$no_msg:
+$	   if not_all .and. .not. do_inq then goto no_inq
+$	   ws 			"OSMH_NEW_INQTABLE"
+$	   adc 			OSMH_NEW_INQTABLE/co = 'from'OSMH_NEW_INQTABLE
+$	   fort/extend'dbg'	OSMH_NEW_INQTABLE
+$	   pvv			OSMH_NEW_INQTABLE
+$	   libr			OSMH_NEW_INQTABLE
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW_INQTABLE.obj'ver'
+$	   cleanup		OSMH_NEW_INQTABLE.for'ver'
+$!
+$no_inq:
+$	   if not_all .and. .not. do_ini then goto no_ini
+$	   ws 			"OSMH_NEW_INI"
+$	   adc 			OSMH_NEW_INI/co = 'from'OSMH_NEW_INI
+$	   fort/extend'dbg'	OSMH_NEW_INI
+$	   pvv			OSMH_NEW_INI
+$	   libr			OSMH_NEW_INI
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW_INI.obj'ver'
+$	   cleanup		OSMH_NEW_INI.for'ver'
+$!
+$no_ini:
+$	   if not_all .and. .not. do_getfld then goto no_getfld
+$	   ws			"OSMH_NEW_GETFLD"
+$	   adc			OSMH_NEW_GETFLD/co = 'from'OSMH_NEW_GETFLD
+$	   fort/extend'dbg'	OSMH_NEW_GETFLD
+$	   pvv			OSMH_NEW_GETFLD
+$	   libr 		OSMH_NEW_GETFLD
+$	   macro		CMN:OSMH_NEW
+$	   libr 		OSMH_NEW
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW.obj'ver'
+$	   cleanup		OSMH_NEW_GETFLD.obj'ver'
+$	   cleanup		OSMH_NEW_GETFLD.for'ver'
+$!
+$no_getfld:
+$	   if not_all .and. .not. do_putint then goto no_putint
+$	   ws			"OSMH_NEW_PUTINT"
+$	   adc			OSMH_NEW_PUTINT/co = 'from'OSMH_NEW_PUTINT
+$	   fort/extend'dbg'	OSMH_NEW_PUTINT
+$	   pvv			OSMH_NEW_PUTINT
+$	   libr 		OSMH_NEW_PUTINT
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW_PUTINT.obj'ver'
+$	   cleanup		OSMH_NEW_PUTINT.for'ver'
+$no_putint:
+$	   if not_all .and. .not. do_putstr then goto no_putstr
+$	   ws			"OSMH_NEW_PUTSTR"
+$	   adc			OSMH_NEW_PUTSTR/co = 'from'OSMH_NEW_PUTSTR
+$	   fort/extend'dbg'	OSMH_NEW_PUTSTR
+$	   pvv			OSMH_NEW_PUTSTR
+$	   libr 		OSMH_NEW_PUTSTR
+$	   delete/noconfirm	ADC.IDE;*
+$	   cleanup		OSMH_NEW_PUTSTR.obj'ver'
+$	   cleanup		OSMH_NEW_PUTSTR.for'ver'
+$no_putstr:
+$!
+$	ws "Compiling old routines..."
+$	from = "[lslmaint.osmhlib.osmh]"
+$	set verify
+$do_bin:
+$	if not_all .and. .not.bin then goto do_my
+$	   adc			osmh_binday/co = 'from'osmh_to_binday,-
+                                                       osmh_from_binday
+$	   fort/extend'dbg'	osmh_binday
+$	   pvv			osmh_binday
+$	   libr			osmh_binday
+$	   delete/noconfirm	adc.ide;*
+$	   cleanup		osmh_binday.obj'ver'
+$	   cleanup		osmh_binday.for'ver'
+$!
+$do_my:
+$	   if not_all .and. .not.my  then goto do_chr
+$	   adc			osmh_my/co = 'from'osmh_putmy,-
+                                                   osmh_getmy
+$	   fort/extend'dbg'	osmh_my
+$	   pvv			osmh_my
+$	   libr			osmh_my
+$	   delete/noconfirm	adc.ide;*
+$	   cleanup		osmh_my.obj'ver'
+$	   cleanup		osmh_my.for'ver'
+$!
+$do_chr:
+$	   if not_all .and. .not.chr then goto do_hav
+$	   adc			osmh_char/co = 'from'osmh_putchar,-
+                                                     osmh_getchar
+$	   fort/extend'dbg'	osmh_char
+$	   pvv			osmh_char
+$	   libr			osmh_char
+$	   delete/noconfirm	adc.ide;*
+$	   cleanup		osmh_char.obj'ver'
+$	   cleanup		osmh_char.for'ver'
+$!
+$do_hav:
+$	   if not_all .and. .not.hav then goto do_bit
+$	   adc			osmh_halves/co = 'from'osmh_puthalves,-
+                                                       osmh_gethalves
+$	   fort/extend'dbg'	osmh_halves
+$	   pvv			osmh_halves
+$	   libr			osmh_halves
+$	   delete/noconfirm	adc.ide;*
+$	   cleanup		osmh_halves.obj'ver'
+$	   cleanup		osmh_halves.for'ver'
+$!
+$do_bit:
+$	   if not_all .and. .not.bit then goto do_upg
+$	   adc			osmh_bits/co = 'from'osmh_putbits,-
+                                                     osmh_getbits
+$	   fort/extend'dbg'	osmh_bits
+$	   pvv			osmh_bits
+$	   libr			osmh_bits
+$	   delete/noconfirm	adc.ide;*
+$	   cleanup		osmh_bits.obj'ver'
+$	   cleanup		osmh_bits.for'ver'
+$!
+$do_upg:
+$	   if not_all .and. .not.upg then goto tidy_exit
+$	   adc			osmh_upgrade/co = 'from'osmh_upgrade,-
+                                                        osmh_cid_zero
+$	   fort/extend'dbg'	osmh_upgrade
+$	   pvv			osmh_upgrade
+$	   libr			osmh_upgrade
+$	   delete/noconfirm	adc.ide;*
+$	   cleanup		osmh_upgrade.obj'ver'
+$	   cleanup		osmh_upgrade.for'ver'
+$!
+$!
+$! *************************************************************************
+$! come here for a tidy exit
+$!
+$tidy_exit:
+$	purge osmhlib_destination:osmhlib.olb
+$	set noverify
+$	deassign  start_directory
+$	exit
+$!
