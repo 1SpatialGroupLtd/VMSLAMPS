@@ -1,13 +1,15 @@
 	SUBROUTINE 	PROCESS
-CDEC$	IDENT	'18AU94'
+CDEC$	IDENT	'28SE94'
 C
 C	Copyright (C)				Laser-Scan Ltd., Cambridge
 C	Created					11-Jun-1990	John Cadogan
 C	Mod					09-Apr-1991	Jon Barber
+C       Mod 1400. Now part of MAPDATA2I		01-Sep-1994	Steve Townrow
 C
 C Description:
 C
-C	Process the MAPDATA file
+C	Process the MAPDATA file. Once we have all the point of a feature,
+C       we call PROCESS_LINE to deal this it.
 C
 	IMPLICIT NONE
 C
@@ -33,6 +35,10 @@ C
 	INTEGER*2	IECODE		! IFF entry type
 	INTEGER*2	IELEN		! IFF entry length
 C
+C Functions
+C
+	LOGICAL		COORD
+	LOGICAL		PROCESS_LINE
 	LOGICAL		FLRLIN
 	LOGICAL		FLRCLO
 	LOGICAL		READSTR
@@ -41,8 +47,9 @@ C
 	LOGICAL		RDINT
 	LOGICAL		RDLONG
 	LOGICAL		RDREAL
-	LOGICAL		RDDBLE
-	LOGICAL		OK
+	LOGICAL		SIGCHS
+C
+C Workspace
 C
 	INTEGER		LEN
 	INTEGER		I
@@ -54,15 +61,16 @@ C
 	INTEGER*2	OLDLAYER
 	INTEGER*2	LAYER
 C
-	REAL*4		MD_FC
+	CHARACTER*8	MD_FC
 	INTEGER		XYVAL
-	REAL*8		X,Y,Z
+	REAL*4		X,Y,Z
 	LOGICAL		FIRST_FEATURE
 	LOGICAL		HAD_H_OR_L
 	LOGICAL		EOF
+	LOGICAL		OK
 C
+	INTEGER*4	NUM
 	INTEGER*4	SEGMENT_NUMBER
-	CHARACTER*1	CURR_FLAG,PREV_FLAG
 C       
 	BYTE		CHARBYTE
 	INTEGER*4	CHARINT
@@ -76,13 +84,17 @@ C
 	CHARACTER*1	CHARVAL
 	CHARACTER*1	CHARNUM
 	CHARACTER*80	ACTEXT
-	CHARACTER*32	ACODE
 C
 C------------------------------------------------------------------------------
 C
-!	text_ac = 1001
-!	curve_ac = 1002
-!	priority_ac = 1003
+C Clear the first element of the MapData -> IFF FC mapping array
+C
+	MAPDATA_FC(0) = '        '
+	IFF_FC(1,0) = 0
+	IFF_FC(2,0) = 0
+	INTERP(0) = INTERP_UNDEFINED
+C
+C Set up some things
 C
 	EOF = .FALSE.
 	FIRST_FEATURE = .TRUE.
@@ -117,7 +129,7 @@ C
 C
 	CALL IFF_START			! Write start of IFF file
 C
-	IF (HAD_PAR) CALL IFFNO(1,0,0)	! start new single layer
+	CALL IFFNO(1,0,0)		! start a new layer
 C	
 C Now read the data for real
 C
@@ -133,21 +145,23 @@ C
 	   GOTO 900
 	ENDIF
 C
+C Interpret the current line
+C
 501	CALL BSLN
 	HAD_H_OR_L = .FALSE.
 	LEN = READSTR(RECTYPE,,ON_SPACE)
-C	CALL WRITEF( 'Record #%^L%I0 is type %S',RECNUM,RECTYPE(1:LEN) )
 C
+C------------------------------------------------------------------------------
 C SEGMENT command
 C
 	IF ( RECTYPE(1:LEN) .EQ. SEGMENT) THEN
 	   STATUS = RDINT(SEGMENT_NUMBER)
-C	   CALL WRITEF( 'FSN #%^W%I0', FSN)
 C
+C Count the segment
+C
+	   IF (FSN.EQ.32767) FSN = 1
 	   FSN = FSN + 1
 	   NPTS = 0
-	   PEN_UP  = .TRUE.
-	   DONE_ZS = .FALSE.
 	   HAD_AC  = .FALSE.
 	   IS_SYMBOL = .FALSE.
 C
@@ -170,7 +184,7 @@ C
 C
 	   IF (ICH.EQ.'*') GOTO 500	! '*' found, no text present
 C
-C Get text string
+C Get text string, removing the trailing two spaces
 C
 	   CALL BSCH
 	   LEN = READSTR(ACTEXT,STAR,ON_CHAR) - 2
@@ -188,6 +202,7 @@ C
 C
 	   GOTO 500
 C
+C------------------------------------------------------------------------------
 C CODE command
 C
 	ELSEIF( RECTYPE(1:LEN) .EQ. CODE) THEN
@@ -196,86 +211,42 @@ C Store line number of code
 C
 	   CODENUM = RECNUM
 C
-C Get first part of real MAPDATA FC
+C Get the real MAPDATA FC
 C
-	   IF (HAD_PAR) THEN
-	      DEFAULT_FC = .FALSE.
-!	      LEN = READSTR(ACODE,,ON_SPACE)
-	      OK = RDREAL(MD_FC)
+	   DEFAULT_FC = .FALSE.
+	   MD_FC = '       '
+	   LEN = READSTR(MD_FC,,,,)
+	   IF (LEN.EQ.0) GOTO 99
 C
-	      DO 99 I = 1,FC_CNT
-!		 IF (ACODE(1:LEN).EQ.MAPDATA_CODE(I)(1:MAPDATA_LEN(I)) ) THEN
-		 IF (MD_FC.EQ.MAPDATA_FC(I)) THEN
-		    FC_INDEX = I
-		    FC = IFF_FC(1,I)
-		    GOTO 500
-		 ENDIF
-99	      CONTINUE
+C Find it's position in the list
+C
+	   DO 98 I = 1,FC_CNT
+	      IF (MD_FC(1:LEN).EQ.MAPDATA_FC(I)(1:SIGCHS(MAPDATA_FC(I)))) THEN
+		 FC_INDEX = I
+		 FC = IFF_FC(1,I)
+		 GOTO 500
+	      ENDIF
+98	   CONTINUE
 C
 C No FC matching found, use default of 0
 C
-	      IF (HAD_LOG) CALL LSL_PUTMSG
-     &			(MD2I__FCDEFAULT,ACODE(1:LEN),CODENUM)
+99	   IF (HAD_LOG) CALL LSL_PUTMSG
+     &			(MD2I__FCDEFAULT,MD_FC(1:LEN),CODENUM)
 C
 C Set default FC flag to set depending on no. of coords found later
 C
-	      DEFAULT_FC = .TRUE.
-	      GOTO 500
-	   ELSE
+	   DEFAULT_FC = .TRUE.
+	   GOTO 500
 C
-C read 1st digit - first part of FC ** SHOULD BE RDCHS? **
-C
-	      STATUS = RDCH(ICH)
-	      STATUS = RDCH(ICH)
-	      CHARNUM = CHAR(ICH)
-	      READ(CHARNUM,*) FC_PART1
-C	      CALL WRITEF( 'FC_PART1 #%^W%I0',FC_PART1 )
-C
-C read 2nd digit - layer number
-C
-	      STATUS = RDCH(ICH)
-	      CHARNUM = CHAR(ICH)
-	      READ(CHARNUM,*) LAYER
-	      IF (FIRST_FEATURE) THEN
-	         CALL IFFNO(LAYER,0,0)		! start new layer
-	         OLDLAYER = LAYER
-C	         CALL WRITEF( 'LAYER #%^W%I0',LAYER )
-	      ENDIF   
-C
-	      IF (OLDLAYER.NE.LAYER) THEN
-	         CALL IFFUNO(LPOSNO)		! update NO/EO pointer
-	         CALL IFFEO			! end the layer
-C
-	         LPOSNO = LPOSE
-	         CALL IFFNO(LAYER,0,0)		! start new layer
-	         OLDLAYER = LAYER
-C	         CALL WRITEF( 'LAYER #%^W%I0',LAYER )
-	      ENDIF
-C
-C read 3rd digit - skip the point
-C
-	      STATUS = RDCH(ICH)
-C
-C read last two digits as a number - second part of FC
-C
-	      STATUS = RDINT(FC_PART2)
-C
-	      FC = (FC_PART1*1000) + FC_PART2
-C	      CALL WRITEF( 'FC_PART2 #%^W%I0',FC_PART2 )
-C
-	      IF (FIRST_FEATURE) FIRST_FEATURE = .FALSE.
-C
-	      GOTO 500
-	   ENDIF
-C
+C------------------------------------------------------------------------------
 C Read block of coords.
 C
 	ELSE
 C
 C Read the X coord
-Cxxx
+C
 50	   CALL BSLN
-	   STATUS = RDDBLE(X)
+	   STATUS = RDREAL(X)
 	   IF (STATUS) THEN				! no coord
 	      IF (NPTS.EQ.0) THEN
 		 CALL LSL_PUTMSG(MD2I__NOCOORD,RECNUM)
@@ -285,17 +256,21 @@ Cxxx
 	      ENDIF
 	   ENDIF
 C
-	   STATUS = RDDBLE(Y)
-	   STATUS = RDDBLE(Z)
+	   STATUS = RDREAL(Y)
+	   STATUS = RDREAL(Z)
 C
-C Check for any status flags: C for curve, S for straight
+C Store the point
+C
+	   STATUS = COORD( X,Y,Z )
+	   IF (.NOT.STATUS) GOTO 999
+C
+C Check for any status flags: C for curve
 C                           : H for high, L for low priority
+C And store it.
 C
-	   CURR_FLAG = ' '
 	   EOLN = RDCHS(ICH)
 	   IF (.NOT.EOLN) THEN
 	      CHARVAL = CHAR(ICH)
-	      CURR_FLAG = CHARVAL
 	      IF (CHARVAL.EQ.'C') FLAGS(NPTS) = FLAGS(NPTS).OR.'0004'X
 	      IF (CHARVAL.EQ.'L') FLAGS(NPTS) = FLAGS(NPTS).OR.'0002'X
 	      IF (CHARVAL.EQ.'H') FLAGS(NPTS) = FLAGS(NPTS).OR.'0001'X
@@ -312,33 +287,23 @@ C Get the next line
 C
 	   STATUS = FLRLIN()
 	   RECNUM = RECNUM + 1
+C
+C Check for End-of-File
+C
 	   IF ( STATUS .EQ. LSL__EOF ) THEN
 	      EOF = .TRUE.
 	      STATUS = LSL__NORMAL
-	      CALL COORD( X,Y,Z )
 	      GOTO 100
+	   ELSE
+	      GOTO 50
 	   ENDIF
-C
-C If we are to split this feature on a change of interpolation, we should
-C process what we've got and create a new feature
-C
-	   IF (NPTS.EQ.0) PREV_FLAG = CURR_FLAG
-	   IF (INTERP(FC_INDEX).EQ.INTERP_BREAK.AND.
-     &		      PREV_FLAG.NE.CURR_FLAG) THEN
-	      CALL WRITE_FEATURE
-	   ENDIF
-	   PREV_FLAG = CURR_FLAG
-C
-C Put the coords into array read for smoothing.
-C
-	   CALL COORD( X,Y,Z )
-C	   CALL WRITEF( 'Coordinate (%F10.1,%F10.1,%F10.1)',X,Y,Z )
-C
-	   GOTO 50
 C
 C Deal with points so far
 C
-100	   IF (NPTS.GT.0) CALL WRITE_FEATURE
+100	   IF (NPTS.GT.0) THEN
+	      OK = PROCESS_LINE()
+	      IF (.NOT.OK) GOTO 999
+	   ENDIF
 C
 	ENDIF
 	IF (.NOT.EOF) GOTO 501
@@ -365,6 +330,6 @@ C and close the MAPDATA file
 C
 	STATUS = FLRCLO(MAPDATALUN)
 C
-	RETURN
+999	RETURN
 	END
 C

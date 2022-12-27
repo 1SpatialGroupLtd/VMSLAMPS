@@ -23,15 +23,16 @@ $	on control_y then goto filclo
 $ 	on error then goto filclo
 $	wc="write comfil"
 $!
-$	wc 	"$ 	set noverify"
-$	wc	"$	on control_y then goto i2mapdataex"
-$	wc	"$	if ""'","'f$logical(""lsl$i2mapdata_building"")'"" -"
-$	wc	"		 .nes. ""in_progress"" then goto a0"
-$	wc	"$	write sys$output ""Someone else is building"""
-$	wc	"$	exit"
-$	wc	"$!"
-$	wc	"$a0:	define/group lsl$i2mapdata_building ""in_progress"""
-$	wc	"$	set noon"
+$		wc "$!	'f$verify(0)"
+$		wc "$	on control_y then goto i2mapdataex"
+$		wc "$	on error then goto i2mapdataex"
+$		wc "$	if ""'","'f$logical(""lsl$i2mapdata_building"")'"" -"
+$		wc "		 .nes. ""in_progress"" then goto a0"
+$		wc "$	write sys$output ""Someone else is building"""
+$		wc "$	exit"
+$		wc "$!"
+$		wc "$a0:	define/group lsl$i2mapdata_building ""in_progress"""
+$!!!		wc "$	set noon"
 $!
 $	mldbg=""
 $	fsw1=""
@@ -56,227 +57,395 @@ $	   if .not.compile then goto a11
 $!
 $	   inq/nop everything "Compile all fortran sources ? "
 $	   if .not. everything then goto a05
-$	   i2mapdata	 = "t"
-$	   dcl_qual	 = "t"
-$	   obey		 = "t"
-$	   rdpar	 = "t"
-$	   process	 = "t"
+$	   i2mapdata		= "t"
+$	   control_init		= "t"
+$	   obey			= "t"
+$	   obey_qual		= "t"
+$	   obey_erret		= "t"
+$	   rdfrt		= "t"
+$	   rdpar		= "t"
+$	   rdlin		= "t"
+$	   get_strpar		= "t"
+$	   check_md_code	= "t"
+$	   check_ac_code	= "t"
+$	   check_fc		= "t"
+$	   find_fc		= "t"
+$	   set_ac_details	= "t"
+$	   get_ac_code		= "t"
+$	   get_ac_name		= "t"
+$	   open_iff		= "t"
+$	   open_md		= "t"
+$	   close_iff		= "t"
+$	   close_md		= "t"
+$	   process		= "t"
+$	   write_md_head	= "t"
+$	   write_md_seg		= "t"
+$	   write_md_code	= "t"
+$	   write_md_coord	= "t"
 $!
 $	   goto a11
 $!
-$ a05:	   inq/nop i2mapdata	 "Compile I2MAPDATA?	"
-$	   inq/nop dcl_qual	 "Compile DCL_QUAL? 	"
-$	   inq/nop obey		 "Compile OBEY? 	"
-$	   inq/nop rdpar	 "Compile RDPAR?	"
-$	   inq/nop process	 "Compile PROCESS?	"
+$ a05:	   inq/nop i2mapdata		"Compile I2MAPDATA ? "
+$	   inq/nop control_init		"Compile  CONTROL_INIT ? "
+$	   inq/nop obey			"Compile OBEY ? "
+$	   inq/nop obey_qual		"Compile  OBEY_QUAL ? "
+$	   inq/nop obey_erret		"Compile  OBEY_ERRET ? "
+$	   inq/nop rdfrt		"Compile RDFRT ? "
+$	   inq/nop rdpar		"Compile RDPAR ? "
+$	   inq/nop rdlin		"Compile  RDLIN ? "
+$	   inq/nop get_strpar		"Compile   GET_STRPAR ? "
+$	   inq/nop check_md_code	"Compile   CHECK_MD_CODE ? "
+$	   inq/nop check_ac_code	"Compile   CHECK_AC_CODE ? "
+$	   inq/nop check_fc		"Compile   CHECK_FC ? "
+$	   inq/nop find_fc		"Compile   FIND_FC ? "
+$	   inq/nop set_ac_details	"Compile  SET_AC_DETAILS ? "
+$	   inq/nop get_ac_code		"Compile   GET_AC_CODE ? "
+$	   inq/nop get_ac_name		"Compile   GET_AC_NAME ? "
+$	   inq/nop open_iff		"Compile OPEN_IFF ? "
+$	   inq/nop open_md		"Compile OPEN_MD ? "
+$	   inq/nop close_iff		"Compile CLOSE_IFF ? "
+$	   inq/nop close_md		"Compile CLOSE_MD ? "
+$	   inq/nop process		"Compile PROCESS ? "
+$	   inq/nop write_md_head	"Compile  WRITE_MD_HEAD ? "
+$	   inq/nop write_md_seg		"Compile  WRITE_MD_SEG ? "
+$	   inq/nop write_md_code	"Compile  WRITE_MD_CODE ? "
+$	   inq/nop write_md_coord	"Compile  WRITE_MD_COORD ? "
 $	   write sys$output " "
 $!
-$ a11:	   inq/nop mes "Generate message definitions? "
+$ a11:	   inq/nop mes "Generate message definitions ? "
 $	   inquire/nop lnkit "Link ? "
 $	   if .not. lnkit then goto notkb
 $!
 $	   linkver="i2mapdata"
-$	   inquire/nop answer "Experimental version? "
+$	   inquire/nop answer "Experimental version ? "
 $	   if answer then linkver="i2mapdatax"
 $!
 $	   linkopts="/map"
-$	   inquire/nop answer "Link with debug? "
+$	   inquire/nop answer "Link with debug ? "
 $	   if answer then linkopts=linkopts+"/debug"
 $!
 $	   inquire/nop answer "Cross reference map ? "
 $	   if answer then linkopts=linkopts+"/cross"
 $!
-$ notkb:
-$		wc "$ set noverify"
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$		wc "$ 		set verify"
-$ 		if .not. mes then goto nomess
-$		wc "$	newmsg/number=1627/prefix=MD2I__/param=fortran/runoff/hl=2 i2mapdata.mes"
+$ notkb:   if .not. mes then goto nomess
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$		wc "$	newmsg/number=1501/prefix=I2MD__/runoff/hl=2 i2mapdata"
 $		wc "$	@i2mapdata.temp_com"
 $		wc "$	purge i2mapdatamsg.rno"
 $!
-$ nomess:	if .not. cld then goto fortonly
-$		wc "$ 		adc i2mapdata.tmp=i2mapdata_cld.cld"
-$		wc "$ 		set command/object=i2mapdata_cld i2mapdata.tmp"
-$	      	wc "$ 		ok=$status"	
-$!!!		wc "$ 		if ok then pvv i2mapdata_cld"
-$!!!		wc "$ 		if ok then delete adc.ide;*"
-$		wc "$ 		if ok then delete i2mapdata.tmp;*"
-$		wc "$ 		if ok then purge/nolog i2mapdata_cld.obj"
-$
+$ nomess:  if .not. cld then goto fortonly
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$		wc "$ 	adc i2mapdata.tmp=i2mapdata_cld.cld"
+$		wc "$ 	set command/object=i2mapdata_cld i2mapdata.tmp"
+$		wc "$ 	pvv i2mapdata_cld"
+$		wc "$ 	purge/nolog i2mapdata_cld.obj"
+$		wc "$ 	delete adc.ide;*,i2mapdata.tmp;*"
+$!
 $ fortonly:		
 $	if .not. compile then goto lnkonly
-$	   if .not. i2mapdata then goto a99
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$	   	wc "$ 		fort''fsw1' i2mapdata.f"
-$		wc "$ 		purge/nolog i2mapdata.obj"
+$	   if .not. i2mapdata then goto a101
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' i2mapdata.f"
+$		wc "$ 	purge/nolog i2mapdata.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog i2mapdata.lis"
+				wc "$ 	purge/nolog i2mapdata.lis"
 $!
-$ a99:	   if .not. dcl_qual then goto a100
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$	   	wc "$ 		fort''fsw1' dcl_qual.f"
-$		wc "$ 		purge/nolog dcl_qual.obj"
+$ a101:	   if .not. control_init then goto a110
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' control_init.f"
+$		wc "$ 	purge/nolog control_init.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog dcl_qual.lis"
+				wc "$ 	purge/nolog control_init.lis"
 $!
-$ a100:	   if .not. obey then goto a101
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$	   	wc "$ 		fort''fsw1' obey.f"
-$		wc "$ 		purge/nolog obey.obj"
+$ a110:	   if .not. obey then goto a111
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' obey.f"
+$		wc "$ 	purge/nolog obey.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog obey.lis"
+				wc "$ 	purge/nolog obey.lis"
 $!
-$ a101:	   if .not. rdpar then goto a102
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$	   	wc "$ 		fort''fsw1' rdpar.f"
-$		wc "$ 		purge/nolog rdpar.obj"
-$		wc "$ 		macro''mldbg' parcmd"
-$		wc "$ 		append parcmd.obj rdpar.obj"
-$		wc "$ 		delete	parcmd.obj;*"
+$ a111:	   if .not. obey_qual then goto a112
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' obey_qual.f"
+$		wc "$ 	purge/nolog obey_qual.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog rdpar.lis"
+				wc "$ 	purge/nolog obey_qual.lis"
 $!
-$ a102:	   if .not. process then goto a105
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$	   	wc "$ 		fort''fsw1' process.f"
-$		wc "$ 		purge/nolog process.obj"
+$ a112:	   if .not. obey_erret then goto a120
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' obey_erret.f"
+$		wc "$ 	purge/nolog obey_erret.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog process.lis"
+				wc "$ 	purge/nolog obey_erret.lis"
 $!
-$ a105:	   if .not. process_line then goto a108
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$	   	wc "$ 		fort''fsw1' process_line.f"
-$		wc "$ 		purge/nolog process_line.obj"
+$ a120:	   if .not. rdfrt then goto a130
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' rdfrt.f"
+$		wc "$ 	purge/nolog rdfrt.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog process_line.lis"
+				wc "$ 	purge/nolog rdfrt.lis"
 $!
-$ a108:	   if .not. iff_start then goto a109
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$	   	wc "$ 		fort''fsw1' iff_start.f"
-$		wc "$ 		purge/nolog iff_start.obj"
+$ a130:	   if .not. rdpar then goto a131
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' rdpar.f"
+$		wc "$ 	purge/nolog rdpar.obj"
+$		wc "$ 	macro''mldbg' parcmd"
+$		wc "$ 	append parcmd.obj rdpar.obj"
+$		wc "$ 	delete	parcmd.obj;*"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog iff_start.lis"
+				wc "$ 	purge/nolog rdpar.lis"
 $!
-$ a109:	   if .not. insert then goto a110
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$	   	wc "$ 		fort''fsw1' insert_control_pt.f"
-$		wc "$ 		purge/nolog insert_control_pt.obj"
+$ a131:	   if .not. rdlin then goto a132
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' rdlin.f"
+$		wc "$ 	purge/nolog rdlin.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog insert_control_pt.lis"
+				wc "$ 	purge/nolog rdlin.lis"
 $!
-$ a110:	   if .not. write_cb then goto a115
-$		wc "$ set noverify"
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$		wc "$ set verify"
-$	   	wc "$ 		fort''fsw1' write_cb.f"
-$		wc "$ 		purge/nolog write_cb.obj"
+$ a132:	   if .not. get_strpar then goto a133
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' get_strpar.f"
+$		wc "$ 	purge/nolog get_strpar.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog write_cb.lis"
+				wc "$ 	purge/nolog get_strpar.lis"
 $!
-$ a115:	   if .not. write_feature then goto a120
-$		wc "$ set noverify"
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$		wc "$ set verify"
-$	   	wc "$ 		fort''fsw1' write_feature.f"
-$		wc "$ 		purge/nolog write_feature.obj"
+$ a133:	   if .not. check_md_code then goto a134
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' check_md_code.f"
+$		wc "$ 	purge/nolog check_md_code.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog write_feature.lis"
+				wc "$ 	purge/nolog check_md_code.lis"
 $!
-$ a120:	   if .not. addpts then goto a130
-$		wc "$ set noverify"
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$		wc "$ set verify"
-$	   	wc "$ 		fort''fsw1' addpts.f"
-$		wc "$ 		purge/nolog addpts.obj"
+$ a134:	   if .not. check_ac_code then goto a135
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' check_ac_code.f"
+$		wc "$ 	purge/nolog check_ac_code.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog addpts.lis"
+				wc "$ 	purge/nolog check_ac_code.lis"
 $!
-$ a130:	   if .not. outpts then goto a140
-$		wc "$ set noverify"
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$		wc "$ set verify"
-$	   	wc "$ 		fort''fsw1' outpts.f"
-$		wc "$ 		purge/nolog outpts.obj"
+$ a135:	   if .not. check_fc then goto a136
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' check_fc.f"
+$		wc "$ 	purge/nolog check_fc.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog outpts.lis"
+				wc "$ 	purge/nolog check_fc.lis"
 $!
-$ a140:	   if .not. coord then goto a150
-$		wc "$ set noverify"
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$		wc "$ set verify"
-$	   	wc "$ 		fort''fsw1' coord.f"
-$		wc "$ 		purge/nolog coord.obj"
+$ a136:	   if .not. find_fc then goto a137
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' find_fc.f"
+$		wc "$ 	purge/nolog find_fc.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog coord.lis"
+				wc "$ 	purge/nolog find_fc.lis"
 $!
-$ a150:	   if .not. flush then goto a160
-$		wc "$ set noverify"
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$		wc "$ set verify"
-$	   	wc "$ 		fort''fsw1' flush.f"
-$		wc "$ 		purge/nolog flush.obj"
+$ a137:	   if .not. set_ac_details then goto a138
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' set_ac_details.f"
+$		wc "$ 	purge/nolog set_ac_details.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog flush.lis"
+				wc "$ 	purge/nolog set_ac_details.lis"
 $!
-$ a160:	   if .not. retain_flags then goto lnkonly
-$		wc "$ set noverify"
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$		wc "$ set verify"
-$	   	wc "$ 		fort''fsw1' retain_flags.f"
-$		wc "$ 		purge/nolog retain_flags.obj"
+$ a138:	   if .not. get_ac_code then goto a139
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' get_ac_code.f"
+$		wc "$ 	purge/nolog get_ac_code.obj"
 $		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
 			f$length(fsw1).ne.0 then -
-				wc "$ 		purge/nolog retain_flags.lis"
+				wc "$ 	purge/nolog get_ac_code.lis"
 $!
+$ a139:	   if .not. get_ac_name then goto a140
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' get_ac_name.f"
+$		wc "$ 	purge/nolog get_ac_name.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog get_ac_name.lis"
+$!
+$ a140:	   if .not. open_iff then goto a141
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' open_iff.f"
+$		wc "$ 	purge/nolog open_iff.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog open_iff.lis"
+$!
+$ a141:	   if .not. open_md then goto a142
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' open_md.f"
+$		wc "$ 	purge/nolog open_md.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog open_md.lis"
+$!
+$ a142:	   if .not. close_iff then goto a143
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' close_iff.f"
+$		wc "$ 	purge/nolog close_iff.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog close_iff.lis"
+$!
+$ a143:	   if .not. close_md then goto a150
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' close_md.f"
+$		wc "$ 	purge/nolog close_md.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog close_md.lis"
+$!
+$ a150:	   if .not. process then goto a151
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' process.f"
+$		wc "$ 	purge/nolog process.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog process.lis"
+$!
+$ a151:	   if .not. write_md_head then goto a152
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' write_md_head.f"
+$		wc "$ 	purge/nolog write_md_head.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog write_md_head.lis"
+$!
+$ a152:	   if .not. write_md_seg then goto a153
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' write_md_seg.f"
+$		wc "$ 	purge/nolog write_md_seg.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog write_md_seg.lis"
+$!
+$ a153:	   if .not. write_md_code then goto a154
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' write_md_code.f"
+$		wc "$ 	purge/nolog write_md_code.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog write_md_code.lis"
+$!
+$ a154:	   if .not. write_md_coord then goto a160
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	fort''fsw1' write_md_coord.f"
+$		wc "$ 	purge/nolog write_md_coord.obj"
+$		if (f$locate("list",fsw1).ne.f$length(fsw1)).and. -
+			f$length(fsw1).ne.0 then -
+				wc "$ 	purge/nolog write_md_coord.lis"
+$!
+$ a160:
 $ lnkonly:
 $ 	if .not. lnkit then goto nolnk
-$		wc "$ set noverify"
-$		wc "$ write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
-$		wc "$ set verify"
-$	   	wc "$ 		link''linkopts'/exe=''linkver' i2mapdata, -"
+$		wc "$!	'f$verify(0)"
+$		wc "$	write sys$output ""++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"""
+$		wc "$	set verify"
+$	   	wc "$ 	link''linkopts'/exe=''linkver' i2mapdata, -"
 $	   	wc "		i2mapdata_cld, -"
+$		wc "		control_init, -"
 $		wc "		obey, -"
+$		wc "		obey_qual, -"
+$		wc "		obey_erret, -"
+$		wc "		rdfrt, -"
 $		wc "		rdpar, -"
+$		wc "		rdlin, -"
+$		wc "		get_strpar, -"
+$		wc "		check_md_code, -"
+$		wc "		check_ac_code, -"
+$		wc "		check_fc, -"
+$		wc "		find_fc, -"
+$		wc "		set_ac_details, -"
+$		wc "		get_ac_code, -"
+$		wc "		get_ac_name, -"
+$		wc "		open_iff, -"
+$		wc "		open_md, -"
+$		wc "		close_iff, -"
+$		wc "		close_md, -"
 $		wc "		process, -"
-$		wc "		process_line, -"
-$		wc "		iff_start, -"
-$		wc "		insert_control_pt, -"
-$		wc "		write_cb, -"
-$		wc "		write_feature, -"
-$		wc "		addpts, -"
-$		wc "		outpts, -"
-$		wc "		coord, -"
-$		wc "		flush, -"
-$		wc "		retain_flags, -"
+$		wc "		write_md_head, -"
+$		wc "		write_md_seg, -"
+$		wc "		write_md_code, -"
+$		wc "		write_md_coord, -"
 $		wc "		i2mapdata.promsg_obj, -"
-$!		wc "            lsl$library:coordlib/lib, -"
-$		wc "lsl$source_root:[lslmaint.coordlib.test]coordlib/lib, -"
 $		wc "		lsl$library:lslfrtlib/lib,-"
 $	   	wc "		lsl$library:iffshr/opt,lslshr/opt"
 $!
 $ nolnk:
-$		wc "$ 		i2mapdataex:"
-$		wc "$ 		deass/group lsl$i2mapdata_building"
-$		wc "$ 		set nover"
+$		wc "$!"
+$		wc "$ i2mapdataex:				! 'f$verify(0)"
+$		wc "$	deass/group lsl$i2mapdata_building"
+$		wc "$	exit"
 $!
 $ filclo:
-$	set noverify
+$!!!	set noverify
 $	on error then goto i2mapdataex
+$	on control_y then goto i2mapdataex
 $	close comfil
 $	ok=$status
 $	if ok then inq/nop answer_bat "Submit for batch ? "
@@ -284,16 +453,20 @@ $	if .not. answer_bat then goto int
 $	deass/group lsl$i2mapdata_building
 $	bat i2mapdatabat.com
 $	goto i2mapdatax2
+$!
 $ int:	
 $	if ok then inq/nop answer "Interactive ? "
 $	if .not.answer then goto i2mapdataex
 $	deass/group lsl$i2mapdata_building
 $	@i2mapdatabat.com
 $	goto i2mapdatax2
+$!
 $ i2mapdataex:
 $	deass/group lsl$i2mapdata_building
+$!
 $ i2mapdatax2:
 $	if ver then set verify
 $	pur i2mapdatabat.com
 $	pur *.obj
+$	exit
 $!
