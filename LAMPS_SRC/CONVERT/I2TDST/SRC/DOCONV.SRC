@@ -1,7 +1,7 @@
 	LOGICAL FUNCTION DOCONV
 C
 ***	MODULE DOCONV
-***	IDENT  17MR89
+***	IDENT  26AP89
 C
 C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
 C
@@ -47,11 +47,14 @@ C
 	INTEGER*4	FCMAPDIM	!num longwords for FC bit map
 	INTEGER*4	MASK		!value to be put into bit-map.
 	INTEGER*4	LINE_NUM
+	INTEGER*4	LEVEL
 	INTEGER*4	IERR
+	INTEGER*4	MAXLEVELS	!max block-tree level
 
 	PARAMETER(	MAXFC = 32767)
 	PARAMETER(	FCMAPDIM = (MAXFC+1)/32)
 	PARAMETER(	MASK = 1)
+	PARAMETER(	MAXLEVELS = 50)
 
 	INTEGER*4	FCMAP(FCMAPDIM)	!bit-map for ftr code check
 	INTEGER*4	FC,BNT_FC	!longword feature code
@@ -59,11 +62,13 @@ C
 	INTEGER*4 	WORD		!Bit-map word position
 	INTEGER*4	OFFSET		!Bitmap offset
 
-	LOGICAL		SEEN_BEFORE	!FC seen before?
+	LOGICAL*4	SEEN_BEFORE	!FC seen before?
+	LOGICAL*4	HAD_PARENT(MAXLEVELS) ! had parent block @level?
 	BYTE		CH
 
 	INTEGER*4	I,J,K
 	INTEGER*4	NAM_LEN		!Logic block name length
+	INTEGER*4	PARENT_BLOCK_ID(MAXLEVELS)  ! parent block ID
 	INTEGER*2	IECODE		!Entry name as two ASCII chars
 	INTEGER*2	IELEN		!Entry length (-1 = EOF)
 	INTEGER*2	ACVAL		!AC type
@@ -73,6 +78,7 @@ C
 	REAL*4		RA(4)		!Range values
 	LOGICAL		OK
 	CHARACTER*10	LOGIC_BLOCK_NAME
+	CHARACTER*10	PARENT_BLOCK_NAME(MAXLEVELS)
 	EXTERNAL	SS$_NORMAL
 C
 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
@@ -83,6 +89,9 @@ C
 	HAD_RANGE = .FALSE.
 	HAD_NF = .FALSE.
 	CURRENT_FC = -1				! non existent FC
+	PARENT_BLOCK_NAME(1) = 'MASTERBLOC'
+	PARENT_BLOCK_ID(1) = 1234
+	HAD_PARENT(1) = .TRUE.
 C
 	CALL VIOCLR(FCMAP,FCMAPDIM*4,0)		! reset whole FC bit-map
 C
@@ -149,10 +158,12 @@ C -----	name and write the header for a new logic block.
 C
 	IF (FC.NE.CURRENT_FC) THEN
 C
-C -----	Find logic block name for this FC
+C -----	Find logic block name and parent logic block name for this FC
 C
 	   CALL FLRREW(BNTLUN)		! rewind lookup file
 	   LINE_NUM = 0
+	   LEVEL = 2			! level 1 is for MASTERBLOC only
+	   HAD_PARENT(2) = .FALSE.	! not yet had level 2 block
 310	   OK = FLRLIN(,,,IERR)		! read next line into TXTBUF
 	   IF (OK.EQ.LSL__EOF) GOTO 100	! if no more lines, skip feature
 	   LINE_NUM = LINE_NUM+1
@@ -166,6 +177,32 @@ C
 	   CALL BSLN			! reset line pointer
 	   IF (RDCHS(CH)) GOTO 310	! blank line?
 	   IF (CH.EQ.'!') GOTO 310	! comment?
+	   IF (CH.EQ.'B'.OR.CH.EQ.'b') THEN
+	      IF (HAD_PARENT(LEVEL)) THEN
+	         IF (LEVEL.LT.MAXLEVELS) THEN
+	            LEVEL = LEVEL+1	! legitimate BEGIN line
+	            HAD_PARENT(LEVEL) = .FALSE.
+	         ELSE
+	            CALL LSL_PUTMSG(IDST__TOOMNYLEVS,LINE_NUM,MAXLEVELS)
+	            DOCONV = .FALSE.
+	            GOTO 1000
+	         ENDIF
+	      ELSE
+	         CALL LSL_PUTMSG(IDST__NOPARENT,LINE_NUM)
+	         DOCONV = .FALSE.
+	         GOTO 1000
+	      ENDIF
+	      GOTO 310
+	   ELSE IF (CH.EQ.'E'.OR.CH.EQ.'e') THEN
+	      IF (LEVEL.GT.2) THEN
+	         LEVEL = LEVEL-1	! END line
+	      ELSE
+	         CALL LSL_PUTMSG(IDST__UNBALNCDTREE,LINE_NUM)
+	         DOCONV = .FALSE.
+	         GOTO 1000
+	      ENDIF
+	      GOTO 310
+	   ENDIF
 	   CALL BSCH			! backspace
 C
 	   OK = .NOT.RDLONG(BNT_FC)	! read FC
@@ -176,9 +213,7 @@ C
 	      GOTO 1000
 	   ENDIF
 C
-	   IF (BNT_FC.NE.FC) GOTO 310	! read next line
-C
-C -----	Found matching FC. Now read corresponding logic block name
+C -----	Read logic block name
 C
 	   NAM_LEN = READSTR(LOGIC_BLOCK_NAME,,ON_SPACE,,IERR)
 	   IF (.NOT.IERR) THEN
@@ -186,7 +221,7 @@ C
 	     CALL LSL_ADDMSG(IERR)	
 	     GOTO 1000
 	   END IF
-	   DO 320 I = NAM_LEN+1,10		! pad with spaces
+	   DO 320 I = NAM_LEN+1,10	! pad with spaces
 	      LOGIC_BLOCK_NAME(I:I) = ' '
 320	   CONTINUE
 C
@@ -194,7 +229,17 @@ C -----	Force logic block name into uppercase
 C
 	   CALL STR$UPCASE(LOGIC_BLOCK_NAME(:NAM_LEN),
      &	      LOGIC_BLOCK_NAME(:NAM_LEN))
-	   
+C
+C ----- Make current FC parent at current level
+C
+	   PARENT_BLOCK_NAME(LEVEL) = LOGIC_BLOCK_NAME
+	   PARENT_BLOCK_ID(LEVEL) = BNT_FC
+	   HAD_PARENT(LEVEL) = .TRUE.
+C
+C ----- If FC doesn't match FC on current BNT line, go to read next line
+C
+	   IF (BNT_FC.NE.FC) GOTO 310	! read next line
+C	   
 C -----	Test whether this FC has been seen before
 C
 	   SEEN_BEFORE = LIB$EXTZV(FC,1,FCMAP)
@@ -212,8 +257,8 @@ C
 	   IF (.NOT.HAD_RANGE) GOTO 930
 	   CALL FLWRTF('EOS       ')
 	   CALL FLWRTF('LOGIC     ')
-	   CALL FLWRTF('%S10%I11MASTERBLOC       1234',
-     &	      LOGIC_BLOCK_NAME,FC)
+	   CALL FLWRTF('%S10%I11%S10%I11',LOGIC_BLOCK_NAME,FC,
+     &	      PARENT_BLOCK_NAME(LEVEL-1),PARENT_BLOCK_ID(LEVEL-1))
 	ENDIF
 C
 C -----	Find the next feature and inspect it
@@ -224,7 +269,7 @@ C -----	AC - Ancillary Codes
 C
 	IF(IECODE .EQ. 'AC')THEN
 	   CALL EIHRI(ACVAL,1,1)
-	   IF(ACVAL .EQ. 2)THEN	!Only AC types 2 and 3 are
+	   IF(ACVAL .EQ. 2)THEN		!Only AC types 2 and 3 are
 	      HAD_AC = .TRUE.		!relevant to TDST output
 	      CALL EIHRI(IHT,1,2)
 	      HT = IHT*1.0		!TDST requires a real height
