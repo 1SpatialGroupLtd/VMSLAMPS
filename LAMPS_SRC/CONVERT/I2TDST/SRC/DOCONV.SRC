@@ -1,0 +1,345 @@
+	LOGICAL FUNCTION DOCONV
+C
+***	MODULE DOCONV
+***	IDENT  17MR89
+C
+C	Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+C
+C	Author A.D. Trigg 08 June 1988
+C
+CMOD	Added ability to write each different feature code into
+C	a separate "logic block". This will assume that FCs
+C	have already been sorted so that all equal FCs
+C	are contiguous.					ACM  16-Mar-1989
+C
+C	Subroutine to process file for IFF to TDST conversion
+C
+C	Returns .TRUE. if succesful and .FALSE. if we fail
+C
+	IMPLICIT NONE
+C
+C -----	Include
+C
+	INCLUDE	'HERE:I2TDST.CMN'
+	INCLUDE 'HERE:I2TDSTMSG.PAR'
+	INCLUDE 'LSL$CMNLSL:EXPC.CMN'
+	INCLUDE 'LSL$CMNFRT:FRTCOM.CMN'
+C
+	INCLUDE	'LSL$CMNLSL:READSTR.PAR'
+	INCLUDE	'LSL$CMNLSL:LSLLIBMSG.PAR'
+
+C -----	Functions
+C
+	LOGICAL		CRETEX	!Creates text subsection in TDST file
+	LOGICAL		CREPOI	!Creates point subsection in TDST file
+	LOGICAL		CREPOL	!Creates polygon subsection in TDST file
+	LOGICAL		CREARC	!Creates arc subsection in TDST file
+	LOGICAL 	FRTFND	!Finds FC details in FRT table
+	LOGICAL		LIB$EXTZV	!test bit-map
+	LOGICAL		RDCHS
+	LOGICAL		RDLONG
+	INTEGER		FLROPN,FLRLIN,FLRCLO
+	INTEGER		READSTR
+C
+C -----	Workspace
+C
+	INTEGER*4	MAXFC		!max number of feature codes
+	INTEGER*4	FCMAPDIM	!num longwords for FC bit map
+	INTEGER*4	MASK		!value to be put into bit-map.
+	INTEGER*4	LINE_NUM
+	INTEGER*4	IERR
+
+	PARAMETER(	MAXFC = 32767)
+	PARAMETER(	FCMAPDIM = (MAXFC+1)/32)
+	PARAMETER(	MASK = 1)
+
+	INTEGER*4	FCMAP(FCMAPDIM)	!bit-map for ftr code check
+	INTEGER*4	FC,BNT_FC	!longword feature code
+	INTEGER*4	CURRENT_FC	!FC for current logic block
+	INTEGER*4 	WORD		!Bit-map word position
+	INTEGER*4	OFFSET		!Bitmap offset
+
+	LOGICAL		SEEN_BEFORE	!FC seen before?
+	BYTE		CH
+
+	INTEGER*4	I,J,K
+	INTEGER*4	NAM_LEN		!Logic block name length
+	INTEGER*2	IECODE		!Entry name as two ASCII chars
+	INTEGER*2	IELEN		!Entry length (-1 = EOF)
+	INTEGER*2	ACVAL		!AC type
+	INTEGER*2	IHT		!Integer AC height
+	INTEGER		SS$_NORMAL
+	LOGICAL		HAD_RANGE	!Have we had an RA entry yet?
+	REAL*4		RA(4)		!Range values
+	LOGICAL		OK
+	CHARACTER*10	LOGIC_BLOCK_NAME
+	EXTERNAL	SS$_NORMAL
+C
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+C
+C -----	Assume success
+C
+	DOCONV = .TRUE.
+	HAD_RANGE = .FALSE.
+	HAD_NF = .FALSE.
+	CURRENT_FC = -1				! non existent FC
+C
+	CALL VIOCLR(FCMAP,FCMAPDIM*4,0)		! reset whole FC bit-map
+C
+C -----	Open /BNT file 
+C
+	OK = FLROPN(BNTLUN,BNTFIL(:BNTLEN),IERR)
+	IF (.NOT.OK) THEN
+	  CALL LSL_PUTMSG(IDST__UNAOPNBNT,BNTFIL(:BNTLEN))
+	  CALL LSL_ADDMSG(OK)
+	  CALL LSL_ADDMSG(IERR)
+	  GOTO 1000
+	END IF
+C
+C -----	Reset feature indicators for new feature
+C
+100	HAD_AC = .FALSE.
+	HAD_TS = .FALSE.
+C
+C -----	Loop for each IFF entry
+C
+	CALL IFFNXT(IECODE,IELEN)
+	IF(IELEN.EQ.-1)GOTO 900
+	IF(IECODE .EQ. 'NF')GOTO 300
+	IF(IECODE .EQ. 'RA')GOTO 200
+	IF(IECODE .EQ. 'EJ')GOTO 800
+	GOTO 100
+C
+C -----	Unpick range entry and write a TDST master block
+C
+200	HAD_RANGE = .TRUE.
+	CALL EIHRR(RA,4,1)
+	CALL FLWRTF('MASTER    ')
+	CALL FLWRTF('MASTERBLOC       1234')
+	CALL FLWRTF('%F16.4%F16.4%F16.4%F16.4',RA(1),RA(3),RA(2),RA(4))
+	GOTO 100
+C
+C -----	New feature - first check whether it is the first found
+C -----	feature. If it is then check we have had a range entry and then
+C -----	write the header info for the logic block 
+C
+300	HAD_NF = .FALSE.
+	CALL EIHRI(FSN,1,1)		! read Feature Serial No.
+	FSN = IAND(FSN,65535)		! cnvrt to unsgnd lngwrd
+C
+C -----	Search for Feature Status entry
+C
+	CALL IFFNXT(IECODE,IELEN)
+	IF(IECODE .NE. 'FS')GOTO 910
+	CALL EIHRI(FC,1,1)		! read feature code
+	FC = IAND(FC,65535)		! cnvrt to unsgnd lngwrd
+	OK = .NOT.FRTFND(FC)
+C
+C -----	If FC not in FRT then give warning and skip this feature
+C
+	IF (.NOT.OK) GOTO 920
+C
+C -----	Define the Graphical Type of the feature in hand
+C
+	GT = FRTGT
+	IF (GT.LT.1 .OR. GT .GT. 12) GOTO 950
+C
+C -----	If FC has changed, then look up its corresponding logic block
+C -----	name and write the header for a new logic block.
+C
+	IF (FC.NE.CURRENT_FC) THEN
+C
+C -----	Find logic block name for this FC
+C
+	   CALL FLRREW(BNTLUN)		! rewind lookup file
+	   LINE_NUM = 0
+310	   OK = FLRLIN(,,,IERR)		! read next line into TXTBUF
+	   IF (OK.EQ.LSL__EOF) GOTO 100	! if no more lines, skip feature
+	   LINE_NUM = LINE_NUM+1
+	   IF (.NOT.OK) THEN		! failed to read line?
+	      CALL LSL_PUTMSG(IDST__BADBNTLIN,LINE_NUM)
+	      CALL LSL_ADDMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      GOTO 1000			! exit
+	   END IF
+C
+	   CALL BSLN			! reset line pointer
+	   IF (RDCHS(CH)) GOTO 310	! blank line?
+	   IF (CH.EQ.'!') GOTO 310	! comment?
+	   CALL BSCH			! backspace
+C
+	   OK = .NOT.RDLONG(BNT_FC)	! read FC
+	   IF (.NOT.OK) THEN
+	      CALL LSL_PUTMSG(IDST__BADBNTLIN,LINE_NUM)
+	      CALL LSL_ADDMSG(OK)
+	      CALL LSL_ADDMSG(IERR)
+	      GOTO 1000
+	   ENDIF
+C
+	   IF (BNT_FC.NE.FC) GOTO 310	! read next line
+C
+C -----	Found matching FC. Now read corresponding logic block name
+C
+	   NAM_LEN = READSTR(LOGIC_BLOCK_NAME,,ON_SPACE,,IERR)
+	   IF (.NOT.IERR) THEN
+	     CALL LSL_PUTMSG(IDST__BADBNTLIN,LINE_NUM)
+	     CALL LSL_ADDMSG(IERR)	
+	     GOTO 1000
+	   END IF
+	   DO 320 I = NAM_LEN+1,10		! pad with spaces
+	      LOGIC_BLOCK_NAME(I:I) = ' '
+320	   CONTINUE
+C
+C -----	Force logic block name into uppercase
+C
+	   CALL STR$UPCASE(LOGIC_BLOCK_NAME(:NAM_LEN),
+     &	      LOGIC_BLOCK_NAME(:NAM_LEN))
+	   
+C -----	Test whether this FC has been seen before
+C
+	   SEEN_BEFORE = LIB$EXTZV(FC,1,FCMAP)
+	   IF (SEEN_BEFORE) GOTO 960	! reject feature if FC seen bef.
+C
+C -----	Set bit in FCMAP for new FC, and make this FC current
+C
+	   WORD = FC/32			! which word (0-n) the bits in
+	   OFFSET = MOD(FC,32)		! offset into word
+	   CALL LIB$INSV(MASK,OFFSET,1,FCMAP(WORD+1))
+	   CURRENT_FC = FC
+C
+C -----	Write new "logic block" header
+C
+	   IF (.NOT.HAD_RANGE) GOTO 930
+	   CALL FLWRTF('EOS       ')
+	   CALL FLWRTF('LOGIC     ')
+	   CALL FLWRTF('%S10%I11MASTERBLOC       1234',
+     &	      LOGIC_BLOCK_NAME,FC)
+	ENDIF
+C
+C -----	Find the next feature and inspect it
+C
+350	CALL IFFNXT(IECODE,IELEN)
+C
+C -----	AC - Ancillary Codes
+C
+	IF(IECODE .EQ. 'AC')THEN
+	   CALL EIHRI(ACVAL,1,1)
+	   IF(ACVAL .EQ. 2)THEN	!Only AC types 2 and 3 are
+	      HAD_AC = .TRUE.		!relevant to TDST output
+	      CALL EIHRI(IHT,1,2)
+	      HT = IHT*1.0		!TDST requires a real height
+	   END IF
+	   IF(ACVAL .EQ. 3)THEN
+	      HAD_AC = .TRUE.
+	      CALL EIHRR(HT,1,2)
+	   END IF
+	   GOTO 350
+	END IF
+C
+C -----	TS - Composite text
+C
+	IF(IECODE .EQ. 'TS')THEN
+	   IF(GT .NE. 10)GOTO 940
+	   HAD_TS = .TRUE.
+	   OK = CRETEX()	!Don't need to extract any more info
+				!TDST composite texts have same 
+				!attributes for all contained text
+	   IF(.NOT.OK)THEN
+	      DOCONV = .FALSE.
+	      GOTO 1000
+	   END IF
+	   GOTO 350		!Search for next feature
+	END IF
+C
+C -----	TH - Text height or line thickness
+C
+	IF(IECODE .EQ. 'TH') THEN
+	   HAD_TH = .TRUE.
+	   CALL EIHRI(TH,1,1)
+	   GOTO 350
+	END IF
+C
+C -----	If we have coord info then additional info entries (i.e. AC, TS,
+C -----	TH) are finished with so go to deal with different output types
+C -----	separately.
+C
+	IF(IECODE .EQ. 'ST' .OR. IECODE .EQ. 'ZS')
+     &     GOTO (360,370,370,370,370,360,380,380,380,390,360,360) GT
+C
+C -----	EF -End of feature - shouldn't be found here!
+C
+	IF(IECODE .EQ. 'EF')THEN
+	   CALL LSL_PUTMSG(IDST__EMPTFEAT,FSN)
+	   GOTO 100
+	END IF
+	CALL LSL_PUTMSG(IDST__UNXENTTYP,IECODE,FSN)
+	GOTO 350
+C
+C -----	Create TDST polygon feature
+C
+360	OK = CREPOL()
+	IF(.NOT.OK)THEN
+	   DOCONV = .FALSE.
+	   GOTO 1000
+	END IF
+	IF(HAD_NF) GOTO 300
+	GOTO 100
+C
+C -----	Create TDST arc feature
+C
+370	OK = CREARC()
+	IF(.NOT.OK)THEN
+	   DOCONV = .FALSE.
+	   GOTO 1000
+	END IF
+	IF(HAD_NF) GOTO 300
+	GOTO 100
+C
+C -----	Create TDST point feature
+C
+380	OK = CREPOI()
+	IF(.NOT.OK)THEN
+	   DOCONV = .FALSE.
+	   GOTO 1000
+	END IF
+	IF(HAD_NF) GOTO 300
+	GOTO 100
+C
+C -----	Create TDST text feature
+390	OK = CRETEX()
+	IF(.NOT.OK)THEN
+	   DOCONV = .FALSE.
+	   GOTO 1000
+	END IF
+	IF(HAD_NF) GOTO 300
+	GOTO 100
+C
+C -----	Tidy up the end of the TDST file
+C
+800	CALL FLWRTF('EOS       ')
+	CALL FLWRTF('EOI       ')
+	GOTO 1000
+C
+C -----	Errors
+C
+900	CALL LSL_PUTMSG(IDST__UNEXPEOF,IFFFIL)
+	DOCONV = .FALSE.
+	GOTO 1000
+910	CALL LSL_PUTMSG(IDST__NOFSENT,FSN)
+	GOTO 100	!Not fatal just abort this feature
+920	CALL LSL_PUTMSG(IDST__FAIFINFC,FC,FSN)
+	GOTO 100	!Not fatal just abort this feature
+930	CALL LSL_PUTMSG(IDST__NORANENT,IFFFIL)
+	GOTO 1000
+940	CALL LSL_PUTMSG(IDST__NONTEXTS,FSN)
+	GOTO 100	!Not fatal just abort this feature
+950	CALL LSL_PUTMSG(IDST__NONEXIGT,GT,FC)
+	GOTO 100	!Not fatal just abort this feature
+960	CALL LSL_PUTMSG(IDST__BADFCORDER,FSN)
+	GOTO 100	!Not fatal just abort this feature
+1000	CALL IFFCLO(1)
+	CALL FLRCLO(BNTLUN)
+	CALL FLWCLO(DSTLUN)
+	IF(OK)DOCONV = %LOC(SS$_NORMAL)
+	RETURN
+	END
