@@ -1,8 +1,15 @@
 	.TITLE	QUO
-	.IDENT	/09SE88/
+	.IDENT	/10FE92/
 
 	.IIF	NOT_DEFINED	DEBUG,	DEBUG=0
 
+;MOD	use PPGCNT+GPGCNT instead of WSSIZE	CCB	10-Feb-1992
+;	and parse command using LIB$TPARSE
+;MOD	allow nodename/qual, ignore DECW	CCB	30-Oct-1990
+;MOD	allow parameters (FULL,ALL,WIDE)	PGH	20-Jun-1989
+;MOD	ignore all SYSTEM detached processes	PGH	20-Jun-1989
+;MOD	RDB V3 - add RPC$ (and LSL,DECW$)	PGH	01-Feb-1989
+;MOD	VMS V5 - add SMISERVER, change NULL	PGH	14-Nov-1988
 ;MOD	UIS$* processes now called VSW$*	 DM	09-Sep-1988
 ;MOD	Don't show UIS and RDB stuff		 DM	13-Jun-1988
 ;MOD	Allow workspace up to 99999 pages !	 DM	11-Jan-1988
@@ -28,14 +35,16 @@
 	$SSDEF
 	.ENDC
 
+	$PSCANDEF
 	$JPIDEF
 	$STATEDEF
 	$RSNDEF
 	$PCBDEF
 	$FABDEF
 	$RABDEF
+	$TPADEF
 
-; macro to locate a character in string at (R2) and of lenght R3,
+; macro to locate a character in string at (R2) and of length R3,
 ; and if found, and if past R6, then update R6
 
 	.MACRO	LOCM	CHAR,?L1
@@ -53,28 +62,37 @@ L1:
 	IMAGNAME_SIZE=128
 	PRC_USER_NAME_SIZE=15
 	TERM_SIZE=7
+	NODE_SIZE=6
+	IMAGE_ROOM=9
 
 
 ; workspace:
 	.PSECT	QUO_PURE_DATA,NOEXE,NOWRT,LONG
 
-S_SYMBIONT:	.ASCII	/SYMBIONT/
-S_OPCOM:	.ASCII	/OPCOM/
-S_JOBCONTROL:	.ASCII	/JOB_CONTROL/
-S_ACP:		.ASCII	/ACP/
-S_ERRFMT:	.ASCII	/ERRFMT/
-S_DECNET:	.ASCII	/DECNET/
-S_NULL:		.ASCII	/NULL/
-S_SWAPPER:	.ASCII	/SWAPPER/
-S_CACHE:	.ASCII	/CACHE_SERVER/
-S_CLUSTER:	.ASCII	/CLUSTER_SERVER/
-S_CONFIGURE:	.ASCII	/CONFIGURE/
-S_VWS$DISPLAYMGR:.ASCII	/VWS$DISPLAYMGR/
-S_VWS$EMULATORS:.ASCII	/VWS$EMULATORS/
-S_RDMS_MONITOR:	.ASCII	/RDMS_MONITOR/
+; tables for LIB$TPARSE
+	$INIT_STATE	STATAB,KEYTAB
+
+	$STATE		START
+; enter QUAL state if we get a '/'
+	$TRAN		'/',QUAL
+; read a nodename (filespec syntax), execute NODE_PROC, and repeat
+	$TRAN		TPA$_FILESPEC,START,NODE_PROC	
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$STATE		QUAL
+; read a qualifier string and go back to START
+	$TRAN		TPA$_SYMBOL,START,QUAL_PROC
+	$TRAN		TPA$_EOS,TPA$_EXIT
+
+	$END_STATE
 
 BATCH:		.ASCII	/BATCH/
+S_SYSTEM:	.ASCII	/SYSTEM/
+S_DECW:		.ASCII	/DECW/
+S_SPACES:	.ASCII	/      /
 
+NODE_LINE:	.ASCII	/Processes on node /
+NODE_LINEL=.-NODE_LINE
 
 	ASSUME	SCH$C_COLPG	EQUAL	1
 	ASSUME	SCH$C_MWAIT	EQUAL	2
@@ -91,8 +109,8 @@ BATCH:		.ASCII	/BATCH/
 	ASSUME	SCH$C_COMO	EQUAL	13
 	ASSUME	SCH$C_CUR	EQUAL	14
 
-NOT_AVAILABLE:	.ASCII	"]N/A."
-NA_LEN=.-NOT_AVAILABLE
+S_NA:		.ASCII	"n/a"
+NA_LEN=.-S_NA
 
 S_SCH:		.ASCII	/COLPG/
 		.ASCII	/MWAIT/
@@ -166,6 +184,9 @@ CTRSTR_MUTEX:	.ASCID ^(!XL)^
 
 	.PSECT	QUO_DATA,NOEXE,LONG
 
+TPABLK:		.LONG		TPA$K_COUNT0
+		.BLKB		TPA$K_LENGTH0-4
+
 PIDADR:		.BLKL		1		; PID passed to GETJPI
 GETJPI_IOSB:	.BLKL		2		; IOSB for GETJPI
 SUSPND:		.BLKL		1		; process was suspended
@@ -175,8 +196,16 @@ STATE:		.BLKL		1		; Process stare (current,COM,LEF,etc)
 TERMLEN:	.BLKL		1		; no. of chars
 UIC:		.BLKL		1		; UIC, as two words
 USERLEN:	.BLKL		1		; no. of chars
+NODELEN:	.BLKL		1		; no. of chars
 STS:		.BLKL		1		; status
-FIRST_TIME:	.LONG		1
+PPGCNT:		.BLKL		1		; private page count
+GPGCNT:		.BLKL		1		; global page count
+FIRST_TIME:	.LONG		1		; true if first time through
+HAD_FULL:	.LONG		0		; true if Full listing
+HAD_ALL:	.LONG		0		; true if All listing
+HAD_WIDE:	.LONG		0		; true if Wide listing
+HAD_NODE:	.LONG		0		; true if /node given
+LSTPID:		.LONG		0		; PID last time
 
 FAO_LST:	.LONG	9			; arg list for FAO
 		.ADDRESS	CTRSTR
@@ -196,7 +225,23 @@ FAO_LST_MUTEX:	.LONG		4		; arg list for FAO
 EFWM:		.BLKL		1		; event flag wait mask
 
 
+SCAN_LST:					; for $PROCESS_SCAN
+	.BLKW		1
+	.WORD		pscan$_NODENAME
+	.BLKL		1
+	.LONG		pscan$M_WILDCARD
+
+	.LONG		0
+
+JPIFLAGS:
+	.LONG		JPI$M_IGNORE_TARGET_STATUS
+
 ITMLST:						; for $GETJPI
+	.WORD		LONGWORD_SIZE
+	.WORD		JPI$_GETJPI_CONTROL_FLAGS
+	.ADDRESS	JPIFLAGS
+	.LONG		0
+
 	.WORD		IMAGNAME_SIZE
 	.WORD		JPI$_IMAGNAME
 	.ADDRESS	IMAGNAME
@@ -248,14 +293,24 @@ ITMLST:						; for $GETJPI
 	.LONG		0
 
 	.WORD		LONGWORD_SIZE
-	.WORD		JPI$_WSSIZE
-	.ADDRESS	WSSIZE
+	.WORD		JPI$_PPGCNT
+	.ADDRESS	PPGCNT
+	.LONG		0
+
+	.WORD		LONGWORD_SIZE
+	.WORD		JPI$_GPGCNT
+	.ADDRESS	GPGCNT
 	.LONG		0
 
 	.WORD		LONGWORD_SIZE
 	.WORD		JPI$_STS
 	.ADDRESS	STS
 	.LONG		0
+
+	.WORD		NODE_SIZE
+	.WORD		JPI$_NODENAME
+	.ADDRESS	NODENAME
+	.ADDRESS	NODELEN
 
 	.LONG	0
 
@@ -281,6 +336,7 @@ LINE71:		.WORD		80-71+1		; char descr to LINEB+71
 
 LINEB:		.BLKB		80		; for putting the text into
 
+LINLEN:		.BLKL		1		; line length
 
 
 ; the following are pointed to by the item list
@@ -289,6 +345,7 @@ IMAGNAME:	.BLKB		IMAGNAME_SIZE		; name of image being executed
 PRCNAM:		.BLKB		PRC_USER_NAME_SIZE	; name of process
 TERMINAL:	.BLKB		TERM_SIZE		; terminal name
 USERNAME:	.BLKB		PRC_USER_NAME_SIZE	; name of user
+NODENAME:	.BLKB		NODE_SIZE		; node name
 
 	.PSECT	QUO_CODE,NOWRT
 
@@ -313,8 +370,29 @@ USERNAME:	.BLKB		PRC_USER_NAME_SIZE	; name of user
 
 	MNEGL	#1,PIDADR		; to start a wildcard search
 
-; loop calling SYS$GETJPI
+; now find if we have a command
 
+	PUSHAL	LINLEN			; line length (3rd arg)
+	PUSHL	#0			; null prompt (2nd arg)
+	PUSHAL	LINE			; line buffer (1st arg)
+	CALLS	#3,G^LIB$GET_FOREIGN	; get command line (if any)
+
+	MOVZWL	LINLEN,TPABLK+TPA$L_STRINGCNT
+	MOVAB	LINEB,TPABLK+TPA$L_STRINGPTR
+	PUSHAL	KEYTAB
+	PUSHAL	STATAB
+	PUSHAL	TPABLK
+	CALLS	#3,G^LIB$TPARSE
+	BLBS	R0,25$
+	BRW	END
+
+25$:	BLBC	HAD_NODE,LOOP
+	$PROCESS_SCAN_S	PIDCTX=PIDADR,ITMLST=SCAN_LST
+	BLBS	R0,LOOP
+	BRW	END
+
+; ready to start asking about processes
+; loop calling SYS$GETJPI
 LOOP:
 	$GETJPI_G	GETJPI_LST
 
@@ -343,109 +421,86 @@ LOOP:
 	BRW	END		; exit if failed
 60$:
 
+; check the i/o status block
+
 	MOVZWL	GETJPI_IOSB,R0
 	CMPL	R0,#SS$_NORMAL
 	BEQL	80$
 	CMPL	R0,#SS$_SUSPENDED
 	BEQL	70$
-	BRW	END		; exit if failed
+	CMPL	R0,#SS$_NOMOREPROC	; if no more, exit OK
+	BEQL	65$
+	BRW	END			; exit if failed
+65$:	MOVL	#SS$_NORMAL,R0
+	BRW	END1
 
-70$:	MNEGL	#1,SUSPND	; if suspended, mark, and put N/A in imagename
-	MOVC3	#NA_LEN,NOT_AVAILABLE,IMAGNAME
+70$:	DECL	SUSPND		; if suspended, mark, and put N/A in imagename
+	MOVC3	#NA_LEN,S_NA,IMAGNAME
 	MOVL	#NA_LEN,IMAGLEN
 
-; discard any DECnet stuff in one of the normal states.
-; states LEF, LEFO, HIB, HIBO are contiguous
+; here with valid process to check
+80$:	TSTL	HAD_ALL		; All qualifier ?
+	BNEQ	100$		; report everything
 
-80$:	MOVAL	USERNAME,R4
+; single out detached processes for special treatment
 
-	CMPC3	#6, (R4), S_DECNET
-	BNEQ	85$
-
-	MOVL	STATE,R6
-	CMPL	R6,#SCH$C_COM
-	BNEQ	81$		; can't branch directly to 90$ (too far)
-	BRW	90$
-81$:	CMPL	R6,#SCH$C_LEF
-	BGEQU	82$		; can't branch directly to 100$
-	BRW	100$
-82$:	CMPL	R6,#SCH$C_HIBO
-	BLEQU	83$		; can't branch directly to 100$
-	BRW	100$
-83$:	BRW	LOOP
-
-; discard any permanent system processes in one of the normal states.
-
-84$:	BRW	100$		; convenient branch point
-
-85$:	CMPW	UIC+2,#1	; all system processes are [1,n] or [0,0]
-	BGTR	84$
-
-	TSTL	TERMLEN		; and do not have a terminal
-	BNEQ	84$
-
-	MOVL	STATE,R6
-	CMPL	R6,#SCH$C_COM
-	BEQL	86$
-	CMPL	R6,#SCH$C_LEF
-	BLSSU	84$
-	CMPL	R6,#SCH$C_HIBO
-	BGTRU	84$
-
-86$:	MOVAL	PRCNAM,R4
-
-	CMPC3	#8, (R4), S_SYMBIONT
-	BNEQ	89$
-
-88$:	BRW	90$		; convenient branch point
-
-89$:	CMPC3	#4, (R4), S_NULL
-	BEQL	90$
-
-	CMPC3	#7, (R4), S_SWAPPER
-	BEQL	90$
-
-	CMPC3	#12, (R4), S_CACHE
-	BEQL	90$
-
-	CMPC3	#14, (R4), S_CLUSTER
-	BEQL	90$
-
-	CMPC3	#9, (R4), S_CONFIGURE
-	BEQL	90$
-
-	CMPC3	#5, (R4), S_OPCOM
-	BEQL	90$
-
-	CMPC3	#11, (R4), S_JOBCONTROL
-	BEQL	90$
-
-	CMPC3	#6, (R4), S_ERRFMT
-	BEQL	90$
-
-	CMPC3	#14, (R4), S_VWS$DISPLAYMGR
-	BEQL	90$
-
-	CMPC3	#13, (R4), S_VWS$EMULATORS
-	BEQL	90$
-
-	CMPC3	#12, (R4), S_RDMS_MONITOR
-	BEQL	90$
-
-	ADDL	#3,R4
-	CMPC3	#3, (R4), S_ACP
-	BEQL	90$
-
-	ADDL	#2,R4
-	CMPC3	#3, (R4), S_ACP
+	TSTL	TERMLEN		; they do not have a terminal
 	BNEQ	100$
+	BBS	#PCB$V_BATCH,STS,100$	; batch process
 
-90$:	BRW	LOOP
+; any detached processes in odd states do need reporting
+
+	MOVL	STATE,R6
+	CMPL	R6,#SCH$C_COM
+	BEQL	83$		; state OK
+	CMPL	R6,#SCH$C_CUR
+	BEQL	83$		; state OK
+	CMPL	R6,#SCH$C_LEF
+	BGEQU	82$		; test further
+	BRW	100$		; show this one (state is peculiar)
+82$:	CMPL	R6,#SCH$C_HIBO
+	BLEQU	83$		; state OK
+	BRW	100$		; show this one (state is peculiar)
+
+; here with detached process with state OK - test for system owner
+
+83$:	CMPW	UIC+2,#1	; system processes are [1,n] or [0,0]
+	BGTR	84$		; not system by UIC
+	BRW	LOOP		; ignore system detached processes
+84$:	MOVAL	USERNAME,R4	; test for system by name
+	CMPC3	#6, (R4), S_SYSTEM
+	BEQL	85$		; ignore system processes
+	CMPC3	#4, PRCNAM, S_DECW
+	BEQL	85$		; ignore DECWindows processes
+	BRB	100$		; show other processes
+
+; here with detached process with username SYSTEM, or process name DECW*
+
+85$:	TSTL	HAD_FULL	; Full qualifier ?
+	BNEQ	100$		; report everything
+	BRW	LOOP		; else discard
+
+; here with something to output - expand the returned numbers into LINE
+
 100$:
+	BLBC	HAD_NODE,102$
+	CMPW	PID+2,LSTPID+2		; is it the same node
+	BEQL	102$
+	BLBS	FIRST_TIME,101$
+	CLRW	QUO_RAB+RAB$W_RSZ	; write a blank line
+	BSBW	WAITLAB
+	BSBW	PUTLAB
+101$:	BSBW	WAITLAB
+	MOVC3	#NODE_LINEL,NODE_LINE,LINEB
+	MOVC3	NODELEN,NODENAME,LINEB+NODE_LINEL
+	ADDW3	#NODE_LINEL,NODELEN,QUO_RAB+RAB$W_RSZ
+	BSBW	PUTLAB
 
-; expand the returned numbers into LINE
+102$:	BSBW	WAITLAB
+	MOVL	PID,LSTPID
 	MOVZWL	UIC+2,FAO_UIC1
 	MOVZWL	UIC,FAO_UIC2
+	ADDL3	PPGCNT,GPGCNT,WSSIZE
 	$FAO_G	FAO_LST
 	CMPL	R0,#SS$_NORMAL
 	BEQL	110$
@@ -453,22 +508,35 @@ LOOP:
 110$:
 
 ; put the terminal name in, if there was one
-	TSTL	TERMLEN
-	BLEQ	120$
-	MOVC3	TERMLEN, TERMINAL, LINEB
+
+	TSTL	TERMLEN			; anything there ?
+	BLEQ	120$			; no
+	CMPL	TERMLEN,#6		; too big ?
+	BLEQU	115$			; no
+	MOVC3	#4, S_SPACES, LINEB+6	; zap the first half of the pid
+115$:	MOVC3	TERMLEN, TERMINAL, LINEB
 	BRB	127$
 120$:
-	BBC	#PCB$V_BATCH,STS,127$
+	BBC	#PCB$V_BATCH,STS,127$	; batch process
 	MOVC3	#5,BATCH,LINEB
-127$:
 
 ; and then the other names
-	MOVC3	PRCLEN, PRCNAM, LINEB+25
+
+127$:	MOVC3	PRCLEN, PRCNAM, LINEB+25
+
+	TSTL	USERLEN		; have we got a username
+	BLEQ	128$
+	TSTL	USERNAME
+	BLEQ	128$
 	MOVC3	USERLEN, USERNAME, LINEB+41
+	BRB	129$
+
+128$:	MOVC3	#NA_LEN,S_NA,LINEB+41	; if no username (eg SWAPPER)
 
 ; add state name
 ; check that STATE is in range, and index into the list of ASCII text
-	SUBL3	#1,STATE,R6
+
+129$:	SUBL3	#1,STATE,R6
 	BGEQ	121$
 	BPT				; should NEVER get here
 121$:	CMPL	R6,#SCH$C_CUR
@@ -510,9 +578,10 @@ LOOP:
 	MOVAB	IMAGNAME,R2
 	CLRL	R7
 	MOVL	IMAGLEN,R3
-	BLEQ	170$		; no image name
+	BLEQ	126$		; no image name
 	ADDL3	R2,R3,R7	; R7 is one char past last char of name
 	MOVL	R2,R6		; initialise R6 to start of IMAGNAME
+	BLBS	SUSPND,160$
 
 	LOCM	#^A/:/		; input in R2,R3, result in R6
 	LOCM	#^A/]/
@@ -533,27 +602,36 @@ LOOP:
 	MOVL	R1,R7		; one byte beyond end of source string
 160$:	SUBL2	R6,R7		; R7 is length of string
 	BLEQ	170$		; if no image name
+	TSTL	HAD_WIDE	; Wide qualifier ?
+	BNEQ	165$		; report everything
+	CMPL	R7,#IMAGE_ROOM	; only room for 9 chars on the line
+	BLSS	165$		; OK
+	MOVL	#IMAGE_ROOM,R7	; trim back
 
 ; here with start of string in R6
-	MOVC3	R7,(R6),LINEB+71
+165$:	MOVC3	R7,(R6),LINEB+71
+
 
 170$:
 ; no of chars to output
 	ADDL2	#71,R7
 	CVTLW	R7,QUO_RAB+RAB$W_RSZ
+	BSBB	PUTLAB
+	BRW	LOOP
 
 ; write the line out
-; wait for the last PUT to complete
-	BBSC	#0,FIRST_TIME,175$
-	$WAIT	RAB=QUO_RAB
-	BLBC	R0,END
-175$:
-
-
 PUTLAB:
+	BICL2	#1,FIRST_TIME
 	$PUT	RAB=QUO_RAB
 	BLBC	R0,END
-	BRW	LOOP
+	RSB
+
+; wait for the last PUT to complete
+WAITLAB:
+	BBS	#0,FIRST_TIME,10$
+	$WAIT	RAB=QUO_RAB
+	BLBC	R0,END
+10$:	RSB
 
 END1:
 	BBSC	#0,FIRST_TIME,END
@@ -561,6 +639,34 @@ END1:
 	BLBC	R0,END
 	$CLOSE	FAB=QUO_FAB
 END:
+	RET
+
+; LIB$TPARSE action procedures
+NODE_PROC:
+	.WORD	0
+	MNEGL	#1,HAD_NODE
+	MOVW	TPA$L_TOKENCNT(AP),SCAN_LST
+	MOVL	TPA$L_TOKENPTR(AP),SCAN_LST+4
+	MNEGL	#1,R0
+	RET
+
+QUAL_PROC:
+	.WORD	^M<R2,R3>
+
+	MOVL	TPA$L_TOKENCNT(AP),R2
+	MOVL	TPA$L_TOKENPTR(AP),R3
+
+	LOCC	#^A/F/,R2,(R3)
+	BEQL	10$			; if not found
+	MNEGL	#1,HAD_FULL		; yes
+10$:	LOCC	#^A/A/,R2,(R3)
+	BEQL	11$			; if not found
+	MNEGL	#1,HAD_ALL		; yes
+11$:	LOCC	#^A/W/,R2,(R3)
+	BEQL	12$			; if not found
+	MNEGL	#1,HAD_WIDE		; yes
+
+12$:	MNEGL	#1,R0
 	RET
 
 	.END	QUO
