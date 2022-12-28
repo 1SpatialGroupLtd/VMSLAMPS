@@ -24,6 +24,26 @@ $	tidy  := "delete"
 $	ver   := ";*"
 $	link_dir := 'f$logical("HERE")
 $!
+$! check for AXP version
+$!
+$	ARCH_NAME=F$GETSYI("ARCH_NAME")
+$	IF ARCH_NAME.EQS."Alpha" 
+$	THEN 
+$	   TVS="_TV"
+$	   AXPS="_AXP"
+$	   ADC="@here:adc"
+$	   PVV="@nl:"
+$	   list="/EXTEND/TIE/FLOAT=D/VMS/ALIGN=NONE"
+$	   LINKOPTS="/NONATIVE_ONLY"
+$	ELSE
+$	   TVS=""
+$	   AXPS=""
+$	   list="/EXTEND"
+$	   LINKOPTS=""
+$	ENDIF
+
+
+$!
 $	wsb
 $askcmp:inquire CMP "Compile                 "
 $	if .not. CMP then goto askcop
@@ -35,8 +55,8 @@ $	   cmt   = "/co"
 $	   tidy  = "purge"
 $	   ver   = ""
 $!
-$	inquire LST "   and listings         "
-$	if LST then list = "/list"
+$!	inquire LST "   and listings         "
+$!	if LST then list = "/list"
 $!
 $askall:wsb
 $	inquire MAIN     "Main program                  "
@@ -73,7 +93,7 @@ $	purge IMAP2I_CLD.obj
 $	delete adc.ide;*,CLD.tmp;*
 $!
 $noCLD:	if .not. MAIN then goto noMAIN
-$	adc IMAP2I'cmt' = IMAP2I,REPORT
+$	adc IMAP2I'cmt' = IMAP2I REPORT
 $	fort'debug''list' IMAP2I
 $	pvv IMAP2I
 $	purge IMAP2I.obj
@@ -111,7 +131,7 @@ $!
 $noFAC: if .not. RET then goto noRET
 $	adc CONDAT'cmt'    = CONDAT,STARET,ENDRET,RETLIN,RETSYM,RETTXT,RETATT
 $	adc CONDAT'cmt'/ap = CHKTXT,ATTR_IND,AC_IND,GETLIN,GETSYM,GETTEX,GETATT
-$	adc CONDAT'cmt'/ap = NXTGRA,IMAP_SYSMSG
+$	adc CONDAT'cmt'/ap = NXTGRA,IMAP_SYSMSG,RETATTANNO
 $	fort 'debug''list' CONDAT
 $	pvv CONDAT
 $	purge CONDAT.obj
@@ -132,3 +152,24 @@ $noIFF:	set noverify
 $noCMP:	
 $	wsb
 $end:
+$	LINKVER="IMAP2I"+AXPS
+$!
+$	EXPLSL="LSL$LIBRARY:LSLSHR''TVS'/OPT"
+$!
+$	LINKOPTS=LINKOPTS+"/MAP/FULL"
+$	DEFINE/USER LSL$IFFSHR_TV LSL$LIBRARY:IFFSHR_DUMMY_AXP"
+$	DEFINE/USER LSL$LSLSHR_TV LSL$LIBRARY:LSLSHR_DUMMY_AXP"
+$!	LINK''LINKOPTS'/EXE=''LINKVER' -
+$!		IMAP2I,IMAP2I_CLD,-
+$!		GET_COMMAND,RDPAR,GET_LIST,CONDAT,WRITE_IFF,-
+$!		IMAP2I.PROMSG_OBJ,-
+$!		LSL$LIBRARY:LSLFRTLIB/LIB, -
+$!		LSL$LIBRARY:IFFSHR''TVS'/OPT,''EXPLSL'"
+$!		LSL$LIBRARY:LSLSHR/OPT,-
+$!		STI_LIBS:DEBUGLIB/INCL=(RDBMS_ENTRY_POINTS,SET_ADDR),-
+$!		STI_LIBS:GWSOFF/OPT,-
+$!		STI_LIBS:STILIB/INCLUDE=(.MAIN.),-
+$!		STI_LIBS:STILIB/LIB,-
+$!		STI_LIBS:DBMSLIB/LIB,-
+$!		STI_LIBS:USRLINK/OPT
+$!
