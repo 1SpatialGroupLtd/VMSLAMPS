@@ -1,0 +1,508 @@
+	.TITLE	VIOSEC
+	.IDENT	/03NO86/
+
+; Copyright Laser-Scan Laboratories Ltd., Cambridge, England
+
+;MOD	Opt. Virtual Block Number arg for VIO$OPEN_SEC	 DM	03-Nov-1986
+;MOD	Opt. Page Fault Cluster size arg for VIO$OPEN_SEC;
+;MOD	VIO$UPDATE_SEC added to flush changes;
+;MOD	PSECTs now LSL					 DM	20-Oct-1986
+;MOD    VSEC_UNITS increased to 9			DRC	02-Aug-1985
+;MOD	LSL$LIBRARY, not SYS$LIBRARY			AJW	06-Dec-1983
+;MOD	clear out the FIB in EXTEND			AJW	05-May-1983
+;MOD	EXSZ is no. of blocks to add, not new total	AJW	05-May-1983
+;MOD	save error return in R0 over $DASSGN		AJW	22-Mar-1983
+;MOD	changed for general purpose library routine	AJW	01-Mar-1983
+;MOD	Author - MCE digitiser table menu stuff		TJI	 6-Nov-1981
+
+; Private section manipulation routines
+
+; get some symbolic definitions
+
+	.LIBRARY	/LSL$LIBRARY:LSLMACLIB/
+	.LIBRARY	/SYS$LIBRARY:LIB/
+
+	$ATRDEF
+	$FATDEF
+	$FIBDEF
+	$SECDEF
+	$SSDEF
+
+	DATA_PSECT	LSL
+
+VSEC_FAB:	$FAB	FOP=<UFO,CBT>,-		; user file open
+					-	; contiguous best try
+			NAM=VSEC_NAM,-
+			RFM=UDF			; undefined record format
+VSEC_NAM:	$NAM
+
+VSEC_INADR:	.LONG	^X200,^X200		; only to say P0 space
+
+VSEC_FIBBLK:	.BLKB	FIB$K_LENGTH
+VSEC_FIBDSC:	.LONG	FIB$K_LENGTH
+		.LONG	VSEC_FIBBLK
+
+VSEC_FATRAT:	.BLKB	ATR$S_RECATTR
+VSEC_FAT:	.WORD	ATR$S_RECATTR
+		.WORD	ATR$C_RECATTR
+		.LONG	VSEC_FATRAT
+		.LONG	0		; to terminate
+
+VSEC_IOSB:	.BLKW	4
+
+	VSEC_UNITS=9
+
+; make several copies of the local workspace
+
+VSEC_WORKSPACE:
+
+	I=0			; first time through only
+
+	.REPEAT VSEC_UNITS
+
+		.IIF EQ I,	VSEC_RETADR	=.-VSEC_WORKSPACE 
+		.BLKL	2
+
+		.IIF EQ I,	VSEC_SIZE	=.-VSEC_WORKSPACE
+		.BLKL	1
+
+		.IIF EQ I,	VSEC_FLAGS	=.-VSEC_WORKSPACE
+		.BLKL	1
+
+		.IIF EQ I,	VSEC_CHAN	=.-VSEC_WORKSPACE
+		.BLKL	1
+
+		.IIF EQ I,	VSEC_PFC	=.-VSEC_WORKSPACE
+		.BLKL	1
+
+		.IIF EQ I,	VSEC_VBN	=.-VSEC_WORKSPACE
+		.BLKL	1
+
+		.IIF EQ I,	VSEC_FID	=.-VSEC_WORKSPACE
+		.BLKW	3
+
+		.IIF EQ I,	VSEC_WORKSIZE	=.-VSEC_WORKSPACE
+
+		I=-1
+
+	.ENDR
+
+	CODE_PSECT	LSL
+
+;*****************************************************************************
+
+	.ENTRY	VIO$OPEN_SEC,^M<R2,R3,R4,R5,R6,R7,R8,R9,R10,R11>
+
+; to create/open a file and map it to virtual memory
+
+; error_number=VIO$OPEN_SEC(<file_name>, <size_in_blocks>,<write>, -
+;                           <create>,<address>,<number_of_bytes>[,<channel>]
+;			    [,<cluster>][,<vbn>])
+
+; file_name           - input  - address of descriptor
+; size_in_blocks      - input  - int*4 - (passed by reference) - page count
+;                              - how many blocks (pages) we want
+;                              - ignored if file exists already (unless vbn set)
+; write               - input  - logical - (passed by reference)
+;                              - allow write access to file
+; create              - input  - logical - (passed by reference)
+;                              - create a new file
+;                              - implies write access
+; address             - output - int*4 - (passed by reference)
+;                              - address in P0 space of "array"
+; number_of_bytes     - output - int*4 - (passed by reference)
+;                              - actual number of bytes in file
+; channel             - input  - int*4 - (passed by reference)
+;                              - enables several files open simultaneously
+;                              - <=0 - defaults to 0
+; cluster	      - input  - int*4 (passed by reference)
+;			       - set page fault cluster size (how many pages
+;			       - are brought into memory when a fault occurs)
+; vbn		      - input  - int*4 (passed by reference)
+;			       - set virtual block number in file that marks
+;			       - the beginning of the section (used in
+;			       - conjunction with size_in_blocks)
+
+; e.g.
+;	INTEGER ARRAY
+;	IERR=VIO$OPEN_SEC('FILE.DAT',10,.TRUE.,.TRUE.,ARRAY,NBYTES)
+;	IF (.NOT.IERR) CALL EXIT(IERR)
+;	CALL SUB(%VAL(ARRAY),NBYTES/4)
+;	.
+;	.
+;	SUBROUTINE SUB(ARR,SIZ)
+;	INTEGER SIZ
+;	INTEGER ARR(SIZ)
+
+
+; R11 is corrupted by VIOARG
+	JSB	VIO$1ST			; init arg reading mechanism
+	JSB	VIO$GNA			; get <file_name>
+	BCC	10$			; branch if got it
+
+; put error code "insufficient arguments" in RO
+99$:	MOVL	#SS$_INSFARG,R0
+	RET				; and return to moan about it
+
+; so we have the name of our file/section
+10$:	MOVAQ	(R0),R2			; remember where it is
+
+	JSB	VIO$GNA			; get <size_in_blocks>
+	BCS	99$
+	MOVL	(R0),R3			; in R3
+
+	JSB	VIO$GNA			; get <write> enable flag
+	BCS	99$
+	MOVL	(R0),R4			; in R4
+
+	JSB	VIO$GNA			; get <create> flag
+	BCS	99$
+	MOVL	(R0),R5			; in R5
+
+	JSB	VIO$GNA			; get place to put <address> in
+	BCS	99$
+	MOVAL	(R0),R6			; in R6
+
+	JSB	VIO$GNA			; get address to return size in
+	BCS	99$
+	MOVAL	(R0),R7			; in R7
+
+	CLRL	R8			; default "channel" is 0
+	JSB	VIO$GNA			; get "channel" number
+	BCS	8$			; if none specified
+	MOVL	(R0),R8
+
+8$:	CLRL	R9			; default cluster size is 0
+	JSB	VIO$GNA			; get cluster size
+	BCS	85$			; if none specified
+	MOVL	(R0),R9
+
+85$:	CLRL	R10			; default virtual block number is 0
+	JSB	VIO$GNA			; get vbn
+	BCS	89$			; if none specified
+	MOVL	(R0),R10
+	BEQL	89$
+	BLBC	R5,89$			; "create" flag set ?
+	MOVL	#SS$_BADPARAM,R0	; yes - set up 'invalid argument' error
+	RET				; and return to moan about it
+
+89$:
+
+; get the start of the workspace block for this unit in R8
+	CMPL	R8,#0
+	BLSSU	7$
+	CMPL	R8,#VSEC_UNITS-1
+	BGTRU	7$
+	MULL2	#VSEC_WORKSIZE,R8
+	ADDL2	#VSEC_WORKSPACE,R8
+
+; check that the unit is not in use
+	TSTL	VSEC_RETADR(R8)
+	BEQLU	9$
+7$:	MOVL	#SS$_IVCHAN,R0		; produce error moan if it is
+	RET
+9$:
+
+; all args now successfully read - let's create or open a file
+
+	$FAB_STORE	FAB=VSEC_FAB,-
+			FNA=@4(R2),-		; name given us
+			FNS=(R2)		; length of name
+
+	BLBC	R5,15$				; if create
+	MOVL	#SEC$M_WRT!-			; write
+	         SEC$M_DZRO!-			; demand zero
+	         SEC$M_EXPREG,VSEC_FLAGS(R8)	; create new address space
+	$FAB_STORE	FAB=VSEC_FAB,-
+			FOP=<UFO,CBT,SUP>,-	; supersede
+			ALQ=R3			; initial size wanted
+
+	$CREATE		FAB=VSEC_FAB		; make our file
+	BRB	20$
+15$:						; and if already exists
+	BLBS	R4,17$				; write enable ?
+	MOVL	#SEC$M_EXPREG,VSEC_FLAGS(R8)	; no
+	BRB	18$
+17$:
+	MOVL	#SEC$M_WRT!-			; yes
+		 SEC$M_EXPREG,VSEC_FLAGS(R8)
+	$FAB_STORE	FAB=VSEC_FAB,-
+			FAC=<PUT,GET>
+18$:
+	$OPEN		FAB=VSEC_FAB
+	TSTL	R10				; vbn specified ?
+	BNEQ	20$
+	MOVL	VSEC_FAB+FAB$L_ALQ,R3		; get the size of the file
+20$:
+	BLBC	R0,100$				; return with error
+
+
+; file now open - set it up as a private section
+
+	$CRMPSC_S	INADR =VSEC_INADR,-
+			RETADR=VSEC_RETADR(R8),-
+			FLAGS =VSEC_FLAGS(R8),-
+			CHAN  =VSEC_FAB+FAB$L_STV,-
+			PAGCNT=R3,-
+			VBN   =R10,-
+			PFC   =R9
+	BLBC	R0,200$
+
+	MOVL	VSEC_RETADR(R8),(R6)	; return address
+
+	SUBL3	VSEC_RETADR(R8),VSEC_RETADR+4(R8),R1
+	ADDL3	#1,R1,(R7)		; put byte range into arg
+
+; save the file id
+
+	MOVW	VSEC_NAM+NAM$W_FID  ,VSEC_FID(R8)
+	MOVW	VSEC_NAM+NAM$W_FID+2,VSEC_FID+2(R8)
+	MOVW	VSEC_NAM+NAM$W_FID+4,VSEC_FID+4(R8)
+
+; and the channel
+
+	MOVL	VSEC_FAB+FAB$L_STV,VSEC_CHAN(R8)
+
+; and the size
+	MOVL	R3,VSEC_SIZE(R8)
+
+; and the pfc
+	MOVL	R9,VSEC_PFC(R8)
+
+; and the vbn
+	MOVL	R10,VSEC_VBN(R8)
+
+100$:	RET				; and return
+
+; error return if file is open
+200$:	PUSHR	#^M<R0>			; save error
+	$DASSGN_S	CHAN=VSEC_FAB+FAB$L_STV
+	POPR	#^M<R0>
+	RET
+
+;*****************************************************************************
+
+
+	.ENTRY	VIO$EXTEND_SEC,^M<R2,R3,R4,R5,R11>
+
+; to extend an already open section file
+
+; *** N.B. the addresses will NOT be the same ***
+; (not that it should ever matter)
+
+; *** N.B. also - When extending, the effect is to round up the number
+; of blocks that we wish to add to the next multiple of the cluster size, and 
+; add this to the current extent. This means that the file can end up with
+; up to <cluster_size-1> * <number of extends done> blocks of wasted space at 
+; the end. If this worries anyone (it can be undone with TRUNCATE <file_name>),
+; I will try to get round to fixing it. AJW
+
+; error_number=VIO$EXTEND_SEC(<size_in_blocks,address,<number_of_bytes>[,CHAN])
+
+; size_in_blocks      - input  - int*4 - (passed by reference) - page count
+;                              - how many blocks (pages) we want to add
+; address             - output - int*4 - (passed by reference)
+;                              - address in P0 space of "array"
+; number_of_bytes     - output - int*4 - new number of bytes in file
+; channel             - input  - int*4 - (passed by reference)
+
+; First, clear out the FIB (do it now, so that we don't have to save
+; registers
+
+	MOVC5	#0,B^99$,#0,#FIB$K_LENGTH,VSEC_FIBBLK
+
+; R11 is corrupted by VIOARG
+	JSB	VIO$1ST			; init arg reading mechanism
+	JSB	VIO$GNA			; get <size_in_blocks>
+	BCC	10$			; branch if got it
+
+; put error code "insufficient arguments" in RO
+99$:	MOVL	#SS$_INSFARG,R0
+993$:	RET				; and return to moan about it
+
+995$:	MOVL	#SS$_BADPARAM,R0	; invalid arg
+	RET
+
+10$:	CMPL	(R0),#1			; check it's at least one block
+	BLSS	995$
+	MOVL	(R0),R5
+
+	JSB	VIO$GNA			; get address to return new address in
+	BCS	99$
+	MOVAL	(R0),R2
+
+	JSB	VIO$GNA			; get address to return new size in
+	BCS	99$
+	MOVAL	(R0),R3
+
+	CLRL	R4			; default "channel" is 0
+	JSB	VIO$GNA			; get "channel" number
+	BCS	8$			; if none specified
+	MOVL	(R0),R4
+8$:
+
+; get the start of the workspace block for this unit in R4
+	CMPL	R4,#0
+	BLSSU	7$
+	CMPL	R4,#VSEC_UNITS-1
+	BGTRU	7$
+	MULL2	#VSEC_WORKSIZE,R4
+	ADDL2	#VSEC_WORKSPACE,R4
+
+; check that the unit is in use
+	TSTL	VSEC_RETADR(R4)
+	BNEQU	9$
+7$:	MOVL	#SS$_IVCHAN,R0		; produce error moan if it isn't
+	RET
+9$:
+
+	ADDL2	R5,VSEC_SIZE(R4)		; and increment to old size
+
+; get rid of the existing address space
+	$DELTVA_S	INADR=VSEC_RETADR(R4)
+	BLBC	R0,993$
+
+; extend the file - unfortunately, since we did an UFO, we can't use RMS
+
+; copy the file id to the File Information block
+	MOVW	VSEC_FID(R4),	VSEC_FIBBLK+FIB$W_FID
+	MOVW	VSEC_FID+2(R4),	VSEC_FIBBLK+FIB$W_FID+2
+	MOVW	VSEC_FID+4(R4),	VSEC_FIBBLK+FIB$W_FID+4
+
+; first - get the existing attributes
+	$QIOW_S	CHAN=VSEC_CHAN(R4),-
+		FUNC=#IO$_ACCESS,-
+		IOSB=VSEC_IOSB,-
+		P1=VSEC_FIBDSC,-
+		P5=#VSEC_FAT
+	BLBC	R0,4$
+	BLBS	VSEC_IOSB,5$
+	MOVZWL	VSEC_IOSB,R0
+4$:	RET
+5$:
+
+; ask that the file header be written straightway
+	MOVL	#FIB$M_WRITETHRU,	VSEC_FIBBLK+FIB$L_ACCTL
+
+; we are extending, contiguous best try
+	MOVW	#FIB$M_EXTEND!-
+		 FIB$M_ALCONB,		VSEC_FIBBLK+FIB$W_EXCTL
+
+; the amount to extend by
+	MOVL	R5,			VSEC_FIBBLK+FIB$L_EXSZ
+
+; and the highest allocated virtual block number (which is really the start of 
+; the next block)
+	INCL	VSEC_SIZE(R4)
+	MOVW	VSEC_SIZE(R4),		VSEC_FATRAT+FAT$W_EFBLKL
+	MOVW	VSEC_SIZE+2(R4),	VSEC_FATRAT+FAT$W_EFBLKH
+	DECL	VSEC_SIZE(R4)
+
+	$QIOW_S	CHAN=VSEC_CHAN(R4),-
+		FUNC=#IO$_MODIFY,-
+		IOSB=VSEC_IOSB,-
+		P1=VSEC_FIBDSC,-
+		P5=#VSEC_FAT
+	BLBC	R0,100$
+	BLBS	VSEC_IOSB,20$
+	MOVZWL	VSEC_IOSB,R0
+	RET
+20$:
+
+; and map it to virtual memory again
+	$CRMPSC_S	INADR =VSEC_INADR,-
+			RETADR=VSEC_RETADR(R4),-
+			FLAGS =VSEC_FLAGS(R4),-
+			CHAN  =VSEC_CHAN(R4),-
+			PAGCNT=VSEC_SIZE(R4),-
+			VBN   =VSEC_VBN(R4),-
+			PFC   =VSEC_PFC(R4)
+	BLBC	R0,100$
+
+	MOVL	VSEC_RETADR(R4),(R2)	; return address
+
+	SUBL3	VSEC_RETADR(R4),VSEC_RETADR+4(R4),R1
+	ADDL3	#1,R1,(R3)		; put byte size into arg
+100$:
+	RET	
+
+;*****************************************************************************
+
+
+	.ENTRY	VIO$CLOSE_SEC,^M<R2,R11>
+
+; close the section down
+; (by deleting the virtual addresses to which it is mapped)
+
+; error_number=VIO$CLOSE_SEC([channel])
+
+; R11 is corrupted by VIOARG
+	JSB	VIO$1ST			; init arg reading mechanism
+	CLRL	R2			; default "channel" is 0
+	JSB	VIO$GNA			; get "channel" number
+	BCS	8$			; if none specified
+	MOVL	(R0),R2
+8$:
+
+; get the start of the workspace block for this unit in R2
+	CMPL	R2,#0
+	BLSSU	7$
+	CMPL	R2,#VSEC_UNITS-1
+	BGTRU	7$
+	MULL2	#VSEC_WORKSIZE,R2
+	ADDL2	#VSEC_WORKSPACE,R2
+
+; check that the unit is in use
+	TSTL	VSEC_RETADR(R2)
+	BNEQU	9$
+7$:	MOVL	#SS$_IVCHAN,R0		; produce error moan if it isn't
+	RET
+9$:
+	$DELTVA_S	INADR=VSEC_RETADR(R2)
+
+; unmark as used
+	CLRL	VSEC_RETADR(R2)
+	BLBC	R0,200$			 ; error from DELTVA ?
+
+; and deassign the channel
+
+	$DASSGN_S	CHAN=VSEC_CHAN(R2)
+
+200$:	RET
+
+;*****************************************************************************
+
+
+	.ENTRY	VIO$UPDATE_SEC,^M<R2,R11>
+
+; Update the section by writing all modified pages back to disk.
+
+; error_number=VIO$UPDATE_SEC([channel])
+
+; R11 is corrupted by VIOARG
+	JSB	VIO$1ST			; init arg reading mechanism
+	CLRL	R2			; default "channel" is 0
+	JSB	VIO$GNA			; get "channel" number
+	BCS	1$			; if none specified
+	MOVL	(R0),R2
+
+; get the start of the workspace block for this unit in R2
+1$:	CMPL	R2,#0
+	BLSSU	2$
+	CMPL	R2,#VSEC_UNITS-1
+	BGTRU	2$
+	MULL2	#VSEC_WORKSIZE,R2
+	ADDL2	#VSEC_WORKSPACE,R2
+
+; check that the unit is in use
+	TSTL	VSEC_RETADR(R2)
+	BNEQU	3$
+
+2$:	MOVL	#SS$_IVCHAN,R0		; produce error moan if it isn't
+	RET
+
+3$:	$UPDSECW_S	INADR=VSEC_RETADR(R2)
+
+	RET
+
+	.END
